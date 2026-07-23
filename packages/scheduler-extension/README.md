@@ -103,9 +103,47 @@ Examples:
 
 ### Batch files
 
-`add-file` accepts two formats. A **plain-text file** queues one task whose
-prompt is the whole file. A **batch file** queues up to **30** tasks at once:
-a comma-separated sequence of `{prompt: "..."}` objects —
+`add-file` queues one or many tasks from a file, and picks the format
+automatically:
+
+1. **Verbatim batch** (recommended for anything non-trivial) — a file whose
+   first line is the `@@prompts` header. Prompt bodies are taken **exactly
+   as written**: quotes, back/forward slashes, newlines, JSON objects, and
+   pasted code all pass through untouched — there is **no escaping**.
+2. **Legacy JSON batch** — a comma-separated sequence of `{prompt: "..."}`
+   objects (kept for backward compatibility; values are JSON strings).
+3. **Plain text** — no header and not JSON-batch-shaped: the whole file
+   becomes a single task.
+
+#### Verbatim batch
+
+Put `@@prompts` on the first line. Everything after it is split into prompts
+on lines that contain only the separator (default `---`):
+
+```text
+@@prompts
+Refactor src/parser.ts to recursive descent.
+Keep the existing tests green.
+---
+Fix the Windows path bug: C:\Users\me\project must load,
+and JSON like {"retries": 3, "path": "a/b\\c"} must survive verbatim.
+---
+Add a "Troubleshooting" section to the docs.
+Quotes, slashes /\, and code blocks are all fine here:
+
+    const x = `${a}/${b}`;
+```
+
+- No escaping — content is copied byte-for-byte between separators.
+- A prompt can contain multiple lines, blank lines, quotes, `\`, `/`, JSON,
+  and code. Only a line equal to the separator ends a prompt.
+- If your prompts contain a `---` line, choose a separator that they don't,
+  via the header — `@@prompts sep=<<<<` (heredoc/MIME-boundary style). Any
+  token works; `sep`, `delim`, and `delimiter` are accepted, as is `@@batch`.
+- Leading/trailing and doubled separators are ignored (no empty tasks).
+- Up to **30** prompts per file; queued **atomically**.
+
+#### Legacy JSON batch
 
 ```text
 {prompt: "Refactor src/parser.ts to recursive descent"},
@@ -115,7 +153,9 @@ a comma-separated sequence of `{prompt: "..."}` objects —
 
 - Newlines/spaces between objects are irrelevant; a trailing comma and a
   surrounding `[...]` are both fine; the `prompt` key may be bare or quoted.
-- Prompt values are JSON strings: use `\n` for a newline inside a prompt.
+- Prompt values are JSON strings: use `\n` for a newline, `\\` for a
+  literal backslash, `\"` for a quote. (This escaping is exactly why the
+  verbatim format above exists — prefer it for real-world prompts.)
 - The file is syntax-checked first and queued **atomically** — a malformed
   batch (bad syntax, wrong key, empty prompt, >30 entries) queues nothing
   and reports the exact offending entry.

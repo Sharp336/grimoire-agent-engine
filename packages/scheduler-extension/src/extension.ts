@@ -22,6 +22,7 @@
  *   - approval-mode.md         (tools.approvalMode semantics)
  */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -43,6 +44,18 @@ export type TaskStatus =
 export interface SchedulerTask {
 	id: string;
 	prompt: string;
+	/**
+	 * Stable SHA-256 (first 12 hex) of the prompt. Identifies a prompt across
+	 * runs/queues independent of the volatile `id`, and keys the ledger table so
+	 * re-queuing the same prompt tracks to the same row.
+	 */
+	promptHash?: string;
+	/**
+	 * Code-generated one-line outcome (≤100 chars) recorded at settle: the final
+	 * assistant line for a pass, or `classification: error` for a fail. No LLM
+	 * call — reuses the turn's own last message / the classifier's verdict.
+	 */
+	summary?: string;
 	/** Set when the prompt was loaded via `add-file`. */
 	sourceFile?: string;
 	status: TaskStatus;
@@ -145,6 +158,22 @@ export interface SchedulerConfig {
 	maxContextResets: number;
 }
 
+/**
+ * How a turn that ended in error was classified. Determines the recovery path:
+ * `rate_limit`/`outage`/`content_policy` refund the attempt (not the task's
+ * fault) and hold/backoff/reset; `user_abort` pauses the queue; `task_fault`
+ * is the only class that counts against `maxAttempts` and can end in `failed`.
+ * `stalled`/`shutdown` are watchdog/lifecycle settlements.
+ */
+export type TurnOutcome =
+	| "rate_limit"
+	| "outage"
+	| "content_policy"
+	| "user_abort"
+	| "task_fault"
+	| "stalled"
+	| "shutdown";
+
 /** One JSONL log record (task-log.jsonl in the data dir). */
 export interface SchedulerLogEntry {
 	ts: string;
@@ -169,6 +198,25 @@ export interface SchedulerLogEntry {
 	durationMs?: number;
 	resumeAt?: string;
 	detail?: string;
+	/**
+	 * How an errored turn was classified — the single fact that used to require
+	 * cross-referencing the source regexes to reconstruct. Drives whether the
+	 * attempt is refunded and whether the task can ever fail.
+	 */
+	classification?: TurnOutcome;
+	/** True when the attempt was refunded (transient fault, not the task's). */
+	refunded?: boolean;
+	/** Attempt budget at the moment of logging, e.g. 3 of maxAttempts. */
+	attempts?: number;
+	maxAttempts?: number;
+	/** True when this end is terminal (status "failed"): no auto-retry follows. */
+	terminal?: boolean;
+	/** Truncated prompt, so the log is self-describing without opening state.json. */
+	prompt?: string;
+	/** Stable prompt fingerprint (SHA-256/12) for cross-run tracking. */
+	promptHash?: string;
+	/** Code-generated ≤100-char outcome summary recorded at settle. */
+	summary?: string;
 }
 
 /**
@@ -239,6 +287,9 @@ function configFile(): string {
 }
 function logFile(): string {
 	return path.join(dataDir(), "task-log.jsonl");
+}
+function ledgerFile(): string {
+	return path.join(dataDir(), "task-ledger.md");
 }
 
 const DEFAULT_PROMPT_PREAMBLE = [
@@ -463,6 +514,65 @@ function nextPendingTask(state: SchedulerState): SchedulerTask | undefined {
 function truncate(text: string, max: number): string {
 	const one = text.replace(/\s+/g, " ").trim();
 	return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
+}
+
+/** Stable prompt fingerprint: first 12 hex of SHA-256. Same prompt → same id. */
+function hashPrompt(prompt: string): string {
+	return crypto.createHash("sha256").update(prompt, "utf8").digest("hex").slice(0, 12);
+}
+
+/**
+ * Plain text of the final assistant message in an agent_end payload, or null.
+ * Lets a successful turn be summarized for free — the text was already produced,
+ * so no extra LLM call. Defensive reads mirror detectTurnError (the payload
+ * shape is not a documented contract): narrow with `in`/`typeof`, never cast.
+ */
+function lastAssistantText(event: unknown): string | null {
+	if (!event || typeof event !== "object" || !("messages" in event)) return null;
+	const { messages } = event;
+	if (!Array.isArray(messages)) return null;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg: unknown = messages[i];
+		if (!msg || typeof msg !== "object" || !("role" in msg) || msg.role !== "assistant") continue;
+		if (!("content" in msg) || !Array.isArray(msg.content)) return null;
+		const parts: string[] = [];
+		for (const b of msg.content) {
+			if (
+				b &&
+				typeof b === "object" &&
+				"type" in b &&
+				b.type === "text" &&
+				"text" in b &&
+				typeof b.text === "string"
+			) {
+				parts.push(b.text);
+			}
+		}
+		const text = parts.join(" ").trim();
+		return text || null;
+	}
+	return null;
+}
+
+/**
+ * Code-generated ≤100-char outcome line for the ledger — zero LLM cost. A pass
+ * reuses the turn's own last assistant line (falling back to a duration note);
+ * any non-pass reports its classification and the truncated error.
+ */
+function buildSummary(
+	status: TaskStatus,
+	classification: TurnOutcome | undefined,
+	error: string | null,
+	assistantText: string | null,
+	durationMs: number | undefined,
+): string {
+	if (status === "done") {
+		const base =
+			assistantText ?? (durationMs !== undefined ? `completed in ${fmtDuration(durationMs)}` : "completed");
+		return truncate(base, 100);
+	}
+	const cls = classification ?? "task_fault";
+	return truncate(error ? `${cls}: ${error}` : cls, 100);
 }
 
 function fmtDuration(ms: number): string {
@@ -708,6 +818,67 @@ function parsePromptBatch(content: string): string[] | { error: string } | null 
 	return prompts;
 }
 
+/**
+ * Parse a **verbatim** multi-prompt batch file — the robust, escaping-free
+ * format. Prompt bodies are taken exactly as written: quotes, back/forward
+ * slashes, newlines, JSON, and pasted code all pass through untouched.
+ *
+ * The format is opt-in via a header on the first line, so plain prompt
+ * files (including Markdown with `---` frontmatter, code, or raw JSON) are
+ * never misread as a batch:
+ *
+ *   @@prompts                 split on the default "---" separator line
+ *   @@prompts sep=%%%%%       split on a custom separator line
+ *
+ * Everything after the header is split on lines whose *trimmed* text equals
+ * the separator; each block between separators is one prompt (its outer
+ * whitespace trimmed, inner content verbatim). Because any fixed separator
+ * could in principle occur inside a prompt, the user picks one that does not
+ * — the same escape hatch heredocs and MIME boundaries use. Blank segments
+ * (a leading/trailing separator, or doubled separators) are dropped rather
+ * than rejected, so the format stays forgiving.
+ *
+ * `@@batch` is accepted as an alias of `@@prompts`; `delim`/`delimiter` as
+ * aliases of `sep`. Matching is case-insensitive. CRLF and a leading BOM
+ * are tolerated (Windows editors).
+ *
+ * Returns:
+ *   - string[]   parsed prompts (1..MAX_BATCH_PROMPTS, each non-empty)
+ *   - {error}    header present but the shape/limit checks fail
+ *   - null       no header — not a verbatim batch
+ */
+function parseVerbatimBatch(content: string): string[] | { error: string } | null {
+	const text = content.replace(/^\uFEFF/, "");
+	const lines = text.split(/\r?\n/);
+	const header = (lines[0] ?? "").trim();
+	const m = /^@@(?:prompts|batch)\b(.*)$/i.exec(header);
+	if (!m) return null;
+	let sep = "---";
+	const rest = m[1].trim();
+	if (rest) {
+		const sm = /^(?:sep|delim|delimiter)\s*=\s*(.+)$/i.exec(rest);
+		if (!sm) return { error: `bad @@prompts header — expected "sep=<token>", got ${JSON.stringify(rest)}` };
+		sep = sm[1].trim();
+		if (!sep) return { error: "empty separator token in @@prompts header" };
+	}
+	const prompts: string[] = [];
+	let buf: string[] = [];
+	const flush = () => {
+		const p = buf.join("\n").trim();
+		buf = [];
+		if (p) prompts.push(p);
+	};
+	for (let li = 1; li < lines.length; li++) {
+		if (lines[li].trim() === sep) flush();
+		else buf.push(lines[li]);
+	}
+	flush();
+	if (prompts.length === 0) return { error: "batch contains no non-empty prompts" };
+	if (prompts.length > MAX_BATCH_PROMPTS)
+		return { error: `batch has more than ${MAX_BATCH_PROMPTS} prompts — max ${MAX_BATCH_PROMPTS} per file` };
+	return prompts;
+}
+
 // ---------------------------------------------------------------------------
 // Extension factory
 // ---------------------------------------------------------------------------
@@ -783,7 +954,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 					`scheduler: watchdog — ${id} stalled with an idle agent; re-queued (attempt not counted).`,
 					"warning",
 				);
-				settleCurrentTask("stalled: agent idle with task in flight", true);
+				settleCurrentTask("stalled: agent idle with task in flight", true, false, "stalled");
 				scheduleDispatch(cfg.dispatchDelayMs);
 			}
 			return;
@@ -810,6 +981,8 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	function getState(): SchedulerState {
 		if (state === null) {
 			state = migrateState(readJson<unknown>(stateFile()), cfg) ?? structuredClone(EMPTY_STATE);
+			// Backfill the prompt fingerprint for tasks queued before hashing existed.
+			for (const t of state.tasks) if (!t.promptHash) t.promptHash = hashPrompt(t.prompt);
 		}
 		return state;
 	}
@@ -847,6 +1020,36 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		} catch (err) {
 			// pi.logger — extensions.md § "1) Registration and actions" ("Also exposed: pi.logger")
 			pi.logger?.warn?.(`scheduler: failed to append log: ${String(err)}`);
+		}
+	}
+	/**
+	 * Rewrite the human-readable outcome table (task-ledger.md) from current
+	 * state — one row per task keyed by prompt hash: hash | status | prompt(100)
+	 * | summary(100). Regenerated after every pass/fail so the ledger always
+	 * mirrors the latest results, entirely from code (no LLM tokens).
+	 */
+	function writeLedger(): void {
+		const st = getState();
+		const rows = st.tasks.map(t => {
+			const hash = t.promptHash || hashPrompt(t.prompt);
+			const cell = (s: string) => truncate(s, 100).replace(/\|/g, "\\|");
+			return `| \`${hash}\` | ${t.status} | ${cell(t.prompt)} | ${t.summary ? cell(t.summary) : "—"} |`;
+		});
+		const body = [
+			"# Scheduler task ledger",
+			"",
+			`_Auto-generated ${new Date().toISOString()} — one row per task, in queue order._`,
+			"",
+			"| hash | status | prompt | summary |",
+			"| --- | --- | --- | --- |",
+			...rows,
+			"",
+		].join("\n");
+		try {
+			ensureDataDir();
+			fs.writeFileSync(ledgerFile(), body, "utf8");
+		} catch (err) {
+			pi.logger?.warn?.(`scheduler: failed to write ledger: ${String(err)}`);
 		}
 	}
 	function readLogTail(n: number): SchedulerLogEntry[] {
@@ -1022,7 +1225,14 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		st.currentTaskId = task.id;
 		emptyQueueNotified = false;
 		saveState();
-		logEvent({ event: "dispatch", taskId: task.id, attempt: task.attempts, resumed: resuming });
+		logEvent({
+			event: "dispatch",
+			taskId: task.id,
+			attempt: task.attempts,
+			maxAttempts: cfg.maxAttempts,
+			resumed: resuming,
+			prompt: truncate(task.prompt, 120),
+		});
 
 		const parts = [cfg.promptPreamble.trim()];
 		if (resuming) parts.push(cfg.resumePreamble.trim());
@@ -1036,15 +1246,36 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		} catch (err) {
 			task.status = "interrupted";
 			task.lastError = `dispatch failed: ${String(err)}`;
+			task.summary = truncate(`task_fault: ${task.lastError}`, 100);
 			st.currentTaskId = null;
+			writeLedger();
 			saveState();
-			logEvent({ event: "end", taskId: task.id, status: "interrupted", error: task.lastError });
+			logEvent({
+				event: "end",
+				taskId: task.id,
+				status: "interrupted",
+				error: task.lastError,
+				classification: "task_fault",
+				refunded: false,
+				attempts: task.attempts,
+				maxAttempts: cfg.maxAttempts,
+				prompt: truncate(task.prompt, 120),
+				promptHash: task.promptHash,
+				summary: task.summary,
+				detail: "sendUserMessage threw before the turn started",
+			});
 			scheduleDispatch(30_000);
 		}
 		updateStatus();
 	}
 
-	function settleCurrentTask(error: string | null, refundAttempt = false, forceFail = false): void {
+	function settleCurrentTask(
+		error: string | null,
+		refundAttempt = false,
+		forceFail = false,
+		classification?: TurnOutcome,
+		assistantText: string | null = null,
+	): void {
 		const st = getState();
 		if (st.currentTaskId === null) return;
 		const task = st.tasks.find(t => t.id === st.currentTaskId);
@@ -1083,8 +1314,34 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 				task.status = "done";
 				notify(null, `scheduler: ${task.id} done — ${truncate(task.prompt, 60)}`);
 			}
-			logEvent({ event: "end", taskId: task.id, status: task.status, error: error ?? undefined, durationMs });
+			const terminal = task.status === "failed";
+			// One self-contained record: WHY it ended (classification), whether the
+			// attempt was refunded, where the attempt budget stands, whether it is
+			// terminal (no auto-retry), and WHAT the prompt was — so reading the log
+			// alone answers "what happened" without opening state.json or the source.
+			const outcome: TurnOutcome | undefined = error
+				? (classification ?? (forceFail ? "content_policy" : refundAttempt ? "outage" : "task_fault"))
+				: undefined;
+			// Code-generated (no LLM): reuse the turn's own last line / the verdict.
+			task.summary = buildSummary(task.status, outcome, error, assistantText, durationMs);
+			logEvent({
+				event: "end",
+				taskId: task.id,
+				status: task.status,
+				error: error ?? undefined,
+				durationMs,
+				classification: outcome,
+				refunded: error ? refundAttempt : undefined,
+				attempts: task.attempts,
+				maxAttempts: cfg.maxAttempts,
+				terminal: terminal || undefined,
+				prompt: truncate(task.prompt, 120),
+				promptHash: task.promptHash,
+				summary: task.summary,
+				detail: terminal ? `terminal — not auto-retried; run /scheduler retry ${task.id} to re-queue` : undefined,
+			});
 		}
+		writeLedger();
 		saveState();
 	}
 
@@ -1165,7 +1422,21 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			getState().currentTaskId !== null;
 		// contentPolicy settles inside its own branch (it needs the task's running
 		// reset count to decide refund-and-retry vs. give-up); everyone else here.
-		if (!contentPolicy) settleCurrentTask(error, rateLimited || outage || userAbort);
+		const outcome: TurnOutcome | undefined =
+			error === null
+				? undefined
+				: rateLimited
+					? "rate_limit"
+					: outage
+						? "outage"
+						: contentPolicy
+							? "content_policy"
+							: userAbort
+								? "user_abort"
+								: "task_fault";
+		// For a clean pass, reuse the turn's final assistant line as the summary.
+		const assistantText = error === null ? lastAssistantText(event) : null;
+		if (!contentPolicy) settleCurrentTask(error, rateLimited || outage || userAbort, false, outcome, assistantText);
 		const st = getState();
 		if (rateLimited) {
 			// Trust the provider's own reset clock over local window math and
@@ -1210,7 +1481,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			if (cur) {
 				cur.policyResets = (cur.policyResets ?? 0) + 1;
 				const capped = cur.policyResets > cfg.maxContextResets;
-				settleCurrentTask(error, !capped, capped);
+				settleCurrentTask(error, !capped, capped, "content_policy");
 				logEvent({
 					event: "blocked",
 					taskId: cur.id,
@@ -1266,7 +1537,13 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		if (ev && ev.success === false) {
 			retryFailure =
 				typeof ev.error === "string" && ev.error ? ev.error : "provider retries exhausted (rate limit or outage)";
-			logEvent({ event: "retry_failed", taskId: getState().currentTaskId ?? undefined, error: retryFailure });
+			logEvent({
+				event: "retry_failed",
+				taskId: getState().currentTaskId ?? undefined,
+				error: retryFailure,
+				detail:
+					"provider auto-retries exhausted mid-turn; the following end event classifies and refunds/counts the attempt",
+			});
 		}
 	});
 
@@ -1326,6 +1603,8 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 					return cmdExport(cctx, rest);
 				case "log":
 					return cmdLog(cctx, rest);
+				case "ledger":
+					return cmdLedger(cctx);
 				case "config":
 					return cmdConfig(cctx);
 				default:
@@ -1334,7 +1613,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 						[
 							"scheduler — session-quota-aware prompt queue",
 							"  /scheduler add <prompt>      queue a task",
-							'  /scheduler add-file <path>   queue task(s) from a file (multi: {prompt: "…"}, {prompt: "…"})',
+							'  /scheduler add-file <path>   queue task(s) from a file (multi: "@@prompts" header, "---"-separated)',
 							"  /scheduler list | status     queue + session-window state",
 							"  /scheduler start             begin draining the queue when idle",
 							"  /scheduler pause             finish current task, then hold",
@@ -1344,6 +1623,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 							"  /scheduler clear             remove all pending tasks",
 							"  /scheduler export [path]     write the queue to a markdown file (default scheduler-queue.md)",
 							"  /scheduler log [n]           show last n log entries (default 10)",
+							"  /scheduler ledger            show the prompt-hash outcome table (prompt · summary · status)",
 							"  /scheduler config            show config file path + values",
 						].join("\n"),
 					);
@@ -1359,6 +1639,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		const task: SchedulerTask = {
 			id: `t${st.nextTaskSeq++}`,
 			prompt,
+			promptHash: hashPrompt(prompt),
 			sourceFile,
 			status: "queued",
 			addedAt: new Date().toISOString(),
@@ -1366,6 +1647,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		};
 		st.tasks.push(task);
 		emptyQueueNotified = false;
+		writeLedger();
 		return task;
 	}
 
@@ -1403,7 +1685,9 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			notify(ctx, `scheduler: ${resolved} is empty`, "warning");
 			return;
 		}
-		const batch = parsePromptBatch(content);
+		// Verbatim format first (opt-in @@prompts header, escaping-free), then
+		// the legacy JSON `{prompt:"…"}` batch, then a plain single prompt.
+		const batch = parseVerbatimBatch(content) ?? parsePromptBatch(content);
 		if (batch === null) {
 			cmdAdd(ctx, content, resolved); // plain file = one prompt (unchanged behavior)
 			return;
@@ -1665,15 +1949,38 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		const lines = entries.map(e => {
 			const bits = [e.ts.replace("T", " ").slice(0, 19), e.event];
 			if (e.taskId) bits.push(e.taskId);
+			if (e.promptHash) bits.push(`#${e.promptHash}`);
 			if (e.status) bits.push(e.status);
+			if (e.classification) bits.push(e.classification);
+			if (e.refunded !== undefined) bits.push(e.refunded ? "refunded" : "counted");
 			if (e.attempt !== undefined) bits.push(`attempt=${e.attempt}`);
+			if (e.attempts !== undefined && e.maxAttempts !== undefined)
+				bits.push(`attempts=${e.attempts}/${e.maxAttempts}`);
+			if (e.terminal) bits.push("TERMINAL");
 			if (e.durationMs !== undefined) bits.push(`took=${fmtDuration(e.durationMs)}`);
 			if (e.resumeAt) bits.push(`resumeAt=${e.resumeAt}`);
 			if (e.error) bits.push(`error=${truncate(e.error, 60)}`);
 			if (e.detail) bits.push(e.detail);
+			if (e.summary) bits.push(`= ${truncate(e.summary, 70)}`);
+			if (e.prompt) bits.push(`» ${truncate(e.prompt, 70)}`);
 			return `  ${bits.join("  ")}`;
 		});
 		notify(ctx, [`scheduler: last ${entries.length} log entries (${logFile()}):`, ...lines].join("\n"));
+	}
+
+	/** Print the per-prompt outcome table (also persisted at task-ledger.md). */
+	function cmdLedger(ctx: CtxLike): void {
+		const st = getState();
+		writeLedger(); // ensure the file reflects the latest state before we point at it
+		if (st.tasks.length === 0) {
+			notify(ctx, `scheduler: ledger empty (${ledgerFile()})`);
+			return;
+		}
+		const lines = st.tasks.map(t => {
+			const hash = t.promptHash || hashPrompt(t.prompt);
+			return `  #${hash}  ${t.status.padEnd(11)} ${truncate(t.prompt, 60)}  = ${t.summary ? truncate(t.summary, 60) : "—"}`;
+		});
+		notify(ctx, [`scheduler: task ledger (${ledgerFile()}):`, ...lines].join("\n"));
 	}
 
 	/**

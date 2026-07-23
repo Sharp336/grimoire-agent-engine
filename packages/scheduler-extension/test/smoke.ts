@@ -12,11 +12,12 @@
  */
 
 import * as assert from "node:assert/strict";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import type { SchedulerConfig, SchedulerState } from "../src/extension";
+import type { SchedulerConfig, SchedulerLogEntry, SchedulerState } from "../src/extension";
 import schedulerExtension from "../src/extension";
 
 /** Model exposed through the mocked ctx (shape per extensions.md "provider/id"). */
@@ -141,6 +142,7 @@ const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-scheduler-cwd-"));
 const stateFile = path.join(tmpAgentDir, "scheduler", "state.json");
 const configFile = path.join(tmpAgentDir, "scheduler", "config.json");
 const logFile = path.join(tmpAgentDir, "scheduler", "task-log.jsonl");
+const ledgerFile = path.join(tmpAgentDir, "scheduler", "task-ledger.md");
 
 function readState(): SchedulerState {
 	return JSON.parse(fs.readFileSync(stateFile, "utf8")) as SchedulerState;
@@ -149,6 +151,14 @@ function task(state: SchedulerState, id: string) {
 	const found = state.tasks.find(t => t.id === id);
 	assert.ok(found, `task ${id} missing`);
 	return found;
+}
+/** All log records, newest last — for asserting the self-describing log fields. */
+function readLog(): SchedulerLogEntry[] {
+	return fs
+		.readFileSync(logFile, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map(l => JSON.parse(l) as SchedulerLogEntry);
 }
 
 const a = makeMockPi();
@@ -478,6 +488,17 @@ await f.emit("agent_end", { messages: [{ role: "assistant", content: [], stopRea
 		ctxF.notifications.some(n => n.includes("rate-limited — holding dispatch until")),
 		"rate-limit hold is announced",
 	);
+	// The log alone must explain WHY the turn ended and whether it cost an
+	// attempt — no cross-referencing state.json or the source classifiers.
+	const log = readLog();
+	const t40End = [...log].reverse().find(e => e.event === "end" && e.taskId === "t40");
+	assert.ok(t40End, "t40 end is logged");
+	assert.equal(t40End?.classification, "rate_limit", "end log records the rate_limit classification");
+	assert.equal(t40End?.refunded, true, "end log records that the attempt was refunded");
+	assert.equal(t40End?.terminal ?? false, false, "a refunded end is never terminal");
+	assert.ok((t40End?.prompt ?? "").includes("Push the fork"), "end log is self-describing (carries the prompt)");
+	const t40Dispatch = log.find(e => e.event === "dispatch" && e.taskId === "t40");
+	assert.ok((t40Dispatch?.prompt ?? "").includes("Push the fork"), "dispatch log carries the prompt");
 }
 await sleep(120);
 assert.equal(f.sentPrompts.length, 1, "no re-dispatch while the provider hold is active");
@@ -810,6 +831,90 @@ fs.writeFileSync(plainCurly, "{a: 1} is the config shape I want; explain why", "
 	);
 }
 
+// 20b. add-file VERBATIM batch: "@@prompts" header, "---"-separated, no
+// escaping. Quotes, back/forward slashes, JSON, and multi-line/code bodies
+// must survive byte-for-byte — the whole point of the format.
+{
+	const p1 = "Fix path C:\\Users\\me\\proj and url https://x/y";
+	const p2 = 'Handle JSON {"retries": 3, "path": "a/b\\c"} and "quotes" here';
+	const p3 = "Multi-line prompt\n\nwith a blank line and code:\n    const x = a + '/' + b;";
+	const verbatim = path.join(batchDir, "verbatim.txt");
+	fs.writeFileSync(verbatim, `@@prompts\n${p1}\n---\n${p2}\n---\n${p3}\n`, "utf8");
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${verbatim}`, ctxP);
+	const st = readState();
+	assert.equal(st.nextTaskSeq, before + 3, "three verbatim prompts queued");
+	assert.deepEqual(
+		st.tasks.filter(t => t.sourceFile === verbatim).map(t => t.prompt),
+		[p1, p2, p3],
+		"verbatim prompts preserved exactly (slashes/quotes/JSON/newlines/code)",
+	);
+}
+
+// 20c. custom separator via header — content that itself contains "---" lines
+// is kept intact because the user picks a boundary the content lacks.
+{
+	const withDashes = "step one\n---\nstep two (literal --- inside one prompt)";
+	const custom = path.join(batchDir, "custom-sep.txt");
+	fs.writeFileSync(custom, `@@prompts sep=<<<<\n${withDashes}\n<<<<\nsecond prompt\n`, "utf8");
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${custom}`, ctxP);
+	const st = readState();
+	assert.equal(st.nextTaskSeq, before + 2, "custom separator yields two prompts");
+	assert.deepEqual(
+		st.tasks.filter(t => t.sourceFile === custom).map(t => t.prompt),
+		[withDashes, "second prompt"],
+		"embedded --- kept verbatim; only the custom boundary splits",
+	);
+}
+
+// 20d. CRLF endings + leading/trailing/doubled separators drop empties, not error.
+{
+	const crlf = path.join(batchDir, "crlf.txt");
+	fs.writeFileSync(crlf, "@@prompts\r\n---\r\nalpha\r\n---\r\n---\r\nbeta\r\n---\r\n", "utf8");
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${crlf}`, ctxP);
+	const st = readState();
+	assert.equal(st.nextTaskSeq, before + 2, "CRLF + stray separators -> two prompts, no empties");
+	assert.deepEqual(
+		st.tasks.filter(t => t.sourceFile === crlf).map(t => t.prompt),
+		["alpha", "beta"],
+	);
+}
+
+// 20e. header present but only separators/blank -> refused atomically.
+{
+	const emptyV = path.join(batchDir, "empty-verbatim.txt");
+	fs.writeFileSync(emptyV, "@@prompts\n---\n   \n---\n", "utf8");
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${emptyV}`, ctxP);
+	assert.match(ctxP.notifications.at(-1) ?? "", /no non-empty prompts.*nothing queued/s);
+	assert.equal(readState().nextTaskSeq, before, "all-empty verbatim batch queues nothing");
+}
+
+// 20f. bad header options are rejected (not silently treated as a plain prompt).
+{
+	const badHdr = path.join(batchDir, "bad-header.txt");
+	fs.writeFileSync(badHdr, "@@prompts weird=1\nalpha\n---\nbeta\n", "utf8");
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${badHdr}`, ctxP);
+	assert.match(ctxP.notifications.at(-1) ?? "", /bad @@prompts header.*nothing queued/s);
+	assert.equal(readState().nextTaskSeq, before, "malformed header queues nothing");
+}
+
+// 20g. a plain file whose body merely starts with "---" (e.g. Markdown
+// frontmatter) is NOT a verbatim batch — no @@prompts header -> single task.
+{
+	const frontmatter = path.join(batchDir, "frontmatter.txt");
+	const body = "---\ntitle: Notes\ntags: [a, b]\n---\n\nActual prompt body here.";
+	fs.writeFileSync(frontmatter, body, "utf8");
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${frontmatter}`, ctxP);
+	const st = readState();
+	assert.equal(st.nextTaskSeq, before + 1, "frontmatter file = single task (no false split)");
+	assert.equal(st.tasks.find(t => t.sourceFile === frontmatter)?.prompt, body);
+}
+
 // 21. content-policy ("cyber") violation: the poisoned conversation is purged
 // (newSession) and the task resumes in a clean context with the attempt
 // refunded — so total = completed and none fail to the cascade (t = n, m = 0).
@@ -950,9 +1055,84 @@ await cq.emit(
 		ctxCq.notifications.some(n => n.includes("FAILED") && n.includes("content-policy")),
 		"cap failure is announced",
 	);
+	// A terminal failure must be unmistakable in the log: classified, marked
+	// TERMINAL, and carrying the recovery hint — the exact facts that were
+	// missing when a "failed" line looked identical to a transient interrupt.
+	const t91End = [...readLog()].reverse().find(e => e.event === "end" && e.taskId === "t91");
+	assert.ok(t91End, "t91 end is logged");
+	assert.equal(t91End?.classification, "content_policy", "terminal end records the content_policy classification");
+	assert.equal(t91End?.terminal, true, "terminal end is flagged TERMINAL");
+	assert.ok((t91End?.detail ?? "").includes("/scheduler retry"), "terminal end names the recovery command");
 }
 await sleep(50);
 await cq.command("stop", ctxCq);
+
+// 23. prompt-hash tracking + code-generated outcome ledger: a completed turn
+// records a stable prompt fingerprint, a ≤100-char summary lifted from the
+// turn's own final assistant line (no LLM call), and rewrites task-ledger.md.
+{
+	const st = readState();
+	st.run = "running";
+	st.tasks = [
+		{
+			id: "t95",
+			prompt: "Refactor the auth module and add tests",
+			status: "queued",
+			addedAt: new Date().toISOString(),
+			attempts: 0,
+		},
+	];
+	st.nextTaskSeq = 96;
+	st.rateLimitedUntil = null;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const cl = makeMockPi();
+const ctxCl = makeCtx(tmpCwd, null); // ungated: no window/quota interference
+schedulerExtension(cl.api);
+await cl.emit("session_start", {}, ctxCl);
+await sleep(80);
+assert.equal(cl.sentPrompts.length, 1, "ledger scenario dispatches the queued task");
+// getState backfills the fingerprint on load even though the injected task had none.
+const t95Hash = task(readState(), "t95").promptHash;
+const expectedHash = crypto
+	.createHash("sha256")
+	.update("Refactor the auth module and add tests", "utf8")
+	.digest("hex")
+	.slice(0, 12);
+assert.equal(t95Hash, expectedHash, "promptHash is a stable SHA-256/12 fingerprint of the prompt");
+await cl.emit("agent_start", {}, ctxCl);
+await cl.emit(
+	"agent_end",
+	{
+		messages: [{ role: "assistant", content: [{ type: "text", text: "Done: refactored auth and added 12 tests." }] }],
+	},
+	ctxCl,
+);
+{
+	const t95 = task(readState(), "t95");
+	assert.equal(t95.status, "done", "turn completes");
+	assert.equal(
+		t95.summary,
+		"Done: refactored auth and added 12 tests.",
+		"summary is code-generated from the turn's own final assistant line — no LLM call",
+	);
+	const t95End = [...readLog()].reverse().find(e => e.event === "end" && e.taskId === "t95");
+	assert.equal(t95End?.promptHash, expectedHash, "end log carries the prompt fingerprint");
+	assert.equal(t95End?.summary, t95.summary, "end log carries the generated summary");
+	// The ledger table is rewritten after the pass and is self-describing.
+	const ledger = fs.readFileSync(ledgerFile, "utf8");
+	assert.match(ledger, /\| hash \| status \| prompt \| summary \|/, "ledger has the table header");
+	assert.match(
+		ledger,
+		new RegExp(`\\| \`${expectedHash}\` \\| done \\|.*Refactor the auth module.*\\|.*refactored auth.*\\|`),
+		"ledger row keys by hash and holds prompt(100) + summary(100) + status",
+	);
+}
+await sleep(50);
+await cl.command("ledger", ctxCl);
+assert.match(ctxCl.notifications.at(-1) ?? "", /task ledger/, "/scheduler ledger prints the table");
+assert.match(ctxCl.notifications.at(-1) ?? "", /#[0-9a-f]{12}\s+done/, "ledger command shows hash + status");
+await cl.command("stop", ctxCl);
 
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);
