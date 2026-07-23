@@ -1272,22 +1272,22 @@ await wc.command("stop", ctxWc);
 	fs.writeFileSync(stateFile, JSON.stringify(st));
 }
 const dp = makeMockPi();
-const ctxDp = makeCtx(tmpCwd, { provider: "openrouter", id: "claude-3-5-sonnet" });
+const ctxDp = makeCtx(tmpCwd, { provider: "bedrock", id: "anthropic.claude-3-sonnet" });
 schedulerExtension(dp.api);
 await dp.emit("session_start", {}, ctxDp);
 {
 	const seeded = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
 	assert.equal(
 		seeded.quotaProfiles[0].match,
-		"anthropic",
-		"shipped default gates the anthropic provider, not any claude model id",
+		"^anthropic$",
+		"shipped default is anchored to the anthropic provider, not any model id containing 'anthropic'",
 	);
 }
 await dp.command("status", ctxDp);
 assert.match(
 	ctxDp.notifications.at(-1) ?? "",
 	/quota: none/,
-	"a non-Anthropic catalog serving Claude dispatches ungated under the defaults",
+	"a third-party catalog serving an anthropic.* model dispatches ungated under the defaults",
 );
 await dp.command("stop", ctxDp);
 
@@ -1583,6 +1583,34 @@ for (let k = 0; k < 200 && task(readState(), "t102").status !== "failed"; k++) a
 	assert.ok((t102.stalls ?? 0) > 2, "the consecutive-stall counter drove the terminal failure");
 }
 await sc.command("stop", ctxSc);
+
+// 33. the approval-mode preflight parses YAML properly (Bun.YAML), so a FLOW-style
+// `tools: { approvalMode: ... }` in config.yaml is detected — the old single-line
+// regex missed inline maps and silently skipped the non-yolo warning.
+{
+	fs.rmSync(path.join(tmpAgentDir, "config.yml"), { force: true }); // drop scenario 3's block-style file
+	fs.writeFileSync(path.join(tmpAgentDir, "config.yaml"), "tools: { approvalMode: always-ask }\n");
+	fs.rmSync(configFile, { force: true });
+	const st = readState();
+	st.run = "stopped";
+	st.currentTaskId = null;
+	st.tasks = [];
+	st.windows = [];
+	st.nextTaskSeq = 104;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const fy = makeMockPi();
+const ctxFy = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(fy.api);
+await fy.emit("session_start", {}, ctxFy);
+await fy.command("start", ctxFy);
+assert.equal(
+	ctxFy.confirmCalls,
+	1,
+	"flow-style tools:{approvalMode} in config.yaml is parsed, so the non-yolo warning fires",
+);
+await fy.command("stop", ctxFy);
+fs.rmSync(path.join(tmpAgentDir, "config.yaml"), { force: true });
 
 // Restore the agent-dir env + resolver so importing this module from the bun:test
 // process (smoke.test.ts) never leaks the throwaway dir into later test files.

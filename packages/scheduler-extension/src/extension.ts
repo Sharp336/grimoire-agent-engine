@@ -321,13 +321,13 @@ function ledgerFile(): string {
 /**
  * Default quota profiles: only the Anthropic *provider* (Claude subscription
  * auth) is metered in 5-hour session windows (max 4 per rolling 24h). The match
- * is the provider id, NOT any model id containing "claude" — third-party
- * catalogs that serve Claude (Bedrock, OpenRouter, …) bill per API key and must
- * dispatch ungated, so they fall through to the unlimited `.*` profile. First
- * match wins; edit config.json to adjust.
+ * is ANCHORED to the provider id (`^anthropic$`), never a bare model id — so a
+ * third-party catalog serving a `claude`/`anthropic.*` model under another
+ * provider (Bedrock, OpenRouter, API-key gateways) does NOT match and falls
+ * through to the unlimited `.*` profile. First match wins; edit config.json.
  */
 const DEFAULT_QUOTA_PROFILES: QuotaProfile[] = [
-	{ match: "anthropic", sessionHours: 5, maxSessionsPer24h: 4 },
+	{ match: "^anthropic$", sessionHours: 5, maxSessionsPer24h: 4 },
 	{ match: ".*", sessionHours: null, maxSessionsPer24h: null },
 ];
 
@@ -641,20 +641,23 @@ function readApprovalModeFrom(file: string): string | null {
 	} catch {
 		return null;
 	}
-	if (file.endsWith(".json")) {
-		try {
-			const parsed = JSON.parse(text) as { tools?: { approvalMode?: unknown } };
-			const mode = parsed?.tools?.approvalMode;
-			return typeof mode === "string" ? mode : null;
-		} catch {
-			return null;
+	// Parse the file rather than scanning a line. Bun.YAML.parse reads YAML
+	// (config.yml / config.yaml) AND JSON (settings.json — JSON is valid YAML)
+	// in both block (`tools:\n  approvalMode: x`) and flow (`tools: { approvalMode: x }`)
+	// shapes, matching the core settings loader instead of a brittle regex.
+	try {
+		const parsed: unknown = Bun.YAML.parse(text);
+		if (parsed && typeof parsed === "object" && "tools" in parsed) {
+			const tools = parsed.tools;
+			if (tools && typeof tools === "object" && "approvalMode" in tools) {
+				const mode = tools.approvalMode;
+				return typeof mode === "string" ? mode : null;
+			}
 		}
+	} catch {
+		// unreadable / malformed — treat as "no approval-mode setting present"
 	}
-	// Narrow YAML scan: in the settings schema `approvalMode` only exists under
-	// `tools:` (settings.md § "Tools and approvals"), so a single-key match is
-	// unambiguous without a YAML parser.
-	const match = /^\s*approvalMode:\s*["']?([A-Za-z-]+)["']?\s*(?:#.*)?$/m.exec(text);
-	return match ? match[1] : null;
+	return null;
 }
 
 /**
