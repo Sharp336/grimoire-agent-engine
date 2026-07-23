@@ -256,6 +256,11 @@ describe("read and write route xd:// device URLs", () => {
 			expect(allowlistedDocs).not.toContain("## mcp__other_server_execute");
 			expect(allowlistedDocs).toContain("- xd://mcp__other_server_execute —");
 
+			const scalarPatternDocs = registry.docsAll("builtins", "mcp__context_mode_*");
+			expect(scalarPatternDocs).toContain("## mcp__context_mode_ctx_execute");
+			const mixedPatternDocs = registry.docsAll("builtins", ["mcp__context_mode_*", 42] as unknown);
+			expect(mixedPatternDocs).toContain("## mcp__context_mode_ctx_execute");
+
 			const catalogWithAllowlistDocs = registry.docsAll("catalog", ["mcp__context_mode_*"]);
 			expect(catalogWithAllowlistDocs).not.toContain("## mcp__context_mode_ctx_execute");
 		} finally {

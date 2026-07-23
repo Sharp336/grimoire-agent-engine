@@ -183,6 +183,11 @@ function promptCatalogSummary(inst: Tool, maxLength?: number): string {
 	return `${summary.slice(0, maxLength).trimEnd()}…`;
 }
 
+function normalizeInlinePatterns(patterns: unknown): readonly string[] {
+	if (typeof patterns === "string") return [patterns];
+	return Array.isArray(patterns) ? patterns.filter((pattern): pattern is string => typeof pattern === "string") : [];
+}
+
 /** Decode the (possibly partially streamed) inner args JSON string into display args. */
 function decodeInnerArgs(raw: unknown): Record<string, unknown> {
 	if (typeof raw !== "string" || raw.length === 0) return {};
@@ -292,12 +297,13 @@ export class XdevRegistry {
 	 * Dynamic mounts embed at most {@link EXTERNAL_DESCRIPTION_CAP} description
 	 * chars (schema always intact); `read xd://<tool>` returns the full text.
 	 */
-	docsAll(mode: XdevDocsMode = "inline", inlinePatterns: readonly string[] = []): string {
+	docsAll(mode: XdevDocsMode = "inline", inlinePatterns: unknown = []): string {
+		const patterns = normalizeInlinePatterns(inlinePatterns);
 		const sections: string[] = [];
 		const overflow: Tool[] = [];
 		let used = 0;
 		for (const tool of this.list()) {
-			if (!this.#shouldInline(tool, mode, inlinePatterns)) {
+			if (!this.#shouldInline(tool, mode, patterns)) {
 				overflow.push(tool);
 				continue;
 			}
@@ -327,12 +333,13 @@ export class XdevRegistry {
 	}
 
 	/** Docs for selected mounted devices under the configured prompt-doc policy. */
-	docsFor(names: Iterable<string>, mode: XdevDocsMode, inlinePatterns: readonly string[] = []): string {
+	docsFor(names: Iterable<string>, mode: XdevDocsMode, inlinePatterns: unknown = []): string {
+		const patterns = normalizeInlinePatterns(inlinePatterns);
 		const sections: string[] = [];
 		let used = 0;
 		for (const name of names) {
 			const tool = this.get(name);
-			if (!tool || !this.#shouldInline(tool, mode, inlinePatterns)) continue;
+			if (!tool || !this.#shouldInline(tool, mode, patterns)) continue;
 			const descriptionCap = this.#dynamic.has(tool.name) ? XdevRegistry.EXTERNAL_DESCRIPTION_CAP : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
 			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET)
