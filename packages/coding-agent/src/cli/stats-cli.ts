@@ -7,6 +7,7 @@
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { APP_NAME, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { shouldConvertCurrency } from "../i18n/exchange-rate";
 import { openPath } from "../utils/open";
 
 /**
@@ -96,12 +97,6 @@ export function parseStatsArgs(args: string[]): StatsCommandArgs | undefined {
 	return result;
 }
 
-function formatCost(n: number): string {
-	if (n < 0.01) return `$${n.toFixed(4)}`;
-	if (n < 1) return `$${n.toFixed(3)}`;
-	return `$${n.toFixed(2)}`;
-}
-
 function normalizePremiumRequests(n: number): number {
 	return Math.round((n + Number.EPSILON) * 100) / 100;
 }
@@ -161,6 +156,19 @@ async function printStatsSummary(): Promise<void> {
 	const stats = await getDashboardStats();
 	const { overall, byModel, byFolder } = stats;
 
+	// 中文 locale 下显示 CNY 换算
+	const convert = shouldConvertCurrency();
+	let rate = 0;
+	if (convert) {
+		const { getExchangeRate } = await import("../i18n/exchange-rate");
+		rate = await getExchangeRate();
+	}
+	function formatLocalCost(n: number): string {
+		const usd = formatUSDCost(n);
+		if (!convert || !rate) return usd;
+		return `${usd} (≈¥${(n * rate).toFixed(2)})`;
+	}
+
 	console.log(chalk.bold("\n=== AI Usage Statistics ===\n"));
 
 	console.log(chalk.bold("Overall:"));
@@ -170,7 +178,7 @@ async function printStatsSummary(): Promise<void> {
 	console.log(`  Input Tokens: ${formatNumber(overall.totalInputTokens)}`);
 	console.log(`  Output Tokens: ${formatNumber(overall.totalOutputTokens)}`);
 	console.log(`  Cache Rate: ${formatPercent(overall.cacheRate)}`);
-	console.log(`  Total Cost: ${formatCost(overall.totalCost)}`);
+	console.log(`  Total Cost: ${formatLocalCost(overall.totalCost)}`);
 	console.log(`  Premium Requests: ${formatNumber(normalizePremiumRequests(overall.totalPremiumRequests ?? 0))}`);
 	console.log(`  Avg Duration: ${overall.avgDuration !== null ? formatDuration(overall.avgDuration) : "-"}`);
 	console.log(`  Avg TTFT: ${overall.avgTtft !== null ? formatDuration(overall.avgTtft) : "-"}`);
@@ -182,7 +190,7 @@ async function printStatsSummary(): Promise<void> {
 		console.log(chalk.bold("\nBy Model:"));
 		for (const m of byModel.slice(0, 10)) {
 			console.log(
-				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache`,
+				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatLocalCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache`,
 			);
 		}
 	}
@@ -190,11 +198,17 @@ async function printStatsSummary(): Promise<void> {
 	if (byFolder.length > 0) {
 		console.log(chalk.bold("\nBy Folder:"));
 		for (const f of byFolder.slice(0, 10)) {
-			console.log(`  ${f.folder}: ${formatNumber(f.totalRequests)} reqs, ${formatCost(f.totalCost)}`);
+			console.log(`  ${f.folder}: ${formatNumber(f.totalRequests)} reqs, ${formatLocalCost(f.totalCost)}`);
 		}
 	}
 
 	console.log("");
+}
+
+function formatUSDCost(n: number): string {
+	if (n < 0.01) return `$${n.toFixed(4)}`;
+	if (n < 1) return `$${n.toFixed(3)}`;
+	return `$${n.toFixed(2)}`;
 }
 
 // =============================================================================

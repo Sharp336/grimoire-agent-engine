@@ -1,0 +1,10 @@
+{
+  "session.compaction.complete": "Compaction complete",
+  "session.compaction.failed": "Compaction failed",
+  "runtime.compaction.complete": "Compaction complete. Tokens: {before} -> {after} (saved {saved})",
+  "runtime.compaction.complete.simple": "Compaction complete.",
+  "runtime.compaction.failed": "Compaction failed: {error}",
+  "compact.modes.soft.description": "Compact locally using active model (skip remote endpoints)",
+  "compact.modes.remote.description": "Compact via remote endpoint/provider native compaction",
+  "compact.modes.snapcompact.description": "Archive history as dense bitmap images, read back by model (no LLM calls)"
+}

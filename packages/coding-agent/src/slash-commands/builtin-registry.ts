@@ -32,6 +32,8 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import { readMCPConfigFile } from "../mcp/config-writer";
+import { i18n } from "../i18n/index";
+import { interceptSlashCommand } from "../i18n/interceptor";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { collectMcpServerNames, MCPCommandController } from "../modes/controllers/mcp-command-controller";
@@ -1753,15 +1755,28 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				// Compaction precondition failures (no model, already compacted, too
 				// small) and provider errors propagate as plain Errors; surface them
 				// via runtime.output so they don't fail the ACP prompt turn.
-				return usage(`Compaction failed: ${errorMessage(err)}`, runtime);
+				return usage(
+					i18n.t("runtime.compaction.failed", "Compaction failed: {error}", { error: errorMessage(err) }),
+					runtime,
+				);
 			}
 			const after = runtime.session.getContextUsage?.();
 			const afterTokens = after?.tokens;
 			if (beforeTokens != null && afterTokens != null) {
 				const saved = beforeTokens - afterTokens;
-				await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
+				await runtime.output(
+					i18n.t(
+						"runtime.compaction.complete",
+						"Compaction complete. Tokens: {before} -> {after} (saved {saved}).",
+						{
+							before: String(beforeTokens),
+							after: String(afterTokens),
+							saved: String(saved),
+						},
+					),
+				);
 			} else {
-				await runtime.output("Compaction complete.");
+				await runtime.output(i18n.t("runtime.compaction.complete.simple", "Compaction complete."));
 			}
 			return commandConsumed();
 		},
@@ -3018,12 +3033,26 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
+	const translated = interceptSlashCommand({
+		name: cmd.name,
+		description: cmd.description,
+		subcommands: cmd.subcommands,
+	});
+	const materialized: TuiBuiltinSlashCommand = {
+		...cmd,
+		description: translated.description,
+	};
+	if (translated.subcommands) {
+		materialized.subcommands = cmd.subcommands!.map((sub, i) => ({
+			...sub,
+			description: translated.subcommands![i].description,
+		}));
+	}
 	if (cmd.subcommands) {
 		materialized.getArgumentCompletions =
 			cmd.name === "mcp" && runtime
 				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
-				: buildArgumentCompletions(cmd.subcommands);
+				: buildArgumentCompletions(materialized.subcommands!);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();

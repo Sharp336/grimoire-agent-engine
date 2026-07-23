@@ -21,6 +21,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { i18n } from "../../i18n";
 import { AskDialogComponent, boundPromptTitle } from "../../modes/components/ask-dialog";
 import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
@@ -941,9 +942,13 @@ export class ExtensionUiController {
 	/**
 	 * Show a confirmation dialog for hooks.
 	 */
+<<<<<<< HEAD
 	async showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
-		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions);
-		return result === "Yes";
+		const result = await this.showHookSelector(`${title}\n${message}`, [
+			i18n.t("ui.yes", "Yes"),
+			i18n.t("ui.no", "No"),
+		], dialogOptions);
+		return result === i18n.t("ui.yes", "Yes");
 	}
 
 	/**

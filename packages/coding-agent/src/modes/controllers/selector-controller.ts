@@ -30,6 +30,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
+import { i18n } from "../../i18n";
 import {
 	getAvailableThemes,
 	getSymbolTheme,
@@ -103,6 +104,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
+import { invalidateTipsCache } from "../components/welcome";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 import { buildCopyTargets } from "../utils/copy-targets";
 
@@ -587,6 +589,14 @@ export class SelectorController {
 			case "colorBlindMode": {
 				setColorBlindMode(value === "true" || value === true).then(() => {
 					this.ctx.ui.invalidate();
+				});
+				break;
+			}
+			case "i18n.language": {
+				const lang = typeof value === "string" ? value : String(value);
+				void i18n.setLanguage(lang).then(() => {
+					invalidateTipsCache();
+					this.ctx.ui.requestRender();
 				});
 				break;
 			}

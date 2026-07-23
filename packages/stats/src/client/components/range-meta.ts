@@ -5,6 +5,7 @@
  */
 
 import { format } from "date-fns";
+import type { TranslationFn } from "../i18n";
 import type { TimeRange } from "../types";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -24,50 +25,75 @@ export interface RangeMeta {
 	tickFormat: string;
 }
 
-const RANGE_META: Record<TimeRange, RangeMeta> = {
+const RANGE_META_BASE: Record<TimeRange, Omit<RangeMeta, "windowLabel">> = {
 	"1h": {
-		windowLabel: "the last hour",
 		trendLabel: "1h Trend",
 		bucketMs: FIVE_MIN_MS,
 		bucketCount: 12,
 		tickFormat: "HH:mm",
 	},
 	"24h": {
-		windowLabel: "the last 24 hours",
 		trendLabel: "24h Trend",
 		bucketMs: HOUR_MS,
 		bucketCount: 24,
 		tickFormat: "HH:mm",
 	},
 	"7d": {
-		windowLabel: "the last 7 days",
 		trendLabel: "7d Trend",
 		bucketMs: DAY_MS,
 		bucketCount: 7,
 		tickFormat: "MMM d",
 	},
 	"30d": {
-		windowLabel: "the last 30 days",
 		trendLabel: "30d Trend",
 		bucketMs: DAY_MS,
 		bucketCount: 30,
 		tickFormat: "MMM d",
 	},
 	"90d": {
-		windowLabel: "the last 90 days",
 		trendLabel: "90d Trend",
 		bucketMs: DAY_MS,
 		bucketCount: 90,
 		tickFormat: "MMM d",
 	},
-	all: { windowLabel: "all time", trendLabel: "Trend", bucketMs: DAY_MS, bucketCount: 0, tickFormat: "MMM d" },
+	all: { trendLabel: "Trend", bucketMs: DAY_MS, bucketCount: 0, tickFormat: "MMM d" },
 };
 
-export function rangeMeta(range: TimeRange): RangeMeta {
-	return RANGE_META[range];
+const WINDOW_LABEL_KEY: Record<TimeRange, string> = {
+	"1h": "range.lastHour",
+	"24h": "range.last24h",
+	"7d": "range.last7d",
+	"30d": "range.last30d",
+	"90d": "range.last90d",
+	all: "range.allTime",
+};
+
+export interface RangeBucketMeta {
+	/** Bucket size matching the server query for this range. */
+	bucketMs: number;
+	/** Number of buckets the server is expected to return for this range. */
+	bucketCount: number;
 }
 
-/** Format a bucket timestamp using the active range's tick format. */
+/** Get bucketing metadata without translation - for data processing functions. */
+export function rangeBucketMeta(range: TimeRange): RangeBucketMeta {
+	const base = RANGE_META_BASE[range];
+	return {
+		bucketMs: base.bucketMs,
+		bucketCount: base.bucketCount,
+	};
+}
+
+export function rangeMeta(range: TimeRange, t: TranslationFn): RangeMeta {
+	const base = RANGE_META_BASE[range];
+	return {
+		...base,
+		windowLabel: t(WINDOW_LABEL_KEY[range]),
+		trendLabel: t(`trend.${range}`),
+	};
+}
+
+/** Format a timestamp using the range's tick format. */
 export function formatRangeTick(timestamp: number, range: TimeRange): string {
-	return format(new Date(timestamp), RANGE_META[range].tickFormat);
+	return format(new Date(timestamp), RANGE_META_BASE[range].tickFormat);
 }

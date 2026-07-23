@@ -11,6 +11,8 @@
  * ACP hint), the parser, and the engine override all read this table.
  */
 
+import { i18n } from "../i18n";
+
 /** Subcommand selecting a one-off compaction mode for manual `/compact`. */
 export type CompactMode = "soft" | "remote" | "snapcompact";
 
@@ -47,18 +49,27 @@ export interface CompactModeDef {
 export const COMPACT_MODES: readonly CompactModeDef[] = [
 	{
 		name: "soft",
-		description: "Summarize locally with the active model (skip remote endpoints)",
+		description: i18n.t(
+			"compact.modes.soft.description",
+			"Summarize locally with the active model (skip remote endpoints)",
+		),
 		overrides: { strategy: "context-full", remoteEnabled: false },
 	},
 	{
 		name: "remote",
-		description: "Summarize via the remote endpoint / provider-native compaction",
+		description: i18n.t(
+			"compact.modes.remote.description",
+			"Summarize via the remote endpoint / provider-native compaction",
+		),
 		overrides: { strategy: "context-full", remoteEnabled: true },
 		requiresRemote: true,
 	},
 	{
 		name: "snapcompact",
-		description: "Archive history onto dense bitmap images the model reads back (no LLM call)",
+		description: i18n.t(
+			"compact.modes.snapcompact.description",
+			"Archive history onto dense bitmap images the model reads back (no LLM call)",
+		),
 		overrides: { strategy: "snapcompact" },
 		rejectsFocus: true,
 	},

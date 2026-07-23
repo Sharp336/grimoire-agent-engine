@@ -1,5 +1,6 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatCost } from "../../i18n/exchange-rate";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
@@ -193,6 +194,6 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		`Total tokens: ${stats.totalTokens}`,
 		...(orchestrationTokens > 0 ? [`Orchestration tokens: ${orchestrationTokens}`] : []),
 		`Premium requests: ${stats.premiumRequests}`,
-		`Cost: $${stats.cost.toFixed(6)}`,
+		`Cost: ${formatCost(stats.cost)}`,
 	].join("\n");
 }

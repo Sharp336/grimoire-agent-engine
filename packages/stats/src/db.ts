@@ -180,10 +180,11 @@ export async function initDb(): Promise<Database> {
 	`);
 
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
-	if (!messageColumns.some(column => column.name === "premium_requests")) {
+	const hasPremiumColumn = messageColumns.some(column => column.name === "premium_requests");
+	if (!hasPremiumColumn) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
+		db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	}
-	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
 	// TABLE and the parser labels rows at insert time; a pre-existing table gets
@@ -963,28 +964,79 @@ function rowToMessageStats(row: any): MessageStats {
 	};
 }
 
-export function getRecentRequests(limit = 100): MessageStats[] {
+export function getRecentRequests(limit = 100, offset = 0, model?: string): MessageStats[] {
 	if (!db) return [];
+	if (model) {
+		const stmt = db.prepare(`
+			SELECT * FROM messages
+			WHERE model = ?
+			ORDER BY timestamp DESC
+			LIMIT ? OFFSET ?
+		`);
+		return (stmt.all(model, limit, offset) as any[]).map(rowToMessageStats);
+	}
 	const stmt = db.prepare(`
 		SELECT * FROM messages 
 		ORDER BY timestamp DESC 
-		LIMIT ?
+		LIMIT ? OFFSET ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	return (stmt.all(limit, offset) as any[]).map(rowToMessageStats);
 }
 
-export function getRecentErrors(limit = 100, cutoff?: number | null): MessageStats[] {
+export function getRecentErrors(limit = 100, offset = 0, model?: string, cutoff?: number): MessageStats[] {
 	if (!db) return [];
-	const hasCutoff = cutoff !== undefined && cutoff !== null;
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
+	const baseWhere = hasCutoff ? "WHERE stop_reason = 'error' AND timestamp > ?" : "WHERE stop_reason = 'error'";
+	const params: (string | number)[] = hasCutoff ? [cutoff!] : [];
+	if (model) {
+		const stmt = db.prepare(`
+			SELECT * FROM messages
+			${baseWhere} AND model = ?
+			ORDER BY timestamp DESC
+			LIMIT ? OFFSET ?
+		`);
+		return (stmt.all(...params, model, limit, offset) as any[]).map(rowToMessageStats);
+	}
 	const stmt = db.prepare(`
 		SELECT * FROM messages
-		WHERE stop_reason = 'error'
-		${hasCutoff ? "AND timestamp >= ?" : ""}
+		${baseWhere}
 		ORDER BY timestamp DESC
-		LIMIT ?
+		LIMIT ? OFFSET ?
 	`);
-	const rows = hasCutoff ? stmt.all(cutoff, limit) : stmt.all(limit);
-	return rows.map(rowToMessageStats);
+	return (stmt.all(...params, limit, offset) as any[]).map(rowToMessageStats);
+}
+
+export function countRecentRequests(model?: string): number {
+	if (!db) return 0;
+	if (model) {
+		const stmt = db.prepare("SELECT COUNT(*) as count FROM messages WHERE model = ?");
+		const row = stmt.get(model) as { count: number } | undefined;
+		return row?.count ?? 0;
+	}
+	const stmt = db.prepare("SELECT COUNT(*) as count FROM messages");
+	const row = stmt.get() as { count: number } | undefined;
+	return row?.count ?? 0;
+}
+
+export function countRecentErrors(model?: string, cutoff?: number): number {
+	if (!db) return 0;
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
+	const baseWhere = hasCutoff ? "WHERE stop_reason = 'error' AND timestamp > ?" : "WHERE stop_reason = 'error'";
+	const params: (string | number)[] = hasCutoff ? [cutoff!] : [];
+	if (model) {
+		const stmt = db.prepare(`SELECT COUNT(*) as count FROM messages ${baseWhere} AND model = ?`);
+		const row = stmt.get(...params, model) as { count: number } | undefined;
+		return row?.count ?? 0;
+	}
+	const stmt = db.prepare(`SELECT COUNT(*) as count FROM messages ${baseWhere}`);
+	const row = stmt.get(...params) as { count: number } | undefined;
+	return row?.count ?? 0;
+}
+
+export function getDistinctModels(): string[] {
+	if (!db) return [];
+	const stmt = db.prepare("SELECT DISTINCT model FROM messages ORDER BY model");
+	return (stmt.all() as { model: string }[]).map(row => row.model);
 }
 
 export function getMessageById(id: number): MessageStats | null {

@@ -14,6 +14,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { i18n } from "../../i18n";
 import { validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes } from "../../mcp/oauth-discovery";
 import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdioServerConfig } from "../../mcp/types";
@@ -475,7 +476,7 @@ export class MCPAddWizard extends Container {
 		this.#contentContainer.addChild(new Text("Save this configuration?", 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
 
-		const options = ["Yes", "No"];
+		const options = [i18n.t("ui.yes", "Yes"), i18n.t("ui.no", "No")];
 		for (let i = 0; i < options.length; i++) {
 			const isSelected = i === this.#selectedIndex;
 			const prefix = isSelected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
@@ -839,8 +840,16 @@ export class MCPAddWizard extends Container {
 		this.#contentContainer.addChild(new Spacer(1));
 
 		const options = [
-			{ value: "oauth" as const, label: "OAuth flow (web-based)", desc: "(opens browser)" },
-			{ value: "manual" as const, label: "Manual API key/token", desc: "(paste or use shell command)" },
+			{
+				value: "oauth" as const,
+				label: i18n.t("ui.oauthFlow", "OAuth flow (web-based)"),
+				desc: i18n.t("ui.opensBrowser", "(opens browser)"),
+			},
+			{
+				value: "manual" as const,
+				label: i18n.t("ui.manualApiKey", "Manual API key/token"),
+				desc: i18n.t("ui.pasteOrShellCmd", "(paste or use shell command)"),
+			},
 		];
 
 		for (let i = 0; i < options.length; i++) {
@@ -1299,15 +1308,27 @@ export class MCPAddWizard extends Container {
 				);
 			} else if (errorMsg.includes("timeout") || errorMsg.includes("timed out")) {
 				this.#contentContainer.addChild(
-					new Text(theme.fg("muted", "Tip: Complete authorization faster next time"), 0, 0),
+					new Text(
+						theme.fg("muted", i18n.t("ui.tip.authFaster", "Tip: Complete authorization faster next time")),
+						0,
+						0,
+					),
 				);
 			} else if (errorMsg.includes("Invalid OAuth URLs")) {
 				this.#contentContainer.addChild(
-					new Text(theme.fg("muted", "Tip: Check that the OAuth URLs are correct"), 0, 0),
+					new Text(
+						theme.fg("muted", i18n.t("ui.tip.oauthUrls", "Tip: Check that the OAuth URLs are correct")),
+						0,
+						0,
+					),
 				);
 			} else if (errorMsg.includes("ECONNREFUSED")) {
 				this.#contentContainer.addChild(
-					new Text(theme.fg("muted", "Tip: Verify the OAuth server is accessible"), 0, 0),
+					new Text(
+						theme.fg("muted", i18n.t("ui.tip.oauthAccessible", "Tip: Verify the OAuth server is accessible")),
+						0,
+						0,
+					),
 				);
 			}
 

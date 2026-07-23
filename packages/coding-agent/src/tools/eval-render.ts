@@ -15,6 +15,7 @@ import { formatNumber } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import { formatCost } from "../i18n/exchange-rate";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
@@ -160,7 +161,7 @@ function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
 	}
 	const cost = eventNumber(event.cost);
 	if (cost > 0) {
-		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${cost.toFixed(2)}`)}`;
+		line += `${theme.sep.dot}${theme.fg("statusLineCost", formatCost(cost))}`;
 	}
 	const model = eventString(event.model);
 	if (model && settings.get("task.showResolvedModelBadge")) {

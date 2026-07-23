@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import { formatCost } from "../../../i18n/exchange-rate";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
@@ -401,6 +402,19 @@ const tokenOutSegment: StatusLineSegment = {
 	},
 };
 
+const tokenIoSegment: StatusLineSegment = {
+	id: "token_io",
+	render(ctx) {
+		const { input, output } = ctx.usageStats;
+		if (!input && !output) return { content: "", visible: false };
+
+		const inText = input ? `${theme.icon.input} ${formatNumber(input)}` : `${theme.icon.input} 0`;
+		const outText = output ? `${theme.icon.output} ${formatNumber(output)}` : `${theme.icon.output} 0`;
+		const content = `${theme.fg("statusLineSpend", inText)}${theme.fg("dim", "/")}${theme.fg("statusLineOutput", outText)}`;
+		return { content, visible: true };
+	},
+};
+
 const tokenTotalSegment: StatusLineSegment = {
 	id: "token_total",
 	render(ctx) {
@@ -442,7 +456,7 @@ const costSegment: StatusLineSegment = {
 		}
 
 		const billingParts: string[] = [];
-		if (cost) billingParts.push(`$${cost.toFixed(2)}`);
+		if (cost) billingParts.push(formatCost(cost));
 		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
 		if (usingSubscription) billingParts.push("(sub)");
 		if (advisorCost) billingParts.push(`${billingParts.length ? "+ " : ""}$${advisorCost.toFixed(2)} (adv)`);
@@ -681,6 +695,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	subagents: subagentsSegment,
 	token_in: tokenInSegment,
 	token_out: tokenOutSegment,
+	token_io: tokenIoSegment,
 	token_total: tokenTotalSegment,
 	token_rate: tokenRateSegment,
 	cost: costSegment,

@@ -123,6 +123,12 @@ async function main(): Promise<void> {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
 	}
 	await ensureShebang();
+	// Copy bundled i18n translations so dist/cli.js can find them at runtime
+	// (import.meta.dir resolves to dist/, not src/i18n/).
+	const langSrc = path.join(packageDir, "src", "i18n", "lang");
+	const langDst = path.join(outDir, "lang");
+	await fs.rm(langDst, { recursive: true, force: true });
+	await fs.cp(langSrc, langDst, { recursive: true });
 	const stat = await fs.stat(cliPath);
 	const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 	process.stdout.write(

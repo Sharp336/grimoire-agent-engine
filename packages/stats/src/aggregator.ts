@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
+	getDistinctModels as dbGetDistinctModels,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
 	getBehaviorByModel,
@@ -15,6 +16,8 @@ import {
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
+	countRecentErrors as getRecentErrorCount,
+	countRecentRequests as getRecentRequestCount,
 	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
@@ -454,15 +457,39 @@ export async function getCostDashboardStats(range?: string | null): Promise<Pick
 		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
 	};
 }
-export async function getRecentRequests(limit?: number): Promise<MessageStats[]> {
-	await initDb();
-	return dbGetRecentRequests(limit);
+export interface PaginatedResult<T> {
+	items: T[];
+	total: number;
 }
 
-export async function getRecentErrors(range?: string | null, limit?: number): Promise<MessageStats[]> {
+export async function getRecentRequests(
+	limit?: number,
+	offset?: number,
+	model?: string,
+): Promise<PaginatedResult<MessageStats>> {
+	await initDb();
+	const items = dbGetRecentRequests(limit, offset, model);
+	const total = getRecentRequestCount(model);
+	return { items, total };
+}
+
+export async function getRecentErrors(
+	limit?: number,
+	offset?: number,
+	model?: string,
+	range?: string,
+): Promise<PaginatedResult<MessageStats>> {
 	await initDb();
 	const { cutoff } = getTimeRangeConfig(range);
-	return dbGetRecentErrors(limit, cutoff);
+	const cutoffValue = cutoff ?? undefined;
+	const items = dbGetRecentErrors(limit, offset, model, cutoffValue);
+	const total = getRecentErrorCount(model, cutoffValue);
+	return { items, total };
+}
+
+export async function getModelList(): Promise<string[]> {
+	await initDb();
+	return dbGetDistinctModels();
 }
 
 export async function getRequestDetails(id: number): Promise<RequestDetails | null> {

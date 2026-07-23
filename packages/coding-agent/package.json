@@ -106,6 +106,7 @@
     "src",
     "dist/cli.js",
     "dist/CHANGELOG-*.md",
+    "dist/lang",
     "dist/*.node",
     "dist/template-*.css",
     "dist/template-*.html",

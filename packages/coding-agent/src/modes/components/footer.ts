@@ -5,6 +5,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Component, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
+import { formatCost } from "../../i18n/exchange-rate";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { shortenPath } from "../../tools/render-utils";
@@ -178,7 +179,7 @@ export class FooterComponent implements Component {
 		const normalizedPremiumRequests = Math.round((totalPremiumRequests + Number.EPSILON) * 100) / 100;
 		if (totalCost || usingSubscription || normalizedPremiumRequests) {
 			const billingParts: string[] = [];
-			if (totalCost) billingParts.push(`$${totalCost.toFixed(3)}`);
+			if (totalCost) billingParts.push(formatCost(totalCost));
 			if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
 			if (usingSubscription) billingParts.push("(sub)");
 			if (billingParts.length > 0) statsParts.push(billingParts.join(" "));

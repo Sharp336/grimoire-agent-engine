@@ -142,6 +142,7 @@ import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
+import { formatCost } from "../i18n/exchange-rate";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
@@ -8802,7 +8803,92 @@ export class AgentSession {
 	 * Format a concise advisor status line for ACP/text output.
 	 */
 	formatAdvisorStatus(): string {
-		return this.#advisors.formatAdvisorStatus();
+		const stats = this.getAdvisorStats();
+		if (!stats.active && stats.advisors.length === 0) {
+			return stats.configured
+				? "Advisor setting is enabled, but no model is assigned to the 'advisor' role."
+				: "Advisor is disabled.";
+		}
+		if (stats.advisors.length <= 1) {
+			const s = stats.advisors[0];
+			if (s && s.status === "no_model") {
+				return stats.configured
+					? "Advisor setting is enabled, but no model is assigned to the 'advisor' role."
+					: "Advisor is disabled.";
+			}
+			const contextLine =
+				s.contextWindow > 0
+					? `Context: ${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} tokens (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
+					: `Context: ${s.contextTokens.toLocaleString()} tokens`;
+			const spendParts = [`${s.tokens.input.toLocaleString()} input`, `${s.tokens.output.toLocaleString()} output`];
+			if (s.tokens.cacheRead > 0) spendParts.push(`${s.tokens.cacheRead.toLocaleString()} cache read`);
+			if (s.tokens.cacheWrite > 0) spendParts.push(`${s.tokens.cacheWrite.toLocaleString()} cache write`);
+			const spendLine = `Spend: ${spendParts.join(", ")}, ${formatCost(s.cost)}`;
+			if (!s.model || s.status !== "running") return `Advisor "${s.name}" is ${s.status.replace("_", " ")}.`;
+			return `Advisor is enabled (${s.model.provider}/${s.model.id}). ${contextLine}. ${spendLine}.`;
+		}
+		const lines = [`Advisors enabled (${stats.advisors.length}):`];
+		for (const s of stats.advisors) {
+			const ctx =
+				s.contextWindow > 0
+					? `${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
+					: `${s.contextTokens.toLocaleString()}`;
+			lines.push(
+				`  • ${s.name}${s.model && s.status === "running" ? ` (${s.model.provider}/${s.model.id})` : ` [${s.status}]`} — context ${ctx} tokens, ${formatCost(s.cost)}`,
+			);
+		}
+		lines.push(
+			`Totals: ${stats.tokens.input.toLocaleString()} input, ${stats.tokens.output.toLocaleString()} output, ${formatCost(stats.cost)}.`,
+		);
+		return lines.join("\n");
+	}
+
+	/**
+	 * Estimate the advisor's current context tokens. A successful provider usage
+	 * after the latest advisor compaction is ground truth for the prompt plus its
+	 * generated output; only messages after that anchor are estimated. Usage from
+	 * retained pre-compaction messages is stale and must not immediately retrigger
+	 * maintenance on the newly compacted context.
+	 */
+	#estimateAdvisorContextTokens(messages: AgentMessage[]): number {
+		let usageAnchorStartIndex = 0;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role !== "compactionSummary") continue;
+			const advisorSummary = message as AdvisorCompactionSummaryMessage;
+			// Advisor summaries created before this runtime-only boundary existed have
+			// no trustworthy way to distinguish retained from newly appended messages.
+			// Conservatively ignore every current assistant until the next compaction.
+			usageAnchorStartIndex = advisorSummary.advisorUsageAnchorStartIndex ?? messages.length;
+			break;
+		}
+
+		let lastUsageIndex: number | undefined;
+		let lastUsage: AssistantMessage["usage"] | undefined;
+		for (let i = messages.length - 1; i >= usageAnchorStartIndex; i--) {
+			const message = messages[i];
+			if (message.role !== "assistant") continue;
+			const assistant = message as AssistantMessage;
+			if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error" && assistant.usage) {
+				lastUsage = assistant.usage;
+				lastUsageIndex = i;
+				break;
+			}
+		}
+
+		const estimateOptions = { excludeEncryptedReasoning: true } as const;
+		if (!lastUsage || lastUsageIndex === undefined) {
+			let estimated = 0;
+			for (const message of messages) {
+				estimated += estimateTokens(message, estimateOptions);
+			}
+			return estimated;
+		}
+		let trailingTokens = 0;
+		for (let i = lastUsageIndex + 1; i < messages.length; i++) {
+			trailingTokens += estimateTokens(messages[i], estimateOptions);
+		}
+		return calculateContextTokens(lastUsage) + trailingTokens;
 	}
 
 	/**
