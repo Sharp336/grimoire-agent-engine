@@ -368,6 +368,17 @@ cannot express:
    ends, so finishing a manual turn can trigger the next queued task
    (aborting a scheduled turn pauses the queue, but a *completed* manual
    turn does not). Interacting for a while? `/scheduler pause` first.
+7. **Content-policy purge is strongest once a command has run.** The reliable
+   no-LLM context purge (`newSession`) is exposed by omp only on the command
+   context, so the scheduler reuses the context captured from your last
+   `/scheduler` command. In the normal flow — you run `/scheduler start` — that
+   context is captured, so an overnight content-policy ("cyber") hit is purged
+   with a fresh session. If a run is resumed purely from persisted state (omp
+   relaunched with `run: running` and no `/scheduler` command issued yet), no
+   command context exists, so the purge falls back to `compact`, which must
+   summarize the poisoned transcript and may re-trip the classifier. Running any
+   `/scheduler` command (e.g. `/scheduler status`) after launch restores the
+   full `newSession` purge.
 
 ## Development
 
