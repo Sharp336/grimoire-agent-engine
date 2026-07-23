@@ -2247,6 +2247,30 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Experimental: deterministic lossless structured-result re-encoding (transient, per-request)
+	"reencode.losslessToolResults": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Experimental",
+			label: "Lossless Structured Tool Results",
+			description:
+				"Experimental: enable deterministic schema+CSV re-encoding for eligible historical flat JSON-array tool results, but only for tools named in reencode.toolResultAllowlist. Enabling this alone changes nothing.",
+		},
+	},
+	"reencode.toolResultAllowlist": {
+		type: "array",
+		default: [] as string[],
+		ui: {
+			tab: "context",
+			group: "Experimental",
+			label: "Lossless Re-encode Tool Allowlist",
+			description:
+				"Tool names whose eligible historical JSON-array results may be re-encoded when Lossless Structured Tool Results is enabled. Empty by default; opt in only producers whose output is consumed as structured values because formatting and key order are normalized.",
+		},
+	},
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",

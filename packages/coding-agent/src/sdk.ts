@@ -126,6 +126,7 @@ import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewa
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
+import { transformLosslessToolResults } from "./session/lossless-reencode";
 import {
 	type CustomMessage,
 	convertToLlm,
@@ -2795,9 +2796,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return wrapSteeringForModel(withContext);
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
-		// redacted from text before snapcompact rasterizes it into PNG frames, then
-		// clamp images to the active provider budget before the request is sent.
+		// redacted before lossless structured re-encoding, then let snapcompact
+		// consider only the remaining text and clamp images to the provider budget.
 		const snapcompactSystemPromptMode = settings.get("snapcompact.systemPrompt");
+		const losslessReencodeToolResults = settings.get("reencode.losslessToolResults");
+		const losslessReencodeToolAllowlist = settings.get("reencode.toolResultAllowlist");
 		const snapcompactInline =
 			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
 				? new SnapcompactInlineTransformer(
@@ -2813,6 +2816,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				: undefined;
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			if (losslessReencodeToolResults) {
+				transformed = transformLosslessToolResults(transformed, {
+					toolAllowlist: losslessReencodeToolAllowlist,
+				});
+			}
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
 			return clampProviderContextImages(transformed, transformModel);
 		};

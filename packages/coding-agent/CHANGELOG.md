@@ -17,6 +17,7 @@
 - Made the statusline `git` segment jj-aware: in a Jujutsu repo it shows the nearest bookmark (falling back to the short change-id) instead of git's `detached` label or nothing, and working-copy change counts come from jj where there is no `.git` to read ([#3582](https://github.com/can1357/oh-my-pi/issues/3582))
 - Added `block`/`unblock` todo operations and a `blocked` status for tasks waiting on external input; blocked tasks stay visible in the todo HUD and summary but are excluded from the incomplete-todo stop reminder, and an optional blocker note records what the task is waiting for.
 - Added a toggle-list editor in `/settings` for array-of-enum settings: `providers.webSearchOrder` and `providers.imageOrder` (ordered — Enter/Space toggles, ←/→ nudges, 1-9 splices the hovered provider into that position) and `providers.webSearchExclude` now appear under Providers → Services instead of being config-file only.
+- Added opt-in deterministic value-lossless schema+CSV re-encoding for eligible historical flat JSON-array tool results before snapcompact provider transforms, gated by both `reencode.losslessToolResults` and the empty-by-default per-tool `reencode.toolResultAllowlist`; the output marker discloses that values are exact while formatting and key order are normalized ([#5338](https://github.com/can1357/oh-my-pi/issues/5338)).
 
 ### Changed
 
