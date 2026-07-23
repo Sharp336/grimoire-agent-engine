@@ -57,6 +57,7 @@ $MaxFrameBytes = 64MB
 Add-Type -Namespace Omp -Name Stdio -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError=true)] static extern System.IntPtr GetStdHandle(int n);
 [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetStdHandle(int n, System.IntPtr h);
+[DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(System.IntPtr h, uint mask, uint flags);
 [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern System.IntPtr CreateFileW(string name, uint access, uint share, System.IntPtr sec, uint disp, uint flags, System.IntPtr templ);
 [DllImport("libc", SetLastError=true)] static extern int open(string path, int flags);
 [DllImport("libc", SetLastError=true)] static extern int dup(int fd);
@@ -69,8 +70,20 @@ static System.IO.Stream Detach(int stdHandle, int posixFd, bool forWrite) {
     var access = forWrite ? System.IO.FileAccess.Write : System.IO.FileAccess.Read;
     if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows)) {
         // Wrap the original pipe handle (ownsHandle:false — the process still
-        // owns it), then point the inheritable slot at NUL.
+        // owns it), then point the inheritable slot at NUL. SetStdHandle only
+        // repoints the std SLOT; it does not touch HANDLE_FLAG_INHERIT on the
+        // original handle value, which is still open (via `keep`/`orig`) and,
+        // by default, inheritable -- a child spawned with handle inheritance
+        // enabled (bInheritHandles=TRUE) would still receive it as an extra
+        // handle even though the std slot itself now points at NUL. A
+        // long-lived child holding that duplicate open after the host
+        // exits/crashes would keep the pipe alive and hide EOF from Rust's
+        // reader, stalling in-flight run() calls until their own timeout
+        // instead of promptly reporting host death -- the Windows analogue of
+        // the POSIX FD_CLOEXEC fix below. Clear the flag before anything else
+        // can spawn and inherit it.
         System.IntPtr orig = GetStdHandle(stdHandle);
+        SetHandleInformation(orig, 1u /* HANDLE_FLAG_INHERIT */, 0u);
         var keep = new System.IO.FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(orig, false), access, 1);
         uint gen = forWrite ? 0x40000000u : 0x80000000u; // GENERIC_WRITE : GENERIC_READ
         System.IntPtr nul = CreateFileW("NUL", gen, 0x3u, System.IntPtr.Zero, 3u, 0u, System.IntPtr.Zero);

@@ -1566,6 +1566,71 @@ mod tests {
 		assert!(res.is_err(), "host death mid-exec surfaces as an error");
 	}
 
+	/// A user command spawning a background child with default
+	/// `ProcessStartInfo` settings (matching round-24's pattern:
+	/// `UseShellExecute=$false`, nothing explicitly redirected) can inherit
+	/// the sidecar's own std handles on Windows. `Detach()`'s `SetStdHandle`
+	/// only repoints the STD SLOT at NUL -- it never cleared
+	/// `HANDLE_FLAG_INHERIT` on the original handle it keeps open -- so that
+	/// child could receive an inheritable duplicate of the write end of the
+	/// stdout protocol pipe. If the host then dies while that child is still
+	/// alive, an OS pipe stays open for writing as long as ANY process holds
+	/// a duplicate of the write end, so Rust's `read_events` would never see
+	/// EOF until the orphaned child ALSO exits, hiding host death instead of
+	/// reporting it promptly.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn host_death_is_detected_promptly_even_with_a_long_lived_child_holding_inherited_handles()
+	{
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// Fire-and-forget a long-lived child using the exact
+		// ProcessStartInfo shape that empirically inherits handles on this
+		// platform (round-24's pattern) -- the finding's "handle inheritance
+		// enabled" scenario.
+		let spawn_cmd = if cfg!(windows) {
+			"$psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = 'ping.exe'; \
+			 $psi.Arguments = '-n 30 127.0.0.1'; $psi.UseShellExecute = $false; \
+			 [void][System.Diagnostics.Process]::Start($psi); 'spawner-done'"
+		} else {
+			"$psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = '/bin/sleep'; \
+			 $psi.Arguments = '30'; $psi.UseShellExecute = $false; \
+			 [void][System.Diagnostics.Process]::Start($psi); 'spawner-done'"
+		};
+		let (out, _) = run_cmd(&host, spawn_cmd, task::CancelToken::default()).await;
+		assert!(out.contains("spawner-done"), "spawner returns without waiting: {out:?}");
+
+		// Kill the sidecar from inside a separate exec. Bound the wait
+		// generously above ordinary IPC/process teardown latency but far
+		// below the 30s the orphaned child survives for -- if EOF were
+		// hidden behind that child's still-open handle duplicate, this
+		// would time out instead of detecting death promptly.
+		let (chunk_tx, _chunk_rx) = mpsc::channel::<String>(super::CHUNK_QUEUE_CHUNKS);
+		let result = tokio::time::timeout(
+			Duration::from_secs(10),
+			host.core.exec(
+				"[Environment]::Exit(3)".to_string(),
+				None,
+				None,
+				200,
+				task::CancelToken::default(),
+				chunk_tx,
+			),
+		)
+		.await;
+		assert!(
+			result.is_ok(),
+			"host death must be detected within 10s even with a long-lived child holding inherited \
+			 handles -- a hidden EOF would stall this until the child's own 30s lifetime ends"
+		);
+		assert!(result.unwrap().is_err(), "host death mid-exec surfaces as an error");
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn kills_host_when_stop_is_not_acknowledged() {
 		if !pwsh_available() {
