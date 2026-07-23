@@ -35,9 +35,22 @@ afterEach(() => {
 });
 
 describe("Moonshot web search provider", () => {
-	it("executes the $web_search built-in tool loop and returns normalized SearchResponse", async () => {
+	it("executes the Formula fiber loop and returns normalized SearchResponse", async () => {
 		const capturedRequests: CapturedRequest[] = [];
-		let stepCount = 0;
+		let chatStep = 0;
+		const encryptedOutput = "----MOONSHOT ENCRYPTED BEGIN----protected----MOONSHOT ENCRYPTED END----";
+		const toolDeclaration = {
+			type: "function",
+			function: {
+				name: "web_search",
+				description: "Search the web for information",
+				parameters: {
+					type: "object",
+					properties: { query: { type: "string" } },
+					required: ["query"],
+				},
+			},
+		};
 
 		const fetchImpl: FetchImpl = (input, init) => {
 			const url = typeof input === "string" ? input : input.toString();
@@ -51,71 +64,75 @@ describe("Moonshot web search provider", () => {
 						? new TextDecoder().decode(rawBody)
 						: String(rawBody ?? "");
 			const body = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : {};
-
 			capturedRequests.push({ url, method, headers, body });
-			stepCount++;
 
-			if (stepCount === 1) {
-				// Turn 1: model returns tool_calls for $web_search
+			if (url.endsWith("/tools")) {
+				return Promise.resolve(Response.json({ object: "list", tools: [toolDeclaration] }));
+			}
+			if (url.endsWith("/fibers")) {
 				return Promise.resolve(
-					new Response(
-						JSON.stringify({
-							id: "chatcmpl-step1",
-							model: "kimi-k3",
-							choices: [
-								{
-									index: 0,
-									finish_reason: "tool_calls",
-									message: {
-										role: "assistant",
-										reasoning_content: "Thinking about searching Moonshot caching...",
-										tool_calls: [
-											{
-												id: "call_search_1",
-												type: "builtin_function",
-												function: {
-													name: "$web_search",
-													arguments: JSON.stringify({ query: "Moonshot AI Context Caching" }),
-												},
-											},
-										],
-									},
-								},
-							],
-							usage: { prompt_tokens: 15, completion_tokens: 10, total_tokens: 25 },
-						}),
-						{ status: 200, headers: { "Content-Type": "application/json" } },
-					),
+					Response.json({
+						status: "succeeded",
+						context: { encrypted_output: encryptedOutput },
+					}),
 				);
 			}
 
-			// Turn 2: model produces final answer
-			return Promise.resolve(
-				new Response(
-					JSON.stringify({
-						id: "chatcmpl-step2",
+			chatStep++;
+			if (chatStep === 1) {
+				return Promise.resolve(
+					Response.json({
+						id: "chatcmpl-step1",
 						model: "kimi-k3",
 						choices: [
 							{
 								index: 0,
-								finish_reason: "stop",
+								finish_reason: "tool_calls",
 								message: {
 									role: "assistant",
-									content: "Moonshot AI Context Caching optimizes repeated prompt tokens.",
-									annotations: [
+									content: "",
+									reasoning_content: "Thinking about searching Moonshot caching...",
+									tool_calls: [
 										{
-											url: "https://platform.kimi.ai/docs",
-											title: "Kimi Docs",
-											text: "Context caching documentation",
+											id: "call_search_1",
+											type: "function",
+											function: {
+												name: "web_search",
+												arguments: JSON.stringify({ query: "Moonshot AI Context Caching" }),
+											},
 										},
 									],
 								},
 							},
 						],
-						usage: { prompt_tokens: 120, completion_tokens: 25, total_tokens: 145 },
+						usage: { prompt_tokens: 15, completion_tokens: 10, total_tokens: 25 },
 					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				),
+				);
+			}
+
+			return Promise.resolve(
+				Response.json({
+					id: "chatcmpl-step2",
+					model: "kimi-k3",
+					choices: [
+						{
+							index: 0,
+							finish_reason: "stop",
+							message: {
+								role: "assistant",
+								content: "Moonshot AI Context Caching optimizes repeated prompt tokens.",
+								annotations: [
+									{
+										url: "https://platform.kimi.ai/docs",
+										title: "Kimi Docs",
+										text: "Context caching documentation",
+									},
+								],
+							},
+						},
+					],
+					usage: { prompt_tokens: 120, completion_tokens: 25, total_tokens: 145 },
+				}),
 			);
 		};
 
@@ -132,28 +149,31 @@ describe("Moonshot web search provider", () => {
 			temperature: 0,
 		});
 
-		expect(capturedRequests).toHaveLength(2);
-		expect(capturedRequests[0]?.url).toBe("https://api.moonshot.ai/v1/chat/completions");
-		expect(capturedRequests[0]?.headers.get("Authorization")).toBe("Bearer sk-moonshot-test-key");
-		expect(capturedRequests[0]?.body.model).toBe("kimi-k3");
-		expect(capturedRequests[0]?.body.tools).toEqual([
-			{
-				type: "builtin_function",
-				function: { name: "$web_search" },
-			},
+		expect(capturedRequests.map(request => `${request.method} ${request.url}`)).toEqual([
+			"GET https://api.moonshot.ai/v1/formulas/moonshot/web-search:latest/tools",
+			"POST https://api.moonshot.ai/v1/chat/completions",
+			"POST https://api.moonshot.ai/v1/formulas/moonshot/web-search:latest/fibers",
+			"POST https://api.moonshot.ai/v1/chat/completions",
 		]);
-		expect(capturedRequests[0]?.body.temperature).toBeUndefined();
+		expect(capturedRequests[0]?.headers.get("Authorization")).toBe("Bearer sk-moonshot-test-key");
+		expect(capturedRequests[1]?.body.model).toBe("kimi-k3");
+		expect(capturedRequests[1]?.body.tools).toEqual([toolDeclaration]);
+		expect(capturedRequests[1]?.body.reasoning_effort).toBe("low");
+		expect(capturedRequests[1]?.body.temperature).toBeUndefined();
+		expect(capturedRequests[2]?.body).toEqual({
+			name: "web_search",
+			arguments: JSON.stringify({ query: "Moonshot AI Context Caching" }),
+		});
 
-		// Verify turn 2 request carried assistant reasoning and tool result
-		const step2Messages = capturedRequests[1]?.body.messages as Array<Record<string, unknown>>;
-		expect(step2Messages).toHaveLength(4); // system, user, assistant (tool_calls), tool
+		const step2Messages = capturedRequests[3]?.body.messages as Array<Record<string, unknown>>;
+		expect(step2Messages).toHaveLength(4);
 		expect(step2Messages[2]?.reasoning_content).toBe("Thinking about searching Moonshot caching...");
 		expect(step2Messages[2]?.tool_calls).toEqual([
 			{
 				id: "call_search_1",
 				type: "function",
 				function: {
-					name: "$web_search",
+					name: "web_search",
 					arguments: JSON.stringify({ query: "Moonshot AI Context Caching" }),
 				},
 			},
@@ -161,8 +181,7 @@ describe("Moonshot web search provider", () => {
 		expect(step2Messages[3]).toEqual({
 			role: "tool",
 			tool_call_id: "call_search_1",
-			name: "$web_search",
-			content: JSON.stringify({ query: "Moonshot AI Context Caching" }),
+			content: encryptedOutput,
 		});
 
 		expect(response.answer).toBe("Moonshot AI Context Caching optimizes repeated prompt tokens.");
@@ -176,29 +195,32 @@ describe("Moonshot web search provider", () => {
 			},
 		]);
 		expect(response.usage).toEqual({ inputTokens: 120, outputTokens: 25 });
+		expect(response.requestId).toBe("chatcmpl-step2");
 	});
 
 	it("honors MOONSHOT_BASE_URL and MOONSHOT_SEARCH_MODEL overrides", async () => {
 		Bun.env.MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1/";
 		Bun.env.MOONSHOT_SEARCH_MODEL = "kimi-k2.6";
 
-		let capturedUrl = "";
-		let capturedModel = "";
-
+		const capturedUrls: string[] = [];
+		let capturedBody: Record<string, unknown> | undefined;
 		const fetchImpl: FetchImpl = (input, init) => {
-			capturedUrl = typeof input === "string" ? input : input.toString();
-			const bodyText = typeof init?.body === "string" ? init.body : "";
-			const body = JSON.parse(bodyText) as { model: string };
-			capturedModel = body.model;
-
-			return Promise.resolve(
-				new Response(
-					JSON.stringify({
-						model: "kimi-k2.6",
-						choices: [{ finish_reason: "stop", message: { content: "Done" } }],
+			const url = typeof input === "string" ? input : input.toString();
+			capturedUrls.push(url);
+			if (url.endsWith("/tools")) {
+				return Promise.resolve(
+					Response.json({
+						tools: [{ type: "function", function: { name: "web_search" } }],
 					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				),
+				);
+			}
+			const bodyText = typeof init?.body === "string" ? init.body : "";
+			capturedBody = JSON.parse(bodyText) as Record<string, unknown>;
+			return Promise.resolve(
+				Response.json({
+					model: "kimi-k2.6",
+					choices: [{ finish_reason: "stop", message: { content: "Done" } }],
+				}),
 			);
 		};
 
@@ -214,8 +236,12 @@ describe("Moonshot web search provider", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(capturedUrl).toBe("https://api.moonshot.cn/v1/chat/completions");
-		expect(capturedModel).toBe("kimi-k2.6");
+		expect(capturedUrls).toEqual([
+			"https://api.moonshot.cn/v1/formulas/moonshot/web-search:latest/tools",
+			"https://api.moonshot.cn/v1/chat/completions",
+		]);
+		expect(capturedBody?.model).toBe("kimi-k2.6");
+		expect(capturedBody?.reasoning_effort).toBeUndefined();
 		expect(response.answer).toBe("Done");
 	});
 

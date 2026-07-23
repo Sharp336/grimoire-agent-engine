@@ -1,8 +1,8 @@
 /**
  * Moonshot Open Platform Web Search Provider
  *
- * Uses Moonshot's built-in $web_search tool function via Open Platform
- * (/v1/chat/completions).
+ * Executes the official `moonshot/web-search:latest` Formula, then lets Kimi
+ * consume the Formula's protected output and synthesize the answer.
  */
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
@@ -14,6 +14,7 @@ import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const DEFAULT_MODEL = "kimi-k3";
 const DEFAULT_BASE_URL = "https://api.moonshot.ai/v1";
+const FORMULA_URI = "moonshot/web-search:latest";
 const MAX_STEPS = 5;
 
 export interface MoonshotSearchParams extends SearchParams {
@@ -68,7 +69,30 @@ interface MoonshotChatResponse {
 	};
 }
 
-/** Execute Moonshot web search using the $web_search built-in tool loop. */
+interface MoonshotTool {
+	type: string;
+	function: {
+		name: string;
+		description?: string;
+		parameters?: Record<string, unknown>;
+	};
+}
+
+interface MoonshotToolsResponse {
+	tools?: MoonshotTool[];
+}
+
+interface MoonshotFiberResponse {
+	status?: string;
+	context?: {
+		output?: string;
+		encrypted_output?: string;
+		error?: unknown;
+	};
+	error?: unknown;
+}
+
+/** Execute Moonshot web search using the official Formula tool loop. */
 export async function searchMoonshot(params: MoonshotSearchParams): Promise<SearchResponse> {
 	const apiKey = await params.authStorage.getApiKey("moonshot", params.sessionId, { signal: params.signal });
 	if (!apiKey) {
@@ -78,6 +102,29 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 	const baseUrl = resolveBaseUrl();
 	const model = resolveMoonshotSearchModel(params.moonshotModel);
 	const fetchImpl: FetchImpl = params.fetch ?? fetch;
+	const authorization = `Bearer ${apiKey}`;
+	const searchSignal = withHardTimeout(params.signal);
+
+	const toolsResponse = await fetchImpl(`${baseUrl}/formulas/${FORMULA_URI}/tools`, {
+		headers: { Authorization: authorization },
+		signal: searchSignal,
+	});
+	if (!toolsResponse.ok) {
+		const errorText = await toolsResponse.text();
+		const classified = classifyProviderHttpError("moonshot", toolsResponse.status, errorText);
+		if (classified) throw classified;
+		throw new SearchProviderError(
+			"moonshot",
+			`Moonshot Formula tools API error (${toolsResponse.status}): ${errorText}`,
+			toolsResponse.status,
+		);
+	}
+
+	const toolsData = (await toolsResponse.json()) as MoonshotToolsResponse;
+	const tools = toolsData.tools ?? [];
+	if (tools.length === 0) {
+		throw new SearchProviderError("moonshot", "Moonshot Formula returned no web-search tool declaration.", 502);
+	}
 
 	const messages: Array<Record<string, unknown>> = [];
 	if (params.systemPrompt) {
@@ -85,18 +132,10 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 	}
 	messages.push({ role: "user", content: params.query });
 
-	const tools = [
-		{
-			type: "builtin_function",
-			function: {
-				name: "$web_search",
-			},
-		},
-	];
-
 	let step = 0;
 	let finalAnswer: string | undefined;
 	let modelUsed = model;
+	let requestId: string | undefined;
 	let usageTotal: SearchUsage | undefined;
 	const searchQueries: string[] = [];
 	const sources: SearchSource[] = [];
@@ -108,6 +147,10 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 			messages,
 			tools,
 		};
+		// K3 defaults to max reasoning, which can spend tens of seconds before a search-only tool decision.
+		if (model.startsWith("kimi-k3")) {
+			body.reasoning_effort = "low";
+		}
 		if (params.maxOutputTokens !== undefined) {
 			body.max_tokens = params.maxOutputTokens;
 		}
@@ -120,10 +163,10 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
-				Authorization: `Bearer ${apiKey}`,
+				Authorization: authorization,
 			},
 			body: JSON.stringify(body),
-			signal: withHardTimeout(params.signal),
+			signal: searchSignal,
 		});
 
 		if (!response.ok) {
@@ -132,13 +175,13 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 			if (classified) throw classified;
 			throw new SearchProviderError(
 				"moonshot",
-				`Moonshot API error (${response.status}): ${errorText}`,
+				`Moonshot chat API error (${response.status}): ${errorText}`,
 				response.status,
 			);
 		}
 
 		const data = (await response.json()) as MoonshotChatResponse;
-
+		requestId = data.id ?? requestId;
 		if (data.model) {
 			modelUsed = data.model;
 		}
@@ -152,63 +195,89 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 
 		const choice = data.choices?.[0];
 		if (!choice) {
-			throw new SearchProviderError("moonshot", "Moonshot API returned empty choices.", 500);
+			throw new SearchProviderError("moonshot", "Moonshot API returned empty choices.", 502);
 		}
 
 		const message = choice.message;
-		const finishReason = choice.finish_reason;
-
-		if (finishReason === "tool_calls" && message?.tool_calls && message.tool_calls.length > 0) {
-			// Moonshot emits "builtin_function", but raw replay rejects it with "tokenization failed"; normalize to "function".
-			const formattedMessage = {
-				...message,
-				tool_calls: message.tool_calls.map(tc => ({
-					...tc,
-					type: tc.type === "builtin_function" ? "function" : (tc.type ?? "function"),
-				})),
-			};
-			messages.push(formattedMessage as unknown as Record<string, unknown>);
+		if (choice.finish_reason === "tool_calls" && message?.tool_calls && message.tool_calls.length > 0) {
+			messages.push(message as unknown as Record<string, unknown>);
 
 			for (const toolCall of message.tool_calls) {
-				const toolName = toolCall.function?.name;
 				let argsObj: Record<string, unknown> | undefined;
-				if (toolCall.function?.arguments) {
-					try {
-						argsObj = JSON.parse(toolCall.function.arguments);
-					} catch {
-						// Pass raw string if unparseable
+				try {
+					argsObj = JSON.parse(toolCall.function.arguments);
+				} catch {
+					// The Formula endpoint still receives the original encoded arguments unchanged.
+				}
+				if (toolCall.function.name === "web_search") {
+					const searchQuery = argsObj?.query;
+					if (typeof searchQuery === "string" && !searchQueries.includes(searchQuery)) {
+						searchQueries.push(searchQuery);
 					}
 				}
 
-				if (toolName === "$web_search") {
-					if (typeof argsObj?.query === "string" && !searchQueries.includes(argsObj.query)) {
-						searchQueries.push(argsObj.query);
-					}
+				const fiberResponse = await fetchImpl(`${baseUrl}/formulas/${FORMULA_URI}/fibers`, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: authorization,
+					},
+					body: JSON.stringify(toolCall.function),
+					signal: searchSignal,
+				});
+				if (!fiberResponse.ok) {
+					const errorText = await fiberResponse.text();
+					const classified = classifyProviderHttpError("moonshot", fiberResponse.status, errorText);
+					if (classified) throw classified;
+					throw new SearchProviderError(
+						"moonshot",
+						`Moonshot Formula fiber API error (${fiberResponse.status}): ${errorText}`,
+						fiberResponse.status,
+					);
 				}
 
-				const toolResult = argsObj ?? toolCall.function?.arguments ?? {};
+				const fiber = (await fiberResponse.json()) as MoonshotFiberResponse;
+				if (fiber.status !== "succeeded") {
+					const rawError = fiber.error ?? fiber.context?.error;
+					const detail =
+						typeof rawError === "string"
+							? rawError
+							: rawError === undefined
+								? `status ${fiber.status ?? "unknown"}`
+								: JSON.stringify(rawError);
+					throw new SearchProviderError("moonshot", `Moonshot Formula fiber failed: ${detail}`, 502);
+				}
+
+				const toolResult = fiber.context?.output ?? fiber.context?.encrypted_output;
+				if (typeof toolResult !== "string" || toolResult.length === 0) {
+					throw new SearchProviderError("moonshot", "Moonshot Formula fiber returned no output.", 502);
+				}
 				messages.push({
 					role: "tool",
 					tool_call_id: toolCall.id,
-					name: toolName,
-					content: typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult),
+					content: toolResult,
 				});
 			}
-		} else {
-			finalAnswer = message?.content ?? undefined;
-			if (Array.isArray(message?.annotations)) {
-				for (const item of message.annotations) {
-					if (item && typeof item.url === "string") {
-						sources.push({
-							title: item.title ?? item.url,
-							url: item.url,
-							snippet: item.text ?? item.cited_text ?? undefined,
-						});
-					}
+			continue;
+		}
+
+		finalAnswer = message?.content ?? undefined;
+		if (Array.isArray(message?.annotations)) {
+			for (const item of message.annotations) {
+				if (item && typeof item.url === "string") {
+					sources.push({
+						title: item.title ?? item.url,
+						url: item.url,
+						snippet: item.text ?? item.cited_text ?? undefined,
+					});
 				}
 			}
-			break;
 		}
+		break;
+	}
+
+	if (step === MAX_STEPS && !finalAnswer) {
+		throw new SearchProviderError("moonshot", `Moonshot Formula exceeded ${MAX_STEPS} tool-call steps.`, 502);
 	}
 
 	return {
@@ -218,6 +287,7 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 		searchQueries: searchQueries.length > 0 ? searchQueries : undefined,
 		model: modelUsed,
 		usage: usageTotal,
+		requestId,
 	};
 }
 

@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Added
 
-- Added a distinct `moonshot` web search provider using Moonshot's built-in `$web_search` tool function over standard Open Platform credentials (`MOONSHOT_API_KEY` or stored `moonshot` auth) ([#5765](https://github.com/can1357/oh-my-pi/issues/5765)).
+- Added a distinct `moonshot` web search provider using Moonshot's official `moonshot/web-search:latest` Formula over standard Open Platform credentials (`MOONSHOT_API_KEY` or stored `moonshot` auth) ([#5765](https://github.com/can1357/oh-my-pi/issues/5765)).
 
 ### Fixed
 

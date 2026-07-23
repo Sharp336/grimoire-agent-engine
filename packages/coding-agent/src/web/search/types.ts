@@ -48,7 +48,7 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{
 		value: "moonshot",
 		label: "Moonshot",
-		description: "Moonshot Open Platform ($web_search built-in tool via standard MOONSHOT_API_KEY)",
+		description: "Moonshot Open Platform's official web-search Formula (requires MOONSHOT_API_KEY)",
 	},
 	{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },

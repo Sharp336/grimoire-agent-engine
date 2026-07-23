@@ -4476,7 +4476,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Moonshot web_search model",
-			description: "Model ID for Moonshot $web_search tool loop. Defaults to kimi-k3.",
+			description: "Model ID for the Moonshot web-search Formula tool loop. Defaults to kimi-k3.",
 		},
 	},
 	"providers.antigravityEndpoint": {
