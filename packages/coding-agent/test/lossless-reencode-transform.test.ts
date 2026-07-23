@@ -6,6 +6,7 @@ import {
 	decodeLosslessJsonTable,
 	encodeLosslessJsonTable,
 	LOSSLESS_REENCODE_SAVINGS_MARGIN,
+	type LosslessReencodeOptions,
 	transformLosslessToolResults,
 } from "@oh-my-pi/pi-coding-agent/session/lossless-reencode";
 import { SnapcompactInlineTransformer } from "@oh-my-pi/pi-coding-agent/session/snapcompact-inline";
@@ -64,6 +65,10 @@ function encodedBody(marked: string): string {
 	return marked.slice(newline + 1);
 }
 
+function allowlisted(options: Omit<LosslessReencodeOptions, "toolAllowlist"> = {}): LosslessReencodeOptions {
+	return { toolAllowlist: ["read"], ...options };
+}
+
 function makeVisionModel() {
 	return buildModel({
 		id: "test-model",
@@ -86,7 +91,7 @@ describe("lossless request-time transform", () => {
 		const newest = toolResult("newest", structuredJson());
 		const context: Context = { messages: [userMessage(), first, second, newest] };
 
-		const result = transformLosslessToolResults(context);
+		const result = transformLosslessToolResults(context, allowlisted());
 
 		expect(result).not.toBe(context);
 		for (const [index, source] of [
@@ -94,11 +99,49 @@ describe("lossless request-time transform", () => {
 			[2, second],
 		] as const) {
 			const text = encodedText(result.messages[index]);
-			expect(text).toMatch(/^\[lossless-reencode v1 schema\+csv; original=\d+B]\n/);
+			expect(text).toMatch(
+				/^\[lossless-reencode v1 schema\+csv; values exact, formatting\/key-order normalized; original=\d+B]\n/,
+			);
 			expect(decodeLosslessJsonTable(encodedBody(text))).toEqual(JSON.parse(encodedText(source)));
 		}
 		expect(result.messages[3]).toBe(newest);
 		expect(encodedText(newest)).toBe(structuredJson());
+	});
+
+	it("leaves eligible results untouched when the tool name is not allowlisted", () => {
+		const candidate = { ...toolResult("candidate", structuredJson()), toolName: "bash" };
+		const context: Context = {
+			messages: [userMessage(), candidate, toolResult("tail", "tail")],
+		};
+
+		const result = transformLosslessToolResults(context, allowlisted());
+
+		expect(result).toBe(context);
+		expect(result.messages[1]).toBe(candidate);
+	});
+
+	it("is inert when the tool allowlist is empty", () => {
+		const candidate = toolResult("candidate", structuredJson());
+		const context: Context = {
+			messages: [userMessage(), candidate, toolResult("tail", "tail")],
+		};
+
+		const result = transformLosslessToolResults(context, { toolAllowlist: [] });
+
+		expect(result).toBe(context);
+		expect(result.messages[1]).toBe(candidate);
+	});
+
+	it("leaves eligible results untouched when the tool name is unresolvable", () => {
+		const candidate = { ...toolResult("candidate", structuredJson()), toolName: "" };
+		const context: Context = {
+			messages: [userMessage(), candidate, toolResult("tail", "tail")],
+		};
+
+		const result = transformLosslessToolResults(context, allowlisted());
+
+		expect(result).toBe(context);
+		expect(result.messages[1]).toBe(candidate);
 	});
 
 	it("uses the exact 3k-token lower gate and 50 KiB UTF-8 upper gate", () => {
@@ -109,7 +152,7 @@ describe("lossless request-time transform", () => {
 		const tail = toolResult("tail", '[{"id":1},{"id":2}]');
 		const context: Context = { messages: [userMessage(), below, over, tail] };
 
-		const result = transformLosslessToolResults(context);
+		const result = transformLosslessToolResults(context, allowlisted());
 
 		expect(result).toBe(context);
 		expect(result.messages[1]).toBe(below);
@@ -123,7 +166,7 @@ describe("lossless request-time transform", () => {
 		};
 		const countTokensSpy = spyOn(agentCore, "countTokens");
 		try {
-			expect(transformLosslessToolResults(context)).toBe(context);
+			expect(transformLosslessToolResults(context, allowlisted())).toBe(context);
 			expect(countTokensSpy).not.toHaveBeenCalled();
 		} finally {
 			countTokensSpy.mockRestore();
@@ -139,7 +182,7 @@ describe("lossless request-time transform", () => {
 			messages: [userMessage(), candidate, toolResult("tail", '[{"id":1},{"id":2}]')],
 		};
 
-		const result = transformLosslessToolResults(context);
+		const result = transformLosslessToolResults(context, allowlisted());
 
 		expect(result).toBe(context);
 		expect(result.messages[1]).toBe(candidate);
@@ -150,15 +193,15 @@ describe("lossless request-time transform", () => {
 		// makes byte and token margins non-equivalent. Production can additionally
 		// select the accurate native tokenizer via PI_TOKENIZER_ACCURATE=1.
 		const text = JSON.stringify(
-			Array.from({ length: 89 }, (_, id) => ({
+			Array.from({ length: 91 }, (_, id) => ({
 				id,
-				payload: "x".repeat(158),
+				payload: "x".repeat(153),
 			})),
 		);
 		const encoded = encodeLosslessJsonTable(text);
 		if (!encoded) throw new Error("Expected eligible rounding fixture");
 		const originalBytes = Buffer.byteLength(text, "utf8");
-		const replacement = `[lossless-reencode v1 schema+csv; original=${originalBytes}B]\n${encoded}`;
+		const replacement = `[lossless-reencode v1 schema+csv; values exact, formatting/key-order normalized; original=${originalBytes}B]\n${encoded}`;
 
 		expect(Buffer.byteLength(replacement, "utf8")).toBeLessThanOrEqual(
 			originalBytes * LOSSLESS_REENCODE_SAVINGS_MARGIN,
@@ -171,7 +214,7 @@ describe("lossless request-time transform", () => {
 		const context: Context = {
 			messages: [userMessage(), candidate, toolResult("tail", '[{"id":1},{"id":2}]')],
 		};
-		expect(transformLosslessToolResults(context)).toBe(context);
+		expect(transformLosslessToolResults(context, allowlisted())).toBe(context);
 	});
 
 	it("marks the format and exact original UTF-8 size", () => {
@@ -181,10 +224,12 @@ describe("lossless request-time transform", () => {
 			messages: [userMessage(), candidate, toolResult("tail", '[{"id":1},{"id":2}]')],
 		};
 
-		const result = transformLosslessToolResults(context);
+		const result = transformLosslessToolResults(context, allowlisted());
 		const marker = encodedText(result.messages[1]).split("\n", 1)[0];
 
-		expect(marker).toBe(`[lossless-reencode v1 schema+csv; original=${Buffer.byteLength(original, "utf8")}B]`);
+		expect(marker).toBe(
+			`[lossless-reencode v1 schema+csv; values exact, formatting/key-order normalized; original=${Buffer.byteLength(original, "utf8")}B]`,
+		);
 	});
 
 	it("preserves non-text blocks and existing artifact references untouched", () => {
@@ -199,7 +244,7 @@ describe("lossless request-time transform", () => {
 			messages: [userMessage(), candidate, toolResult("tail", '[{"id":1},{"id":2}]')],
 		};
 
-		const result = transformLosslessToolResults(context);
+		const result = transformLosslessToolResults(context, allowlisted());
 		const transformed = result.messages[1];
 		const transformedContent = toolResultContent(transformed);
 
@@ -218,7 +263,7 @@ describe("lossless request-time transform", () => {
 		const messages = context.messages;
 		const content = small.content;
 
-		const result = transformLosslessToolResults(context);
+		const result = transformLosslessToolResults(context, allowlisted());
 
 		expect(result).toBe(context);
 		expect(context.messages).toBe(messages);
@@ -231,8 +276,8 @@ describe("lossless request-time transform", () => {
 			messages: [userMessage(), toolResult("candidate", structuredJson()), toolResult("tail", "tail")],
 		};
 
-		const turnOne = JSON.stringify(transformLosslessToolResults(context));
-		const turnTwo = JSON.stringify(transformLosslessToolResults(context));
+		const turnOne = JSON.stringify(transformLosslessToolResults(context, allowlisted()));
+		const turnTwo = JSON.stringify(transformLosslessToolResults(context, allowlisted()));
 
 		expect(turnTwo).toBe(turnOne);
 	});
@@ -252,7 +297,7 @@ describe("lossless request-time transform", () => {
 		const snapcompactOnly = await snapcompact.transform(context, makeVisionModel());
 		expect(toolResultContent(snapcompactOnly.messages[1]).some(block => block.type === "image")).toBe(true);
 
-		const reencoded = transformLosslessToolResults(context);
+		const reencoded = transformLosslessToolResults(context, allowlisted());
 		const compactedText = encodedText(reencoded.messages[1]);
 		expect(agentCore.countTokens(compactedText)).toBeLessThan(3000);
 		const combined = await snapcompact.transform(reencoded, makeVisionModel());

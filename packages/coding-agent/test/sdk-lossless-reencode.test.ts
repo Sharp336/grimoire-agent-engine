@@ -93,9 +93,47 @@ describe("createAgentSession lossless re-encode wiring", () => {
 		}
 	});
 
+	it("remains inert when the boolean is enabled but the allowlist is empty", async () => {
+		const original = structuredJson();
+		const settings = Settings.isolated({ "reencode.losslessToolResults": true });
+		const { session } = await createAgentSession(options(settings));
+		try {
+			const context = await session.agent.buildSideRequestContext([
+				{ role: "user", content: "go", timestamp: 0 },
+				toolResult("candidate", original),
+				toolResult("tail", "tail"),
+			]);
+
+			expect(resultText(context.messages[1])).toBe(original);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("fails closed when the allowlist setting is not an array", async () => {
+		const original = structuredJson();
+		const settings = Settings.isolated({
+			"reencode.losslessToolResults": true,
+			"reencode.toolResultAllowlist": "read",
+		});
+		const { session } = await createAgentSession(options(settings));
+		try {
+			const context = await session.agent.buildSideRequestContext([
+				{ role: "user", content: "go", timestamp: 0 },
+				toolResult("candidate", original),
+				toolResult("tail", "tail"),
+			]);
+
+			expect(resultText(context.messages[1])).toBe(original);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("runs re-encoding before snapcompact so sub-3k output remains text", async () => {
 		const settings = Settings.isolated({
 			"reencode.losslessToolResults": true,
+			"reencode.toolResultAllowlist": ["read"],
 			"snapcompact.toolResults": true,
 			"snapcompact.shape": "6x12-dim",
 		});
@@ -108,7 +146,9 @@ describe("createAgentSession lossless re-encode wiring", () => {
 			]);
 			const candidate = context.messages[1];
 
-			expect(resultText(candidate)).toMatch(/^\[lossless-reencode v1 schema\+csv; original=\d+B]\n/);
+			expect(resultText(candidate)).toMatch(
+				/^\[lossless-reencode v1 schema\+csv; values exact, formatting\/key-order normalized; original=\d+B]\n/,
+			);
 			if (candidate.role !== "toolResult") throw new Error("Expected tool result");
 			expect(candidate.content.some(block => block.type === "image")).toBe(false);
 		} finally {

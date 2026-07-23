@@ -147,7 +147,9 @@ describe("Settings", () => {
 			const settings = Settings.isolated();
 			expect(settings.get("snapcompact.toolResults")).toBe(false);
 			expect(settings.get("reencode.losslessToolResults")).toBe(false);
+			expect(settings.get("reencode.toolResultAllowlist")).toEqual([]);
 			expect(getDefault("reencode.losslessToolResults")).toBe(false);
+			expect(getDefault("reencode.toolResultAllowlist")).toEqual([]);
 		});
 
 		it("exposes all tool calling mode options", () => {

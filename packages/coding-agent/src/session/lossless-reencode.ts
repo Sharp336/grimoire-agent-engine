@@ -91,6 +91,10 @@ export function decodeLosslessJsonTable(encoded: string): FlatRow[] | undefined 
 	}
 }
 
+export interface LosslessReencodeOptions {
+	toolAllowlist: readonly string[];
+}
+
 export interface LosslessReencodeSwap {
 	messageIndex: number;
 	blockIndex: number;
@@ -102,7 +106,11 @@ export interface LosslessReencodeSwap {
  * provider context. Candidates are visited oldest-first and the newest tool
  * result is a stable frontier that always remains verbatim.
  */
-export function planLosslessReencodes(messages: readonly Message[]): LosslessReencodeSwap[] {
+export function planLosslessReencodes(
+	messages: readonly Message[],
+	options: LosslessReencodeOptions,
+): LosslessReencodeSwap[] {
+	if (!Array.isArray(options.toolAllowlist) || options.toolAllowlist.length === 0) return [];
 	let newestToolResultIndex = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		if (messages[i].role === "toolResult") {
@@ -116,6 +124,7 @@ export function planLosslessReencodes(messages: readonly Message[]): LosslessRee
 	for (let messageIndex = 0; messageIndex < newestToolResultIndex; messageIndex++) {
 		const message = messages[messageIndex];
 		if (message.role !== "toolResult") continue;
+		if (!options.toolAllowlist.includes(message.toolName)) continue;
 		for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
 			const block = message.content[blockIndex];
 			if (block.type !== "text") continue;
@@ -125,7 +134,7 @@ export function planLosslessReencodes(messages: readonly Message[]): LosslessRee
 			if (originalTokens < MIN_LOSSLESS_REENCODE_TOKENS) continue;
 			const encoded = encodeLosslessJsonTable(block.text);
 			if (!encoded) continue;
-			const marker = `[lossless-reencode v1 schema+csv; original=${originalBytes}B]`;
+			const marker = `[lossless-reencode v1 schema+csv; values exact, formatting/key-order normalized; original=${originalBytes}B]`;
 			const replacement = `${marker}\n${encoded}`;
 			const replacementBytes = Buffer.byteLength(replacement, "utf8");
 			// Token savings are the goal and match snapcompact's precedent. The
@@ -139,8 +148,8 @@ export function planLosslessReencodes(messages: readonly Message[]): LosslessRee
 }
 
 /** Apply the pure plan to fresh message/content arrays for provider dispatch. */
-export function transformLosslessToolResults(context: Context): Context {
-	const swaps = planLosslessReencodes(context.messages);
+export function transformLosslessToolResults(context: Context, options: LosslessReencodeOptions): Context {
+	const swaps = planLosslessReencodes(context.messages, options);
 	if (swaps.length === 0) return context;
 
 	const messages = [...context.messages];

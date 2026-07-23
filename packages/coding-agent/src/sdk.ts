@@ -2800,6 +2800,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// consider only the remaining text and clamp images to the provider budget.
 		const snapcompactSystemPromptMode = settings.get("snapcompact.systemPrompt");
 		const losslessReencodeToolResults = settings.get("reencode.losslessToolResults");
+		const losslessReencodeToolAllowlist = settings.get("reencode.toolResultAllowlist");
 		const snapcompactInline =
 			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
 				? new SnapcompactInlineTransformer(
@@ -2815,7 +2816,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				: undefined;
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-			if (losslessReencodeToolResults) transformed = transformLosslessToolResults(transformed);
+			if (losslessReencodeToolResults) {
+				transformed = transformLosslessToolResults(transformed, {
+					toolAllowlist: losslessReencodeToolAllowlist,
+				});
+			}
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
 			return clampProviderContextImages(transformed, transformModel);
 		};

@@ -2256,7 +2256,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Experimental",
 			label: "Lossless Structured Tool Results",
 			description:
-				"Experimental: re-encode eligible historical flat JSON arrays as deterministic schema+CSV in the 3K-token–50KiB band when that saves at least 10% of estimated tokens without increasing bytes.",
+				"Experimental: enable deterministic schema+CSV re-encoding for eligible historical flat JSON-array tool results, but only for tools named in reencode.toolResultAllowlist. Enabling this alone changes nothing.",
+		},
+	},
+	"reencode.toolResultAllowlist": {
+		type: "array",
+		default: [] as string[],
+		ui: {
+			tab: "context",
+			group: "Experimental",
+			label: "Lossless Re-encode Tool Allowlist",
+			description:
+				"Tool names whose eligible historical JSON-array results may be re-encoded when Lossless Structured Tool Results is enabled. Empty by default; opt in only producers whose output is consumed as structured values because formatting and key order are normalized.",
 		},
 	},
 
