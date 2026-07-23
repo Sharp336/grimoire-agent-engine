@@ -264,13 +264,18 @@ wins:
 
 ```json
 "quotaProfiles": [
-	{ "match": "anthropic|claude", "sessionHours": 5, "maxSessionsPer24h": 4 },
+	{ "match": "anthropic", "sessionHours": 5, "maxSessionsPer24h": 4 },
 	{ "match": ".*", "sessionHours": null, "maxSessionsPer24h": null }
 ]
 ```
 
 - `match` is a case-insensitive regex tested against the provider id, the
   model id, and `provider/modelId` of the active model.
+- The shipped default matches the **`anthropic` provider**, not the string
+  `claude`, so a third-party catalog that serves Claude models (Bedrock,
+  OpenRouter, other API-key gateways) is **not** gated by the subscription
+  window — it bills per key and falls through to the unlimited `.*` profile.
+  Widen the pattern yourself if your setup genuinely meters those.
 - `sessionHours`/`maxSessionsPer24h` set the window policy; `null` (either
   field) means **unlimited**: no windows are recorded and dispatch is never
   quota-blocked for that model.

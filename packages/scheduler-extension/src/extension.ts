@@ -24,9 +24,9 @@
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import CONTEXT_RESET_COMPACT_INSTRUCTION from "./prompts/context-reset-compact.md" with { type: "text" };
 import DEFAULT_PROMPT_PREAMBLE from "./prompts/prompt-preamble.md" with { type: "text" };
 import DEFAULT_RESUME_PREAMBLE from "./prompts/resume-preamble.md" with { type: "text" };
@@ -283,11 +283,13 @@ const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
 /**
- * settings.md § "Where settings live": PI_CODING_AGENT_DIR relocates the
- * ~/.omp/agent base directory; honor it so scheduler data moves with it.
+ * Base agent directory. Delegates to the shared resolver so `PI_CODING_AGENT_DIR`,
+ * `PI_CONFIG_DIR`, named profiles, and the XDG layout all resolve exactly as
+ * omp's own config loader does (settings.md § "Where settings live");
+ * reconstructing the path here drifts from the host on any non-default layout.
  */
 function agentDir(): string {
-	return process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".omp", "agent");
+	return getAgentDir();
 }
 
 function dataDir(): string {
@@ -307,13 +309,15 @@ function ledgerFile(): string {
 }
 
 /**
- * Default quota profiles: Anthropic Claude subscription auth is metered in
- * 5-hour session windows (max 4 per rolling 24h); every other provider —
- * OpenAI, Google, local models, API-key billing — has no such windows and
- * dispatches ungated. First match wins; edit config.json to adjust.
+ * Default quota profiles: only the Anthropic *provider* (Claude subscription
+ * auth) is metered in 5-hour session windows (max 4 per rolling 24h). The match
+ * is the provider id, NOT any model id containing "claude" — third-party
+ * catalogs that serve Claude (Bedrock, OpenRouter, …) bill per API key and must
+ * dispatch ungated, so they fall through to the unlimited `.*` profile. First
+ * match wins; edit config.json to adjust.
  */
 const DEFAULT_QUOTA_PROFILES: QuotaProfile[] = [
-	{ match: "anthropic|claude", sessionHours: 5, maxSessionsPer24h: 4 },
+	{ match: "anthropic", sessionHours: 5, maxSessionsPer24h: 4 },
 	{ match: ".*", sessionHours: null, maxSessionsPer24h: null },
 ];
 
@@ -1186,22 +1190,39 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	async function resetContext(reason: string): Promise<void> {
 		const purgeCtx = typeof cmdCtx?.newSession === "function" ? cmdCtx : null;
 		let method = "none";
+		let purged = false;
 		try {
 			if (purgeCtx?.newSession) {
-				await purgeCtx.newSession();
-				method = "newSession";
-			} else if (typeof liveCtx?.compact === "function") {
+				const res = await purgeCtx.newSession();
+				// newSession resolves `{ cancelled: true }` when a hook vetoes the
+				// session switch — the poisoned transcript is then still live, so this
+				// must NOT count as a purge.
+				const cancelled = res !== null && typeof res === "object" && "cancelled" in res && res.cancelled === true;
+				if (cancelled) {
+					method = "newSession-cancelled";
+				} else {
+					method = "newSession";
+					purged = true;
+				}
+			}
+			if (!purged && typeof liveCtx?.compact === "function") {
 				await liveCtx.compact(CONTEXT_RESET_COMPACT_INSTRUCTION.trim());
-				method = "compact";
+				method = method === "newSession-cancelled" ? "compact (newSession cancelled)" : "compact";
+				purged = true;
 			}
 		} catch (err) {
 			pi.logger?.warn?.(`scheduler: context reset failed: ${String(err)}`);
 			method = "failed";
 		}
-		logEvent({ event: "context_reset", detail: `${reason} — ${method}` });
+		// If nothing actually purged the context, keep the reset pending so the next
+		// dispatch retries instead of sending the task back into flagged history.
+		if (!purged) pendingContextReset = true;
+		logEvent({ event: "context_reset", detail: `${reason} — ${method}${purged ? "" : " (still pending)"}` });
 		notify(
 			null,
-			`scheduler: content-policy violation — cleared conversation context (${method}) before continuing.`,
+			purged
+				? `scheduler: content-policy violation — cleared conversation context (${method}) before continuing.`
+				: "scheduler: content-policy violation — context purge unavailable (reset kept pending); will retry.",
 			"warning",
 		);
 	}
@@ -1984,11 +2005,16 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	function cmdClear(ctx: CtxLike): void {
 		const st = getState();
 		const before = st.tasks.length;
-		st.tasks = st.tasks.filter(t => t.id === st.currentTaskId);
+		// "clear" empties only *pending* work (queued/interrupted). The in-flight
+		// task and finished rows (done/failed) survive so /scheduler status, export,
+		// and ledger keep their outcome history.
+		st.tasks = st.tasks.filter(
+			t => t.id === st.currentTaskId || (t.status !== "queued" && t.status !== "interrupted"),
+		);
 		saveState();
 		notify(
 			ctx,
-			`scheduler: cleared ${before - st.tasks.length} task(s)${st.currentTaskId ? " (in-flight task kept; /scheduler stop to abort it)" : ""}`,
+			`scheduler: cleared ${before - st.tasks.length} pending task(s)${st.currentTaskId ? " (in-flight task kept; /scheduler stop to abort it)" : ""}`,
 		);
 		updateStatus();
 	}

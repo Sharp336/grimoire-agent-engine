@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { refreshDirsFromEnv } from "@oh-my-pi/pi-utils/dirs";
 import type { SchedulerConfig, SchedulerLogEntry, SchedulerState } from "../src/extension";
 import schedulerExtension from "../src/extension";
 
@@ -98,6 +99,7 @@ interface MockCtx {
 	confirmCalls: number;
 	newSessionCalls: number;
 	compactCalls: number;
+	newSessionCancelled: boolean;
 	setTimeout(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
 	setInterval(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
 	clearTimer(timer: Timer): void;
@@ -116,6 +118,7 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		notifications: [],
 		confirmCalls: 0,
 		newSessionCalls: 0,
+		newSessionCancelled: false,
 		compactCalls: 0,
 		setTimeoutCalls: 0,
 		setIntervalCalls: 0,
@@ -139,7 +142,7 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		getContextUsage: () => undefined,
 		async newSession() {
 			ctx.newSessionCalls += 1;
-			return { cancelled: false };
+			return { cancelled: ctx.newSessionCancelled };
 		},
 		async compact() {
 			ctx.compactCalls += 1;
@@ -174,6 +177,10 @@ function sleep(ms: number): Promise<void> {
 
 const tmpAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-scheduler-smoke-"));
 process.env.PI_CODING_AGENT_DIR = tmpAgentDir;
+// The pi-utils dir resolver caches at module load (before this line runs), so
+// re-sync it to the throwaway agent dir just set — otherwise getAgentDir() (used
+// by the extension) would point at the real ~/.omp/agent.
+refreshDirsFromEnv();
 const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-scheduler-cwd-"));
 const stateFile = path.join(tmpAgentDir, "scheduler", "state.json");
 const configFile = path.join(tmpAgentDir, "scheduler", "config.json");
@@ -317,6 +324,13 @@ assert.equal(
 	false,
 );
 await a.command("clear", ctx);
+{
+	const kept = readState().tasks;
+	assert.ok(
+		kept.length >= 2 && kept.every(t => t.status === "done" || t.status === "failed"),
+		"clear preserves finished (done/failed) tasks and drops only pending work",
+	);
+}
 
 // 10. crash recovery: a fresh instance finds a task left "running" by a dead
 // process, marks it interrupted, and (run=running) resumes it with the preamble.
@@ -1223,6 +1237,94 @@ await wc.emit("agent_end", { messages: [{ role: "assistant", content: [] }] }, c
 assert.equal(task(readState(), "t96").status, "done", "terminal end settles the task done");
 await sleep(50);
 await wc.command("stop", ctxWc);
+
+// 25. the shipped default profile gates the Anthropic *provider*, not any model
+// id containing "claude": a third-party catalog serving Claude (Bedrock,
+// OpenRouter, …) must dispatch ungated under the defaults (regression guard —
+// the old "anthropic|claude" default gated them after 4 turns).
+{
+	fs.rmSync(configFile, { force: true }); // drop the customized config so session_start re-seeds the shipped defaults
+	const st = readState();
+	st.run = "stopped";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [];
+	st.nextTaskSeq = 100;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const dp = makeMockPi();
+const ctxDp = makeCtx(tmpCwd, { provider: "openrouter", id: "claude-3-5-sonnet" });
+schedulerExtension(dp.api);
+await dp.emit("session_start", {}, ctxDp);
+{
+	const seeded = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	assert.equal(
+		seeded.quotaProfiles[0].match,
+		"anthropic",
+		"shipped default gates the anthropic provider, not any claude model id",
+	);
+}
+await dp.command("status", ctxDp);
+assert.match(
+	ctxDp.notifications.at(-1) ?? "",
+	/quota: none/,
+	"a non-Anthropic catalog serving Claude dispatches ungated under the defaults",
+);
+await dp.command("stop", ctxDp);
+
+// 26. a cancelled newSession (a hook vetoes the session switch) is NOT treated as
+// a successful purge: the scheduler falls back to compact instead of silently
+// re-sending the task into the still-poisoned transcript.
+{
+	const c26 = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	c26.watchdogIntervalMs = 60_000;
+	c26.stallTimeoutMs = 600_000;
+	c26.dispatchDelayMs = 30;
+	fs.writeFileSync(configFile, JSON.stringify(c26));
+	const st = readState();
+	st.run = "stopped";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [
+		{ id: "t97", prompt: "Poisoned task", status: "queued", addedAt: new Date().toISOString(), attempts: 0 },
+	];
+	st.nextTaskSeq = 98;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const rc = makeMockPi();
+const ctxRc = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+ctxRc.newSessionCancelled = true; // a hook will veto the session switch
+schedulerExtension(rc.api);
+await rc.emit("session_start", {}, ctxRc);
+await rc.command("start", ctxRc); // capture the command context (carries newSession)
+await sleep(600); // cmdStart arms a 500ms initial dispatch
+assert.equal(rc.sentPrompts.length, 1, "t97 dispatched once");
+await rc.emit("agent_start", {}, ctxRc);
+await rc.emit(
+	"agent_end",
+	{
+		messages: [
+			{
+				role: "assistant",
+				content: [],
+				stopReason: "error",
+				errorMessage: "blocked: usage policy violation (cyber)",
+			},
+		],
+	},
+	ctxRc,
+);
+await sleep(200);
+{
+	assert.ok(ctxRc.newSessionCalls >= 1, "purge attempted via newSession");
+	assert.ok(ctxRc.compactCalls >= 1, "cancelled newSession falls back to compact — not treated as a completed purge");
+	const resetLog = [...readLog()].reverse().find(e => e.event === "context_reset");
+	assert.ok(resetLog, "a context_reset attempt is logged");
+	assert.match(resetLog?.detail ?? "", /cancel/i, "the reset log records the newSession cancellation");
+}
+await rc.command("stop", ctxRc);
 
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);
