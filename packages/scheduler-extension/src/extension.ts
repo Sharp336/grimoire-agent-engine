@@ -504,6 +504,21 @@ function migrateState(raw: unknown, cfg: SchedulerConfig): SchedulerState | null
 	) {
 		return null;
 	}
+	for (const row of st.tasks as unknown[]) {
+		// Each task must carry at least a string id + prompt; a row like `{}` would
+		// otherwise crash hashPrompt(undefined) after stateReadError was cleared,
+		// bypassing the malformed-state path. Reject the whole file instead.
+		if (
+			row === null ||
+			typeof row !== "object" ||
+			!("id" in row) ||
+			typeof row.id !== "string" ||
+			!("prompt" in row) ||
+			typeof row.prompt !== "string"
+		) {
+			return null;
+		}
+	}
 	const legacyKey =
 		cfg.quotaProfiles.find(p => typeof p.sessionHours === "number" && typeof p.maxSessionsPer24h === "number")
 			?.match ?? DEFAULT_QUOTA_PROFILES[0].match;
@@ -618,20 +633,17 @@ function fmtClock(epochMs: number): string {
 }
 
 /**
- * Best-effort effective `tools.approvalMode` from persisted settings.
- *
- * settings.md § "Where settings live" / § "Precedence": project
- * `<cwd>/.omp/config.{yml,yaml}` (and legacy `settings.json`) overrides global
- * `~/.omp/agent/config.{yml,yaml}` (and legacy `settings.json`), and merges in
- * project `.claude/settings*.json`. Runtime flags (`--yolo`, `--approval-mode`)
- * are in-memory only and CANNOT be detected here — callers must treat a non-yolo
- * result as a warning, not a hard fact. The extension can't see the host's
- * fully-merged effective value or its provider precedence, so rather than guess
- * which layer wins, this returns a non-yolo mode if ANY layer sets one: it never
- * under-warns on an unattended run (a false warning is harmless; a missed one
- * stalls). Returns null only when no layer sets the key (schema default `yolo`,
+ * Best-effort scan of persisted settings for an approval policy that could block
+ * an unattended run. settings.md § Precedence: project `<cwd>/.omp/config.{yml,
+ * yaml}` + legacy `settings.json` + `.claude/settings*.json`, then global
+ * `~/.omp/agent/…`. Runtime flags (`--yolo`) are in-memory and invisible here, so
+ * callers treat a hit as a warning, not a hard fact. The extension can't see the
+ * host's merged effective settings or provider precedence, so rather than guess
+ * which layer wins it flags a concern if ANY layer sets one — it never
+ * under-warns (a false warning is harmless; a missed one stalls). Returns a short
+ * description of the first blocking setting, or null when none is found.
  */
-function detectApprovalMode(cwd: string): string | null {
+function detectApprovalConcern(cwd: string): string | null {
 	const candidates = [
 		path.join(cwd, ".omp", "config.yml"),
 		path.join(cwd, ".omp", "config.yaml"),
@@ -642,38 +654,44 @@ function detectApprovalMode(cwd: string): string | null {
 		path.join(agentDir(), "config.yaml"),
 		path.join(agentDir(), "settings.json"),
 	];
-	let firstMode: string | null = null;
 	for (const file of candidates) {
-		const mode = readApprovalModeFrom(file);
-		if (mode === null) continue;
-		firstMode ??= mode;
-		if (mode !== "yolo") return mode; // any non-yolo layer => surface the warning
+		const concern = readApprovalConcern(file);
+		if (concern) return concern;
 	}
-	return firstMode;
+	return null;
 }
 
-function readApprovalModeFrom(file: string): string | null {
+/**
+ * A `tools` approval setting in one file that could block a tool call, or null.
+ * Covers BOTH `tools.approvalMode` (non-yolo) AND per-tool `tools.approval`
+ * policies — settings-schema.ts marks any non-`allow` entry as honored in EVERY
+ * approval mode, so it can prompt/deny even under yolo. Bun.YAML.parse reads YAML
+ * block+flow and JSON (settings.json), matching the core loader, not a regex.
+ */
+function readApprovalConcern(file: string): string | null {
 	let text: string;
 	try {
 		text = fs.readFileSync(file, "utf8");
 	} catch {
 		return null;
 	}
-	// Parse the file rather than scanning a line. Bun.YAML.parse reads YAML
-	// (config.yml / config.yaml) AND JSON (settings.json — JSON is valid YAML)
-	// in both block (`tools:\n  approvalMode: x`) and flow (`tools: { approvalMode: x }`)
-	// shapes, matching the core settings loader instead of a brittle regex.
 	try {
 		const parsed: unknown = Bun.YAML.parse(text);
-		if (parsed && typeof parsed === "object" && "tools" in parsed) {
-			const tools = parsed.tools;
-			if (tools && typeof tools === "object" && "approvalMode" in tools) {
-				const mode = tools.approvalMode;
-				return typeof mode === "string" ? mode : null;
+		if (!parsed || typeof parsed !== "object" || !("tools" in parsed)) return null;
+		const tools = parsed.tools;
+		if (!tools || typeof tools !== "object") return null;
+		// Per-tool policies apply in every mode, so check them even under yolo.
+		if ("approval" in tools && tools.approval && typeof tools.approval === "object") {
+			for (const [name, policy] of Object.entries(tools.approval)) {
+				if (typeof policy === "string" && policy !== "allow") return `tools.approval.${name} = "${policy}"`;
 			}
 		}
+		if ("approvalMode" in tools) {
+			const mode = tools.approvalMode;
+			if (typeof mode === "string" && mode !== "yolo") return `tools.approvalMode = "${mode}"`;
+		}
 	} catch {
-		// unreadable / malformed — treat as "no approval-mode setting present"
+		// unreadable / malformed — treat as "no blocking setting present"
 	}
 	return null;
 }
@@ -2096,11 +2114,11 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		// Permissions upfront: unattended tasks must never block on approval
 		// prompts. approval-mode.md § "Modes": only `yolo` auto-approves all
 		// tiers; `--yolo`/`--auto-approve` force it per session.
-		const mode = detectApprovalMode(ctx.cwd);
-		if (mode && mode !== "yolo") {
+		const concern = detectApprovalConcern(ctx.cwd);
+		if (concern) {
 			const warning =
-				`tools.approvalMode is "${mode}" (not "yolo"): overnight tasks WILL stall on approval prompts. ` +
-				`Fix: relaunch with --yolo, or run: omp config set tools.approvalMode yolo. ` +
+				`a tool-approval setting may block unattended runs (${concern}; not fully "yolo"/"allow"): overnight tasks can stall on approval prompts. ` +
+				`Fix: relaunch with --yolo and clear non-"allow" tools.approval entries, or run: omp config set tools.approvalMode yolo. ` +
 				`(If you launched with --yolo just now, this check cannot see runtime flags.)`;
 			if (ctx.hasUI) {
 				let proceed = false;

@@ -1734,6 +1734,48 @@ export async function runSmoke(): Promise<void> {
 	await sleep(400); // let newSession resolve and the clean re-dispatch happen
 	assert.ok(rf.sentPrompts.length >= 2, "task is re-dispatched only after the purge completes");
 	await rf.command("stop", ctxRf);
+	fs.rmSync(configFile, { force: true });
+	fs.writeFileSync(
+		stateFile,
+		JSON.stringify({ version: 2, run: "stopped", currentTaskId: null, nextTaskSeq: 1, tasks: [{}] }),
+	);
+	const tr = makeMockPi();
+	const ctxTr = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(tr.api);
+	await tr.emit("session_start", {}, ctxTr);
+	await tr.command("add hello", ctxTr); // mutating → must be refused, not crash
+	assert.ok(
+		ctxTr.notifications.some(n => /malformed|corrupt|unreadable/i.test(n)),
+		"a tasks array with malformed rows is treated as unreadable state",
+	);
+	await tr.command("stop", ctxTr);
+
+	// 38. a per-tool approval policy (tools.approval.<tool> != "allow") triggers
+	// the start warning even when approvalMode is yolo — the core honors per-tool
+	// policies in every mode, so an overnight run could still block otherwise.
+	{
+		fs.rmSync(configFile, { force: true });
+		fs.mkdirSync(path.join(tmpCwd, ".omp"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmpCwd, ".omp", "config.yml"),
+			"tools:\n  approvalMode: yolo\n  approval:\n    bash: prompt\n",
+		);
+		const st = readState();
+		st.run = "stopped";
+		st.currentTaskId = null;
+		st.tasks = [];
+		st.windows = [];
+		st.nextTaskSeq = 106;
+		fs.writeFileSync(stateFile, JSON.stringify(st));
+	}
+	const pt = makeMockPi();
+	const ctxPt = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(pt.api);
+	await pt.emit("session_start", {}, ctxPt);
+	await pt.command("start", ctxPt);
+	assert.equal(ctxPt.confirmCalls, 1, "a non-allow per-tool approval policy warns even under approvalMode: yolo");
+	await pt.command("stop", ctxPt);
+	fs.rmSync(path.join(tmpCwd, ".omp"), { recursive: true, force: true });
 
 	console.log("smoke: all assertions passed");
 	console.log(`smoke: data dir was ${tmpAgentDir}`);
