@@ -94,7 +94,7 @@ describe("Bedrock prompt-cache compat", () => {
 		}
 	});
 
-	test("models exact cache-capable Nova base and geo IDs for explicit 5m checkpoints", () => {
+	test("models every AWS-documented Nova 2 Lite ID for explicit 5m checkpoints", () => {
 		const expected = {
 			promptCacheMode: "explicit",
 			supportsLongPromptCacheRetention: false,
@@ -102,20 +102,15 @@ describe("Bedrock prompt-cache compat", () => {
 			promptCacheMaximumCheckpoints: 4,
 		} as const;
 
-		for (const id of [
-			"us.amazon.nova-lite-v1:0",
-			"us.amazon.nova-micro-v1:0",
-			"us.amazon.nova-pro-v1:0",
-			"us.amazon.nova-premier-v1:0",
-		] as const) {
-			expect(getBundledModel<"bedrock-converse-stream">("amazon-bedrock", id)?.compat).toEqual(expected);
-		}
+		const bundled = getBundledModel<"bedrock-converse-stream">("amazon-bedrock", "global.amazon.nova-2-lite-v1:0");
+		expect(bundled?.compat).toEqual(expected);
 
 		for (const id of [
-			"amazon.nova-lite-v1:0",
-			"amazon.nova-micro-v1:0",
-			"amazon.nova-pro-v1:0",
-			"amazon.nova-premier-v1:0",
+			"amazon.nova-2-lite-v1:0",
+			"us.amazon.nova-2-lite-v1:0",
+			"eu.amazon.nova-2-lite-v1:0",
+			"jp.amazon.nova-2-lite-v1:0",
+			"global.amazon.nova-2-lite-v1:0",
 		] as const) {
 			expect(buildModel(bedrockSpec({ id })).compat).toEqual(expected);
 		}
@@ -131,6 +126,10 @@ describe("Bedrock prompt-cache compat", () => {
 			"amazon.nova-micro-v1:1",
 			"amazon.nova-pro-v1:1",
 			"amazon.nova-premier-v1:1",
+			"amazon.nova-2-lite-v1:1",
+			"global.amazon.nova-2-lite-v1:1",
+			"global.amazon.nova-2-lite-v2:0",
+			"us.amazon.nova-2-lite-v1:0-preview",
 			"us.amazon.nova-unknown-v1:0",
 		]) {
 			expect(buildModel(bedrockSpec({ id })).compat.promptCacheMode).toBe("none");
