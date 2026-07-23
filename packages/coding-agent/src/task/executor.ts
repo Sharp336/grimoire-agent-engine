@@ -815,12 +815,14 @@ export function createSubagentSettings(
 					baseSettings.get("tier.openai"),
 					baseSettings.get("tier.anthropic"),
 					baseSettings.get("tier.google"),
+					baseSettings.get("tier.qoder"),
 				)
 			: (inheritedServiceTier ?? {});
 	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
 	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
 	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
 	snapshot["tier.google"] = subagentTiers.google ?? "none";
+	snapshot["tier.qoder"] = subagentTiers.qoder ?? "none";
 	return Settings.isolated({
 		...snapshot,
 		"async.enabled": false,

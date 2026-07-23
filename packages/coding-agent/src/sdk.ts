@@ -2840,6 +2840,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					settings.get("tier.openai"),
 					settings.get("tier.anthropic"),
 					settings.get("tier.google"),
+					settings.get("tier.qoder"),
 				);
 
 		// One-shot launch-latency marker: fired the first time the loop dispatches

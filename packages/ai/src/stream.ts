@@ -57,6 +57,7 @@ import {
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
 	streamOpenAIResponses,
+	streamQoderApi3,
 } from "./providers/register-builtins";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
 import { PROVIDER_REGISTRY } from "./registry";
@@ -73,6 +74,7 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
+import { isQoderApi3Model } from "./types";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
@@ -850,12 +852,19 @@ function streamDispatch<TApi extends Api>(
 			);
 		}
 
-		case "openai-completions":
+		case "openai-completions": {
+			const completionsModel = model as Model<"openai-completions">;
+			// Qoder api3-only families authenticate with a WASM signature and
+			// cannot ride the plaintext OpenAI-compatible transport.
+			if (isQoderApi3Model(completionsModel)) {
+				return streamQoderApi3(completionsModel, context, providerOptions as OptionsForApi<"openai-completions">);
+			}
 			return streamOpenAICompletions(
-				model as Model<"openai-completions">,
+				completionsModel,
 				context,
 				providerOptions as OptionsForApi<"openai-completions">,
 			);
+		}
 
 		case "openai-responses":
 			return streamOpenAIResponses(

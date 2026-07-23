@@ -1343,6 +1343,12 @@ export interface ProviderModelConfig {
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
+	/**
+	 * Upstream wire model id. When set, providers serialize this value as the
+	 * request model id while everything local (selection, caching, usage) keys
+	 * on {@link id}.
+	 */
+	requestModelId?: string;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
 	/** OpenAI compatibility settings. */

@@ -2221,28 +2221,38 @@ describe("AgentSession TTSR resume gate", () => {
 		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-promo.db"));
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("openai-codex", "test-key");
-		// The bundled catalog has no codex model whose promotion target carries a
-		// strictly larger window (gpt-5.5's bundled target gpt-5.4 is same-window),
-		// so pin gpt-5.5 (272k) -> gpt-5.6-sol (372k) via modelOverrides.
-		const modelsConfigPath = path.join(tempDir, "models-promo.json");
-		await Bun.write(
-			modelsConfigPath,
-			JSON.stringify({
-				providers: {
-					"openai-codex": {
-						modelOverrides: {
-							"gpt-5.5": { contextPromotionTarget: "openai-codex/gpt-5.6-sol" },
-						},
-					},
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		modelRegistry.registerProvider("openai-codex", {
+			api: "openai-codex-responses",
+			baseUrl: "https://chatgpt.com/backend-api",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "test-codex-small",
+					name: "Test Codex Small",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 32_000,
+					contextPromotionTarget: "openai-codex/test-codex-large",
 				},
-			}),
-		);
-		const modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+				{
+					id: "test-codex-large",
+					name: "Test Codex Large",
+					reasoning: true,
+					input: ["text", "image"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 256_000,
+					maxTokens: 64_000,
+				},
+			],
+		});
 
-		const smallModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		const largeModel = modelRegistry.find("openai-codex", "gpt-5.6-sol");
-		if (!smallModel || !largeModel) {
-			throw new Error("Expected small and large codex models to exist");
+		const sparkModel = modelRegistry.find("openai-codex", "test-codex-small");
+		const codexModel = modelRegistry.find("openai-codex", "test-codex-large");
+		if (!sparkModel || !codexModel) {
+			throw new Error("Expected deterministic Codex promotion models");
 		}
 
 		let streamCallCount = 0;
@@ -2251,9 +2261,9 @@ describe("AgentSession TTSR resume gate", () => {
 		const makeOverflowMessage = (): AssistantMessage => ({
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
-			api: smallModel.api,
-			provider: smallModel.provider,
-			model: smallModel.id,
+			api: sparkModel.api,
+			provider: sparkModel.provider,
+			model: sparkModel.id,
 			usage: {
 				input: 0,
 				output: 0,
@@ -2270,9 +2280,9 @@ describe("AgentSession TTSR resume gate", () => {
 		const makeSuccessMessage = (): AssistantMessage => ({
 			role: "assistant",
 			content: [{ type: "text", text: "Recovered after promotion" }],
-			api: largeModel.api,
-			provider: largeModel.provider,
-			model: largeModel.id,
+			api: codexModel.api,
+			provider: codexModel.provider,
+			model: codexModel.id,
 			usage: {
 				input: 0,
 				output: 0,
@@ -2287,7 +2297,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model: smallModel, systemPrompt: ["Test"], tools: [] },
+			initialState: { model: sparkModel, systemPrompt: ["Test"], tools: [] },
 			streamFn: () => {
 				streamCallCount++;
 				const stream = new AssistantMessageEventStream();
@@ -2328,7 +2338,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		expect(continuationCompleted).toBe(true);
 		expect(streamCallCount).toBeGreaterThanOrEqual(2);
-		expect(session.model?.id).toBe(largeModel.id);
+		expect(session.model?.id).toBe(codexModel.id);
 		expect(session.isStreaming).toBe(false);
 		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
 	});

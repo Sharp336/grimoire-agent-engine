@@ -31,6 +31,7 @@ import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import {
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
 	buildFireworksFastSeed,
+	buildQoderStaticSeed,
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
@@ -359,6 +360,20 @@ function dropXiaomiAudioOnlyIds(models: readonly ModelSpec[]): ModelSpec[] {
 	});
 }
 
+/**
+ * Qoder's curated seed is the authoritative catalog — the provider has no
+ * unauthenticated discovery. Previous bundled snapshots predate seed changes
+ * (retired ids, or the api3-only families added once the WASM-signed api3
+ * transport landed) and can resurrect stale wire ids via the fallback merge,
+ * so keep exactly the rows the current seed produces. The six api3-only
+ * families are curated here; runtime availability gating (auth-WASM
+ * detection) lives in the coding-agent, not in the bundle.
+ */
+function dropPrunedQoderWireIds(models: readonly ModelSpec[]): ModelSpec[] {
+	const curated = new Set(buildQoderStaticSeed().map(model => model.id));
+	return models.filter(model => model.provider !== "qoder" || curated.has(model.id));
+}
+
 function normalizeAntigravityEndpoint(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
 		if (model.provider === "google-antigravity" && model.baseUrl) {
@@ -516,6 +531,10 @@ async function generateModels() {
 	// persisted `modelRoles.default = "xai-oauth/<id>"` is honored before the
 	// async refresh fires (interactive boot does not await refresh).
 	allModels.push(...buildXaiOAuthStaticSeed());
+	// Qoder's model list requires a signed request, so no unauthenticated
+	// discovery path can populate this provider. Keep its curated router seed in
+	// the bundle for fresh, offline boot before OAuth credentials are available.
+	allModels.push(...buildQoderStaticSeed());
 	// Seed Anthropic models that are live on the first-party API or in limited
 	// release but that models.dev has not catalogued yet (e.g. Claude Fable 5 /
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
@@ -610,6 +629,7 @@ async function generateModels() {
 	allModels = dropFireworksWireIds(allModels);
 	allModels = dropUnusableZaiContextTierIds(allModels);
 	allModels = dropXiaomiAudioOnlyIds(allModels);
+	allModels = dropPrunedQoderWireIds(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and

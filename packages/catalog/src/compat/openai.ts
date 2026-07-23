@@ -569,6 +569,10 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		usesOpenAIToolCallIdLimit: provider === "openai",
 		promptCacheSessionHeader: isGrok ? "x-grok-conv-id" : undefined,
 		dropThinkingWhenReasoningEffort: provider === "fireworks",
+		// Never detected: the Qoder curated seed authors `api3: true` for the
+		// WASM-signed api3-only rows; applyCompatOverrides carries it here. The
+		// key must exist on the literal for the override copy to land.
+		api3: false,
 	};
 
 	applyCompatOverrides(compat, spec.compat);

@@ -1510,9 +1510,9 @@ export class Settings {
 		delete raw.readHashLines;
 
 		// serviceTier (single enum with scoped openai-only/claude-only sentinels)
-		// → per-family tier.openai/tier.anthropic/tier.google; serviceTierSubagent
+		// → per-family tier.openai/tier.anthropic/tier.google/tier.qoder; serviceTierSubagent
 		// → tier.subagent; serviceTierAdvisor → tier.advisor. `fastModeScope` is
-		// dropped — per-family scoping is now expressed by the three tier settings.
+		// dropped — per-family scoping is now expressed by the tier.* settings.
 		const tierObj = isRecord(raw.tier) ? raw.tier : {};
 		let tierTouched = false;
 		const setTier = (family: string, value: unknown): void => {
@@ -1527,6 +1527,7 @@ export class Settings {
 					setTier("openai", "priority");
 					setTier("anthropic", "priority");
 					setTier("google", "priority");
+					setTier("qoder", "priority");
 					break;
 				case "openai-only":
 					setTier("openai", "priority");

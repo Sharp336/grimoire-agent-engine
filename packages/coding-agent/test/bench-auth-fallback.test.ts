@@ -190,7 +190,11 @@ function settingsStub(serviceTier: string | undefined): Settings | undefined {
 	if (serviceTier === undefined) return undefined;
 	return {
 		get: (key: string) =>
-			key === "tier.openai" ? serviceTier : key === "tier.anthropic" || key === "tier.google" ? "none" : undefined,
+			key === "tier.openai"
+				? serviceTier
+				: key === "tier.anthropic" || key === "tier.google" || key === "tier.qoder"
+					? "none"
+					: undefined,
 	} as unknown as Settings;
 }
 
@@ -269,7 +273,7 @@ describe("bench service tier", () => {
 	it("lets an explicit --service-tier override the configured setting", async () => {
 		const { wire, summary } = await captureServiceTier({ flag: "priority", setting: "flex" });
 		expect(wire).toBe("priority");
-		expect(summary).toEqual({ openai: "priority", anthropic: "priority", google: "priority" });
+		expect(summary).toEqual({ openai: "priority", anthropic: "priority", google: "priority", qoder: "priority" });
 	});
 
 	it("omits service_tier when the setting is none and no flag is passed", async () => {

@@ -6,15 +6,17 @@ import type { SubmenuOption } from "./settings-schema";
  * sentinel; the rest mirror the wire {@link ServiceTier} values each provider
  * family actually realizes. OpenAI accepts the full set; Anthropic realizes
  * only `priority` (fast mode); Google (Gemini API + Vertex) realizes
- * `flex`/`priority`.
+ * `flex`/`priority`; Qoder realizes only `priority` (highspeed on kmodel).
  */
 export const SERVICE_TIER_OPENAI_VALUES = ["none", "auto", "default", "flex", "scale", "priority"] as const;
 export const SERVICE_TIER_ANTHROPIC_VALUES = ["none", "priority"] as const;
 export const SERVICE_TIER_GOOGLE_VALUES = ["none", "flex", "priority"] as const;
+export const SERVICE_TIER_QODER_VALUES = ["none", "priority"] as const;
 
 export type ServiceTierOpenAISettingValue = (typeof SERVICE_TIER_OPENAI_VALUES)[number];
 export type ServiceTierAnthropicSettingValue = (typeof SERVICE_TIER_ANTHROPIC_VALUES)[number];
 export type ServiceTierGoogleSettingValue = (typeof SERVICE_TIER_GOOGLE_VALUES)[number];
+export type ServiceTierQoderSettingValue = (typeof SERVICE_TIER_QODER_VALUES)[number];
 
 /**
  * Inherit-capable single value for the subagent/advisor tiers. The chosen tier
@@ -58,6 +60,15 @@ export const SERVICE_TIER_GOOGLE_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 	{ value: "priority", label: "Priority", description: "Faster, higher reliability (Gemini API + Vertex)" },
 ];
 
+export const SERVICE_TIER_QODER_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierQoderSettingValue>> = [
+	{ value: "none", label: "None", description: "Standard processing" },
+	{
+		value: "priority",
+		label: "Priority",
+		description: "Highspeed metadata on Qoder Kimi-K2.7-Code (kmodel); ignored on other Qoder models",
+	},
+];
+
 export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierInheritSettingValue>> = [
 	{ value: "inherit", label: "Inherit", description: "Match the main agent's live per-family tiers" },
 	{ value: "none", label: "None", description: "Standard processing" },
@@ -74,8 +85,13 @@ export function serviceTierSettingToTier(value: string): ServiceTier | undefined
 	return value as ServiceTier;
 }
 
-/** Assemble the live per-family tier map from the three `tier.*` setting values. */
-export function buildServiceTierByFamily(openai: string, anthropic: string, google: string): ServiceTierByFamily {
+/** Assemble the live per-family tier map from the `tier.*` setting values. */
+export function buildServiceTierByFamily(
+	openai: string,
+	anthropic: string,
+	google: string,
+	qoder: string,
+): ServiceTierByFamily {
 	const out: ServiceTierByFamily = {};
 	const o = serviceTierSettingToTier(openai);
 	if (o) out.openai = o;
@@ -83,20 +99,25 @@ export function buildServiceTierByFamily(openai: string, anthropic: string, goog
 	if (a) out.anthropic = a;
 	const g = serviceTierSettingToTier(google);
 	if (g) out.google = g;
+	const q = serviceTierSettingToTier(qoder);
+	if (q) out.qoder = q;
 	return out;
 }
 
 /**
  * Broadcast a single chosen tier across families, clamped to what each family
  * realizes: OpenAI takes any tier, Anthropic only `priority`, Google only
- * `flex`/`priority`. Used by the subagent/advisor single-value settings and the
+ * `flex`/`priority`, Qoder only `priority`. Used by the subagent/advisor single-value settings and the
  * `omp bench --service-tier` flag, which apply one tier to whatever family the
  * target model belongs to.
  */
 export function serviceTierForAllFamilies(tier: ServiceTier | undefined): ServiceTierByFamily {
 	if (!tier) return {};
 	const out: ServiceTierByFamily = { openai: tier };
-	if (tier === "priority") out.anthropic = "priority";
+	if (tier === "priority") {
+		out.anthropic = "priority";
+		out.qoder = "priority";
+	}
 	if (tier === "flex" || tier === "priority") out.google = tier;
 	return out;
 }

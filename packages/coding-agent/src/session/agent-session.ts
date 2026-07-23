@@ -16845,6 +16845,7 @@ export class AgentSession {
 				this.settings.get("tier.openai"),
 				this.settings.get("tier.anthropic"),
 				this.settings.get("tier.google"),
+				this.settings.get("tier.qoder"),
 			);
 			// Restore the thinking selector. Each change persists the configured
 			// selector (`auto` or a concrete level), so prefer it: an `auto` session

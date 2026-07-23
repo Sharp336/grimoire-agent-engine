@@ -299,11 +299,45 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("applies a model-keyed fallback chain to advisor quota failures", async () => {
+		modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry.registerProvider("devin", {
+			api: "devin-agent",
+			baseUrl: "https://server.codeium.com",
+			apiKey: "devin-test-key",
+			models: [
+				{
+					id: "test-advisor-primary",
+					name: "Test Advisor Primary",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 32_000,
+				},
+			],
+		});
+		modelRegistry.registerProvider("openai-codex", {
+			api: "openai-codex-responses",
+			baseUrl: "https://chatgpt.com/backend-api",
+			apiKey: "openai-codex-test-key",
+			models: [
+				{
+					id: "test-advisor-fallback",
+					name: "Test Advisor Fallback",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 256_000,
+					maxTokens: 64_000,
+				},
+			],
+		});
+
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
-		const advisorPrimary = getBundledModel("devin", "swe-1-6-slow");
-		const advisorFallback = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const advisorPrimary = modelRegistry.find("devin", "test-advisor-primary");
+		const advisorFallback = modelRegistry.find("openai-codex", "test-advisor-fallback");
 		if (!mainModel || !advisorPrimary || !advisorFallback) {
-			throw new Error("Expected bundled advisor fallback models to exist");
+			throw new Error("Expected deterministic advisor fallback models");
 		}
 
 		const mainMock = createMockModel({

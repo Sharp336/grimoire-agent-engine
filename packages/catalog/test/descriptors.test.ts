@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import {
+	DEFAULT_MODEL_PER_PROVIDER,
+	isCatalogDescriptor,
+	PROVIDER_DESCRIPTORS,
+} from "@oh-my-pi/pi-catalog/provider-models";
 
 describe("catalog provider descriptors", () => {
 	test("descriptors cover standard model providers, excluding special-managed ones", () => {
@@ -32,6 +36,24 @@ describe("catalog provider descriptors", () => {
 		const options = anthropic?.createModelManagerOptions({ apiKey: "k" });
 		expect(options?.providerId).toBe("anthropic");
 		expect(typeof options?.fetchDynamicModels).toBe("function");
+	});
+
+	test("keeps Devin discovery runtime-only", () => {
+		const devin = PROVIDER_DESCRIPTORS.find(descriptor => descriptor.providerId === "devin");
+		expect(devin).toBeDefined();
+		expect(devin?.catalogDiscovery).toBeUndefined();
+		expect(devin === undefined ? false : isCatalogDescriptor(devin)).toBe(false);
+		expect(devin?.dynamicModelsAuthoritative).toBe(true);
+
+		const authenticated = devin?.createModelManagerOptions({ apiKey: "k" });
+		expect(authenticated?.providerId).toBe("devin");
+		expect(typeof authenticated?.fetchDynamicModels).toBe("function");
+		expect(authenticated?.dynamicModelsAuthoritative).toBe(true);
+
+		const unauthenticated = devin?.createModelManagerOptions({});
+		expect(unauthenticated?.fetchDynamicModels).toBeUndefined();
+		expect(unauthenticated?.dynamicModelsAuthoritative).toBeUndefined();
+		expect(DEFAULT_MODEL_PER_PROVIDER.devin).toBe("swe-1-6");
 	});
 
 	test("every descriptor has a default model and a factory that preserves provider identity", () => {

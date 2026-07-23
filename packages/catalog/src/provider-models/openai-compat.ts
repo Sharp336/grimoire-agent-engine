@@ -1367,6 +1367,218 @@ export function xaiOAuthModelManagerOptions(
 	};
 }
 
+export interface QoderModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const QODER_DEFAULT_MODEL_BASE_URL = "https://api2-v2.qoder.sh/model/v1";
+
+interface QoderAliasContext {
+	suffix: string;
+	label: string;
+	contextWindow: number;
+}
+
+interface QoderCuratedModel {
+	id: string;
+	name: string;
+	contextWindow: number;
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	thinking?: ThinkingConfig;
+	aliasContexts?: readonly QoderAliasContext[];
+	/** Served only by Qoder's WASM-signed api3 transport; gated out of the effective model list when the auth WASM is unavailable. */
+	api3?: boolean;
+}
+
+const QODER_EFFORT_LADDER_FIVE: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
+
+const QODER_EFFORT_LADDER_HIGH_MAX: readonly Effort[] = [Effort.High, Effort.Max];
+
+const QODER_STANDARD_ALIASES: readonly QoderAliasContext[] = [
+	{ suffix: "-400k", label: " (400K)", contextWindow: 400_000 },
+	{ suffix: "-1m", label: " (1M)", contextWindow: 1_000_000 },
+];
+
+// Qoder's model list is behind a signed endpoint, so this offline seed is the
+// source of truth for the picker. `auto` is Qoder's server-side router. Nine
+// base ids are served by the legacy api2-v2 OpenAI transport; the six
+// api3-only families (cmodel, qmodel_preview, qmodel_latest, kmodel_latest,
+// gm51model, dfmodel) require Qoder's WASM-signed api3 transport and are
+// marked `api3: true` — the coding-agent gates them out of the effective
+// model list when the user's installed auth WASM is unavailable, falling back
+// to the legacy nine-model surface. Effort ladders are the pinned static
+// defaults recovered from `qodercli --list-models`.
+export const QODER_CURATED_MODELS: readonly QoderCuratedModel[] = [
+	{ id: "auto", name: "Qoder (Auto)", contextWindow: 180_000, reasoning: false, input: ["text", "image"] },
+	{
+		id: "ultimate",
+		name: "Ultimate",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_FIVE, defaultLevel: Effort.High },
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "performance",
+		name: "Performance",
+		contextWindow: 272_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{ id: "efficient", name: "Efficient", contextWindow: 180_000, reasoning: false, input: ["text", "image"] },
+	{ id: "lite", name: "Lite", contextWindow: 180_000, reasoning: false, input: ["text"] },
+	{
+		id: "qmodel",
+		name: "Qwen3.7-Plus",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{ id: "kmodel", name: "Kimi-K2.7-Code", contextWindow: 262_144, reasoning: false, input: ["text", "image"] },
+	{
+		id: "dmodel",
+		name: "DeepSeek-V4-Pro",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_HIGH_MAX, defaultLevel: Effort.Max },
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "mmodel",
+		name: "MiniMax-M3",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	// api3-only families: served exclusively through Qoder's WASM-signed api3
+	// transport. Static ladders are the pinned pre-prune defaults.
+	{
+		id: "cmodel",
+		name: "Cantus",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_FIVE, defaultLevel: Effort.High },
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "qmodel_preview",
+		name: "Qwen3.8-Max-Preview",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: [Effort.High], defaultLevel: Effort.High, requiresEffort: true },
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "qmodel_latest",
+		name: "Qwen3.7-Max",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "kmodel_latest",
+		name: "Kimi-K3",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "gm51model",
+		name: "GLM-5.2",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_HIGH_MAX, defaultLevel: Effort.Max },
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "dfmodel",
+		name: "DeepSeek-V4-Flash",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_HIGH_MAX, defaultLevel: Effort.Max },
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+];
+
+export function buildQoderStaticSeed(baseUrl?: string): ModelSpec<"openai-completions">[] {
+	const resolvedBaseUrl = baseUrl ?? QODER_DEFAULT_MODEL_BASE_URL;
+	const baseCompat = (model: QoderCuratedModel) => ({
+		supportsStore: false as const,
+		...(model.api3 === true ? { api3: true } : {}),
+	});
+	const bases: ModelSpec<"openai-completions">[] = QODER_CURATED_MODELS.map(model => ({
+		id: model.id,
+		name: model.name,
+		api: "openai-completions",
+		provider: "qoder",
+		baseUrl: resolvedBaseUrl,
+		reasoning: model.reasoning,
+		input: model.input,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		compat: baseCompat(model),
+		contextWindow: model.contextWindow,
+		maxTokens: 32_768,
+		...(model.thinking ? { thinking: model.thinking } : {}),
+	}));
+	const aliases: ModelSpec<"openai-completions">[] = [];
+	for (const model of QODER_CURATED_MODELS) {
+		if (!model.aliasContexts) continue;
+		for (const alias of model.aliasContexts) {
+			aliases.push({
+				id: `${model.id}${alias.suffix}`,
+				name: `${model.name}${alias.label}`,
+				api: "openai-completions",
+				provider: "qoder",
+				baseUrl: resolvedBaseUrl,
+				reasoning: model.reasoning,
+				input: model.input,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				compat: {
+					...baseCompat(model),
+					extraBody: { context_length: alias.contextWindow },
+				},
+				contextWindow: alias.contextWindow,
+				maxTokens: 32_768,
+				requestModelId: model.id,
+				...(model.thinking ? { thinking: model.thinking } : {}),
+			});
+		}
+	}
+	return [...bases, ...aliases];
+}
+
+export function qoderModelManagerOptions(config?: QoderModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const resolvedBaseUrl = config?.baseUrl ?? QODER_DEFAULT_MODEL_BASE_URL;
+	// Qoder has no unauthenticated OpenAI `/models` endpoint. Deliberately omit
+	// apiKey here so createSimpleOpenAICompletionsOptions cannot add discovery.
+	const base = createSimpleOpenAICompletionsOptions(
+		"qoder" as Parameters<typeof getBundledModels>[0],
+		QODER_DEFAULT_MODEL_BASE_URL,
+		{ baseUrl: resolvedBaseUrl, fetch: config?.fetch },
+	);
+	return { ...base, staticModels: buildQoderStaticSeed(resolvedBaseUrl) };
+}
+
 // ---------------------------------------------------------------------------
 // 6.4 AIML API
 // ---------------------------------------------------------------------------

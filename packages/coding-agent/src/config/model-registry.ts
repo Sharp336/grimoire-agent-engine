@@ -32,6 +32,7 @@ import {
 	getVariantAliasSources,
 	resolveVariantAlias,
 } from "@oh-my-pi/pi-catalog/variant-collapse";
+import { dropUnavailableQoderApi3Models } from "./qoder-api3-availability";
 
 const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
@@ -515,6 +516,11 @@ interface ModelPatch {
 	contextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
+	/**
+	 * Upstream wire model id for local aliases. Providers serialize this value
+	 * as the request model id while local selection/caching/usage keys on id.
+	 */
+	requestModelId?: string;
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	contextPromotionTarget?: string;
@@ -542,6 +548,18 @@ function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTr
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
+	// Replace-mode overlays own the wire id: omitting requestModelId clears a
+	// bundled alias rewrite (registerProvider drops the row; merge must match).
+	// Merge/patch modes still treat undefined as "leave the base value alone".
+	if (transport === "replace") {
+		if (patch.requestModelId !== undefined) {
+			result.requestModelId = patch.requestModelId;
+		} else {
+			delete result.requestModelId;
+		}
+	} else if (patch.requestModelId !== undefined) {
+		result.requestModelId = patch.requestModelId;
+	}
 	if (patch.contextPromotionTarget !== undefined) result.contextPromotionTarget = patch.contextPromotionTarget;
 	if (patch.compactionModel !== undefined) result.compactionModel = patch.compactionModel;
 	if (patch.remoteCompaction !== undefined) {
@@ -651,6 +669,7 @@ function buildCustomModelOverlay(
 		cost: modelDef.cost,
 		contextWindow: modelDef.contextWindow,
 		maxTokens: modelDef.maxTokens,
+		requestModelId: modelDef.requestModelId,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
 		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
 		compat: mergeCompat(providerCompat, modelDef.compat),
@@ -669,10 +688,19 @@ function applyStandaloneCustomModelPolicies(model: CustomModelOverlay): CustomMo
 	return { ...model, contextWindow: 1_000_000 };
 }
 
+function resolveCustomModelReference(modelId: string, provider: string): Model<Api> | undefined {
+	const reference = resolveModelReference(modelId, getBundledModelReferenceIndex());
+	if (!reference) return undefined;
+	if (reference.provider === provider) return reference;
+	// Qoder references carry provider-specific compat/windows; keep them local.
+	if (reference.provider === "qoder") return undefined;
+	return reference;
+}
+
 function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
 	const resolvedModel = options.useDefaults ? applyStandaloneCustomModelPolicies(model) : model;
 	const reference = options.useDefaults
-		? resolveModelReference(resolvedModel.id, getBundledModelReferenceIndex())
+		? resolveCustomModelReference(resolvedModel.id, resolvedModel.provider)
 		: undefined;
 	const cost =
 		resolvedModel.cost ??
@@ -693,6 +721,10 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		cost,
 		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
+		// requestModelId is overlay-owned: omitting it must not revive a bundled
+		// alias wire rewrite via reference lookup (replace-mode merge clears the
+		// same way). Same-provider aliases set requestModelId explicitly.
+		requestModelId: resolvedModel.requestModelId,
 		headers: resolvedModel.headers,
 		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,
 		compat: mergeCompat(reference?.compatConfig, resolvedModel.compat),
@@ -1053,7 +1085,9 @@ export class ModelRegistry {
 		// Custom/config providers bypass the model-manager merge point —
 		// collapse effort-tier variants here so X/X-thinking twins fold.
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#models = this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
+		this.#models = dropUnavailableQoderApi3Models(
+			this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
+		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
 	}
 
@@ -1094,7 +1128,9 @@ export class ModelRegistry {
 		return mergeByModelKey(builtInModels, customModels, (existingModel, customModel) => {
 			if (!existingModel) return finalizeCustomModel(customModel, { useDefaults: true });
 			// Same-id custom definitions replace bundled transport behavior, so the
-			// patch is applied with the `replace` transport policy.
+			// patch is applied with the `replace` transport policy. Omitted
+			// requestModelId clears any bundled alias wire rewrite — same as
+			// registerProvider dropping the row and finalizing the overlay alone.
 			return applyModelPatch(
 				{
 					...existingModel,
@@ -1496,7 +1532,9 @@ export class ModelRegistry {
 		// Merge runtime extension models so they survive online discovery completion
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#models = this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
+		this.#models = dropUnavailableQoderApi3Models(
+			this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
+		);
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -2357,12 +2395,14 @@ export class ModelRegistry {
 			if (config.oauth?.modifyModels) {
 				const credential = this.authStorage.getOAuthCredential(providerName);
 				if (credential) {
-					this.#models = config.oauth.modifyModels(withRuntimeTransportOverride, credential);
+					this.#models = dropUnavailableQoderApi3Models(
+						config.oauth.modifyModels(withRuntimeTransportOverride, credential),
+					);
 					return;
 				}
 			}
 
-			this.#models = withRuntimeTransportOverride;
+			this.#models = dropUnavailableQoderApi3Models(withRuntimeTransportOverride);
 			return;
 		}
 
@@ -2527,6 +2567,11 @@ export interface ProviderConfigInput {
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
 		maxTokens: number;
+		/**
+		 * Upstream wire model id. When set, providers serialize this value as
+		 * the request model id while local selection/caching/usage keys on id.
+		 */
+		requestModelId?: string;
 		headers?: Record<string, string>;
 		compat?: ModelSpec<Api>["compat"];
 		contextPromotionTarget?: string;

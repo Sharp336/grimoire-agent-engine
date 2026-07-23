@@ -9,10 +9,16 @@ import {
 	shouldSendServiceTier,
 } from "@oh-my-pi/pi-ai/types";
 
-const m = (provider: string, api: Api, id: string): { provider: string; api: Api; id: string } => ({
+const m = (
+	provider: string,
+	api: Api,
+	id: string,
+	requestModelId?: string,
+): { provider: string; api: Api; id: string; requestModelId?: string } => ({
 	provider,
 	api,
 	id,
+	...(requestModelId !== undefined ? { requestModelId } : {}),
 });
 
 const openai = m("openai", "openai-responses", "gpt-5");
@@ -34,6 +40,12 @@ const customOpenAIAliases = [
 	m("custom-relay", "openai-responses", "o4-mini"),
 	m("custom-relay", "openai-responses", "codex-mini-latest"),
 ];
+
+const qoder = (api: Api, id: string) => m("qoder", api, id);
+const qoderKmodel = qoder("openai-completions", "kmodel");
+const qoderKmodelLatest = qoder("openai-completions", "kmodel_latest");
+const qoderAuto = qoder("openai-completions", "auto");
+const qoderUltimate = qoder("openai-completions", "ultimate");
 
 describe("serviceTierFamily", () => {
 	it("classifies first-party providers by provider/api", () => {
@@ -61,6 +73,25 @@ describe("serviceTierFamily", () => {
 		expect(serviceTierFamily(orAnthropic)).toBe("anthropic");
 		expect(serviceTierFamily(m("openrouter", "openai-completions", "z-ai/glm-4.7"))).toBeUndefined();
 	});
+
+	it("classifies only qoder kmodel as qoder", () => {
+		expect(serviceTierFamily(qoderKmodel)).toBe("qoder");
+	});
+
+	it("classifies local aliases whose wire id is kmodel as qoder", () => {
+		const alias = m("qoder", "openai-completions", "kimi-local", "kmodel");
+		expect(serviceTierFamily(alias)).toBe("qoder");
+		expect(resolveModelServiceTier({ qoder: "priority" }, alias)).toBe("priority");
+		expect(realizesPriorityServiceTier("priority", alias)).toBe(true);
+	});
+
+	it("leaves other qoder models unclassified", () => {
+		expect(serviceTierFamily(qoderAuto)).toBeUndefined();
+		expect(serviceTierFamily(qoderUltimate)).toBeUndefined();
+		expect(serviceTierFamily(qoderKmodelLatest)).toBeUndefined();
+		// Local id kmodel with a non-kmodel wire id must not classify as qoder.
+		expect(serviceTierFamily(m("qoder", "openai-completions", "kmodel", "kmodel_latest"))).toBeUndefined();
+	});
 });
 
 describe("resolveModelServiceTier", () => {
@@ -74,6 +105,13 @@ describe("resolveModelServiceTier", () => {
 		expect(resolveModelServiceTier(tiers, fireworksOpenAI)).toBeUndefined(); // dedicated provider tier
 		expect(resolveModelServiceTier(undefined, openai)).toBeUndefined();
 		expect(resolveModelServiceTier({ google: "priority" }, openai)).toBeUndefined();
+	});
+
+	it("resolves qoder kmodel from the qoder family entry", () => {
+		const tiers = { qoder: "priority" } as const;
+		expect(resolveModelServiceTier(tiers, qoderKmodel)).toBe("priority");
+		expect(resolveModelServiceTier(tiers, qoderAuto)).toBeUndefined();
+		expect(resolveModelServiceTier({ openai: "priority" }, qoderKmodel)).toBeUndefined();
 	});
 });
 
@@ -108,6 +146,13 @@ describe("shouldSendServiceTier", () => {
 		expect(shouldSendServiceTier("priority", "anthropic")).toBe(false);
 	});
 
+	it("never sends an OpenAI service_tier field for qoder", () => {
+		for (const tier of ["auto", "default", "flex", "scale", "priority"] as const) {
+			expect(shouldSendServiceTier(tier, qoderKmodel)).toBe(false);
+			expect(shouldSendServiceTier(tier, "qoder")).toBe(false);
+		}
+	});
+
 	it("returns false for unset tiers", () => {
 		expect(shouldSendServiceTier(undefined, "openai")).toBe(false);
 		expect(shouldSendServiceTier(null, "openai")).toBe(false);
@@ -135,6 +180,14 @@ describe("realizesPriorityServiceTier", () => {
 		expect(realizesPriorityServiceTier("flex", openai)).toBe(false);
 		expect(realizesPriorityServiceTier(undefined, openai)).toBe(false);
 	});
+
+	it("realizes priority only for qoder kmodel", () => {
+		expect(realizesPriorityServiceTier("priority", qoderKmodel)).toBe(true);
+		expect(realizesPriorityServiceTier("priority", qoderKmodelLatest)).toBe(false);
+		expect(realizesPriorityServiceTier("priority", qoderAuto)).toBe(false);
+		expect(realizesPriorityServiceTier("priority", qoderUltimate)).toBe(false);
+		expect(realizesPriorityServiceTier("flex", qoderKmodel)).toBe(false);
+	});
 });
 
 describe("getPriorityPremiumRequests", () => {
@@ -153,6 +206,7 @@ describe("getPriorityPremiumRequests", () => {
 		expect(getPriorityPremiumRequests("priority", fireworksOpenAI)).toBe(0); // dedicated provider tier
 		expect(getPriorityPremiumRequests("flex", openai)).toBe(0);
 		expect(getPriorityPremiumRequests(undefined, openai)).toBe(0);
+		expect(getPriorityPremiumRequests("priority", qoderKmodel)).toBe(0); // Qoder priority is realized but not billed as premium
 	});
 });
 
@@ -162,6 +216,7 @@ describe("coerceServiceTierByFamily", () => {
 			openai: "priority",
 			anthropic: "priority",
 			google: "priority",
+			qoder: "priority",
 		});
 		expect(coerceServiceTierByFamily("openai-only")).toEqual({ openai: "priority" });
 		expect(coerceServiceTierByFamily("claude-only")).toEqual({ anthropic: "priority" });
@@ -176,5 +231,10 @@ describe("coerceServiceTierByFamily", () => {
 			google: "flex",
 		});
 		expect(coerceServiceTierByFamily({ openai: "bogus" })).toBeUndefined();
+		expect(coerceServiceTierByFamily({ qoder: "priority", openai: "priority" })).toEqual({
+			qoder: "priority",
+			openai: "priority",
+		});
+		expect(coerceServiceTierByFamily({ qoder: "bogus" })).toBeUndefined();
 	});
 });

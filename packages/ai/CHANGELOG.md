@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Qoder browser OAuth login, token refresh, client-attribution headers, provider-scoped folded-SSE repair, and `/fast` high-speed routing for Kimi-K2.7-Code.
+- Added Qoder's WASM-signed api3 transport: the six api3-only families stream through the user's installed qodercli auth module (runtime-located, SHA-256 pinned, fail-closed, never bundled), with per-credential identity resolution and context leases.
+
+### Changed
+
+- Enforced Qoder Privacy Mode on every request: the api2-v2 transport now sends Cosy-Data-Policy: disagree (matching the official client's opt-out wire value) alongside the existing Cosy-* client-attribution headers.
+
+### Fixed
+
+- Fixed Qoder login polling on transient failures, preserved `invalid_grant` refresh details, refreshed client attribution, covered `/fast` non-Kimi routing, and hardened api3 against stalled identity lookup, oversized output limits, and malformed or truncated envelopes.
 ## [17.0.8] - 2026-07-22
 
 ### Fixed

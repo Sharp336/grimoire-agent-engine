@@ -83,6 +83,11 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
  */
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isVariantCollapsedSpec(model)) return;
+	// Qoder's curated seed carries provider-authored thinking metadata for
+	// models whose wire ids are unknown to identity/family classification.
+	// Re-deriving would replace the evidence-backed effort ladders with
+	// generic defaults, so preserve the authored config exactly.
+	if (model.provider === "qoder") return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelThinking({ ...model, thinking: undefined }, buildCompat(model));
@@ -246,6 +251,14 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 			reasoningContentField: "reasoning_content",
 		};
 		delete model.compat.thinkingFormat;
+	}
+	// Kimi K3's Coding endpoint uses the native Kimi reasoning dialect. Pin the
+	// format so credential-free regeneration repairs stale bundled snapshots.
+	if (model.api === "openai-completions" && model.provider === "kimi-code" && model.id === "k3") {
+		model.compat = {
+			...(model.compat ?? {}),
+			thinkingFormat: "kimi",
+		};
 	}
 	if (model.api === "openai-completions" && model.provider === "wafer-serverless" && model.reasoning) {
 		const thinkingFormat = resolveWaferServerlessThinkingFormat(model.id, undefined);

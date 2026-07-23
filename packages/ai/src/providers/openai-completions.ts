@@ -7,6 +7,7 @@ import { $env, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
+import { getQoderCommonHeaders, QODER_PRIVATE_DATA_POLICY, wrapQoderSseFetch } from "../registry/oauth/qoder";
 import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
@@ -27,7 +28,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 } from "../types";
-import { normalizeSystemPrompts } from "../utils";
+import { isRecord, normalizeSystemPrompts } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withEmptyCompletionRetry } from "../utils/empty-completion-retry";
@@ -704,7 +705,7 @@ const streamOpenAICompletionsOnce = (
 						headers: headersWithTimeout,
 						body: params,
 						signal: requestSignal,
-						fetch: options?.fetch,
+						fetch: model.provider === "qoder" ? wrapQoderSseFetch(options?.fetch) : options?.fetch,
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
@@ -1380,6 +1381,8 @@ const streamOpenAICompletionsOnce = (
 export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) =>
 	withEmptyCompletionRetry(model, context, options, streamOpenAICompletionsOnce);
 
+const QODER_ENFORCED_HEADERS = { "Cosy-Data-Policy": QODER_PRIVATE_DATA_POLICY };
+
 function createRequestSetup(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -1397,10 +1400,15 @@ function createRequestSetup(
 		promptCacheSessionId,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
-		// Provider auth/header overlay: Kimi-code hosts require shared client
-		// attribution headers prepended before caller headers. Kept here (not in
-		// the shared helper) because it is provider-specific request setup.
-		prependHeaders: model.provider === "kimi-code" ? getKimiCommonHeaders : undefined,
+		// Subscription gateways prepend their client-attribution headers before
+		// caller headers. This stays here because it is provider-specific setup.
+		prependHeaders:
+			model.provider === "qoder"
+				? getQoderCommonHeaders
+				: model.provider === "kimi-code"
+					? getKimiCommonHeaders
+					: undefined,
+		enforcedHeaders: model.provider === "qoder" ? QODER_ENFORCED_HEADERS : undefined,
 		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});
@@ -1620,6 +1628,18 @@ function buildParams(
 	applyOpenAIExtraBody(params, compat.extraBody, {
 		dropThinkingWhenReasoningEffort: compat.dropThinkingWhenReasoningEffort,
 	});
+	if (model.provider === "qoder" && requestModelId === "kmodel" && options?.serviceTier === "priority") {
+		const metadataValue: unknown = params.metadata;
+		const metadata = isRecord(metadataValue) ? metadataValue : {};
+		const business = isRecord(metadata.business) ? metadata.business : {};
+		const featureSwitches = isRecord(business.feature_switches) ? business.feature_switches : {};
+		Object.assign(params, {
+			metadata: {
+				...metadata,
+				business: { ...business, feature_switches: { ...featureSwitches, highspeed: "true" } },
+			},
+		});
+	}
 
 	return { params, toolStrictMode, strictToolsApplied };
 }
