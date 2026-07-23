@@ -27,6 +27,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import CONTEXT_RESET_COMPACT_INSTRUCTION from "./prompts/context-reset-compact.md" with { type: "text" };
 import DEFAULT_PROMPT_PREAMBLE from "./prompts/prompt-preamble.md" with { type: "text" };
 import DEFAULT_RESUME_PREAMBLE from "./prompts/resume-preamble.md" with { type: "text" };
@@ -362,11 +363,16 @@ function writeJson(file: string, value: unknown): void {
 }
 
 function readJson<T>(file: string): T | null {
+	let text: string;
 	try {
-		return JSON.parse(fs.readFileSync(file, "utf8")) as T;
-	} catch {
-		return null;
+		text = fs.readFileSync(file, "utf8");
+	} catch (err) {
+		if (isEnoent(err)) return null; // genuinely absent — callers may seed defaults
+		throw err; // permission/IO error: surface it, never masquerade as "missing"
 	}
+	// A parse error propagates on purpose: a corrupt file must not read as absent
+	// and then get silently overwritten with defaults/empty.
+	return JSON.parse(text) as T;
 }
 
 /** Limits of a gated quota profile (both bounds present and positive). */
@@ -911,6 +917,9 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 
 	// ---- in-memory runtime -------------------------------------------------
 	let state: SchedulerState | null = null;
+	// Set when state.json exists but can't be read/parsed. Blocks saves so a
+	// corrupt file is never clobbered by an empty/replacement write.
+	let stateReadError = false;
 	let cfg: SchedulerConfig = structuredClone(DEFAULT_CONFIG);
 	let liveCtx: CtxLike | null = null;
 	/**
@@ -1044,19 +1053,51 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	// ---- persistence -------------------------------------------------------
 	function getState(): SchedulerState {
 		if (state === null) {
-			state = migrateState(readJson<unknown>(stateFile()), cfg) ?? structuredClone(EMPTY_STATE);
+			let raw: unknown;
+			try {
+				raw = readJson<unknown>(stateFile());
+			} catch (err) {
+				// state.json exists but is corrupt/unreadable: do NOT run on top of it
+				// — a later save would clobber the queue. Preserve the file, block
+				// saves, and surface the problem.
+				stateReadError = true;
+				pi.logger?.warn?.(`scheduler: state.json unreadable — leaving it untouched: ${String(err)}`);
+				notify(
+					null,
+					"scheduler: state.json is corrupt/unreadable — queue paused and the file left untouched; fix or delete it to resume.",
+					"error",
+				);
+				state = structuredClone(EMPTY_STATE);
+				return state;
+			}
+			state = migrateState(raw, cfg) ?? structuredClone(EMPTY_STATE);
 			// Backfill the prompt fingerprint for tasks queued before hashing existed.
 			for (const t of state.tasks) if (!t.promptHash) t.promptHash = hashPrompt(t.prompt);
 		}
 		return state;
 	}
 	function saveState(): void {
+		if (stateReadError) return; // never overwrite a state.json we refused to load
 		if (state !== null) writeJson(stateFile(), state);
 	}
 	function loadConfig(): void {
-		const onDisk = readJson<Partial<SchedulerConfig> & { windowHours?: unknown; maxWindowsPer24h?: unknown }>(
-			configFile(),
-		);
+		let onDisk: (Partial<SchedulerConfig> & { windowHours?: unknown; maxWindowsPer24h?: unknown }) | null;
+		try {
+			onDisk = readJson<Partial<SchedulerConfig> & { windowHours?: unknown; maxWindowsPer24h?: unknown }>(
+				configFile(),
+			);
+		} catch (err) {
+			// Corrupt/unreadable config.json: use defaults in memory but DO NOT
+			// overwrite the user's file — surface it so they can fix it.
+			cfg = structuredClone(DEFAULT_CONFIG);
+			pi.logger?.warn?.(`scheduler: config.json unreadable — using defaults without overwriting: ${String(err)}`);
+			notify(
+				null,
+				"scheduler: config.json is corrupt/unreadable — using defaults this session; the file was left untouched (fix or delete it).",
+				"error",
+			);
+			return;
+		}
 		if (onDisk === null) {
 			cfg = structuredClone(DEFAULT_CONFIG);
 			writeJson(configFile(), cfg); // seed an editable config file
@@ -1327,7 +1368,12 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			pi.sendUserMessage(parts.filter(Boolean).join("\n\n"));
 			notify(null, `scheduler: dispatched ${task.id}${resuming ? " (resume)" : ""} — ${truncate(task.prompt, 60)}`);
 		} catch (err) {
-			task.status = "interrupted";
+			// Delivery failed before a turn started (e.g. a host mode rejects prompt
+			// flow). This path bypasses settleCurrentTask, so apply the same
+			// maxAttempts terminal check here — otherwise an undeliverable prompt
+			// retries every 30s forever instead of failing after the budget.
+			const terminal = task.attempts >= cfg.maxAttempts;
+			task.status = terminal ? "failed" : "interrupted";
 			task.lastError = `dispatch failed: ${String(err)}`;
 			task.summary = truncate(`task_fault: ${task.lastError}`, 100);
 			st.currentTaskId = null;
@@ -1336,18 +1382,29 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			logEvent({
 				event: "end",
 				taskId: task.id,
-				status: "interrupted",
+				status: task.status,
 				error: task.lastError,
 				classification: "task_fault",
 				refunded: false,
 				attempts: task.attempts,
 				maxAttempts: cfg.maxAttempts,
+				terminal,
 				prompt: truncate(task.prompt, 120),
 				promptHash: task.promptHash,
 				summary: task.summary,
-				detail: "sendUserMessage threw before the turn started",
+				detail: terminal
+					? `sendUserMessage failed on attempt ${task.attempts}/${cfg.maxAttempts} — task failed; /scheduler retry ${task.id} to re-queue`
+					: "sendUserMessage threw before the turn started",
 			});
-			scheduleDispatch(30_000);
+			if (terminal) {
+				notify(
+					null,
+					`scheduler: ${task.id} FAILED — delivery failed after ${task.attempts} attempts (${truncate(String(err), 80)}) — /scheduler retry ${task.id} to re-queue.`,
+					"error",
+				);
+			} else {
+				scheduleDispatch(30_000);
+			}
 		}
 		updateStatus();
 	}
@@ -2022,6 +2079,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			// partially, so the resume preamble applies on re-dispatch.
 			t.status = "interrupted";
 			t.attempts = 0;
+			t.policyResets = 0;
 			logEvent({ event: "notice", taskId: t.id, detail: "failed task re-queued via /scheduler retry" });
 		}
 		emptyQueueNotified = false;

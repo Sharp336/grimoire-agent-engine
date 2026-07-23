@@ -39,12 +39,14 @@ interface MockPi {
 	emit(event: string, payload: unknown, ctx: unknown): Promise<void>;
 	command(args: string, ctx: unknown): Promise<void>;
 	sentPrompts: string[];
+	setFailSend(fail: boolean): void;
 }
 
 function makeMockPi(): MockPi {
 	const handlers = new Map<string, EventHandler[]>();
 	let commandHandler: CommandHandler | null = null;
 	const sentPrompts: string[] = [];
+	let failSend = false;
 	const raw = {
 		setLabel(_label: string) {},
 		logger: { warn(_msg: string) {}, info(_msg: string) {} },
@@ -57,6 +59,7 @@ function makeMockPi(): MockPi {
 			commandHandler = def.handler;
 		},
 		sendUserMessage(content: string) {
+			if (failSend) throw new Error("host mode rejected prompt delivery");
 			sentPrompts.push(content);
 		},
 	};
@@ -77,6 +80,9 @@ function makeMockPi(): MockPi {
 			await commandHandler(args, ctx);
 		},
 		sentPrompts,
+		setFailSend(fail: boolean) {
+			failSend = fail;
+		},
 	};
 }
 
@@ -1423,5 +1429,113 @@ assert.ok(ln.sentPrompts.length >= 2, "truncated task is resumed");
 assert.match(ln.sentPrompts.at(-1) ?? "", /RESUME/);
 await ln.command("stop", ctxLn);
 
+// 29. a delivery failure (sendUserMessage throws before the turn starts) respects
+// the attempt budget instead of retrying forever — with attempts already at the
+// cap, the failed delivery fails the task rather than re-arming every 30s.
+{
+	const c29 = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	c29.maxAttempts = 2;
+	c29.dispatchDelayMs = 30;
+	fs.writeFileSync(configFile, JSON.stringify(c29));
+	const st = readState();
+	st.run = "running";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [
+		{ id: "t100", prompt: "Undeliverable", status: "interrupted", addedAt: new Date().toISOString(), attempts: 1 },
+	];
+	st.nextTaskSeq = 101;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const df = makeMockPi();
+df.setFailSend(true); // the host mode rejects prompt delivery
+const ctxDf = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(df.api);
+await df.emit("session_start", {}, ctxDf);
+await sleep(120);
+{
+	const st = readState();
+	assert.equal(df.sentPrompts.length, 0, "nothing delivered — sendUserMessage threw");
+	assert.equal(
+		task(st, "t100").status,
+		"failed",
+		"delivery failure at the attempt budget fails the task (no infinite retry)",
+	);
+	assert.equal(st.currentTaskId, null, "failed delivery clears the in-flight slot");
+}
+await sleep(120); // the old buggy path would re-dispatch here; it must not
+assert.equal(df.sentPrompts.length, 0, "a budget-exhausted delivery failure is not retried");
+await df.command("stop", ctxDf);
+
+// 30. a corrupt config.json is preserved, not silently reseeded with defaults
+// (which would destroy the user's edits): readJson distinguishes ENOENT from a
+// parse error, and loadConfig leaves an unreadable file untouched.
+{
+	fs.writeFileSync(configFile, "{ this is not valid json ]");
+	const st = readState();
+	st.run = "stopped";
+	st.currentTaskId = null;
+	st.tasks = [];
+	st.windows = [];
+	st.nextTaskSeq = 102;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const cf = makeMockPi();
+const ctxCf = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(cf.api);
+await cf.emit("session_start", {}, ctxCf);
+await cf.command("status", ctxCf); // loadConfig runs again; must not overwrite the bad file
+assert.equal(
+	fs.readFileSync(configFile, "utf8"),
+	"{ this is not valid json ]",
+	"corrupt config.json is left untouched (not reseeded with defaults)",
+);
+assert.ok(
+	ctxCf.notifications.some(n => /corrupt|unreadable/i.test(n)),
+	"the corrupt config is surfaced to the user",
+);
+await cf.command("stop", ctxCf);
+
+// 31. /scheduler retry on a task that failed via maxContextResets restores the
+// full reset budget — policyResets is cleared alongside attempts, so the retried
+// task is not failed on its very next content-policy hit.
+{
+	fs.rmSync(configFile, { force: true }); // reseed a clean default config after scenario 30
+	const st = readState();
+	st.run = "stopped";
+	st.currentTaskId = null;
+	st.windows = [];
+	st.tasks = [
+		{
+			id: "t101",
+			prompt: "Repeatedly flagged",
+			status: "failed",
+			addedAt: new Date().toISOString(),
+			attempts: 3,
+			policyResets: 5,
+		},
+	];
+	st.nextTaskSeq = 102;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const rt = makeMockPi();
+const ctxRt = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(rt.api);
+await rt.emit("session_start", {}, ctxRt);
+await rt.command("retry t101", ctxRt);
+{
+	const t101 = task(readState(), "t101");
+	assert.equal(t101.status, "interrupted", "retry re-queues the failed task");
+	assert.equal(t101.attempts, 0, "retry resets the attempt budget");
+	assert.equal(t101.policyResets, 0, "retry also resets the content-policy reset budget");
+}
+await rt.command("stop", ctxRt);
+
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);
+
+// Set only after every scenario above has run without throwing. `smoke.test.ts`
+// imports this (a static side-effect import that runs the suite) and asserts it,
+// so `bun test` — and repo CI — gates the whole smoke.
+export const smokeCompleted = true;
