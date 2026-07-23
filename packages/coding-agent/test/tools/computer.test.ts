@@ -20,6 +20,7 @@ import {
 	type TabSession,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { type ComputerParams, ComputerTool, type ComputerToolRuntime } from "@oh-my-pi/pi-coding-agent/tools/computer";
+import { getImageDimensions } from "@oh-my-pi/pi-tui";
 
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -229,15 +230,15 @@ describe("ComputerTool", () => {
 			{ kind: "headless", headless: false },
 		]);
 		expect(runtime.browserCalls.map(call => call.opts.viewport)).toEqual([
-			{ width: 1280, height: 720 },
-			{ width: 1280, height: 720 },
+			{ width: 1280, height: 720, deviceScaleFactor: 1 },
+			{ width: 1280, height: 720, deviceScaleFactor: 1 },
 		]);
 		expect(runtime.tabCalls.map(call => ({ name: call.name, opts: call.opts }))).toEqual([
 			{
 				name: "computer:session-a",
 				opts: {
 					url: "https://session-a.example.test/start",
-					viewport: { width: 1280, height: 720 },
+					viewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
 					timeoutMs: 30_000,
 					signal: undefined,
 					ownerSessionId: "session-a",
@@ -248,7 +249,7 @@ describe("ComputerTool", () => {
 				name: "computer:session-b",
 				opts: {
 					url: "https://session-b.example.test/start",
-					viewport: { width: 1280, height: 720 },
+					viewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
 					timeoutMs: 30_000,
 					signal: undefined,
 					ownerSessionId: "session-b",
@@ -388,11 +389,17 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("ComputerTool browser context isolation", (
 			expect(secondNavigationCookie).toBeNull();
 			expect(firstResult.details).toMatchObject({
 				tab: `computer:${sessionAId}`,
-				viewport: { width: 1280, height: 720 },
+				viewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
 			});
 			expect(secondResult.details).toMatchObject({
 				tab: `computer:${sessionBId}`,
-				viewport: { width: 1280, height: 720 },
+				viewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
+			});
+			const firstScreenshot = firstResult.content[0];
+			if (firstScreenshot?.type !== "image") throw new Error("Expected a PNG computer screenshot");
+			expect(getImageDimensions(firstScreenshot.data, firstScreenshot.mimeType)).toEqual({
+				widthPx: 1280,
+				heightPx: 720,
 			});
 
 			const tabA = getTabsMapForTest().get(`computer:${sessionAId}`);

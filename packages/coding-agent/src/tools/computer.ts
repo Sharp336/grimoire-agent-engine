@@ -17,7 +17,7 @@ import type { AcquireTabOptions, AcquireTabResult, RunInTabOptions, TabSession }
 import { acquireTab, getTab, runInTab } from "./browser/tab-supervisor";
 import { ToolError, throwIfAborted } from "./tool-errors";
 
-const VIEWPORT = { width: 1280, height: 720 } as const;
+const VIEWPORT = { width: 1280, height: 720, deviceScaleFactor: 1 } as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const WAIT_MS = 2_000;
 
