@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an `onBeforeSleep` surface hook to `fetchWithRetry` (with the new `FetchRetrySleepInfo` payload): callers can inspect a retryable response's classified body and pending delay immediately before the backoff sleep and return `"surface"` to stop retrying and receive the non-ok response instead.
+
 ## [17.0.5] - 2026-07-18
 
 ### Changed

@@ -120,6 +120,22 @@ function unitToMs(unit: string): number | undefined {
 	}
 }
 
+export interface FetchRetrySleepInfo {
+	response: Response;
+	bodyText: string;
+	attempt: number;
+	/** The delay fetchWithRetry is about to sleep (hint-capped). */
+	delayMs: number;
+	/** Raw server retry hint (headers/body), before capping; undefined if none. */
+	retryHintMs: number | undefined;
+	/**
+	 * Whether a `"sleep"` decision would actually sleep `delayMs`. `false` on the
+	 * final attempt and on an over-cap hint (both return the response immediately
+	 * after the hook), so a hook must not attribute a stall to those paths.
+	 */
+	willSleep: boolean;
+}
+
 export interface FetchWithRetryOptions extends RequestInit {
 	/** Total fetch attempts (initial + retries). Default `5`. */
 	maxAttempts?: number;
@@ -154,6 +170,14 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	shouldRetryResponse?: (response: Response, bodyText: string, attempt: number) => boolean | Promise<boolean>;
 	/**
+	 * Called after a retryable response's delay is computed, immediately before
+	 * sleeping. Return `"surface"` to stop retrying and return the current
+	 * (non-ok) response to the caller; `"sleep"` preserves the normal backoff.
+	 * Receives the cloned body text so callers can classify without consuming
+	 * the response.
+	 */
+	onBeforeSleep?: (info: FetchRetrySleepInfo) => "sleep" | "surface" | Promise<"sleep" | "surface">;
+	/**
 	 * Bun extension forwarded verbatim to the underlying `fetch` call. `false`
 	 * disables Bun's native ~300s pre-response timeout (callers that own a
 	 * configurable first-event/idle watchdog or an external `AbortSignal`
@@ -185,6 +209,7 @@ export async function fetchWithRetry(
 		defaultDelayMs,
 		prepareInit,
 		shouldRetryResponse,
+		onBeforeSleep,
 		fetch: fetchImpl = fetch,
 		timeout = false,
 		...baseInit
@@ -219,15 +244,50 @@ export async function fetchWithRetry(
 		}
 
 		if (!isRetryableStatus(response.status)) return response;
-		if (attempt + 1 >= maxAttempts) return response;
+		const isFinalAttempt = attempt + 1 >= maxAttempts;
+		// Byte-identical no-hook path: without a surface gate the final attempt
+		// returns immediately, never reading the body (no extra awaits) — exactly
+		// as the pre-gate `attempt + 1 >= maxAttempts` early-return did.
+		if (isFinalAttempt && !onBeforeSleep) return response;
 
 		const retryBody = await response.clone().text();
-		if (shouldRetryResponse && !(await shouldRetryResponse(response, retryBody, attempt))) return response;
+		// `shouldRetryResponse` governs whether this response stays in the retry
+		// machinery at all. On the final attempt it is only reached when a surface
+		// gate exists (the no-hook early-return above already fired); a decline
+		// here must return before `onBeforeSleep` is consulted, so a gate can never
+		// surface a response its own retry predicate rejected.
+		if (shouldRetryResponse && !(await shouldRetryResponse(response, retryBody, attempt))) {
+			return response;
+		}
 
 		const hint = extractRetryHint(response, retryBody);
-		if (hint !== undefined && hint > maxDelayMs) return response;
-
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
+		const failsFastOverCap = hint !== undefined && hint > maxDelayMs;
+		// Consult the surface gate BEFORE the over-cap early-return: a 429 whose
+		// hint exceeds the cap is the strongest rotation case, so the hook must get
+		// a chance to surface it. `delayMs` stays the capped value; `retryHintMs`
+		// carries the raw (possibly over-cap) hint. When no hook is provided the
+		// control flow is byte-identical to the pre-gate behavior — the over-cap
+		// return below happens without any awaits (`hint` is defined, so the
+		// `delayMs` above never calls `resolveDefaultDelay`).
+		if (onBeforeSleep) {
+			const decision = await onBeforeSleep({
+				response,
+				bodyText: retryBody,
+				attempt,
+				delayMs,
+				retryHintMs: hint,
+				willSleep: !isFinalAttempt && !failsFastOverCap,
+			});
+			// On the final attempt there is no sleep to preserve — "surface" and
+			// "sleep" both return the response; the point of consulting is letting
+			// the gate mark the response surfaced so the caller rewrites the terminal
+			// error with the rotation marker. Consult exactly once, then return.
+			if (isFinalAttempt || decision === "surface") return response;
+		}
+		// A server hint above the per-delay cap means "fail fast": return the
+		// current response so the caller deals with `!response.ok`.
+		if (failsFastOverCap) return response;
 		await scheduler.wait(delayMs, { signal });
 	}
 }
