@@ -76,6 +76,15 @@ export interface SchedulerTask {
 	 * task marked failed. Distinct from `attempts`, which counts task-fault errors.
 	 */
 	policyResets?: number;
+	/**
+	 * Consecutive watchdog stall recoveries — a dispatched turn that never
+	 * materialized (no `agent_start`). Reset to 0 the moment a turn actually
+	 * starts. After `maxAttempts` consecutive stalls the task is failed rather
+	 * than re-queued forever, so a persistently undeliverable prompt (no model /
+	 * API key, a rejecting pre-turn hook) can't loop indefinitely on refunded
+	 * attempts. Distinct from `attempts` (task-fault) and `policyResets`.
+	 */
+	stalls?: number;
 }
 
 /** Scheduler run mode set by start/pause/stop. */
@@ -949,6 +958,8 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	let watchdogTimer: IntervalHandle | null = null;
 	/** One-shot guard for the unknown-provider notice (reset per process). */
 	let unknownModelNoticed = false;
+	/** One-shot guard for the gated-profile (subscription-assumption) notice. */
+	let gatedProfileNoticed = false;
 	/**
 	 * A content-policy ("cyber") violation poisoned the conversation; the next
 	 * dispatch must purge the context (newSession) before sending, or every
@@ -1014,13 +1025,36 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			const stale = !Number.isFinite(dispatchedAt) || Date.now() - dispatchedAt > cfg.stallTimeoutMs;
 			if (stale && liveCtx?.isIdle() === true) {
 				const id = st.currentTaskId;
-				logEvent({ event: "recovered", taskId: id, detail: "watchdog: task in flight but agent idle" });
-				notify(
-					null,
-					`scheduler: watchdog — ${id} stalled with an idle agent; re-queued (attempt not counted).`,
-					"warning",
-				);
-				settleCurrentTask("stalled: agent idle with task in flight", true, false, "stalled");
+				const stalls = task ? (task.stalls = (task.stalls ?? 0) + 1) : 0;
+				if (task && stalls > cfg.maxAttempts) {
+					// A dispatched turn that never materializes this many times running is
+					// not a transient swallow — it's undeliverable (no model/API key, a
+					// rejecting pre-turn hook, a send that rejects async). Fail it instead
+					// of looping on refunded attempts forever.
+					logEvent({
+						event: "recovered",
+						taskId: id,
+						detail: `watchdog: ${stalls} consecutive stalls — dispatched turn never started; task undeliverable`,
+					});
+					notify(
+						null,
+						`scheduler: ${id} FAILED — dispatched turn never started after ${stalls} watchdog recoveries (no model/API key, or a rejecting pre-turn hook?) — /scheduler retry ${id} to re-queue.`,
+						"error",
+					);
+					settleCurrentTask("stalled: dispatched turn never started (undeliverable)", false, true, "stalled");
+				} else {
+					logEvent({
+						event: "recovered",
+						taskId: id,
+						detail: `watchdog: task in flight but agent idle (stall ${stalls}/${cfg.maxAttempts})`,
+					});
+					notify(
+						null,
+						`scheduler: watchdog — ${id} stalled with an idle agent; re-queued (attempt not counted, stall ${stalls}/${cfg.maxAttempts}).`,
+						"warning",
+					);
+					settleCurrentTask("stalled: agent idle with task in flight", true, false, "stalled");
+				}
 				scheduleDispatch(cfg.dispatchDelayMs);
 			}
 			return;
@@ -1209,6 +1243,22 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 				detail: "active provider/model not detectable — treating as unlimited (no session-window gating)",
 			});
 			notify(null, "scheduler: provider/model unknown — dispatching without session-window gating.", "warning");
+		}
+		if (quota.limits !== null && !gatedProfileNoticed) {
+			gatedProfileNoticed = true;
+			// The extension API exposes no credential kind (ExtensionModelQuery →
+			// Model carries provider/id only), so a gated profile is a subscription
+			// *assumption*. Surface it once: API-key/pay-as-you-go Anthropic has no
+			// session windows and should run ungated.
+			logEvent({
+				event: "notice",
+				detail: `gating ${quota.provider}/${quota.modelId} at ${quota.limits.sessionHours}h×${quota.limits.maxSessionsPer24h} (Claude subscription assumption)`,
+			});
+			notify(
+				null,
+				`scheduler: gating ${quota.provider || "this model"} at ${quota.limits.sessionHours}h×${quota.limits.maxSessionsPer24h} session windows — assumes Claude subscription auth. API-key/pay-as-you-go billing has no such windows; set the profile's limits to null in config.json to run ungated.`,
+				"info",
+			);
 		}
 		return quota;
 	}
@@ -1518,6 +1568,16 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	pi.on("agent_start", async (_event, ctx) => {
 		liveCtx = ctx as unknown as CtxLike;
 		agentActive = true;
+		// A turn actually started — the previous dispatch was delivered, so clear
+		// the in-flight task's consecutive-stall counter.
+		{
+			const inflight = getState();
+			const running = inflight.tasks.find(t => t.id === inflight.currentTaskId);
+			if (running?.stalls) {
+				running.stalls = 0;
+				saveState();
+			}
+		}
 		currentTurnWindowAt = null; // reset per turn; set below only when a new window opens
 		// Window accounting: ANY agent turn (scheduled or typed manually)
 		// consumes the provider session window, so a new local window record
@@ -2080,6 +2140,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			t.status = "interrupted";
 			t.attempts = 0;
 			t.policyResets = 0;
+			t.stalls = 0;
 			logEvent({ event: "notice", taskId: t.id, detail: "failed task re-queued via /scheduler retry" });
 		}
 		emptyQueueNotified = false;

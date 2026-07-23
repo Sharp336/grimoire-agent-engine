@@ -182,6 +182,7 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const tmpAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-scheduler-smoke-"));
+const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = tmpAgentDir;
 // The pi-utils dir resolver caches at module load (before this line runs), so
 // re-sync it to the throwaway agent dir just set — otherwise getAgentDir() (used
@@ -1542,6 +1543,52 @@ await rt.command("retry t101", ctxRt);
 	assert.equal(t101.policyResets, 0, "retry also resets the content-policy reset budget");
 }
 await rt.command("stop", ctxRt);
+
+// 32. a dispatched turn that never materializes (no agent_start/agent_end — an
+// undeliverable prompt: no model, a rejecting pre-turn hook, an async send
+// failure) is failed after maxAttempts consecutive watchdog stalls instead of
+// looping on refunded attempts forever.
+{
+	const c32 = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	c32.maxAttempts = 2;
+	c32.watchdogIntervalMs = 20;
+	c32.stallTimeoutMs = 20;
+	c32.dispatchDelayMs = 20;
+	fs.writeFileSync(configFile, JSON.stringify(c32));
+	const st = readState();
+	st.run = "running";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [
+		{ id: "t102", prompt: "Never starts", status: "queued", addedAt: new Date().toISOString(), attempts: 0 },
+	];
+	st.nextTaskSeq = 103;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const sc = makeMockPi();
+const ctxSc = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(sc.api);
+await sc.emit("session_start", {}, ctxSc);
+// never emit agent_start/agent_end: the watchdog keeps finding the task in flight
+// with an idle agent. After maxAttempts consecutive stalls it must fail the task.
+for (let k = 0; k < 200 && task(readState(), "t102").status !== "failed"; k++) await sleep(20);
+{
+	const t102 = task(readState(), "t102");
+	assert.equal(
+		t102.status,
+		"failed",
+		"an undeliverable dispatch fails after maxAttempts consecutive stalls (no infinite refund loop)",
+	);
+	assert.ok((t102.stalls ?? 0) > 2, "the consecutive-stall counter drove the terminal failure");
+}
+await sc.command("stop", ctxSc);
+
+// Restore the agent-dir env + resolver so importing this module from the bun:test
+// process (smoke.test.ts) never leaks the throwaway dir into later test files.
+if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+refreshDirsFromEnv();
 
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);
