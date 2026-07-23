@@ -161,6 +161,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			// gone, and acquirePsHost lazy-spawns on a missing entry. Spawn
 			// failure leaves the session hostless; the next call re-spawns
 			// lazily, exactly like a first call.
+			throwIfAborted(signal);
 			if (hostMode === "new-session") await disposePsHostSession(sessionKey);
 			const lease = await acquirePsHost({
 				...spawnOptions,

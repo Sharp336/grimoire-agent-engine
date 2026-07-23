@@ -309,6 +309,30 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(result).trim()).toBe("never-ran");
 	});
 
+	test("a pre-aborted new-session call never destroys the existing session host's state", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-cancel-before-dispose-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Warm the session host and set a marker that only survives if the
+		// runspace is never disposed.
+		await tool.execute("warm", { command: "$global:__cancel_marker = 'alive'" });
+
+		const controller = new AbortController();
+		controller.abort();
+		// host: "new-session" disposes the existing pooled host before
+		// acquiring its replacement. A call that's already cancelled by the
+		// time execute() runs must never reach that disposal — otherwise a
+		// call that never executes still destroys the session's persistent
+		// state (variables/modules/loaded resources) for nothing.
+		await expect(
+			tool.execute("cancelled", { command: "'unreachable'", host: "new-session" }, controller.signal),
+		).rejects.toThrow(/abort/i);
+
+		const result = await tool.execute("verify", { command: "$global:__cancel_marker" });
+		expect(textOf(result).trim()).toBe("alive");
+	});
+
 	test("a top-level return in the command exits only the user command, not wrapper bookkeeping", async () => {
 		const tool = await loadPowerShellTool(fakeSession("ps-toplevel-return-test"));
 		expect(tool).not.toBeNull();

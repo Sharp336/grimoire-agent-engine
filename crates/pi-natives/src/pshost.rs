@@ -677,10 +677,23 @@ impl PsHost {
 	/// hard-kill the process tree if it has not exited.
 	#[napi]
 	pub async fn dispose(&self) -> Result<()> {
+		let process = self.core.process.lock().clone();
+		// Snapshot the root's direct children BEFORE requesting exit: on
+		// Unix/macOS, `Process::children()` is gated on the root's own live
+		// identity and unconditionally returns empty once the root is no
+		// longer Running, so capturing it only after observing a dead root
+		// (the common graceful-exit case) would always find nothing — a
+		// background child (`Start-Process`/`ProcessStartInfo`) the command
+		// left running would leak forever even with the reap-on-clean-exit
+		// branch below. This is the only point in `dispose()` where the root
+		// is (as far as we know) still alive.
+		let children_before_exit = process
+			.as_ref()
+			.map(core_process::Process::children)
+			.unwrap_or_default();
 		if let Ok(frame) = encode_frame(&HostRequest::Exit) {
 			let _ = self.core.send(frame);
 		}
-		let process = self.core.process.lock().clone();
 		if let Some(process) = process {
 			let _ = process
 				.wait_for_exit(Some(Duration::from_secs(2)), core_cancel::CancelToken::default())
@@ -693,12 +706,10 @@ impl PsHost {
 				// The root exited within the grace window, but terminate_tree
 				// bails out immediately whenever the root isn't Running — it
 				// would never reap a background child the command left running
-				// when it returned (e.g. `Start-Process`/`ProcessStartInfo`
-				// with UseShellExecute, or any detached grandchild). Sweep the
-				// root's still-live direct children explicitly so ephemeral/
-				// session teardown fully releases side effects like file
-				// locks even when the sidecar itself shut down cleanly.
-				for child in process.children() {
+				// when it returned. Reap the pre-exit snapshot directly; each
+				// child's own `terminate_tree` call checks THAT process's live
+				// identity, independent of the (already-dead) root's.
+				for child in children_before_exit {
 					let _ = child
 						.terminate_tree(false, 0, 5_000, core_cancel::CancelToken::default())
 						.await;
