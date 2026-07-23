@@ -623,6 +623,8 @@ function detectApprovalMode(cwd: string): string | null {
 		path.join(cwd, ".omp", "config.yml"),
 		path.join(cwd, ".omp", "config.yaml"),
 		path.join(cwd, ".omp", "settings.json"),
+		path.join(cwd, ".claude", "settings.json"),
+		path.join(cwd, ".claude", "settings.local.json"),
 		path.join(agentDir(), "config.yml"),
 		path.join(agentDir(), "config.yaml"),
 		path.join(agentDir(), "settings.json"),
@@ -1028,7 +1030,8 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			const stale = !Number.isFinite(dispatchedAt) || Date.now() - dispatchedAt > cfg.stallTimeoutMs;
 			if (stale && liveCtx?.isIdle() === true) {
 				const id = st.currentTaskId;
-				const stalls = task ? (task.stalls = (task.stalls ?? 0) + 1) : 0;
+				if (task) task.stalls = (task.stalls ?? 0) + 1;
+				const stalls = task?.stalls ?? 0;
 				if (task && stalls >= cfg.maxAttempts) {
 					// A dispatched turn that never materializes this many times running is
 					// not a transient swallow — it's undeliverable (no model/API key, a
@@ -1089,28 +1092,32 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 
 	// ---- persistence -------------------------------------------------------
 	function getState(): SchedulerState {
-		if (state === null) {
-			let raw: unknown;
-			try {
-				raw = readJson<unknown>(stateFile());
-			} catch (err) {
-				// state.json exists but is corrupt/unreadable: do NOT run on top of it
-				// — a later save would clobber the queue. Preserve the file, block
-				// saves, and surface the problem.
-				stateReadError = true;
+		// Re-read while a prior read failed (stateReadError) so fixing/deleting a
+		// corrupt state.json mid-session clears the block without a restart.
+		if (state !== null && !stateReadError) return state;
+		let raw: unknown;
+		try {
+			raw = readJson<unknown>(stateFile());
+		} catch (err) {
+			// state.json exists but is corrupt/unreadable: do NOT run on top of it —
+			// a later save would clobber the queue. Preserve the file, block saves,
+			// and surface the problem once per corruption episode.
+			if (!stateReadError) {
 				pi.logger?.warn?.(`scheduler: state.json unreadable — leaving it untouched: ${String(err)}`);
 				notify(
 					null,
 					"scheduler: state.json is corrupt/unreadable — queue paused and the file left untouched; fix or delete it to resume.",
 					"error",
 				);
-				state = structuredClone(EMPTY_STATE);
-				return state;
 			}
-			state = migrateState(raw, cfg) ?? structuredClone(EMPTY_STATE);
-			// Backfill the prompt fingerprint for tasks queued before hashing existed.
-			for (const t of state.tasks) if (!t.promptHash) t.promptHash = hashPrompt(t.prompt);
+			stateReadError = true;
+			state ??= structuredClone(EMPTY_STATE);
+			return state;
 		}
+		stateReadError = false; // readable now — first load, or recovered after a fix
+		state = migrateState(raw, cfg) ?? structuredClone(EMPTY_STATE);
+		// Backfill the prompt fingerprint for tasks queued before hashing existed.
+		for (const t of state.tasks) if (!t.promptHash) t.promptHash = hashPrompt(t.prompt);
 		return state;
 	}
 	function saveState(): void {
