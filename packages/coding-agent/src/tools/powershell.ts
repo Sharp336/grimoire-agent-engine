@@ -203,7 +203,9 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			const crashOutput = crashSummary.output;
 			const crashMessage = err instanceof Error ? err.message : String(err);
 			if (!crashOutput) throw new ToolError(crashMessage);
-			const crashTruncation = outputMeta().truncationFromSummary(crashSummary, { direction: "tail" }).get()?.truncation;
+			const crashTruncation = outputMeta()
+				.truncationFromSummary(crashSummary, { direction: "tail" })
+				.get()?.truncation;
 			const crashOutputWithNotice = crashTruncation
 				? `${crashOutput}\n\n${formatTruncationMetaNotice(crashTruncation)}`
 				: crashOutput;

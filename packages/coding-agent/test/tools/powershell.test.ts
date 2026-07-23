@@ -118,9 +118,9 @@ suite("PowerShellTool (persistent host)", () => {
 		// streamed diagnostic output: the run must reject, and the thrown
 		// message must still carry the pre-crash output rather than only the
 		// native "host terminated" rejection.
-		await expect(tool.execute("d2", { command: "Write-Host 'before-crash-marker'; [Environment]::Exit(5)" })).rejects.toThrow(
-			/before-crash-marker/,
-		);
+		await expect(
+			tool.execute("d2", { command: "Write-Host 'before-crash-marker'; [Environment]::Exit(5)" }),
+		).rejects.toThrow(/before-crash-marker/);
 
 		// …and the next default call gets a fresh host, not the pooled corpse.
 		const after = await tool.execute("d3", { command: "$PID" });
@@ -307,6 +307,28 @@ suite("PowerShellTool (persistent host)", () => {
 			command: "if ($global:__preabort_marker) { 'ran' } else { 'never-ran' }",
 		});
 		expect(textOf(result).trim()).toBe("never-ran");
+	});
+
+	test("a top-level return in the command exits only the user command, not wrapper bookkeeping", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-toplevel-return-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Splicing user text directly into the wrapper's own try-block scriptblock
+		// means a bare top-level `return` previously exited the WHOLE wrapped
+		// script, skipping the $__omp.Last/History update and Out-String render
+		// that run after the try/finally. Test-HasTopLevelReturn now detects this
+		// case and dot-sources the command from a literal scriptblock instead, so
+		// `return` only exits the user command's own scope.
+		const withReturn = await tool.execute("ret1", {
+			command: "function Get-Value { return 99 }; $v = Get-Value; if ($v -eq 99) { return 'ok' }; 'bad'",
+		});
+		expect(textOf(withReturn).trim()).toBe("ok");
+
+		// Proves the wrapper's post-try bookkeeping (history/session-scope
+		// variable persistence) still ran: $v must survive into the next call.
+		const after = await tool.execute("ret2", { command: "$v" });
+		expect(textOf(after).trim()).toBe("99");
 	});
 });
 

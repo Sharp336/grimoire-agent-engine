@@ -192,6 +192,46 @@ $ExecutionContext.InvokeCommand.PostCommandLookupAction = {
 # the omp manager serializes calls, the host enforces it).
 $script:current = $null
 
+# Detects a `return` statement at TOP LEVEL of $Command — i.e. not nested
+# inside a function or scriptblock literal defined within the command text
+# itself (those already have their own return boundary and are unaffected).
+# Start-Exec splices $Command directly into $wrapped's try block for speed
+# and to preserve Write-Error's compact ConciseView formatting (any nested
+# scriptblock/function invocation boundary makes PowerShell fall back to a
+# verbose per-error position block — confirmed empirically, and it also
+# inflates high-volume error output past OutputSink's truncation window).
+# A bare top-level `return`, though, would exit the WHOLE wrapped script via
+# that same splice, skipping the counter/history/Out-String bookkeeping in
+# the try's `finally` (see Start-Exec) — so those commands are instead
+# dot-sourced from a literal scriptblock, which gives `return` its own
+# boundary while still not opening a child scope (dot-sourcing never does),
+# so user variables keep persisting into the next call either way.
+function Test-HasTopLevelReturn([string] $Command) {
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Command, [ref] $tokens, [ref] $parseErrors)
+    if ($parseErrors -and $parseErrors.Count -gt 0) {
+        # Let the wrapped script itself surface the real syntax error at
+        # invoke time (existing behavior) — don't second-guess unparsable text.
+        return $false
+    }
+    $returns = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.ReturnStatementAst] }, $true)
+    foreach ($r in $returns) {
+        $enclosing = $r.Parent
+        $nested = $false
+        while ($enclosing -and $enclosing -ne $ast) {
+            if ($enclosing -is [System.Management.Automation.Language.FunctionDefinitionAst] -or
+                $enclosing -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                $nested = $true
+                break
+            }
+            $enclosing = $enclosing.Parent
+        }
+        if (-not $nested) { return $true }
+    }
+    return $false
+}
+
 function Start-Exec([pscustomobject] $Request) {
     $id      = [int]$Request.id
     $command = [string]$Request.command
@@ -229,8 +269,8 @@ function Start-Exec([pscustomobject] $Request) {
 
     # Two evaluation phases in the expandable here-string below: backtick-escaped
     # `$ (e.g. `$global:...) is literal text that executes LATER in the shared
-    # runspace; bare $ ($command, $width, $HistoryDepth) interpolates template
-    # values NOW, host-side. Edit with that rule in mind.
+    # runspace; bare $ ($commandBody, $width, $HistoryDepth) interpolates
+    # template values NOW, host-side. Edit with that rule in mind.
     #
     # Retain result objects AND keep user variables at top scope: @() is an
     # array-subexpression and try/finally is a plain block — neither (unlike
@@ -240,12 +280,18 @@ function Start-Exec([pscustomobject] $Request) {
     # exit is attributed via the PostCommandLookupAction flag (or an observed
     # value change, covering path-invoked executables that skip name lookup)
     # inside a finally, so it is recorded even when the command throws, calls
-    # exit, or the pipeline is stopped. $command sits alone on its own line so
-    # a trailing line-comment cannot swallow the closing paren.
+    # exit, returns, or the pipeline is stopped. $commandBody sits alone on
+    # its own line so a trailing line-comment cannot swallow the closing paren.
     # ONE pipeline per call carries everything: run the user command at top
     # scope, retain its live objects in $global:__omp, then render them as the
     # pipeline's output (captured in $out). Exit code is read afterwards via the
     # session-state proxy — a direct API call, not another pipeline.
+    #
+    # See Test-HasTopLevelReturn above: most commands splice directly (fast
+    # path, unchanged since introduction); a command with a bare top-level
+    # `return` is dot-sourced from a literal scriptblock instead, so `return`
+    # exits only the user command, not the whole wrapped script.
+    $commandBody = if (Test-HasTopLevelReturn $command) { ". {`n$command`n}" } else { $command }
     $wrapped = @"
 if (`$__ompCwd) {
     try { Set-Location -LiteralPath `$__ompCwd -ErrorAction Stop }
@@ -255,7 +301,7 @@ if (`$__ompCwd) {
 `$global:__ompNativeRan = `$false
 try {
 `$global:__omp.Last = @(
-$command
+$commandBody
 )
 } finally {
 if ((`$global:__ompNativeRan -or `$global:LASTEXITCODE -ne `$global:__ompPrevExit) -and `$null -ne `$global:LASTEXITCODE) {
