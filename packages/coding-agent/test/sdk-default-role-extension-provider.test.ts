@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -100,5 +101,76 @@ describe("issue #3569 fresh launch default role from extension provider", () => 
 		} finally {
 			await session.dispose();
 		}
+	});
+
+	async function assertSharedRegistryPreserved(restrictToolNames: boolean): Promise<void> {
+		const bundledModel = getBundledModel("openai", "gpt-5.5");
+		if (!bundledModel) throw new Error("Expected bundled OpenAI GPT-5.5 default");
+
+		const authStorage = await AuthStorage.create(path.join(tempDir, "shared-auth.db"));
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("openai", "test-openai-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "shared-models.yml"));
+		const sourceId = path.join(tempDir, "qoder-extension.ts");
+		modelRegistry.registerProvider(
+			"qoder",
+			{
+				baseUrl: "https://qoder.example.com/v1",
+				apiKey: "qoder-test-key",
+				api: "qoder-completions",
+				streamSimple: () => {
+					throw new Error("stream should not run in this lifecycle test");
+				},
+				models: [
+					{
+						id: "ultimate-400k",
+						name: "Ultimate 400K",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 400_000,
+						maxTokens: 32_768,
+					},
+				],
+			},
+			sourceId,
+		);
+		let session: { dispose(): Promise<void> } | undefined;
+		try {
+			expect(getCustomApi("qoder-completions")).toBeDefined();
+			({ session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings: Settings.isolated(),
+				model: bundledModel,
+				sessionManager: SessionManager.inMemory(),
+				disableExtensionDiscovery: true,
+				restrictToolNames: restrictToolNames || undefined,
+				toolNames: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			}));
+
+			expect(getCustomApi("qoder-completions")).toBeDefined();
+			expect(modelRegistry.find("qoder", "ultimate-400k")).toBeDefined();
+		} finally {
+			await session?.dispose();
+			modelRegistry.clearSourceRegistrations(sourceId);
+		}
+	}
+
+	test("preserves parent custom APIs when a restricted child skips extensions", async () => {
+		await assertSharedRegistryPreserved(true);
+	});
+
+	test("preserves parent custom APIs when a shared child disables extension discovery", async () => {
+		await assertSharedRegistryPreserved(false);
 	});
 });

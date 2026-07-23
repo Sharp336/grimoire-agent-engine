@@ -2009,7 +2009,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// This must happen before the runner is created so that models registered by
 		// extensions are available for model selection on session resume / fallback.
 		const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
-		modelRegistry.syncExtensionSources(activeExtensionSources);
+		const skippedExtensionLoading =
+			extensionPaths.length === 0 && (restrictToolNames || options.disableExtensionDiscovery === true);
+		// A child that intentionally loads no extensions can share its parent's
+		// registry, so an empty sync is not authoritative and must not erase it.
+		if (!skippedExtensionLoading) modelRegistry.syncExtensionSources(activeExtensionSources);
 		for (const sourceId of new Set(activeExtensionSources)) {
 			modelRegistry.clearSourceRegistrations(sourceId);
 		}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed restricted and discovery-disabled child sessions erasing source-scoped custom APIs from a shared parent model registry, which made extension-backed advisor models unavailable.
+
 ## [17.0.8] - 2026-07-22
 
 ### Added
