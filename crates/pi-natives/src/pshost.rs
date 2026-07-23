@@ -720,19 +720,21 @@ impl PsHost {
 	#[napi]
 	pub async fn dispose(&self) -> Result<()> {
 		let process = self.core.process.lock().clone();
-		// Snapshot the root's direct children BEFORE requesting exit: on
-		// Unix/macOS, `Process::children()` is gated on the root's own live
-		// identity and unconditionally returns empty once the root is no
-		// longer Running, so capturing it only after observing a dead root
-		// (the common graceful-exit case) would always find nothing — a
-		// background child (`Start-Process`/`ProcessStartInfo`) the command
-		// left running would leak forever even with the reap-on-clean-exit
-		// branch below. This is the only point in `dispose()` where the root
-		// is (as far as we know) still alive.
+		// Snapshot the root's direct children AND process group id BEFORE
+		// requesting exit: on Unix/macOS, `Process::children()`/`group_id()`
+		// are gated on the root's own live identity and unconditionally
+		// return empty/None once the root is no longer Running, so capturing
+		// either only after observing a dead root (the common graceful-exit
+		// case) would always find nothing — a background child
+		// (`Start-Process`/`ProcessStartInfo`) the command left running
+		// would leak forever even with the reap-on-clean-exit branch below.
+		// This is the only point in `dispose()` where the root is, as far as
+		// we know, still alive.
 		let children_before_exit = process
 			.as_ref()
 			.map(core_process::Process::children)
 			.unwrap_or_default();
+		let pgid_before_exit = process.as_ref().and_then(core_process::Process::group_id);
 		if let Ok(frame) = encode_frame(&HostRequest::Exit) {
 			let _ = self.core.send(frame);
 		}
@@ -747,10 +749,26 @@ impl PsHost {
 			} else {
 				// The root exited within the grace window, but terminate_tree
 				// bails out immediately whenever the root isn't Running — it
-				// would never reap a background child the command left running
-				// when it returned. Reap the pre-exit snapshot directly; each
-				// child's own `terminate_tree` call checks THAT process's live
-				// identity, independent of the (already-dead) root's.
+				// would never reap a background child the command left
+				// running when it returned. `children_before_exit` only
+				// covers DIRECT children though: a grandchild left behind by
+				// something like `sh -c 'sleep 30 &'` (the backgrounded job
+				// is `sh`'s child, not the root pwsh's) would still leak,
+				// since `Process::children()` enumerates one level, not the
+				// full descendant tree. Signal the whole process group
+				// directly (round-4 spawns the sidecar as its own group
+				// leader, so pgid == the root's own original pid) — this
+				// reaches every process in the group regardless of depth or
+				// reparenting, and — unlike `terminate_tree`'s group path —
+				// `kill_process_group` has no root-Running gate, so it works
+				// even though the root is already dead by this point. A
+				// no-op on Windows (`group_id()` is always `None` there; no
+				// POSIX process-group equivalent), where the direct-children
+				// sweep below remains the only cross-depth-1 cleanup.
+				if let Some(pgid) = pgid_before_exit {
+					let _ = core_process::kill_process_group(pgid, core_process::TERM_SIGNAL);
+					let _ = core_process::kill_process_group(pgid, core_process::KILL_SIGNAL);
+				}
 				for child in children_before_exit {
 					let _ = child
 						.terminate_tree(false, 0, 5_000, core_cancel::CancelToken::default())
@@ -1859,6 +1877,83 @@ mod tests {
 		assert!(
 			reaped,
 			"dispose() must reap a background child even when the root exits cleanly (pid {pid})"
+		);
+	}
+
+	/// The round-30 fix above only sweeps the root's DIRECT children
+	/// (`Process::children()` enumerates one level). A grandchild -- e.g.
+	/// `sh -c 'sleep 30 &'`, where the backgrounded job is `sh`'s child, not
+	/// the root pwsh's -- would still leak even with that sweep in place,
+	/// especially once orphan-reparenting moves its ppid away from `sh`
+	/// entirely after `sh` itself exits. Process-GROUP membership survives
+	/// reparenting (pgid is independent of the parent-child relationship
+	/// tracked by ppid), so signaling the whole group catches it regardless
+	/// of depth.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dispose_reaps_a_reparented_grandchild_via_the_process_group() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+		if cfg!(windows) {
+			eprintln!(
+				"skipping pshost test: process groups are POSIX-only (round-30's direct-children \
+				 sweep is the only cross-depth cleanup on Windows)"
+			);
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// `sh -c 'sleep 30 & echo child-pid:$!'` backgrounds sleep as sh's OWN
+		// child (pwsh's GRANDCHILD) then exits immediately, printing the
+		// grandchild's pid via `$!`.
+		let spawn_cmd = "$psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = \
+		                 '/bin/sh'; $psi.ArgumentList.Add('-c'); $psi.ArgumentList.Add('sleep 30 & \
+		                 echo child-pid:$!'); $psi.UseShellExecute = $false; \
+		                 $psi.RedirectStandardOutput = $true; $p = \
+		                 [System.Diagnostics.Process]::Start($psi); $p.WaitForExit(); \
+		                 $p.StandardOutput.ReadToEnd()";
+		let (out, _) = run_cmd(&host, spawn_cmd, task::CancelToken::default()).await;
+		let pid: i32 = out
+			.lines()
+			.find_map(|line| line.trim().strip_prefix("child-pid:"))
+			.and_then(|s| s.trim().parse().ok())
+			.unwrap_or_else(|| panic!("grandchild pid printed: {out:?}"));
+
+		let is_running = |pid: i32| {
+			super::core_process::Process::from_pid(pid)
+				.is_some_and(|p| matches!(p.status(), super::core_process::ProcessStatus::Running))
+		};
+
+		// The reparented grandchild's ppid may already point away from `sh`
+		// (or pwsh) by now; give orphan reparenting a moment to settle before
+		// asserting the pre-dispose baseline.
+		let mut alive_before = false;
+		for _ in 0..20 {
+			if is_running(pid) {
+				alive_before = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+		assert!(alive_before, "grandchild is alive before dispose (pid {pid})");
+
+		host.dispose().await.expect("host disposes");
+
+		let mut reaped = false;
+		for _ in 0..20 {
+			if !is_running(pid) {
+				reaped = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+		assert!(
+			reaped,
+			"dispose() must reap a reparented grandchild via process-group signaling even when the \
+			 root exits cleanly (pid {pid})"
 		);
 	}
 }
