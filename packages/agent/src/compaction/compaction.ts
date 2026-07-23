@@ -17,6 +17,7 @@ import {
 	type MessageAttribution,
 	type Model,
 	type ProviderSessionState,
+	type RateLimitRotationOptions,
 	type SimpleStreamOptions,
 	type Tool,
 	type Usage,
@@ -766,6 +767,14 @@ export interface SummaryOptions {
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
 	/**
+	 * Opt-in rate-limit credential rotation for the local summarization
+	 * oneshots. The host builds it bound to the SAME session id the `apiKey`
+	 * resolver was constructed with, so the sibling probe reads the right
+	 * sticky credential. `undefined` (rotation off) leaves the oneshot request
+	 * options unchanged.
+	 */
+	rateLimitRotation?: RateLimitRotationOptions;
+	/**
 	 * Optional completion transport override for host-level request wrappers
 	 * (e.g. the coding-agent provider-concurrency limiter). When provided,
 	 * every local summarization oneshot (`generateSummary`,
@@ -881,6 +890,7 @@ export async function generateSummary(
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,
 			codexCompaction: localCodexCompaction(options),
+			rateLimitRotation: options?.rateLimitRotation,
 		},
 		{ telemetry: options?.telemetry, oneshotKind: "compaction_summary", completeImpl: options?.completeImpl },
 	);
@@ -1089,6 +1099,7 @@ async function generateShortSummary(
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,
 			codexCompaction: localCodexCompaction(options),
+			rateLimitRotation: options?.rateLimitRotation,
 		},
 		{ telemetry: options?.telemetry, oneshotKind: "compaction_short_summary", completeImpl: options?.completeImpl },
 	);
@@ -1363,6 +1374,7 @@ export async function compact(
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
 		fetch: options?.fetch,
+		rateLimitRotation: options?.rateLimitRotation,
 		completeImpl: options?.completeImpl,
 	};
 
@@ -1619,6 +1631,7 @@ async function generateTurnPrefixSummary(
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,
 			codexCompaction: localCodexCompaction(options),
+			rateLimitRotation: options?.rateLimitRotation,
 		},
 		{ telemetry: options?.telemetry, oneshotKind: "compaction_turn_prefix", completeImpl: options?.completeImpl },
 	);
