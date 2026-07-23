@@ -349,6 +349,9 @@
 - Fixed parsing of POSIX `$EDITOR` commands that contain quoted arguments or executable paths with spaces.
 - Fixed persisted Agent Hub rows losing the explicit caller model role when a subagent used a model override, preserving role provenance across restarts.
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
+### Added
+
+- Added a `powershell` tool backed by a persistent `pwsh` host (one shared runspace per session via the native `PsHost`). Unlike one-shot shells, session state — variables, imported modules, current location, `$LASTEXITCODE`, and the live result objects from prior commands — persists across calls; `$__omp.Last` exposes the previous command's objects for inspection without re-running. All PowerShell output streams are surfaced: success and `Write-Host`/`Write-Information` verbatim, with `Write-Warning`/`Write-Verbose`/`Write-Debug` labeled and ANSI color-coded (yellow/red) like the console. Output streams through the standard `OutputSink` (tail + artifact spill), non-zero exits and error-stream writes surface as `isError` results, timeout/abort stop only the in-flight pipeline and preserve runspace state, and the result carries the host PID for `Enter-PSHostProcess` debugging. A `host` parameter selects where the command runs: `session` (default) uses the persistent session host; `ephemeral` uses a throwaway host fully terminated before the result returns, releasing file locks and loaded assemblies deterministically (ephemeral calls run with shared tool concurrency); `new-session` disposes the current session host and runs in a fresh replacement, for runspaces poisoned by assemblies or `Add-Type` classes that cannot be unloaded. Opt-in via `powershell.enabled` (default off; presented top-level like `bash` so ACP client approval always applies; loads only when `pwsh` is on PATH).
 
 ## [17.2.9] - 2026-08-05
 
@@ -1084,10 +1087,6 @@
 - Fixed in-progress aborts awaiting `session_stop` extension handlers whose results would be discarded.
 - Fixed `/retry` reporting "Nothing to retry" after a stream stalled or aborted mid-tool-call.
 - Fixed locally consumed extension commands triggering automatic title generation and exposing their command text to the title model.
-
-### Added
-
-- Added a `powershell` tool backed by a persistent `pwsh` host (one shared runspace per session via the native `PsHost`). Unlike one-shot shells, session state — variables, imported modules, current location, `$LASTEXITCODE`, and the live result objects from prior commands — persists across calls; `$__omp.Last` exposes the previous command's objects for inspection without re-running. All PowerShell output streams are surfaced: success and `Write-Host`/`Write-Information` verbatim, with `Write-Warning`/`Write-Verbose`/`Write-Debug` labeled and ANSI color-coded (yellow/red) like the console. Output streams through the standard `OutputSink` (tail + artifact spill), non-zero exits and error-stream writes surface as `isError` results, timeout/abort stop only the in-flight pipeline and preserve runspace state, and the result carries the host PID for `Enter-PSHostProcess` debugging. A `host` parameter selects where the command runs: `session` (default) uses the persistent session host; `ephemeral` uses a throwaway host fully terminated before the result returns, releasing file locks and loaded assemblies deterministically (ephemeral calls run with shared tool concurrency); `new-session` disposes the current session host and runs in a fresh replacement, for runspaces poisoned by assemblies or `Add-Type` classes that cannot be unloaded. Opt-in via `powershell.enabled` (default off; presented top-level like `bash` so ACP client approval always applies; loads only when `pwsh` is on PATH).
 
 ## [17.0.7] - 2026-07-21
 

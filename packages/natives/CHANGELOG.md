@@ -79,6 +79,9 @@
 
 - Fixed per-window capture failing on Wayland with `InvalidTarget` errors for window IDs returned by `desktop.windows()`.
 - Fixed `desktop.capabilities()` incorrectly reporting `capture: true` on Wayland builds compiled without the `wayland-pipewire` feature.
+### Added
+
+- Added `PsHost`, a persistent PowerShell host sidecar. One long-lived `pwsh` process owns a shared runspace, so variables, imported modules, `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist across `run()` calls and stay inspectable via `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid once per session (~1s); warm per-call cost is ~20–30 ms. All PowerShell output streams are forwarded — Success and Information (`Write-Host`) verbatim, Warning/Verbose/Debug/Error labeled and ANSI color-coded like the console — with each `chunk` frame tagged by its stream. Cancellation maps to typed `cancelled`/`timedOut` flags (consistent with `Shell`) and stops only the in-flight pipeline, leaving runspace state intact; a parent-PID watchdog terminates the whole `pwsh` process tree if the host's owner dies.
 
 ## [17.2.9] - 2026-08-05
 
@@ -224,9 +227,6 @@
 ### Removed
 
 - Removed unused `similar` crate dependency and dev-dependency on npm `diff`.
-### Added
-
-- Added `PsHost`, a persistent PowerShell host sidecar. One long-lived `pwsh` process owns a shared runspace, so variables, imported modules, `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist across `run()` calls and stay inspectable via `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid once per session (~1s); warm per-call cost is ~20–30 ms. All PowerShell output streams are forwarded — Success and Information (`Write-Host`) verbatim, Warning/Verbose/Debug/Error labeled and ANSI color-coded like the console — with each `chunk` frame tagged by its stream. Cancellation maps to typed `cancelled`/`timedOut` flags (consistent with `Shell`) and stops only the in-flight pipeline, leaving runspace state intact; a parent-PID watchdog self-terminates the sidecar if the host process dies, so a hard crash cannot orphan it. The sidecar's stdin (the length-prefixed request pipe) is detached from child inheritance at startup: native executables spawned by user commands — most visibly Git for Windows' `git.exe`, which blocks reading stdin on every subcommand — inherit the null device instead, so they can neither hang waiting on the protocol channel nor steal request frames from it.
 
 ## [17.0.5] - 2026-07-18
 
