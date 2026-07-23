@@ -113,6 +113,12 @@ Hook events are strongly typed in `types.ts`.
 - `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string }`
 - `tool_result` (post-execution) → can return `{ content?; details?; isError? }`
 
+> **`xd://` device dispatch:** when a tool is invoked through an `xd://` device
+> mount (`write xd://<tool>`), the wrapper fires for the outer `write` call
+> only — `event.toolName` is `"write"`, and the mounted tool's own name/args
+> live under `event.input.path` and `event.details.xdev`. There is no separate
+> inner event for the device tool. See [`xd-devices.md`](./xd-devices.md#hook--extension-observability).
+
 This is the hook subsystem’s core pre/post interception model.
 
 ```text
