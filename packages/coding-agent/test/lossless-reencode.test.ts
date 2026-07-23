@@ -64,6 +64,16 @@ describe("lossless schema+CSV format", () => {
 		expect(encoded).toContain("8,東京 α");
 	});
 
+	it("rejects escaped lone surrogates before emitting CSV", () => {
+		const input = '[{"id":1,"value":"\\ud800"},{"id":2,"value":"well-formed"}]';
+		expect(encodeLosslessJsonTable(input)).toBeUndefined();
+		expect(reencodeLosslessJsonArray(input)).toBe(input);
+	});
+
+	it("accepts escaped well-formed surrogate pairs", () => {
+		expectRoundTrip('[{"id":1,"value":"\\ud83d\\ude00"},{"id":2,"value":"well-formed"}]');
+	});
+
 	it("accepts only canonical, exactly round-trippable JSON number literals", () => {
 		const input = '[{"n":0},{"n":42},{"n":-42},{"n":1.25},{"n":0.000001},{"n":1e-7}]';
 		expectRoundTrip(input);

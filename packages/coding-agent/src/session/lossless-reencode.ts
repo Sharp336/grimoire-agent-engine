@@ -247,7 +247,9 @@ class FlatJsonArrayParser {
 			const code = this.input.charCodeAt(this.#index);
 			if (code === 0x22) {
 				this.#index++;
-				return JSON.parse(this.input.slice(start, this.#index)) as string;
+				const value = JSON.parse(this.input.slice(start, this.#index)) as string;
+				if (!value.isWellFormed()) throw new Error("Ill-formed JSON string");
+				return value;
 			}
 			if (code < 0x20) throw new Error("Control character in JSON string");
 			if (code !== 0x5c) {
