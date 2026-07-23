@@ -439,6 +439,25 @@ impl HostCore {
 			let _ = stderr_chunk_tx
 				.send(format!("[external process stderr]\n{labeled}\n"))
 				.await;
+			// Deliberately does NOT flip `had_errors` on `outcome` below.
+			// Many CLI tools write informational/progress/warning text to
+			// stderr as a CONVENTION (progress bars, verbose logging,
+			// startup banners) without it indicating failure -- flipping
+			// `had_errors` for ANY non-empty inherited-stderr content would
+			// misclassify a successfully-completed command as failed
+			// whenever it happens to spawn a chatty-on-stderr native tool.
+			// This child's exit code is NOT independently observable here:
+			// a `[System.Diagnostics.Process]::Start()`-spawned child (the
+			// scenario this whole forwarding path exists for) never sets
+			// `$LASTEXITCODE` -- that's exclusively set by PowerShell's OWN
+			// native-pipeline invocation mechanism -- so there is no
+			// separate signal Rust could correlate with this content to
+			// distinguish "benign logger" from "the child actually failed".
+			// The content is still fully visible to the caller (labeled,
+			// red-highlighted, forwarded as its own chunk) so a human or an
+			// agent reading the transcript can judge for itself; the TOOL
+			// just doesn't force that judgment into a binary success/error
+			// classification it cannot make correctly either way.
 		}
 		match outcome {
 			Some(result) => Ok(result),
