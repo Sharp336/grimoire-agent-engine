@@ -62,7 +62,7 @@ function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 
 interface EmptyCompletionRetryOptions {
 	signal?: AbortSignal;
-	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	providerRetryWait?: (delayMs: number, signal?: AbortSignal, cause?: unknown) => Promise<void>;
 }
 
 /**

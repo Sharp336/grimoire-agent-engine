@@ -40,6 +40,7 @@ import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
 import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
+import type { RateLimitRotationOptions } from "./utils/rate-limit-rotation";
 
 export type { StopDetails } from "./providers/anthropic-wire";
 export type { AssistantMessageEventStream } from "./utils/event-stream";
@@ -486,9 +487,21 @@ export interface StreamOptions {
 	 */
 	streamIdleTimeoutMs?: number;
 	/**
-	 * Optional retry delay hook for tests and transports that need custom scheduling.
+	 * Optional retry delay hook for tests and transports that need custom
+	 * scheduling. `cause` carries the failure that triggered the retry when the
+	 * provider loop knows it (anthropic-messages); other call sites may omit it.
 	 */
-	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	providerRetryWait?: (delayMs: number, signal?: AbortSignal, cause?: unknown) => Promise<void>;
+	/**
+	 * Opt-in rate-limit credential-rotation seam. When set (and enabled), a
+	 * transport about to sleep a transient 429 (`RATE_LIMIT_EXCEEDED` body
+	 * classification only) for at least `minSleepMs` asks `hasUsableSibling`
+	 * and, if a sibling credential exists, surfaces a marker error the
+	 * auth-retry driver rotates on instead of sleeping. Requires the
+	 * resolver-form {@link SimpleStreamOptions.apiKey}; with a static key the
+	 * surfaced error is terminal, so callers must not set this without one.
+	 */
+	rateLimitRotation?: RateLimitRotationOptions;
 	/**
 	 * Optional `fetch` implementation override. Providers route every HTTP
 	 * request — direct calls, SDK clients, and retry helpers — through this
