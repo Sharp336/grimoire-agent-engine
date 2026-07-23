@@ -143,7 +143,7 @@ export const parseOpenAIModel = parser((modelId): OpenAIModel | null => {
  * `parseKnownModel`.
  */
 export const parseGlmModel = parser((modelId): GlmModel | null => {
-	const match = /glm-(\d{1,2}(?:\.\d+)?)(v)?(?:-(air|turbo|flashx|flash|preview))?\b/.exec(modelId);
+	const match = /glm-(\d{1,2}(?:\.\d+)?)(v)?(?:-(air|turbo|flashx|flash|preview))?\b/i.exec(modelId);
 	if (!match) {
 		return null;
 	}
