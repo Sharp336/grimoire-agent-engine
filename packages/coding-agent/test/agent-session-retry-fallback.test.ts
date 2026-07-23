@@ -1,9 +1,16 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type AssistantMessage, Effort, type Model, type ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import {
+	type AssistantMessage,
+	type Context,
+	Effort,
+	type Model,
+	type ProviderSessionState,
+} from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -14,6 +21,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
@@ -219,6 +227,63 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
+	});
+
+	it("carries a surfaced rotation from the settings stream fn to a credential_rotated session event", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) {
+			throw new Error("Expected bundled test model to exist");
+		}
+
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: createMockModel().stream,
+		});
+		const settings = Settings.isolated({ "retry.rotateOnRateLimit": true });
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const rotated = Promise.withResolvers<Extract<AgentSessionEvent, { type: "credential_rotated" }>>();
+		session.subscribe(event => {
+			if (event.type === "credential_rotated") rotated.resolve(event);
+		});
+
+		// The base stream stands in for the transport + auth-retry driver: when a
+		// transient 429 is surfaced and a sibling credential takes over, the driver
+		// fires `rateLimitRotation.onRotated`. This wires the real chain the main
+		// agent uses — createSettingsAwareStreamFn's binding fans that callback into
+		// the session's `notifyCredentialRotated` (mirroring sdk.ts's arrow).
+		const base: StreamFn = (model, _context, options) => {
+			options?.rateLimitRotation?.onRotated?.({ provider: model.provider, modelId: model.id });
+			return new AssistantMessageEventStream();
+		};
+		const boundSession = session;
+		const streamFn = createSettingsAwareStreamFn(settings, base, {
+			authStorage: { hasUsableSibling: () => true },
+			getSessionId: () => boundSession.sessionId,
+			onRotated: info => boundSession.notifyCredentialRotated(info),
+		});
+
+		streamFn(primaryModel, { messages: [], tools: [], systemPrompt: [] } as unknown as Context, {
+			apiKey: () => "resolved-key",
+		});
+
+		const event = await rotated.promise;
+		expect(event).toEqual({
+			type: "credential_rotated",
+			provider: primaryModel.provider,
+			modelId: primaryModel.id,
+		});
 	});
 
 	it("continues a startup-owned role fallback chain from the active fallback", async () => {
@@ -2583,5 +2648,49 @@ describe("AgentSession retry fallback", () => {
 			throw new Error(`Expected text content block, got ${contentBlock.type}`);
 		}
 		expect(contentBlock.text).toBe("Recovered after provider finish_reason error");
+	});
+
+	it("emits a credential_rotated session event carrying the rotated provider and model", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) {
+			throw new Error("Expected bundled test model to exist");
+		}
+
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => mock.stream(model, context, options),
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const rotatedEvents: Array<Extract<AgentSessionEvent, { type: "credential_rotated" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "credential_rotated") {
+				rotatedEvents.push(event);
+			}
+		});
+
+		// The auth-retry driver's onRotated seam calls this once a surfaced
+		// rate-limit failure has moved onto a sibling credential.
+		session.notifyCredentialRotated({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		// notifyCredentialRotated dispatches through #emitSessionEvent as
+		// fire-and-forget (void); a macrotask turn drains the subscriber fan-out.
+		await scheduler.wait(0);
+
+		expect(rotatedEvents).toEqual([
+			{ type: "credential_rotated", provider: "anthropic", modelId: "claude-sonnet-4-5" },
+		]);
 	});
 });

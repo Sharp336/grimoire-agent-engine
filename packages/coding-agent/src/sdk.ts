@@ -134,7 +134,7 @@ import {
 import { clampProviderContextImages } from "./session/provider-image-budget";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
-import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
+import { createSettingsAwareStreamFn, type StreamRotationBinding } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { closeAllConnections } from "./ssh/connection-manager";
@@ -2852,9 +2852,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// the session drives. Wrapped in a per-provider concurrency limiter so
 		// each LLM HTTP request — not the whole subagent lifecycle — holds the
 		// slot, preventing the nested-spawn deadlock from issue #3749.
+		// Shared with AgentSession (config.streamRotation) so direct oneshots that
+		// bypass the settings-aware wrapper — compaction summaries, title
+		// generation — rebuild rotation options from the same binding.
+		const streamRotation: StreamRotationBinding = {
+			// Same authStorage instance the apiKey resolver rotates through
+			// (pinned to modelRegistry.authStorage above); sessionId mirrors the
+			// `getApiKey` binding so sibling checks and sticky agree.
+			authStorage,
+			getSessionId: () => agent?.sessionId ?? providerSessionId,
+			onRotated: info => session?.notifyCredentialRotated(info),
+		};
 		const settingsAwareStreamFn = wrapStreamFnWithProviderConcurrency(
 			settings,
-			createSettingsAwareStreamFn(settings),
+			createSettingsAwareStreamFn(settings, undefined, streamRotation),
 		);
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
@@ -3039,6 +3050,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
 			advisorStreamFn: settingsAwareStreamFn,
+			streamRotation,
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,

@@ -1,4 +1,11 @@
-import { type Api, type ApiKeyResolver, type AuthStorage, isUsageLimitOutcome, type Model } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type ApiKeyResolver,
+	type AuthStorage,
+	isSurfacedRateLimitMessage,
+	isUsageLimitOutcome,
+	type Model,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
@@ -50,7 +57,7 @@ export function createApiKeyResolver(
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId } = options;
-	return async ({ lastChance, error, signal, previousKey }) => {
+	const resolve: ApiKeyResolver = async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
 			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
 		}
@@ -72,10 +79,23 @@ export function createApiKeyResolver(
 				// No sibling for an account-quota failure: stop so the outer
 				// whole-turn retry layer can honor the recorded backoff. A hard
 				// auth decline can instead mean a peer refreshed the bearer.
-				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
+				// Surfaced rate-limit markers also stop here: returning undefined
+				// hands control to the stream driver's bounded stall fallback
+				// instead of re-resolving a just-blocked credential.
+				if (
+					AIError.isUsageLimit(error) ||
+					isUsageLimitOutcome(status, message) ||
+					(message !== undefined && isSurfacedRateLimitMessage(message))
+				) {
+					return undefined;
+				}
 			}
 			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
 		}
 		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
 	};
+	// Expose the pool identity on the resolver so per-request consumers (the
+	// rate-limit rotation sibling probe) read the session this resolver actually
+	// stickies under — not whatever session the shared stream wrapper serves.
+	return sessionId !== undefined ? Object.assign(resolve, { sessionId }) : resolve;
 }

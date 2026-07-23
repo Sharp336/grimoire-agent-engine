@@ -12,6 +12,7 @@ import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
+import { buildRateLimitRotationOptions, type StreamRotationBinding } from "../session/settings-stream-fn";
 import { formatTitleUserMessage } from "../tiny/message-preproc";
 import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
@@ -69,6 +70,8 @@ function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel
  *   reflects the credential actually selected for this request.
  * @param customSystemPrompt Optional title-specific system prompt override
  * @param signal Session-lifecycle cancellation for background title requests
+ * @param rotation Optional per-session rate-limit rotation binding; the online
+ *   path binds it to the same `sessionId` the request's apiKey resolver uses
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -79,6 +82,7 @@ export async function generateSessionTitle(
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	customSystemPrompt?: string,
 	signal?: AbortSignal,
+	rotation?: StreamRotationBinding,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -101,6 +105,7 @@ export async function generateSessionTitle(
 			metadataResolver,
 			signal,
 			titleSystemPrompt,
+			rotation,
 		);
 	}
 
@@ -159,6 +164,7 @@ export async function generateTitleOnline(
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
+	rotation?: StreamRotationBinding,
 ): Promise<string | null> {
 	const model = getTitleModel(registry, settings, currentModel);
 	if (!model) {
@@ -211,6 +217,9 @@ export async function generateTitleOnline(
 				disableReasoning: true,
 				metadata,
 				signal,
+				// Bound to the same `sessionId` the resolver above stickies under,
+				// so the sibling probe reads this request's credential pool.
+				rateLimitRotation: buildRateLimitRotationOptions(settings, rotation, model.provider, () => sessionId),
 			},
 		);
 

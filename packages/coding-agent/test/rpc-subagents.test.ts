@@ -410,6 +410,7 @@ function handle(frame) {
 	if (frame.type === "prompt") {
 		write({ id: frame.id, type: "response", command: "prompt", success: true });
 		write({ type: "notice", level: "info", message: "subagent test" });
+		write({ type: "credential_rotated", provider: "anthropic", modelId: "claude-sonnet-4-5" });
 		write({ type: "subagent_lifecycle", payload: { id: "SubagentA", index: 0, agent: "task", agentSource: "bundled", status: "started", sessionFile: "/tmp/subagent.jsonl" } });
 		write({ type: "subagent_progress", payload: { index: 0, agent: "task", agentSource: "bundled", task: "Do work", assignment: "Implement work", sessionFile: "/tmp/subagent.jsonl", progress } });
 		write({ type: "subagent_event", payload: { id: "SubagentA", event: { type: "agent_start" } } });
@@ -424,10 +425,16 @@ function handle(frame) {
 		const progressTasks: string[] = [];
 		const rawEventTypes: string[] = [];
 		const sessionEventTypes: string[] = [];
+		let rotatedEvent: { provider: string; modelId?: string } | undefined;
 		client.onSubagentLifecycle(payload => lifecycleIds.push(payload.id));
 		client.onSubagentProgress(payload => progressTasks.push(payload.task));
 		client.onSubagentEvent(payload => rawEventTypes.push(payload.event.type));
-		client.onSessionEvent(event => sessionEventTypes.push(event.type));
+		client.onSessionEvent(event => {
+			sessionEventTypes.push(event.type);
+			if (event.type === "credential_rotated") {
+				rotatedEvent = { provider: event.provider, modelId: event.modelId };
+			}
+		});
 
 		await client.start();
 		await expect(client.setSubagentSubscription("events")).resolves.toBe("events");
@@ -441,5 +448,13 @@ function handle(frame) {
 		expect(progressTasks).toEqual(["Do work"]);
 		expect(rawEventTypes).toEqual(["agent_start"]);
 		expect(sessionEventTypes).toContain("notice");
+		// Regression guard: the client-side session-event allowlist
+		// (sessionEventTypes) must admit credential_rotated frames — an omission
+		// silently drops the rate-limit rotation telemetry before it reaches
+		// onSessionEvent listeners. The onSessionEvent listener must also receive
+		// the frame's payload intact (provider + modelId survive serialize→parse
+		// across the spawned-CLI boundary), not just the bare type string.
+		expect(sessionEventTypes).toContain("credential_rotated");
+		expect(rotatedEvent).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
 	});
 });

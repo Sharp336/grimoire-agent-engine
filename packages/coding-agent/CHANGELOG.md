@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added `retry.rotateOnRateLimit` (default off) and `retry.rotateMinSleepMs` settings: when a provider rate limit (429) forces a long wait and a sibling credential is available, the rate-limited credential is temporarily parked and the request continues on the sibling instead of sleeping, with a `credential_rotated` session event for telemetry.
+
 ### Fixed
 
 - Fixed the setup wizard hiding the selected row on short terminals (e.g. 24x80): the provider sign-in, theme, and web-search lists now fit their windows to the visible height, and decorative chrome (sign-in hint, theme mock preview) yields to the list when space is tight.

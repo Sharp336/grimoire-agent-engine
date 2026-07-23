@@ -11,9 +11,26 @@
  * and OpenRouter response-cache hits across advisor calls.
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	type AuthStorage,
+	isApiKeyResolver,
+	type RateLimitRotationOptions,
+	type SimpleStreamOptions,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import { isAnthropicFableOrMythosModel } from "@oh-my-pi/pi-catalog/identity";
-import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
+import { getDefault, type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
+
+/**
+ * Per-session binding for the rate-limit rotation seam. `authStorage` answers
+ * sibling availability; the provider is taken from the per-call resolved model
+ * so mid-run model switches (context promotion, retry fallback) re-bind it.
+ */
+export interface StreamRotationBinding {
+	authStorage: Pick<AuthStorage, "hasUsableSibling">;
+	getSessionId: () => string | undefined;
+	onRotated?: (info: { provider: string; modelId?: string }) => void;
+}
 
 function timeoutSecondsToMs(value: number): number | undefined {
 	if (!Number.isFinite(value) || value < 0) return undefined;
@@ -22,12 +39,63 @@ function timeoutSecondsToMs(value: number): number | undefined {
 }
 
 /**
+ * Sanitize the configured `retry.rotateMinSleepMs` surface threshold. The
+ * setting is a bare schema number with no runtime validation, so a corrupt or
+ * negative value (NaN, -1) would drop the "only rotate after a long wait"
+ * threshold below zero and make every transient 429 rotation-eligible — the
+ * opposite of the intent. Non-finite or negative values fall back to the schema
+ * default, read programmatically so it never drifts from `SETTINGS_SCHEMA`.
+ */
+function sanitizeRotateMinSleepMs(value: number): number {
+	if (!Number.isFinite(value) || value < 0) return getDefault("retry.rotateMinSleepMs");
+	return value;
+}
+
+/**
+ * THE single constructor for a request's `rateLimitRotation` options — the
+ * settings-aware stream wrapper and the direct `completeSimple` oneshots
+ * (compaction, title generation) all build through here so the enabled-flag
+ * gate, `minSleepMs` sanitization, and sibling-probe binding cannot drift.
+ *
+ * `getSessionId` must return the SAME session id the request's apiKey resolver
+ * was built with (main session vs. advisor provider session) — the sibling
+ * probe reads that session's sticky credential, so a mismatched id probes the
+ * wrong pool. It is a getter, not a value, because the probe fires mid-request
+ * and the main session id can be assigned after request setup.
+ *
+ * Callers must only attach the result to resolver-form `apiKey` requests — a
+ * surfaced marker error is terminal for a static key.
+ *
+ * Rotation off (or no binding) → `undefined`, leaving the request options
+ * identical to the pre-rotation shape.
+ */
+export function buildRateLimitRotationOptions(
+	settings: Settings,
+	rotation: StreamRotationBinding | undefined,
+	provider: string,
+	getSessionId: () => string | undefined,
+): RateLimitRotationOptions | undefined {
+	if (!rotation || !settings.get("retry.rotateOnRateLimit")) return undefined;
+	return {
+		enabled: true,
+		provider,
+		minSleepMs: sanitizeRotateMinSleepMs(settings.get("retry.rotateMinSleepMs")),
+		hasUsableSibling: () => rotation.authStorage.hasUsableSibling(provider, getSessionId()),
+		onRotated: rotation.onRotated,
+	};
+}
+
+/**
  * Build a {@link StreamFn} that reads provider routing/guard settings from
  * `settings` per call and forwards to `base` (defaults to `streamSimple`).
  *
  * Caller-supplied `streamOptions` always win — the helper only fills holes.
  */
-export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn = streamSimple): StreamFn {
+export function createSettingsAwareStreamFn(
+	settings: Settings,
+	base: StreamFn = streamSimple,
+	rotation?: StreamRotationBinding,
+): StreamFn {
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = settings.get("providers.openrouterVariant");
 		const openrouterVariant =
@@ -51,6 +119,25 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			isAnthropicFableOrMythosModel(model.id);
 		const fallbacks =
 			streamOptions?.fallbacks ?? (serverSideFallbackEnabled ? [{ model: "claude-opus-4-8" }] : undefined);
+		// Rate-limit rotation (opt-in): only for resolver-form apiKey requests —
+		// a surfaced marker error is terminal for a static key. `hasUsableSibling`
+		// closes over THIS call's resolved model.provider (mirrors the
+		// serverSideFallbackEnabled per-request gating above). The probe's session
+		// id prefers the one the resolver itself was built with: this wrapper is
+		// shared by the main agent, the advisor, and the autolearn capture agent,
+		// whose resolvers sticky under different sessions — the binding's
+		// getSessionId only covers resolvers that don't carry their own id.
+		const requestApiKey = streamOptions?.apiKey;
+		const rateLimitRotation =
+			streamOptions?.rateLimitRotation ??
+			(rotation && isApiKeyResolver(requestApiKey)
+				? buildRateLimitRotationOptions(
+						settings,
+						rotation,
+						model.provider,
+						() => requestApiKey.sessionId ?? rotation.getSessionId(),
+					)
+				: undefined);
 		const merged: SimpleStreamOptions = {
 			...streamOptions,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
@@ -68,6 +155,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			},
 			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? settings.get("omitThinking"),
 			...(fallbacks !== undefined ? { fallbacks } : {}),
+			...(rateLimitRotation !== undefined ? { rateLimitRotation } : {}),
 		};
 		return base(model, context, merged);
 	};

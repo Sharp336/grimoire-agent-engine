@@ -401,6 +401,7 @@ import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionEnt
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
+import { buildRateLimitRotationOptions, type StreamRotationBinding } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -708,6 +709,7 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
+	| { type: "credential_rotated"; provider: string; modelId?: string }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -952,6 +954,14 @@ export interface AgentSessionConfig {
 	 * to plain `streamSimple` when omitted.
 	 */
 	sideStreamFn?: StreamFn;
+	/**
+	 * Per-session rate-limit rotation binding shared with the settings-aware
+	 * stream wrapper in `sdk.ts`. Direct `completeSimple` oneshots (compaction
+	 * summaries, title generation) rebuild `rateLimitRotation` request options
+	 * from it via {@link buildRateLimitRotationOptions}, bound to the session id
+	 * their apiKey resolver uses. Omitted → those oneshots never rotate.
+	 */
+	streamRotation?: StreamRotationBinding;
 	/**
 	 * Stream wrapper passed to the advisor agent so its requests apply the
 	 * session's `providers.openrouterVariant`, `providers.antigravityEndpoint`,
@@ -2105,6 +2115,7 @@ export class AgentSession {
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#sideStreamFn: StreamFn;
+	#streamRotation?: StreamRotationBinding;
 	#advisorStreamFn: StreamFn | undefined;
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -2781,6 +2792,7 @@ export class AgentSession {
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#transformProviderContext = config.transformProviderContext;
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		this.#streamRotation = config.streamRotation;
 		this.#advisorStreamFn = config.advisorStreamFn;
 		this.#preferWebsockets = config.preferWebsockets;
 		this.#onPayload = config.onPayload;
@@ -3862,6 +3874,15 @@ export class AgentSession {
 						promptCacheKey: advisorProviderSessionId,
 						providerSessionState: this.#providerSessionState,
 						codexCompaction,
+						// Bound to advisorProviderSessionId — the resolver above
+						// stickies under it, so the sibling probe must read the same
+						// session's credential, not the main session's.
+						rateLimitRotation: buildRateLimitRotationOptions(
+							this.settings,
+							this.#streamRotation,
+							candidate.provider,
+							() => advisorProviderSessionId,
+						),
 					},
 				);
 				break;
@@ -4166,6 +4187,16 @@ export class AgentSession {
 	 */
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
 		this.#emit({ type: "notice", level, message, source });
+	}
+
+	/**
+	 * Telemetry entry for the rate-limit rotation seam (`retry.rotateOnRateLimit`):
+	 * the auth-retry driver confirmed a surfaced rate-limit failure moved to a
+	 * sibling credential. Emits a session event for the UI and a structured log.
+	 */
+	notifyCredentialRotated(info: { provider: string; modelId?: string }): void {
+		logger.info("credential_rotated", { provider: info.provider, modelId: info.modelId });
+		void this.#emitSessionEvent({ type: "credential_rotated", provider: info.provider, modelId: info.modelId });
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
@@ -9867,6 +9898,7 @@ export class AgentSession {
 			provider => this.agent.metadataForProvider(provider),
 			this.#titleSystemPrompt,
 			this.#titleGenerationAbortController.signal,
+			this.#streamRotation,
 		);
 	}
 
@@ -14288,6 +14320,14 @@ export class AgentSession {
 									promptCacheKey: this.sessionId,
 									providerSessionState: this.#providerSessionState,
 									codexCompaction,
+									// Bound to this.sessionId — the same id the resolver
+									// above stickies under.
+									rateLimitRotation: buildRateLimitRotationOptions(
+										this.settings,
+										this.#streamRotation,
+										candidate.provider,
+										() => this.sessionId,
+									),
 								},
 							);
 							break;

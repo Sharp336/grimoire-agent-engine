@@ -222,6 +222,64 @@ describe("title generator", () => {
 		expect(title).toBe("Debug failing CI tests");
 	});
 
+	it("attaches rateLimitRotation from the session binding, probing the resolver's session id", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Rotated Title</title>" }],
+		} as never);
+		const settings = createSettings(model) as { get(path: string): unknown };
+		const baseGet = settings.get.bind(settings);
+		settings.get = (path: string) => (path === "retry.rotateOnRateLimit" ? true : baseGet(path));
+		const hasUsableSibling = vi.fn((_provider: string, _sessionId?: string) => true);
+
+		const title = await generateSessionTitle(
+			"Investigate the resolver",
+			createRegistry(model),
+			settings as never,
+			"sess-title",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			// Binding's own getSessionId points elsewhere — the title request must
+			// probe under the SAME id its resolver stickied ("sess-title").
+			{ authStorage: { hasUsableSibling }, getSessionId: () => "other-session" },
+		);
+
+		expect(title).toBe("Rotated Title");
+		const options = completeSimpleMock.mock.calls[0]?.[2] as ai.SimpleStreamOptions | undefined;
+		expect(options?.rateLimitRotation).toMatchObject({ enabled: true, provider: model.provider });
+		await options?.rateLimitRotation?.hasUsableSibling();
+		expect(hasUsableSibling.mock.calls).toEqual([[model.provider, "sess-title"]]);
+	});
+
+	it("omits rateLimitRotation when rotation is off or no binding is supplied", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Plain Title</title>" }],
+		} as never);
+
+		// No binding at all (flag irrelevant), then flag-off with a binding.
+		await generateSessionTitle("Investigate the resolver", createRegistry(model), createSettings(model));
+		await generateSessionTitle(
+			"Investigate the resolver",
+			createRegistry(model),
+			createSettings(model),
+			"sess-title",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ authStorage: { hasUsableSibling: () => true }, getSessionId: () => "sess-title" },
+		);
+
+		for (const call of completeSimpleMock.mock.calls) {
+			expect((call[2] as ai.SimpleStreamOptions | undefined)?.rateLimitRotation).toBeUndefined();
+		}
+	});
+
 	it("defers titling for a greeting without invoking the model", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple");

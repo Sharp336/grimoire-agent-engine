@@ -1447,6 +1447,18 @@ export const SETTINGS_SCHEMA = {
 				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows).",
 		},
 	},
+	"retry.rotateOnRateLimit": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Rotate on rate limit",
+			description:
+				"When a transient provider rate limit (429) forces a long wait and a sibling credential is available, temporarily park the rate-limited credential and continue on the sibling instead of sleeping.",
+		},
+	},
+	"retry.rotateMinSleepMs": { type: "number", default: 2000 },
 	"retry.modelFallback": {
 		type: "boolean",
 		default: true,
@@ -5224,6 +5236,8 @@ export interface RetrySettings {
 	maxRetries: number;
 	baseDelayMs: number;
 	maxDelayMs: number;
+	rotateOnRateLimit: boolean;
+	rotateMinSleepMs: number;
 	modelFallback: boolean;
 }
 
