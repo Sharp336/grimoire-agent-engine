@@ -724,6 +724,19 @@ const usageSegment: StatusLineSegment = {
 	},
 };
 
+const balanceSegment: StatusLineSegment = {
+	id: "balance",
+	render(ctx) {
+		const b = ctx.balance;
+		if (!b) return { content: "", visible: false };
+		// Balance string may contain ANSI color codes from the provider fetcher.
+		// sanitizeStatusText preserves ANSI escapes, only strips control characters.
+		const text = sanitizeStatusText(b);
+		if (!text) return { content: "", visible: false };
+		return { content: `💳 ${text}`, visible: true };
+	},
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
 // ═══════════════════════════════════════════════════════════════════════════
@@ -752,6 +765,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_hit: cacheHitSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
+	balance: balanceSegment,
 	collab: collabSegment,
 };
 

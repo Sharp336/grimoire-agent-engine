@@ -139,6 +139,8 @@ export interface SegmentContext {
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null;
+	/** API-key provider account balance (e.g. DeepSeek). Null when unavailable or not an API-key provider. */
+	balance: string | null;
 }
 
 export interface RenderedSegment {
