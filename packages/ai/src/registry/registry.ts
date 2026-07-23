@@ -13,6 +13,7 @@ import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
+import { friendliProvider } from "./friendli";
 import { githubCopilotProvider } from "./github-copilot";
 import { gitlabDuoProvider } from "./gitlab-duo";
 import { gitLabDuoWorkflowProvider } from "./gitlab-duo-workflow";
@@ -109,6 +110,7 @@ const ALL = [
 	cerebrasProvider,
 	basetenProvider,
 	fireworksProvider,
+	friendliProvider,
 	togetherProvider,
 	nvidiaProvider,
 	novitaProvider,

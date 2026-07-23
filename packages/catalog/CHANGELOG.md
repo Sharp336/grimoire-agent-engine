@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added FriendliAI provider with dynamic model discovery ([#4770](https://github.com/can1357/oh-my-pi/discussions/4770))
+
 ### Changed
 
 - Renamed `codex-auto-review` model to `GPT-5.3 Codex Spark` with updated pricing and capabilities
