@@ -159,7 +159,7 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 		const finishReason = choice.finish_reason;
 
 		if (finishReason === "tool_calls" && message?.tool_calls && message.tool_calls.length > 0) {
-			// Append assistant message with type mapped to "function" for OpenAI-compat replay
+			// Moonshot emits "builtin_function", but raw replay rejects it with "tokenization failed"; normalize to "function".
 			const formattedMessage = {
 				...message,
 				tool_calls: message.tool_calls.map(tc => ({
