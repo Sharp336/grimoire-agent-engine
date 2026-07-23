@@ -2247,6 +2247,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Experimental: deterministic lossless structured-result re-encoding (transient, per-request)
+	"reencode.losslessToolResults": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Experimental",
+			label: "Lossless Structured Tool Results",
+			description:
+				"Experimental: re-encode eligible historical flat JSON arrays as deterministic schema+CSV in the 3K-token–50KiB band when that saves at least 10%.",
+		},
+	},
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",

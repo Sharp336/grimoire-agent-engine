@@ -143,6 +143,13 @@ describe("Settings", () => {
 			expect(getDefault("providers.maxInFlightRequests")).toEqual({});
 		});
 
+		it("keeps lossless tool-result re-encoding opt-in like snapcompact tool-result imaging", () => {
+			const settings = Settings.isolated();
+			expect(settings.get("snapcompact.toolResults")).toBe(false);
+			expect(settings.get("reencode.losslessToolResults")).toBe(false);
+			expect(getDefault("reencode.losslessToolResults")).toBe(false);
+		});
+
 		it("exposes all tool calling mode options", () => {
 			const values = getEnumValues("tools.format");
 			expect(values).toEqual([

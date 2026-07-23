@@ -76,6 +76,9 @@
 ### Removed
 
 - Added dynamic multi-root workspace context (issue [#2569](https://github.com/can1357/oh-my-pi/issues/2569)): a session now carries an ordered list of workspace directories beyond `cwd`, managed live from the terminal. New `/add-dir <path>`, `/remove-dir <path>`, and `/dirs` slash commands let you add and remove folders mid-session; the repeatable `--add-dir <path>` CLI flag seeds them at launch, and the `workspace.additionalDirectories` setting persists defaults per project. Additional roots are persisted in the session header, survive reopen/fork/move, and are surfaced to the agent in the system prompt so it knows they exist and can `read`/`grep`/`glob` them by absolute path. Design aligns with the endorsed community implementation on `feature/session-workspace`.
+### Added
+
+- Added opt-in deterministic lossless schema+CSV re-encoding for eligible historical flat JSON-array tool results before snapcompact provider transforms ([#5338](https://github.com/can1357/oh-my-pi/issues/5338)).
 
 ## [17.0.9] - 2026-07-23
 
