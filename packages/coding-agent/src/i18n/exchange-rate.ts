@@ -25,12 +25,15 @@ interface ExchangeRateCache {
 
 // Module-level sync cache
 let currentRate: number = FALLBACK_RATE;
+let cacheInitialized = false;
 
 /**
  * Synchronously initialize rate from cache file.
- * Called at module scope so rate is available immediately.
+ * Lazy-initialized on first access to avoid module-load side effects.
  */
-export function initCache(): void {
+function ensureCacheInitialized(): void {
+	if (cacheInitialized) return;
+	cacheInitialized = true;
 	try {
 		const content = fsSync.readFileSync(CACHE_FILE, "utf-8");
 		const cache: ExchangeRateCache = JSON.parse(content);
@@ -42,8 +45,9 @@ export function initCache(): void {
 	}
 }
 
-// Initialize at module load
-initCache();
+export function initCache(): void {
+	ensureCacheInitialized();
+}
 
 async function fetchRate(): Promise<number> {
 	const resp = await fetch(API_URL);
@@ -115,6 +119,7 @@ export async function getExchangeRate(): Promise<number> {
  * Sync exchange rate. Returns current cached value.
  */
 export function getExchangeRateSync(): number {
+	ensureCacheInitialized();
 	return currentRate;
 }
 
@@ -148,6 +153,7 @@ export function formatCost(usdAmount: number): string {
 	if (!shouldConvertCurrency()) {
 		return usd;
 	}
+	ensureCacheInitialized();
 	const cnyAmount = usdAmount * currentRate;
 	return `${usd} (≈¥${cnyAmount.toFixed(2)})`;
 }

@@ -19,19 +19,6 @@ import { EMBEDDED_TRANSLATIONS } from "./embedded-translations";
 /** 包内 bundled 翻译目录 */
 const BUNDLED_LAN_DIR = path.join(import.meta.dir, "lang");
 
-/** 编译时嵌入的翻译表（通过 scripts/generate-embedded-translations.ts 生成） */
-let embeddedTranslations: Record<string, TranslationFile> | null = null;
-try {
-	// 这个模块只在编译到二进制时存在，源文件模式下不会生成
-	embeddedTranslations = (await import("./embedded-translations")).EMBEDDED_TRANSLATIONS;
-} catch (err) {
-	// 源文件模式：embedded-translations 模块不存在，使用 bundle-dist.ts 或 compile-binary.ts 复制的 lang 目录
-	// 只在非预期的导入失败时记录日志
-	if (!(err instanceof Error) || !err.message.includes("Cannot find module")) {
-		logger.warn("Failed to load embedded translations", { error: String(err) });
-	}
-}
-
 /**
  * 缓存失效回调注册表
  * 用于打破循环依赖：其他模块注册缓存失效回调，setLanguage 时统一调用
@@ -247,12 +234,11 @@ class I18nManager {
 
 	/** 从嵌入的翻译表中加载指定语言的文件 */
 	#loadEmbeddedTranslations(lang: string, target: TranslationFile): boolean {
-		if (!embeddedTranslations) return false;
 		let found = false;
 		const prefix = `${lang}-`;
-		for (const [name, content] of Object.entries(embeddedTranslations)) {
+		for (const [name, content] of Object.entries(EMBEDDED_TRANSLATIONS)) {
 			if (name === lang || name.startsWith(prefix)) {
-				this.#mergeTranslations(target, content);
+				this.#mergeTranslations(target, content as TranslationFile);
 				found = true;
 			}
 		}
