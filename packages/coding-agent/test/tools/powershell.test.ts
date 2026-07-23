@@ -354,6 +354,60 @@ suite("PowerShellTool (persistent host)", () => {
 		const after = await tool.execute("ret2", { command: "$v" });
 		expect(textOf(after).trim()).toBe("99");
 	});
+
+	test("a terminating error preserves pre-error output and finalizes $__omp.Last instead of leaving it stale", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-terminating-error-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Warm with a distinct marker result so a stale $__omp.Last after the
+		// failing command below would be detectably WRONG, not just absent.
+		const warm = await tool.execute("warm", { command: "'stale-marker'" });
+		expect(textOf(warm).trim()).toBe("stale-marker");
+
+		// $global:__omp.Last = @($commandBody) was an atomic assignment: a
+		// terminating error partway through the array-subexpression discarded
+		// the WHOLE assignment (confirmed empirically -- `$x = @("before";
+		// throw "boom")` leaves $x completely unchanged), so 'before-throw'
+		// never reached the tool result and $__omp.Last stayed pointed at the
+		// previous command's value. Complete-Exec now finalizes Last/History
+		// from $out (which accumulates live, independent of a later throw).
+		const failed = await tool.execute("t1", { command: "'before-throw'; throw 'boom'" });
+		expect(failed.isError).toBe(true);
+		expect(textOf(failed)).toContain("before-throw");
+		// The terminating error's own text must also surface, not vanish
+		// behind a generic "Command reported errors" note with no detail
+		// (EndInvoke throws for this case; Streams.Error stays empty).
+		expect(textOf(failed)).toContain("boom");
+
+		// $__omp.Last must reflect THIS command's partial output, not the
+		// previous command's stale "stale-marker" result.
+		const check = await tool.execute("t2", { command: "$__omp.Last" });
+		expect(textOf(check).trim()).toBe("before-throw");
+	});
+
+	test("tools.maxTimeout caps the resolved PowerShell timeout even when the request omits it", async () => {
+		// The SDK argument transform only caps an EXPLICITLY supplied numeric
+		// timeout; clampTimeout must be passed tools.maxTimeout itself so the
+		// global cap also governs the fallback-to-default path other
+		// execution-style tools (bash/browser/debug/eval/fetch) already cover.
+		const cappedSettings = Settings.isolated({ "tools.maxTimeout": 1 });
+		const session = {
+			cwd: process.cwd(),
+			getSessionId: () => "ps-maxtimeout-test",
+			settings: cappedSettings,
+		} as unknown as ToolSession;
+		const tool = await loadPowerShellTool(session);
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// No `timeout` supplied -> falls back to PowerShell's 300s default,
+		// which tools.maxTimeout=1 must still cap down to ~1s instead.
+		const started = Date.now();
+		await expect(tool.execute("t1", { command: "Start-Sleep -Seconds 30" })).rejects.toThrow(/timed out/i);
+		const elapsedMs = Date.now() - started;
+		expect(elapsedMs).toBeLessThan(15_000);
+	});
 });
 
 // Ungated: these need neither pwsh nor a live host.

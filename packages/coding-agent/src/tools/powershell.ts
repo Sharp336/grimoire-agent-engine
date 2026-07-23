@@ -117,7 +117,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		_ctx?: AgentToolContext,
 	): Promise<AgentToolResult<PowerShellToolDetails>> {
 		const settings = this.session.settings;
-		const timeoutSec = clampTimeout("powershell", rawTimeout);
+		const timeoutSec = clampTimeout("powershell", rawTimeout, settings.get("tools.maxTimeout"));
 
 		const spawnOptions = {
 			cwd: this.session.cwd,
