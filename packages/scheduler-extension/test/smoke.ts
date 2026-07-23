@@ -106,6 +106,7 @@ interface MockCtx {
 	newSessionCalls: number;
 	compactCalls: number;
 	newSessionCancelled: boolean;
+	newSessionDelayMs: number;
 	setTimeout(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
 	setInterval(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
 	clearTimer(timer: Timer): void;
@@ -125,6 +126,7 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		confirmCalls: 0,
 		newSessionCalls: 0,
 		newSessionCancelled: false,
+		newSessionDelayMs: 0,
 		compactCalls: 0,
 		setTimeoutCalls: 0,
 		setIntervalCalls: 0,
@@ -148,6 +150,7 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		getContextUsage: () => undefined,
 		async newSession() {
 			ctx.newSessionCalls += 1;
+			if (ctx.newSessionDelayMs) await Bun.sleep(ctx.newSessionDelayMs);
 			return { cancelled: ctx.newSessionCancelled };
 		},
 		async compact() {
@@ -1660,6 +1663,77 @@ export async function runSmoke(): Promise<void> {
 	await pa.command("stop", ctxPa);
 	fs.rmSync(path.join(tmpCwd, ".omp"), { recursive: true, force: true });
 	fs.rmSync(path.join(tmpCwd, ".claude"), { recursive: true, force: true });
+	fs.rmSync(configFile, { force: true });
+	fs.writeFileSync(stateFile, "{}");
+	const iv = makeMockPi();
+	const ctxIv = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(iv.api);
+	await iv.emit("session_start", {}, ctxIv);
+	await iv.command("add hello world", ctxIv); // mutating → must be refused
+	assert.equal(
+		fs.readFileSync(stateFile, "utf8"),
+		"{}",
+		"structurally invalid state.json is left untouched (not reseeded/clobbered)",
+	);
+	assert.ok(
+		ctxIv.notifications.some(n => /malformed|corrupt|unreadable/i.test(n)),
+		"the invalid state is surfaced and mutating commands refused",
+	);
+	await iv.command("stop", ctxIv);
+
+	// 36. while a context purge is in flight (slow newSession), the interrupted
+	// task is NOT re-dispatched into the not-yet-purged transcript — the
+	// resetInFlight guard (and the watchdog's !resetInFlight check) hold dispatch
+	// until the purge resolves. Without it the watchdog would re-send the poisoned
+	// prompt and re-trip the classifier the reset was meant to avoid.
+	{
+		fs.rmSync(configFile, { force: true });
+		const st = {
+			version: 2,
+			run: "stopped",
+			tasks: [{ id: "t103", prompt: "Poisoned", status: "queued", addedAt: new Date().toISOString(), attempts: 0 }],
+			currentTaskId: null,
+			rateLimitedUntil: null,
+			windows: [],
+			nextTaskSeq: 104,
+		};
+		fs.writeFileSync(stateFile, JSON.stringify(st));
+	}
+	const rf = makeMockPi();
+	const ctxRf = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	ctxRf.newSessionDelayMs = 300; // slow purge so the in-flight window is observable
+	schedulerExtension(rf.api);
+	await rf.emit("session_start", {}, ctxRf);
+	{
+		const c = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+		c.dispatchDelayMs = 20;
+		c.watchdogIntervalMs = 30;
+		c.stallTimeoutMs = 600_000;
+		fs.writeFileSync(configFile, JSON.stringify(c));
+	}
+	await rf.command("start", ctxRf); // captures the command ctx (newSession) + dispatches t103
+	await sleep(600); // cmdStart arms a 500ms initial dispatch
+	assert.equal(rf.sentPrompts.length, 1, "t103 dispatched");
+	await rf.emit("agent_start", {}, ctxRf);
+	await rf.emit(
+		"agent_end",
+		{
+			messages: [
+				{
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage: "blocked: usage policy violation (cyber)",
+				},
+			],
+		},
+		ctxRf,
+	);
+	await sleep(120); // reset is now in flight (newSession sleeping 300ms)
+	assert.equal(rf.sentPrompts.length, 1, "the task is NOT re-dispatched while the purge is in flight");
+	await sleep(400); // let newSession resolve and the clean re-dispatch happen
+	assert.ok(rf.sentPrompts.length >= 2, "task is re-dispatched only after the purge completes");
+	await rf.command("stop", ctxRf);
 
 	console.log("smoke: all assertions passed");
 	console.log(`smoke: data dir was ${tmpAgentDir}`);

@@ -493,6 +493,17 @@ function pruneWindows(state: SchedulerState, now: number): void {
 function migrateState(raw: unknown, cfg: SchedulerConfig): SchedulerState | null {
 	if (!raw || typeof raw !== "object") return null;
 	const st = raw as SchedulerState & { windows?: unknown[] };
+	// Reject a present-but-wrong-shape file (e.g. `{}` or hand-mangled JSON):
+	// returning null on a non-absent file routes it through the unreadable-state
+	// path rather than coercing it (which later crashes iterating tasks / clobbers it).
+	if (
+		!Array.isArray(st.tasks) ||
+		typeof st.run !== "string" ||
+		typeof st.nextTaskSeq !== "number" ||
+		(st.currentTaskId !== null && typeof st.currentTaskId !== "string")
+	) {
+		return null;
+	}
 	const legacyKey =
 		cfg.quotaProfiles.find(p => typeof p.sessionHours === "number" && typeof p.maxSessionsPer24h === "number")
 			?.match ?? DEFAULT_QUOTA_PROFILES[0].match;
@@ -978,6 +989,11 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	 * and a lingering poison self-heals (re-detected → reset on the next turn).
 	 */
 	let pendingContextReset = false;
+	// True while resetContext() is purging the poisoned conversation. A slow
+	// compact()/hook-delayed newSession() leaves no timer armed until `.finally`,
+	// so guard dispatch (and the watchdog re-arm) from sending the interrupted
+	// task back into the not-yet-purged transcript mid-reset.
+	let resetInFlight = false;
 
 	/**
 	 * Run a timer callback so a throw can never escape as a process-fatal
@@ -1070,7 +1086,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			}
 			return;
 		}
-		if (dispatchTimer === null && resumeTimer === null && !agentActive && nextPendingTask(st)) {
+		if (dispatchTimer === null && resumeTimer === null && !agentActive && !resetInFlight && nextPendingTask(st)) {
 			logEvent({ event: "notice", detail: "watchdog: pending work with no armed timer — re-arming dispatch" });
 			scheduleDispatch(cfg.dispatchDelayMs);
 		}
@@ -1119,8 +1135,30 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			state ??= structuredClone(EMPTY_STATE);
 			return state;
 		}
-		stateReadError = false; // readable now — first load, or recovered after a fix
-		state = migrateState(raw, cfg) ?? structuredClone(EMPTY_STATE);
+		if (raw === null) {
+			// genuinely absent (ENOENT) → fresh queue, seeded on the first save
+			stateReadError = false;
+			state = structuredClone(EMPTY_STATE);
+			return state;
+		}
+		const migrated = migrateState(raw, cfg);
+		if (migrated === null) {
+			// present but not a valid SchedulerState → same handling as corruption:
+			// preserve the file, block saves, surface once.
+			if (!stateReadError) {
+				pi.logger?.warn?.("scheduler: state.json is not a valid scheduler state — leaving it untouched");
+				notify(
+					null,
+					"scheduler: state.json is malformed (not a valid scheduler state) — queue paused and the file left untouched; fix or delete it to resume.",
+					"error",
+				);
+			}
+			stateReadError = true;
+			state ??= structuredClone(EMPTY_STATE);
+			return state;
+		}
+		stateReadError = false; // readable + valid — first load, or recovered after a fix
+		state = migrated;
 		// Backfill the prompt fingerprint for tasks queued before hashing existed.
 		for (const t of state.tasks) if (!t.promptHash) t.promptHash = hashPrompt(t.prompt);
 		return state;
@@ -1340,7 +1378,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		}
 		// If nothing actually purged the context, keep the reset pending so the next
 		// dispatch retries instead of sending the task back into flagged history.
-		if (!purged) pendingContextReset = true;
+		pendingContextReset = !purged; // clear on success; keep pending to retry on failure
 		logEvent({ event: "context_reset", detail: `${reason} — ${method}${purged ? "" : " (still pending)"}` });
 		notify(
 			null,
@@ -1356,6 +1394,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		if (st.run !== "running") return;
 		if (st.currentTaskId !== null) return; // a task is already in flight
 		if (agentActive) return; // manual/other turn in progress
+		if (resetInFlight) return; // a context purge is running — don't dispatch until it completes
 		// extensions.md § "2) Handler context": isIdle(), hasPendingMessages().
 		// Defer to user-queued messages; re-check after the next agent_end.
 		if (liveCtx && (!liveCtx.isIdle() || liveCtx.hasPendingMessages())) {
@@ -1402,8 +1441,11 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		// it BEFORE sending, or this dispatch just trips the same classifier.
 		// Reset is async; re-arm the loop and dispatch into the clean context.
 		if (pendingContextReset) {
-			pendingContextReset = false;
-			void resetContext("content-policy violation").finally(() => scheduleDispatch(cfg.dispatchDelayMs));
+			resetInFlight = true;
+			void resetContext("content-policy violation").finally(() => {
+				resetInFlight = false;
+				scheduleDispatch(cfg.dispatchDelayMs);
+			});
 			return;
 		}
 
