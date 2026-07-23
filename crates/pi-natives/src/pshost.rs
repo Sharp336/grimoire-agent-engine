@@ -25,6 +25,7 @@
 use std::{
 	collections::HashMap,
 	path::PathBuf,
+	pin::Pin,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
@@ -42,7 +43,7 @@ use parking_lot::Mutex;
 use pi_shell::{cancel as core_cancel, process as core_process};
 use serde::{Deserialize, Serialize};
 use tokio::{
-	io::{AsyncReadExt, AsyncWriteExt, BufReader},
+	io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, ReadBuf},
 	process::Command,
 	sync::{mpsc, oneshot, watch},
 };
@@ -201,17 +202,23 @@ struct HostCore {
 	pid:            AtomicI32,
 	next_id:        AtomicU32,
 	/// Id of the in-flight exec (`0` == none); read by `abort`.
-	current_id:  AtomicU32,
-	started:     AtomicBool,
-	req_tx:      mpsc::UnboundedSender<Vec<u8>>,
-	req_rx:      Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
-	pending:     Mutex<HashMap<u32, Pending>>,
-	process:     Mutex<Option<core_process::Process>>,
-	ready_tx:    watch::Sender<ReadyState>,
-	ready_rx:    watch::Receiver<ReadyState>,
-	stderr_tail: Mutex<String>,
+	current_id:     AtomicU32,
+	started:        AtomicBool,
+	req_tx:         mpsc::UnboundedSender<Vec<u8>>,
+	req_rx:         Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
+	pending:        Mutex<HashMap<u32, Pending>>,
+	process:        Mutex<Option<core_process::Process>>,
+	ready_tx:       watch::Sender<ReadyState>,
+	ready_rx:       watch::Receiver<ReadyState>,
+	stderr_tail:    Mutex<String>,
+	/// Set (and reset) by `supervise` while the stderr pump is running.
+	/// `exec()` uses this to rendezvous with the pump task before draining
+	/// `stderr_tail`, so bytes the OS already delivered to the pipe by the
+	/// time `done` arrives on the unrelated stdout channel aren't dropped
+	/// just because the pump's own read hadn't been scheduled yet.
+	stderr_sync_tx: Mutex<Option<mpsc::UnboundedSender<oneshot::Sender<()>>>>,
 	/// Serializes execs: the shared runspace runs one pipeline at a time.
-	exec_lock:   tokio::sync::Mutex<()>,
+	exec_lock:      tokio::sync::Mutex<()>,
 }
 
 impl HostCore {
@@ -220,6 +227,28 @@ impl HostCore {
 			.req_tx
 			.send(frame)
 			.map_err(|_| Error::from_reason("PowerShell host is not running"))
+	}
+
+	/// Rendezvous with the stderr pump task before draining `stderr_tail`.
+	/// `done` (stdout) and stderr bytes arrive on two independent OS pipes
+	/// with no ordering guarantee between the tokio tasks reading them —
+	/// even when the bytes were physically written to the kernel first (e.g.
+	/// a child's `WaitForExit()` returning inside the PS script, which
+	/// happens-before the wrapper continues and sends `done`), the pump
+	/// task still needs its own independent scheduling to read them. This
+	/// asks the pump to non-blockingly drain whatever the kernel has ready
+	/// RIGHT NOW before replying, so a caller that awaits the reply sees
+	/// every byte already delivered. Times out rather than hanging if the
+	/// pump task is gone (host already died, or never had a stderr pipe).
+	async fn sync_stderr(&self) {
+		let Some(tx) = self.stderr_sync_tx.lock().clone() else {
+			return;
+		};
+		let (ack_tx, ack_rx) = oneshot::channel();
+		if tx.send(ack_tx).is_err() {
+			return;
+		}
+		let _ = tokio::time::timeout(Duration::from_millis(200), ack_rx).await;
 	}
 
 	/// Drop the routing state for exec `id`: clear the in-flight marker (only if
@@ -381,7 +410,11 @@ impl HostCore {
 		// (and clear, bounding memory the same way as the PS1-side stream
 		// release) whatever accumulated during this exec -- both on success
 		// and on host death, where a child's last words are often the most
-		// useful diagnostic.
+		// useful diagnostic. sync_stderr() rendezvous with the pump task
+		// first so bytes the OS already delivered to the pipe by the time
+		// `done` arrived on the unrelated stdout channel aren't dropped
+		// just because the pump's own read hadn't been scheduled yet.
+		self.sync_stderr().await;
 		let stderr_content = std::mem::take(&mut *self.stderr_tail.lock());
 		if !stderr_content.trim().is_empty() {
 			let labeled = stderr_content
@@ -561,6 +594,7 @@ impl PsHost {
 			ready_tx,
 			ready_rx,
 			stderr_tail: Mutex::new(String::new()),
+			stderr_sync_tx: Mutex::new(None),
 			exec_lock: tokio::sync::Mutex::new(()),
 		});
 		Ok(Self { core })
@@ -882,7 +916,9 @@ async fn supervise(core: Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>
 
 	let writer = tokio::spawn(pump_writer(stdin, req_rx));
 	let stderr_core = Arc::clone(&core);
-	let stderr_pump = tokio::spawn(pump_stderr(stderr, stderr_core));
+	let (stderr_sync_tx, stderr_sync_rx) = mpsc::unbounded_channel();
+	*core.stderr_sync_tx.lock() = Some(stderr_sync_tx);
+	let stderr_pump = tokio::spawn(pump_stderr(stderr, stderr_core, stderr_sync_rx));
 
 	read_events(stdout, &core).await;
 
@@ -899,6 +935,7 @@ async fn supervise(core: Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>
 	}
 	core.pending.lock().clear();
 
+	*core.stderr_sync_tx.lock() = None;
 	writer.abort();
 	stderr_pump.abort();
 	let _ = child.wait().await;
@@ -920,21 +957,66 @@ async fn pump_writer(
 }
 
 /// Capture the child's stderr tail for diagnostics (capped).
-async fn pump_stderr(mut stderr: tokio::process::ChildStderr, core: Arc<HostCore>) {
+async fn pump_stderr(
+	mut stderr: tokio::process::ChildStderr,
+	core: Arc<HostCore>,
+	mut sync_rx: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
+) {
 	let mut buf = [0u8; 4096];
 	loop {
-		match stderr.read(&mut buf).await {
-			Ok(0) | Err(_) => break,
-			Ok(n) => {
-				let mut tail = core.stderr_tail.lock();
-				tail.push_str(&String::from_utf8_lossy(&buf[..n]));
-				if tail.len() > 8192 {
-					let cut = floor_char_boundary(&tail, tail.len() - 8192);
-					*tail = tail.split_off(cut);
+		tokio::select! {
+			biased;
+			// A caller (HostCore::sync_stderr) wants a rendezvous before it
+			// drains stderr_tail: non-blockingly pull everything the kernel
+			// has ready RIGHT NOW, ack, then resume the normal blocking read.
+			// Polling once per iteration (never `.await`ing on empty) means
+			// this loop terminates the instant nothing more is available,
+			// instead of blocking the ack on the next byte to arrive.
+			Some(ack) = sync_rx.recv() => {
+				while let Some(n) = poll_stderr_once(&mut stderr, &mut buf) {
+					if n == 0 {
+						break;
+					}
+					push_stderr_tail(&core, &buf[..n]);
 				}
-			},
+				let _ = ack.send(());
+			}
+			result = stderr.read(&mut buf) => {
+				match result {
+					Ok(0) | Err(_) => break,
+					Ok(n) => push_stderr_tail(&core, &buf[..n]),
+				}
+			}
 		}
 	}
+}
+
+/// Append `data` to `stderr_tail`, capped the same way as the startup-tail
+/// cap: bounds memory for a long-running command whose external child is
+/// noisy on stderr.
+fn push_stderr_tail(core: &HostCore, data: &[u8]) {
+	let mut tail = core.stderr_tail.lock();
+	tail.push_str(&String::from_utf8_lossy(data));
+	if tail.len() > 8192 {
+		let cut = floor_char_boundary(&tail, tail.len() - 8192);
+		*tail = tail.split_off(cut);
+	}
+}
+
+/// Single non-blocking poll of `stderr`: `Some(n)` (`n == 0` on EOF) if a
+/// read completed immediately, `None` if it would otherwise block (nothing
+/// available right now) or the pipe errored. Used only by the sync-drain
+/// path above — the normal loop uses the plain `.await`ing read.
+fn poll_stderr_once(stderr: &mut tokio::process::ChildStderr, buf: &mut [u8]) -> Option<usize> {
+	let mut polled = None;
+	let waker = std::task::Waker::noop();
+	let mut cx = std::task::Context::from_waker(waker);
+	let mut read_buf = ReadBuf::new(buf);
+	if let std::task::Poll::Ready(result) = Pin::new(&mut *stderr).poll_read(&mut cx, &mut read_buf)
+	{
+		polled = result.ok().map(|()| read_buf.filled().len());
+	}
+	polled
 }
 
 /// Read framed events from the child's stdout and route them to waiters.
@@ -1602,6 +1684,47 @@ mod tests {
 		);
 
 		host.dispose().await.expect("host disposes");
+	}
+
+	/// End-to-end wiring: `HostCore::sync_stderr()` round-trips through the
+	/// real channel to a real `pump_stderr` task and gets an ack only after
+	/// the pump has drained everything currently buffered — proving the
+	/// production code path `exec()` uses (not just the underlying
+	/// primitive) delivers bytes without an explicit sleep/yield in the
+	/// caller.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn sync_stderr_rendezvous_drains_the_real_pump_task() {
+		let host = test_host();
+		let core = std::sync::Arc::clone(&host.core);
+
+		let mut cmd = if cfg!(windows) {
+			let mut c = tokio::process::Command::new("cmd.exe");
+			c.args(["/c", "echo rendezvous-marker 1>&2"]);
+			c
+		} else {
+			let mut c = tokio::process::Command::new("/bin/sh");
+			c.args(["-c", "echo rendezvous-marker >&2"]);
+			c
+		};
+		let mut child = cmd
+			.stderr(std::process::Stdio::piped())
+			.spawn()
+			.expect("spawn stderr-writing child");
+		let stderr = child.stderr.take().expect("child stderr piped");
+
+		let (sync_tx, sync_rx) = mpsc::unbounded_channel();
+		*core.stderr_sync_tx.lock() = Some(sync_tx);
+		let pump = tokio::spawn(super::pump_stderr(stderr, std::sync::Arc::clone(&core), sync_rx));
+
+		child.wait().await.expect("child exits");
+		core.sync_stderr().await;
+		let tail = core.stderr_tail.lock().clone();
+		assert!(
+			tail.contains("rendezvous-marker"),
+			"sync_stderr()'s ack must not arrive until the pump has drained buffered bytes: {tail:?}"
+		);
+
+		pump.abort();
 	}
 
 	/// A command can leave a detached background child running when it
