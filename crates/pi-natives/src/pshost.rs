@@ -315,6 +315,27 @@ impl HostCore {
 			.insert(id, Pending { chunk_tx, done_tx });
 		self.current_id.store(id, Ordering::Relaxed);
 
+		// Clear BEFORE the exec frame is sent (not after): `self.send()` only
+		// enqueues onto the writer task's channel -- actual delivery to the
+		// sidecar's stdin, PowerShell dispatching the command, and a spawned
+		// external process immediately writing to inherited stderr can all
+		// happen before this line runs if the clear comes after send. A
+		// fast-failing native child could have its diagnostic bytes wiped by
+		// this exec's own "start of window" clear, exactly what the clear is
+		// supposed to protect content BEING attributed to. Clearing first
+		// bounds the forward to content written DURING this exec's window,
+		// not stale content from an idle period between commands (a
+		// PREVIOUS command's fire-and-forget child, spawned without waiting
+		// for it, could otherwise keep writing to the sidecar's inherited
+		// stderr pipe after that command's own exec already completed and
+		// took+cleared the tail; those idle-period bytes would then sit in
+		// stderr_tail until THIS unrelated exec's completion misattributed
+		// them as its own diagnostic output). A background child racing this
+		// exact clear (in the narrow window before it and the exec's own
+		// frame are actually delivered) remains possible but is now a
+		// sub-millisecond race instead of a real "did the pump already
+		// capture this exec's own output" ordering bug.
+		self.stderr_tail.lock().clear();
 		let exec = match encode_frame(&HostRequest::Exec {
 			id,
 			command: &command,
@@ -332,19 +353,6 @@ impl HostCore {
 			self.abandon(id);
 			return Err(err);
 		}
-		// Bound the per-exec stderr forward (below) to content written DURING
-		// this exec's window, not stale content from an idle period between
-		// commands. Without this, a PREVIOUS command's fire-and-forget child
-		// (spawned without waiting for it, e.g. Start-Process without -Wait)
-		// could keep writing to the sidecar's inherited stderr pipe after
-		// that command's own exec already completed and took+cleared the
-		// tail; those idle-period bytes would then sit in stderr_tail until
-		// THIS unrelated exec's completion misattributed them as its own
-		// diagnostic output. A background child racing this exact clear (in
-		// the narrow window between it and the exec's own frames starting)
-		// remains possible but is now a few-millisecond race instead of an
-		// unbounded idle period.
-		self.stderr_tail.lock().clear();
 
 		// `None` signals the host died before completing; every other path
 		// yields a result and falls through to the shared cleanup below.
