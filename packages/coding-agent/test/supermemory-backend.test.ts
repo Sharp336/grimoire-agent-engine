@@ -246,7 +246,7 @@ describe("supermemoryBackend", () => {
 		await supermemoryBackend.enqueue?.("/tmp", "/tmp/supermemory-project", primary as never);
 		expect(create).toHaveBeenCalledTimes(1);
 		expect(create.mock.calls[0]![0]).toMatchObject({
-			containerTags: [expect.stringMatching(/^omp-project-[a-f0-9]{24}$/)],
+			containerTag: expect.stringMatching(/^omp-project-[a-f0-9]{24}$/),
 			content: expect.stringContaining("User: first"),
 		});
 		primary.emit({ type: "agent_end", messages: [] });
@@ -435,7 +435,7 @@ describe("supermemoryBackend", () => {
 		expect(create).toHaveBeenCalledTimes(2);
 		const customIds = create.mock.calls.map(([input]) => input.customId);
 		expect(new Set(customIds)).toEqual(new Set([customIds[0]]));
-		expect(customIds[0]).toMatch(/^omp-retention-[A-Za-z0-9_-]{43}$/);
+		expect(customIds[0]).toMatch(/^omp-retention-[a-f0-9]{64}$/);
 		expect(customIds[0]).not.toContain("persisted-transcript-id");
 		expect(create.mock.calls[1]![0]?.content).toContain("User: unflushed third");
 		expect(create.mock.calls[1]![0]?.content).toContain("User: fourth");
@@ -492,9 +492,7 @@ describe("supermemoryBackend", () => {
 			{ content: "second fact" },
 		);
 
-		expect(create.mock.calls[0]![0]?.containerTags).toHaveLength(1);
-		expect(create.mock.calls[1]![0]?.containerTags).toHaveLength(1);
-		expect(create.mock.calls[0]![0]?.containerTags[0]).not.toBe(create.mock.calls[1]![0]?.containerTags[0]);
+		expect(create.mock.calls[0]![0]?.containerTag).not.toBe(create.mock.calls[1]![0]?.containerTag);
 		await supermemoryBackend.disposeSession?.(session as never);
 	});
 
@@ -1327,7 +1325,7 @@ describe("supermemoryBackend", () => {
 		expect(create.mock.calls[0]![0]?.content).toContain("User: old scope");
 		expect(create.mock.calls[1]![0]?.content).toContain("User: new scope");
 		expect(create.mock.calls[1]![0]?.content).not.toContain("User: old scope");
-		expect(create.mock.calls[0]![0]?.containerTags[0]).not.toBe(create.mock.calls[1]![0]?.containerTags[0]);
+		expect(create.mock.calls[0]![0]?.containerTag).not.toBe(create.mock.calls[1]![0]?.containerTag);
 		await supermemoryBackend.disposeSession?.(session as never);
 	});
 
@@ -1356,7 +1354,7 @@ describe("supermemoryBackend", () => {
 
 		expect(create).toHaveBeenCalledTimes(1);
 		expect(create.mock.calls[0]![0]).toMatchObject({
-			containerTags: [await resolveSupermemoryContainerTag("/tmp/supermemory-moved-project", "per-project")],
+			containerTag: await resolveSupermemoryContainerTag("/tmp/supermemory-moved-project", "per-project"),
 			content: expect.stringContaining("User: moved project turn"),
 		});
 		expect(JSON.stringify(create.mock.calls[0]![0]).includes("User: old project turn")).toBe(false);

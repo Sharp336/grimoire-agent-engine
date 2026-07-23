@@ -1,4 +1,5 @@
 import type { Settings } from "../config/settings";
+import { supermemoryBackend } from "../supermemory/backend";
 import { localBackend } from "./local-backend";
 import { offBackend } from "./off-backend";
 import type { MemoryBackend } from "./types";
@@ -20,7 +21,7 @@ import type { MemoryBackend } from "./types";
 export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBackend> {
 	const id = settings.get("memory.backend");
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
-	if (id === "supermemory") return (await import("../supermemory/backend")).supermemoryBackend;
+	if (id === "supermemory") return supermemoryBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
 	if (id === "local") return localBackend;
 	return offBackend;

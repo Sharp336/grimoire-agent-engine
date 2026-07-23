@@ -76,6 +76,12 @@ describe("Supermemory configuration", () => {
 				SUPERMEMORY_BASE_URL: "http://memory.example",
 			}).baseUrl,
 		).toBe("https://api.supermemory.ai");
+		expect(
+			loadSupermemoryConfig(fakeSettings(), {
+				SUPERMEMORY_API_KEY: "secret",
+				SUPERMEMORY_BASE_URL: "http://127.evil.com",
+			}).baseUrl,
+		).toBe("https://api.supermemory.ai");
 	});
 
 	it("uses stable opaque project tags and a stable global tag", async () => {
@@ -118,7 +124,7 @@ describe("SupermemoryClient", () => {
 
 		await client.createDocument({
 			content: "save this",
-			containerTags: ["omp-global"],
+			containerTag: "omp-global",
 			customId: "omp-retention-opaque-document-id",
 			metadata: { source: "test" },
 		});
@@ -134,7 +140,7 @@ describe("SupermemoryClient", () => {
 		});
 		expect(JSON.parse(documentInit!.body as string)).toEqual({
 			content: "save this",
-			containerTags: ["omp-global"],
+			containerTag: "omp-global",
 			customId: "omp-retention-opaque-document-id",
 			metadata: { source: "test" },
 		});

@@ -7,6 +7,7 @@
 - Added per-call `model` selection to the `task` tool, including per-item batch selectors, fallback chains, and explicit reasoning suffixes.
 - Added Firecrawl keyless mode: explicitly selecting `firecrawl` as the web-search provider now works without `FIRECRAWL_API_KEY` by calling the Firecrawl REST API without an `Authorization` header; the automatic provider chain remains credential-gated (#4332).
 - Added `mcp.renderMarkdownResults` (enabled by default): non-JSON MCP text results render as Markdown in the terminal transcript; set it to `false` to keep raw text.
+- Added a native Supermemory memory backend with project-scoped recall, profiles, explicit save/search, automatic retention, compaction context, `/memory` operations, and self-hosted endpoint support via `SUPERMEMORY_BASE_URL`.
 
 ### Changed
 

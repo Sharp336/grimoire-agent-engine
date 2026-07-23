@@ -120,7 +120,7 @@ export class SupermemoryClient {
 
 	async createDocument(input: {
 		content: string;
-		containerTags: string[];
+		containerTag: string;
 		customId?: string;
 		metadata?: Record<string, string | number | boolean>;
 	}): Promise<SupermemoryDocument> {

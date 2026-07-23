@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
@@ -164,18 +163,18 @@ function transcriptForRetentionWindow(
 }
 
 /**
- * Supermemory documents are upserted by `customId`. A retention document is
- * therefore one bounded, latest transcript snapshot per durable transcript and
- * remote container, rather than a cadence-shaped sequence of documents.
+ * Supermemory documents are upserted by `customId`. Each bounded cadence window
+ * is therefore appended to one stable remote conversation document instead of
+ * creating an unbounded sequence of documents.
  *
  * The persisted SessionManager id survives resume; provider ids and retention
  * cadence deliberately do not participate in the identity.
  */
 function automaticRetentionCustomId(session: AgentSession, containerTag: string): string {
 	const sessionId = session.sessionManager.getSessionId();
-	const digest = createHash("sha256")
+	const digest = new Bun.CryptoHasher("sha256")
 		.update(`omp-supermemory-retention\u0000${sessionId}\u0000${containerTag}`)
-		.digest("base64url");
+		.digest("hex");
 	return `omp-retention-${digest}`;
 }
 
@@ -207,9 +206,9 @@ function invalidateLifecycle(state: SupermemorySessionState, preserveActiveRecal
 }
 
 function coordinatorKey(config: SupermemoryConfig & { apiKey: string }, containerTag: string): string {
-	return createHash("sha256")
+	return new Bun.CryptoHasher("sha256")
 		.update(`omp-supermemory-coordinator\u0000${config.baseUrl}\u0000${config.apiKey}\u0000${containerTag}`)
-		.digest("base64url");
+		.digest("hex");
 }
 function containerState(key: string): SupermemoryContainerState {
 	let state = containerStates.get(key);
@@ -466,7 +465,7 @@ async function saveWithState(
 		const document = await createTrackedDocument(state, scope, () =>
 			scope.client.createDocument({
 				content: input.content,
-				containerTags: [scope.containerTag],
+				containerTag: scope.containerTag,
 				metadata: {
 					source: input.source ?? "omp",
 					...(input.context ? { context: input.context } : {}),
@@ -736,7 +735,7 @@ async function retainCurrentSession(
 		const document = await createTrackedDocument(state, scope, () =>
 			scope.client.createDocument({
 				content: transcript.content,
-				containerTags: [retention.containerTag],
+				containerTag: retention.containerTag,
 				customId: automaticRetentionCustomId(session, retention.containerTag),
 				metadata: {
 					source: "omp-conversation",

@@ -49,7 +49,7 @@ function resolveBaseUrl(env: NodeJS.ProcessEnv): string {
 		const isLoopback =
 			url.hostname === "localhost" ||
 			url.hostname.endsWith(".localhost") ||
-			url.hostname.startsWith("127.") ||
+			url.hostname === "127.0.0.1" ||
 			url.hostname === "[::1]";
 		return url.protocol === "https:" || (url.protocol === "http:" && isLoopback)
 			? url.toString().replace(/\/+$/, "")
