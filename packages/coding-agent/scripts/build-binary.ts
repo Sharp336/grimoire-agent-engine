@@ -92,6 +92,7 @@ async function main(): Promise<void> {
 			crossBuild ? { ...Bun.env, TARGET_PLATFORM: crossBuild.platform, TARGET_ARCH: crossBuild.arch } : Bun.env,
 		);
 		await runCommand(["bun", "run", "gen:mupdf"]);
+		await runCommand(["bun", "scripts/generate-embedded-translations.ts"]);
 		try {
 			await compileCodingAgent({
 				repoRoot,

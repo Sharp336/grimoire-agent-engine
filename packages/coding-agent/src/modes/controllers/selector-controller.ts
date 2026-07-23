@@ -1623,22 +1623,22 @@ export class SelectorController {
 		const storage = new FileSessionStorage();
 		const fileExists = await storage.exists(sessionFile);
 		if (!fileExists) {
-			this.ctx.showError("Session has not been saved yet");
+			this.ctx.showError(i18n.t("settings.sessions.notSaved", "Session has not been saved yet"));
 			return;
 		}
 
 		const confirmed = await this.ctx.showHookConfirm(
-			"Delete Session",
-			"This will permanently delete the current session.\nYou will be returned to the session selector.",
+			i18n.t("settings.sessions.delete", "Delete Session"),
+			i18n.t("settings.sessions.deleteWarning", "This will permanently delete the current session.\nYou will be returned to the session selector."),
 		);
 
 		if (!confirmed) {
-			this.ctx.showStatus("Delete cancelled");
+			this.ctx.showStatus(i18n.t("settings.sessions.cancelled", "Delete cancelled"));
 			return;
 		}
 
 		if (!(await this.#detachActiveSessionBeforeDeletion(sessionFile))) {
-			this.ctx.showStatus("Delete cancelled");
+			this.ctx.showStatus(i18n.t("settings.sessions.cancelled", "Delete cancelled"));
 			return;
 		}
 
@@ -1646,7 +1646,7 @@ export class SelectorController {
 		await storage.deleteSessionWithArtifacts(sessionFile);
 
 		// Show session selector
-		this.ctx.showStatus("Session deleted");
+		this.ctx.showStatus(i18n.t("settings.sessions.deleted", "Session deleted"));
 		await this.showSessionSelector();
 	}
 

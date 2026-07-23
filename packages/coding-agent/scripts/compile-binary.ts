@@ -1,5 +1,7 @@
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
 export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze(["fastembed", "onnxruntime-node"]);
@@ -66,4 +68,12 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			Bun.env.BUN_NO_CODESIGN_MACHO_BINARY = previousCodesignSetting;
 		}
 	}
+
+	// Copy bundled i18n translations alongside the binary so fs.readFile can find
+	// them at runtime (import.meta.dir resolves to the binary's directory).
+	const binaryDir = path.dirname(options.outfile);
+	const langSrc = path.join(options.repoRoot, "packages", "coding-agent", "src", "i18n", "lang");
+	const langDst = path.join(binaryDir, "lang");
+	await fs.rm(langDst, { recursive: true, force: true });
+	await fs.cp(langSrc, langDst, { recursive: true });
 }

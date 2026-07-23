@@ -485,7 +485,6 @@ const translations: Record<Locale, Record<string, string>> = {
 		"common.output": "输出",
 		"common.cacheRead": "缓存读取",
 		"common.cacheWrite": "缓存写入",
-		"common.conversationTotal": "会话总计",
 		"common.reasoning": "推理",
 		"common.tps": "TPS",
 		"common.success": "成功",

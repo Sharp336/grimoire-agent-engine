@@ -481,9 +481,8 @@ export async function getRecentErrors(
 ): Promise<PaginatedResult<MessageStats>> {
 	await initDb();
 	const { cutoff } = getTimeRangeConfig(range);
-	const cutoffValue = cutoff ?? undefined;
-	const items = dbGetRecentErrors(limit, offset, model, cutoffValue);
-	const total = getRecentErrorCount(model, cutoffValue);
+	const items = dbGetRecentErrors(limit, offset, model, cutoff ?? undefined);
+	const total = getRecentErrorCount(model, cutoff ?? undefined);
 	return { items, total };
 }
 
