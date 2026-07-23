@@ -62,7 +62,14 @@ function makeMockPi(): MockPi {
 	return {
 		api: raw as unknown as ExtensionAPI,
 		async emit(event, payload, ctx) {
-			for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
+			// Model the host: event/timer handlers get a base ExtensionContext WITHOUT
+			// the command-only session controls (newSession/switchSession/…); only
+			// command handlers see those (createCommandContext). Strip newSession so
+			// the scheduler must source the content-policy purge from a retained
+			// command context, exactly as in production.
+			const eventCtx =
+				ctx && typeof ctx === "object" ? { ...(ctx as Record<string, unknown>), newSession: undefined } : ctx;
+			for (const handler of handlers.get(event) ?? []) await handler(payload, eventCtx);
 		},
 		async command(args, ctx) {
 			assert.ok(commandHandler, "command not registered");
@@ -86,9 +93,11 @@ interface MockCtx {
 	abort(): void;
 	getContextUsage(): undefined;
 	newSession(): Promise<{ cancelled: boolean }>;
+	compact(instructionsOrOptions?: string): Promise<void>;
 	notifications: string[];
 	confirmCalls: number;
 	newSessionCalls: number;
+	compactCalls: number;
 	setTimeout(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
 	setInterval(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
 	clearTimer(timer: Timer): void;
@@ -107,6 +116,7 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		notifications: [],
 		confirmCalls: 0,
 		newSessionCalls: 0,
+		compactCalls: 0,
 		setTimeoutCalls: 0,
 		setIntervalCalls: 0,
 		clearTimerCalls: 0,
@@ -130,6 +140,9 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		async newSession() {
 			ctx.newSessionCalls += 1;
 			return { cancelled: false };
+		},
+		async compact() {
+			ctx.compactCalls += 1;
 		},
 		setTimeout(callback, ms, ...args) {
 			ctx.setTimeoutCalls += 1;
@@ -495,7 +508,8 @@ await f.emit(
 	"auto_retry_end",
 	{
 		success: false,
-		error: 'Retry failed after 1 attempts: Provider requested 120000ms wait, exceeds retry.maxDelayMs (300000ms). Original error: 429 {"type":"rate_limit_error"} retry-after-ms=120000',
+		finalError:
+			'Retry failed after 1 attempts: Provider requested 120000ms wait, exceeds retry.maxDelayMs (300000ms). Original error: 429 {"type":"rate_limit_error"} retry-after-ms=120000',
 	},
 	ctxF,
 );
@@ -612,7 +626,7 @@ await h.emit(
 	"auto_retry_end",
 	{
 		success: false,
-		error: "Retry failed after 8 attempts: fetch failed: connect ECONNREFUSED api.anthropic.com:443",
+		finalError: "Retry failed after 8 attempts: fetch failed: connect ECONNREFUSED api.anthropic.com:443",
 	},
 	ctxH,
 );
@@ -638,7 +652,7 @@ assert.match(h.sentPrompts[1], /Count to 200/);
 await h.emit("agent_start", {}, ctxH);
 await h.emit(
 	"auto_retry_end",
-	{ success: false, error: "fetch failed: getaddrinfo ENOTFOUND api.anthropic.com" },
+	{ success: false, finalError: "fetch failed: getaddrinfo ENOTFOUND api.anthropic.com" },
 	ctxH,
 );
 await h.emit("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] }, ctxH);
@@ -958,7 +972,7 @@ fs.writeFileSync(plainCurly, "{a: 1} is the config shape I want; explain why", "
 	c21.stallTimeoutMs = 600_000;
 	fs.writeFileSync(configFile, JSON.stringify(c21));
 	const st = readState();
-	st.run = "running";
+	st.run = "stopped";
 	st.currentTaskId = null;
 	st.rateLimitedUntil = null;
 	st.windows = [];
@@ -978,7 +992,11 @@ const cp = makeMockPi();
 const ctxCp = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
 schedulerExtension(cp.api);
 await cp.emit("session_start", {}, ctxCp);
-await sleep(80);
+// The user starts the overnight run via the command — the ONLY context that
+// carries newSession (createCommandContext). The later content-policy purge
+// fires from a timer/event where newSession is gone, so it must reuse this one.
+await cp.command("start", ctxCp);
+await sleep(600); // cmdStart arms a 500ms initial dispatch
 assert.equal(cp.sentPrompts.length, 1, "t90 dispatched");
 assert.equal(task(readState(), "t90").attempts, 1, "first dispatch counts an attempt");
 // Anthropic content-policy rejection lands on agent_end.
@@ -1163,6 +1181,48 @@ await cl.command("ledger", ctxCl);
 assert.match(ctxCl.notifications.at(-1) ?? "", /task ledger/, "/scheduler ledger prints the table");
 assert.match(ctxCl.notifications.at(-1) ?? "", /#[0-9a-f]{12}\s+done/, "ledger command shows hash + status");
 await cl.command("stop", ctxCl);
+
+// 24. willContinue: a non-terminal agent_end (auto-retry / unexpected-stop
+// retry / auto-compaction continuation) must NOT settle the task or dispatch
+// the next one — the same turn is still coming. Only the final agent_end
+// (willContinue falsy) settles.
+{
+	const st = readState();
+	st.run = "running";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [
+		{ id: "t96", prompt: "Continuation task", status: "queued", addedAt: new Date().toISOString(), attempts: 0 },
+	];
+	st.nextTaskSeq = 97;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const wc = makeMockPi();
+const ctxWc = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(wc.api);
+await wc.emit("session_start", {}, ctxWc);
+await sleep(80);
+assert.equal(wc.sentPrompts.length, 1, "t96 dispatched");
+assert.equal(readState().currentTaskId, "t96", "t96 in flight");
+await wc.emit("agent_start", {}, ctxWc);
+// A continuation end arrives first — the scheduler must ignore it.
+await wc.emit(
+	"agent_end",
+	{ messages: [{ role: "assistant", content: [], stopReason: "stop" }], willContinue: true },
+	ctxWc,
+);
+{
+	const st = readState();
+	assert.equal(st.currentTaskId, "t96", "willContinue end leaves the task in flight");
+	assert.equal(wc.sentPrompts.length, 1, "willContinue end does not dispatch the next task");
+	assert.equal(task(st, "t96").status, "running", "willContinue end does not settle the task");
+}
+// The terminal end (no willContinue) finally settles it.
+await wc.emit("agent_end", { messages: [{ role: "assistant", content: [] }] }, ctxWc);
+assert.equal(task(readState(), "t96").status, "done", "terminal end settles the task done");
+await sleep(50);
+await wc.command("stop", ctxWc);
 
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);

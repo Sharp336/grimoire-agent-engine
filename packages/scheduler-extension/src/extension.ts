@@ -245,11 +245,12 @@ interface CtxLike {
 	abort(): void | Promise<void>;
 	getContextUsage(): { tokens: number; contextWindow: number; percent: number } | undefined;
 	/**
-	 * Runtime session control. `newSession` (ExtensionCommandContext, but wired
-	 * onto the event-handler context too — see runner.createContext) starts a
-	 * fresh, empty conversation, purging any history the content-policy
-	 * classifier flagged. `compact` is the reduce-in-place fallback. Optional so
-	 * headless / older hosts that omit them degrade gracefully.
+	 * Runtime session control. `newSession` starts a fresh, empty conversation
+	 * (purging the history the content-policy classifier flagged) with no LLM
+	 * call, but the host wires it ONLY onto the command context
+	 * (createCommandContext) — so it is read from the retained command context,
+	 * never the event/timer context. `compact` lives on the base context and is
+	 * the reduce-in-place fallback. Optional so headless / older hosts degrade.
 	 */
 	newSession?(options?: unknown): Promise<unknown> | undefined;
 	compact?(instructionsOrOptions?: unknown): Promise<void> | undefined;
@@ -898,6 +899,13 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	let state: SchedulerState | null = null;
 	let cfg: SchedulerConfig = structuredClone(DEFAULT_CONFIG);
 	let liveCtx: CtxLike | null = null;
+	/**
+	 * Last context that carried command-only session controls (`newSession`).
+	 * Captured whenever a `/scheduler` command runs and never clobbered by event
+	 * contexts, so the autonomous content-policy purge — which fires from a timer
+	 * where only the base event context is live — still has a real `newSession`.
+	 */
+	let cmdCtx: CtxLike | null = null;
 	let agentActive = false;
 	/** Set by auto_retry_end when retries were exhausted during the current turn. */
 	let retryFailure: string | null = null;
@@ -1162,24 +1170,28 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Purge a conversation poisoned by a content-policy violation. newSession
-	 * drops all history (no LLM call, so the flagged text is never re-scanned)
-	 * and — unlike a fresh launch — does NOT re-fire session_start (agent
-	 * session.newSession emits only session_before_switch/session_switch), so the
-	 * scheduler's own lifecycle, queue, and state are untouched. compact is the
-	 * reduce-in-place fallback for hosts that expose no newSession. Both are
-	 * best-effort: on failure the next dispatch simply re-enters the poisoned
-	 * context, re-detects, and retries — a stall, never a lost task.
+	 * Purge a conversation poisoned by a content-policy violation. `newSession`
+	 * drops all history with no LLM call, so the flagged text is never re-scanned
+	 * — the only reliable purge. But newSession lives ONLY on the command context
+	 * (host createCommandContext); the event/timer context this runs from exposes
+	 * just `compact`. So reset through the retained command context (cmdCtx) and
+	 * fall back to compacting the live context — a best-effort reduce-in-place
+	 * that must summarize the poisoned transcript and MAY re-trip the classifier,
+	 * hence newSession is strongly preferred. newSession does not re-fire
+	 * session_start (agent session.newSession emits only
+	 * session_before_switch/session_switch), so the scheduler's own lifecycle,
+	 * queue, and state are untouched. On total failure the next dispatch simply
+	 * re-enters the context, re-detects, and retries — a stall, never a lost task.
 	 */
 	async function resetContext(reason: string): Promise<void> {
-		const ctx = liveCtx;
+		const purgeCtx = typeof cmdCtx?.newSession === "function" ? cmdCtx : null;
 		let method = "none";
 		try {
-			if (typeof ctx?.newSession === "function") {
-				await ctx.newSession();
+			if (purgeCtx?.newSession) {
+				await purgeCtx.newSession();
 				method = "newSession";
-			} else if (typeof ctx?.compact === "function") {
-				await ctx.compact(CONTEXT_RESET_COMPACT_INSTRUCTION.trim());
+			} else if (typeof liveCtx?.compact === "function") {
+				await liveCtx.compact(CONTEXT_RESET_COMPACT_INSTRUCTION.trim());
 				method = "compact";
 			}
 		} catch (err) {
@@ -1431,6 +1443,13 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (event, ctx) => {
 		liveCtx = ctx as unknown as CtxLike;
+		// A continuation end (willContinue: auto-retry, unexpected-stop retry, or
+		// auto-compaction) is NOT the terminal end of the prompt — the same turn
+		// resumes. Settling or dispatching here would double-run (settle the task
+		// and fire the next one while the continuation is still coming). Leave the
+		// task in flight and wait for the final agent_end where willContinue is
+		// falsy; agentActive stays true because the agent is still working.
+		if (event && typeof event === "object" && "willContinue" in event && event.willContinue === true) return;
 		agentActive = false;
 		const fromRetryExhaustion = retryFailure !== null;
 		const error = retryFailure ?? detectTurnError(event);
@@ -1568,7 +1587,9 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		const ev = event as unknown as Record<string, unknown> | null | undefined;
 		if (ev && ev.success === false) {
 			retryFailure =
-				typeof ev.error === "string" && ev.error ? ev.error : "provider retries exhausted (rate limit or outage)";
+				(typeof ev.finalError === "string" && ev.finalError) ||
+				(typeof ev.error === "string" && ev.error) ||
+				"provider retries exhausted (rate limit or outage)";
 			logEvent({
 				event: "retry_failed",
 				taskId: getState().currentTaskId ?? undefined,
@@ -1605,6 +1626,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const cctx = ctx as unknown as CtxLike;
 			liveCtx = cctx;
+			cmdCtx = cctx;
 			loadConfig();
 			const trimmed = (args ?? "").trim();
 			const space = trimmed.search(/\s/);
