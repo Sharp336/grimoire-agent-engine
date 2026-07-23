@@ -4,6 +4,8 @@ import type { Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	decodeLosslessJsonTable,
+	encodeLosslessJsonTable,
+	LOSSLESS_REENCODE_SAVINGS_MARGIN,
 	transformLosslessToolResults,
 } from "@oh-my-pi/pi-coding-agent/session/lossless-reencode";
 import { SnapcompactInlineTransformer } from "@oh-my-pi/pi-coding-agent/session/snapcompact-inline";
@@ -114,7 +116,7 @@ describe("lossless request-time transform", () => {
 		expect(result.messages[2]).toBe(over);
 	});
 
-	it("requires the marked replacement to be at least 10% smaller", () => {
+	it("requires the marked replacement to save at least 10% of estimated tokens", () => {
 		const text = highEntropyJson();
 		expect(countTokens(text)).toBeGreaterThanOrEqual(3000);
 		expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(50 * 1024);
@@ -127,6 +129,33 @@ describe("lossless request-time transform", () => {
 
 		expect(result).toBe(context);
 		expect(result.messages[1]).toBe(candidate);
+	});
+
+	it("rejects a byte-saving replacement that misses the token margin at the estimator rounding boundary", () => {
+		// In tests countTokens is ceil(UTF-8 bytes / 4), but the ceiling still
+		// makes byte and token margins non-equivalent. Production can additionally
+		// select the accurate native tokenizer via PI_TOKENIZER_ACCURATE=1.
+		const text = JSON.stringify(
+			Array.from({ length: 89 }, (_, id) => ({
+				id,
+				payload: "x".repeat(158),
+			})),
+		);
+		const encoded = encodeLosslessJsonTable(text);
+		if (!encoded) throw new Error("Expected eligible rounding fixture");
+		const originalBytes = Buffer.byteLength(text, "utf8");
+		const replacement = `[lossless-reencode v1 schema+csv; original=${originalBytes}B]\n${encoded}`;
+
+		expect(Buffer.byteLength(replacement, "utf8")).toBeLessThanOrEqual(
+			originalBytes * LOSSLESS_REENCODE_SAVINGS_MARGIN,
+		);
+		expect(countTokens(replacement)).toBeGreaterThan(countTokens(text) * LOSSLESS_REENCODE_SAVINGS_MARGIN);
+
+		const candidate = toolResult("candidate", text);
+		const context: Context = {
+			messages: [userMessage(), candidate, toolResult("tail", '[{"id":1},{"id":2}]')],
+		};
+		expect(transformLosslessToolResults(context)).toBe(context);
 	});
 
 	it("marks the format and exact original UTF-8 size", () => {

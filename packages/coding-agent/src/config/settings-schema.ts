@@ -2256,7 +2256,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Experimental",
 			label: "Lossless Structured Tool Results",
 			description:
-				"Experimental: re-encode eligible historical flat JSON arrays as deterministic schema+CSV in the 3K-token–50KiB band when that saves at least 10%.",
+				"Experimental: re-encode eligible historical flat JSON arrays as deterministic schema+CSV in the 3K-token–50KiB band when that saves at least 10% of estimated tokens without increasing bytes.",
 		},
 	},
 

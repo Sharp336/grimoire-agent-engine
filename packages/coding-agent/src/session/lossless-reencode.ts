@@ -23,7 +23,7 @@ const NUMBER_LITERAL = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 export const MIN_LOSSLESS_REENCODE_TOKENS = 3000;
 /** Stage 1 intentionally stops at the existing inline-result cap. */
 export const MAX_LOSSLESS_REENCODE_BYTES = 50 * 1024;
-/** Adjacent snapcompact precedent: the complete replacement must save at least 10%. */
+/** Adjacent snapcompact precedent: the complete replacement must save at least 10% of estimated tokens. */
 export const LOSSLESS_REENCODE_SAVINGS_MARGIN = 0.9;
 
 /**
@@ -120,7 +120,8 @@ export function planLosslessReencodes(messages: readonly Message[]): LosslessRee
 			const block = message.content[blockIndex];
 			if (block.type !== "text") continue;
 			const originalBytes = Buffer.byteLength(block.text, "utf8");
-			if (originalBytes > MAX_LOSSLESS_REENCODE_BYTES || countTokens(block.text) < MIN_LOSSLESS_REENCODE_TOKENS) {
+			const originalTokens = countTokens(block.text);
+			if (originalBytes > MAX_LOSSLESS_REENCODE_BYTES || originalTokens < MIN_LOSSLESS_REENCODE_TOKENS) {
 				continue;
 			}
 			const encoded = encodeLosslessJsonTable(block.text);
@@ -128,7 +129,10 @@ export function planLosslessReencodes(messages: readonly Message[]): LosslessRee
 			const marker = `[lossless-reencode v1 schema+csv; original=${originalBytes}B]`;
 			const replacement = `${marker}\n${encoded}`;
 			const replacementBytes = Buffer.byteLength(replacement, "utf8");
-			if (replacementBytes > originalBytes * LOSSLESS_REENCODE_SAVINGS_MARGIN) continue;
+			// Token savings are the goal and match snapcompact's precedent. The
+			// byte guard is independent defense against pathological wire growth.
+			if (replacementBytes > originalBytes) continue;
+			if (countTokens(replacement) > originalTokens * LOSSLESS_REENCODE_SAVINGS_MARGIN) continue;
 			swaps.push({ messageIndex, blockIndex, replacement });
 		}
 	}
