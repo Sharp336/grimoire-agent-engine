@@ -430,9 +430,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 					? "qwen-chat-template"
 					: isQwen && isFireworks
 						? "openai"
-						: isAlibaba || isQwen
-							? "qwen"
-							: "openai";
+						: isFriendli
+							? "qwen-chat-template"
+							: isAlibaba || isQwen
+								? "qwen"
+								: "openai";
 
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
@@ -509,7 +511,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			(isKimiModel && !isOpenCodeProvider) ||
 			(isDeepseekFamily && Boolean(spec.reasoning)) ||
 			isXiaomiMimo ||
-			(isOpenRouter && Boolean(spec.reasoning)),
+			(isOpenRouter && Boolean(spec.reasoning)) ||
+			(isFriendli && Boolean(spec.reasoning)),
 		requiresReasoningContentForAllAssistantTurns:
 			((isDeepseekFamily && Boolean(spec.reasoning)) || isXiaomiMimo) && !isOpenRouter,
 		// DeepSeek V4 and Xiaomi MiMo reject synthetic reasoning_content placeholders (".") on tool-call turns.
@@ -554,7 +557,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		wireModelIdMode,
 		isVercelGatewayHost: isVercelGateway,
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
-		extraBody: isDirectDeepseekReasoning ? { thinking: { type: "enabled" } } : undefined,
+		extraBody: isDirectDeepseekReasoning
+			? { thinking: { type: "enabled" } }
+			: isFriendli
+				? { parse_reasoning: true, include_reasoning: true }
+				: undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
 		// Kimi-family ids trigger MFJS on any host, not just native base URLs:
 		// proxies (OpenRouter, custom gateways) forward `tools.function.parameters`
