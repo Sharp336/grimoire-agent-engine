@@ -103,7 +103,8 @@ function readProfileFromEnvSafe(): string | undefined {
 	}
 }
 
-function getBaseConfigRoot(): string {
+/** Profile-independent config root (~/.omp), shared by every omp profile. */
+export function getBaseConfigRoot(): string {
 	return path.join(os.homedir(), getConfigDirName());
 }
 

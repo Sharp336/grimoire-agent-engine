@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `omp collab list` (with `--view` and `--json`) and `/collab list [view]` to list every active local Collab host and recover its browser URL from a runtime host registry over Unix sockets/named pipes, without persisting room keys, write tokens, or URLs to disk ([#6099](https://github.com/can1357/oh-my-pi/issues/6099))
+
 ### Changed
 
 - Adjusted retry fallback handling to recognize discovery-only and runtime extension providers, preventing spurious unknown-provider warnings.
