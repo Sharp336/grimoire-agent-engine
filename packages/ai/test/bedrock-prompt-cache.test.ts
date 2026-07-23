@@ -142,6 +142,29 @@ describe("Bedrock prompt cache checkpoints", () => {
 		}
 	});
 
+	test("does not exceed a configured checkpoint maximum", async () => {
+		const base = model("anthropic.claude-haiku-4-5-20251001-v1:0");
+		const disabled: Model<"bedrock-converse-stream"> = {
+			...base,
+			compat: { ...base.compat, promptCacheMaximumCheckpoints: 0 },
+		};
+		const single: Model<"bedrock-converse-stream"> = {
+			...base,
+			compat: { ...base.compat, promptCacheMaximumCheckpoints: 1 },
+		};
+
+		const disabledPayload = await capturePayload(disabled, "long");
+		expect(checkpoints(disabledPayload)).toHaveLength(0);
+
+		const singlePayload = await capturePayload(single, "long");
+		expect(checkpoints(singlePayload)).toEqual([{ cachePoint: { type: "default", ttl: "1h" } }]);
+		expect(singlePayload.messages[0]?.content).toEqual([
+			{ text: "What is the answer?" },
+			{ cachePoint: { type: "default", ttl: "1h" } },
+		]);
+		expect(singlePayload.system).toEqual([{ text: "Use concise answers." }]);
+	});
+
 	test("forces opaque profiles to default checkpoints without granting 1h retention", async () => {
 		await withEnv({ AWS_BEDROCK_FORCE_CACHE: "1" }, async () => {
 			const payload = await capturePayload(
