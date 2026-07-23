@@ -18,6 +18,7 @@ export type OpenAIResponsesToolChoice =
 	| "required"
 	| { type: "function"; name: string }
 	| { type: "custom"; name: string }
+	| { type: "computer" }
 	| undefined;
 
 /** Anthropic-compatible tool choice format */

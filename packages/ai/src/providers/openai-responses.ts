@@ -94,6 +94,7 @@ import {
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
 	shouldRetryWithoutStrictTools,
+	supportsOpenAINativeComputerUse,
 } from "./openai-shared";
 
 // OpenAI Responses-specific options
@@ -973,19 +974,25 @@ export function buildParams(
 			disableStrictToolsOverride || isStrictToolsDisabledForScope(providerSessionState, strictToolsScope);
 		const strictMode = !disableStrictTools && model.compat.supportsStrictMode !== false;
 		params.tools = convertTools(context.tools, strictMode, model);
-		strictToolsApplied = params.tools.some(t => (t as { strict?: boolean }).strict === true);
+		strictToolsApplied = params.tools.some(tool => "strict" in tool && tool.strict === true);
 		if (options?.toolChoice) {
 			// Map tool_choice against the tools that survived quarantine, not the
 			// original list: a forced choice for a dropped tool — or "required" when
 			// every tool was dropped — would otherwise send a tool_choice with no
 			// matching tool, which the provider rejects just like the bad schema did (#2652).
 			const emittedNames = new Set(
-				params.tools.map(t => (t as { name?: string }).name).filter((n): n is string => n !== undefined),
+				params.tools.flatMap(tool => ("name" in tool && typeof tool.name === "string" ? [tool.name] : [])),
 			);
+			const nativeComputerUse = supportsOpenAINativeComputerUse(model);
+			const emittedComputer = params.tools.some(tool => tool.type === "computer");
 			const survivingTools =
 				params.tools.length === context.tools.length
 					? context.tools
-					: context.tools.filter(t => emittedNames.has(t.customWireName ?? t.name));
+					: context.tools.filter(tool =>
+							tool.openaiNativeTool === "computer" && nativeComputerUse
+								? emittedComputer
+								: emittedNames.has(tool.customWireName ?? tool.name),
+						);
 			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
 			if (toolChoice !== undefined && params.tools.length > 0) {
 				params.tool_choice = toolChoice;
@@ -1067,6 +1074,9 @@ export function mapOpenAIResponsesToolChoiceForTools(
 	if (!offeredTool) {
 		return undefined;
 	}
+	if (offeredTool.openaiNativeTool === "computer" && supportsOpenAINativeComputerUse(model)) {
+		return { type: "computer" };
+	}
 	return customTool ? { type: "custom", name: customTool.customWireName ?? customTool.name } : mapped;
 }
 
@@ -1083,6 +1093,10 @@ export function convertTools(
 	const allowFreeform = supportsFreeformApplyPatch(model);
 	const out: OpenAITool[] = [];
 	for (const tool of tools) {
+		if (tool.openaiNativeTool === "computer" && supportsOpenAINativeComputerUse(model)) {
+			out.push({ type: "computer" });
+			continue;
+		}
 		if (allowFreeform && tool.customFormat) {
 			out.push({
 				type: "custom",

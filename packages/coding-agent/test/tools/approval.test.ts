@@ -94,6 +94,25 @@ describe("resolveApproval override and user policy", () => {
 		);
 	});
 
+	it("never auto-approves mandatory per-call confirmation", () => {
+		const guarded = tool("computer", {
+			tier: "exec",
+			alwaysPrompt: true,
+			reason: "Provider safety check",
+		});
+		for (const mode of ["always-ask", "write", "yolo"] as const) {
+			expect(resolveApproval(guarded, {}, mode)).toEqual({
+				policy: "prompt",
+				tier: "exec",
+				override: true,
+				alwaysPrompt: true,
+				reason: "Provider safety check",
+			});
+			expect(resolveApproval(guarded, {}, mode, { computer: "allow" }).policy).toBe("prompt");
+			expect(resolveApproval(guarded, {}, mode, { computer: "deny" }).policy).toBe("deny");
+		}
+	});
+
 	it("valid user policy overrides mode and tier when no tool override is active", () => {
 		const writeTool = tool("write", "write");
 		expect(resolveApproval(writeTool, {}, "always-ask", { write: "allow" }).policy).toBe("allow");

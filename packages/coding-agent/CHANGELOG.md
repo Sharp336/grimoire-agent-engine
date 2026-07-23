@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a disabled-by-default `computer` tool for model-driven control of a session-owned 1280×720 Chromium tab, with ordered GA actions, PNG feedback, OpenAI safety-check confirmation, settings, and user documentation.
+
 ### Fixed
 
 - Fixed credential-shaped tokens (GitHub/GitLab/OpenAI/Anthropic key patterns) being redacted from outbound provider requests even with `secrets.enabled` off; the pattern redaction now follows the `secrets.enabled` ("Hide Secrets") setting like the secret obfuscator.

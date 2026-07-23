@@ -165,14 +165,13 @@ const CODEX_INTERRUPTED_TOOL_OUTPUT =
 	"[No tool output recorded: the tool call was interrupted before it produced a result.]";
 
 function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputItem {
-	const itemRecord = item as unknown as Record<string, unknown>;
-	const toolName = typeof itemRecord.name === "string" ? itemRecord.name : "tool";
+	const toolName = item.type === "computer_call_output" ? "computer" : (item.name ?? "tool");
 	let text = "";
 	try {
-		const output = itemRecord.output;
+		const output = item.output;
 		text = typeof output === "string" ? output : JSON.stringify(output);
 	} catch {
-		text = String(itemRecord.output ?? "");
+		text = String(item.output ?? "");
 	}
 	if (text.length > CODEX_ORPHAN_OUTPUT_LIMIT) {
 		text = `${text.slice(0, CODEX_ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
@@ -182,6 +181,32 @@ function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputIt
 		role: "assistant",
 		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
 	} as InputItem;
+}
+
+type CodexToolCallItemType = "function_call" | "custom_tool_call" | "computer_call";
+type CodexToolOutputItemType = "function_call_output" | "custom_tool_call_output" | "computer_call_output";
+
+function isValidCodexCallId(callId: unknown): callId is string {
+	return typeof callId === "string" && callId.length > 0;
+}
+
+function isCodexToolCallItemType(type: InputItem["type"]): type is CodexToolCallItemType {
+	return type === "function_call" || type === "custom_tool_call" || type === "computer_call";
+}
+
+function isCodexToolOutputItemType(type: InputItem["type"]): type is CodexToolOutputItemType {
+	return type === "function_call_output" || type === "custom_tool_call_output" || type === "computer_call_output";
+}
+
+function expectedCodexToolOutputType(type: CodexToolCallItemType): CodexToolOutputItemType {
+	switch (type) {
+		case "custom_tool_call":
+			return "custom_tool_call_output";
+		case "computer_call":
+			return "computer_call_output";
+		default:
+			return "function_call_output";
+	}
 }
 
 /**
@@ -199,43 +224,93 @@ function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputIt
  *   is aborted/crashes after the call streamed but before its result persisted.
  */
 function repairToolCallPairs(input: InputItem[]): InputItem[] {
-	const callIds = new Set<string>();
-	const outputCallIds = new Set<string>();
-	for (const item of input) {
-		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
-		if (callId === undefined) continue;
-		if (item.type === "function_call" || item.type === "custom_tool_call") callIds.add(callId);
-		else if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
-			outputCallIds.add(callId);
+	const expectedOutputTypeByPriorCallId = new Map<string, CodexToolOutputItemType>();
+	const invalidOutputIndexes = new Set<number>();
+	for (let index = 0; index < input.length; index++) {
+		const item = input[index];
+		if (!item) continue;
+		const callId = item.call_id;
+		if (isCodexToolCallItemType(item.type) && isValidCodexCallId(callId)) {
+			expectedOutputTypeByPriorCallId.set(callId, expectedCodexToolOutputType(item.type));
+			continue;
+		}
+		if (
+			isCodexToolOutputItemType(item.type) &&
+			(!isValidCodexCallId(callId) || expectedOutputTypeByPriorCallId.get(callId) !== item.type)
+		) {
+			invalidOutputIndexes.add(index);
 		}
 	}
 
-	const repaired: InputItem[] = [];
-	for (const item of input) {
-		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
+	const laterFunctionOutputIds = new Set<string>();
+	const laterCustomOutputIds = new Set<string>();
+	const laterComputerOutputIds = new Set<string>();
+	const orphanCallIndexes = new Set<number>();
+	for (let index = input.length - 1; index >= 0; index--) {
+		const item = input[index];
+		if (!item) continue;
+		const callId = item.call_id;
+		if (isCodexToolOutputItemType(item.type)) {
+			if (invalidOutputIndexes.has(index) || !isValidCodexCallId(callId)) continue;
+			const matchingCallIds =
+				item.type === "function_call_output"
+					? laterFunctionOutputIds
+					: item.type === "custom_tool_call_output"
+						? laterCustomOutputIds
+						: laterComputerOutputIds;
+			matchingCallIds.add(callId);
+			continue;
+		}
+		if (!isCodexToolCallItemType(item.type)) continue;
+		const matchingOutputIds =
+			item.type === "function_call"
+				? laterFunctionOutputIds
+				: item.type === "custom_tool_call"
+					? laterCustomOutputIds
+					: laterComputerOutputIds;
+		if (!isValidCodexCallId(callId) || !matchingOutputIds.has(callId)) orphanCallIndexes.add(index);
+	}
+	if (invalidOutputIndexes.size === 0 && orphanCallIndexes.size === 0) return input;
 
-		if (
-			(item.type === "function_call_output" || item.type === "custom_tool_call_output") &&
-			callId !== undefined &&
-			!callIds.has(callId)
-		) {
-			repaired.push(orphanFunctionOutputToMessage(item, callId));
+	const repaired: InputItem[] = [];
+	for (let index = 0; index < input.length; index++) {
+		const item = input[index];
+		if (!item) continue;
+		const callId = item.call_id;
+		if (invalidOutputIndexes.has(index)) {
+			repaired.push(
+				orphanFunctionOutputToMessage(item, isValidCodexCallId(callId) ? callId : "<missing or invalid>"),
+			);
+			continue;
+		}
+		if (!orphanCallIndexes.has(index)) {
+			repaired.push(item);
+			continue;
+		}
+		if (!isValidCodexCallId(callId)) {
+			const toolName = item.type === "computer_call" ? "computer" : (item.name ?? "tool");
+			repaired.push({
+				type: "message",
+				role: "assistant",
+				content: `[Malformed ${toolName} call omitted: missing valid call_id.]`,
+			});
+			continue;
+		}
+		if (item.type === "computer_call") {
+			repaired.push({
+				type: "message",
+				role: "assistant",
+				content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}.]`,
+			});
 			continue;
 		}
 
 		repaired.push(item);
-
-		if (
-			(item.type === "function_call" || item.type === "custom_tool_call") &&
-			callId !== undefined &&
-			!outputCallIds.has(callId)
-		) {
-			repaired.push({
-				type: item.type === "custom_tool_call" ? "custom_tool_call_output" : "function_call_output",
-				call_id: callId,
-				output: CODEX_INTERRUPTED_TOOL_OUTPUT,
-			} as InputItem);
-		}
+		repaired.push({
+			type: item.type === "custom_tool_call" ? "custom_tool_call_output" : "function_call_output",
+			call_id: callId,
+			output: CODEX_INTERRUPTED_TOOL_OUTPUT,
+		} as InputItem);
 	}
 	return repaired;
 }

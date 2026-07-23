@@ -454,7 +454,15 @@ tools:
 | `tools.artifactTailBytes` | number | `20` | KB of tail kept inline on spill. |
 | `tools.artifactTailLines` | number | `500` | Max tail lines kept inline on spill. |
 
-Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `astEdit.enabled`, `astGrep.enabled`, `web_search.enabled`, `inspect_image.enabled`.
+Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `astEdit.enabled`, `astGrep.enabled`, `web_search.enabled`, `inspect_image.enabled`.
+
+Computer use is disabled by default. It drives one isolated 1280×720 Chromium tab per session; see [Computer use](computer-use.md) for model support, safety, and lifecycle details.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `computer.enabled` | boolean | `false` | Expose the `computer` tool. Required even when `--tools computer` is passed. |
+| `computer.startUrl` | string | `about:blank` | Initial URL for the session-owned computer tab. |
+| `browser.headless` | boolean | `true` | Run the computer tab without a visible Chromium window. |
 
 ### Shell, eval, and LSP
 

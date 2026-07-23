@@ -52,6 +52,8 @@ export type WorkerInitPayload =
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 			timeoutMs: number;
+			/** Create the page in a fresh browser context whose storage is isolated from every other tab. */
+			isolateStorage?: boolean;
 	  }
 	| {
 			mode: "attach";
@@ -65,6 +67,8 @@ export type WorkerInitPayload =
 			 * previously force-killed the tab). Never set for first-time Electron attach.
 			 */
 			recover?: boolean;
+			/** Browser context this tab owns across worker recovery and must close with the tab. */
+			ownedBrowserContextId?: string;
 	  };
 
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
@@ -81,6 +85,8 @@ export interface ReadyInfo {
 	title?: string;
 	viewport: { width: number; height: number; deviceScaleFactor?: number };
 	targetId: string;
+	/** Non-default browser context owned by this tab, when storage isolation was requested. */
+	browserContextId?: string;
 }
 
 export interface RunResultOk {

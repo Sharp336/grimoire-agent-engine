@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added native OpenAI computer-call dispatch and safety metadata propagation through tool execution and persisted result history.
+
 ## [17.0.8] - 2026-07-22
 
 ### Fixed

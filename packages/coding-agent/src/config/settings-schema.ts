@@ -138,6 +138,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
 		"Available Tools",
+		"Computer Use",
 		"Todos",
 		"Grep & Browser",
 		"GitHub",
@@ -3783,6 +3784,28 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "Ask",
 			description: "Enable the ask tool for interactive user questions",
+		},
+	},
+
+	"computer.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Computer Use",
+			label: "Computer Use",
+			description: "Enable graphical computer control",
+		},
+	},
+
+	"computer.startUrl": {
+		type: "string",
+		default: "about:blank",
+		ui: {
+			tab: "tools",
+			group: "Computer Use",
+			label: "Computer Start URL",
+			description: "Initial page opened when computer use starts",
 		},
 	},
 

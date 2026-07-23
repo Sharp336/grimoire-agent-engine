@@ -151,6 +151,9 @@ const isOpenAIWireGen54Plus = memo((modelId: string): boolean => {
 	return semverGte(parsed.version, "5.4");
 });
 
+/** OpenAI model ids that support the GA native computer-use protocol. */
+export const supportsOpenAINativeComputerUseModelId = isOpenAIWireGen54Plus;
+
 /**
  * OpenAI Codex models that honor `reasoning.context: "all_turns"` (full
  * cross-turn reasoning replay). The `reasoning.context` field itself exists for

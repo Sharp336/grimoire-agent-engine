@@ -137,6 +137,46 @@ const customToolCallOutputItemSchema = type({
 	output: "string",
 });
 
+const computerActionSchema = type({
+	type: "string >= 1",
+	"[string]": "unknown",
+});
+
+const computerSafetyCheckSchema = type({
+	id: "string >= 1",
+	"code?": "string | null",
+	"message?": "string | null",
+});
+
+const computerCallItemSchema = type({
+	type: "'computer_call'",
+	id: "string >= 1",
+	call_id: "string >= 1",
+	"action?": computerActionSchema,
+	"actions?": computerActionSchema.array(),
+	"pending_safety_checks?": computerSafetyCheckSchema.array(),
+	"status?": "'in_progress' | 'completed' | 'incomplete'",
+});
+
+const computerCallOutputItemSchema = type({
+	type: "'computer_call_output'",
+	"id?": "string",
+	call_id: "string >= 1",
+	output: type({
+		type: "'computer_screenshot'",
+		"image_url?": "string >= 1",
+		"file_id?": "string >= 1",
+	}).narrow((v, ctx) => {
+		return (
+			typeof v.image_url === "string" ||
+			typeof v.file_id === "string" ||
+			ctx.mustBe("at least one of `image_url` or `file_id` for computer_screenshot")
+		);
+	}),
+	"acknowledged_safety_checks?": computerSafetyCheckSchema.array().or("null"),
+	"status?": "'in_progress' | 'completed' | 'incomplete' | null",
+});
+
 /**
  * Direct mapping to standard types.
  */
@@ -148,6 +188,8 @@ export const inputItemSchema = userMessageItemSchema
 	.or(functionCallOutputItemSchema)
 	.or(customToolCallItemSchema)
 	.or(customToolCallOutputItemSchema)
+	.or(computerCallItemSchema)
+	.or(computerCallOutputItemSchema)
 	// Tolerated but not bridged (file_search_call, web_search_call, …).
 	.or(type({ type: "string" }));
 
@@ -170,13 +212,19 @@ export type OpenAIResponsesOutputRefusalBlock = typeof outputRefusalSchema.infer
 
 // ─── Tools ──────────────────────────────────────────────────────────────────
 
-export const toolSchema = type({
+const functionToolSchema = type({
 	type: "'function'",
 	name: "string >= 1",
 	"description?": "string",
 	"parameters?": type({ "[string]": "unknown" }),
 	"strict?": "boolean",
 });
+
+const computerToolSchema = type({
+	type: "'computer'",
+});
+
+export const toolSchema = functionToolSchema.or(computerToolSchema);
 
 // Built-in / hosted tool entries (web_search_preview, file_search, …) — accepted
 // but skipped by the walker.
@@ -187,7 +235,7 @@ const builtinToolSchema = type({
 // ─── Tool choice ────────────────────────────────────────────────────────────
 
 const hostedToolType = type(
-	"'web_search_preview' | 'file_search' | 'computer_use_preview' | 'code_interpreter' | 'image_generation' | 'mcp'",
+	"'web_search_preview' | 'file_search' | 'computer_use_preview' | 'computer' | 'code_interpreter' | 'image_generation' | 'mcp'",
 );
 
 const allowedToolEntrySchema = type({

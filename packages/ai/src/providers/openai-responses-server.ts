@@ -18,7 +18,9 @@ import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Context,
+	ImageContent,
 	Message,
+	OpenAIComputerSafetyCheck,
 	TextContent,
 	ThinkingContent,
 	Tool,
@@ -33,7 +35,8 @@ import {
 	type OpenAIResponsesTool,
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
-import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
+import type { ComputerAction, ResponseComputerToolCall } from "./openai-responses-wire";
+import { createOpenAIComputerToolCall, encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
 
 export type { ParsedRequest };
 
@@ -100,6 +103,10 @@ function makeFuncCallId(): string {
 
 function makeCustomCallId(): string {
 	return `ctc_${uuidNoDashes()}`;
+}
+
+function makeComputerCallId(): string {
+	return `cu_${uuidNoDashes()}`;
 }
 
 // ─── once-only warnings ─────────────────────────────────────────────────────
@@ -192,6 +199,66 @@ function outputTextOf(
 	return text.length > 0 ? [textContent(text)] : [];
 }
 
+function copyComputerSafetyChecks(value: readonly unknown[] | null | undefined): OpenAIComputerSafetyCheck[] {
+	if (!value) return [];
+	const checks: OpenAIComputerSafetyCheck[] = [];
+	for (const raw of value) {
+		if (!isObj(raw) || typeof raw.id !== "string") continue;
+		const check: OpenAIComputerSafetyCheck = { id: raw.id };
+		if (raw.code === null || typeof raw.code === "string") check.code = raw.code;
+		if (raw.message === null || typeof raw.message === "string") check.message = raw.message;
+		checks.push(check);
+	}
+	return checks;
+}
+
+function parseComputerScreenshotDataUrl(value: unknown, callId: string): ImageContent {
+	if (typeof value !== "string") {
+		throw new AIError.ValidationError(
+			`openai-responses: computer_call_output ${callId} requires a screenshot data URL`,
+		);
+	}
+	const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/]+={0,2})$/.exec(value);
+	if (!match || match[2]!.length % 4 === 1) {
+		throw new AIError.ValidationError(
+			`openai-responses: computer_call_output ${callId} requires a valid base64 screenshot data URL`,
+		);
+	}
+	return { type: "image", mimeType: match[1]!, data: match[2]! };
+}
+
+function replaceComputerCallWithUnsupportedScreenshotNote(messages: Message[], call: ToolCall, callId: string): void {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		const contentIndex = message.content.indexOf(call);
+		if (contentIndex < 0) continue;
+		message.content.splice(contentIndex, 1, {
+			type: "text",
+			text: `[Computer call returned a file-backed screenshot that this gateway cannot replay; call_id=${callId}.]`,
+		});
+		return;
+	}
+}
+
+function repairUnpairedComputerCalls(messages: Message[]): void {
+	const pairedCallIds = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "toolResult" && message.openaiComputer) pairedCallIds.add(message.toolCallId);
+	}
+	for (const message of messages) {
+		if (message.role !== "assistant") continue;
+		for (let i = 0; i < message.content.length; i++) {
+			const part = message.content[i];
+			if (part?.type !== "toolCall" || !part.openaiComputer || pairedCallIds.has(part.id)) continue;
+			message.content[i] = {
+				type: "text",
+				text: `[Computer call interrupted before a screenshot was recorded; call_id=${wireCallId(part.id)}.]`,
+			};
+		}
+	}
+}
+
 // The schema accepts a much wider tool_choice union than the SDK type so the
 // walker narrows against the local schema shape.
 type ParsedToolChoice =
@@ -205,6 +272,7 @@ type ParsedToolChoice =
 				| "web_search_preview"
 				| "file_search"
 				| "computer_use_preview"
+				| "computer"
 				| "code_interpreter"
 				| "image_generation"
 				| "mcp";
@@ -219,6 +287,7 @@ function mapToolChoice(value: ParsedToolChoice | undefined): ParsedRequest["opti
 		// pi-ai shape: pi-ai's dispatcher matches `Tool.name` AND `customWireName`,
 		// so passing the wire name works for either.
 		if (value.type === "function" || value.type === "custom") return { name: value.name };
+		if (value.type === "computer") return { name: "computer" };
 		// Hosted tools + allowed_tools — we don't surface these to pi-ai; fall
 		// back to letting the model pick a tool freely.
 		return "auto";
@@ -230,6 +299,15 @@ function buildTools(tools: Array<OpenAIResponsesTool | { type: string }> | undef
 	if (!tools) return undefined;
 	const out: Tool[] = [];
 	for (const t of tools) {
+		if (t.type === "computer") {
+			out.push({
+				name: "computer",
+				description: "Control the computer.",
+				parameters: { type: "object", properties: {} },
+				openaiNativeTool: "computer",
+			});
+			continue;
+		}
 		// Skip non-function tools (web_search, file_search, …).
 		if (t.type !== "function") continue;
 		const fn = t as Extract<OpenAIResponsesTool, { type: "function" }>;
@@ -372,6 +450,11 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				ensureAssistantPlaceholder(messages, data.model, now).content.push(thinking);
 				continue;
 			}
+			if (effectiveType === "computer_call") {
+				const toolCall = createOpenAIComputerToolCall(item as ResponseComputerToolCall);
+				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
+				continue;
+			}
 			if (effectiveType === "function_call") {
 				const call = item as OpenAIResponsesFunctionCallItem;
 				const argsRaw = call.arguments ?? "{}";
@@ -412,7 +495,13 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 			}
 			if (effectiveType === "function_call_output") {
 				const output = item as OpenAIResponsesFunctionCallOutputItem;
-				const toolName = findToolNameById(messages, output.call_id);
+				const pairedCall = findToolCallById(messages, output.call_id);
+				if (pairedCall?.openaiComputer) {
+					throw new AIError.ValidationError(
+						`openai-responses: computer call ${output.call_id} requires computer_call_output`,
+					);
+				}
+				const toolName = pairedCall?.name ?? "";
 				const text =
 					typeof output.output === "string"
 						? output.output
@@ -431,7 +520,13 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 			}
 			if (effectiveType === "custom_tool_call_output") {
 				const output = item as { call_id: string; output: string };
-				const toolName = findToolNameById(messages, output.call_id);
+				const pairedCall = findToolCallById(messages, output.call_id);
+				if (pairedCall?.openaiComputer) {
+					throw new AIError.ValidationError(
+						`openai-responses: computer call ${output.call_id} requires computer_call_output`,
+					);
+				}
+				const toolName = pairedCall?.name ?? "";
 				messages.push({
 					role: "toolResult",
 					toolCallId: output.call_id,
@@ -440,10 +535,41 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					isError: false,
 					timestamp: now,
 				});
+				continue;
+			}
+			if (effectiveType === "computer_call_output") {
+				const output = item as {
+					call_id: string;
+					output: { image_url?: string; file_id?: string };
+					acknowledged_safety_checks?: readonly unknown[] | null;
+				};
+				const pairedCall = findToolCallById(messages, output.call_id);
+				if (!pairedCall?.openaiComputer) {
+					throw new AIError.ValidationError(
+						`openai-responses: computer_call_output ${output.call_id} has no matching computer_call`,
+					);
+				}
+				if (output.output.image_url === undefined) {
+					replaceComputerCallWithUnsupportedScreenshotNote(messages, pairedCall, output.call_id);
+					continue;
+				}
+				messages.push({
+					role: "toolResult",
+					toolCallId: pairedCall.id,
+					toolName: "computer",
+					content: [parseComputerScreenshotDataUrl(output.output.image_url, output.call_id)],
+					openaiComputer: {
+						acknowledgedSafetyChecks: copyComputerSafetyChecks(output.acknowledged_safety_checks),
+					},
+					isError: false,
+					timestamp: now,
+				});
 			}
 			// Other item types are tolerated but not bridged.
 		}
 	}
+
+	repairUnpairedComputerCalls(messages);
 
 	const tools = buildTools(data.tools);
 	const context: Context = {
@@ -503,15 +629,15 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	};
 }
 
-function findToolNameById(messages: Message[], callId: string): string {
+function findToolCallById(messages: Message[], callId: string): ToolCall | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
 		if (m.role !== "assistant") continue;
 		for (const c of m.content) {
-			if (c.type === "toolCall" && c.id === callId) return c.name;
+			if (c.type === "toolCall" && wireCallId(c.id) === callId) return c;
 		}
 	}
-	return "";
+	return undefined;
 }
 
 // ─── formatError ────────────────────────────────────────────────────────────
@@ -558,7 +684,21 @@ type CustomToolCallOutputItem = {
 	status: "completed";
 };
 
-type OutputItem = ReasoningOutputItem | MessageOutputItem | FunctionCallOutputItem | CustomToolCallOutputItem;
+type ComputerCallOutputItem = {
+	type: "computer_call";
+	id: string;
+	call_id: string;
+	actions: ComputerAction[];
+	pending_safety_checks: OpenAIComputerSafetyCheck[];
+	status: "completed";
+};
+
+type OutputItem =
+	| ReasoningOutputItem
+	| MessageOutputItem
+	| FunctionCallOutputItem
+	| CustomToolCallOutputItem
+	| ComputerCallOutputItem;
 
 type ResponseStatus = "completed" | "in_progress" | "failed" | "incomplete";
 
@@ -626,6 +766,75 @@ function wireCallId(id: string): string {
 	return sep >= 0 ? id.slice(0, sep) : id;
 }
 
+function wireItemId(id: string): string | undefined {
+	const sep = id.indexOf("|");
+	if (sep < 0 || sep === id.length - 1) return undefined;
+	return id.slice(sep + 1);
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string");
+}
+
+function hasOptionalComputerKeys(value: Record<string, unknown>): boolean {
+	return value.keys === undefined || value.keys === null || isStringArray(value.keys);
+}
+
+function isComputerAction(value: unknown): value is ComputerAction {
+	if (!isObj(value)) return false;
+	switch (value.type) {
+		case "click":
+			return (
+				(value.button === "left" ||
+					value.button === "right" ||
+					value.button === "wheel" ||
+					value.button === "back" ||
+					value.button === "forward") &&
+				typeof value.x === "number" &&
+				typeof value.y === "number" &&
+				hasOptionalComputerKeys(value)
+			);
+		case "double_click":
+			return (
+				typeof value.x === "number" &&
+				typeof value.y === "number" &&
+				(value.keys === null || isStringArray(value.keys))
+			);
+		case "drag":
+			return (
+				Array.isArray(value.path) &&
+				value.path.every(point => isObj(point) && typeof point.x === "number" && typeof point.y === "number") &&
+				hasOptionalComputerKeys(value)
+			);
+		case "keypress":
+			return isStringArray(value.keys);
+		case "move":
+			return typeof value.x === "number" && typeof value.y === "number" && hasOptionalComputerKeys(value);
+		case "screenshot":
+		case "wait":
+			return true;
+		case "scroll":
+			return (
+				typeof value.x === "number" &&
+				typeof value.y === "number" &&
+				typeof value.scroll_x === "number" &&
+				typeof value.scroll_y === "number" &&
+				hasOptionalComputerKeys(value)
+			);
+		case "type":
+			return typeof value.text === "string";
+		default:
+			return false;
+	}
+}
+
+function computerActions(part: ToolCall): ComputerAction[] {
+	const actions = part.arguments.actions;
+	if (Array.isArray(actions)) return actions.filter(isComputerAction);
+	const action = part.arguments.action;
+	return isComputerAction(action) ? [action] : [];
+}
+
 /**
  * Walk the assistant content array and group consecutive TextContent into a
  * single message item; each ThinkingContent / ToolCall is its own item.
@@ -666,7 +875,16 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
 			out.push(buildReasoningItem(part));
 		} else if (part.type === "toolCall") {
 			flushMessage();
-			if (part.customWireName) {
+			if (part.openaiComputer) {
+				out.push({
+					type: "computer_call",
+					id: part.thoughtSignature ?? wireItemId(part.id) ?? makeComputerCallId(),
+					call_id: wireCallId(part.id),
+					actions: computerActions(part),
+					pending_safety_checks: part.openaiComputer.pendingSafetyChecks.map(check => ({ ...check })),
+					status: "completed",
+				});
+			} else if (part.customWireName) {
 				const input = part.arguments?.input;
 				const rawInput = typeof input === "string" ? input : "";
 				out.push({
@@ -768,6 +986,10 @@ interface OpenFunctionCall {
 	argsText: string;
 	/** Set when the underlying ToolCall is a custom-tool emission. */
 	customWireName?: string;
+	computer?: {
+		actions: ComputerAction[];
+		pendingSafetyChecks: OpenAIComputerSafetyCheck[];
+	};
 }
 type OpenItem = OpenMessage | OpenReasoning | OpenFunctionCall;
 
@@ -872,31 +1094,51 @@ export function encodeStream(
 				const itemOutputIndex = allocateOutputIndex();
 				const part = partial.content[contentIndex];
 				const tc = part && part.type === "toolCall" ? part : undefined;
-				const customWireName: string | undefined =
+				const customWireName =
 					tc && typeof tc.customWireName === "string" && tc.customWireName.length > 0
 						? tc.customWireName
 						: undefined;
-				const isCustom = customWireName !== undefined;
-				const itemId = tc?.thoughtSignature ?? (isCustom ? makeCustomCallId() : makeFuncCallId());
+				const computer = tc?.openaiComputer
+					? {
+							actions: computerActions(tc),
+							pendingSafetyChecks: tc.openaiComputer.pendingSafetyChecks.map(check => ({ ...check })),
+						}
+					: undefined;
+				const itemId =
+					tc?.thoughtSignature ??
+					(computer
+						? (wireItemId(tc?.id ?? "") ?? makeComputerCallId())
+						: customWireName
+							? makeCustomCallId()
+							: makeFuncCallId());
 				const callId = wireCallId(tc?.id ?? "");
 				const name = customWireName ?? tc?.name ?? "";
-				const item = isCustom
+				const item = computer
 					? {
-							type: "custom_tool_call" as const,
+							type: "computer_call" as const,
 							id: itemId,
 							call_id: callId,
-							name,
-							input: "",
+							actions: computer.actions,
+							pending_safety_checks: computer.pendingSafetyChecks,
 							status: "in_progress",
 						}
-					: {
-							type: "function_call" as const,
-							id: itemId,
-							call_id: callId,
-							name,
-							arguments: "",
-							status: "in_progress",
-						};
+					: customWireName
+						? {
+								type: "custom_tool_call" as const,
+								id: itemId,
+								call_id: callId,
+								name,
+								input: "",
+								status: "in_progress",
+							}
+						: {
+								type: "function_call" as const,
+								id: itemId,
+								call_id: callId,
+								name,
+								arguments: "",
+								status: "in_progress",
+							};
 				emit("response.output_item.added", { output_index: itemOutputIndex, item });
 				const next: OpenFunctionCall = {
 					kind: "function_call",
@@ -906,7 +1148,8 @@ export function encodeStream(
 					callId,
 					name,
 					argsText: "",
-					...(isCustom ? { customWireName } : {}),
+					...(customWireName ? { customWireName } : {}),
+					...(computer ? { computer } : {}),
 				};
 				openFunctionCalls.set(contentIndex, next);
 				state.open = next;
@@ -915,42 +1158,39 @@ export function encodeStream(
 
 			const closeFunctionCall = (call: OpenFunctionCall): void => {
 				const text = call.argsText ?? "";
-				if (call.customWireName) {
-					const item = {
+				if (call.computer) {
+					const item: ComputerCallOutputItem = {
+						type: "computer_call",
+						id: call.itemId,
+						call_id: call.callId,
+						actions: call.computer.actions,
+						pending_safety_checks: call.computer.pendingSafetyChecks,
+						status: "completed",
+					};
+					emit("response.output_item.done", { output_index: call.outputIndex, item });
+					finishedItems.push(item);
+				} else if (call.customWireName) {
+					const item: CustomToolCallOutputItem = {
 						type: "custom_tool_call",
 						id: call.itemId,
-						call_id: call.callId ?? "",
+						call_id: call.callId,
 						name: call.customWireName,
 						input: text,
 						status: "completed",
 					};
 					emit("response.output_item.done", { output_index: call.outputIndex, item });
-					finishedItems.push({
-						type: "custom_tool_call",
-						id: call.itemId,
-						call_id: call.callId ?? "",
-						name: call.customWireName,
-						input: text,
-						status: "completed",
-					});
+					finishedItems.push(item);
 				} else {
-					const item = {
+					const item: FunctionCallOutputItem = {
 						type: "function_call",
 						id: call.itemId,
-						call_id: call.callId ?? "",
-						name: call.name ?? "",
+						call_id: call.callId,
+						name: call.name,
 						arguments: text,
 						status: "completed",
 					};
 					emit("response.output_item.done", { output_index: call.outputIndex, item });
-					finishedItems.push({
-						type: "function_call",
-						id: call.itemId,
-						call_id: call.callId ?? "",
-						name: call.name ?? "",
-						arguments: text,
-						status: "completed",
-					});
+					finishedItems.push(item);
 				}
 				openFunctionCalls.delete(call.contentIndex);
 				if (state.open === call) state.open = null;
@@ -1134,6 +1374,7 @@ export function encodeStream(
 						case "toolcall_delta": {
 							const cur = functionCallForEvent(ev.contentIndex);
 							if (!cur) break;
+							if (cur.computer) break;
 							cur.argsText += ev.delta;
 							if (cur.customWireName) {
 								emit("response.custom_tool_call_input.delta", {
@@ -1155,11 +1396,22 @@ export function encodeStream(
 							if (!cur) break;
 							// Promote possibly-late info from the canonical ToolCall.
 							const tc = ev.toolCall;
-							if (tc.customWireName && !cur.customWireName) cur.customWireName = tc.customWireName;
+							if (tc.openaiComputer) {
+								cur.computer = {
+									actions: computerActions(tc),
+									pendingSafetyChecks: tc.openaiComputer.pendingSafetyChecks.map(check => ({ ...check })),
+								};
+								cur.customWireName = undefined;
+							}
+							if (tc.customWireName && !cur.computer && !cur.customWireName)
+								cur.customWireName = tc.customWireName;
 							if (tc.thoughtSignature) cur.itemId = tc.thoughtSignature;
-							cur.callId = tc.id;
+							else if (cur.computer) cur.itemId = wireItemId(tc.id) ?? cur.itemId;
+							cur.callId = wireCallId(tc.id);
 							cur.name = cur.customWireName ?? tc.name;
-							if (cur.customWireName) {
+							if (cur.computer) {
+								// Computer calls are atomic; actions are carried by output_item.done.
+							} else if (cur.customWireName) {
 								// Custom tool: raw input string. Streamed deltas accumulated
 								// the wire-level body; fall back to `arguments.input` from
 								// the finalized ToolCall when nothing streamed (rare).

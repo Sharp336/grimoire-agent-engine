@@ -1,0 +1,1 @@
+Control the session's isolated browser viewport with ordered native computer actions. Each call executes one serial batch and returns a fresh PNG screenshot. Use the screenshot to choose coordinates for the next batch.

@@ -20,6 +20,7 @@ export interface ResolvedApproval {
 	tier: ToolTier;
 	reason?: string;
 	override: boolean;
+	alwaysPrompt: boolean;
 }
 
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
@@ -50,9 +51,16 @@ function isToolTier(value: unknown): value is ToolTier {
 	return typeof value === "string" && TIER_VALUES.has(value as ToolTier);
 }
 
-function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> {
+interface NormalizedApprovalDecision {
+	tier: ToolTier;
+	reason?: string;
+	override: boolean;
+	alwaysPrompt: boolean;
+}
+
+function normalizeDecision(value: unknown): NormalizedApprovalDecision {
 	if (isToolTier(value)) {
-		return { tier: value, override: false };
+		return { tier: value, override: false, alwaysPrompt: false };
 	}
 
 	if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -62,14 +70,15 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> {
 		return {
 			tier,
 			override: record.override === true,
+			alwaysPrompt: record.alwaysPrompt === true,
 			...(reason ? { reason } : {}),
 		};
 	}
 
-	return { tier: "exec", override: false };
+	return { tier: "exec", override: false, alwaysPrompt: false };
 }
 
-function getToolDecision(tool: ApprovalSubject, args: unknown): Omit<ResolvedApproval, "policy"> {
+function getToolDecision(tool: ApprovalSubject, args: unknown): NormalizedApprovalDecision {
 	const approval = tool.approval;
 	const decision: ToolApprovalDecision | undefined = typeof approval === "function" ? approval(args) : approval;
 	return normalizeDecision(decision);
@@ -95,11 +104,13 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
  *
  * Resolution order:
  *  1. Tool `approval(args)` decision, defaulting to tier "exec" when omitted.
- *  2. User per-tool override, if set and valid.
- *  3. Active mode tier comparison.
+ *  2. Mandatory per-call confirmation (`alwaysPrompt`) regardless of mode or
+ *     allow policy; an explicit deny remains authoritative.
+ *  3. User per-tool override, if set and valid.
+ *  4. Active mode tier comparison.
  *
- * In yolo mode, override-based tool prompts are ignored; user `tools.approval`
- * settings remain authoritative.
+ * In yolo mode, ordinary `override` prompts are ignored; user `tools.approval`
+ * settings remain authoritative. Mandatory prompts are not ordinary overrides.
  */
 export function resolveApproval(
 	tool: ApprovalSubject,
@@ -110,34 +121,46 @@ export function resolveApproval(
 	const decision = getToolDecision(tool, args);
 	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
 
+	if (decision.alwaysPrompt) {
+		return {
+			policy: userPolicy === "deny" ? "deny" : "prompt",
+			tier: decision.tier,
+			override: true,
+			alwaysPrompt: true,
+			...(decision.reason ? { reason: decision.reason } : {}),
+		};
+	}
+
 	if (mode === "yolo") {
-		return { policy: userPolicy ?? "allow", tier: decision.tier, override: false };
+		return { policy: userPolicy ?? "allow", tier: decision.tier, override: false, alwaysPrompt: false };
 	}
 
 	if (decision.override) {
 		if (userPolicy === "deny") {
-			return { policy: "deny", tier: decision.tier, override: true };
+			return { policy: "deny", tier: decision.tier, override: true, alwaysPrompt: false };
 		}
 		return {
 			policy: "prompt",
 			tier: decision.tier,
 			override: true,
+			alwaysPrompt: false,
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
 
 	if (userPolicy) {
-		return { policy: userPolicy, tier: decision.tier, override: false };
+		return { policy: userPolicy, tier: decision.tier, override: false, alwaysPrompt: false };
 	}
 
 	if (modeApprovesTier(mode, decision.tier)) {
-		return { policy: "allow", tier: decision.tier, override: false };
+		return { policy: "allow", tier: decision.tier, override: false, alwaysPrompt: false };
 	}
 
 	return {
 		policy: "prompt",
 		tier: decision.tier,
 		override: false,
+		alwaysPrompt: false,
 		...(decision.reason ? { reason: decision.reason } : {}),
 	};
 }

@@ -5,6 +5,7 @@
 ### Added
 
 - Added Anthropic extra-usage reporting across `omp usage`, interactive `/usage`, and ACP `/usage`: the OAuth usage endpoint's authoritative `spend` payload (or legacy `extra_usage` fallback when absent) is normalized into a `Claude Extra Usage` USD row; capped accounts show limit/remaining/fractions and status, while uncapped spend exposes only its absolute used amount—rendered as `$… used` in CLI/TUI and `123.45 usd used` in ACP—without a fabricated cap, percentage, or status. ([#5575](https://github.com/can1357/oh-my-pi/issues/5575))
+- Added capability-gated native OpenAI Responses and Codex computer-use protocol support for official GPT-5.4+ targets, including GA action batches, legacy single-action normalization, screenshot outputs, safety-check replay, ordinary function-tool fallback on unsupported endpoints/models, and valid recovery for failed or orphaned calls.
 
 ### Fixed
 

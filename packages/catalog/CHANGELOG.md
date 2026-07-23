@@ -5,6 +5,7 @@
 ### Added
 
 - Added the native Meta Model API provider and Muse Spark 1.1 with Responses API reasoning replay, image input, and the full supported reasoning-effort ladder ([#4941](https://github.com/can1357/oh-my-pi/issues/4941)).
+- Added resolved `supportsNativeComputerUse` compatibility metadata, defaulting safely to official OpenAI Responses/Codex GPT-5.4+ models with explicit override support for compatible endpoints.
 
 ## [17.0.9] - 2026-07-23
 

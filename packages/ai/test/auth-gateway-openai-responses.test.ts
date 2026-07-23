@@ -229,6 +229,182 @@ describe("openai-responses parseRequest", () => {
 			itemId: "rs_x",
 		});
 	});
+
+	it("maps native computer tools, GA calls, screenshots, and safety checks to generic metadata", () => {
+		const pendingSafetyChecks = [{ id: "safe-pending", code: null, message: "Confirm navigation" }];
+		const acknowledgedSafetyChecks = [{ id: "safe-ack", code: "policy", message: null }];
+		const actions = [
+			{ type: "click", button: "left", x: 12, y: 34 },
+			{ type: "keypress", keys: ["CTRL", "L"] },
+		];
+		const parsed = parseRequest({
+			model: "gpt-computer",
+			input: [
+				{
+					type: "computer_call",
+					id: "cu_native",
+					call_id: "call_native",
+					status: "completed",
+					actions,
+					action: { type: "wait" },
+					pending_safety_checks: pendingSafetyChecks,
+				},
+				{
+					type: "computer_call_output",
+					call_id: "call_native",
+					output: { type: "computer_screenshot", image_url: "data:image/png;base64,aW1hZ2U=" },
+					acknowledged_safety_checks: acknowledgedSafetyChecks,
+				},
+			],
+			tools: [
+				{ type: "computer" },
+				{ type: "function", name: "lookup", description: "Look up", parameters: { type: "object" } },
+			],
+			tool_choice: { type: "computer" },
+		});
+
+		expect(parsed.context.tools).toEqual([
+			{
+				name: "computer",
+				description: "Control the computer.",
+				parameters: { type: "object", properties: {} },
+				openaiNativeTool: "computer",
+			},
+			{ name: "lookup", description: "Look up", parameters: { type: "object" } },
+		]);
+		expect(parsed.options.toolChoice).toEqual({ name: "computer" });
+		expect(parsed.context.messages).toHaveLength(2);
+		const assistant = parsed.context.messages[0]!;
+		if (assistant.role !== "assistant") throw new Error("expected computer assistant call");
+		expect(assistant.content).toEqual([
+			{
+				type: "toolCall",
+				id: "call_native|cu_native",
+				name: "computer",
+				arguments: { actions, pendingSafetyChecks },
+				openaiComputer: { pendingSafetyChecks },
+			},
+		]);
+		const result = parsed.context.messages[1]!;
+		expect(result).toEqual({
+			role: "toolResult",
+			toolCallId: "call_native|cu_native",
+			toolName: "computer",
+			content: [{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" }],
+			openaiComputer: { acknowledgedSafetyChecks },
+			isError: false,
+			timestamp: expect.any(Number),
+		});
+	});
+
+	it("normalizes a legacy single computer action", () => {
+		const parsed = parseRequest({
+			model: "gpt-computer",
+			input: [
+				{
+					type: "computer_call",
+					id: "cu_legacy",
+					call_id: "call_legacy",
+					action: { type: "keypress", keys: ["CTRL", "L"] },
+					pending_safety_checks: [],
+				},
+				{
+					type: "computer_call_output",
+					call_id: "call_legacy",
+					output: { type: "computer_screenshot", image_url: "data:image/jpeg;base64,c2NyZWVu" },
+				},
+			],
+		});
+		const assistant = parsed.context.messages[0]!;
+		if (assistant.role !== "assistant") throw new Error("expected computer assistant call");
+		expect(assistant.content[0]).toMatchObject({
+			type: "toolCall",
+			arguments: { actions: [{ type: "keypress", keys: ["CTRL", "L"] }], pendingSafetyChecks: [] },
+			openaiComputer: { pendingSafetyChecks: [] },
+		});
+	});
+
+	it("removes computer protocol pairs that cannot produce a replayable screenshot", () => {
+		const fileBacked = parseRequest({
+			model: "gpt-computer",
+			input: [
+				{
+					type: "computer_call",
+					id: "cu_file",
+					call_id: "call_file",
+					actions: [{ type: "screenshot" }],
+					pending_safety_checks: [],
+				},
+				{
+					type: "computer_call_output",
+					call_id: "call_file",
+					output: { type: "computer_screenshot", file_id: "file_sensitive_not_echoed" },
+				},
+			],
+		});
+		expect(fileBacked.context.messages).toHaveLength(1);
+		const recovery = fileBacked.context.messages[0]!;
+		if (recovery.role !== "assistant") throw new Error("expected assistant recovery note");
+		expect(recovery.content).toEqual([
+			{
+				type: "text",
+				text: "[Computer call returned a file-backed screenshot that this gateway cannot replay; call_id=call_file.]",
+			},
+		]);
+		expect(JSON.stringify(fileBacked.context.messages)).not.toContain("file_sensitive_not_echoed");
+		expect(fileBacked.context.messages.some(message => message.role === "toolResult")).toBe(false);
+
+		const interrupted = parseRequest({
+			model: "gpt-computer",
+			input: [
+				{
+					type: "computer_call",
+					id: "cu_interrupted",
+					call_id: "call_interrupted",
+					actions: [{ type: "wait" }],
+					pending_safety_checks: [],
+				},
+			],
+		});
+		const interruptedAssistant = interrupted.context.messages[0]!;
+		if (interruptedAssistant.role !== "assistant") throw new Error("expected interrupted recovery note");
+		expect(interruptedAssistant.content).toEqual([
+			{
+				type: "text",
+				text: "[Computer call interrupted before a screenshot was recorded; call_id=call_interrupted.]",
+			},
+		]);
+
+		expect(() =>
+			parseRequest({
+				model: "gpt-computer",
+				input: [
+					{
+						type: "computer_call",
+						id: "cu_failed",
+						call_id: "call_failed",
+						actions: [{ type: "screenshot" }],
+						pending_safety_checks: [],
+					},
+					{ type: "computer_call_output", call_id: "call_failed", status: "failed" },
+				],
+			}),
+		).toThrow(/computer_call_output|output/);
+		expect(() =>
+			parseRequest({
+				model: "gpt-computer",
+				input: [
+					{
+						type: "computer_call",
+						id: "cu_mismatch",
+						call_id: "call_mismatch",
+						actions: [{ type: "wait" }],
+					},
+					{ type: "function_call_output", call_id: "call_mismatch", output: "failed" },
+				],
+			}),
+		).toThrow(/requires computer_call_output/);
+	});
 });
 
 describe("openai-responses encodeResponse", () => {
@@ -377,6 +553,72 @@ describe("openai-responses encodeResponse", () => {
 
 		expect(body.status).toBe("incomplete");
 		expect(body.incomplete_details).toEqual({ reason: "max_output_tokens" });
+	});
+
+	it("encodes native computer calls and round-trips them through request parsing", () => {
+		const pendingSafetyChecks = [{ id: "safe-output", code: "policy", message: "Confirm click" }];
+		const actions = [
+			{ type: "move", x: 40, y: 50 },
+			{ type: "click", button: "left", x: 40, y: 50 },
+		];
+		const message: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-computer",
+			content: [
+				{
+					type: "toolCall",
+					id: "call_output|cu_output",
+					name: "computer",
+					arguments: { actions, pendingSafetyChecks },
+					openaiComputer: { pendingSafetyChecks },
+				},
+			],
+			usage: zeroUsage(),
+			stopReason: "toolUse",
+			timestamp: 1_700_000_000_000,
+		};
+
+		const body = encodeResponse(message, "gpt-computer-requested");
+		const output = body.output as Array<Record<string, unknown>>;
+		expect(output).toEqual([
+			{
+				type: "computer_call",
+				id: "cu_output",
+				call_id: "call_output",
+				actions,
+				pending_safety_checks: pendingSafetyChecks,
+				status: "completed",
+			},
+		]);
+		expect(output.some(item => item.type === "function_call")).toBe(false);
+
+		const roundTrip = parseRequest({
+			model: "gpt-computer",
+			input: [
+				...output,
+				{
+					type: "computer_call_output",
+					call_id: "call_output",
+					output: { type: "computer_screenshot", image_url: "data:image/png;base64,cm91bmQtdHJpcA==" },
+					acknowledged_safety_checks: pendingSafetyChecks,
+				},
+			],
+		});
+		const assistant = roundTrip.context.messages[0]!;
+		if (assistant.role !== "assistant") throw new Error("expected round-tripped computer call");
+		expect(assistant.content[0]).toEqual({
+			type: "toolCall",
+			id: "call_output|cu_output",
+			name: "computer",
+			arguments: { actions, pendingSafetyChecks },
+			openaiComputer: { pendingSafetyChecks },
+		});
+		const result = roundTrip.context.messages[1]!;
+		if (result.role !== "toolResult") throw new Error("expected round-tripped computer output");
+		expect(result.content).toEqual([{ type: "image", mimeType: "image/png", data: "cm91bmQtdHJpcA==" }]);
+		expect(result.openaiComputer).toEqual({ acknowledgedSafetyChecks: pendingSafetyChecks });
 	});
 });
 
@@ -690,5 +932,66 @@ describe("openai-responses encodeStream", () => {
 		const response = incomplete.response as Record<string, unknown>;
 		expect(response.status).toBe("incomplete");
 		expect(response.incomplete_details).toEqual({ reason: "max_output_tokens" });
+	});
+
+	it("streams computer calls as atomic native items without function argument events", async () => {
+		const stream = new AssistantMessageEventStream();
+		const pendingSafetyChecks = [{ id: "safe-stream", code: null, message: "Confirm typing" }];
+		const actions = [
+			{ type: "click", button: "left", x: 7, y: 9 },
+			{ type: "type", text: "hello" },
+		];
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "call_stream|cu_stream",
+			name: "computer",
+			arguments: { actions, pendingSafetyChecks },
+			openaiComputer: { pendingSafetyChecks },
+		};
+		const base: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-computer",
+			content: [],
+			usage: zeroUsage(),
+			stopReason: "toolUse",
+			timestamp: 1_700_000_000_000,
+		};
+		const partial: AssistantMessage = { ...base, content: [toolCall] };
+
+		queueMicrotask(() => {
+			stream.push({ type: "start", partial: base });
+			stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+			stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+			stream.push({ type: "done", reason: "toolUse", message: partial });
+		});
+
+		const frames = parseSse(await collectStream(encodeStream(stream, "gpt-computer-requested")));
+		const names = frames.map(frame => frame.event);
+		expect(names).not.toContain("response.function_call_arguments.delta");
+		expect(names).not.toContain("response.function_call_arguments.done");
+		const added = frames.find(frame => frame.event === "response.output_item.added")!;
+		expect((added.data as Record<string, unknown>).item).toEqual({
+			type: "computer_call",
+			id: "cu_stream",
+			call_id: "call_stream",
+			actions,
+			pending_safety_checks: pendingSafetyChecks,
+			status: "in_progress",
+		});
+		const done = frames.find(frame => frame.event === "response.output_item.done")!;
+		const completedItem = {
+			type: "computer_call",
+			id: "cu_stream",
+			call_id: "call_stream",
+			actions,
+			pending_safety_checks: pendingSafetyChecks,
+			status: "completed",
+		};
+		expect((done.data as Record<string, unknown>).item).toEqual(completedItem);
+		const completed = frames.find(frame => frame.event === "response.completed")!;
+		const response = (completed.data as Record<string, unknown>).response as Record<string, unknown>;
+		expect(response.output).toEqual([completedItem]);
 	});
 });

@@ -175,13 +175,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			if (!this.runner.hasUI()) {
 				const reason = "no interactive UI available";
 				await resolveApproval(false, reason);
-				throw new Error(
-					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
-						`Options:\n` +
-						`  1. Set tools.approvalMode: yolo in /settings\n` +
-						`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
-						`  3. Use an interactive UI to approve the tool call`,
-				);
+				const recovery = resolved.alwaysPrompt
+					? "Use an interactive UI to explicitly confirm this call. Auto-approval and allow policy cannot bypass it."
+					: `Options:\n  1. Set tools.approvalMode: yolo in /settings\n  2. Add tools.approval.${this.tool.name}: allow to config\n  3. Use an interactive UI to approve the tool call`;
+				throw new Error(`Tool "${this.tool.name}" requires approval but no interactive UI available.\n${recovery}`);
 			}
 
 			const uiContext = this.runner.getUIContext();
@@ -228,7 +225,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		}
 
 		// Execute the actual tool
-		let result: { content: any; details?: TDetails };
+		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
 
 		try {
@@ -253,7 +250,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 				content: result.content,
 				details: result.details,
-				isError: !!executionError,
+				isError: result.isError === true || !!executionError,
 			});
 
 			if (resultResult) {
@@ -264,7 +261,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				// original execution outcome stands. This lets a handler rewrite a failed
 				// call's model-visible content/details while keeping it an error, flip a
 				// failure to success, or flag a success as an error.
-				const effectiveError = resultResult.isError ?? !!executionError;
+				const effectiveError = resultResult.isError ?? (result.isError === true || !!executionError);
 
 				// Return the (possibly modified) result carrying the error flag rather than
 				// rethrowing the original exception. The agent loop honors
@@ -272,10 +269,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				// `coerceToolResult` in agent-loop), so replacement failure content reaches
 				// the model while the call remains an error — the original exception text is
 				// no longer forced through, which previously discarded the replacement.
+				// Spread the framework result first so framework-owned provider replay
+				// metadata remains attached without entering the extension event/patch contract.
 				return {
+					...result,
 					content: modifiedContent,
 					details: modifiedDetails,
-					...(effectiveError ? { isError: true } : {}),
+					isError: effectiveError || undefined,
 				};
 			}
 		}

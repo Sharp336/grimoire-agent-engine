@@ -359,6 +359,8 @@ export interface OpenAICompat {
 	strictResponsesPairing?: boolean;
 	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: auto-detected (false for GitHub Copilot, which rejects it with a 400). */
 	supportsImageDetailOriginal?: boolean;
+	/** Whether the Responses endpoint/model supports OpenAI's GA native computer-use protocol. Default: official OpenAI GPT-5.4+. */
+	supportsNativeComputerUse?: boolean;
 	/** Whether streamed reasoning deltas for the same field may repeat the full cumulative text snapshot. Default: false. */
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
@@ -596,6 +598,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "thinkingKeep"
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
+			| "supportsNativeComputerUse"
 			| "enableGeminiThinkingLoopGuard"
 			| "whenThinking"
 		>
@@ -618,6 +621,7 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	supportsLongPromptCacheRetention: boolean;
 	strictResponsesPairing: boolean;
 	supportsImageDetailOriginal: boolean;
+	supportsNativeComputerUse: boolean;
 	supportsObfuscationOptOut: boolean;
 	streamIdleTimeoutMs?: number;
 }

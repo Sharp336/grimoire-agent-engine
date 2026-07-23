@@ -24,6 +24,7 @@ export const ESSENTIAL_BUILTIN_TOOL_NAMES: Record<string, true> = {
 	read: true,
 	write: true,
 	bash: true,
+	computer: true,
 	edit: true,
 	glob: true,
 	eval: true,

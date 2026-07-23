@@ -6,7 +6,7 @@ Tool approval has two independent inputs:
    - `read`: reads data or updates UI-only session metadata.
    - `write`: mutates workspace/session state but does not execute arbitrary code.
    - `exec`: executes code, shells out, drives a browser, spawns agents, or performs similarly broad actions.
-2. **User policy** — `tools.approval.<toolName>: allow | deny | prompt` overrides the mode for that tool unless a non-yolo safety override forces a prompt.
+2. **User policy** — `tools.approval.<toolName>: allow | deny | prompt` overrides the mode for that tool unless the tool requires a safety prompt for the specific call.
 
 Tools without an `approval` declaration are treated as `exec`. This is the safe default for unknown custom tools. MCP server tools declare `write`.
 
@@ -21,6 +21,8 @@ Configure with `tools.approvalMode`:
 | `yolo` (default) | `read`, `write`, `exec` | none            |
 
 `--auto-approve` and `--yolo` force `tools.approvalMode: yolo` for the session.
+
+This table describes ordinary calls. A tool decision with `alwaysPrompt: true` still requires explicit confirmation in `yolo`.
 
 ## User overrides
 
@@ -39,10 +41,11 @@ Resolution per tool call:
 
 1. Compute the tool's approval decision from `tool.approval(args)`; omitted means `exec`.
 2. Normalize `tools.approval.<tool>` if present; invalid values are ignored.
-3. In `yolo` mode, the user policy is used when present; otherwise the call is allowed. Safety `override` reasons do not force a prompt in `yolo`.
-4. In non-yolo modes, if the tool sets `override: true`, `deny` is blocked and all other cases prompt, even if user policy says `allow`.
-5. Otherwise, a valid user policy wins.
-6. Otherwise, the active mode auto-approves or prompts by tier.
+3. If the tool sets `alwaysPrompt: true`, `deny` remains blocked and every other policy prompts, even in `yolo` or when policy says `allow`.
+4. In `yolo` mode, the user policy is used when present; otherwise the call is allowed. Ordinary `override` reasons do not force a prompt in `yolo`.
+5. In non-yolo modes, if the tool sets `override: true`, `deny` is blocked and all other cases prompt, even if user policy says `allow`.
+6. Otherwise, a valid user policy wins.
+7. Otherwise, the active mode auto-approves or prompts by tier.
 
 ## Safety overrides
 
@@ -53,6 +56,8 @@ approval: { tier: "exec", override: true, reason: "Critical pattern detected" }
 ```
 
 `bash` uses this for critical destructive patterns such as `rm -rf /`, fork bombs, remote-fetch-then-execute, writes to `/etc/passwd`, and host shutdown commands. These surface as `reason` in the approval prompt, but in `yolo` mode they are auto-approved unless a user policy for the tool is set to `prompt` or `deny`.
+
+`alwaysPrompt: true` is reserved for per-call confirmation that auto-approval must never bypass. The computer tool uses it when OpenAI returns pending safety checks. Unlike an ordinary override, neither `yolo` nor `tools.approval.computer: allow` clears this prompt; a non-interactive session rejects the call.
 
 ## Per-tool prompt details
 
@@ -69,7 +74,7 @@ Built-in and custom tools share the same shape:
 
 ```ts
 export type ToolTier = "read" | "write" | "exec";
-export type ToolApprovalDecision = ToolTier | { tier: ToolTier; reason?: string; override?: boolean };
+export type ToolApprovalDecision = ToolTier | { tier: ToolTier; reason?: string; override?: boolean; alwaysPrompt?: boolean };
 export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprovalDecision);
 
 approval?: ToolApproval;
@@ -86,6 +91,11 @@ approval: (args) => (LSP_READONLY_ACTIONS.has(args.action) ? "read" : "write");
 approval: (args) =>
   isCritical(args.command)
     ? { tier: "exec", override: true, reason: "Critical pattern detected" }
+    : "exec";
+
+approval: (args) =>
+  args.pendingSafetyChecks.length > 0
+    ? { tier: "exec", alwaysPrompt: true, reason: "Provider safety check" }
     : "exec";
 ```
 
@@ -117,4 +127,4 @@ When ACP approval is required, OMP routes it through the ACP client instead of t
 
 ## Subagents
 
-Subagents run headless with `tools.approvalMode: yolo` so they do not stall waiting for UI. The parent `task` approval is the authorization boundary. User `tools.approval.<tool>` settings continue to control whether a tool is allowed, prompted, or blocked.
+Subagents run headless with `tools.approvalMode: yolo` so ordinary calls do not stall waiting for UI. The parent `task` approval is the authorization boundary, and user `tools.approval.<tool>` settings continue to control ordinary calls. A tool's `alwaysPrompt: true` decision is not bypassed; without an interactive UI that call fails closed.

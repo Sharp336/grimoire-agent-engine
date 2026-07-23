@@ -1,7 +1,7 @@
 /**
  * Tool wrapper - wraps tools with hook callbacks for interception.
  */
-import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
@@ -38,7 +38,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
-	) {
+	): Promise<AgentToolResult<TDetails, TParameters>> {
 		// Emit tool_call event - hooks can block execution
 		// If hook errors/times out, block by default (fail-safe)
 		if (this.hookRunner.hasHandlers("tool_call")) {
@@ -82,14 +82,16 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					),
 					content: result.content,
 					details: result.details,
-					isError: false,
+					isError: result.isError === true,
 				})) as ToolResultEventResult | undefined;
 
 				// Apply modifications if any
 				if (resultResult) {
 					return {
+						...result,
 						content: resultResult.content ?? result.content,
 						details: (resultResult.details ?? result.details) as TDetails,
+						isError: (resultResult.isError ?? result.isError) || undefined,
 					};
 				}
 			}

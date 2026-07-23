@@ -931,6 +931,58 @@ describe("ExtensionRunner", () => {
 				isError: true,
 			});
 		});
+
+		it("preserves OpenAI computer metadata when an extension rewrites a screenshot result", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "computer-result-rewrite.ts"),
+				`
+					export default function(pi) {
+						pi.on("tool_result", (event) => ({
+							content: [...event.content, { type: "text", text: "extension annotation" }],
+							details: {
+								rewritten: true,
+								metadataExposed: Object.hasOwn(event, "openaiComputer"),
+							},
+							isError: event.isError,
+						}));
+					}
+				`,
+			);
+			const loaded = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const acknowledgedSafetyChecks = [
+				{ id: "safety-1", code: "confirm_navigation", message: "Confirm navigation" },
+			];
+			const openaiComputer = { acknowledgedSafetyChecks };
+			const screenshotTool: AgentTool = {
+				name: "computer",
+				label: "Computer",
+				description: "returns a screenshot",
+				parameters: {} as never,
+				execute: async () => ({
+					content: [{ type: "image", mimeType: "image/png", data: "full-resolution-png" }],
+					details: { original: true },
+					openaiComputer,
+				}),
+			};
+
+			const rewritten = await new ExtensionToolWrapper(screenshotTool, runner).execute("computer-call", {} as never);
+
+			expect(rewritten.content).toEqual([
+				{ type: "image", mimeType: "image/png", data: "full-resolution-png" },
+				{ type: "text", text: "extension annotation" },
+			]);
+			expect(rewritten.details).toEqual({ rewritten: true, metadataExposed: false });
+			expect(rewritten.isError).toBeUndefined();
+			expect(rewritten.openaiComputer).toBe(openaiComputer);
+			expect(rewritten.openaiComputer?.acknowledgedSafetyChecks).toEqual(acknowledgedSafetyChecks);
+		});
 	});
 
 	describe("tool_result rewrite of thrown failures", () => {

@@ -81,6 +81,10 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle> {
 	backend: "worker";
 	worker: WorkerHandle;
+	/** True when this tab owns a non-default browser context for isolated storage. */
+	isolatedStorage: boolean;
+	/** Puppeteer browser context owned and closed with this tab. */
+	browserContextId?: string;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -101,6 +105,8 @@ export interface AcquireTabOptions {
 	timeoutMs: number;
 	dialogs?: DialogPolicy;
 	cmuxSurface?: string;
+	/** Create this Puppeteer tab in a fresh browser context with isolated cookies and origin storage. */
+	isolateStorage?: boolean;
 	/**
 	 * Session id of the acquirer. Recorded on the tab when created (never on
 	 * reuse) so `releaseTabsForOwner` can walk the shared tabs map on session
@@ -194,6 +200,10 @@ async function acquireTabImpl(
 		if (existing.browser === browser && existing.state === "alive") {
 			const requestedCmuxSurface = "client" in browser ? (opts.cmuxSurface ?? browser.surface) : undefined;
 			if (existing.backend === "cmux" && existing.cmuxAttachedSurface !== requestedCmuxSurface) {
+				holdBrowser(browser);
+				tempHold = true;
+				await releaseTab(name, { kill: false });
+			} else if (existing.backend === "worker" && existing.isolatedStorage !== Boolean(opts.isolateStorage)) {
 				holdBrowser(browser);
 				tempHold = true;
 				await releaseTab(name, { kill: false });
@@ -292,7 +302,8 @@ async function acquireTabImpl(
 	// a tab nobody is waiting for.
 	if (opts.signal?.aborted) {
 		await worker.terminate().catch(() => undefined);
-		if (tempHold) await releaseBrowser(browser, { kill: false }).catch(() => undefined);
+		if (info.browserContextId) await closeBrowserContext(browser, info.browserContextId).catch(() => undefined);
+		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false }).catch(() => undefined);
 		throw new ToolAbortError("Browser tab open aborted");
 	}
 
@@ -303,6 +314,8 @@ async function acquireTabImpl(
 		browser,
 		targetId: info.targetId,
 		backend: "worker",
+		isolatedStorage: Boolean(opts.isolateStorage),
+		browserContextId: info.browserContextId,
 		worker,
 		state: "alive",
 		info,
@@ -591,7 +604,19 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 		}
 	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (forced && tab.kindTag === "headless") {
+	if (tab.browserContextId) {
+		try {
+			await waitForTabCleanup(
+				tab,
+				timeoutMs,
+				`isolated browser context ${JSON.stringify(tab.browserContextId)} (BrowserContext.close)`,
+				closeBrowserContext(tab.browser, tab.browserContextId),
+			);
+		} catch (error) {
+			cleanupError = error;
+		}
+	}
+	if (!tab.browserContextId && forced && tab.kindTag === "headless") {
 		try {
 			await waitForTabCleanup(
 				tab,
@@ -678,6 +703,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			dialogs: opts.dialogs,
 			url: opts.url,
 			waitUntil: opts.waitUntil,
+			isolateStorage: opts.isolateStorage,
 			timeoutMs: opts.timeoutMs,
 		};
 	}
@@ -787,6 +813,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		safeDir: getPuppeteerDir(),
 		targetId: tab.targetId,
 		dialogs: tab.dialogPolicy,
+		ownedBrowserContextId: tab.browserContextId,
 		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: true,
@@ -796,6 +823,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		const info = await initializeTabWorker(worker, payload, timeoutMs);
 		tab.worker = worker;
 		tab.info = info;
+		tab.browserContextId = info.browserContextId;
 		tab.state = "alive";
 		worker.onMessage(msg => handleTabMessage(tab, msg));
 	} catch (error) {
@@ -805,6 +833,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 			const info = await initializeTabWorker(worker, payload, timeoutMs);
 			tab.worker = worker;
 			tab.info = info;
+			tab.browserContextId = info.browserContextId;
 			tab.state = "alive";
 			worker.onMessage(msg => handleTabMessage(tab, msg));
 		} catch (inlineError) {
@@ -832,9 +861,24 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 		return;
 	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (tab.kindTag === "headless") await closeOrphanTarget(tab);
+	if (tab.browserContextId) {
+		await closeBrowserContext(tab.browser, tab.browserContextId).catch(() => closeOrphanTarget(tab));
+	} else if (tab.kindTag === "headless") {
+		await closeOrphanTarget(tab);
+	}
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(name);
+}
+
+async function closeBrowserContext(browser: PuppeteerBrowserHandle, browserContextId: string): Promise<void> {
+	const session = await browser.browser.target().createCDPSession();
+	try {
+		const { browserContextIds } = await session.send("Target.getBrowserContexts");
+		if (!browserContextIds.includes(browserContextId)) return;
+		await session.send("Target.disposeBrowserContext", { browserContextId });
+	} finally {
+		await session.detach().catch(() => undefined);
+	}
 }
 
 async function closeOrphanTarget(tab: WorkerTabSession): Promise<void> {

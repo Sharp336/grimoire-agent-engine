@@ -22,6 +22,7 @@ import {
 	isOpenAISamplingRestrictedModelId,
 	isQwenModelId,
 	modelFamilyToken,
+	supportsOpenAINativeComputerUseModelId,
 } from "../identity/family";
 import type {
 	ModelSpec,
@@ -609,6 +610,18 @@ interface OpenAIResponsesSpecLike {
 	compat?: OpenAICompat;
 }
 
+function isOfficialOpenAINativeComputerEndpoint(provider: string, baseUrl: string): boolean {
+	if (provider !== "openai" && provider !== "openai-codex") return false;
+	if (!baseUrl) return true;
+	try {
+		const hostname = new URL(baseUrl).hostname;
+		if (provider === "openai") return hostname === "api.openai.com";
+		return hostname === "api.openai.com" || hostname === "chatgpt.com";
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Build the resolved Responses-API compat record. Most shared OpenAI-compatible
  * capability defaults intentionally mirror chat-completions, while Responses-
@@ -624,6 +637,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 	const isOpenRouter = modelMatchesHost({ provider: spec.provider, baseUrl }, "openrouter");
 	const isOpenAIUrl = hostMatchesUrl(baseUrl, "openai");
 	const id = spec.id ?? "";
+	const isOfficialOpenAIEndpoint = isOfficialOpenAINativeComputerEndpoint(spec.provider, baseUrl);
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] = isOpenRouter ? "openrouter" : "openai";
 	const isKimiModel = id ? isKimiModelId(id) : false;
 	const isAnthropicModel = id ? isClaudeModelId(id) || isAnthropicNamespacedModelId(id) : false;
@@ -652,6 +666,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// clamps; xai-oauth is provider-id only (same host family as paid `xai`).
 		supportsImageDetailOriginal:
 			spec.provider !== "xai-oauth" && !modelMatchesHost({ provider: spec.provider, baseUrl }, "githubCopilot"),
+		supportsNativeComputerUse: isOfficialOpenAIEndpoint && supportsOpenAINativeComputerUseModelId(id),
 		reasoningEffortMap: {},
 		supportsReasoningParams: true,
 		// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
@@ -723,6 +738,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsLongPromptCacheRetention: compat.supportsLongPromptCacheRetention,
 		strictResponsesPairing: compat.strictResponsesPairing,
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
+		supportsNativeComputerUse: compat.supportsNativeComputerUse,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 	} satisfies ResponsesOnlyCompat;
 }

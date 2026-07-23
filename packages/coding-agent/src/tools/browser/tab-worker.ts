@@ -6,6 +6,7 @@ import { postmortem, Snowflake, untilAborted, withTimeout } from "@oh-my-pi/pi-u
 import type { HTMLElement } from "linkedom";
 import type {
 	Browser,
+	BrowserContext,
 	CDPSession,
 	Dialog,
 	ElementHandle,
@@ -739,6 +740,7 @@ export function describeInflight(inflight: Map<number, InflightOp>): string {
 export class WorkerCore {
 	#transport: Transport;
 	#browser?: Browser;
+	#ownedBrowserContext?: BrowserContext;
 	#page?: Page;
 	#targetId?: string;
 	#elementCache = new Map<number, ElementHandle>();
@@ -802,7 +804,12 @@ export class WorkerCore {
 				protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 			});
 			if (payload.mode === "headless") {
-				this.#page = await this.#browser.newPage();
+				if (payload.isolateStorage) {
+					this.#ownedBrowserContext = await this.#browser.createBrowserContext();
+					this.#page = await this.#ownedBrowserContext.newPage();
+				} else {
+					this.#page = await this.#browser.newPage();
+				}
 				this.#observeDialogs();
 				await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
 				await applyViewport(this.#page, payload.viewport);
@@ -823,12 +830,25 @@ export class WorkerCore {
 				const page = await target.page();
 				if (!page) throw new ToolError(`Target ${payload.targetId} is no longer available on the attached browser`);
 				this.#page = page;
+				if (payload.ownedBrowserContextId) {
+					const context = page.browserContext();
+					if (context.id !== payload.ownedBrowserContextId) {
+						throw new ToolError(`Target ${payload.targetId} moved out of its owned browser context`);
+					}
+					this.#ownedBrowserContext = context;
+				}
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#transport.send({ type: "ready", info: await this.#currentReadyInfo() });
 		} catch (error) {
+			if (payload.mode === "headless") {
+				if (this.#ownedBrowserContext) await this.#ownedBrowserContext.close().catch(() => undefined);
+				else if (this.#page && !this.#page.isClosed()) await this.#page.close().catch(() => undefined);
+			}
+			this.#ownedBrowserContext = undefined;
+			if (this.#browser?.connected) this.#browser.disconnect();
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
 		}
 	}
@@ -890,6 +910,7 @@ export class WorkerCore {
 			title: await page.title().catch(() => undefined),
 			viewport: page.viewport() ?? DEFAULT_VIEWPORT,
 			targetId,
+			browserContextId: this.#ownedBrowserContext?.id,
 		};
 	}
 
@@ -1843,7 +1864,8 @@ export class WorkerCore {
 		this.#clearElementCache();
 		const page = this.#page;
 		if (this.#dialogHandler && page && !page.isClosed()) page.off("dialog", this.#dialogHandler);
-		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
+		if (this.#ownedBrowserContext) await this.#ownedBrowserContext.close().catch(() => undefined);
+		else if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
 		if (this.#browser?.connected) this.#browser.disconnect();
 		this.#transport.send({ type: "closed" });
 		this.#transport.close();

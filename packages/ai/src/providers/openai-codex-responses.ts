@@ -75,6 +75,7 @@ import {
 } from "./openai-codex/request-transformer";
 import { CodexApiError } from "./openai-codex/response-handler";
 import type {
+	ResponseComputerToolCall,
 	ResponseCustomToolCall,
 	ResponseFunctionToolCall,
 	ResponseInput,
@@ -86,6 +87,7 @@ import type {
 import {
 	accumulateCustomToolCallInputDelta,
 	accumulateToolCallArgumentsDelta,
+	adaptResponsesReplayItemsForModel,
 	appendMessageContentPart,
 	appendMessageTextDelta,
 	appendReasoningSummaryPart,
@@ -97,6 +99,7 @@ import {
 	buildResponsesDeltaInput,
 	convertResponsesAssistantMessage,
 	convertResponsesInputContent,
+	createOpenAIComputerToolCall,
 	createSequentialCutoffSummaryState,
 	encodeResponsesToolCallId,
 	encodeTextSignatureV1,
@@ -111,6 +114,7 @@ import {
 	populateResponsesUsageFromResponse,
 	promoteResponsesToolUseStopReason,
 	type SequentialCutoffSummaryState,
+	supportsOpenAINativeComputerUse,
 } from "./openai-shared";
 import { redactSensitiveInObject, transformMessages } from "./transform-messages";
 
@@ -295,7 +299,12 @@ function createCodexWebSocketTimeoutMessage(reason: string, details: CodexWebSoc
 }
 
 type CodexTransport = "sse" | "websocket";
-type CodexEventItem = ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | ResponseCustomToolCall;
+type CodexEventItem =
+	| ResponseReasoningItem
+	| ResponseOutputMessage
+	| ResponseFunctionToolCall
+	| ResponseCustomToolCall
+	| ResponseComputerToolCall;
 type CodexOutputBlock =
 	| ThinkingContent
 	| TextContent
@@ -1096,6 +1105,9 @@ export function normalizeCodexToolChoice(
 			: undefined;
 		const offeredTool = customTool ?? directTool;
 		if (!offeredTool) return undefined;
+		if (offeredTool.openaiNativeTool === "computer" && model && supportsOpenAINativeComputerUse(model)) {
+			return { type: "computer" };
+		}
 		return customTool
 			? { type: "custom", name: customTool.customWireName ?? customTool.name }
 			: { type: "function", name: offeredTool.name };
@@ -1610,6 +1622,9 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			[kStreamingPartialJson]: item.input ?? "",
 		};
 	}
+	if (item.type === "computer_call") {
+		return { ...createOpenAIComputerToolCall(item), [kStreamingPartialJson]: "" };
+	}
 	return null;
 }
 
@@ -2047,6 +2062,23 @@ class CodexStreamProcessor {
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+			return;
+		}
+
+		if (item.type === "computer_call") {
+			const toolCall = createOpenAIComputerToolCall(item);
+			let toolCallIndex = contentIndex;
+			if (block?.type === "toolCall") {
+				block.arguments = toolCall.arguments;
+				block.openaiComputer = toolCall.openaiComputer;
+				clearStreamingPartialJson(block);
+			} else {
+				output.content.push(toolCall);
+				toolCallIndex = output.content.length - 1;
+			}
+			runtime.closeOpenItem(entry);
+			runtime.canSafelyReplayWebsocketOverSse = false;
+			stream.push({ type: "toolcall_end", contentIndex: toolCallIndex, toolCall, partial: output });
 			return;
 		}
 	}
@@ -3955,14 +3987,15 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				| Array<ResponseInput[number]>
 				| undefined;
 			if (historyItems) {
-				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
-				for (const item of redactedHistoryItems) {
+				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as ResponseInput;
+				const adaptedHistoryItems = adaptResponsesReplayItemsForModel(redactedHistoryItems, model, context.tools);
+				for (const item of adaptedHistoryItems) {
 					const maybe = item as { type?: string; call_id?: string };
 					if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
 						customCallIds.add(maybe.call_id);
 					}
 				}
-				messages.push(...redactedHistoryItems);
+				messages.push(...adaptedHistoryItems);
 				msgIndex += 1;
 				continue;
 			}
@@ -3988,16 +4021,21 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			if (historyItems) {
 				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems);
 				if (sanitizedHistoryItems) {
-					for (const item of sanitizedHistoryItems) {
+					const adaptedHistoryItems = adaptResponsesReplayItemsForModel(
+						sanitizedHistoryItems as ResponseInput,
+						model,
+						context.tools,
+					);
+					for (const item of adaptedHistoryItems) {
 						const maybe = item as { type?: string; call_id?: string };
 						if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
 							customCallIds.add(maybe.call_id);
 						}
 					}
 					if (providerPayload?.dt) {
-						messages.push(...sanitizedHistoryItems);
+						messages.push(...adaptedHistoryItems);
 					} else {
-						messages.splice(0, messages.length, ...sanitizedHistoryItems);
+						messages.splice(0, messages.length, ...adaptedHistoryItems);
 						// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
 					}
 					msgIndex += 1;
@@ -4061,6 +4099,7 @@ function normalizeInputMessageContent(
 export { convertMessages as convertCodexResponsesMessages };
 
 type CodexToolPayload =
+	| { type: "computer"; name?: never }
 	| {
 			type: "function";
 			name: string;
@@ -4082,6 +4121,9 @@ export function convertOpenAICodexResponsesTools(
 ): CodexToolPayload[] {
 	const allowFreeform = model.applyPatchToolType === "freeform";
 	return tools.map((tool): CodexToolPayload => {
+		if (tool.openaiNativeTool === "computer" && supportsOpenAINativeComputerUse(model)) {
+			return { type: "computer" };
+		}
 		if (allowFreeform && tool.customFormat) {
 			return {
 				type: "custom",

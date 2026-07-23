@@ -192,7 +192,13 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 		case "fallback":
 			return { ...block, from: { ...block.from }, to: { ...block.to } };
 		case "toolCall":
-			return { ...block, arguments: structuredCloneJSON(block.arguments) };
+			return {
+				...block,
+				arguments: structuredCloneJSON(block.arguments),
+				openaiComputer: block.openaiComputer
+					? { pendingSafetyChecks: block.openaiComputer.pendingSafetyChecks.map(check => ({ ...check })) }
+					: undefined,
+			};
 	}
 }
 
@@ -275,12 +281,17 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 	// Tools may flag the result contextually useless (zero matches, elapsed
 	// wait) so compaction can elide it once consumed. Errors are never useless.
 	const useless = Boolean(rawObj && "useless" in rawObj && rawObj.useless);
+	const openaiComputer =
+		rawObj?.openaiComputer && typeof rawObj.openaiComputer === "object"
+			? (rawObj.openaiComputer as AgentToolResult["openaiComputer"])
+			: undefined;
 
 	if (!Array.isArray(rawContent)) {
 		return {
 			result: {
 				content: [{ type: "text", text: "Tool returned an invalid result: missing content array." }],
 				details,
+				...(openaiComputer ? { openaiComputer } : {}),
 				isError: true,
 			},
 			malformed: true,
@@ -323,6 +334,7 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 			content,
 			details,
 			...(isError ? { isError: true } : {}),
+			...(openaiComputer ? { openaiComputer } : {}),
 			...(useless && !isError ? { useless: true } : {}),
 		},
 		malformed: invalidBlocks > 0,
@@ -1836,7 +1848,8 @@ async function executeToolCalls(
 		// determinism if both somehow collide.
 		const tool =
 			tools?.find(t => t.name === toolCall.name) ??
-			tools?.find(t => t.customWireName !== undefined && t.customWireName === toolCall.name);
+			tools?.find(t => t.customWireName !== undefined && t.customWireName === toolCall.name) ??
+			tools?.find(t => t.openaiNativeTool === toolCall.name);
 		const args = toolCall.arguments as Record<string, unknown>;
 		const interruptibleMode = tool?.interruptible;
 		let interruptible = false;
@@ -1937,6 +1950,7 @@ async function executeToolCalls(
 			toolName: toolCall.name,
 			content: result.content,
 			details: result.details,
+			...(result.openaiComputer ? { openaiComputer: result.openaiComputer } : {}),
 			isError,
 			...(result.useless && !isError ? { useless: true } : {}),
 			timestamp: Date.now(),
@@ -2149,6 +2163,7 @@ async function executeToolCalls(
 							details: after.details ?? result.details,
 							isError: after.isError ?? result.isError,
 							useless: after.useless ?? result.useless,
+							openaiComputer: result.openaiComputer,
 						});
 						result = coerced.result;
 						isError = coerced.malformed || (after.isError ?? isError);

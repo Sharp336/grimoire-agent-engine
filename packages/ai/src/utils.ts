@@ -20,7 +20,7 @@ export function normalizeToolCallId(id: string): string {
 	return sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
 }
 
-type ResponsesToolItemIdPrefix = "fc" | "ctc";
+type ResponsesToolItemIdPrefix = "fc" | "ctc" | "cu";
 
 export function normalizeResponsesToolCallId(
 	id: string,
@@ -51,7 +51,9 @@ function normalizeResponsesItemId(itemId: string, fallbackPrefix: ResponsesToolI
 	const isAllowedPrefix = prefix
 		? fallbackPrefix === "ctc"
 			? prefix === "ctc"
-			: prefix === "fc" || prefix === "fcr"
+			: fallbackPrefix === "cu"
+				? prefix === "cu"
+				: prefix === "fc" || prefix === "fcr"
 		: false;
 	if (!prefix || !isAllowedPrefix) {
 		return `${fallbackPrefix}_${Bun.hash(itemId).toString(36)}`;

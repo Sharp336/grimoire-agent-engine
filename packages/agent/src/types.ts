@@ -8,6 +8,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	OpenAIComputerResultMetadata,
 	ServiceTier,
 	SimpleStreamOptions,
 	Static,
@@ -576,6 +577,8 @@ export interface AgentToolResult<T = any, _TInput = unknown> {
 	isError?: boolean;
 	/** Marks the result as contextually useless: safe for compaction to elide once consumed (e.g. zero matches, wait timeout). Ignored when isError is set. */
 	useless?: boolean;
+	/** Native OpenAI computer-use result metadata required for wire replay. */
+	openaiComputer?: OpenAIComputerResultMetadata;
 }
 
 // Callback for streaming tool execution updates
@@ -608,13 +611,21 @@ export type ToolLoadMode = "essential" | "discoverable";
 /**
  * Per-tool approval declaration.
  * - bare tier ("read" / "write" / "exec") — static classification.
- * - object form — adds a `reason` (shown in the prompt) and/or `override: true`
- *   (force-prompt even in modes that would otherwise auto-approve this tier).
+ * - object form — adds a `reason` (shown in the prompt), `override: true`
+ *   (force-prompt outside yolo), or `alwaysPrompt: true` (explicit confirmation
+ *   required even in yolo and despite per-tool allow policy).
  * - function — dynamic, given parsed args. Returns either form above.
  *
  * Omitted approvals are treated as "exec" by callers that enforce approvals.
  */
-export type ToolApprovalDecision = ToolTier | { tier: ToolTier; reason?: string; override?: boolean };
+export type ToolApprovalDecision =
+	| ToolTier
+	| {
+			tier: ToolTier;
+			reason?: string;
+			override?: boolean;
+			alwaysPrompt?: boolean;
+	  };
 export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprovalDecision);
 
 /**

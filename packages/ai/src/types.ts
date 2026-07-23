@@ -628,6 +628,23 @@ export interface ImageContent {
 	detail?: "auto" | "low" | "high" | "original";
 }
 
+/** OpenAI computer-use safety check preserved across call/result replay. */
+export interface OpenAIComputerSafetyCheck {
+	id: string;
+	code?: string | null;
+	message?: string | null;
+}
+
+/** Provider metadata attached to a native OpenAI computer call. */
+export interface OpenAIComputerCallMetadata {
+	pendingSafetyChecks: OpenAIComputerSafetyCheck[];
+}
+
+/** Provider metadata attached to a native OpenAI computer result. */
+export interface OpenAIComputerResultMetadata {
+	acknowledgedSafetyChecks: OpenAIComputerSafetyCheck[];
+}
+
 export interface ToolCall {
 	type: "toolCall";
 	id: string;
@@ -649,6 +666,8 @@ export interface ToolCall {
 	 * JSON function tools.
 	 */
 	customWireName?: string;
+	/** Native OpenAI computer-use metadata required for wire replay. */
+	openaiComputer?: OpenAIComputerCallMetadata;
 }
 
 export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
@@ -764,6 +783,8 @@ export interface ToolResultMessage<TDetails = unknown> {
 	toolName: string;
 	content: (TextContent | ImageContent)[]; // Supports text and images
 	details?: TDetails;
+	/** Native OpenAI computer-use result metadata required for wire replay. */
+	openaiComputer?: OpenAIComputerResultMetadata;
 	isError: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
@@ -861,6 +882,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
 	description: string;
 	parameters: TParameters;
+	/** Emit this tool through OpenAI's native computer-use protocol instead of as a function. */
+	openaiNativeTool?: "computer";
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */
 	strict?: boolean;
 	/**
