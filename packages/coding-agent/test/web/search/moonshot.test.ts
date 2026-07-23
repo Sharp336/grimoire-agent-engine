@@ -72,7 +72,7 @@ describe("Moonshot web search provider", () => {
 										tool_calls: [
 											{
 												id: "call_search_1",
-												type: "function",
+												type: "builtin_function",
 												function: {
 													name: "$web_search",
 													arguments: JSON.stringify({ query: "Moonshot AI Context Caching" }),
@@ -129,6 +129,7 @@ describe("Moonshot web search provider", () => {
 			systemPrompt: "You are a web search helper.",
 			authStorage,
 			fetch: fetchImpl,
+			temperature: 0,
 		});
 
 		expect(capturedRequests).toHaveLength(2);
@@ -141,11 +142,22 @@ describe("Moonshot web search provider", () => {
 				function: { name: "$web_search" },
 			},
 		]);
+		expect(capturedRequests[0]?.body.temperature).toBeUndefined();
 
 		// Verify turn 2 request carried assistant reasoning and tool result
 		const step2Messages = capturedRequests[1]?.body.messages as Array<Record<string, unknown>>;
 		expect(step2Messages).toHaveLength(4); // system, user, assistant (tool_calls), tool
 		expect(step2Messages[2]?.reasoning_content).toBe("Thinking about searching Moonshot caching...");
+		expect(step2Messages[2]?.tool_calls).toEqual([
+			{
+				id: "call_search_1",
+				type: "function",
+				function: {
+					name: "$web_search",
+					arguments: JSON.stringify({ query: "Moonshot AI Context Caching" }),
+				},
+			},
+		]);
 		expect(step2Messages[3]).toEqual({
 			role: "tool",
 			tool_call_id: "call_search_1",

@@ -6,7 +6,7 @@
  */
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
-import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../types";
+import type { SearchResponse, SearchSource, SearchUsage } from "../types";
 import { SearchProviderError } from "../types";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -100,7 +100,6 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 	let usageTotal: SearchUsage | undefined;
 	const searchQueries: string[] = [];
 	const sources: SearchSource[] = [];
-	const citations: SearchCitation[] = [];
 
 	while (step < MAX_STEPS) {
 		step++;
@@ -112,7 +111,8 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 		if (params.maxOutputTokens !== undefined) {
 			body.max_tokens = params.maxOutputTokens;
 		}
-		if (params.temperature !== undefined && params.temperature === 1) {
+		// Kimi K3 accepts only temperature 1; omit other tool-supplied values so the API uses its required default.
+		if (params.temperature === 1) {
 			body.temperature = 1;
 		}
 
@@ -215,7 +215,6 @@ export async function searchMoonshot(params: MoonshotSearchParams): Promise<Sear
 		provider: "moonshot",
 		answer: finalAnswer,
 		sources,
-		citations: citations.length > 0 ? citations : undefined,
 		searchQueries: searchQueries.length > 0 ? searchQueries : undefined,
 		model: modelUsed,
 		usage: usageTotal,
