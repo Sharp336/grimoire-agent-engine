@@ -104,7 +104,7 @@ import {
 	parseMCPToolName,
 } from "./mcp";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
-import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
+import { createSessionMemoryRuntimeContext, offBackend, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
@@ -3301,6 +3301,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Start after session construction so prompt assembly stays on the startup
 		// critical path, while AgentSession gates only its first agent-start hook on
 		// this task. That makes first-turn recall observe fully initialized state.
+		if (restrictToolNames) {
+			// Restricted sessions intentionally omit memory tools, instructions, and
+			// startup. Register the explicit no-op backend so AgentSession's direct-
+			// construction fallback cannot later attach the configured backend.
+			session.setMemoryBackend(offBackend);
+		}
 		const backendReady = restrictToolNames
 			? Promise.resolve()
 			: logger.time("startMemoryStartupTask", startMemoryBackend);
