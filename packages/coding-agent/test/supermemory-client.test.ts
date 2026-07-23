@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { SupermemoryClient } from "../src/supermemory/client";
 import {
 	isSupermemoryConfigured,
 	loadSupermemoryConfig,
 	resolveSupermemoryContainerTag,
 } from "../src/supermemory/config";
-import { SupermemoryClient } from "../src/supermemory/client";
 
 function fakeSettings(values: Record<string, unknown> = {}) {
 	return { get: (key: string) => values[key] } as never;
@@ -50,16 +50,32 @@ describe("Supermemory configuration", () => {
 			{ SUPERMEMORY_API_KEY: "test-secret" },
 		);
 		expect(config).toMatchObject({ retainEveryNTurns: 5, recallLimit: 12, threshold: 0.8 });
-		expect(loadSupermemoryConfig(fakeSettings({ "supermemory.recallLimit": "twelve" }), { SUPERMEMORY_API_KEY: "test-secret" }).recallLimit).toBe(8);
+		expect(
+			loadSupermemoryConfig(fakeSettings({ "supermemory.recallLimit": "twelve" }), {
+				SUPERMEMORY_API_KEY: "test-secret",
+			}).recallLimit,
+		).toBe(8);
 	});
 
-	it("allows a process-only HTTPS origin override but rejects unsafe origins", () => {
-		expect(loadSupermemoryConfig(fakeSettings(), { SUPERMEMORY_API_KEY: "secret", SUPERMEMORY_BASE_URL: "https://memory.example/" }).baseUrl).toBe(
-			"https://memory.example",
-		);
-		expect(loadSupermemoryConfig(fakeSettings(), { SUPERMEMORY_API_KEY: "secret", SUPERMEMORY_BASE_URL: "http://memory.example" }).baseUrl).toBe(
-			"https://api.supermemory.ai",
-		);
+	it("allows HTTPS and loopback HTTP process-only origin overrides but rejects remote plaintext origins", () => {
+		expect(
+			loadSupermemoryConfig(fakeSettings(), {
+				SUPERMEMORY_API_KEY: "secret",
+				SUPERMEMORY_BASE_URL: "https://memory.example/",
+			}).baseUrl,
+		).toBe("https://memory.example");
+		expect(
+			loadSupermemoryConfig(fakeSettings(), {
+				SUPERMEMORY_API_KEY: "secret",
+				SUPERMEMORY_BASE_URL: "http://localhost:6767/",
+			}).baseUrl,
+		).toBe("http://localhost:6767");
+		expect(
+			loadSupermemoryConfig(fakeSettings(), {
+				SUPERMEMORY_API_KEY: "secret",
+				SUPERMEMORY_BASE_URL: "http://memory.example",
+			}).baseUrl,
+		).toBe("https://api.supermemory.ai");
 	});
 
 	it("uses stable opaque project tags and a stable global tag", async () => {
@@ -88,11 +104,16 @@ describe("SupermemoryClient", () => {
 			.spyOn(globalThis, "fetch")
 			.mockResolvedValueOnce(new Response(JSON.stringify({ id: "doc-1", status: "queued" }), { status: 200 }))
 			.mockResolvedValueOnce(
-				new Response(JSON.stringify({ results: [{ id: "m-1", memory: "remembered", similarity: 0.9 }], total: 1 }), {
-					status: 200,
-				}),
+				new Response(
+					JSON.stringify({ results: [{ id: "m-1", memory: "remembered", similarity: 0.9 }], total: 1 }),
+					{
+						status: 200,
+					},
+				),
 			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ profile: { static: ["prefers terse"], dynamic: [] } }), { status: 200 }));
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ profile: { static: ["prefers terse"], dynamic: [] } }), { status: 200 }),
+			);
 		const client = new SupermemoryClient("https://example.test/", "test-secret");
 
 		await client.createDocument({
@@ -107,7 +128,10 @@ describe("SupermemoryClient", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(3);
 		const [documentUrl, documentInit] = fetchMock.mock.calls[0]!;
 		expect(documentUrl).toBe("https://example.test/v3/documents");
-		expect(documentInit).toMatchObject({ method: "POST", headers: { Authorization: "Bearer test-secret", "Content-Type": "application/json" } });
+		expect(documentInit).toMatchObject({
+			method: "POST",
+			headers: { Authorization: "Bearer test-secret", "Content-Type": "application/json" },
+		});
 		expect(JSON.parse(documentInit!.body as string)).toEqual({
 			content: "save this",
 			containerTags: ["omp-global"],
@@ -131,11 +155,29 @@ describe("SupermemoryClient", () => {
 		const fetchMock = vi
 			.spyOn(globalThis, "fetch")
 			.mockResolvedValueOnce(
-				new Response(JSON.stringify({ success: true, containerTag: "omp-global", deletedDocumentsCount: 2, deletedMemoriesCount: 3 }), {
-					status: 200,
-				}),
+				new Response(
+					JSON.stringify({
+						success: true,
+						containerTag: "omp-global",
+						deletedDocumentsCount: 2,
+						deletedMemoriesCount: 3,
+					}),
+					{
+						status: 200,
+					},
+				),
 			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ success: false, containerTag: "omp-global", deletedDocumentsCount: 0, deletedMemoriesCount: 0 }), { status: 200 }));
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						success: false,
+						containerTag: "omp-global",
+						deletedDocumentsCount: 0,
+						deletedMemoriesCount: 0,
+					}),
+					{ status: 200 },
+				),
+			);
 		const client = new SupermemoryClient("https://example.test", "test-secret");
 
 		await expect(client.deleteContainerTag("omp-global")).resolves.toEqual({
@@ -144,7 +186,9 @@ describe("SupermemoryClient", () => {
 			deletedDocumentsCount: 2,
 			deletedMemoriesCount: 3,
 		});
-		await expect(client.deleteContainerTag("omp-global")).rejects.toThrow("Supermemory returned an unsuccessful clear response.");
+		await expect(client.deleteContainerTag("omp-global")).rejects.toThrow(
+			"Supermemory returned an unsuccessful clear response.",
+		);
 		expect(fetchMock.mock.calls[0]).toMatchObject([
 			"https://example.test/v3/container-tags/omp-global",
 			{ method: "DELETE", headers: { Authorization: "Bearer test-secret" } },
@@ -154,33 +198,43 @@ describe("SupermemoryClient", () => {
 	it("redacts transport failures without exposing an API credential", async () => {
 		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Authorization: Bearer test-secret"));
 		const client = new SupermemoryClient("https://example.test", "test-secret");
-		await expect(client.search({ q: "x", containerTag: "scope", searchMode: "hybrid", limit: 1, threshold: 0 })).rejects.toThrow(
-			"Supermemory request failed.",
-		);
+		await expect(
+			client.search({ q: "x", containerTag: "scope", searchMode: "hybrid", limit: 1, threshold: 0 }),
+		).rejects.toThrow("Supermemory request failed.");
 	});
 
 	it("bounds a hung request with the client timeout", async () => {
-		vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) => {
-			const { promise, reject } = Promise.withResolvers<Response>();
-			const signal = (init as RequestInit).signal;
-			signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-			return promise;
-		});
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				(...[_url, init]: Parameters<typeof fetch>) => {
+					const { promise, reject } = Promise.withResolvers<Response>();
+					const signal = (init as RequestInit).signal;
+					signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+					return promise;
+				},
+				{ preconnect: globalThis.fetch.preconnect },
+			),
+		);
 		const client = new SupermemoryClient("https://example.test", "test-secret", 1);
 
-		await expect(client.search({ q: "x", containerTag: "scope", searchMode: "hybrid", limit: 1, threshold: 0 })).rejects.toThrow(
-			"Supermemory request timed out.",
-		);
+		await expect(
+			client.search({ q: "x", containerTag: "scope", searchMode: "hybrid", limit: 1, threshold: 0 }),
+		).rejects.toThrow("Supermemory request timed out.");
 	});
 
 	it("composes a caller abort signal into search requests", async () => {
 		const controller = new AbortController();
-		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) => {
-			const { promise, reject } = Promise.withResolvers<Response>();
-			const signal = (init as RequestInit).signal;
-			signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-			return promise;
-		});
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				(...[_url, init]: Parameters<typeof fetch>) => {
+					const { promise, reject } = Promise.withResolvers<Response>();
+					const signal = (init as RequestInit).signal;
+					signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+					return promise;
+				},
+				{ preconnect: globalThis.fetch.preconnect },
+			),
+		);
 		const client = new SupermemoryClient("https://example.test", "test-secret", 1_000);
 		const search = client.search({
 			q: "x",

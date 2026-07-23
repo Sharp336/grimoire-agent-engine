@@ -1265,7 +1265,10 @@ describe("AgentSession retry delay cap", () => {
 				tools: [],
 				messages: [],
 			},
-			streamFn: mock.stream,
+			streamFn: (streamModel, context, options) => {
+				session?.beginDispose();
+				return mock.stream(streamModel, context, options);
+			},
 		});
 
 		const settings = Settings.isolated({
@@ -1290,10 +1293,6 @@ describe("AgentSession retry delay cap", () => {
 		});
 
 		const abortRetry = vi.spyOn(session, "abortRetry");
-
-		// Enter the disposing window before the empty abort lands. Without the
-		// #isDisposed guard this prompt would hang on an orphaned retry promise.
-		session.beginDispose();
 
 		await session.prompt("Trigger empty aborted turn while disposing");
 		await session.waitForIdle();

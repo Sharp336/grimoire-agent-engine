@@ -38,11 +38,15 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
 			const memory = this.session.getMemoryRuntime?.();
 			if (!memory) throw new Error("Supermemory backend is not initialised for this session.");
 			const results = await Promise.all(
-				params.items.map(item => memory.save({ content: item.content, context: item.context, source: "coding-agent-retain" })),
+				params.items.map(item =>
+					memory.save({ content: item.content, context: item.context, source: "coding-agent-retain" }),
+				),
 			);
 			const stored = results.reduce((total, result) => total + result.stored, 0);
 			const failures = results
-				.map((result, index) => (result.stored > 0 ? undefined : `item ${index + 1}: ${result.message ?? "not stored"}`))
+				.map((result, index) =>
+					result.stored > 0 ? undefined : `item ${index + 1}: ${result.message ?? "not stored"}`,
+				)
 				.filter((failure): failure is string => failure !== undefined);
 			if (failures.length > 0) {
 				throw new Error(

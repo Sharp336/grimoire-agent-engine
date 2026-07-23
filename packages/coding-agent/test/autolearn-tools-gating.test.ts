@@ -92,10 +92,7 @@ describe("autolearn tool gating", () => {
 	it("excludes automatic learning from subagents and depth-zero /tan clones while retaining manual memory tools", async () => {
 		const sub = (
 			await createTools(
-				makeSession(
-					{ "autolearn.enabled": true, "memory.backend": "mnemopi" },
-					{ taskDepth: 1, agentKind: "sub" },
-				),
+				makeSession({ "autolearn.enabled": true, "memory.backend": "mnemopi" }, { taskDepth: 1, agentKind: "sub" }),
 				["read"],
 			)
 		).map(t => t.name);
@@ -105,10 +102,7 @@ describe("autolearn tool gating", () => {
 		// `/tan` is a subagent despite starting at task depth zero.
 		const tan = (
 			await createTools(
-				makeSession(
-					{ "autolearn.enabled": true, "memory.backend": "mnemopi" },
-					{ taskDepth: 0, agentKind: "sub" },
-				),
+				makeSession({ "autolearn.enabled": true, "memory.backend": "mnemopi" }, { taskDepth: 0, agentKind: "sub" }),
 				["read"],
 			)
 		).map(t => t.name);
@@ -119,10 +113,9 @@ describe("autolearn tool gating", () => {
 
 	it("falls back to task depth when ToolSession omits agentKind", async () => {
 		const depthOnlySubagent = (
-			await createTools(
-				makeSession({ "autolearn.enabled": true, "memory.backend": "mnemopi" }, { taskDepth: 1 }),
-				["read"],
-			)
+			await createTools(makeSession({ "autolearn.enabled": true, "memory.backend": "mnemopi" }, { taskDepth: 1 }), [
+				"read",
+			])
 		).map(tool => tool.name);
 		expect(depthOnlySubagent).toEqual(expect.arrayContaining(["recall", "retain"]));
 		expect(depthOnlySubagent).not.toContain("manage_skill");

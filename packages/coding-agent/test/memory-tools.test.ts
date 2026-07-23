@@ -14,9 +14,9 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import type { MemoryRuntimeContext } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { loadMnemopiConfig, type MnemopiBackendConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
-import type { MemoryRuntimeContext } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import {
 	getMnemopiScopedDbPaths,
 	getMnemopiSessionState,
@@ -253,7 +253,11 @@ describe("Supermemory tool factories", () => {
 	});
 
 	it("renders explicit Supermemory recall as escaped untrusted background data", async () => {
-		const session = makeSession(Settings.isolated({ "memory.backend": "supermemory" }), TEST_SESSION_ID, "supermemory");
+		const session = makeSession(
+			Settings.isolated({ "memory.backend": "supermemory" }),
+			TEST_SESSION_ID,
+			"supermemory",
+		);
 		session.getMemoryRuntime = () => ({
 			status: async () => ({ backend: "supermemory", active: true, writable: true, searchable: true }),
 			search: async () => ({
@@ -407,7 +411,9 @@ describe("retain.execute", () => {
 			search: async query => ({ backend: "supermemory", query, count: 0, items: [] }),
 			save: async input => {
 				const content = typeof input === "string" ? input : input.content;
-				return content === "stored" ? { backend: "supermemory", stored: 1 } : { backend: "supermemory", stored: 0, message: "HTTP 503" };
+				return content === "stored"
+					? { backend: "supermemory", stored: 1 }
+					: { backend: "supermemory", stored: 0, message: "HTTP 503" };
 			},
 		});
 

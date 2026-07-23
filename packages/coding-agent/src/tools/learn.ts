@@ -29,7 +29,8 @@ export type LearnParams = typeof learnSchema.infer;
 export class LearnTool implements AgentTool<typeof learnSchema> {
 	readonly name = "learn";
 	readonly approval = (args: unknown) =>
-		(args as Partial<LearnParams>).skill || (this.session.getMemoryBackend?.()?.id ?? this.session.settings.get("memory.backend")) === "local"
+		(args as Partial<LearnParams>).skill ||
+		(this.session.getMemoryBackend?.()?.id ?? this.session.settings.get("memory.backend")) === "local"
 			? "write"
 			: "read";
 	readonly label = "Learn";
@@ -44,7 +45,8 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
 		const backend = session.getMemoryBackend?.()?.id ?? session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "supermemory" && backend !== "mnemopi" && backend !== "local") return null;
+		if (backend !== "hindsight" && backend !== "supermemory" && backend !== "mnemopi" && backend !== "local")
+			return null;
 		return new LearnTool(session);
 	}
 

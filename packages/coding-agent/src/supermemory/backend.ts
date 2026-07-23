@@ -2,21 +2,21 @@ import { createHash } from "node:crypto";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { extractMessages } from "../hindsight/transcript";
 import type {
 	MemoryBackend,
-	MemoryBackendOperationContext,
-	MemoryBackendSaveInput,
-	MemoryBackendSaveResult,
 	MemoryBackendBeforeAgentStartOptions,
 	MemoryBackendCommitAgentStartOptions,
+	MemoryBackendOperationContext,
 	MemoryBackendPreparedAgentStartCommit,
+	MemoryBackendSaveInput,
+	MemoryBackendSaveResult,
 	MemoryBackendSearchOptions,
 	MemoryBackendSearchResult,
 	MemoryBackendStartOptions,
 	MemoryBackendStatus,
 } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
-import { extractMessages } from "../hindsight/transcript";
 import { SupermemoryClient, type SupermemorySearchItem } from "./client";
 import {
 	isSupermemoryConfigured,
@@ -59,6 +59,7 @@ interface SupermemorySessionState {
 	ready: Promise<void>;
 	automatic: boolean;
 	lifecycleGeneration: number;
+	recallInvalidationGeneration: number;
 	scopeTransition?: Promise<void>;
 	pendingTranscriptResume: boolean;
 	retention: {
@@ -134,7 +135,8 @@ function transcriptForRetentionWindow(
 	const userMessageIndexes = messages.flatMap((message, index) => (message.role === "user" ? [index] : []));
 	const availableTurns = userMessageIndexes.length;
 	const retainedThroughTurn = forceTail ? availableTurns : firstTurn + retainEveryNTurns;
-	if (firstTurn < 0 || firstTurn >= availableTurns || (!forceTail && availableTurns < retainedThroughTurn)) return undefined;
+	if (firstTurn < 0 || firstTurn >= availableTurns || (!forceTail && availableTurns < retainedThroughTurn))
+		return undefined;
 	const start = userMessageIndexes[firstTurn]!;
 	const nextWindowStart = userMessageIndexes[retainedThroughTurn] ?? messages.length;
 	const entries = messages
@@ -154,7 +156,10 @@ function transcriptForRetentionWindow(
 	}
 	const omittedMessages = entries.length - retained.length;
 	const header = `[Automatic retention transcript truncated: ${omittedMessages} earlier message(s) omitted.]\n\n`;
-	const trailing = retained.length > 0 ? retained.join("\n\n") : entries.at(-1)!.slice(-(MAX_AUTOMATIC_TRANSCRIPT_CHARS - header.length));
+	const trailing =
+		retained.length > 0
+			? retained.join("\n\n")
+			: entries.at(-1)!.slice(-(MAX_AUTOMATIC_TRANSCRIPT_CHARS - header.length));
 	return { content: `${header}${trailing}`, retainedThroughTurn, truncated: { omittedMessages } };
 }
 
@@ -181,7 +186,10 @@ function flattenMessagesForQuery(messages: AgentMessage[]): string | undefined {
 		if (typeof message.content === "string" && message.content.trim()) return message.content.trim();
 		if (Array.isArray(message.content)) {
 			const text = message.content
-				.filter((block): block is { type: "text"; text: string } => !!block && typeof block === "object" && block.type === "text" && typeof block.text === "string")
+				.filter(
+					(block): block is { type: "text"; text: string } =>
+						!!block && typeof block === "object" && block.type === "text" && typeof block.text === "string",
+				)
 				.map(block => block.text)
 				.join("\n")
 				.trim();
@@ -191,8 +199,9 @@ function flattenMessagesForQuery(messages: AgentMessage[]): string | undefined {
 	return undefined;
 }
 
-function invalidateLifecycle(state: SupermemorySessionState): number {
+function invalidateLifecycle(state: SupermemorySessionState, preserveActiveRecall = false): number {
 	state.pendingRecall = undefined;
+	if (!preserveActiveRecall) state.recallInvalidationGeneration += 1;
 	state.lifecycleGeneration += 1;
 	return state.lifecycleGeneration;
 }
@@ -279,27 +288,37 @@ function registerContainerState(state: SupermemorySessionState, containerTag: st
 }
 
 function scopeIsCurrent(state: SupermemorySessionState, scope: SupermemoryScopeSnapshot): boolean {
-	return !state.disposed && state.lifecycleGeneration === scope.generation && state.coordinatorKey === scope.coordinatorKey;
+	return (
+		!state.disposed && state.lifecycleGeneration === scope.generation && state.coordinatorKey === scope.coordinatorKey
+	);
 }
 
-function createTrackedDocument<T>(state: SupermemorySessionState, scope: SupermemoryScopeSnapshot, write: () => Promise<T>): Promise<T> | undefined {
+function createTrackedDocument<T>(
+	state: SupermemorySessionState,
+	scope: SupermemoryScopeSnapshot,
+	write: () => Promise<T>,
+): Promise<T> | undefined {
 	const container = containerState(scope.coordinatorKey);
 	if (!scopeIsCurrent(state, scope) || container.clearing) return undefined;
 	const promise = write();
 	container.documentWrites.add(promise);
-	void promise.finally(() => {
-		container.documentWrites.delete(promise);
-		if (container.states.size === 0 && container.documentWrites.size === 0 && !container.clearing && container.successfulClearGeneration === 0) {
-			containerStates.delete(scope.coordinatorKey);
-		}
-	}).catch(() => undefined);
+	void promise
+		.finally(() => {
+			container.documentWrites.delete(promise);
+			if (
+				container.states.size === 0 &&
+				container.documentWrites.size === 0 &&
+				!container.clearing &&
+				container.successfulClearGeneration === 0
+			) {
+				containerStates.delete(scope.coordinatorKey);
+			}
+		})
+		.catch(() => undefined);
 	return promise;
 }
 
-function serializeScopeTransition<T>(
-	state: SupermemorySessionState,
-	transition: () => Promise<T>,
-): Promise<T> {
+function serializeScopeTransition<T>(state: SupermemorySessionState, transition: () => Promise<T>): Promise<T> {
 	const prior = state.scopeTransition ?? Promise.resolve();
 	const current = prior.catch(() => undefined).then(transition);
 	state.scopeTransition = current.then(
@@ -317,7 +336,7 @@ async function refreshStateForOperation(
 	state: SupermemorySessionState,
 	cwd: string,
 	session?: AgentSession,
-	options?: { refreshPromptContext?: boolean },
+	options?: { refreshPromptContext?: boolean; preserveActiveRecallOnScopeTransition?: boolean },
 ): Promise<SupermemoryScopeSnapshot | undefined> {
 	await state.ready;
 	const transition = await serializeScopeTransition(state, async () => {
@@ -334,7 +353,7 @@ async function refreshStateForOperation(
 		const resumedTranscript = state.pendingTranscriptResume;
 		const needsRefresh = containerTag !== state.containerTag;
 		if (needsRefresh) {
-			invalidateLifecycle(state);
+			invalidateLifecycle(state, options?.preserveActiveRecallOnScopeTransition);
 			const joinedAfterClear = registerContainerState(state, containerTag);
 			state.retention = {
 				scopeGeneration: state.retention.scopeGeneration + 1,
@@ -343,9 +362,13 @@ async function refreshStateForOperation(
 				// Ordinary cwd movement intentionally isolates existing turns.
 				lastRetainedTurn: resumedTranscript
 					? 0
-					: (joinedAfterClear
-						? extractMessages((session ?? state.session).sessionManager).filter(message => message.role === "user").length
-						: (session ? extractMessages(session.sessionManager).filter(message => message.role === "user").length : 0)),
+					: joinedAfterClear
+						? extractMessages((session ?? state.session).sessionManager).filter(
+								message => message.role === "user",
+							).length
+						: session
+							? extractMessages(session.sessionManager).filter(message => message.role === "user").length
+							: 0,
 			};
 			state.hasRecalledForFirstTurn = false;
 			state.lastRecallSnippet = undefined;
@@ -382,7 +405,11 @@ async function refreshStateForOperation(
 	return transition.scope;
 }
 
-function createState(session: AgentSession, settings: Settings, automatic: boolean): SupermemorySessionState | undefined {
+function createState(
+	session: AgentSession,
+	settings: Settings,
+	automatic: boolean,
+): SupermemorySessionState | undefined {
 	const config = loadSupermemoryConfig(settings);
 	if (!isSupermemoryConfigured(config)) return undefined;
 	const state = {
@@ -397,6 +424,7 @@ function createState(session: AgentSession, settings: Settings, automatic: boole
 		pendingTranscriptResume: false,
 		retention: { scopeGeneration: 0, containerTag: "", lastRetainedTurn: 0 },
 		lifecycleGeneration: 0,
+		recallInvalidationGeneration: 0,
 		observedSuccessfulClearGenerations: new Map(),
 		hasRecalledForFirstTurn: false,
 		lastSearchCount: 0,
@@ -443,13 +471,23 @@ async function saveWithState(
 					source: input.source ?? "omp",
 					...(input.context ? { context: input.context } : {}),
 					...(sessionId ? { sessionId } : {}),
-					...(retention ? { automaticRetention: true, transcriptTruncated: retention.truncated, omittedMessages: retention.omittedMessages } : {}),
+					...(retention
+						? {
+								automaticRetention: true,
+								transcriptTruncated: retention.truncated,
+								omittedMessages: retention.omittedMessages,
+							}
+						: {}),
 				},
 			}),
 		);
 		if (!document) return { backend: "supermemory", stored: 0, message: "Supermemory clear is in progress." };
 		if (!scopeIsCurrent(state, scope)) {
-			return { backend: "supermemory", stored: 0, message: "Supermemory operation was superseded by a session lifecycle change." };
+			return {
+				backend: "supermemory",
+				stored: 0,
+				message: "Supermemory operation was superseded by a session lifecycle change.",
+			};
 		}
 		state.lastMemoryId = document.id;
 		state.lastMemoryStatus = document.status;
@@ -468,11 +506,18 @@ async function searchWithState(
 	options?: MemoryBackendSearchOptions,
 	session?: AgentSession,
 ): Promise<MemoryBackendSearchResult> {
-	if (options?.signal?.aborted) return { backend: "supermemory", query, count: 0, items: [], message: "Search cancelled." };
+	if (options?.signal?.aborted)
+		return { backend: "supermemory", query, count: 0, items: [], message: "Search cancelled." };
 	try {
-
 		const scope = await refreshStateForOperation(state, cwd, session);
-		if (!scope) return { backend: "supermemory", query, count: 0, items: [], message: "Supermemory is unavailable or unconfigured." };
+		if (!scope)
+			return {
+				backend: "supermemory",
+				query,
+				count: 0,
+				items: [],
+				message: "Supermemory is unavailable or unconfigured.",
+			};
 		const response = await scope.client.search({
 			q: query,
 			containerTag: scope.containerTag,
@@ -481,9 +526,16 @@ async function searchWithState(
 			limit: Math.min(options?.limit ?? scope.config.recallLimit, scope.config.recallLimit),
 			threshold: scope.config.threshold,
 		});
-		if (options?.signal?.aborted) return { backend: "supermemory", query, count: 0, items: [], message: "Search cancelled." };
+		if (options?.signal?.aborted)
+			return { backend: "supermemory", query, count: 0, items: [], message: "Search cancelled." };
 		if (!scopeIsCurrent(state, scope)) {
-			return { backend: "supermemory", query, count: 0, items: [], message: "Search was superseded by a session lifecycle change." };
+			return {
+				backend: "supermemory",
+				query,
+				count: 0,
+				items: [],
+				message: "Search was superseded by a session lifecycle change.",
+			};
 		}
 		state.lastSearchCount = response.results.length;
 		state.lastSearchAt = Date.now();
@@ -491,7 +543,12 @@ async function searchWithState(
 			backend: "supermemory",
 			query,
 			count: response.results.length,
-			items: response.results.map(item => ({ id: item.id, content: item.content, timestamp: item.updatedAt, score: item.similarity })),
+			items: response.results.map(item => ({
+				id: item.id,
+				content: item.content,
+				timestamp: item.updatedAt,
+				score: item.similarity,
+			})),
 		};
 	} catch (error) {
 		state.lastError = error instanceof Error ? error.message : "Supermemory search failed.";
@@ -504,10 +561,12 @@ function preparePendingRecallCommit(
 	state: SupermemorySessionState,
 	promptText: string,
 	options?: MemoryBackendCommitAgentStartOptions,
-): MemoryBackendPreparedAgentStartCommit | false {
+): MemoryBackendPreparedAgentStartCommit | false | undefined {
 	const pending = state.pendingRecall;
+	// No preflight ran for this prompt, so this is a no-op rather than an
+	// admission rejection. `false` is reserved for a stale, still-staged recall.
+	if (!pending) return undefined;
 	if (
-		!pending ||
 		pending.promptText !== promptText ||
 		pending.generation !== options?.generation ||
 		pending.signal !== options?.signal ||
@@ -546,10 +605,14 @@ async function recallForFirstTurn(
 	promptText: string,
 	options?: MemoryBackendBeforeAgentStartOptions,
 ): Promise<string | undefined> {
+	const recallInvalidationGeneration = state.recallInvalidationGeneration;
 	discardPendingRecall(state);
 	if (options?.signal?.aborted || options?.isCurrent?.() === false) return undefined;
-	const scope = await refreshStateForOperation(state, session.sessionManager.getCwd(), session);
+	const scope = await refreshStateForOperation(state, session.sessionManager.getCwd(), session, {
+		preserveActiveRecallOnScopeTransition: true,
+	});
 	if (
+		state.recallInvalidationGeneration !== recallInvalidationGeneration ||
 		!scope ||
 		!state.automatic ||
 		!scope.config.autoRecall ||
@@ -571,29 +634,45 @@ async function recallForFirstTurn(
 				signal: options?.signal,
 			}),
 		]);
-		if (!recallRequestIsCurrent(state, scope, options)) return undefined;
+		if (
+			state.recallInvalidationGeneration !== recallInvalidationGeneration ||
+			!recallRequestIsCurrent(state, scope, options)
+		)
+			return undefined;
 		const snippets: string[] = [];
 		const errors: string[] = [];
 		if (profileResult.status === "fulfilled") {
 			const profileSnippet = formatProfile(profileResult.value);
 			if (profileSnippet) snippets.push(profileSnippet);
 		} else {
-			errors.push(profileResult.reason instanceof Error ? profileResult.reason.message : "Supermemory profile recall failed.");
+			errors.push(
+				profileResult.reason instanceof Error ? profileResult.reason.message : "Supermemory profile recall failed.",
+			);
 		}
 		if (searchResult.status === "fulfilled") {
-			if (!recallRequestIsCurrent(state, scope, options)) return undefined;
+			if (
+				state.recallInvalidationGeneration !== recallInvalidationGeneration ||
+				!recallRequestIsCurrent(state, scope, options)
+			)
+				return undefined;
 			state.lastSearchCount = searchResult.value.results.length;
 			state.lastSearchAt = Date.now();
 			const searchSnippet = formatSearch(searchResult.value.results);
 			if (searchSnippet) snippets.push(searchSnippet);
 		} else {
-			errors.push(searchResult.reason instanceof Error ? searchResult.reason.message : "Supermemory search recall failed.");
+			errors.push(
+				searchResult.reason instanceof Error ? searchResult.reason.message : "Supermemory search recall failed.",
+			);
 		}
 		if (errors.length > 0) {
 			state.lastError = errors.join("; ");
 			logger.warn("Supermemory: first-turn recall failed", { error: state.lastError });
 		}
-		if (!recallRequestIsCurrent(state, scope, options)) return undefined;
+		if (
+			state.recallInvalidationGeneration !== recallInvalidationGeneration ||
+			!recallRequestIsCurrent(state, scope, options)
+		)
+			return undefined;
 		// A completed recall attempt is consumed only when this exact prompt
 		// reaches the synchronous agent-core boundary. This includes empty and
 		// outage results: otherwise every turn would retry a known first-turn
@@ -615,7 +694,11 @@ async function recallForFirstTurn(
 		);
 		return pending.snippet;
 	} catch (error) {
-		if (!recallRequestIsCurrent(state, scope, options)) return undefined;
+		if (
+			state.recallInvalidationGeneration !== recallInvalidationGeneration ||
+			!recallRequestIsCurrent(state, scope, options)
+		)
+			return undefined;
 		state.lastError = error instanceof Error ? error.message : "Supermemory recall failed.";
 		logger.warn("Supermemory: first-turn recall failed", { error: state.lastError });
 		const pending = { promptText, generation: options?.generation, signal: options?.signal, scope };
@@ -642,7 +725,12 @@ async function retainCurrentSession(
 	if (!scope || state.disposed) return "stop";
 	if (session.sessionManager.getCwd() !== cwd) return "retry";
 	const retention = { ...state.retention };
-	const transcript = transcriptForRetentionWindow(session, retention.lastRetainedTurn, scope.config.retainEveryNTurns, forceTail);
+	const transcript = transcriptForRetentionWindow(
+		session,
+		retention.lastRetainedTurn,
+		scope.config.retainEveryNTurns,
+		forceTail,
+	);
 	if (!transcript) return "empty";
 	try {
 		const document = await createTrackedDocument(state, scope, () =>
@@ -654,11 +742,19 @@ async function retainCurrentSession(
 					source: "omp-conversation",
 					sessionId: session.sessionId,
 					automaticRetention: true,
-					...(transcript.truncated ? { transcriptTruncated: true, omittedMessages: transcript.truncated.omittedMessages } : {}),
+					...(transcript.truncated
+						? { transcriptTruncated: true, omittedMessages: transcript.truncated.omittedMessages }
+						: {}),
 				},
 			}),
 		);
-		if (!document) return "stop";
+		if (!document) {
+			// Admission can close in the narrow interval after the loop's clear
+			// check. Keep this request for the clear boundary to replay rather
+			// than silently dropping the unretained transcript window.
+			if (containerState(scope.coordinatorKey).clearing) state.retainPending = true;
+			return "stop";
+		}
 		if (
 			scopeIsCurrent(state, scope) &&
 			state.retention.scopeGeneration === retention.scopeGeneration &&
@@ -695,10 +791,13 @@ function requestAutomaticRetention(state: SupermemorySessionState, session: Agen
 			const forceTailEpoch = state.retainForceTailEpoch;
 			if (!state.automatic) return;
 			const config = loadSupermemoryConfig(state.settings);
-			// A clear closes document admission. Do not consume an explicit tail
-			// request here: clear's finally re-schedules every live state after
-			// either a successful or failed deletion, including autoRetain=false.
-			if (containerState(state.coordinatorKey).clearing) return;
+			// A clear closes document admission. Preserve the pending request for
+			// clear's finally block, which re-schedules live states after either
+			// outcome (including autoRetain=false).
+			if (containerState(state.coordinatorKey).clearing) {
+				state.retainPending = true;
+				return;
+			}
 			if (!isSupermemoryConfigured(config) || (!config.autoRetain && !retainTail)) return;
 			const outcome = await retainCurrentSession(state, session, session.sessionManager.getCwd(), retainTail);
 			// A forced tail is consumed only by a successful document write. An
@@ -716,7 +815,9 @@ function requestAutomaticRetention(state: SupermemorySessionState, session: Agen
 		}
 	})().finally(() => {
 		state.retainInFlight = undefined;
-		if (state.retainPending && !state.disposed) requestAutomaticRetention(state, session);
+		if (state.retainPending && !state.disposed && !containerState(state.coordinatorKey).clearing) {
+			requestAutomaticRetention(state, session);
+		}
 	});
 	state.retainInFlight = retain;
 	void retain;
@@ -751,7 +852,22 @@ function statusForState(state: SupermemorySessionState): MemoryBackendStatus {
 	};
 }
 
-export const supermemoryBackend: MemoryBackend = {
+export const supermemoryBackend: MemoryBackend &
+	Required<
+		Pick<
+			MemoryBackend,
+			| "status"
+			| "search"
+			| "save"
+			| "stats"
+			| "diagnose"
+			| "beforeAgentStartPrompt"
+			| "commitBeforeAgentStartPrompt"
+			| "preCompactionContext"
+			| "resetSession"
+			| "disposeSession"
+		>
+	> = {
 	id: "supermemory",
 
 	async start(options: MemoryBackendStartOptions): Promise<void> {
@@ -790,7 +906,9 @@ export const supermemoryBackend: MemoryBackend = {
 		// the session's live cwd here, but never invoke the prompt-refresh hook
 		// from inside prompt assembly.
 		if (state && session) {
-			await refreshStateForOperation(state, session.sessionManager.getCwd(), session, { refreshPromptContext: false });
+			await refreshStateForOperation(state, session.sessionManager.getCwd(), session, {
+				refreshPromptContext: false,
+			});
 		}
 		return [instructions.trim(), state?.lastRecallSnippet].filter((value): value is string => !!value).join("\n\n");
 	},
@@ -808,14 +926,15 @@ export const supermemoryBackend: MemoryBackend = {
 		session: AgentSession,
 		promptText: string,
 		options?: MemoryBackendCommitAgentStartOptions,
-	): Promise<MemoryBackendPreparedAgentStartCommit | false> {
+	): Promise<MemoryBackendPreparedAgentStartCommit | false | undefined> {
 		const state = sessionStates.get(session);
-		return state ? preparePendingRecallCommit(state, promptText, options) : false;
+		return state ? preparePendingRecallCommit(state, promptText, options) : undefined;
 	},
 
 	async clear(_agentDir, cwd, session): Promise<void> {
 		const state = session && sessionStates.get(session);
-		if (!state || !session) throw new Error("Supermemory is unavailable: no configured active session state to clear.");
+		if (!state || !session)
+			throw new Error("Supermemory is unavailable: no configured active session state to clear.");
 		const scope = await refreshStateForOperation(state, cwd, session);
 		if (!scope) throw new Error("Supermemory is unavailable or unconfigured.");
 		const container = containerState(scope.coordinatorKey);
@@ -851,7 +970,9 @@ export const supermemoryBackend: MemoryBackend = {
 					) {
 						return [];
 					}
-					return [{ liveState, admission, retainedThroughTurn: watermarkForSuccessfulClear(liveState, admission) }];
+					return [
+						{ liveState, admission, retainedThroughTurn: watermarkForSuccessfulClear(liveState, admission) },
+					];
 				});
 				if (pendingAdmissions.length === 0) break;
 
@@ -875,10 +996,7 @@ export const supermemoryBackend: MemoryBackend = {
 			// rather than joining an already-drained map.
 			container.successfulClearGeneration += 1;
 			for (const [liveState] of clearWatermarks) {
-				liveState.observedSuccessfulClearGenerations.set(
-					scope.coordinatorKey,
-					container.successfulClearGeneration,
-				);
+				liveState.observedSuccessfulClearGenerations.set(scope.coordinatorKey, container.successfulClearGeneration);
 			}
 			if (container.clearAdmissionWatermarks === clearWatermarks) container.clearAdmissionWatermarks = undefined;
 		};
@@ -887,10 +1005,12 @@ export const supermemoryBackend: MemoryBackend = {
 		container.clearing = task;
 		void task.then(
 			() => {
-				if (container.clearAdmissionWatermarks === activeClearWatermarks) container.clearAdmissionWatermarks = undefined;
+				if (container.clearAdmissionWatermarks === activeClearWatermarks)
+					container.clearAdmissionWatermarks = undefined;
 			},
 			() => {
-				if (container.clearAdmissionWatermarks === activeClearWatermarks) container.clearAdmissionWatermarks = undefined;
+				if (container.clearAdmissionWatermarks === activeClearWatermarks)
+					container.clearAdmissionWatermarks = undefined;
 			},
 		);
 		try {
@@ -911,6 +1031,7 @@ export const supermemoryBackend: MemoryBackend = {
 					) {
 						continue;
 					}
+					if (!liveState.retainPending && !liveState.retainForceTail) continue;
 					requestAutomaticRetention(liveState, liveState.session);
 				}
 			}
@@ -938,12 +1059,23 @@ export const supermemoryBackend: MemoryBackend = {
 
 	async status(context: MemoryBackendOperationContext): Promise<MemoryBackendStatus> {
 		const state = context.session && sessionStates.get(context.session);
-		if (!state) return { backend: "supermemory", active: false, writable: false, searchable: false, message: "No active Supermemory session state." };
+		if (!state)
+			return {
+				backend: "supermemory",
+				active: false,
+				writable: false,
+				searchable: false,
+				message: "No active Supermemory session state.",
+			};
 		await refreshStateForOperation(state, context.cwd, context.session);
 		return statusForState(state);
 	},
 
-	async search(context: MemoryBackendOperationContext, query: string, options?: MemoryBackendSearchOptions): Promise<MemoryBackendSearchResult> {
+	async search(
+		context: MemoryBackendOperationContext,
+		query: string,
+		options?: MemoryBackendSearchOptions,
+	): Promise<MemoryBackendSearchResult> {
 		const state = context.session && sessionStates.get(context.session);
 		return state
 			? await searchWithState(state, query, context.cwd, options, context.session)
@@ -963,11 +1095,18 @@ export const supermemoryBackend: MemoryBackend = {
 		session?: AgentSession,
 	): Promise<string | undefined> {
 		const state = session && sessionStates.get(session);
-		if (!state?.automatic) return undefined;
+		if (!state || !session || !state.automatic) return undefined;
 		const query = flattenMessagesForQuery(messages);
 		if (!query) return undefined;
 		const result = await searchWithState(state, query, session.sessionManager.getCwd(), undefined, session);
-		return formatSearch(result.items.map(item => ({ id: item.id ?? "", content: item.content, similarity: item.score, updatedAt: item.timestamp })));
+		return formatSearch(
+			result.items.map(item => ({
+				id: item.id ?? "",
+				content: item.content,
+				similarity: item.score,
+				updatedAt: item.timestamp,
+			})),
+		);
 	},
 
 	async stats(_agentDir, cwd, session): Promise<string | undefined> {
@@ -979,7 +1118,8 @@ export const supermemoryBackend: MemoryBackend = {
 
 	async diagnose(_agentDir, cwd, session): Promise<string | undefined> {
 		const state = session && sessionStates.get(session);
-		if (!state) return "## Supermemory\n\nNo active session state. Set `SUPERMEMORY_API_KEY` and restart the session.";
+		if (!state)
+			return "## Supermemory\n\nNo active session state. Set `SUPERMEMORY_API_KEY` and restart the session.";
 		await refreshStateForOperation(state, cwd, session);
 		return `## Supermemory\n\n- API key: configured (not displayed)\n- Scope: \`${state.containerTag}\`\n- Automatic recall/retention: ${state.automatic ? "primary session only" : "disabled for this subagent"}\n- Last request error: ${state.lastError ?? "none"}`;
 	},

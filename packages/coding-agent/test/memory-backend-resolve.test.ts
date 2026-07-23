@@ -1,10 +1,10 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createMemoryRuntimeContext, resolveMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("resolveMemoryBackend", () => {
 	let tempDir: string;
@@ -20,7 +20,6 @@ describe("resolveMemoryBackend", () => {
 		resetSettingsForTest();
 		await removeWithRetries(tempDir);
 	});
-
 
 	it("returns the hindsight backend when memory.backend is hindsight, regardless of legacy memories.enabled", async () => {
 		const a = Settings.isolated({ "memory.backend": "hindsight", "memories.enabled": false });

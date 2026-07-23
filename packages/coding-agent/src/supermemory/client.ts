@@ -32,7 +32,9 @@ interface SupermemorySearchResponse {
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
 }
 
 function asStringArray(value: unknown): string[] {
@@ -75,7 +77,8 @@ function parseSearch(value: unknown): SupermemorySearchResponse {
 	for (const raw of rawResults) {
 		const item = asRecord(raw);
 		if (!item || typeof item.id !== "string") continue;
-		const content = typeof item.memory === "string" ? item.memory : typeof item.chunk === "string" ? item.chunk : undefined;
+		const content =
+			typeof item.memory === "string" ? item.memory : typeof item.chunk === "string" ? item.chunk : undefined;
 		if (!content) continue;
 		results.push({
 			id: item.id,
@@ -85,7 +88,11 @@ function parseSearch(value: unknown): SupermemorySearchResponse {
 			metadata: asRecord(item.metadata) ?? null,
 		});
 	}
-	return { results, total: typeof object.total === "number" ? object.total : results.length, timing: typeof object.timing === "number" ? object.timing : undefined };
+	return {
+		results,
+		total: typeof object.total === "number" ? object.total : results.length,
+		timing: typeof object.timing === "number" ? object.timing : undefined,
+	};
 }
 
 function parseProfile(value: unknown): SupermemoryProfile {
@@ -142,7 +149,12 @@ export class SupermemoryClient {
 		);
 	}
 
-	async #request(pathname: string, method: "POST" | "DELETE", body?: unknown, callerSignal?: AbortSignal): Promise<unknown> {
+	async #request(
+		pathname: string,
+		method: "POST" | "DELETE",
+		body?: unknown,
+		callerSignal?: AbortSignal,
+	): Promise<unknown> {
 		if (callerSignal?.aborted) throw new Error("Supermemory request cancelled.");
 		const timeoutSignal = AbortSignal.timeout(this.#requestTimeoutMs);
 		const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;

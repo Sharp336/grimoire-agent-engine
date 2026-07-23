@@ -47,6 +47,17 @@ describe("task spawn policy surfaces", () => {
 		expect(parsed).toEqual({ agent: "fact-finder", task: "check" });
 	});
 
+	it("preserves an explicit per-call model selector for the spawned agent", () => {
+		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, defaultAgent: "fact-finder" });
+		const parsed = schema({ task: "check", model: "openai-codex/gpt-5.6-sol:high" });
+
+		expect(parsed).toEqual({
+			agent: "fact-finder",
+			model: "openai-codex/gpt-5.6-sol:high",
+			task: "check",
+		});
+	});
+
 	it("filters the agent list to the restricted spawn policy in the description", async () => {
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
 			agents: [factFinderAgent, oracleAgent],

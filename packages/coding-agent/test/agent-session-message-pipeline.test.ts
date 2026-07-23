@@ -28,7 +28,11 @@ import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/typ
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
-import { AgentSession, type AgentSessionEvent, type PreCoreQueuedMessageInput } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	AgentSession,
+	type AgentSessionEvent,
+	type PreCoreQueuedMessageInput,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -113,13 +117,27 @@ describe("AgentSession message pipeline", () => {
 			{ kind: "userMessage", content: "user", deliverAs: "prompt" },
 			{
 				kind: "customPrompt",
-				message: { role: "custom", customType: "test", content: "custom", display: false, attribution: "user", timestamp: 0 },
+				message: {
+					role: "custom",
+					customType: "test",
+					content: "custom",
+					display: false,
+					attribution: "user",
+					timestamp: 0,
+				},
 				keywordNotices: [],
 				options: { streamingBehavior: "steer", queueOnly: true, queueChipText: "chip" },
 			},
 			{
 				kind: "customDelivery",
-				message: { role: "custom", customType: "test", content: "custom", display: false, attribution: "agent", timestamp: 0 },
+				message: {
+					role: "custom",
+					customType: "test",
+					content: "custom",
+					display: false,
+					attribution: "agent",
+					timestamp: 0,
+				},
 				options: { deliverAs: "nextTurn", triggerTurn: false, queueChipText: "chip" },
 			},
 		] satisfies PreCoreQueuedMessageInput[];
@@ -850,7 +868,9 @@ describe("AgentSession message pipeline", () => {
 		await session.refreshMemoryPromptContext();
 		expect(agent.state.systemPrompt.join("\n")).not.toContain(injected);
 		await session.sendUserMessage("second");
-		expect(contexts[1]!.systemPrompt.join("\n")).not.toContain(injected);
+		expect(
+			Array.isArray(contexts[1]!.systemPrompt) ? contexts[1]!.systemPrompt.join("\n") : contexts[1]!.systemPrompt,
+		).not.toContain(injected);
 	});
 
 	it("restores a promoted memory prompt when aborted before agent_start commits it", async () => {
@@ -963,7 +983,7 @@ describe("AgentSession message pipeline", () => {
 		const secondRecall = Promise.withResolvers<string>();
 		const firstStarted = Promise.withResolvers<void>();
 		const secondStarted = Promise.withResolvers<void>();
-		const commitBeforeAgentStartPrompt = vi.fn(async () => {});
+		const commitBeforeAgentStartPrompt = vi.fn(async (): Promise<undefined> => undefined);
 		const fakeBackend: MemoryBackend = {
 			id: "supermemory",
 			async start() {},
@@ -1056,7 +1076,7 @@ describe("AgentSession message pipeline", () => {
 					abortAtCommit = false;
 					session.abort();
 				}
-				if (options?.isCurrent()) pendingRecall = undefined;
+				if (options?.isCurrent?.()) pendingRecall = undefined;
 			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
@@ -1095,7 +1115,7 @@ describe("AgentSession message pipeline", () => {
 	});
 	it("commits staged recall after a resolved non-streaming prompt fake", async () => {
 		const api = "test-memory-resolved-non-streaming-fake";
-		const commitBeforeAgentStartPrompt = vi.fn(async () => {});
+		const commitBeforeAgentStartPrompt = vi.fn(async (): Promise<undefined> => undefined);
 		const fakeBackend: MemoryBackend = {
 			id: "supermemory",
 			async start() {},
@@ -1129,7 +1149,6 @@ describe("AgentSession message pipeline", () => {
 		expect(commitBeforeAgentStartPrompt).toHaveBeenCalledTimes(1);
 	});
 
-
 	it("rolls back a synchronously rejected recall before dispatching the prompt", async () => {
 		const api = "test-memory-rejected-prompt-dispatch";
 		const contexts: Context[] = [];
@@ -1157,7 +1176,12 @@ describe("AgentSession message pipeline", () => {
 			return stream;
 		});
 		const agent = new Agent({
-			initialState: { model: createPipelineModel(api), systemPrompt: ["base", "static memory instructions"], messages: [], tools: [] },
+			initialState: {
+				model: createPipelineModel(api),
+				systemPrompt: ["base", "static memory instructions"],
+				messages: [],
+				tools: [],
+			},
 		});
 		const session = new AgentSession({
 			agent,
@@ -1211,7 +1235,9 @@ describe("AgentSession message pipeline", () => {
 			return stream;
 		});
 		session = new AgentSession({
-			agent: new Agent({ initialState: { model: createPipelineModel(api), systemPrompt: ["base"], messages: [], tools: [] } }),
+			agent: new Agent({
+				initialState: { model: createPipelineModel(api), systemPrompt: ["base"], messages: [], tools: [] },
+			}),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: createModelRegistryStub() as never,
@@ -1235,7 +1261,7 @@ describe("AgentSession message pipeline", () => {
 	});
 	it("retries idle admission when Agent.prompt becomes busy after memory preparation", async () => {
 		const api = "test-memory-immediate-busy-rejection";
-		const commitBeforeAgentStartPrompt = vi.fn(async () => {});
+		const commitBeforeAgentStartPrompt = vi.fn(async (): Promise<undefined> => undefined);
 		let recallAvailable = true;
 		let rollbackCount = 0;
 		const stagedRecall = "<supermemory_recall>must remain staged</supermemory_recall>";
@@ -1247,7 +1273,7 @@ describe("AgentSession message pipeline", () => {
 			},
 			async clear() {},
 			async enqueue() {},
-			beforeAgentStartPrompt(_session, _promptText, options) {
+			async beforeAgentStartPrompt(_session, _promptText, options) {
 				const signal = options?.signal;
 				if (!signal) throw new Error("beforeAgentStartPrompt signal is required");
 				signal.addEventListener("abort", () => {
@@ -1285,71 +1311,76 @@ describe("AgentSession message pipeline", () => {
 
 	it("holds replacement prompts behind delayed direct Hindsight/Mnemopi cleanup after abort", async () => {
 		for (const backendId of ["hindsight", "mnemopi"] as const) {
-		const api = `test-legacy-refresh-replacement-barrier-${backendId}`;
-		const startStarted = Promise.withResolvers<void>();
-		const releaseStart = Promise.withResolvers<void>();
-		const refreshStarted = Promise.withResolvers<void>();
-		const releaseRefresh = Promise.withResolvers<void>();
-		const fakeBackend: MemoryBackend = {
-			id: backendId,
-			async start() {
-				startStarted.resolve();
-				await releaseStart.promise;
-			},
-			async buildDeveloperInstructions() {
-				return "static memory instructions";
-			},
-			async clear() {},
-			async enqueue() {},
-			async beforeAgentStartPrompt(_session, promptText) {
-				return promptText === "first" ? "<memories>stale first-turn recall</memories>" : undefined;
-			},
-		};
-		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
-		registerCustomApi(api, () => {
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") }));
-			return stream;
-		});
-		const agent = new Agent({
-			initialState: { model: createPipelineModel(api), systemPrompt: ["base"], messages: [], tools: [] },
-		});
-		const promptSpy = vi.spyOn(agent, "prompt");
-		const session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: createModelRegistryStub() as never,
-		});
-		sessions.push(session);
-		vi.spyOn(session, "refreshMemoryPromptContext").mockImplementation(async () => {
-			refreshStarted.resolve();
-			await releaseRefresh.promise;
-		});
-		const originalSetSystemPrompt = agent.setSystemPrompt.bind(agent);
-		let abort: Promise<void> | undefined;
-		let replacement: Promise<void> | undefined;
-		vi.spyOn(agent, "setSystemPrompt").mockImplementation(prompt => {
-			originalSetSystemPrompt(prompt);
-			if (prompt.join("\n").includes("stale first-turn recall") && !abort) {
-				abort = session.abort();
-				replacement = session.sendUserMessage("replacement");
-			}
-		});
+			const api = `test-legacy-refresh-replacement-barrier-${backendId}`;
+			const startStarted = Promise.withResolvers<void>();
+			const releaseStart = Promise.withResolvers<void>();
+			const refreshStarted = Promise.withResolvers<void>();
+			const releaseRefresh = Promise.withResolvers<void>();
+			const fakeBackend: MemoryBackend = {
+				id: backendId,
+				async start() {
+					startStarted.resolve();
+					await releaseStart.promise;
+				},
+				async buildDeveloperInstructions() {
+					return "static memory instructions";
+				},
+				async clear() {},
+				async enqueue() {},
+				async beforeAgentStartPrompt(_session, promptText) {
+					return promptText === "first" ? "<memories>stale first-turn recall</memories>" : undefined;
+				},
+			};
+			vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
+			registerCustomApi(api, () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") }));
+				return stream;
+			});
+			const agent = new Agent({
+				initialState: { model: createPipelineModel(api), systemPrompt: ["base"], messages: [], tools: [] },
+			});
+			const replacementPromptStarted = Promise.withResolvers<void>();
+			const originalPrompt = agent.prompt.bind(agent);
+			const promptSpy = vi.spyOn(agent, "prompt").mockImplementation(async (...args) => {
+				replacementPromptStarted.resolve();
+				return (originalPrompt as unknown as (...promptArgs: typeof args) => Promise<void>)(...args);
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+			});
+			sessions.push(session);
+			vi.spyOn(session, "refreshMemoryPromptContext").mockImplementation(async () => {
+				refreshStarted.resolve();
+				await releaseRefresh.promise;
+			});
+			const originalSetSystemPrompt = agent.setSystemPrompt.bind(agent);
+			let abort: Promise<void> | undefined;
+			let replacement: Promise<void> | undefined;
+			vi.spyOn(agent, "setSystemPrompt").mockImplementation(prompt => {
+				originalSetSystemPrompt(prompt);
+				if ((Array.isArray(prompt) ? prompt.join("\n") : prompt).includes("stale first-turn recall") && !abort) {
+					abort = session.abort();
+					replacement = session.sendUserMessage("replacement");
+				}
+			});
 
-		const first = session.sendUserMessage("first");
-		await startStarted.promise;
-		releaseStart.resolve();
-		await refreshStarted.promise;
+			const first = session.sendUserMessage("first");
+			await startStarted.promise;
+			releaseStart.resolve();
+			await refreshStarted.promise;
 
-		expect(promptSpy).not.toHaveBeenCalled();
-		releaseRefresh.resolve();
-		await Promise.all([first, abort, replacement]);
+			expect(promptSpy).not.toHaveBeenCalled();
+			releaseRefresh.resolve();
+			await Promise.all([first, abort, replacement]);
+			await replacementPromptStarted.promise;
 
-		expect(promptSpy).toHaveBeenCalledTimes(1);
+			expect(promptSpy).toHaveBeenCalledTimes(1);
 		}
 	});
-
 
 	it("does not commit staged recall while core is busy at admission, then admits it after idle", async () => {
 		const api = "test-memory-core-busy-admission";
@@ -1357,7 +1388,7 @@ describe("AgentSession message pipeline", () => {
 		const coreBecameBusy = Promise.withResolvers<void>();
 		const coreBecameIdle = Promise.withResolvers<void>();
 		let makeCoreBusy = true;
-		const commitBeforeAgentStartPrompt = vi.fn(async () => {});
+		const commitBeforeAgentStartPrompt = vi.fn(async (): Promise<undefined> => undefined);
 		const fakeBackend: MemoryBackend = {
 			id: "supermemory",
 			async start() {},
@@ -1366,7 +1397,7 @@ describe("AgentSession message pipeline", () => {
 			},
 			async clear() {},
 			async enqueue() {},
-			beforeAgentStartPrompt() {
+			async beforeAgentStartPrompt() {
 				if (makeCoreBusy) {
 					makeCoreBusy = false;
 					agent.state.isStreaming = true;
@@ -1442,7 +1473,7 @@ describe("AgentSession message pipeline", () => {
 			},
 			async clear() {},
 			async enqueue() {},
-			beforeAgentStartPrompt() {
+			async beforeAgentStartPrompt() {
 				if (makeCoreBusy) {
 					makeCoreBusy = false;
 					agent.state.isStreaming = true;
@@ -1475,7 +1506,9 @@ describe("AgentSession message pipeline", () => {
 			initialState: { model, systemPrompt: ["base"], messages: [], tools: [] },
 		});
 		let waitCount = 0;
-		vi.spyOn(agent, "waitForIdle").mockImplementation(() => (++waitCount === 1 ? releaseIdle.promise : Promise.resolve()));
+		vi.spyOn(agent, "waitForIdle").mockImplementation(() =>
+			++waitCount === 1 ? releaseIdle.promise : Promise.resolve(),
+		);
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -1515,11 +1548,13 @@ describe("AgentSession message pipeline", () => {
 			});
 		});
 		const promptLifecycle: string[] = [];
-		const beforeAgentStartPrompt = vi.fn(async () => {
+		const beforeAgentStartPrompt = vi.fn<NonNullable<MemoryBackend["beforeAgentStartPrompt"]>>(async () => {
 			promptLifecycle.push("before");
 			return "<supermemory_recall>first turn fact</supermemory_recall>";
 		});
-		const commitBeforeAgentStartPrompt = vi.fn(async () => ({ commit: () => promptLifecycle.push("commit") }));
+		const commitBeforeAgentStartPrompt = vi.fn<NonNullable<MemoryBackend["commitBeforeAgentStartPrompt"]>>(
+			async () => ({ commit: () => promptLifecycle.push("commit") }),
+		);
 		const fakeBackend: MemoryBackend = {
 			id: "supermemory",
 			start,
@@ -1587,12 +1622,20 @@ describe("AgentSession message pipeline", () => {
 			expect(beforeAgentStartPrompt).toHaveBeenCalledWith(
 				session,
 				"first prompt",
-				expect.objectContaining({ generation: expect.any(Number), signal: expect.any(AbortSignal), isCurrent: expect.any(Function) }),
+				expect.objectContaining({
+					generation: expect.any(Number),
+					signal: expect.any(AbortSignal),
+					isCurrent: expect.any(Function),
+				}),
 			);
 			expect(commitBeforeAgentStartPrompt).toHaveBeenCalledWith(
 				session,
 				"first prompt",
-				expect.objectContaining({ generation: expect.any(Number), signal: expect.any(AbortSignal), isCurrent: expect.any(Function) }),
+				expect.objectContaining({
+					generation: expect.any(Number),
+					signal: expect.any(AbortSignal),
+					isCurrent: expect.any(Function),
+				}),
 			);
 			expect(commitBeforeAgentStartPrompt.mock.calls[0]![2]).toBe(beforeAgentStartPrompt.mock.calls[0]![2]);
 			expect(promptLifecycle).toEqual(["before", "commit", "agent-core"]);
@@ -2274,7 +2317,7 @@ describe("AgentSession message pipeline", () => {
 			},
 			async clear() {},
 			async enqueue() {},
-			beforeAgentStartPrompt(_session, promptText) {
+			async beforeAgentStartPrompt(_session, promptText) {
 				if (promptText === "A") {
 					firstRecallStarted.resolve();
 					return releaseFirstRecall.promise;
@@ -2323,10 +2366,7 @@ describe("AgentSession message pipeline", () => {
 
 		const first = session.sendUserMessage("A");
 		await firstRecallStarted.promise;
-		await session.followUp(
-			"ultrathink B",
-			[{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
-		);
+		await session.followUp("ultrathink B", [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }]);
 		expect(session.queuedMessageCount).toBe(1);
 		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["ultrathink B"] });
 		releaseFirstRecall.resolve("<supermemory_recall>A-only fact</supermemory_recall>");
@@ -2340,7 +2380,6 @@ describe("AgentSession message pipeline", () => {
 		expect(contexts[0]!.systemPrompt?.join("\n")).toContain("B-specific fact");
 		expect(contexts[0]!.systemPrompt?.join("\n")).not.toContain("A-only fact");
 	});
-
 
 	it("surfaces only user-attributed pre-core custom messages in queue APIs", async () => {
 		const recallStarted = Promise.withResolvers<void>();
@@ -2360,7 +2399,14 @@ describe("AgentSession message pipeline", () => {
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
 		const session = new AgentSession({
-			agent: new Agent({ initialState: { model: createPipelineModel("test-pre-core-custom-queue"), systemPrompt: ["base"], messages: [], tools: [] } }),
+			agent: new Agent({
+				initialState: {
+					model: createPipelineModel("test-pre-core-custom-queue"),
+					systemPrompt: ["base"],
+					messages: [],
+					tools: [],
+				},
+			}),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: createModelRegistryStub() as never,
@@ -2406,7 +2452,7 @@ describe("AgentSession message pipeline", () => {
 			},
 			async clear() {},
 			async enqueue() {},
-			beforeAgentStartPrompt(_session, promptText) {
+			async beforeAgentStartPrompt(_session, promptText) {
 				recalledPrompts.push(promptText);
 				if (promptText === "A") {
 					firstRecallStarted.resolve();
@@ -2463,7 +2509,7 @@ describe("AgentSession message pipeline", () => {
 			},
 			async clear() {},
 			async enqueue() {},
-			beforeAgentStartPrompt(_session, promptText, options) {
+			async beforeAgentStartPrompt(_session, promptText, options) {
 				recalledPrompts.push(promptText);
 				if (promptText === "A") {
 					firstRecallStarted.resolve();
@@ -2494,6 +2540,44 @@ describe("AgentSession message pipeline", () => {
 
 		expect(recalledPrompts).toEqual(["A"]);
 	});
+	it("drops custom prompts while a transcript replacement owns the session boundary", async () => {
+		const replacementFlushStarted = Promise.withResolvers<void>();
+		const releaseReplacementFlush = Promise.withResolvers<void>();
+		const sessionManager = SessionManager.inMemory();
+		vi.spyOn(sessionManager, "flush").mockImplementation(async () => {
+			replacementFlushStarted.resolve();
+			await releaseReplacementFlush.promise;
+		});
+		const agent = new Agent({
+			initialState: {
+				model: createPipelineModel("test-custom-prompt-replacement-guard"),
+				systemPrompt: ["base"],
+				messages: [],
+				tools: [],
+			},
+		});
+		const prompt = vi.spyOn(agent, "prompt").mockResolvedValue(undefined);
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+		});
+		sessions.push(session);
+
+		const replacement = session.newSession();
+		await replacementFlushStarted.promise;
+		await session.promptCustomMessage({
+			customType: "replacement-test",
+			content: "must not dispatch",
+			display: false,
+		});
+		expect(prompt).not.toHaveBeenCalled();
+
+		releaseReplacementFlush.resolve();
+		await replacement;
+	});
+
 	it("keeps a prepared recall commit rollbackable when core rejects immediately", async () => {
 		const commitAccepted = vi.fn();
 		const commit = vi.fn(async () => ({ commit: commitAccepted }));
@@ -2534,6 +2618,52 @@ describe("AgentSession message pipeline", () => {
 		expect(commitAccepted).not.toHaveBeenCalled();
 		expect(agent.state.systemPrompt).toEqual(["base"]);
 	});
+	it("finalizes core admission when a prepared backend commit callback throws", async () => {
+		let admissionSignal: AbortSignal | undefined;
+		const fakeBackend: MemoryBackend = {
+			id: "supermemory",
+			async start() {},
+			async buildDeveloperInstructions() {
+				return undefined;
+			},
+			async clear() {},
+			async enqueue() {},
+			async beforeAgentStartPrompt() {
+				return "<supermemory_recall>staged fact</supermemory_recall>";
+			},
+			async commitBeforeAgentStartPrompt(_session, _promptText, options) {
+				admissionSignal = options?.signal;
+				return {
+					commit() {
+						throw new Error("prepared commit failed");
+					},
+				};
+			},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
+		const agent = new Agent({
+			initialState: {
+				model: createPipelineModel("test-prepared-commit-failure"),
+				systemPrompt: ["base"],
+				messages: [],
+				tools: [],
+			},
+		});
+		vi.spyOn(agent, "prompt").mockImplementation(async (_message, promptOptions) => {
+			if (!Array.isArray(promptOptions)) promptOptions?.onAccepted?.();
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+		});
+		sessions.push(session);
+
+		await expect(session.sendUserMessage("A")).rejects.toThrow("prepared commit failed");
+		expect(admissionSignal?.aborted).toBe(false);
+	});
+
 	it("replays a transformed custom command once after a concurrent pre-core rejection", async () => {
 		const api = "test-prepared-command-replay";
 		const contexts: Context[] = [];
@@ -2550,7 +2680,7 @@ describe("AgentSession message pipeline", () => {
 			},
 			async clear() {},
 			async enqueue() {},
-			beforeAgentStartPrompt(_session, promptText) {
+			async beforeAgentStartPrompt(_session, promptText) {
 				if (promptText === "A") {
 					recallStarted.resolve();
 					return releaseRecall.promise;
@@ -2574,7 +2704,9 @@ describe("AgentSession message pipeline", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: createModelRegistryStub() as never,
-			slashCommands: [{ name: "file-output", description: "file output", content: "expanded file command", source: "test" }],
+			slashCommands: [
+				{ name: "file-output", description: "file output", content: "expanded file command", source: "test" },
+			],
 			customCommands: [
 				{
 					path: "once.ts",

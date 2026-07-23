@@ -16,9 +16,9 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
-import type { MemoryBackend, MemoryRuntimeContext } from "../memory-backend";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
+import type { MemoryBackend, MemoryRuntimeContext } from "../memory-backend";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -437,9 +437,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			: undefined;
 	// `agentKind` is authoritative when present (`/tan` can be depth zero);
 	// hand-built ToolSession callers retain the historical depth-based fallback.
-	const isPrimaryAutolearnSession = session.agentKind
-		? session.agentKind === "main"
-		: (session.taskDepth ?? 0) === 0;
+	const isPrimaryAutolearnSession = session.agentKind ? session.agentKind === "main" : (session.taskDepth ?? 0) === 0;
 	const goalEnabled = session.settings.get("goal.enabled");
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
 	const memoryBackend = restrictToolNames
@@ -523,7 +521,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		) {
 			requestedTools.push("ast_edit");
 		}
-		const genericMemoryTools = memoryBackend === "supermemory" ? (["recall", "retain"] as const) : (["recall", "retain", "reflect"] as const);
+		const genericMemoryTools =
+			memoryBackend === "supermemory" ? (["recall", "retain"] as const) : (["recall", "retain", "reflect"] as const);
 		if (["hindsight", "mnemopi", "supermemory"].includes(memoryBackend)) {
 			for (const name of genericMemoryTools) {
 				if (!requestedTools.includes(name)) requestedTools.push(name);

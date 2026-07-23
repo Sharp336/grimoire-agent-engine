@@ -28,7 +28,8 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 function finiteNumber(value: unknown, fallback: number, minimum: number, maximum: number): number {
-	const numeric = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
+	const numeric =
+		typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
 	return Number.isFinite(numeric) ? Math.min(maximum, Math.max(minimum, numeric)) : fallback;
 }
 
@@ -45,7 +46,14 @@ function resolveBaseUrl(env: NodeJS.ProcessEnv): string {
 	if (!override) return DEFAULT_BASE_URL;
 	try {
 		const url = new URL(override);
-		return url.protocol === "https:" ? url.toString().replace(/\/+$/, "") : DEFAULT_BASE_URL;
+		const isLoopback =
+			url.hostname === "localhost" ||
+			url.hostname.endsWith(".localhost") ||
+			url.hostname.startsWith("127.") ||
+			url.hostname === "[::1]";
+		return url.protocol === "https:" || (url.protocol === "http:" && isLoopback)
+			? url.toString().replace(/\/+$/, "")
+			: DEFAULT_BASE_URL;
 	} catch {
 		return DEFAULT_BASE_URL;
 	}

@@ -8,7 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent, AgentBusyError, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Message, ToolCall } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, TextContent, ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -20,6 +20,7 @@ import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -46,6 +47,7 @@ function collapseSchedulerSettleDelays(): void {
 
 describe("AgentSession concurrent prompt guard", () => {
 	let session: AgentSession;
+	let sessionManager: SessionManager;
 	let tempDir: string;
 	const authStorages: AuthStorage[] = [];
 
@@ -105,7 +107,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 		});
 
-		const sessionManager = SessionManager.inMemory();
+		sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated(settingsOverrides);
 		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
 		authStorages.push(authStorage);
@@ -175,12 +177,18 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 		} as unknown as ExtensionRunner;
 		await createSession(undefined, extensionRunner);
-		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(messages => {
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(((
+			_messages: AgentMessage[] | AgentMessage | string,
+			optionsOrImages?: ImageContent[] | { onAccepted?: () => void },
+			options?: { onAccepted?: () => void },
+		) => {
+			const promptOptions = Array.isArray(optionsOrImages) ? options : optionsOrImages;
 			session.agent.state.isStreaming = true;
+			promptOptions?.onAccepted?.();
 			return Promise.resolve().finally(() => {
 				session.agent.state.isStreaming = false;
 			});
-		});
+		}) as unknown as typeof session.agent.prompt);
 
 		const cancelled = session.prompt("cancelled prompt");
 		await session.sendCustomMessage(
@@ -194,7 +202,8 @@ describe("AgentSession concurrent prompt guard", () => {
 		await cancelled;
 		await session.prompt("next prompt");
 
-		const forwarded = promptSpy.mock.calls[0]?.[0] as AgentMessage[];
+		const forwarded = promptSpy.mock.calls[0]?.[0];
+		if (!Array.isArray(forwarded)) throw new Error("Expected prompt to receive message records");
 		expect(forwarded.map(message => ("customType" in message ? message.customType : undefined))).toEqual(
 			expect.arrayContaining(["first-context", "second-context"]),
 		);
@@ -206,15 +215,26 @@ describe("AgentSession concurrent prompt guard", () => {
 
 	it("reserves same-tick admission without losing queued context or the plan reference", async () => {
 		await createSession();
-		const planPath = path.join(tempDir, "PLAN.md");
+		const planUrl = "local://PLAN.md";
+		const planPath = resolveLocalUrlToPath(planUrl, {
+			getArtifactsDir: () => sessionManager.getArtifactsDir(),
+			getSessionId: () => sessionManager.getSessionId(),
+		});
+		fs.mkdirSync(path.dirname(planPath), { recursive: true });
 		fs.writeFileSync(planPath, "# Approved plan\n\nKeep this reference.");
-		session.setPlanReferencePath(planPath);
-		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(messages => {
+		session.setPlanReferencePath(planUrl);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(((
+			_messages: AgentMessage[] | AgentMessage | string,
+			optionsOrImages?: ImageContent[] | { onAccepted?: () => void },
+			options?: { onAccepted?: () => void },
+		) => {
+			const promptOptions = Array.isArray(optionsOrImages) ? options : optionsOrImages;
 			session.agent.state.isStreaming = true;
+			promptOptions?.onAccepted?.();
 			return Promise.resolve().finally(() => {
 				session.agent.state.isStreaming = false;
 			});
-		});
+		}) as unknown as typeof session.agent.prompt);
 
 		const winner = session.prompt("first prompt");
 		const queued = session.sendCustomMessage(
@@ -232,16 +252,22 @@ describe("AgentSession concurrent prompt guard", () => {
 		await queued;
 		await winner;
 
-		const forwarded = promptSpy.mock.calls[0]?.[0] as AgentMessage[];
+		const forwarded = promptSpy.mock.calls[0]?.[0];
+		if (!Array.isArray(forwarded)) throw new Error("Expected prompt to receive message records");
 		expect(
-			forwarded.some(
-				message =>
-					message.role === "user" &&
-					message.content.some(content => content.type === "text" && content.text === "first prompt"),
-			),
+			forwarded.some(message => {
+				if (message.role !== "user" || !Array.isArray(message.content)) return false;
+				return message.content.some(
+					(content: TextContent | ImageContent) => content.type === "text" && content.text === "first prompt",
+				);
+			}),
 		).toBe(true);
-		expect(forwarded.some(message => message.role === "custom" && message.customType === "queued-context")).toBe(true);
-		expect(forwarded.some(message => message.role === "custom" && message.customType === "plan-mode-reference")).toBe(true);
+		expect(forwarded.some(message => message.role === "custom" && message.customType === "queued-context")).toBe(
+			true,
+		);
+		expect(forwarded.some(message => message.role === "custom" && message.customType === "plan-mode-reference")).toBe(
+			true,
+		);
 	});
 
 	it("should allow steer() while streaming", async () => {
@@ -282,7 +308,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await createSession();
 
 		const firstPrompt = session.prompt("First message");
-		await waitFor(() => session.isStreaming);
+		await waitFor(() => session.agent.state.isStreaming);
 
 		// The first agent loop may dequeue a steer before the assertion runs, so
 		// observe agent.steer itself rather than the residual queue length.
@@ -312,7 +338,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await createSession({ "magicKeywords.enabled": true, "magicKeywords.ultrathink": true });
 
 		const firstPrompt = session.prompt("First message");
-		await waitFor(() => session.isStreaming);
+		await waitFor(() => session.agent.state.isStreaming);
 
 		try {
 			await session.sendUserMessage("ultrathink fix via extension");

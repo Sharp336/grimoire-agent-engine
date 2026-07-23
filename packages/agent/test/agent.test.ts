@@ -35,6 +35,7 @@ describe("Agent", () => {
 		});
 		const concurrentPrompt = rejectedConcurrentPrompt;
 		if (!concurrentPrompt) throw new Error("Expected concurrent prompt attempt");
+		expect(admittedWhileStreaming).toBe(true);
 		await expect(concurrentPrompt).rejects.toBeInstanceOf(AgentBusyError);
 		agent.abort();
 		await prompt;

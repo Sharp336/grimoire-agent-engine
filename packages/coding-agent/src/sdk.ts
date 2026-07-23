@@ -2440,7 +2440,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			sessionManager,
 			modelRegistry,
-			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, session.sessionManager.getCwd()) : undefined),
+			() =>
+				hasSession
+					? createSessionMemoryRuntimeContext(session, agentDir, session.sessionManager.getCwd())
+					: undefined,
 			settings,
 			localProtocolOptions,
 		);

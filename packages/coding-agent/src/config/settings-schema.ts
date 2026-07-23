@@ -2459,7 +2459,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight, or Supermemory remote memory. Changes apply when the next session starts.",
+			description:
+				"Off, local summary pipeline, Mnemopi SQLite, Hindsight, or Supermemory remote memory. Changes apply when the next session starts.",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },

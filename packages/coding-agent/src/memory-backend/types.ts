@@ -133,7 +133,7 @@ export interface MemoryBackend {
 	 * Reset per-transcript tracking after this session switches to a new
 	 * transcript. Return true when developer instructions need rebuilding.
 	 */
-	resetSession?(session: AgentSession): void | boolean | Promise<void | boolean>;
+	resetSession?(session: AgentSession): boolean | void | Promise<boolean | undefined> | Promise<void>;
 
 	/** Release session-scoped resources during AgentSession disposal. */
 	disposeSession?(session: AgentSession): void | Promise<void>;
@@ -198,7 +198,7 @@ export interface MemoryBackend {
 		session: AgentSession,
 		promptText: string,
 		options?: MemoryBackendCommitAgentStartOptions,
-	): Promise<MemoryBackendPreparedAgentStartCommit | false | void>;
+	): Promise<MemoryBackendPreparedAgentStartCommit | false | undefined> | Promise<void>;
 
 	/**
 	 * Optional hook to splice extra context into a compaction summarization.
