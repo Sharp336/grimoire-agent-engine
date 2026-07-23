@@ -282,23 +282,33 @@ function Start-Exec([pscustomobject] $Request) {
 
     # Two evaluation phases in the expandable here-string below: backtick-escaped
     # `$ (e.g. `$global:...) is literal text that executes LATER in the shared
-    # runspace; bare $ ($commandBody, $width, $HistoryDepth) interpolates
-    # template values NOW, host-side. Edit with that rule in mind.
+    # runspace; bare $ ($commandBody) interpolates template values NOW,
+    # host-side. Edit with that rule in mind.
     #
-    # Retain result objects AND keep user variables at top scope: @() is an
-    # array-subexpression and try/finally is a plain block — neither (unlike
-    # & {}) opens a child scope, so `$x = 1` in the user command persists into
-    # the next call. $LASTEXITCODE is never written by the wrapper, so user
-    # commands always read the true persisted value; this invocation's native
-    # exit is attributed via the PostCommandLookupAction flag (or an observed
-    # value change, covering path-invoked executables that skip name lookup)
-    # inside a finally, so it is recorded even when the command throws, calls
-    # exit, returns, or the pipeline is stopped. $commandBody sits alone on
-    # its own line so a trailing line-comment cannot swallow the closing paren.
-    # ONE pipeline per call carries everything: run the user command at top
-    # scope, retain its live objects in $global:__omp, then render them as the
-    # pipeline's output (captured in $out). Exit code is read afterwards via the
-    # session-state proxy — a direct API call, not another pipeline.
+    # $commandBody runs BARE (unwrapped) at top scope so its own pipeline
+    # output streams directly into $wrapped's own output stream -- captured
+    # live in $out (the PSDataCollection given to BeginInvoke below) as it's
+    # produced, regardless of whether a LATER statement throws a terminating
+    # error. This used to be `$global:__omp.Last = @($commandBody)`: an
+    # array-subexpression assignment is atomic -- if $commandBody threw
+    # partway through, the WHOLE assignment was skipped (confirmed
+    # empirically: `$x = @("before"; throw "boom")` leaves $x completely
+    # UNCHANGED, not partially populated), silently discarding every object
+    # already produced and leaving $global:__omp.Last/History/render
+    # pointing at the PREVIOUS command instead of finalizing this one. $out
+    # doesn't have that atomicity problem, so Complete-Exec (after
+    # EndInvoke, success or not) now does the retention/History/render work
+    # itself from $out's actual contents -- see there for the rest.
+    # try/finally is a plain block (unlike & {}) so it doesn't open a child
+    # scope, keeping `$x = 1` in the user command persisted into the next
+    # call. $LASTEXITCODE is never written by the wrapper, so user commands
+    # always read the true persisted value; this invocation's native exit is
+    # attributed via the PostCommandLookupAction flag (or an observed value
+    # change, covering path-invoked executables that skip name lookup)
+    # inside a finally, so it is recorded even when the command throws,
+    # calls exit, returns, or the pipeline is stopped. $commandBody sits
+    # alone on its own line so a trailing line-comment cannot swallow the
+    # `} finally {` that follows.
     #
     # See Test-HasTopLevelReturn above: most commands splice directly (fast
     # path, unchanged since introduction); a command with a bare top-level
@@ -313,23 +323,12 @@ if (`$__ompCwd) {
 `$global:__ompPrevExit = `$global:LASTEXITCODE
 `$global:__ompNativeRan = `$false
 try {
-`$global:__omp.Last = @(
 $commandBody
-)
 } finally {
 if ((`$global:__ompNativeRan -or `$global:LASTEXITCODE -ne `$global:__ompPrevExit) -and `$null -ne `$global:LASTEXITCODE) {
     `$global:__ompExit = [int]`$global:LASTEXITCODE
 }
 }
-`$global:__omp.Counter++
-# History keys must stay strings: int indexing of an ordered dictionary is
-# positional, while @(Keys)[0] eviction below relies on keyed writes.
-`$global:__omp.History[[string]`$global:__omp.Counter] = `$global:__omp.Last
-while (`$global:__omp.History.Count -gt $HistoryDepth) {
-    `$k = @(`$global:__omp.History.Keys)[0]
-    `$global:__omp.History.Remove(`$k)
-}
-`$global:__omp.Last | Out-String -Width $width
 "@
 
     $ps = [PowerShell]::Create()
@@ -421,17 +420,60 @@ function Complete-Exec {
     $cur = $script:current
     $script:current = $null
 
-    try { $cur.PS.EndInvoke($cur.Async) | Out-Null }
-    catch { } # terminating/stopped errors surface via HadErrors / Streams.Error
+    # A terminating error that escapes the whole wrapped script (bare
+    # `throw`/`-ErrorAction Stop` past the try/finally) never reaches
+    # Streams.Error -- PowerShell reports it by making EndInvoke itself
+    # throw a MethodInvocationException instead (confirmed empirically:
+    # Streams.Error.Count stays 0 for this exact case). Unwrap it via
+    # IContainsErrorRecord so the error's own text/position still surfaces
+    # instead of silently vanishing behind a generic "Command reported
+    # errors" note with zero detail.
+    $terminatingErrorText = $null
+    try {
+        $cur.PS.EndInvoke($cur.Async) | Out-Null
+    } catch {
+        $inner = $_.Exception.InnerException
+        $terminatingErrorText = if ($inner -is [System.Management.Automation.IContainsErrorRecord]) {
+            $inner.ErrorRecord | Out-String -Width $cur.Width
+        } else {
+            $_.Exception.Message
+        }
+    }
 
     $consoleErrText = if ($script:consoleErr.GetStringBuilder().Length -gt 0) { $script:consoleErr.ToString() } else { $null }
     $hadErrors = [bool]$cur.PS.HadErrors -or $cur.HadErrorRecords -or ($null -ne $consoleErrText)
 
-    # Success output renders once, from the whole collection: per-object
-    # rendering would break table formatting (columns are sized from every
-    # row). The data streams have been flowing live via Publish-Streams; the
-    # tail is drained below.
-    Write-Chunk -Id $cur.Id -Stream 'output' -Text ($cur.Out -join '')
+    # Retain result objects (inspectable via Enter-PSHostProcess) and update
+    # the History ring from whatever the pipeline actually produced. Done
+    # here -- after EndInvoke, using $cur.Out -- rather than as $wrapped's
+    # own trailing statement: $cur.Out accumulates objects live as they're
+    # streamed, independent of whether the pipeline later throws a
+    # terminating error, so this finalizes Last/Counter/History even for a
+    # command that emitted output and THEN failed. Render via
+    # Invoke-OnRunspace (not the host's own default runspace) so Out-String
+    # sees $rs's own format data/culture/$FormatEnumerationLimit -- the
+    # same context this render used to run in as $wrapped's own trailing
+    # line. Success output renders once, from the whole collection: per-
+    # object rendering would break table formatting (columns are sized from
+    # every row). The data streams have been flowing live via
+    # Publish-Streams; the tail is drained below.
+    $omp = $null
+    try { $omp = $rs.SessionStateProxy.GetVariable('__omp') } catch { } # best-effort
+    $renderedOutput = ''
+    if ($null -ne $omp) {
+        $omp.Last = @($cur.Out)
+        $omp.Counter++
+        # History keys must stay strings: int indexing of an ordered
+        # dictionary is positional, while @(Keys)[0] eviction below relies
+        # on keyed writes.
+        $omp.History[[string]$omp.Counter] = $omp.Last
+        while ($omp.History.Count -gt $HistoryDepth) {
+            $k = @($omp.History.Keys)[0]
+            $omp.History.Remove($k)
+        }
+        $renderedOutput = (Invoke-OnRunspace 'param($w) $global:__omp.Last | Out-String -Width $w' @($cur.Width)) -join ''
+    }
+    Write-Chunk -Id $cur.Id -Stream 'output' -Text $renderedOutput
     # Drain direct [Console]::Out writes (redirected at startup) as output.
     # Completion-only on purpose: the pipeline thread appends to this
     # StringBuilder while running, and StringBuilder is not safe to read
@@ -446,6 +488,9 @@ function Complete-Exec {
     if ($null -ne $consoleErrText) {
         Write-Chunk -Id $cur.Id -Stream 'error' -Text (Format-AnsiText $consoleErrText '31;1')
         [void]$script:consoleErr.GetStringBuilder().Clear()
+    }
+    if ($null -ne $terminatingErrorText) {
+        Write-Chunk -Id $cur.Id -Stream 'error' -Text (Format-AnsiText $terminatingErrorText '31;1')
     }
     Publish-Streams $cur
 
