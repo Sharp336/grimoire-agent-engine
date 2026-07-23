@@ -3,6 +3,7 @@ import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isUsageLimit } from "./error/flags";
 import { isUsageLimitOutcome } from "./error/rate-limit";
+import { isSurfacedRateLimitMessage } from "./utils/rate-limit-rotation";
 
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
@@ -36,8 +37,20 @@ export interface ApiKeyResolveContext {
 /**
  * Resolves the API key to send for a request, retried through the a/b/c policy
  * described on {@link ApiKeyResolveContext}.
+ *
+ * `sessionId` optionally names the session whose sticky credential pool the
+ * resolver reads, attached at construction by AuthStorage-backed builders.
+ * Consumers that probe the credential pool on the resolver's behalf (the
+ * rate-limit rotation sibling check) must prefer it over any ambient session
+ * id — one stream wrapper can serve resolvers bound to different sessions
+ * (main agent vs. advisor provider session), and probing the wrong session's
+ * pool answers for the wrong credentials. Wrappers around a resolver
+ * ({@link seedApiKeyResolver}) must propagate it.
  */
-export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<string | undefined> | string | undefined;
+export type ApiKeyResolver = {
+	(ctx: ApiKeyResolveContext): Promise<string | undefined> | string | undefined;
+	readonly sessionId?: string;
+};
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
@@ -67,13 +80,16 @@ export async function resolveApiKeyOnce(key: ApiKey | undefined, signal?: AbortS
  */
 export function seedApiKeyResolver(seed: string | undefined, resolver: ApiKeyResolver): ApiKeyResolver {
 	let seedPending = seed !== undefined;
-	return ctx => {
+	const seeded: ApiKeyResolver = ctx => {
 		if (seedPending && ctx.error === undefined) {
 			seedPending = false;
 			return seed;
 		}
 		return resolver(ctx);
 	};
+	// The wrapper delegates every real resolution to `resolver`, so it reads the
+	// same session's sticky pool — carry that identity for pool probes.
+	return resolver.sessionId !== undefined ? Object.assign(seeded, { sessionId: resolver.sessionId }) : seeded;
 }
 
 // Re-exported from the error module (its new home); see error/auth-classify.ts.
@@ -93,6 +109,9 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	if (isUsageLimit(error) || isInvalidatedOAuthTokenError(error)) return true;
 	const status = AIError.status(error);
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	// A transport-surfaced transient 429 rotates directly: refresh-same cannot
+	// help a per-minute cap, and the sibling pool cycles via attemptedKeys.
+	if (message !== undefined && isSurfacedRateLimitMessage(message)) return true;
 	return isUsageLimitOutcome(status, message);
 }
 

@@ -58,6 +58,11 @@ import {
 } from "./usage/openai-codex-reset";
 import { opencodeGoUsageProvider } from "./usage/opencode-go";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
+import {
+	clampRateLimitRotationMs,
+	isSurfacedRateLimitMessage,
+	parseSurfacedRateLimit,
+} from "./utils/rate-limit-rotation";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
@@ -3790,6 +3795,63 @@ export class AuthStorage {
 	}
 
 	/**
+	 * OAuth bearer-alias attribution fallback shared by {@link markUsageLimitReached}
+	 * and {@link markRateLimited}. Both a delayed usage-limit and a transient rate
+	 * limit are account-local and survive OAuth bearer rotation, so when the primary
+	 * target could not be resolved we attribute the response through the durable row
+	 * id captured when this exact bearer was resolved. Never use this alias for hard
+	 * auth errors.
+	 */
+	#resolveOAuthBearerAliasTarget(
+		provider: string,
+		apiKey: string,
+	): { type: AuthCredential["type"]; index: number; explicit: boolean } | undefined {
+		const credentialId = this.#findOAuthCredentialIdForBearer(provider, apiKey);
+		const index =
+			credentialId === undefined
+				? -1
+				: this.#getStoredCredentials(provider).findIndex(
+						entry => entry.id === credentialId && entry.credential.type === "oauth",
+					);
+		return index >= 0 ? { type: "oauth", index, explicit: true } : undefined;
+	}
+
+	/**
+	 * Scan same-type sibling credentials (excluding the just-blocked `targetIndex`)
+	 * for one available now. Returns `switched: true` on the first unblocked sibling;
+	 * otherwise `switched: false` with the soonest sibling unblock time. `blockScope`
+	 * selects scoped vs unscoped block lookups. Shared by {@link markUsageLimitReached}
+	 * (scoped) and {@link markRateLimited} (unscoped); callers own any logging.
+	 */
+	#scanRemainingSiblingsForAvailability(
+		provider: string,
+		providerKey: string,
+		credentialType: AuthCredential["type"],
+		targetIndex: number,
+		blockScope: string | undefined,
+	): UsageLimitMarkResult {
+		const remainingCredentials = this.#getCredentialsForProvider(provider)
+			.map((credential, index) => ({ credential, index }))
+			.filter(
+				(entry): entry is { credential: AuthCredential; index: number } =>
+					entry.credential.type === credentialType && entry.index !== targetIndex,
+			);
+
+		let retryAtMs: number | undefined;
+		for (const candidate of remainingCredentials) {
+			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				providerKey,
+				candidate.index,
+				blockScope,
+			);
+			if (candidateBlockedUntil === undefined) return { switched: true };
+			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+		}
+		return { switched: false, retryAtMs };
+	}
+
+	/**
 	 * Marks the current session's credential as temporarily blocked due to usage limits.
 	 * Uses usage reports to determine accurate reset time when available.
 	 * Returns whether a sibling credential is available now; when none is, also
@@ -3813,17 +3875,7 @@ export class AuthStorage {
 			apiKey: options?.apiKey,
 		});
 		if (!sessionCredential && options?.credentialId === undefined && options?.apiKey !== undefined) {
-			// Account quota survives OAuth bearer rotation. Attribute a delayed
-			// usage-limit response through the durable row id captured when this
-			// exact bearer was resolved; never use this alias for hard auth errors.
-			const credentialId = this.#findOAuthCredentialIdForBearer(provider, options.apiKey);
-			const index =
-				credentialId === undefined
-					? -1
-					: this.#getStoredCredentials(provider).findIndex(
-							entry => entry.id === credentialId && entry.credential.type === "oauth",
-						);
-			if (index >= 0) sessionCredential = { type: "oauth", index, explicit: true };
+			sessionCredential = this.#resolveOAuthBearerAliasTarget(provider, options.apiKey);
 		}
 		if (!sessionCredential) return { switched: false };
 		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
@@ -3860,25 +3912,82 @@ export class AuthStorage {
 			this.#markCredentialBlocked(provider, providerKey, targetIndex, blockedUntil, blockScope);
 		}
 
-		const remainingCredentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter(
-				(entry): entry is { credential: AuthCredential; index: number } =>
-					entry.credential.type === credentialType && entry.index !== targetIndex,
-			);
+		return this.#scanRemainingSiblingsForAvailability(provider, providerKey, credentialType, targetIndex, blockScope);
+	}
 
-		let retryAtMs: number | undefined;
-		for (const candidate of remainingCredentials) {
-			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
-				provider,
-				providerKey,
-				candidate.index,
-				blockScope,
-			);
-			if (candidateBlockedUntil === undefined) return { switched: true };
-			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+	/**
+	 * Short, unscoped, persisted block for a transport-surfaced transient rate
+	 * limit (RATE_LIMIT_EXCEEDED). Unlike {@link markUsageLimitReached} this
+	 * never consults usage reports, never applies a strategy blockScope, and
+	 * clamps the window to [5s, 120s] — parking the hot credential just long
+	 * enough for ranked selection to prefer a sibling. Sticky is left intact so
+	 * the session returns to its preferred credential once the block expires.
+	 */
+	async markRateLimited(
+		provider: string,
+		sessionId: string | undefined,
+		options?: { retryAfterMs?: number; apiKey?: string; credentialId?: number },
+	): Promise<UsageLimitMarkResult> {
+		let sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
+			credentialId: options?.credentialId,
+			apiKey: options?.apiKey,
+		});
+		if (!sessionCredential && options?.credentialId === undefined && options?.apiKey !== undefined) {
+			sessionCredential = this.#resolveOAuthBearerAliasTarget(provider, options.apiKey);
 		}
-		return { switched: false, retryAtMs };
+		if (!sessionCredential) return { switched: false };
+		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
+		if (!target || target.credential.type !== sessionCredential.type) return { switched: false };
+		const credentialType = sessionCredential.type;
+
+		const providerKey = this.#getProviderTypeKey(provider, credentialType);
+		const blockedUntil = Date.now() + clampRateLimitRotationMs(options?.retryAfterMs);
+		const targetIndex = sessionCredential.index;
+		this.#markCredentialBlocked(provider, providerKey, targetIndex, blockedUntil);
+
+		const result = this.#scanRemainingSiblingsForAvailability(
+			provider,
+			providerKey,
+			credentialType,
+			targetIndex,
+			undefined,
+		);
+		if (result.switched) {
+			logger.info("auth: rate-limited credential parked, sibling available", {
+				provider,
+				credentialId: target.id,
+				blockedUntilMs: blockedUntil,
+			});
+		}
+		return result;
+	}
+
+	/**
+	 * Cheap availability probe for the rate-limit rotation seam: does a sibling
+	 * credential (same type, different row, not blocked — unscoped check) exist
+	 * for this session's current credential? Advisory only; rotation re-checks
+	 * at rotate time and the caller degrades to sleeping when it raced away.
+	 *
+	 * Scoped (per-model) blocks are invisible here; a scoped-blocked sibling may
+	 * be over-reported — callers degrade via the bounded stall path.
+	 */
+	hasUsableSibling(provider: string, sessionId?: string): boolean {
+		const sticky = this.#getSessionCredential(provider, sessionId);
+		// No sticky means we cannot identify the in-use credential. Rotation is
+		// same-type-only, so a cross-type unblocked row is not a usable sibling —
+		// and #recordSessionCredential runs at every credential resolution site
+		// before any HTTP request, so a 429 in the rotation-enabled flow always
+		// has a sticky. Absence is an anomaly state: decline and let the transport
+		// sleep (baseline) rather than guess.
+		if (!sticky) return false;
+		const credentials = this.#getCredentialsForProvider(provider);
+		const providerKey = this.#getProviderTypeKey(provider, sticky.type);
+		return credentials.some(
+			(credential, index) =>
+				credential.type === sticky.type &&
+				index !== sticky.index &&
+				!this.#isCredentialBlocked(provider, providerKey, index),
+		);
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -5425,6 +5534,25 @@ export class AuthStorage {
 			).switched;
 		}
 
+		// Transport-surfaced transient rate limit: short unscoped park + sibling
+		// re-rank. Ordered after the usage-limit branch so a body that clearly
+		// indicates quota exhaustion still takes the long markUsageLimitReached
+		// path even when the surface marker is present. Never falls through to
+		// the hard-auth branch: the credential is healthy, so no suspect-marking
+		// and no sticky clear.
+		if (message !== undefined) {
+			const surfaced = parseSurfacedRateLimit(message);
+			if (surfaced) {
+				return (
+					await this.markRateLimited(provider, sessionId, {
+						retryAfterMs: surfaced.retryAfterMs,
+						apiKey: options?.apiKey,
+						credentialId: options?.credentialId,
+					})
+				).switched;
+			}
+		}
+
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
@@ -5516,8 +5644,17 @@ export class AuthStorage {
 					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 					// Preserve no-sibling quota backoff instead of re-resolving an
 					// already-blocked fallback. Hard-auth declines still re-resolve
-					// because a peer may have refreshed the failed bearer.
-					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
+					// because a peer may have refreshed the failed bearer. Surfaced
+					// rate limits also stop here: returning `undefined` hands control
+					// to the driver's stall fallback instead of re-resolving a
+					// just-blocked credential.
+					if (
+						AIError.isUsageLimit(error) ||
+						isUsageLimitOutcome(status, message) ||
+						(message !== undefined && isSurfacedRateLimitMessage(message))
+					) {
+						return undefined;
+					}
 				}
 				return this.getApiKey(provider, sessionId, { baseUrl, modelId, signal });
 			}

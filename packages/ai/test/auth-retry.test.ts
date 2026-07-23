@@ -1,10 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import type { ApiKeyResolveContext, OAuthAccess, OAuthAccessSource } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolveContext, ApiKeyResolver, OAuthAccess, OAuthAccessSource } from "@oh-my-pi/pi-ai";
 import {
 	AUTH_RETRY_MAX_ATTEMPTS,
+	createAuthRetryKeyState,
+	formatSurfacedRateLimitMessage,
 	isApiKeyResolver,
 	isAuthRetryableError,
 	resolveApiKeyOnce,
+	resolveNextAuthRetryKey,
+	seedApiKeyResolver,
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
@@ -41,6 +45,26 @@ describe("isApiKeyResolver / resolveApiKeyOnce", () => {
 		expect(resolved).toBe("minted");
 		// Initial resolve must look like an initial resolve, not a retry.
 		expect(seen).toEqual({ lastChance: false, error: undefined, signal: undefined });
+	});
+});
+
+describe("seedApiKeyResolver", () => {
+	it("carries the wrapped resolver's session identity", async () => {
+		// The agent loop seeds every per-request resolver before it reaches the
+		// stream options; the rate-limit rotation sibling probe reads
+		// `apiKey.sessionId` there to probe the pool the resolver stickies under.
+		// Dropping it on the wrapper would silently re-point advisor probes at the
+		// main session.
+		const inner: ApiKeyResolver = Object.assign(() => "rotated", { sessionId: "advisor-7" });
+		const seeded = seedApiKeyResolver("seed-key", inner);
+		expect(seeded.sessionId).toBe("advisor-7");
+		// Seeding semantics are unchanged: first initial resolve returns the seed,
+		// later resolves delegate to the wrapped resolver.
+		expect(await seeded({ lastChance: false, error: undefined })).toBe("seed-key");
+		expect(await seeded({ lastChance: false, error: undefined })).toBe("rotated");
+
+		// A resolver without a session identity stays without one.
+		expect(seedApiKeyResolver("seed-key", () => "k").sessionId).toBeUndefined();
 	});
 });
 
@@ -87,6 +111,65 @@ describe("isAuthRetryableError", () => {
 		expect(isAuthRetryableError(authError(500))).toBe(false);
 		expect(isAuthRetryableError(new Error("network blip"))).toBe(false);
 		expect(isAuthRetryableError(undefined)).toBe(false);
+	});
+});
+
+describe("resolveNextAuthRetryKey surfaced rate-limit rotation", () => {
+	function surfacedRateLimitError(): Error & { status: number } {
+		return Object.assign(new Error(formatSurfacedRateLimitMessage("429 Too many requests", 12_000)), {
+			status: 429,
+		});
+	}
+
+	it("rotates directly on a marker error: one resolve with lastChance, no refresh-same step", async () => {
+		const contexts: ApiKeyResolveContext[] = [];
+		const state = createAuthRetryKeyState("key-A");
+		const next = await resolveNextAuthRetryKey(
+			state,
+			ctx => {
+				contexts.push(ctx);
+				return "key-B";
+			},
+			surfacedRateLimitError(),
+		);
+
+		expect(next).toBe("key-B");
+		// Skip-refresh-same: exactly one resolver call, already at the switch step.
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0]).toMatchObject({ lastChance: true, previousKey: "key-A" });
+	});
+
+	it("cycles distinct siblings on repeated marker errors until the resolver repeats a key", async () => {
+		const contexts: ApiKeyResolveContext[] = [];
+		const pool = ["key-A", "key-B", "key-C", "key-B"];
+		let resolveIndex = 0;
+		const state = createAuthRetryKeyState(pool[0]!);
+		const resolver = (ctx: ApiKeyResolveContext) => {
+			contexts.push(ctx);
+			return pool[++resolveIndex];
+		};
+
+		expect(await resolveNextAuthRetryKey(state, resolver, surfacedRateLimitError())).toBe("key-B");
+		expect(await resolveNextAuthRetryKey(state, resolver, surfacedRateLimitError())).toBe("key-C");
+		// The resolver cycles back to key-B → attemptedKeys stops the loop.
+		expect(await resolveNextAuthRetryKey(state, resolver, surfacedRateLimitError())).toBeUndefined();
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([true, true, true]);
+	});
+
+	it("keeps the legacy refresh-same + one-switch shape for a plain transient 429 (baseline pin)", async () => {
+		const contexts: ApiKeyResolveContext[] = [];
+		const plain429 = Object.assign(new Error("429 too many requests"), { status: 429 });
+		const state = createAuthRetryKeyState("key-A");
+		const resolver = (ctx: ApiKeyResolveContext) => {
+			contexts.push(ctx);
+			return ctx.lastChance ? "switch-key" : "refresh-key";
+		};
+
+		expect(await resolveNextAuthRetryKey(state, resolver, plain429)).toBe("refresh-key");
+		expect(await resolveNextAuthRetryKey(state, resolver, plain429)).toBe("switch-key");
+		// Legacy path is bounded: after one refresh and one switch it declines.
+		expect(await resolveNextAuthRetryKey(state, resolver, plain429)).toBeUndefined();
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true]);
 	});
 });
 

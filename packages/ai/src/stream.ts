@@ -17,7 +17,12 @@ import { CATALOG_PROVIDERS, type ProviderCatalogEntry } from "@oh-my-pi/pi-catal
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getConfigRootDir, isEnoent, logger, withExtraCaFetch } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	AUTH_RETRY_MAX_ATTEMPTS,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isInvalidatedOAuthTokenError } from "./error/auth-classify";
@@ -77,6 +82,13 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { wrapFetchForProxy } from "./utils/proxy";
+import {
+	isSurfacedRateLimitMessage,
+	type RateLimitStallOnce,
+	resolveRateLimitStallMs,
+	stripSurfacedRateLimitMarker,
+	warnRateLimitStall,
+} from "./utils/rate-limit-rotation";
 import { withRequestDebugFetch } from "./utils/request-debug";
 import { withGeminiThinkingLoopGuard } from "./utils/thinking-loop";
 
@@ -981,6 +993,7 @@ function isRetryableUpstreamError(error: unknown, status: number | undefined, me
 	// instead of burning siblings.
 	if (AIError.isUsageLimit(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
+	if (message !== undefined && isSurfacedRateLimitMessage(message)) return true;
 	if (status === 401) return true;
 	return isUsageLimitOutcome(status, message);
 }
@@ -1000,6 +1013,19 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 		stream.push(event);
 	}
 }
+
+/**
+ * Internal marker set only by the resolver-branch recursion below. It signals to
+ * the non-resolver dispatch that an auth-retry rotation driver is live in an
+ * outer frame, so `rateLimitRotation` may be forwarded to the transports. A
+ * direct static-key caller never sets it, so its rotation is stripped: with no
+ * driver to parse and rotate on the surfaced marker, forwarding it would only
+ * leak the internal marker as a terminal 429 (see the precondition on
+ * SimpleStreamOptions.rateLimitRotation). Whitelisted out of provider options by
+ * mapOptionsForApi, so it never reaches the wire.
+ */
+const ROTATION_DRIVER_ACTIVE = Symbol("rotationDriverActive");
+type RotationDriverFlag = { [ROTATION_DRIVER_ACTIVE]?: boolean };
 
 export function streamSimple<TApi extends Api>(
 	model: Model<TApi>,
@@ -1030,7 +1056,13 @@ export function streamSimple<TApi extends Api>(
 			};
 
 			try {
-				const inner = streamSimple(model, context, { ...requestOptions, apiKey });
+				// Flag the recursion so the non-resolver dispatch keeps rotation live:
+				// this driver owns the surfaced-marker parse/rotate loop below.
+				const inner = streamSimple(model, context, {
+					...requestOptions,
+					apiKey,
+					[ROTATION_DRIVER_ACTIVE]: true,
+				} as SimpleStreamOptions & RotationDriverFlag);
 				for await (const event of inner) {
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -1049,6 +1081,13 @@ export function streamSimple<TApi extends Api>(
 					}
 					flushBuffered();
 					emittedReplayUnsafeEvent = true;
+					// Direct terminal emission (non-retryable, or replay-unsafe content
+					// already out): this bypasses the resolver-loop stripper below, so
+					// strip the internal rotation marker in place here too — a marker
+					// surfaced mid/post-content must never leak its bytes to the user.
+					if (event.type === "error" && event.error.errorMessage !== undefined) {
+						event.error.errorMessage = stripSurfacedRateLimitMarker(event.error.errorMessage);
+					}
 					outer.push(event);
 					if (outer.done) return undefined;
 				}
@@ -1066,6 +1105,12 @@ export function streamSimple<TApi extends Api>(
 					return { error, bufferedEvents };
 				}
 				flushBuffered();
+				// Replay-unsafe content already emitted: this is a direct terminal
+				// failure that skips the resolver-loop stripper, so strip the marker
+				// in place (identity preserved) before it reaches the user.
+				if (error instanceof Error) {
+					error.message = stripSurfacedRateLimitMarker(error.message);
+				}
 				outer.fail(error);
 			}
 			return undefined;
@@ -1101,19 +1146,106 @@ export function streamSimple<TApi extends Api>(
 			const retryState = createAuthRetryKeyState(lastKey);
 			let failure = await runAttempt(lastKey);
 			if (!failure) return;
+			let stallRetriesUsed = 0;
+			// One latch per driver invocation: a single stalled request may burn
+			// several stall reattempts, but the module contract is one logical stall
+			// = one `rate_limit_stall` warn (mirrors the fetch-retry and provider-retry
+			// seams). Shared across every iteration of this while-loop.
+			const stallOnce: RateLimitStallOnce = { warned: false };
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
+				const failureMessage = failure.error instanceof Error ? failure.error.message : undefined;
 				const nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal);
-				if (nextKey === undefined) break;
+				if (nextKey === undefined) {
+					// Surfaced rate limit but rotation declined (sibling raced away or
+					// the pool cycled): degrade to sleeping the embedded hint in place
+					// and re-attempting the same credential instead of surfacing a
+					// terminal 429 the transport would have absorbed.
+					if (retryState.attempts >= AUTH_RETRY_MAX_ATTEMPTS) break;
+					const stallMs = resolveRateLimitStallMs(failureMessage, stallRetriesUsed);
+					if (stallMs === undefined) break;
+					stallRetriesUsed++;
+					warnRateLimitStall(
+						{ provider: model.provider, delayMs: stallMs, source: "auth-retry-stall" },
+						stallOnce,
+					);
+					try {
+						await scheduler.wait(stallMs, { signal });
+					} catch {
+						break;
+					}
+					retryState.attempts += 1;
+					// A stall sleep can run up to 10 minutes — long enough for an OAuth
+					// bearer to expire and for a blocked sibling to free. Re-resolve
+					// through the resolver's side-effect-free initial path (`error:
+					// undefined`) instead of replaying the captured raw key: it
+					// re-mints/refreshes the token and re-ranks the pool, possibly
+					// landing a now-free sibling. A decline (undefined/throw) falls
+					// back to the captured key, preserving the pre-existing behavior.
+					let stallKey: string;
+					try {
+						stallKey =
+							(await apiKeyResolver({ lastChance: false, error: undefined, signal })) || retryState.lastKey;
+					} catch {
+						stallKey = retryState.lastKey;
+					}
+					if (stallKey !== retryState.lastKey) {
+						// Landed a different credential: record it the way the rotation
+						// path does so `previousKey`/cycle bookkeeping stays coherent.
+						// Deliberately NOT via acceptRetryKey — a freed sibling attempted
+						// earlier in this operation is already in `attemptedKeys` (Set.add
+						// is idempotent) and must not be rejected as a cycle here.
+						// Deliberately NO onRotated here: this path is only reached when
+						// rotation was DECLINED, and the initial-resolve's least-bad
+						// selection can hand back a different-but-still-blocked credential
+						// — announcing "rotated to a sibling" right before a repeat 429
+						// would be a false UI event. `credential_rotated` stays reserved
+						// for actual driver rotations; a genuinely freed sibling surfaces
+						// through the subsequent success.
+						retryState.attemptedKeys.add(stallKey);
+						retryState.lastKey = stallKey;
+						retryState.refreshedCurrent = false;
+					}
+					const retried = await runAttempt(stallKey);
+					if (!retried) return;
+					failure = retried;
+					continue;
+				}
+				if (failureMessage !== undefined && isSurfacedRateLimitMessage(failureMessage)) {
+					requestOptions.rateLimitRotation?.onRotated?.({ provider: model.provider, modelId: model.id });
+				}
 				const next = await runAttempt(nextKey);
 				if (!next) return;
 				failure = next;
 			}
+			// The stall loop exhausted (attempts cap / no stall budget / abort):
+			// this is the terminal emission point, so strip the internal rotation
+			// marker the driver relied on above — users see a clean 429. Nothing
+			// downstream reads the marker after this.
+			if (failure.terminalEvent?.error.errorMessage !== undefined) {
+				failure.terminalEvent.error.errorMessage = stripSurfacedRateLimitMarker(
+					failure.terminalEvent.error.errorMessage,
+				);
+			}
+			if (failure.error instanceof Error) {
+				failure.error.message = stripSurfacedRateLimitMarker(failure.error.message);
+			}
 			emitFailure(failure);
 		})();
 		return outer;
+	}
+
+	// Non-resolver dispatch. `rateLimitRotation` requires the resolver-form apiKey
+	// and its auth-retry driver (above) to parse the surfaced marker and rotate.
+	// The resolver recursion flags itself as the active driver, so keep rotation
+	// live for it; a direct static-key caller has no driver, so strip rotation —
+	// otherwise the transport's surfaced marker would leak as a terminal 429 with
+	// nothing to rotate. This makes the static path behavior-identical to
+	// rotation-off (the openai rotation test pins the full event sequence).
+	if (requestOptions.rateLimitRotation && (requestOptions as RotationDriverFlag)[ROTATION_DRIVER_ACTIVE] !== true) {
+		requestOptions.rateLimitRotation = undefined;
 	}
 
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
@@ -1435,6 +1567,7 @@ function mapOptionsForApi<TApi extends Api>(
 		execHandlers: options?.execHandlers,
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
+		rateLimitRotation: options?.rateLimitRotation,
 	};
 
 	switch (model.api) {
