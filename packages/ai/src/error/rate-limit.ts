@@ -22,6 +22,18 @@ const INSUFFICIENT_BALANCE_PATTERN = /insufficient.?balance/i;
 const SPEND_LIMIT_PATTERN = /spend.?limit/i;
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
 
+// Numeric HTTP status markers matched on WORD BOUNDARIES, not raw substrings.
+// A bare `includes("503")` also fires on digit-runs that merely embed the
+// status — our own surfaced `retry-after-ms: 5030ms` hint, a `15030 tokens`
+// count — and would misclassify a transient rate limit as capacity/server
+// error. `\b503\b` keeps matching "HTTP 503", "503 Service Unavailable", and
+// "(503)" while rejecting "5030"/"15030". The surfaced-hint formatter suffixes
+// its digits with `ms` (`retry-after-ms: 503ms`) precisely so an exact-status
+// hint value keeps a word char on its right and can never match here either.
+const HTTP_503_STATUS_PATTERN = /\b503\b/;
+const HTTP_529_STATUS_PATTERN = /\b529\b/;
+const HTTP_500_STATUS_PATTERN = /\b500\b/;
+
 /**
  * Classify a rate-limit error message into a reason category.
  * Priority order: QUOTA (Antigravity "quota will reset") > MODEL_CAPACITY > QUOTA (account) >
@@ -45,8 +57,8 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 	if (
 		lower.includes("capacity") ||
 		lower.includes("overloaded") ||
-		lower.includes("529") ||
-		lower.includes("503") ||
+		HTTP_529_STATUS_PATTERN.test(lower) ||
+		HTTP_503_STATUS_PATTERN.test(lower) ||
 		lower.includes("resource exhausted")
 	) {
 		return "MODEL_CAPACITY_EXHAUSTED";
@@ -88,7 +100,11 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 		return "QUOTA_EXHAUSTED";
 	}
 
-	if (lower.includes("500") || lower.includes("internal error") || lower.includes("internal server error")) {
+	if (
+		HTTP_500_STATUS_PATTERN.test(lower) ||
+		lower.includes("internal error") ||
+		lower.includes("internal server error")
+	) {
 		return "SERVER_ERROR";
 	}
 

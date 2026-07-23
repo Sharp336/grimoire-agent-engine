@@ -43,6 +43,20 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("Internal Server Error (500)")).toBe("SERVER_ERROR");
 	});
 
+	it("matches numeric HTTP statuses on word boundaries, not embedded digit-runs", () => {
+		// Genuine status framing still classifies as capacity/server error.
+		expect(parseRateLimitReason("HTTP 503 Service Unavailable")).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(parseRateLimitReason("Service unavailable (529)")).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(parseRateLimitReason("Request failed with status 500")).toBe("SERVER_ERROR");
+		// Digit-runs that merely embed a status must NOT reclassify: a rate-limit
+		// message carrying "5030"/"15030" stays RATE_LIMIT_EXCEEDED (503 no longer
+		// wins the MODEL_CAPACITY branch), and an otherwise-unrecognised message
+		// carrying "15000" stays UNKNOWN (500 no longer wins SERVER_ERROR).
+		expect(parseRateLimitReason("Too many requests; retry-after-ms: 5030")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("Rate limit reached: 15030 tokens used")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("Processed 15000 tokens in the request")).toBe("UNKNOWN");
+	});
+
 	it("returns UNKNOWN for unrecognised messages", () => {
 		expect(parseRateLimitReason("Something completely unexpected happened")).toBe("UNKNOWN");
 	});
