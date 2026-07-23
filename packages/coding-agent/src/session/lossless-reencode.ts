@@ -1,3 +1,6 @@
+import { countTokens } from "@oh-my-pi/pi-agent-core";
+import type { Context, Message } from "@oh-my-pi/pi-ai";
+
 type JsonPrimitive = string | number | boolean | null;
 type FlatRow = Record<string, JsonPrimitive>;
 type ColumnType = "string" | "number" | "boolean" | "null";
@@ -16,6 +19,12 @@ interface CsvCell {
 const MIN_ROWS = 2;
 const SAFE_COLUMN_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 const NUMBER_LITERAL = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+/** Mirrors snapcompact's token floor so both transforms classify the same input scale. */
+export const MIN_LOSSLESS_REENCODE_TOKENS = 3000;
+/** Stage 1 intentionally stops at the existing inline-result cap. */
+export const MAX_LOSSLESS_REENCODE_BYTES = 50 * 1024;
+/** Adjacent snapcompact precedent: the complete replacement must save at least 10%. */
+export const LOSSLESS_REENCODE_SAVINGS_MARGIN = 0.9;
 
 /**
  * Re-encode an eligible JSON array, otherwise return the original bytes.
@@ -80,6 +89,68 @@ export function decodeLosslessJsonTable(encoded: string): FlatRow[] | undefined 
 	} catch {
 		return undefined;
 	}
+}
+
+export interface LosslessReencodeSwap {
+	messageIndex: number;
+	blockIndex: number;
+	replacement: string;
+}
+
+/**
+ * Plan deterministic historical tool-result replacements without mutating the
+ * provider context. Candidates are visited oldest-first and the newest tool
+ * result is a stable frontier that always remains verbatim.
+ */
+export function planLosslessReencodes(messages: readonly Message[]): LosslessReencodeSwap[] {
+	let newestToolResultIndex = -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].role === "toolResult") {
+			newestToolResultIndex = i;
+			break;
+		}
+	}
+	if (newestToolResultIndex < 0) return [];
+
+	const swaps: LosslessReencodeSwap[] = [];
+	for (let messageIndex = 0; messageIndex < newestToolResultIndex; messageIndex++) {
+		const message = messages[messageIndex];
+		if (message.role !== "toolResult") continue;
+		for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
+			const block = message.content[blockIndex];
+			if (block.type !== "text") continue;
+			const originalBytes = Buffer.byteLength(block.text, "utf8");
+			if (originalBytes > MAX_LOSSLESS_REENCODE_BYTES || countTokens(block.text) < MIN_LOSSLESS_REENCODE_TOKENS) {
+				continue;
+			}
+			const encoded = encodeLosslessJsonTable(block.text);
+			if (!encoded) continue;
+			const marker = `[lossless-reencode v1 schema+csv; original=${originalBytes}B]`;
+			const replacement = `${marker}\n${encoded}`;
+			const replacementBytes = Buffer.byteLength(replacement, "utf8");
+			if (replacementBytes > originalBytes * LOSSLESS_REENCODE_SAVINGS_MARGIN) continue;
+			swaps.push({ messageIndex, blockIndex, replacement });
+		}
+	}
+	return swaps;
+}
+
+/** Apply the pure plan to fresh message/content arrays for provider dispatch. */
+export function transformLosslessToolResults(context: Context): Context {
+	const swaps = planLosslessReencodes(context.messages);
+	if (swaps.length === 0) return context;
+
+	const messages = [...context.messages];
+	for (const swap of swaps) {
+		const message = messages[swap.messageIndex];
+		if (message.role !== "toolResult") continue;
+		const content = [...message.content];
+		const block = content[swap.blockIndex];
+		if (block?.type !== "text") continue;
+		content[swap.blockIndex] = { ...block, text: swap.replacement };
+		messages[swap.messageIndex] = { ...message, content };
+	}
+	return { ...context, messages };
 }
 
 class FlatJsonArrayParser {
