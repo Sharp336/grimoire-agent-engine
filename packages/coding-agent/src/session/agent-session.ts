@@ -131,6 +131,7 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { GeminiHeaderRunDetector, isGeminiThinkingModel } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
+import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
@@ -256,7 +257,8 @@ import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
-import { resolveMemoryBackend } from "../memory-backend";
+import { resolveMemoryBackend } from "../memory-backend/resolve";
+import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
@@ -311,6 +313,7 @@ import {
 	obfuscateMessages,
 	obfuscateProviderContext,
 	type SecretObfuscator,
+	stripPendingSecretPlaceholderSuffix,
 } from "../secrets/obfuscator";
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import {
@@ -355,6 +358,13 @@ import { formatLocalCalendarDate } from "../utils/local-date";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
+import {
+	ASYNC_INLINE_RESULT_MAX_CHARS,
+	ASYNC_PREVIEW_MAX_CHARS,
+	ASYNC_RESULT_MESSAGE_TYPE,
+	type AsyncResultEntry,
+	buildAsyncResultBatchMessage,
+} from "./async-job-delivery";
 import type { AuthStorage } from "./auth-storage";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
@@ -662,7 +672,11 @@ function sanitizeAssistantForReparentedHistory(message: AssistantMessage): Assis
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
-	| AgentEvent
+	| Exclude<AgentEvent, { type: "agent_end" }>
+	| (Extract<AgentEvent, { type: "agent_end" }> & {
+			/** False when an async delivery will resume the session before its true final settle. */
+			isTerminal?: boolean;
+	  })
 	| {
 			type: "auto_compaction_start";
 			reason: "threshold" | "overflow" | "idle" | "incomplete";
@@ -924,6 +938,12 @@ export interface AgentSessionConfig {
 	/** Custom commands (TypeScript slash commands) */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
+	/** Agent directory used when applying memory backend changes during a live session. */
+	memoryAgentDir?: string;
+	/** Recursion depth used to suppress live backend replacement in subagents. */
+	memoryTaskDepth?: number;
+	/** Creates the built-in memory tools allowed by the current backend selection. */
+	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings */
@@ -2064,6 +2084,8 @@ export class AgentSession {
 	 * undefined to avoid reading the primary's jobs.
 	 */
 	readonly #asyncJobManager: AsyncJobManager | undefined;
+	/** Clears this session's owner delivery sink registration; set when a manager + agent id exist. */
+	#unregisterAsyncDeliverySink: (() => void) | undefined;
 	#pendingPythonMessages: PythonExecutionMessage[] = [];
 	#activeEvalExecutions = new Set<Promise<unknown>>();
 	#evalExecutionDisposing = false;
@@ -2244,6 +2266,11 @@ export class AgentSession {
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+	#memoryAgentDir: string | undefined;
+	#memoryTaskDepth = 0;
+	#createMemoryTools: (() => Promise<AgentTool[]>) | undefined;
+	#memoryBackendTransition: Promise<void> = Promise.resolve();
+	#localMemoryStartupAbort: AbortController | undefined;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
 	#resetPromptMaintenanceState(): void {
@@ -2452,8 +2479,8 @@ export class AgentSession {
 		const prewalk = this.#prewalk;
 		if (!prewalk || context?.message.role !== "assistant") return;
 
-		const todoCalledThisTurn = context.toolResults.some(result => result.toolName === "todo");
-		if (todoCalledThisTurn) {
+		const todoSucceededThisTurn = context.toolResults.some(result => result.toolName === "todo" && !result.isError);
+		if (todoSucceededThisTurn) {
 			this.#prewalkTodoSeen = true;
 		}
 
@@ -2484,10 +2511,10 @@ export class AgentSession {
 		// todo list from it and start" — so the switch waits until a todo list
 		// exists AND the model has actually started implementing (first
 		// edit/write). The todo call itself never triggers: firing there handed
-		// the fast model the whole implementation cold. The gate keys on the
-		// ACTIVE tool set, not the registry: a registered-but-deactivated todo
-		// (e.g. a restricted active-tool slate) is uncallable and would
-		// deadlock the switch.
+		// the fast model the whole implementation cold. A failed todo call does
+		// not establish the list. The gate keys on the ACTIVE tool set, not the
+		// registry: a registered-but-deactivated todo (e.g. a restricted
+		// active-tool slate) is uncallable and would deadlock the switch.
 		const todoGateOpen = this.#prewalkTodoSeen || !this.getActiveToolNames().includes("todo");
 		const action = todoGateOpen
 			? context.toolResults.find(result => PREWALK_ACTION_TOOLS[result.toolName])
@@ -2776,6 +2803,9 @@ export class AgentSession {
 		this.#skillsReloadable = config.skillsReloadable ?? true;
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
+		this.#memoryAgentDir = config.memoryAgentDir;
+		this.#memoryTaskDepth = config.memoryTaskDepth ?? 0;
+		this.#createMemoryTools = config.createMemoryTools;
 		// Resolve the wire service-tier per request so the Fireworks Priority
 		// toggle scopes priority to Fireworks alone, without mutating the shared
 		// session `serviceTier` that drives `/fast` and OpenAI/Anthropic priority.
@@ -2917,6 +2947,21 @@ export class AgentSession {
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
+		// Owner-routed async delivery: completions for jobs this agent owns are
+		// injected into THIS session's run as async-result follow-ups. Without a
+		// registered sink the manager dead-letters owned deliveries, so this
+		// registration is what makes background jobs usable — for the main
+		// session and for subagents inheriting the process manager alike.
+		if (this.#asyncJobManager && this.#agentId) {
+			const manager = this.#asyncJobManager;
+			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
+				this.#deliverAsyncJobResult(manager, jobId, text, job),
+			);
+			this.yieldQueue.register<AsyncResultEntry>("async-result", {
+				isStale: entry => manager.isDeliverySuppressed(entry.jobId),
+				build: buildAsyncResultBatchMessage,
+			});
+		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			const event: AgentEvent = {
 				type: "message_update",
@@ -3827,11 +3872,7 @@ export class AgentSession {
 			this.sessionId,
 			advisor.slug,
 		);
-		const preparation = prepareCompaction(
-			pathEntries,
-			compactionSettings,
-			await this.#runnableCompactionCandidates(candidates, advisorProviderSessionId),
-		);
+		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel);
 		if (!preparation) {
 			// Cannot prepare compaction, fallback to re-prime
 			return true;
@@ -4016,6 +4057,12 @@ export class AgentSession {
 		this.#planProposalHandler = handler ?? undefined;
 	}
 
+	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
+
+	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
+		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
+	}
+
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
@@ -4125,9 +4172,10 @@ export class AgentSession {
 
 	/**
 	 * True when a background async job owned by this agent is still running with
-	 * an unsuppressed delivery, or a finished job's delivery is still queued or
-	 * in flight. Either way the async-result follow-up will re-wake the loop, so
-	 * a settle observed now is a scheduling pause rather than a terminal stop:
+	 * an unsuppressed delivery, a finished job's delivery is still queued or in
+	 * flight, or a delivered result is still sitting on the yield queue awaiting
+	 * injection. In every case the async-result follow-up will re-wake the loop,
+	 * so a settle observed now is a scheduling pause rather than a terminal stop:
 	 * stop-time passes (todo reminder, session_stop hooks) defer to the settle
 	 * reached once the session is fully idle. Suppressed deliveries
 	 * (acknowledged, or watched by an in-flight `hub` wait) never wake the loop,
@@ -4139,8 +4187,75 @@ export class AgentSession {
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
 			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
-			manager.hasPendingDeliveries(ownerFilter)
+			manager.hasPendingDeliveries(ownerFilter) ||
+			// Delivered but not yet injected: the sink has enqueued the
+			// async-result follow-up on the yield queue, and the manager no
+			// longer reports it. Without this leg a terminal yield in the
+			// (idle-flush delay / step-boundary) handoff window would read as
+			// quiescent and the run driver would drop the queued result.
+			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE)
 		);
+	}
+
+	/**
+	 * Public view of the pending-async-wake state for run drivers: true while
+	 * owner-scoped async work can still re-wake this session's run (a running
+	 * background job with an unsuppressed delivery, or a queued / in-flight
+	 * delivery). The task executor's quiescence barrier polls this to
+	 * distinguish a scheduling pause from terminal completion.
+	 */
+	hasPendingAsyncWork(): boolean {
+		return this.#hasPendingAsyncWake();
+	}
+
+	/**
+	 * Settle one generation of owner-scoped async work: wait for running owner
+	 * jobs to finish, deliver their queued results (which enqueue async-result
+	 * follow-ups on this session's yield queue), and wait for the injected
+	 * follow-up turn(s) to go idle. Callers loop while
+	 * {@link hasPendingAsyncWork} still holds — a follow-up turn may start new
+	 * jobs.
+	 */
+	async settleAsyncWork(): Promise<void> {
+		const manager = this.#asyncJobManager;
+		if (!manager || !this.#agentId) return;
+		await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
+		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		await this.waitForIdle();
+	}
+
+	/**
+	 * Delivery sink for async jobs owned by this agent: format the result
+	 * (spilling oversized output to an artifact) and enqueue it as an
+	 * async-result follow-up on the yield queue. The queue's idle flush starts
+	 * the follow-up turn when the session is between turns.
+	 */
+	async #deliverAsyncJobResult(manager: AsyncJobManager, jobId: string, text: string, job?: AsyncJob): Promise<void> {
+		if (this.#isDisposed) return;
+		if (manager.isDeliverySuppressed(jobId)) return;
+		const formatted = await this.#formatAsyncResultForFollowUp(text);
+		if (manager.isDeliverySuppressed(jobId)) return;
+		const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
+		this.yieldQueue.enqueue<AsyncResultEntry>("async-result", { jobId, result: formatted, job, durationMs });
+	}
+
+	async #formatAsyncResultForFollowUp(result: string): Promise<string> {
+		if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) {
+			return result;
+		}
+		const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+		try {
+			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
+			if (artifactPath && artifactId) {
+				await Bun.write(artifactPath, result);
+				return `${preview}\nFull output: artifact://${artifactId}`;
+			}
+		} catch (error) {
+			logger.warn("Failed to persist async follow-up artifact", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return preview;
 	}
 
 	// =========================================================================
@@ -4324,6 +4439,13 @@ export class AgentSession {
 	 * the recovery wait always sees the in-flight handler and blocks until it — and
 	 * everything it schedules — settles. */
 	#handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
+			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
+			if (!alreadyTerminated) {
+				this.#markTerminalYieldToolCall(event.toolCallId);
+				this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+			}
+		}
 		if (event.type !== "agent_end") {
 			const processing = this.#processAgentEvent(event);
 			if ((event.type === "message_start" || event.type === "message_end") && isAdvisorCard(event.message)) {
@@ -4678,11 +4800,13 @@ export class AgentSession {
 			this.#recordToolExecutionStart(event);
 		}
 
-		try {
-			await this.#emitSessionEvent(displayEvent);
-		} catch (error) {
-			messageEndPersistence?.release();
-			throw error;
+		if (event.type !== "agent_end") {
+			try {
+				await this.#emitSessionEvent(displayEvent);
+			} catch (error) {
+				messageEndPersistence?.release();
+				throw error;
+			}
 		}
 
 		if (event.type === "turn_start") {
@@ -4719,13 +4843,6 @@ export class AgentSession {
 			) {
 				this.#planModeReminderCount = 0;
 				this.#planModeReminderAwaitingProgress = false;
-			}
-		}
-		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
-			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
-			if (!alreadyTerminated) {
-				this.#markTerminalYieldToolCall(event.toolCallId);
-				this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 			}
 		}
 
@@ -4940,12 +5057,19 @@ export class AgentSession {
 
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
-			const settledMessages = this.agent.state.messages;
+			const settledMessages = event.messages;
+			const activeMessages = this.agent.state.messages;
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsrAbortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
-				await this.#emitAgentEndNotification(settledMessages, options);
+				// Public agent_end is held out of the eager display pass and emitted
+				// here after maintenance routing, tagged isTerminal so subscribers can
+				// tell final settles from scheduled continuations.
+				await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
+				void this.#emitAgentEndNotification(activeMessages, options).catch(err => {
+					logger.error("Agent end extension notification failed", { err });
+				});
 			};
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
@@ -4972,8 +5096,10 @@ export class AgentSession {
 				return;
 			}
 
-			const successfulYieldMessage = this.#findSuccessfulYieldAssistantMessage(settledMessages);
 			const yieldOnThisMessage = this.#assistantEndedWithSuccessfulYield(msg);
+			const successfulYieldMessage = yieldOnThisMessage
+				? msg
+				: this.#findSuccessfulYieldAssistantMessage(settledMessages);
 
 			const maintenanceRoute = (route: string, extra?: Record<string, unknown>) => {
 				logger.debug("agent_end maintenance routing", {
@@ -5065,11 +5191,8 @@ export class AgentSession {
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
 				checkedCompaction = true;
-				if (
-					compactionResult.deferredHandoff ||
-					compactionResult.continuationScheduled ||
-					compactionResult.automaticContinuationBlocked
-				) {
+				const compactionContinues = compactionResult.deferredHandoff || compactionResult.continuationScheduled;
+				if (compactionContinues || compactionResult.automaticContinuationBlocked) {
 					maintenanceRoute("active-goal-pre-empt-compaction-handled", {
 						deferredHandoff: compactionResult.deferredHandoff,
 						continuationScheduled: compactionResult.continuationScheduled,
@@ -5116,11 +5239,11 @@ export class AgentSession {
 					return;
 				}
 			}
-			const resumeCursorStreamStall = this.#canResumeCursorStreamStall(msg);
-			if (resumeCursorStreamStall || this.#isRetryableError(msg)) {
+			const resumeResolvedStreamStall = this.#canResumeResolvedStreamStall(msg);
+			if (resumeResolvedStreamStall || this.#isRetryableError(msg)) {
 				const didRetry = await this.#handleRetryableError(
 					msg,
-					resumeCursorStreamStall ? { preserveFailedTurn: true } : undefined,
+					resumeResolvedStreamStall ? { preserveFailedTurn: true } : undefined,
 				);
 				if (didRetry) {
 					await emitAgentEndNotification({ willContinue: true });
@@ -5166,6 +5289,17 @@ export class AgentSession {
 				const compactionTask = this.#checkCompaction(msg);
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
+			}
+			if (msg.stopReason === "error" && this.#retryAttempt > 0 && !compactionResult.continuationScheduled) {
+				const attempt = this.#retryAttempt;
+				this.#retryAttempt = 0;
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt,
+					finalError: msg.errorMessage,
+				});
+				this.#clearPendingRecoveredRetryErrors();
 			}
 			// Stop-time todo reconciliation only fires at a text-only final stop. A run
 			// that ends still mid-tool-use (deadline hit, context full, etc.) skips the
@@ -5214,7 +5348,7 @@ export class AgentSession {
 				await emitAgentEndNotification({ willContinue: true });
 				return;
 			}
-			const sessionStopWillContinue = await this.#emitSessionStopEvent(settledMessages, msg);
+			const sessionStopWillContinue = await this.#emitSessionStopEvent(activeMessages, msg);
 			await emitAgentEndNotification(sessionStopWillContinue ? { willContinue: true } : undefined);
 		}
 	};
@@ -6854,6 +6988,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#flushPendingIrcAsides();
@@ -6881,6 +7016,10 @@ export class AgentSession {
 	}
 
 	async #disposeOwnedAsyncJobs(): Promise<void> {
+		// Unregister before cancelling: a job completing during teardown must
+		// dead-letter rather than enqueue a follow-up into a disposing session.
+		this.#unregisterAsyncDeliverySink?.();
+		this.#unregisterAsyncDeliverySink = undefined;
 		this.#cancelOwnAsyncJobs();
 		const manager = this.#ownedAsyncJobManager;
 		if (!manager) return;
@@ -6980,6 +7119,7 @@ export class AgentSession {
 			logger.warn("Post-prompt tasks still draining at dispose deadline", { error: String(error) });
 		}
 		await this.#drainAutolearnCapture();
+		await this.#memoryBackendTransition;
 
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
@@ -7286,12 +7426,30 @@ export class AgentSession {
 
 	/** Removes tools installed by {@link activateVibeTools} and activates `nextToolNames`. */
 	async deactivateVibeTools(nextToolNames: string[]): Promise<void> {
+		this.#uninstallVibeTools();
+		await this.#applyActiveToolsByName(nextToolNames);
+	}
+
+	/**
+	 * Removes the ephemeral vibe tools while keeping whatever active tool set the
+	 * session currently holds (minus those vibe tools). Unlike
+	 * {@link deactivateVibeTools}, this never restores a caller-held pre-vibe
+	 * snapshot — use it on the session-switch path, where that snapshot belongs to
+	 * the source session and would clobber the freshly loaded target's tools.
+	 */
+	async removeVibeToolsPreservingActive(): Promise<void> {
+		const removed = new Set(this.#installedVibeToolNames);
+		this.#uninstallVibeTools();
+		const nextActive = this.getActiveToolNames().filter(name => !removed.has(name));
+		await this.#applyActiveToolsByName(nextActive);
+	}
+
+	#uninstallVibeTools(): void {
 		for (const name of this.#installedVibeToolNames) {
 			this.#toolRegistry.delete(name);
 			this.#builtInToolNames.delete(name);
 		}
 		this.#installedVibeToolNames.clear();
-		await this.#applyActiveToolsByName(nextToolNames);
 	}
 
 	#getEditModeSession() {
@@ -7706,13 +7864,126 @@ export class AgentSession {
 		}
 	}
 
+	/** Cancel the local rollout-memory startup owned by this session. */
+	cancelLocalMemoryStartup(): void {
+		this.#localMemoryStartupAbort?.abort();
+		this.#localMemoryStartupAbort = undefined;
+	}
+
+	/** Start a new local rollout-memory generation and cancel its predecessor. */
+	beginLocalMemoryStartup(): AbortSignal {
+		this.cancelLocalMemoryStartup();
+		const controller = new AbortController();
+		this.#localMemoryStartupAbort = controller;
+		return controller.signal;
+	}
+
+	/** Release the local startup slot if `signal` still owns it. */
+	endLocalMemoryStartup(signal: AbortSignal): void {
+		if (this.#localMemoryStartupAbort?.signal === signal) this.#localMemoryStartupAbort = undefined;
+	}
+
+	async #disposeMemoryBackendState(consolidateMnemopi = true): Promise<void> {
+		this.cancelLocalMemoryStartup();
+		const hindsight = this.getHindsightSessionState();
+		if (hindsight) {
+			try {
+				await hindsight.flushRetainQueue();
+			} catch (error) {
+				logger.warn("Memory lifecycle: Hindsight flush failed", { error: String(error) });
+			}
+			this.setHindsightSessionState(undefined);
+			hindsight.dispose();
+		}
+
+		const mnemopi = setMnemopiSessionState(this, undefined);
+		if (mnemopi) {
+			try {
+				await mnemopi.dispose({ consolidate: consolidateMnemopi });
+			} catch (error) {
+				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
+			}
+		}
+	}
+
+	/**
+	 * Apply the selected memory backend to runtime state, tools, and prompt.
+	 * Concurrent settings changes run in order and settle before the next turn.
+	 */
+	async applyMemoryBackend(): Promise<void> {
+		if (this.#isDisposed) return;
+		const transition = this.#memoryBackendTransition.then(() => this.#applyMemoryBackend());
+		this.#memoryBackendTransition = transition.then(
+			() => undefined,
+			() => undefined,
+		);
+		await transition;
+	}
+
+	async #applyMemoryBackend(): Promise<void> {
+		if (this.#isDisposed) return;
+		try {
+			await this.#disposeMemoryBackendState();
+			if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#isDisposed) {
+				const backend = await resolveMemoryBackend(this.settings);
+				await backend.start({
+					session: this,
+					settings: this.settings,
+					modelRegistry: this.#modelRegistry,
+					agentDir: this.#memoryAgentDir,
+					taskDepth: this.#memoryTaskDepth,
+				});
+			}
+			if (this.#isDisposed) return;
+			await this.#refreshMemoryTools();
+			if (this.#isDisposed) return;
+			await this.refreshBaseSystemPrompt();
+		} catch (error) {
+			await this.#disposeMemoryBackendState(false);
+			if (!this.#isDisposed) {
+				await this.#replaceMemoryTools([]).catch(refreshError => {
+					logger.warn("Failed to remove memory tools after backend apply error", {
+						error: String(refreshError),
+					});
+				});
+			}
+			throw error;
+		}
+	}
+
+	async #refreshMemoryTools(): Promise<void> {
+		const tools = (await this.#createMemoryTools?.()) ?? [];
+		await this.#replaceMemoryTools(tools);
+	}
+
+	async #replaceMemoryTools(tools: AgentTool[]): Promise<void> {
+		const removed = new Set<string>(MEMORY_BACKEND_TOOL_NAMES.filter(name => this.#builtInToolNames.has(name)));
+		const nextActive = this.getEnabledToolNames().filter(name => !removed.has(name));
+		for (const name of removed) {
+			this.#toolRegistry.delete(name);
+			this.#builtInToolNames.delete(name);
+		}
+
+		for (const tool of tools) {
+			if (!MEMORY_BACKEND_TOOL_NAMES.some(name => name === tool.name) || this.#toolRegistry.has(tool.name)) {
+				continue;
+			}
+			const wrapped = this.#wrapRuntimeTool(tool);
+			this.#toolRegistry.set(wrapped.name, wrapped);
+			this.#builtInToolNames.add(wrapped.name);
+			nextActive.push(wrapped.name);
+		}
+		await this.#applyActiveToolsByName([...new Set(nextActive)]);
+	}
+
 	/** Rebuild the base system prompt using the current active tool set. */
 	async refreshBaseSystemPrompt(): Promise<void> {
-		if (!this.#rebuildSystemPrompt) return;
+		if (this.#isDisposed || !this.#rebuildSystemPrompt) return;
 		const activeToolNames = this.getActiveToolNames();
 		this.#setActiveToolNames?.(activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
+		if (this.#isDisposed) return;
 		this.#baseSystemPrompt = built.systemPrompt;
 		this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		if (
@@ -8004,7 +8275,10 @@ export class AgentSession {
 	 * Transcript for TUI display. Full history is kept for export/resume-style
 	 * callers; live chat can collapse compacted history to keep the hot render
 	 * surface bounded. Display-only — NEVER feed the result to
-	 * `agent.replaceMessages` or a provider.
+	 * `agent.replaceMessages` or a provider. Because it is never re-obfuscated,
+	 * it opts into legacy index-derived alias restoration so pre-keyed sessions
+	 * still render their secrets; the agent-feeding paths
+	 * (`buildDisplaySessionContext`) keep the keyed-only default.
 	 */
 	buildTranscriptSessionContext(
 		options?: Pick<BuildSessionContextOptions, "collapseCompactedHistory" | "keepDanglingToolCalls">,
@@ -8016,6 +8290,7 @@ export class AgentSession {
 				keepDanglingToolCalls: options?.keepDanglingToolCalls,
 			}),
 			this.#obfuscator,
+			true,
 		);
 	}
 
@@ -8077,9 +8352,7 @@ export class AgentSession {
 	#deobfuscatedProviderTextReadyForDelta(text: string): string {
 		const deobfuscated = this.#deobfuscateFromProvider(text);
 		if (!this.#obfuscator?.hasSecrets()) return deobfuscated;
-		const pendingPlaceholderStart = deobfuscated.match(/#[A-Z0-9]{0,4}$/);
-		if (pendingPlaceholderStart?.index === undefined) return deobfuscated;
-		return deobfuscated.slice(0, pendingPlaceholderStart.index);
+		return stripPendingSecretPlaceholderSuffix(deobfuscated);
 	}
 
 	#convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
@@ -8250,6 +8523,12 @@ export class AgentSession {
 
 	setVibeModeState(state: VibeModeState | undefined): void {
 		this.#vibeModeState = state;
+	}
+
+	#assertVibeSessionTransitionAllowed(action: string): void {
+		if (this.#vibeModeState?.enabled) {
+			throw new Error(`Cannot ${action} while vibe mode is active. Exit vibe mode first.`);
+		}
 	}
 
 	get goalRuntime(): GoalRuntime {
@@ -9047,6 +9326,14 @@ export class AgentSession {
 				}
 			}
 
+			// A prompt issued while the session is already disposing must still run:
+			// the dispose-driven abort settles its turn (see "does not auto-retry
+			// empty reasonless aborts once the session is disposing"). Only drop the
+			// prompt when disposal began during the backend-transition await, where
+			// resuming would start a turn on a torn-down session.
+			const disposingBeforeTransition = this.#isDisposed;
+			await this.#memoryBackendTransition;
+			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return;
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
 
 			// Emit before_agent_start extension event
@@ -9934,7 +10221,11 @@ export class AgentSession {
 	#cloneTodoPhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task => ({ content: task.content, status: task.status })),
+			tasks: phase.tasks.map(task =>
+				task.blocker !== undefined
+					? { content: task.content, status: task.status, blocker: task.blocker }
+					: { content: task.content, status: task.status },
+			),
 		}));
 	}
 
@@ -10034,6 +10325,7 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
+		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -10076,7 +10368,10 @@ export class AgentSession {
 			} else {
 				await this.sessionManager.flush();
 			}
-			await this.sessionManager.newSession(options);
+			await this.sessionManager.newSession({
+				...options,
+				additionalDirectories: this.settings.get("workspace.additionalDirectories"),
+			});
 			this.#markBashSessionTransition(bashTransition);
 			sessionTransitioned = true;
 		} finally {
@@ -10105,6 +10400,9 @@ export class AgentSession {
 		this.#planReferencePath = "local://PLAN.md";
 		this.#resetAdvisorSessionState();
 		this.#reconnectToAgent();
+		// The workspace-roots block must reflect the new session's directory set,
+		// not the previous session's — refresh before the next turn goes out.
+		await this.refreshBaseSystemPrompt();
 
 		// Emit session_switch event with reason "new" to hooks
 		if (this.#extensionRunner) {
@@ -10133,6 +10431,7 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
 	async fork(): Promise<boolean> {
+		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "fork" (can be cancelled)
@@ -10204,6 +10503,12 @@ export class AgentSession {
 		}
 
 		return true;
+	}
+
+	/** Move the active session and artifacts after enforcing mode transition invariants. */
+	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
+		this.#assertVibeSessionTransitionAllowed("move the session");
+		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
 
 	// =========================================================================
@@ -11062,11 +11367,7 @@ export class AgentSession {
 				compactionCandidates = this.#getCompactionModelCandidates(availableModels);
 			}
 			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(
-				pathEntries,
-				effectiveSettings,
-				await this.#runnableCompactionCandidates(compactionCandidates, this.sessionId),
-			);
+			const preparation = prepareCompaction(pathEntries, effectiveSettings, this.model);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -11119,6 +11420,11 @@ export class AgentSession {
 			let snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
+			// Claude refuses inputs that reproduce its own reasoning as text
+			// ("reasoning_extraction"), and the snapcompact archive is replayed as
+			// text into every later request; drop `¶think:` sections for
+			// Anthropic-dialect targets (issue #6093).
+			const snapcompactIncludeThinking = preferredDialect(this.model.id) !== "anthropic";
 			if (wantsSnapcompact && !this.model.input.includes("image")) {
 				if (explicitSnapcompact) {
 					this.emitNotice(
@@ -11137,6 +11443,7 @@ export class AgentSession {
 			} else if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
+					{ includeThinking: snapcompactIncludeThinking },
 				);
 				const probeText = snapcompact.renderabilityProbeText(
 					text,
@@ -11192,6 +11499,7 @@ export class AgentSession {
 						model: this.model,
 						...(snapcompactShapeSetting === "auto" ? {} : { shape }),
 						maxFrames,
+						includeThinking: snapcompactIncludeThinking,
 					});
 					const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
 					if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
@@ -11431,6 +11739,7 @@ export class AgentSession {
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
 	async handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		this.#assertVibeSessionTransitionAllowed("handoff to a new session");
 		const entries = this.sessionManager.getBranch();
 		const messageCount = entries.filter(e => e.type === "message").length;
 
@@ -13417,17 +13726,6 @@ export class AgentSession {
 		return this.#resolveCompactionModelCandidates(this.model, availableModels, filter);
 	}
 
-	/**
-	 * Compaction candidates that can actually run — those with a resolvable API
-	 * key, matching the per-candidate getApiKey gate the execution loop applies.
-	 * Re-expansion reusability (prepareCompaction) must judge remote-preserve
-	 * reuse against these, not against candidates the loop would skip at runtime.
-	 */
-	async #runnableCompactionCandidates(candidates: readonly Model[], sessionId: string | undefined): Promise<Model[]> {
-		const keys = await Promise.all(candidates.map(model => this.#modelRegistry.getApiKey(model, sessionId)));
-		return candidates.filter((_, index) => keys[index] !== undefined);
-	}
-
 	#resolveCompactionModelCandidates(
 		preferredModel: Model | null | undefined,
 		availableModels: Model[],
@@ -13811,6 +14109,17 @@ export class AgentSession {
 		options: { skipElide: boolean; hasProgress: () => boolean },
 	): Promise<boolean> {
 		if (signal.aborted) return false;
+		// Tier 0 — a snapcompact pass whose just-written frame archive is itself
+		// the over-budget cost (each pass re-renders the carried-forward text
+		// into MORE frames, so the archive grows past the recovery band and the
+		// elide/image tiers below can never shrink it): rebuild the archive at
+		// a threshold-derived frame budget.
+		const frameRescue = await this.#rescueSnapcompactFrameOverflow(
+			this.sessionManager.getBranch(),
+			this.settings.getGroup("compaction"),
+			signal,
+		);
+		if (frameRescue !== undefined && options.hasProgress()) return true;
 		let elided = 0;
 		let elidedTokens = 0;
 		let elideSink = "placeholders";
@@ -13865,6 +14174,179 @@ export class AgentSession {
 	/** Notice fragment for a dead-end elide tier: what was freed and where it went. */
 	#describeElideRescue(elided: number, tokensFreed: number, sink: string): string {
 		return `elided ${elided} heavy block${elided === 1 ? "" : "s"} (~${tokensFreed.toLocaleString()} tokens) to ${sink}`;
+	}
+
+	/**
+	 * Frame budget for {@link #rescueSnapcompactFrameOverflow}: targets
+	 * `COMPACTION_RECOVERY_BAND × threshold` (the same band
+	 * {@link #compactionCreatedHeadroom} re-tests), not the window-fit budget
+	 * {@link #computeSnapcompactMaxFrames} sizes against — a rebuilt archive
+	 * must land back under the maintenance trigger, or the next settle
+	 * re-enters the same dead-end. Cap reserve mirrors
+	 * #computeSnapcompactMaxFrames (text edges + summary template), and
+	 * `keptTailTokens` charges the kept entries AFTER the archive so the
+	 * budget mirrors what #compactionCreatedHeadroom will actually measure.
+	 * Returns 0 when not even one frame fits that budget — the rebuild could
+	 * never create headroom, so the caller must not append it.
+	 */
+	#computeSnapcompactRescueMaxFrames(settings: CompactionSettings, keptTailTokens: number): number {
+		const ctxWindow = this.model?.contextWindow ?? 0;
+		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
+		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
+		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
+		const baseTokens = computeNonMessageTokens(this);
+		const shape = snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape"));
+		const edgeCap = snapcompact.geometry(shape).capacity;
+		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
+		const SUMMARY_TEMPLATE_TOKENS = 2000;
+		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
+		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 0;
+		// Same hard caps as #computeSnapcompactMaxFrames: a threshold-derived
+		// count above the per-request payload budget would "shrink" a huge
+		// archive to a frame count the rebuilt prompt can never attach anyway.
+		return Math.min(
+			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
+			snapcompact.MAX_FRAMES_DEFAULT,
+			snapcompact.maxFramesForDataBudget(),
+		);
+	}
+
+	/**
+	 * Dead-end rescue for a branch whose latest snapcompact CompactionEntry is
+	 * itself billed past the maintenance threshold
+	 * (`FRAME_TOKEN_ESTIMATE × frames`). Reaching the `!preparation` dead-end
+	 * proves everything after that entry is already kept-recent (nothing to
+	 * summarize), so the archive is the irreducible cost — and the elide/image
+	 * tiers can never touch it: `collectShakeRegions` and `dropImages()` only
+	 * inspect "message"/"custom_message" entries, so a `type: "compaction"`
+	 * entry falls through both and the session re-warns on every resume (the
+	 * shape issue #4786's rescue does not cover).
+	 *
+	 * Rebuilds the SAME archive locally — no LLM, no network — by re-running
+	 * `snapcompact.compact()` over the entry's carried-forward source text at
+	 * a maxFrames derived from the trigger threshold instead of the window:
+	 * `planArchive` truncates the oldest chars to fit, so the rebuilt entry
+	 * genuinely shrinks. The rebuilt entry keeps the stale entry's
+	 * `firstKeptEntryId`, so the kept tail is untouched, and persisting
+	 * through `appendCompaction()` lets the write-time superseded-compaction
+	 * elision drop the stale frame payload from the JSONL automatically.
+	 */
+	async #rescueSnapcompactFrameOverflow(
+		branchEntries: SessionEntry[],
+		settings: CompactionSettings,
+		signal: AbortSignal,
+	): Promise<snapcompact.CompactionResult | undefined> {
+		if (signal.aborted) return undefined;
+		// Re-rendering frames needs a vision-capable model, same gate as the
+		// snapcompact strategy path.
+		if (!this.model?.input.includes("image")) return undefined;
+		const staleEntry = getLatestCompactionEntry(branchEntries);
+		if (!staleEntry) return undefined;
+		// Only rescue when the archive is the actual source of the overflow.
+		// The frame budget below charges every kept entry the rebuilt context
+		// will still carry — the kept-recent region from `firstKeptEntryId`
+		// (re-emitted before the archive by buildSessionContext) plus the
+		// entries after the archive — on top of the fixed context, mirroring
+		// what #compactionCreatedHeadroom will measure. When not even one
+		// frame fits (e.g. a huge kept tool result dominates), rebuilding
+		// would append the replacement compaction at the leaf — turning the
+		// branch tail into a compaction entry, which prepareCompaction's
+		// last-entry guard can never summarize past even after an elide
+		// shrinks the real culprit. Bail and let the elide/image tiers handle
+		// that tail instead.
+		let keptTailTokens = 0;
+		let inKeptRegion = false;
+		for (const entry of branchEntries) {
+			if (entry.id === staleEntry.firstKeptEntryId) inKeptRegion = true;
+			if (entry.id === staleEntry.id) {
+				// Everything after the archive is always kept.
+				inKeptRegion = true;
+				continue;
+			}
+			if (!inKeptRegion) continue;
+			const message = (entry as { message?: AgentMessage }).message;
+			if (message) keptTailTokens += estimateTokens(message);
+		}
+		const archive = snapcompact.getPreservedArchive(staleEntry.preserveData);
+		if (!archive || archive.frames.length <= 1) return undefined;
+		const archiveText = snapcompact.archiveSourceText(archive);
+		if (!archiveText) return undefined;
+		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens);
+		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
+
+		const staleDetails = staleEntry.details as snapcompact.CompactionDetails | undefined;
+		const fileOps = snapcompact.createFileOps();
+		for (const file of staleDetails?.readFiles ?? []) fileOps.read.add(file);
+		for (const file of staleDetails?.modifiedFiles ?? []) fileOps.edited.add(file);
+		const shapeSetting = this.settings.get("snapcompact.shape");
+		const shape = snapcompact.resolveShapeForText(archiveText, this.model, shapeSetting);
+		let result: snapcompact.CompactionResult;
+		try {
+			result = await snapcompact.compact(
+				{
+					firstKeptEntryId: staleEntry.firstKeptEntryId,
+					messagesToSummarize: [],
+					turnPrefixMessages: [],
+					tokensBefore: staleEntry.tokensBefore,
+					previousSummary: staleEntry.summary,
+					previousPreserveData: staleEntry.preserveData,
+					fileOps,
+				},
+				{
+					convertToLlm,
+					model: this.model,
+					...(shapeSetting === "auto" ? {} : { shape }),
+					maxFrames,
+				},
+			);
+		} catch (error) {
+			logger.warn("Dead-end snapcompact frame rescue failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+		if (signal.aborted) return undefined;
+		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
+		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
+
+		const rebuiltEntryId = this.sessionManager.appendCompaction(
+			result.summary,
+			result.shortSummary,
+			result.firstKeptEntryId,
+			result.tokensBefore,
+			result.details,
+			false,
+			result.preserveData,
+		);
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#rebasePendingContextSnapshotAfterCompaction();
+		// Same post-rewrite bookkeeping as the regular compaction append: the
+		// rebuilt context no longer carries the transient plan reference (#1246),
+		// and advisor cursors / todo phases were derived from the replaced
+		// history.
+		this.#planReferenceSent = false;
+		this.#resetAllAdvisorRuntimes();
+		this.#syncTodoPhasesFromBranch();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		// Extensions must see the entry that is now active, not (only) the one
+		// this rebuild just superseded — mirror the regular append path's hook.
+		const rebuiltEntry = this.sessionManager.getEntries().find(e => e.id === rebuiltEntryId) as
+			| CompactionEntry
+			| undefined;
+		if (this.#extensionRunner && rebuiltEntry) {
+			await this.#extensionRunner.emit({
+				type: "session_compact",
+				compactionEntry: rebuiltEntry,
+				fromExtension: false,
+			});
+		}
+		this.emitNotice(
+			"info",
+			`Compaction dead-end recovery: rebuilt the trailing snapcompact archive at a smaller frame budget (${archive.frames.length} → ${rebuilt.frames.length} frames) so maintenance could make progress.`,
+			"compaction",
+		);
+		return result;
 	}
 
 	/**
@@ -14056,12 +14538,8 @@ export class AgentSession {
 
 			const pathEntries = this.sessionManager.getBranch();
 
-			const autoCompactionCandidates = await this.#runnableCompactionCandidates(
-				this.#getCompactionModelCandidates(availableModels),
-				this.sessionId,
-			);
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, autoCompactionCandidates);
+			let preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, this.model);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -14080,35 +14558,84 @@ export class AgentSession {
 				// strategy pass (it tried and found nothing); skip entirely on the
 				// idle timer (it re-checks usage on its own cadence).
 				let rescueRewroteHistory = false;
+				// A snapcompact CompactionEntry is invisible to both rescue tiers
+				// below (they only inspect message entries) and to prepareCompaction
+				// itself (last-entry-is-compaction guard), so a frame archive billed
+				// past the threshold dead-ends here on every resume. Rebuild it at a
+				// threshold-derived frame budget first — but treat that as complete
+				// only when it actually created headroom: the latest archive may not
+				// be the oversized tail (e.g. a huge kept tool result after it), and
+				// declaring victory on a mere frame-count shrink would skip the
+				// elide/image tiers that can still reach that tail and suppress a
+				// warning the user should see.
+				let frameRescueResult: snapcompact.CompactionResult | undefined;
+				let frameRescueCreatedHeadroom = false;
 				if (reason !== "idle") {
-					await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
-						skipElide: fallbackFromShake,
-						hasProgress: () => {
-							// Only reached when a tier actually freed something, so the
-							// branch has been rewritten either way.
-							rescueRewroteHistory = true;
-							pathEntriesForCompaction = this.sessionManager.getBranch();
-							preparation = prepareCompaction(
-								pathEntriesForCompaction,
-								compactionSettings,
-								autoCompactionCandidates,
-							);
-							return preparation !== undefined;
-						},
-					});
+					frameRescueResult = await this.#rescueSnapcompactFrameOverflow(
+						pathEntriesForCompaction,
+						compactionSettings,
+						autoCompactionSignal,
+					);
+					if (frameRescueResult) {
+						rescueRewroteHistory = true;
+						pathEntriesForCompaction = this.sessionManager.getBranch();
+						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom();
+					}
+					if (!frameRescueCreatedHeadroom) {
+						await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+							skipElide: fallbackFromShake,
+							hasProgress: () => {
+								// Only reached when a tier actually freed something, so the
+								// branch has been rewritten either way.
+								rescueRewroteHistory = true;
+								pathEntriesForCompaction = this.sessionManager.getBranch();
+								preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, this.model);
+								return preparation !== undefined;
+							},
+						});
+					}
 				}
 				if (!preparation) {
+					const noProgressDeadEnd = reason !== "idle" && !frameRescueCreatedHeadroom;
+					const deadEndWarning = noProgressDeadEnd
+						? compactionDeadEndWarning("shrink it (e.g. clear large tool output)")
+						: undefined;
+					// A rescue that appended a rebuilt archive without creating
+					// headroom must carry the dead-end badge on the entry the
+					// transcript actually shows (the rebuilt one), or the pause
+					// loses its explanation once the notice scrolls away. Stamp it
+					// BEFORE the auto_compaction_end event: a result-carrying event
+					// makes the TUI rebuild the chat from the current entries
+					// immediately, so a later stamp would not appear until some
+					// unrelated rebuild.
+					if (deadEndWarning && frameRescueResult) {
+						const stampEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+						if (stampEntry) {
+							stampEntry.warning = deadEndWarning;
+							await this.sessionManager.rewriteEntries();
+						}
+					}
+					// A successful frame rescue rewrote history and activated a new
+					// compaction entry — surface it as a real (non-skipped) result so
+					// the TUI rebuilds the transcript instead of treating the pass as
+					// a benign no-op.
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
-						result: undefined,
+						result: frameRescueResult,
 						aborted: false,
 						willRetry: false,
-						skipped: true,
+						skipped: frameRescueResult === undefined,
 					});
-					const noProgressDeadEnd = reason !== "idle";
 					let continuationScheduled = false;
-					if (!suppressContinuation && this.agent.hasQueuedMessages()) {
+					if (frameRescueCreatedHeadroom) {
+						continuationScheduled = this.#scheduleCompactionContinuation({
+							generation,
+							autoContinue: shouldAutoContinue,
+							terminalTextAnswer,
+							suppressContinuation,
+						});
+					} else if (!suppressContinuation && this.agent.hasQueuedMessages()) {
 						this.#scheduleAgentContinue({
 							delayMs: 100,
 							generation,
@@ -14116,12 +14643,8 @@ export class AgentSession {
 						});
 						continuationScheduled = true;
 					}
-					if (noProgressDeadEnd) {
-						this.emitNotice(
-							"warning",
-							compactionDeadEndWarning("shrink it (e.g. clear large tool output)"),
-							"compaction",
-						);
+					if (deadEndWarning) {
+						this.emitNotice("warning", deadEndWarning, "compaction");
 					}
 					// A rescue that offloaded content but still could not produce a
 					// preparation rewrote the branch; flag it so the overflow-recovery
@@ -14188,8 +14711,13 @@ export class AgentSession {
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			let snapcompactBlocker: string | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
+				// Drop `¶think:` sections for Anthropic-dialect targets: the archive
+				// is replayed as text and Claude refuses reproduced reasoning
+				// ("reasoning_extraction", issue #6093).
+				const snapcompactIncludeThinking = preferredDialect(this.model.id) !== "anthropic";
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
+					{ includeThinking: snapcompactIncludeThinking },
 				);
 				const probeText = snapcompact.renderabilityProbeText(
 					text,
@@ -14220,6 +14748,7 @@ export class AgentSession {
 							model: this.model,
 							...(shapeSetting === "auto" ? {} : { shape }),
 							maxFrames,
+							includeThinking: snapcompactIncludeThinking,
 						});
 						const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
 						if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
@@ -14542,12 +15071,18 @@ export class AgentSession {
 			}
 
 			const deadEndWarning = noProgressDeadEnd ? compactionDeadEndWarning("clear large tool output") : undefined;
-			if (deadEndWarning && savedCompactionEntry) {
+			if (deadEndWarning) {
 				// Stamp the divider: the compaction bar badges the dead-end and
 				// carries the full warning in its ctrl+o detail, so the pause
-				// stays explained even after the notice row scrolls away.
-				savedCompactionEntry.warning = deadEndWarning;
-				await this.sessionManager.rewriteEntries();
+				// stays explained even after the notice row scrolls away. Stamp
+				// the branch's LATEST compaction entry — a frame rescue may have
+				// superseded `savedCompactionEntry` with a rebuilt one, and the
+				// collapsed transcript badges only the active entry.
+				const stampEntry = getLatestCompactionEntry(this.sessionManager.getBranch()) ?? savedCompactionEntry;
+				if (stampEntry) {
+					stampEntry.warning = deadEndWarning;
+					await this.sessionManager.rewriteEntries();
+				}
 			}
 
 			await this.#emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
@@ -14861,17 +15396,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Resume a stalled Cursor turn after every server-executed tool has produced
-	 * a result. The failed assistant/tool-result pair must stay in context: it
-	 * records completed side effects and lets the next request continue from
-	 * them instead of replaying the original turn.
+	 * Resume a stalled turn after every emitted tool call has produced a result.
+	 * Cursor calls must also carry the server-execution marker. The failed
+	 * assistant/tool-result pair stays in context so completed side effects are
+	 * continued from rather than replayed.
 	 */
-	#canResumeCursorStreamStall(message: AssistantMessage): boolean {
-		if (
-			message.provider !== "cursor" ||
-			message.stopReason !== "error" ||
-			!message.errorMessage?.toLowerCase().includes("stream stall")
-		) {
+	#canResumeResolvedStreamStall(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error" || !message.errorMessage?.toLowerCase().includes("stream stall")) {
 			return false;
 		}
 		const id = this.#classifyRetryMessage(message);
@@ -14880,7 +15411,12 @@ export class AgentSession {
 		const resolvedToolCallIds: string[] = [];
 		for (const block of message.content) {
 			if (block.type !== "toolCall") continue;
-			if (!(kCursorExecResolved in block) || block[kCursorExecResolved] !== true) return false;
+			if (
+				message.provider === "cursor" &&
+				(!(kCursorExecResolved in block) || block[kCursorExecResolved] !== true)
+			) {
+				return false;
+			}
 			resolvedToolCallIds.push(block.id);
 		}
 		if (resolvedToolCallIds.length === 0) return false;
@@ -15645,6 +16181,23 @@ export class AgentSession {
 			this.#retryAttempt = 1;
 		}
 		if (classifierRefusal && !switchedModel) {
+			// A prior attempt in this saga already announced `auto_retry_start`
+			// (retryAttempt was incremented for each call to this method, so > 1
+			// means at least one earlier attempt started the loop) but this
+			// attempt is not going to retry — the saga must close with its own
+			// `auto_retry_end` so subscribers tracking retry-outstanding state
+			// (e.g. suppressing a duplicate error toast) don't stay latched on
+			// an announcement that never resolves.
+			if (this.#retryAttempt > 1) {
+				await this.#persistTerminalEmptyErrorTurn(message);
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt: this.#retryAttempt - 1,
+					finalError: errorMessage,
+				});
+				this.#clearPendingRecoveredRetryErrors();
+			}
 			this.#retryAttempt = 0;
 			this.#resolveRetry();
 			return false;
@@ -15659,6 +16212,17 @@ export class AgentSession {
 			!switchedModel &&
 			!this.#isRetryableError(message)
 		) {
+			// Same auto_retry_end backstop as the classifier-refusal branch above.
+			if (this.#retryAttempt > 1) {
+				await this.#persistTerminalEmptyErrorTurn(message);
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt: this.#retryAttempt - 1,
+					finalError: errorMessage,
+				});
+				this.#clearPendingRecoveredRetryErrors();
+			}
 			this.#retryAttempt = 0;
 			this.#resolveRetry();
 			return false;
@@ -15698,8 +16262,8 @@ export class AgentSession {
 			errorId: message.errorId,
 		});
 
-		// Cursor exec-channel tools have already run and emitted results. Keep that
-		// failed turn intact so continuation cannot repeat their side effects.
+		// Resolved stream-stall tools have already emitted results. Keep that failed
+		// turn intact so continuation cannot repeat their side effects.
 		if (!options?.preserveFailedTurn) {
 			this.#removeAssistantMessageFromActiveContext(message, "auto-retry");
 		}
@@ -16742,6 +17306,7 @@ export class AgentSession {
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
+		await this.#sessionBeforeSwitchReconciler?.();
 
 		await this.#flushPendingBashMessages();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
@@ -16926,6 +17491,17 @@ export class AgentSession {
 					error: String(error),
 				});
 			}
+			// Refresh the workspace-roots block to match the resumed session's directory set.
+			// Wrapped so a rebuild failure (e.g. a gate that intentionally fails in tests)
+			// doesn't roll back an otherwise-successful session switch.
+			try {
+				await this.refreshBaseSystemPrompt();
+			} catch (refreshErr) {
+				logger.warn("Failed to refresh system prompt after session switch", {
+					targetSessionFile: sessionPath,
+					error: String(refreshErr),
+				});
+			}
 			this.#finishBashSessionTransition(bashTransition, true);
 			return true;
 		} catch (error) {
@@ -16958,6 +17534,14 @@ export class AgentSession {
 			this.#syncTodoPhasesFromBranch();
 			this.#resetAllAdvisorRuntimes();
 			this.#reconnectToAgent();
+			try {
+				await this.#sessionSwitchReconciler?.();
+			} catch (reconcileError) {
+				logger.warn("Failed to reconcile session mode after switch rollback", {
+					targetSessionFile: sessionPath,
+					error: String(reconcileError),
+				});
+			}
 			this.#finishBashSessionTransition(bashTransition, false);
 			throw error;
 		}
@@ -18019,16 +18603,23 @@ export class AgentSession {
 
 	/**
 	 * Export session to HTML.
-	 * @param outputPath Optional output path (defaults to session directory)
-	 * @returns Path to exported file
+	 * @param outputPath Optional output path
+	 * @param useUserThemes Bundle the dark and light TUI themes selected in settings
 	 */
-	async exportToHtml(outputPath?: string): Promise<string> {
-		// Public HTML export ships in the omp brand palette (collab-web
-		// pink/purple), matching my.omp.sh — not the host's terminal theme.
-		// Callers who want a themed export can pass `palette: "theme"` with
-		// `themeName` directly to `exportSessionToHtml`.
+	async exportToHtml(outputPath?: string, useUserThemes = false): Promise<string> {
+		// Lazy import: the export module embeds the HTML template and pre-built
+		// tool renderers as text; only `/export` should pay that load.
 		const { exportSessionToHtml } = await import("../export/html");
-		return exportSessionToHtml(this.sessionManager, this.state, { outputPath, palette: "web" });
+		return exportSessionToHtml(this.sessionManager, this.state, {
+			outputPath,
+			palette: useUserThemes ? "theme" : "web",
+			themeNames: useUserThemes
+				? {
+						dark: this.settings.get("theme.dark") ?? "titanium",
+						light: this.settings.get("theme.light") ?? "light",
+					}
+				: undefined,
+		});
 	}
 
 	// =========================================================================

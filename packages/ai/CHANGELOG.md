@@ -8,8 +8,12 @@
 
 ### Fixed
 
+- Fixed Bedrock cache checkpoints to use resolved model compatibility: unsupported 1-hour retention now falls back to the provider-default 5-minute cache, bundled Nova Lite, Micro, Pro, and Premier requests—and Nova Premier's documented in-region model ID—emit AWS-recommended explicit checkpoints for cache savings, and forced opaque profiles remain conservative.
 - Fixed outbound credential-pattern redaction (`[github_token_redacted]` & co.) running unconditionally: it is now opt-in via `configureCredentialRedaction` and disabled by default, so credential-shaped strings the user deliberately pastes reach the provider unmodified unless the host enables redaction.
 - Added interactive Meta Model API key login and `MODEL_API_KEY` / `META_API_KEY` environment authentication ([#4941](https://github.com/can1357/oh-my-pi/issues/4941)).
+- Fixed SuperGrok (`xai-oauth`) `/usage` showing "no usage data" for unified-billing accounts: when `?format=credits` lacks `creditUsagePercent` (or marks `isUnifiedBillingUser`), fall back to / merge the default monthly `monthlyLimit`/`used` payload.
+- Fixed sessions wedging onto their fallback model with `400 Invalid \`signature\` in \`thinking\` block` after switching to an Anthropic signing endpoint while the latest assistant turn came from a different Anthropic-compatible provider (e.g. Kimi k3). The cross-model thinking-signature strip skipped the latest surviving assistant turn entirely, replaying the foreign signature verbatim on every attempt; the latest turn now strips signatures whose issuing provider differs from the target (same-provider switches keep their byte-for-byte latest turn), and foreign `redacted_thinking` siblings are dropped alongside instead of riding the wire unverifiable.
+- Fixed OAuth callback servers aborting login when an invalid callback arrives before the legitimate browser redirect, and restricted `localhost` callback listeners to the IPv4 loopback interface ([#4106](https://github.com/can1357/oh-my-pi/issues/4106)).
 
 ## [17.0.9] - 2026-07-23
 
