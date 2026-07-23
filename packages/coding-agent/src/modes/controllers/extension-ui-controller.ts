@@ -1,3 +1,4 @@
+import { i18n } from "../../i18n";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
@@ -907,8 +908,8 @@ export class ExtensionUiController {
 	 * Show a confirmation dialog for hooks.
 	 */
 	async showHookConfirm(title: string, message: string): Promise<boolean> {
-		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"]);
-		return result === "Yes";
+		const result = await this.showHookSelector(`${title}\n${message}`, [i18n.t("ui.yes", "Yes"), i18n.t("ui.no", "No")]);
+		return result === i18n.t("ui.yes", "Yes");
 	}
 
 	/**

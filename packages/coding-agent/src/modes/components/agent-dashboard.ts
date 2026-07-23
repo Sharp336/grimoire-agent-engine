@@ -16,6 +16,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { i18n } from "../../i18n";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
@@ -278,20 +279,20 @@ class AgentInspectorPane implements Component {
 
 		lines.push(theme.bold(theme.fg("accent", replaceTabs(this.agent.name))));
 		lines.push("");
-		lines.push(`${theme.fg("muted", "Status:")} ${state}`);
-		lines.push(`${theme.fg("muted", "Source:")} ${SOURCE_LABEL[this.agent.source]}`);
+		lines.push(`${theme.fg("muted", i18n.t("ui.status", "Status:"))} ${state}`);
+		lines.push(`${theme.fg("muted", i18n.t("ui.source", "Source:"))} ${SOURCE_LABEL[this.agent.source]}`);
 		lines.push("");
 
-		lines.push(`${theme.fg("muted", "Default pattern:")} ${replaceTabs(joinPatterns(this.defaultPatterns))}`);
+		lines.push(`${theme.fg("muted", i18n.t("ui.defaultPattern", "Default pattern:"))} ${replaceTabs(joinPatterns(this.defaultPatterns))}`);
 		lines.push(
-			`${theme.fg("muted", "Default resolves:")} ${this.defaultResolution ? this.#formatResolution(this.defaultResolution) : theme.fg("dim", "(unresolved)")}`,
+			`${theme.fg("muted", i18n.t("ui.defaultResolves", "Default resolves:"))} ${this.defaultResolution ? this.#formatResolution(this.defaultResolution) : theme.fg("dim", i18n.t("ui.unresolved", "(unresolved)"))}`,
 		);
 		lines.push(
-			`${theme.fg("muted", "Override:")} ${this.agent.overrideModel ? theme.fg("warning", replaceTabs(this.agent.overrideModel)) : theme.fg("dim", "(none)")}`,
+			`${theme.fg("muted", i18n.t("ui.override", "Override:"))} ${this.agent.overrideModel ? theme.fg("warning", replaceTabs(this.agent.overrideModel)) : theme.fg("dim", i18n.t("ui.none", "(none)"))}`,
 		);
-		lines.push(`${theme.fg("muted", "Effective pattern:")} ${replaceTabs(joinPatterns(this.effectivePatterns))}`);
+		lines.push(`${theme.fg("muted", i18n.t("ui.effectivePattern", "Effective pattern:"))} ${replaceTabs(joinPatterns(this.effectivePatterns))}`);
 		lines.push(
-			`${theme.fg("muted", "Effective:")} ${this.effectiveResolution ? this.#formatResolution(this.effectiveResolution) : theme.fg("dim", "(unresolved)")}`,
+			`${theme.fg("muted", i18n.t("ui.effective", "Effective:"))} ${this.effectiveResolution ? this.#formatResolution(this.effectiveResolution) : theme.fg("dim", i18n.t("ui.unresolved", "(unresolved)"))}`,
 		);
 		lines.push(`${theme.fg("muted", "Prewalk:")} ${this.#prewalkLabel()}`);
 
@@ -372,7 +373,7 @@ export class AgentDashboard extends Container {
 	#settingsManager: Settings | null = null;
 	#allAgents: DashboardAgent[] = [];
 	#filteredAgents: DashboardAgent[] = [];
-	#tabs: SourceTab[] = [{ id: "all", label: "All", count: 0 }];
+	#tabs: SourceTab[] = [{ id: "all", label: i18n.t("ui.all", "All"), count: 0 }];
 	#activeTabIndex = 0;
 	#selectedIndex = 0;
 	#scrollOffset = 0;
@@ -465,7 +466,7 @@ export class AgentDashboard extends Container {
 		} catch (error) {
 			this.#allAgents = [];
 			this.#filteredAgents = [];
-			this.#tabs = [{ id: "all", label: "All", count: 0 }];
+			this.#tabs = [{ id: "all", label: i18n.t("ui.all", "All"), count: 0 }];
 			this.#activeTabIndex = 0;
 			this.#selectedIndex = 0;
 			this.#scrollOffset = 0;
@@ -477,7 +478,7 @@ export class AgentDashboard extends Container {
 	}
 
 	#buildTabs(agents: DashboardAgent[]): SourceTab[] {
-		const tabs: SourceTab[] = [{ id: "all", label: "All", count: agents.length }];
+		const tabs: SourceTab[] = [{ id: "all", label: i18n.t("ui.all", "All"), count: agents.length }];
 		const counts: Record<AgentSource, number> = { project: 0, user: 0, bundled: 0 };
 
 		for (const agent of agents) {

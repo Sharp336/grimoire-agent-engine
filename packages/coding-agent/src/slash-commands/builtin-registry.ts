@@ -1453,15 +1453,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				// Compaction precondition failures (no model, already compacted, too
 				// small) and provider errors propagate as plain Errors; surface them
 				// via runtime.output so they don't fail the ACP prompt turn.
-				return usage(`Compaction failed: ${errorMessage(err)}`, runtime);
+				return usage(i18n.t("runtime.compaction.failed", "Compaction failed: {error}", { error: errorMessage(err) }), runtime);
 			}
 			const after = runtime.session.getContextUsage?.();
 			const afterTokens = after?.tokens;
 			if (beforeTokens != null && afterTokens != null) {
 				const saved = beforeTokens - afterTokens;
-				await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
+				await runtime.output(
+					i18n.t("runtime.compaction.complete", "Compaction complete. Tokens: {before} -> {after} (saved {saved}).", {
+						before: String(beforeTokens),
+						after: String(afterTokens),
+						saved: String(saved),
+					}),
+				);
 			} else {
-				await runtime.output("Compaction complete.");
+				await runtime.output(i18n.t("runtime.compaction.complete.simple", "Compaction complete."));
 			}
 			return commandConsumed();
 		},

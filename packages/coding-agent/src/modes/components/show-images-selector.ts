@@ -1,3 +1,4 @@
+import { i18n } from "../../i18n";
 import { Container, type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
 import { getSelectListTheme } from "../../modes/theme/theme";
 import { DynamicBorder } from "./dynamic-border";
@@ -13,8 +14,8 @@ export class ShowImagesSelectorComponent extends Container {
 		super();
 
 		const items: SelectItem[] = [
-			{ value: "yes", label: "Yes", description: "Show images inline in terminal" },
-			{ value: "no", label: "No", description: "Show text placeholder instead" },
+			{ value: "yes", label: i18n.t("ui.yes", "Yes"), description: i18n.t("ui.showImagesInline", "Show images inline in terminal") },
+			{ value: "no", label: i18n.t("ui.no", "No"), description: i18n.t("ui.showTextPlaceholder", "Show text placeholder instead") },
 		];
 
 		// Add top border

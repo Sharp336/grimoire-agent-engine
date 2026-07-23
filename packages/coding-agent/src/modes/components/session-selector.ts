@@ -1,3 +1,4 @@
+import { i18n } from "../../i18n";
 import {
 	type Component,
 	Container,
@@ -917,9 +918,9 @@ export class SessionSelectorComponent extends Container {
 		};
 		this.#confirmationDialog = new HookSelectorComponent(
 			`Delete session?\n${displayName}`,
-			["Yes", "No"],
+			[i18n.t("ui.yes", "Yes"), i18n.t("ui.no", "No")],
 			async (option: string) => {
-				if (option === "Yes" && this.#onDelete) {
+				if (option === i18n.t("ui.yes", "Yes") && this.#onDelete) {
 					this.#clearError();
 					try {
 						const deleted = await this.#onDelete(session);
