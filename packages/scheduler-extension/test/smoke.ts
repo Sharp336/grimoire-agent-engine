@@ -798,6 +798,17 @@ assert.ok(fs.existsSync(defaultExport), "default export file created");
 }
 await w.command("export custom-dump.md", ctxW);
 assert.ok(fs.existsSync(path.join(tmpCwd, "custom-dump.md")), "explicit export path honored");
+// Scenario 18 armed a 40ms watchdog on `w`; /scheduler stop leaves that interval
+// running until session_shutdown. Emit it now so the stale low-interval watchdog
+// cannot fire against later scenarios (which reuse the same state file), and
+// restore sane timers in the shared config so nothing inherits the 40ms cadence.
+await w.emit("session_shutdown", {}, ctxW);
+{
+	const cReset = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	cReset.watchdogIntervalMs = 60_000;
+	cReset.stallTimeoutMs = 600_000;
+	fs.writeFileSync(configFile, JSON.stringify(cReset));
+}
 
 // 20. add-file batch: comma-separated {prompt: "..."} objects — whitespace/
 // newline tolerant, bare or quoted keys, syntax-verified, capped at 30.
