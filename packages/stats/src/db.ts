@@ -180,10 +180,11 @@ export async function initDb(): Promise<Database> {
 	`);
 
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
-	if (!messageColumns.some(column => column.name === "premium_requests")) {
+	const hasPremiumColumn = messageColumns.some(column => column.name === "premium_requests");
+	if (!hasPremiumColumn) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
+		db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	}
-	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
 	// TABLE and the parser labels rows at insert time; a pre-existing table gets
@@ -989,13 +990,15 @@ export function getRecentErrors(limit = 100, offset = 0, model?: string, cutoff?
 			? `SELECT * FROM messages WHERE stop_reason = 'error' AND model = ? AND timestamp > ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`
 			: `SELECT * FROM messages WHERE stop_reason = 'error' AND model = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
 		const stmt = db.prepare(sql);
-		return (cutoff ? stmt.all(model, cutoff, limit, offset) : stmt.all(model, limit, offset) as any[]).map(rowToMessageStats);
+		return (cutoff ? stmt.all(model, cutoff, limit, offset) : (stmt.all(model, limit, offset) as any[])).map(
+			rowToMessageStats,
+		);
 	}
 	const sql = cutoff
 		? `SELECT * FROM messages WHERE stop_reason = 'error' AND timestamp > ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`
 		: `SELECT * FROM messages WHERE stop_reason = 'error' ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
 	const stmt = db.prepare(sql);
-	return (cutoff ? stmt.all(cutoff, limit, offset) : stmt.all(limit, offset) as any[]).map(rowToMessageStats);
+	return (cutoff ? stmt.all(cutoff, limit, offset) : (stmt.all(limit, offset) as any[])).map(rowToMessageStats);
 }
 
 export function countRecentRequests(model?: string): number {

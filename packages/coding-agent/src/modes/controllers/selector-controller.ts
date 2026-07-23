@@ -1629,7 +1629,10 @@ export class SelectorController {
 
 		const confirmed = await this.ctx.showHookConfirm(
 			i18n.t("settings.sessions.delete", "Delete Session"),
-			i18n.t("settings.sessions.deleteWarning", "This will permanently delete the current session.\nYou will be returned to the session selector."),
+			i18n.t(
+				"settings.sessions.deleteWarning",
+				"This will permanently delete the current session.\nYou will be returned to the session selector.",
+			),
 		);
 
 		if (!confirmed) {

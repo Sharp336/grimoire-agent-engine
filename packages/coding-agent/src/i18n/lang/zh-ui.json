@@ -61,9 +61,9 @@
   "ui.unresolved": "(未解析)",
   "ui.oauthFlow": "OAuth 流程（基于网页）",
   "ui.opensBrowser": "（打开浏览器）",
-  "ui.session.notSaved": "会话尚未保存",
-  "ui.session.delete": "删除会话",
-  "ui.session.deleteWarning": "此操作将永久删除当前会话。\n你将返回会话选择器。",
-  "ui.session.cancelled": "已取消删除",
-  "ui.session.deleted": "会话已删除"
+  "settings.sessions.notSaved": "会话尚未保存",
+  "settings.sessions.delete": "删除会话",
+  "settings.sessions.deleteWarning": "此操作将永久删除当前会话。\n你将返回会话选择器。",
+  "settings.sessions.cancelled": "已取消删除",
+  "settings.sessions.deleted": "会话已删除"
 }

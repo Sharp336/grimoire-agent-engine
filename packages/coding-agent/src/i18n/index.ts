@@ -24,8 +24,12 @@ let embeddedTranslations: Record<string, TranslationFile> | null = null;
 try {
 	// 这个模块只在编译到二进制时存在，源文件模式下不会生成
 	embeddedTranslations = (await import("./embedded-translations")).EMBEDDED_TRANSLATIONS;
-} catch {
-	// 源文件模式：使用 bundle-dist.ts 或 compile-binary.ts 复制的 lang 目录
+} catch (err) {
+	// 源文件模式：embedded-translations 模块不存在，使用 bundle-dist.ts 或 compile-binary.ts 复制的 lang 目录
+	// 只在非预期的导入失败时记录日志
+	if (!(err instanceof Error) || !err.message.includes("Cannot find module")) {
+		logger.warn("Failed to load embedded translations", { error: String(err) });
+	}
 }
 
 /**
