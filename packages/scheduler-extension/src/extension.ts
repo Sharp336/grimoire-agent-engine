@@ -661,11 +661,21 @@ function detectTurnError(event: unknown): string | null {
 		if (!msg || typeof msg !== "object") continue;
 		if (msg.role !== "assistant") continue;
 		const stop = typeof msg.stopReason === "string" ? msg.stopReason : "";
-		if (stop === "error" || stop === "aborted") {
+		// Non-success terminal stop reasons: hard errors, user aborts, and output
+		// truncation the core could not auto-continue (length / max_tokens /
+		// incomplete). A recoverable truncation arrives as `willContinue` and is
+		// handled before this runs, so reaching here with one is terminal.
+		if (
+			stop === "error" ||
+			stop === "aborted" ||
+			stop === "length" ||
+			stop === "max_tokens" ||
+			stop === "incomplete"
+		) {
 			const errText = typeof msg.errorMessage === "string" && msg.errorMessage ? `: ${msg.errorMessage}` : "";
 			return `turn ${stop}${errText}`;
 		}
-		return null; // last assistant message looks normal
+		return null; // last assistant message is a normal completion
 	}
 	return null;
 }
@@ -910,6 +920,14 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	 * where only the base event context is live — still has a real `newSession`.
 	 */
 	let cmdCtx: CtxLike | null = null;
+	/**
+	 * ISO start of the session window this turn's `agent_start` optimistically
+	 * recorded, or null when it reused an active window. A turn that then fails as
+	 * a transient provider fault (outage / rate-limit rejection) opened no real
+	 * session, so `agent_end` drops that window — otherwise a long outage accrues
+	 * phantom windows and eventually trips the rolling-24h cap.
+	 */
+	let currentTurnWindowAt: string | null = null;
 	let agentActive = false;
 	/** Set by auto_retry_end when retries were exhausted during the current turn. */
 	let retryFailure: string | null = null;
@@ -1443,6 +1461,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	pi.on("agent_start", async (_event, ctx) => {
 		liveCtx = ctx as unknown as CtxLike;
 		agentActive = true;
+		currentTurnWindowAt = null; // reset per turn; set below only when a new window opens
 		// Window accounting: ANY agent turn (scheduled or typed manually)
 		// consumes the provider session window, so a new local window record
 		// starts whenever a turn begins outside an active one — but only for
@@ -1452,7 +1471,11 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		const st = getState();
 		const now = Date.now();
 		if (activeWindowStart(st, quota.key, quota.limits.sessionHours, now) === null) {
-			st.windows.push({ startedAt: new Date(now).toISOString(), profile: quota.key });
+			const startedAt = new Date(now).toISOString();
+			st.windows.push({ startedAt, profile: quota.key });
+			// Provisional: refunded in agent_end if the turn turns out to be a
+			// transient provider failure that opened no real session.
+			currentTurnWindowAt = startedAt;
 			pruneWindows(st, now);
 			saveState();
 			logEvent({
@@ -1510,6 +1533,15 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		const assistantText = error === null ? lastAssistantText(event) : null;
 		if (!contentPolicy) settleCurrentTask(error, rateLimited || outage || userAbort, false, outcome, assistantText);
 		const st = getState();
+		// A turn that failed before opening a real provider session (transient
+		// outage or rate-limit rejection) must not keep the window agent_start
+		// optimistically recorded — drop it so a long outage can't accrue phantom
+		// windows that later trip the 24h cap. Healthy/other endings keep it.
+		if ((rateLimited || outage) && currentTurnWindowAt) {
+			st.windows = st.windows.filter(w => w.startedAt !== currentTurnWindowAt);
+			saveState();
+		}
+		currentTurnWindowAt = null;
 		if (rateLimited) {
 			// Trust the provider's own reset clock over local window math and
 			// hold ALL dispatch until then — immediate retries only burn attempts.

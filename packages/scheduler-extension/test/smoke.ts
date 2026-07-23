@@ -1326,5 +1326,102 @@ await sleep(200);
 }
 await rc.command("stop", ctxRc);
 
+// 27. a transient provider failure (outage) must not keep the session window
+// agent_start optimistically recorded — otherwise a long outage accrues phantom
+// windows that trip the 24h cap even though no Claude session was opened.
+{
+	const c27 = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	c27.quotaProfiles = [
+		{ match: "anthropic", sessionHours: 5, maxSessionsPer24h: 4 },
+		{ match: ".*", sessionHours: null, maxSessionsPer24h: null },
+	];
+	c27.watchdogIntervalMs = 60_000;
+	c27.stallTimeoutMs = 600_000;
+	c27.dispatchDelayMs = 30;
+	fs.writeFileSync(configFile, JSON.stringify(c27));
+	const st = readState();
+	st.run = "running";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [
+		{
+			id: "t98",
+			prompt: "Gated task during an outage",
+			status: "queued",
+			addedAt: new Date().toISOString(),
+			attempts: 0,
+		},
+	];
+	st.nextTaskSeq = 99;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const pw = makeMockPi();
+const ctxPw = makeCtx(tmpCwd, { provider: "anthropic", id: "claude-fable-5" });
+schedulerExtension(pw.api);
+await pw.emit("session_start", {}, ctxPw);
+await sleep(80);
+assert.equal(pw.sentPrompts.length, 1, "t98 dispatched");
+await pw.emit("agent_start", {}, ctxPw);
+assert.equal(readState().windows.length, 1, "agent_start optimistically records a session window");
+// the turn never reaches the provider — a DNS/connection outage exhausts retries
+await pw.emit(
+	"auto_retry_end",
+	{ success: false, finalError: "fetch failed: getaddrinfo ENOTFOUND api.anthropic.com" },
+	ctxPw,
+);
+await pw.emit("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] }, ctxPw);
+{
+	const st = readState();
+	assert.equal(st.windows.length, 0, "the phantom window is refunded — a failed probe opened no real session");
+	assert.equal(task(st, "t98").attempts, 0, "outage also refunds the task attempt");
+}
+await pw.command("stop", ctxPw);
+
+// 28. a length-truncated terminal turn (the core could not auto-continue) is an
+// interruption, not a silent success: unattended work is resumed/failed visibly
+// rather than recorded done.
+{
+	const c28 = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	c28.dispatchDelayMs = 30;
+	fs.writeFileSync(configFile, JSON.stringify(c28));
+	const st = readState();
+	st.run = "running";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [
+		{
+			id: "t99",
+			prompt: "Big task that truncates",
+			status: "queued",
+			addedAt: new Date().toISOString(),
+			attempts: 0,
+		},
+	];
+	st.nextTaskSeq = 100;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const ln = makeMockPi();
+const ctxLn = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(ln.api);
+await ln.emit("session_start", {}, ctxLn);
+await sleep(80);
+assert.equal(ln.sentPrompts.length, 1, "t99 dispatched");
+await ln.emit("agent_start", {}, ctxLn);
+await ln.emit(
+	"agent_end",
+	{ messages: [{ role: "assistant", content: [{ type: "text", text: "partial…" }], stopReason: "length" }] },
+	ctxLn,
+);
+{
+	const st = readState();
+	assert.equal(task(st, "t99").status, "interrupted", "a length-truncated turn interrupts (not done) for resume");
+}
+await sleep(120);
+assert.ok(ln.sentPrompts.length >= 2, "truncated task is resumed");
+assert.match(ln.sentPrompts.at(-1) ?? "", /RESUME/);
+await ln.command("stop", ctxLn);
+
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);
