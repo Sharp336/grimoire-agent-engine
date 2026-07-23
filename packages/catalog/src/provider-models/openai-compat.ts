@@ -1875,6 +1875,12 @@ export function friendliModelManagerOptions(
 						const raw = entry as Record<string, unknown> & {
 							context_length?: unknown;
 							max_completion_tokens?: unknown;
+							pricing?: Record<string, unknown>;
+							functionality?: Record<string, unknown>;
+							reasoning?: unknown;
+							reasoning_options?: unknown;
+							input_modalities?: unknown;
+							interleaved?: unknown;
 						};
 
 						const contextWindow = toPositiveNumber(
@@ -1886,12 +1892,35 @@ export function friendliModelManagerOptions(
 							reference?.maxTokens ?? defaults.maxTokens,
 						);
 
+						const pricing = raw.pricing ?? {};
+						const cost = {
+							input: toPositiveNumber(pricing.input, 0) * 1_000_000,
+							output: toPositiveNumber(pricing.output, 0) * 1_000_000,
+							cacheRead: toPositiveNumber(pricing.input_cache_read, 0) * 1_000_000,
+							cacheWrite: toPositiveNumber(pricing.cache_write, 0) * 1_000_000,
+						};
+
+						const functionality = raw.functionality ?? {};
+						const supportsTools = toBoolean(functionality.tool_call) === false ? false : undefined;
+						const modalities = Array.isArray(raw.input_modalities) ? raw.input_modalities : [];
+						const vision = modalities.includes("image") || (reference?.input.includes("image") ?? false);
+
+						const reasoning = toBoolean(raw.reasoning) ?? reference?.reasoning ?? false;
+						const interleaved = raw.interleaved === "reasoning_content";
+
 						const baseModel = mapWithBundledReference(entry, defaults, reference);
 
 						return {
 							...baseModel,
+							reasoning,
+							input: vision ? ["text", "image"] : ["text"],
+							cost,
 							contextWindow,
 							maxTokens,
+							...(supportsTools === false ? { supportsTools } : {}),
+							...(interleaved
+								? { compat: { ...baseModel.compat, reasoningContentField: "reasoning_content" } }
+								: {}),
 						};
 					},
 					fetch: config?.fetch,
