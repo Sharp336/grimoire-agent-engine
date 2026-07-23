@@ -1054,6 +1054,9 @@ export const supermemoryBackend: MemoryBackend &
 			await clearing.catch(() => undefined);
 		}
 		await waitForRetention(state);
+		if (state.retainForceTail) {
+			throw new Error(state.lastError ?? "Supermemory retention failed.");
+		}
 	},
 
 	async status(context: MemoryBackendOperationContext): Promise<MemoryBackendStatus> {

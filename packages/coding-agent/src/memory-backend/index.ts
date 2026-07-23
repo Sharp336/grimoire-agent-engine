@@ -11,7 +11,7 @@ export type {
 	MnemopiSessionState,
 	MnemopiSessionStateOptions,
 } from "../mnemopi/state";
-export type { SupermemoryConfig, SupermemoryScoping, SupermemorySearchMode } from "../supermemory/config";
+export * from "../supermemory/config";
 export * from "./local-backend";
 export * from "./off-backend";
 export * from "./resolve";

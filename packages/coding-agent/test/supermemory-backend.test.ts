@@ -314,6 +314,26 @@ describe("supermemoryBackend", () => {
 		await supermemoryBackend.disposeSession?.(session as never);
 	});
 
+	it("rejects explicit enqueue when the forced retention write fails", async () => {
+		const session = makeSession([
+			{ role: "user", text: "unpersisted turn" },
+			{ role: "assistant", text: "unpersisted answer" },
+		]);
+		vi.spyOn(SupermemoryClient.prototype, "createDocument").mockRejectedValue(new Error("HTTP 503"));
+		await supermemoryBackend.start({
+			session: session as never,
+			settings: configuredSettings(),
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		await expect(supermemoryBackend.enqueue?.("/tmp", "/tmp/supermemory-project", session as never)).rejects.toThrow(
+			"HTTP 503",
+		);
+		await supermemoryBackend.disposeSession?.(session as never);
+	});
+
 	it("keeps agent-end retention disabled but flushes an explicit enqueue when auto-retain is off", async () => {
 		const session = makeSession([
 			{ role: "user", text: "manual turn" },
