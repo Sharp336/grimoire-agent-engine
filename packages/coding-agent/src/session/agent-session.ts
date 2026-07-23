@@ -2733,7 +2733,7 @@ export class AgentSession {
 			// we append here would race the handoff, retry, auto-continue prompt,
 			// or queued-message drain that already owns the next turn.
 			if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
-				await emitAgentEndNotification();
+				await emitAgentEndNotification({ willContinue: true });
 				return;
 			}
 
@@ -7652,8 +7652,10 @@ export class AgentSession {
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
-		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
+		const tailPruned = options.tailPruned === true;
+		const noneResult = tailPruned ? COMPACTION_CHECK_NONE_TAIL_PRUNED : COMPACTION_CHECK_NONE;
+		if (compactionSettings.strategy === "off") return noneResult;
+		if (reason !== "idle" && !compactionSettings.enabled) return noneResult;
 		const generation = this.#promptGeneration;
 		const terminalTextAnswer =
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#findLastAssistantMessage());
@@ -7674,6 +7676,7 @@ export class AgentSession {
 				terminalTextAnswer,
 				options.triggerContextTokens,
 				suppressContinuation,
+				tailPruned,
 			);
 			if (outcome !== "fallback") return outcome;
 
@@ -7757,7 +7760,7 @@ export class AgentSession {
 							aborted: true,
 							willRetry: false,
 						});
-						return COMPACTION_CHECK_NONE;
+						return noneResult;
 					}
 					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
 						reason,
@@ -7796,7 +7799,7 @@ export class AgentSession {
 					willRetry: false,
 					skipped: true,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			const availableModels = this.#modelRegistry.getAvailable();
@@ -7809,7 +7812,7 @@ export class AgentSession {
 					willRetry: false,
 					skipped: true,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
@@ -7930,7 +7933,7 @@ export class AgentSession {
 						? COMPACTION_CHECK_CONTINUATION
 						: noProgressDeadEnd
 							? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION
-							: COMPACTION_CHECK_NONE;
+							: noneResult;
 					return rescueRewroteHistory ? { ...base, historyRewritten: true } : base;
 				}
 			}
@@ -7957,7 +7960,7 @@ export class AgentSession {
 						aborted: true,
 						willRetry: false,
 					});
-					return COMPACTION_CHECK_NONE;
+					return noneResult;
 				}
 
 				if (hookResult?.compaction) {
@@ -8221,7 +8224,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			this.sessionManager.appendCompaction(
@@ -8389,7 +8392,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			await this.#emitSessionEvent({
@@ -8410,7 +8413,7 @@ export class AgentSession {
 				this.#autoCompactionAbortController = undefined;
 			}
 		}
-		return COMPACTION_CHECK_NONE;
+		return noneResult;
 	}
 
 	/**
@@ -8431,12 +8434,14 @@ export class AgentSession {
 		terminalTextAnswer: boolean,
 		triggerContextTokens?: number,
 		suppressContinuation = false,
+		tailPruned = false,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
 		this.#autoCompactionAbortController?.abort();
 		const controller = new AbortController();
 		this.#autoCompactionAbortController = controller;
 		const signal = controller.signal;
+		const noneResult = tailPruned ? COMPACTION_CHECK_NONE_TAIL_PRUNED : COMPACTION_CHECK_NONE;
 		try {
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
@@ -8448,7 +8453,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
@@ -8539,7 +8544,7 @@ export class AgentSession {
 					? { ...COMPACTION_CHECK_CONTINUATION, historyRewritten: true }
 					: continuationScheduled
 						? COMPACTION_CHECK_CONTINUATION
-						: COMPACTION_CHECK_NONE;
+						: noneResult;
 			}
 			return {
 				...(continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE),
@@ -8554,7 +8559,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
 			await this.#emitSessionEvent({
@@ -8567,7 +8572,7 @@ export class AgentSession {
 				skipped: false,
 			});
 			// Overflow still needs recovery even if shake threw.
-			return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
+			return reason === "overflow" ? "fallback" : noneResult;
 		} finally {
 			if (this.#autoCompactionAbortController === controller) {
 				this.#autoCompactionAbortController = undefined;
@@ -8611,7 +8616,7 @@ export class AgentSession {
 			if (wasSync && result.blocksDropped === 0 && result.tokensFreed === 0) {
 				const sessionContext = this.buildDisplaySessionContext();
 				this.agent.replaceMessages(sessionContext.messages);
-				this.#advisorRuntime?.reset();
+				for (const a of this.#advisors) a.runtime.reset();
 				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
 			if (result.blocksDropped > 0 || result.tokensFreed > 0) {
@@ -8635,6 +8640,10 @@ export class AgentSession {
 		this.#midRunShakeRunning = true;
 		try {
 			this.#shakeToolCallCounter = 0;
+			// Wait for all pending message_end persistence to complete so
+			// shake() sees the tool result that crossed the interval in the
+			// session branch.
+			await this.#messageEndPersistenceTail;
 			const result = await this.shake("elide", {
 				config: DEFAULT_SHAKE_CONFIG,
 				skipAgentUpdate: true,

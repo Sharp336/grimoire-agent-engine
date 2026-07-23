@@ -9,6 +9,29 @@
 - Added the `/computer` slash command (`on`/`off`/`status`/toggle) to enable or disable the computer tool for the current session without persisting settings.
 - Exposed `computer` to models without native OpenAI computer-use support as a regular function tool with a typed GA action schema; the same native desktop backend and approval policy apply on both paths.
 - Hardened computer action ingress: action-specific fields, modifier/key arrays, coordinates, drag points, and scroll deltas fail closed before native input; numeric fields must be signed 32-bit integers and coordinates must be non-negative.
+- Added `error.notify` so failed model turns can emit distinct terminal/desktop notifications without changing completion notifications ([#2691](https://github.com/can1357/oh-my-pi/issues/2691)).
+- Added auto-following light and dark themes to HTML session exports, with a `/export --themes` option to bundle the user's selected TUI themes.
+- Added owner-routed async job delivery: every session (including subagents) registers its own delivery sink, so background bash/task results are injected into the owning agent's run instead of the first top-level session; deliveries whose owner is gone are dead-lettered with the result retained on the job row.
+- Added `AsyncJobManager.registerDeliverySink` and `AsyncJobManager.waitForOwnerJobs` (with an `excludeSuppressed` filter for quiescence checks).
+- Added background-on-steer for auto-backgrounded bash: an incoming user/peer message backgrounds the running command (instead of waiting it out or killing it) so the message is handled promptly.
+- Added `friendlyName` support for hidden secrets so model-visible placeholders can carry sanitized semantic labels, content-derived hashes, and case hints while preserving exact deobfuscation ([#2465](https://github.com/can1357/oh-my-pi/issues/2465)).
+- Made the statusline `git` segment jj-aware: in a Jujutsu repo it shows the nearest bookmark (falling back to the short change-id) instead of git's `detached` label or nothing, and working-copy change counts come from jj where there is no `.git` to read ([#3582](https://github.com/can1357/oh-my-pi/issues/3582))
+- Added `block`/`unblock` todo operations and a `blocked` status for tasks waiting on external input; blocked tasks stay visible in the todo HUD and summary but are excluded from the incomplete-todo stop reminder, and an optional blocker note records what the task is waiting for.
+- Added a toggle-list editor in `/settings` for array-of-enum settings: `providers.webSearchOrder` and `providers.imageOrder` (ordered — Enter/Space toggles, ←/→ nudges, 1-9 splices the hovered provider into that position) and `providers.webSearchExclude` now appear under Providers → Services instead of being config-file only.
+- Added `models.yml` Bedrock Converse prompt-cache capability overrides for bundled and opaque inference profiles.
+- Documented Vibe mode (`/vibe`) in `docs/vibe-mode.md` and the `/fresh` provider-stream reset in the session-operations doc, and linked both from the README's new "Session controls" section ([#6440](https://github.com/can1357/oh-my-pi/issues/6440)).
+
+### Changed
+
+- Subagents now inherit `async.enabled` and `bash.autoBackground.enabled` from the parent instead of having both force-disabled. Subagent runs complete only after their own background jobs settle and the agent submits a `yield` that postdates every delivered result: a terminal yield with jobs still pending parks the run (recoverable turn stop) instead of completing it, async results are folded in as follow-up turns (with a one-time notice offering `hub` wait/cancel), a result delivered after a yield supersedes that yield and re-runs the yield reminder ladder, and a run that never refreshes a superseded yield fails with the stale payload preserved as salvage. Teardown cancels and awaits surviving jobs before isolation worktree capture and cleanup.
+- Added ordered `bash.patterns` command approval rules so selected bash commands can be allowed, prompted, or denied by command pattern.
+- Cache full-session retention transcript incrementally instead of re-formatting the entire message history on every retain cycle ([#4246](https://github.com/can1357/oh-my-pi/issues/4246))
+- Bound interactive bash live display write queue to prevent unbounded PTY chunk backlog ([#4240](https://github.com/can1357/oh-my-pi/issues/4240))
+- All Markdown flavors (`.markdown`, `.mdx`, `.mdc`, `.mkd`, `.mdown`) now follow the `read.summarize.prose` setting like `.md`, so they read verbatim instead of being code-block summarized when prose summaries are off.
+- xAI web search now uses `grok-4.5` (at low reasoning effort) instead of `grok-4.3`.
+### Added
+
+- Added `shake.interval` setting (default `0`, disabled) for periodic tool-output pruning (shake) every N tool calls, independent of the compaction strategy. Uses conservative auto-shake config and runs before the hasToolCalls guard so long-running tool-heavy sessions still get periodic maintenance without competing with compaction-owned turns ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 
 ### Fixed
 
@@ -106,6 +129,10 @@
 - Added opt-in RPC protocol v2 negotiation with bounded, lossless chunking for stdout objects up to 64 MiB, plus stable cursor-based message pages for histories that should not travel as one response. Legacy JSONL clients remain on protocol v1, while the bundled TypeScript and Python RPC clients negotiate, reassemble, and drain message pages automatically.
 - Fixed protocol v2 chunked framing materializing the whole base64 transport in memory: near-limit logical frames (~63 MiB) peaked around 686 MB RSS and over-ceiling frames allocated the full payload buffer before rejection. Chunk lines are now produced lazily from a single serialization, the 64 MiB ceiling is checked before any full-payload allocation, and RPC stdout writes honor backpressure line by line.
 - Fixed the bundled TypeScript and Python RPC clients throwing when a `get_messages_page` cursor went stale mid-walk (e.g. a background bash appending a message between pages): the high-level `getMessages()` drains now discard partial pages and fall back to the legacy snapshot on both `session_busy` and `stale_cursor`, driven by a new machine-readable `code` field on RPC error responses. Direct page calls remain strict.
+- Fixed periodic shake running after compaction pruned the trailing assistant and recovery failed, which would re-introduce the failed/truncated assistant into the next prompt ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+- Fixed mid-run periodic shake timing to fire after tool results are emitted and persisted, so the current tool result is visible when shake scans session entries for region collection ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+- Fixed periodic shake state sync at agent_end to rebuild agent state when the mid-run pass already rewrote persisted entries but agent.state.messages still carried unshaken tool output ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+- Fixed periodic shake state rebuild at agent_end to close open Codex provider sessions, preventing stale server-side history from being used as the basis for the next turn ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 
 ## [17.0.8] - 2026-07-22
 
@@ -168,8 +195,6 @@
 ## [17.0.7] - 2026-07-21
 
 ### Added
-
-- Added `shake.interval` setting (default `0`, disabled) for periodic tool-output pruning (shake) every N tool calls, independent of the compaction strategy. Uses conservative auto-shake config and runs before the hasToolCalls guard so long-running tool-heavy sessions still get periodic maintenance without competing with compaction-owned turns ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 
 ### Fixed
 
@@ -2035,10 +2060,6 @@
 - Enabled inline prompts with `/loop` commands (e.g., `/loop 10 fix the bug`)
 - Added support for compound duration formats in `/loop` (e.g., `1h30m`)
 
-- Fixed periodic shake running after compaction pruned the trailing assistant and recovery failed, which would re-introduce the failed/truncated assistant into the next prompt ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
-- Fixed mid-run periodic shake timing to fire after tool results are emitted and persisted, so the current tool result is visible when shake scans session entries for region collection ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
-- Fixed periodic shake state sync at agent_end to rebuild agent state when the mid-run pass already rewrote persisted entries but agent.state.messages still carried unshaken tool output ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
-- Fixed periodic shake state rebuild at agent_end to close open Codex provider sessions, preventing stale server-side history from being used as the basis for the next turn ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 ## [16.1.5] - 2026-06-19
 
 ### Changed
@@ -2202,14 +2223,6 @@
 - Fixed `inspect_image` resolving pasted image labels such as `Image #1`, `[Image #1, WxH]`, and `attachment://1` against current chat attachments instead of falling back to `<cwd>/Image #1` ([#2787](https://github.com/can1357/oh-my-pi/issues/2787)).
 - Accepted `max` as an alias for the top thinking level (`xhigh`) in selectors and `--thinking`, so DeepSeek V4 Pro can be selected with its provider-facing maximum effort ([#2727](https://github.com/can1357/oh-my-pi/issues/2727)).
 - Fixed `--provider=amazon-bedrock --model <application-inference-profile ARN>` being rejected as an unknown model before the Bedrock provider could send the ARN to Converse Stream. ([#3004](https://github.com/can1357/oh-my-pi/issues/3004))
-
-### Added
-
-- Added `shake.interval` setting for periodic tool-result elision in long sessions, independent of compaction strategy ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
-
-### Fixed
-
-- Fixed periodic shake running after compaction pruned the trailing assistant and recovery failed, which would re-introduce the failed/truncated assistant into the next prompt ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 
 ## [16.0.9] - 2026-06-18
 

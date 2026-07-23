@@ -1080,6 +1080,7 @@ export class SessionMaintenance {
 			suppressHandoff: true,
 			triggerContextTokens: contextTokens,
 			phase: "mid_turn",
+			tailPruned: true,
 		});
 
 		if (signal?.aborted) return;
@@ -2055,11 +2056,13 @@ export class SessionMaintenance {
 			suppressHandoff?: boolean;
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
+			tailPruned?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
-		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
+		const noneResult = options.tailPruned ? COMPACTION_CHECK_NONE_TAIL_PRUNED : COMPACTION_CHECK_NONE;
+		if (compactionSettings.strategy === "off") return noneResult;
+		if (reason !== "idle" && !compactionSettings.enabled) return noneResult;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
@@ -2162,7 +2165,7 @@ export class SessionMaintenance {
 							aborted: true,
 							willRetry: false,
 						});
-						return COMPACTION_CHECK_NONE;
+						return noneResult;
 					}
 					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
 						reason,
@@ -2201,7 +2204,7 @@ export class SessionMaintenance {
 					willRetry: false,
 					skipped: true,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			const availableModels = this.#host.modelRegistry.getAvailable();
@@ -2214,7 +2217,7 @@ export class SessionMaintenance {
 					willRetry: false,
 					skipped: true,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			const pathEntries = this.#host.sessionManager.getBranch();
@@ -2362,7 +2365,7 @@ export class SessionMaintenance {
 						aborted: true,
 						willRetry: false,
 					});
-					return COMPACTION_CHECK_NONE;
+					return noneResult;
 				}
 
 				if (hookResult?.compaction) {
@@ -2626,7 +2629,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			this.#host.sessionManager.appendCompaction(
@@ -2794,7 +2797,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			await this.#host.emitSessionEvent({
@@ -2815,7 +2818,7 @@ export class SessionMaintenance {
 				this.#autoCompactionAbortController = undefined;
 			}
 		}
-		return COMPACTION_CHECK_NONE;
+		return noneResult;
 	}
 
 	/**
@@ -2853,7 +2856,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
@@ -2959,7 +2962,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
 			await this.#host.emitSessionEvent({
