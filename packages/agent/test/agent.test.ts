@@ -80,8 +80,10 @@ describe("Agent", () => {
 		});
 		const agent = new Agent({ streamFn: mock.stream });
 		let dequeueHooks = 0;
-		agent.addBeforeQueuedMessageDequeueHook(() => {
+		const dequeueSignals: Array<AbortSignal | undefined> = [];
+		agent.addBeforeQueuedMessageDequeueHook(signal => {
 			dequeueHooks++;
+			dequeueSignals.push(signal);
 		});
 
 		agent.replaceMessages([
@@ -104,12 +106,16 @@ describe("Agent", () => {
 			timestamp: Date.now() + 1,
 		});
 
-		await expect(agent.continue()).resolves.toBeUndefined();
+		const controller = new AbortController();
+		await expect(agent.continue(controller.signal)).resolves.toBeUndefined();
 
 		const recentMessages = agent.state.messages.slice(-4);
 		expect(recentMessages.map(m => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
 		expect(mock.calls.length).toBe(2);
 		expect(dequeueHooks).toBe(2);
+		expect(dequeueSignals).toHaveLength(2);
+		controller.abort();
+		expect(dequeueSignals.every(signal => signal?.aborted === true)).toBe(true);
 	});
 
 	it("delivers a steer that lands at the yield boundary instead of stranding it", async () => {

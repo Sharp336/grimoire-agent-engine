@@ -1091,12 +1091,12 @@ export class Agent {
 			// allocation loop until OOM (issue #6344).
 			const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(signal);
 			if (queuedSteering.length > 0) {
-				await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true });
+				await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal);
 				return;
 			}
 			const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(signal);
 			if (queuedFollowUp.length > 0) {
-				await this.#runLoop(queuedFollowUp);
+				await this.#runLoop(queuedFollowUp, undefined, signal);
 				return;
 			}
 			throw new Error("No messages to continue from");
@@ -1104,20 +1104,20 @@ export class Agent {
 		if (messages[messages.length - 1].role === "assistant") {
 			const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(signal);
 			if (queuedSteering.length > 0) {
-				await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true });
+				await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal);
 				return;
 			}
 
 			const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(signal);
 			if (queuedFollowUp.length > 0) {
-				await this.#runLoop(queuedFollowUp);
+				await this.#runLoop(queuedFollowUp, undefined, signal);
 				return;
 			}
 
 			throw new Error("Cannot continue from message role: assistant");
 		}
 
-		await this.#runLoop(undefined);
+		await this.#runLoop(undefined, undefined, signal);
 	}
 
 	/**
@@ -1125,7 +1125,11 @@ export class Agent {
 	 * If messages are provided, starts a new conversation turn with those messages.
 	 * Otherwise, continues from existing context.
 	 */
-	async #runLoop(messages?: AgentMessage[], options?: AgentPromptOptions & { skipInitialSteeringPoll?: boolean }) {
+	async #runLoop(
+		messages?: AgentMessage[],
+		options?: AgentPromptOptions & { skipInitialSteeringPoll?: boolean },
+		continuationSignal?: AbortSignal,
+	) {
 		const model = this.#state.model;
 		if (!model) throw new Error("No model configured");
 
@@ -1136,6 +1140,9 @@ export class Agent {
 		this.#resolveRunningPrompt = resolve;
 
 		this.#abortController = new AbortController();
+		const loopSignal = continuationSignal
+			? AbortSignal.any([this.#abortController.signal, continuationSignal])
+			: this.#abortController.signal;
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
@@ -1250,7 +1257,7 @@ export class Agent {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
-				return this.#dequeueSteeringMessagesAfterHooks(this.#abortController?.signal);
+				return this.#dequeueSteeringMessagesAfterHooks(loopSignal);
 			},
 			hasSteeringMessages: () => {
 				if (this.#steeringQueue.length === 0) {
@@ -1266,7 +1273,7 @@ export class Agent {
 				return { queued: true, source: "system" };
 			},
 			hasIrcInterrupts: this.hasIrcInterrupts,
-			getFollowUpMessages: async () => this.#dequeueFollowUpMessagesAfterHooks(this.#abortController?.signal),
+			getFollowUpMessages: async () => this.#dequeueFollowUpMessagesAfterHooks(loopSignal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			telemetry: this.#telemetry,
@@ -1277,8 +1284,8 @@ export class Agent {
 
 		try {
 			const stream = messages
-				? agentLoop(messages, context, config, this.#abortController.signal, this.streamFn)
-				: agentLoopContinue(context, config, this.#abortController.signal, this.streamFn);
+				? agentLoop(messages, context, config, loopSignal, this.streamFn)
+				: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
 			for await (const event of stream) {
 				// Update internal state based on events
