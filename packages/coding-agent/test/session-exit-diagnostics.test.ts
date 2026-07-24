@@ -6,9 +6,10 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionFactory, ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type { SessionShutdownEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
 import { createSessionTeardown } from "@oh-my-pi/pi-coding-agent/modes/session-teardown";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -215,6 +216,41 @@ describe("session exit diagnostics", () => {
 			reason: "sigterm",
 			kind: "signal",
 		});
+	});
+
+	it("preserves the teardown reason through the createAgentSession disposal wrapper", async () => {
+		tempDir = TempDir.createSync("@pi-session-exit-sdk-wrapper-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const shutdownEvents: SessionShutdownEvent[] = [];
+		const extension: ExtensionFactory = pi => {
+			pi.on("session_shutdown", event => {
+				shutdownEvents.push(event);
+			});
+		};
+		const created = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		session = created.session;
+
+		await session.dispose({ reason: postmortem.Reason.SIGTERM });
+		session = undefined;
+
+		expect(shutdownEvents).toEqual([{ type: "session_shutdown", reason: "signal" }]);
 	});
 
 	it("classifies fatal postmortem teardown in the shutdown event", async () => {
