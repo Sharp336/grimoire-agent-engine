@@ -485,6 +485,79 @@ function pruneWindows(state: SchedulerState, now: number): void {
 	});
 }
 
+const RUN_MODES: Record<string, true> = { stopped: true, running: true, paused: true };
+const TASK_STATUSES: Record<string, true> = {
+	queued: true,
+	running: true,
+	interrupted: true,
+	done: true,
+	failed: true,
+};
+
+/**
+ * Full structural check of one persisted task row. A syntactically-valid
+ * state.json whose task objects miss/mistype required fields (id, prompt,
+ * status, addedAt, attempts) — or carry a wrong-typed optional — would otherwise
+ * be accepted, then crash hashPrompt/ledger or hide from the status filters.
+ * Required fields must be present and correctly typed; optionals are validated
+ * only when present.
+ */
+function isValidTaskRow(row: unknown): boolean {
+	if (row === null || typeof row !== "object") return false;
+	const r = row as Record<string, unknown>;
+	if (typeof r.id !== "string" || typeof r.prompt !== "string") return false;
+	if (typeof r.status !== "string" || !Object.hasOwn(TASK_STATUSES, r.status)) return false;
+	if (typeof r.addedAt !== "string") return false;
+	if (typeof r.attempts !== "number" || !Number.isFinite(r.attempts)) return false;
+	for (const k of ["promptHash", "summary", "sourceFile", "dispatchedAt", "endedAt", "lastError"]) {
+		if (r[k] !== undefined && typeof r[k] !== "string") return false;
+	}
+	for (const k of ["policyResets", "stalls"]) {
+		if (r[k] !== undefined && typeof r[k] !== "number") return false;
+	}
+	return true;
+}
+
+/**
+ * Name of the first config field whose value has the wrong type, or null when
+ * every present field matches SchedulerConfig. Missing fields are fine (defaults
+ * fill them); only a present-but-mistyped field is rejected, so a hand-edited
+ * `config.json` like `{ "promptPreamble": 123 }` never reaches a string/number
+ * helper as the wrong type. Legacy `windowHours`/`maxWindowsPer24h` are ignored
+ * (migrated separately with their own guards).
+ */
+function configShapeError(onDisk: unknown): string | null {
+	if (onDisk === null || typeof onDisk !== "object") return null;
+	const c = onDisk as Record<string, unknown>;
+	const numeric = [
+		"maxAttempts",
+		"dispatchDelayMs",
+		"windowSlackMs",
+		"outageBackoffBaseMs",
+		"outageBackoffMaxMs",
+		"watchdogIntervalMs",
+		"stallTimeoutMs",
+		"maxContextResets",
+	];
+	for (const k of numeric) {
+		if (c[k] !== undefined && (typeof c[k] !== "number" || !Number.isFinite(c[k]))) return k;
+	}
+	for (const k of ["promptPreamble", "resumePreamble"]) {
+		if (c[k] !== undefined && typeof c[k] !== "string") return k;
+	}
+	if (c.quotaProfiles !== undefined) {
+		if (!Array.isArray(c.quotaProfiles)) return "quotaProfiles";
+		for (const p of c.quotaProfiles) {
+			if (p === null || typeof p !== "object") return "quotaProfiles[]";
+			const pr = p as Record<string, unknown>;
+			if (typeof pr.match !== "string") return "quotaProfiles[].match";
+			if (pr.sessionHours !== null && typeof pr.sessionHours !== "number") return "quotaProfiles[].sessionHours";
+			if (pr.maxSessionsPer24h !== null && typeof pr.maxSessionsPer24h !== "number")
+				return "quotaProfiles[].maxSessionsPer24h";
+		}
+	}
+	return null;
+}
 /**
  * Migrate persisted state to the current shape. v1 stored windows as plain
  * ISO strings under the then-global (Claude-only) quota; they are re-tagged
@@ -499,32 +572,35 @@ function migrateState(raw: unknown, cfg: SchedulerConfig): SchedulerState | null
 	if (
 		!Array.isArray(st.tasks) ||
 		typeof st.run !== "string" ||
+		!Object.hasOwn(RUN_MODES, st.run) ||
 		typeof st.nextTaskSeq !== "number" ||
+		!Number.isFinite(st.nextTaskSeq) ||
 		(st.currentTaskId !== null && typeof st.currentTaskId !== "string")
 	) {
 		return null;
 	}
 	for (const row of st.tasks as unknown[]) {
-		// Each task must carry at least a string id + prompt; a row like `{}` would
-		// otherwise crash hashPrompt(undefined) after stateReadError was cleared,
-		// bypassing the malformed-state path. Reject the whole file instead.
-		if (
-			row === null ||
-			typeof row !== "object" ||
-			!("id" in row) ||
-			typeof row.id !== "string" ||
-			!("prompt" in row) ||
-			typeof row.prompt !== "string"
-		) {
-			return null;
-		}
+		// Full row validation (id/prompt/status/addedAt/attempts + optional types).
+		// A partial row like `{id,prompt}` would otherwise be accepted, then crash
+		// hashPrompt/ledger or hide from the status filters.
+		if (!isValidTaskRow(row)) return null;
 	}
 	const legacyKey =
 		cfg.quotaProfiles.find(p => typeof p.sessionHours === "number" && typeof p.maxSessionsPer24h === "number")
 			?.match ?? DEFAULT_QUOTA_PROFILES[0].match;
-	st.windows = (Array.isArray(st.windows) ? st.windows : []).map(w =>
-		typeof w === "string" ? { startedAt: w, profile: legacyKey } : (w as WindowRecord),
-	);
+	const windows: WindowRecord[] = [];
+	for (const w of (Array.isArray(st.windows) ? st.windows : []) as unknown[]) {
+		if (typeof w === "string") {
+			windows.push({ startedAt: w, profile: legacyKey }); // v1 plain-ISO window
+		} else if (w !== null && typeof w === "object") {
+			const wr = w as Record<string, unknown>;
+			if (typeof wr.startedAt !== "string" || typeof wr.profile !== "string") return null;
+			windows.push({ startedAt: wr.startedAt, profile: wr.profile });
+		} else {
+			return null; // neither a legacy string nor a {startedAt, profile} record
+		}
+	}
+	st.windows = windows;
 	st.rateLimitedUntil ??= null;
 	st.version = 2;
 	return st;
@@ -1214,6 +1290,23 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		if (onDisk === null) {
 			cfg = structuredClone(DEFAULT_CONFIG);
 			writeJson(configFile(), cfg); // seed an editable config file
+			return;
+		}
+		const badField = configShapeError(onDisk);
+		if (badField) {
+			// A present config field has the wrong type — using it would crash a
+			// string/number helper (e.g. `.trim()` on a number). Fall back to defaults
+			// for the session WITHOUT overwriting the user's file (same safe path as an
+			// unreadable config).
+			cfg = structuredClone(DEFAULT_CONFIG);
+			pi.logger?.warn?.(
+				`scheduler: config.json field '${badField}' has the wrong type — using defaults without overwriting`,
+			);
+			notify(
+				null,
+				`scheduler: config.json is malformed ('${badField}' has the wrong type) — using defaults this session; the file was left untouched (fix or delete it).`,
+				"error",
+			);
 			return;
 		}
 		cfg = { ...structuredClone(DEFAULT_CONFIG), ...onDisk } as SchedulerConfig;

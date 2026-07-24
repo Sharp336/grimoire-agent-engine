@@ -1859,6 +1859,71 @@ export async function runSmoke(): Promise<void> {
 		afterShutdown,
 		"no dispatch is armed after shutdown, even when an in-flight purge resolves later",
 	);
+	fs.rmSync(configFile, { force: true });
+	fs.writeFileSync(
+		stateFile,
+		JSON.stringify({
+			version: 2,
+			run: "stopped",
+			currentTaskId: null,
+			nextTaskSeq: 2,
+			tasks: [{ id: "t1", prompt: "x" }],
+		}),
+	);
+	const fv = makeMockPi();
+	const ctxFv = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(fv.api);
+	await fv.emit("session_start", {}, ctxFv);
+	await fv.command("add hello", ctxFv); // mutating → must be refused, not persist over the bad file
+	assert.ok(
+		ctxFv.notifications.some(n => /malformed|corrupt|unreadable/i.test(n)),
+		"a task row missing required fields is treated as unreadable state",
+	);
+	await fv.command("stop", ctxFv);
+
+	// 42. a config.json with a wrong-typed field (promptPreamble: number) falls
+	// back to defaults for the session WITHOUT overwriting the file, rather than
+	// merging a number that later crashes string helpers (.trim()/truncate()).
+	{
+		fs.writeFileSync(configFile, JSON.stringify({ promptPreamble: 123 }));
+		const st = readState();
+		st.run = "stopped";
+		st.currentTaskId = null;
+		st.tasks = [];
+		st.windows = [];
+		st.nextTaskSeq = 108;
+		fs.writeFileSync(stateFile, JSON.stringify(st));
+	}
+	const cv = makeMockPi();
+	const ctxCv = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(cv.api);
+	await cv.emit("session_start", {}, ctxCv);
+	await cv.command("status", ctxCv); // exercises loadConfig; a merged number would crash a string helper
+	assert.equal(
+		JSON.parse(fs.readFileSync(configFile, "utf8")).promptPreamble,
+		123,
+		"a wrong-typed config.json is left untouched (not normalized/overwritten)",
+	);
+	assert.ok(
+		ctxCv.notifications.some(n => /malformed|wrong type|corrupt/i.test(n)),
+		"the wrong-typed config is surfaced and defaults used for the session",
+	);
+	await cv.command("stop", ctxCv);
+	fs.rmSync(configFile, { force: true });
+	fs.writeFileSync(
+		stateFile,
+		JSON.stringify({ version: 2, run: "stopped", currentTaskId: null, nextTaskSeq: 1, tasks: [], windows: [{}] }),
+	);
+	const wv = makeMockPi();
+	const ctxWv = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(wv.api);
+	await wv.emit("session_start", {}, ctxWv);
+	await wv.command("add hello", ctxWv);
+	assert.ok(
+		ctxWv.notifications.some(n => /malformed|corrupt|unreadable/i.test(n)),
+		"a malformed window row is treated as unreadable state",
+	);
+	await wv.command("stop", ctxWv);
 
 	console.log("smoke: all assertions passed");
 	console.log(`smoke: data dir was ${tmpAgentDir}`);
