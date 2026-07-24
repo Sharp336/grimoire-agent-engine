@@ -217,6 +217,37 @@ describe("session exit diagnostics", () => {
 		});
 	});
 
+	it("classifies fatal postmortem teardown in the shutdown event", async () => {
+		tempDir = TempDir.createSync("@pi-session-exit-fatal-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			convertToLlm,
+		});
+		const shutdown = captureShutdownEvents();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			extensionRunner: shutdown.runner,
+		});
+
+		await session.dispose({ reason: postmortem.Reason.UNCAUGHT_EXCEPTION });
+		session = undefined;
+
+		expect(shutdown.events).toEqual([{ type: "session_shutdown", reason: "fatal" }]);
+	});
+
 	it("does not materialize an empty session just to write an exit marker", async () => {
 		tempDir = TempDir.createSync("@pi-empty-session-exit-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
