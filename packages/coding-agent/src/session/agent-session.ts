@@ -8633,11 +8633,10 @@ export class AgentSession {
 	}
 
 	/**
-	 * Mid-run periodic shake, fired from afterToolCall during an autonomous
-	 * agent loop. Prunes session entries with skipAgentUpdate:true to avoid
-	 * mutating agent.state.messages while the loop holds a reference to it.
-	 * The pruned session takes effect on the next run/continue; the current
-	 * loop continues safely with its original message reference.
+	 * Mid-run periodic shake, fired at turn_end during an autonomous agent
+	 * loop after a tool result has been persisted. Prunes session entries
+	 * and immediately updates agent.state.messages so the next provider
+	 * call sees the compacted context.
 	 */
 	async #runMidRunShake(): Promise<void> {
 		// Guard against concurrent entry from parallel tool calls
@@ -8651,10 +8650,8 @@ export class AgentSession {
 			await this.#messageEndPersistenceTail;
 			const result = await this.shake("elide", {
 				config: DEFAULT_SHAKE_CONFIG,
-				skipAgentUpdate: true,
 			});
 			this.emitNotice("info", formatShakeSummary(result), "shake");
-			this.#shakeNeedsAgentSync = true;
 		} catch (error) {
 			logger.warn("Mid-run shake failed", {
 				error: error instanceof Error ? error.message : String(error),
