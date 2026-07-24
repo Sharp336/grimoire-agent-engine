@@ -549,6 +549,14 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// parameter, so the flag stays a no-op outside the Qwen path.
 		qwenPreserveThinking:
 			(thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template") && isLocalOpenAICompatBackend,
+		// Friendli serves GLM-5.2 reasoning models via `chat_template_kwargs.enable_thinking`
+		// (so `thinkingFormat` resolves to `qwen-chat-template` like NVIDIA NIM Qwen), but
+		// unlike NIM it ALSO accepts top-level `reasoning_effort` for the `high`/`max`
+		// ladder exposed by `getModelDefinedEfforts`. The encoder reads this to emit
+		// `reasoning_effort` alongside the template kwarg — otherwise selecting high vs max
+		// produces identical wire bodies. NIM's strict schema rejects top-level
+		// `reasoning_effort`, so the flag is gated to Friendli GLM-5.2 reasoning models only.
+		friendliTemplateReasoningEffort: isFriendli && isGlm52ReasoningEffortModelId(spec.id) && Boolean(spec.reasoning),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		openRouterRouting: undefined,
@@ -689,6 +697,9 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// Responses-only; the Qwen `preserve_thinking` template knob lives on
 		// the chat-completions wire shape, never on Responses.
 		qwenPreserveThinking: false,
+		// Friendli's chat-completions-only `reasoning_effort` alongside the template
+		// toggle is never exercised on the Responses path.
+		friendliTemplateReasoningEffort: false,
 		requiresThinkingAsText: false,
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,

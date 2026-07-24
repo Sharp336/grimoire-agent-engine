@@ -5,6 +5,7 @@
 ### Added
 
 - Added FriendliAI provider with API key login and model validation ([#4770](https://github.com/can1357/oh-my-pi/discussions/4770))
+- Preserved `reasoning_effort` on Friendli GLM-5.2 reasoning turns. The `qwen-chat-template` thinking-format dialect (shared with NVIDIA NIM Qwen) only emitted `chat_template_kwargs.enable_thinking`, so selecting `high` vs `max` on a Friendli GLM-5.2 reasoning model produced identical wire bodies. The encoder now also writes top-level `reasoning_effort` for Friendli GLM-5.2 reasoning models (gated by the catalog's `friendliTemplateReasoningEffort` flag); NIM is unaffected since its strict request schema rejects the field.
 
 ## [17.0.9] - 2026-07-23
 

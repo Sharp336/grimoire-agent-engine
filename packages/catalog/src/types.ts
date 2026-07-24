@@ -263,6 +263,19 @@ export interface OpenAICompat {
 	 * Non-Qwen templates ignore the flag, so the auto-detection is safe.
 	 */
 	qwenPreserveThinking?: boolean;
+	/**
+	 * Whether the chat-completions encoder must ALSO emit top-level
+	 * `reasoning_effort` for a `qwen-chat-template` reasoning dialect. Friendli's
+	 * GLM-5.2 reasoning models are toggled on via
+	 * `chat_template_kwargs.enable_thinking` (so they resolve to the
+	 * `qwen-chat-template` thinking format like NVIDIA NIM Qwen) but, unlike NIM,
+	 * they additionally publish the `high`/`max` effort ladder via
+	 * `reasoning_effort`. The `qwen-template-false` enable branch would otherwise
+	 * write only the template kwarg and collapse both effort tiers to identical
+	 * wire bodies. NIM's strict `additionalProperties: false` schema rejects
+	 * top-level `reasoning_effort`, so this stays Friendli-specific. Default: false.
+	 */
+	friendliTemplateReasoningEffort?: boolean;
 	/** Whether assistant tool-call messages must include non-empty content. Default: false. */
 	requiresAssistantContentForToolCalls?: boolean;
 	/** Whether the provider supports the `tool_choice` parameter. Default: true. */
@@ -514,6 +527,8 @@ export interface ResolvedOpenAISharedCompat {
 	allowsSyntheticReasoningContentForToolCalls: boolean;
 	replayReasoningContent: boolean;
 	qwenPreserveThinking: boolean;
+	/** See {@link OpenAICompat.friendliTemplateReasoningEffort}. Set by the builder for Friendli GLM-5.2 reasoning models. */
+	friendliTemplateReasoningEffort: boolean;
 	requiresThinkingAsText: boolean;
 	requiresMistralToolIds: boolean;
 	requiresToolResultName: boolean;
@@ -570,6 +585,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "allowsSyntheticReasoningContentForToolCalls"
 			| "replayReasoningContent"
 			| "qwenPreserveThinking"
+			| "friendliTemplateReasoningEffort"
 			| "requiresThinkingAsText"
 			| "requiresMistralToolIds"
 			| "requiresToolResultName"

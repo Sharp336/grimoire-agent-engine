@@ -981,6 +981,18 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 				// survives the merge — a bare `{ enable_thinking: true }`
 				// would clobber it.
 				params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: true };
+				// Friendli's GLM-5.2 reasoning models share the `qwen-chat-template`
+				// toggle (`chat_template_kwargs.enable_thinking`) with NVIDIA NIM
+				// Qwen but, unlike NIM, additionally accept top-level
+				// `reasoning_effort` for the `high`/`max` ladder. Without this, the
+				// template-only emission above collapses both effort tiers to the
+				// same wire body and silently drops the user's selected effort.
+				// `friendliTemplateReasoningEffort` is gated to Friendli GLM-5.2
+				// reasoning models in `buildOpenAICompat` precisely because NIM's
+				// strict `additionalProperties: false` schema 400s on the field.
+				if (policy.compat.friendliTemplateReasoningEffort && reasoning.wireEffort !== undefined) {
+					params.reasoning_effort = reasoning.wireEffort as Effort;
+				}
 				break;
 			case "openrouter-enabled-false":
 				if (reasoning.wireEffort !== undefined) {

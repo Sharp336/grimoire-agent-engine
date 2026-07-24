@@ -202,6 +202,7 @@ describe("openai-completions compatibility", () => {
 			allowsSyntheticReasoningContentForToolCalls: true,
 			replayReasoningContent: false,
 			qwenPreserveThinking: false,
+			friendliTemplateReasoningEffort: false,
 			requiresAssistantContentForToolCalls: false,
 			openRouterRouting: {},
 			vercelGatewayRouting: {},
