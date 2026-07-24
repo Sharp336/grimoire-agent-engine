@@ -63,6 +63,7 @@ async function executeTool(
 	toolName: string,
 	toolCallId: string,
 	args: Record<string, unknown>,
+	signal?: AbortSignal,
 ): Promise<ToolResultMessage> {
 	const tool = options.tools.get(toolName) ?? options.getTool?.(toolName);
 	if (!tool) {
@@ -95,7 +96,7 @@ async function executeTool(
 		result = await tool.execute(
 			toolCallId,
 			args as Record<string, unknown>,
-			undefined,
+			signal,
 			onUpdate,
 			options.getToolContext?.(),
 		);
@@ -115,12 +116,22 @@ async function executeTool(
 	return createToolResultMessage(toolCallId, toolName, result, isError);
 }
 
-async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
+async function executeDelete(
+	options: CursorExecBridgeOptions,
+	pathArg: string,
+	toolCallId: string,
+	signal?: AbortSignal,
+) {
 	const toolName = "delete";
 
 	if (options.allowNativeDelete === false) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
+	}
+
+	const tool = options.tools?.get(toolName) ?? options.getTool?.(toolName);
+	if (tool) {
+		return executeTool(options, toolName, toolCallId, { path: pathArg }, signal);
 	}
 
 	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: { path: pathArg } });
@@ -130,6 +141,9 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	let result: AgentToolResult<unknown>;
 
 	try {
+		if (signal?.aborted) {
+			throw signal.reason ?? new Error("Operation aborted");
+		}
 		let fileStat: fs.Stats | undefined;
 		try {
 			fileStat = fs.statSync(absolutePath);
@@ -140,6 +154,9 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 			throw new Error(`Path is not a file: ${pathArg}`);
 		}
 
+		if (signal?.aborted) {
+			throw signal.reason ?? new Error("Operation aborted");
+		}
 		fs.rmSync(absolutePath);
 
 		const sizeText = fileStat.size ? ` (${fileStat.size} bytes)` : "";
@@ -180,60 +197,79 @@ function formatMcpToolErrorMessage(toolName: string, availableTools: string[]): 
 export class CursorExecHandlers implements ICursorExecHandlers {
 	constructor(private options: CursorExecBridgeOptions) {}
 
-	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0]) {
+	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0], signal?: AbortSignal) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const toolResultMessage = await executeTool(this.options, "read", toolCallId, { path: args.path });
+		const toolResultMessage = await executeTool(this.options, "read", toolCallId, { path: args.path }, signal);
 		return toolResultMessage;
 	}
 
-	async ls(args: Parameters<NonNullable<ICursorExecHandlers["ls"]>>[0]) {
+	async ls(args: Parameters<NonNullable<ICursorExecHandlers["ls"]>>[0], signal?: AbortSignal) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		// Redirect ls to read tool, which handles directories
-		const toolResultMessage = await executeTool(this.options, "read", toolCallId, { path: args.path });
+		const toolResultMessage = await executeTool(this.options, "read", toolCallId, { path: args.path }, signal);
 		return toolResultMessage;
 	}
 
-	async grep(args: Parameters<NonNullable<ICursorExecHandlers["grep"]>>[0]) {
+	async grep(args: Parameters<NonNullable<ICursorExecHandlers["grep"]>>[0], signal?: AbortSignal) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
-		const toolResultMessage = await executeTool(this.options, "grep", toolCallId, {
-			pattern: args.pattern,
-			path: searchPath,
-			case: args.caseInsensitive === true ? false : undefined,
-		});
+		const toolResultMessage = await executeTool(
+			this.options,
+			"grep",
+			toolCallId,
+			{
+				pattern: args.pattern,
+				path: searchPath,
+				case: args.caseInsensitive === true ? false : undefined,
+			},
+			signal,
+		);
 		return toolResultMessage;
 	}
 
-	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0]) {
+	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0], signal?: AbortSignal) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
-		const toolResultMessage = await executeTool(this.options, "write", toolCallId, {
-			path: args.path,
-			content,
-		});
+		const toolResultMessage = await executeTool(
+			this.options,
+			"write",
+			toolCallId,
+			{
+				path: args.path,
+				content,
+			},
+			signal,
+		);
 		return toolResultMessage;
 	}
 
-	async delete(args: Parameters<NonNullable<ICursorExecHandlers["delete"]>>[0]) {
+	async delete(args: Parameters<NonNullable<ICursorExecHandlers["delete"]>>[0], signal?: AbortSignal) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const toolResultMessage = await executeDelete(this.options, args.path, toolCallId);
+		const toolResultMessage = await executeDelete(this.options, args.path, toolCallId, signal);
 		return toolResultMessage;
 	}
 
-	async shell(args: Parameters<NonNullable<ICursorExecHandlers["shell"]>>[0]) {
+	async shell(args: Parameters<NonNullable<ICursorExecHandlers["shell"]>>[0], signal?: AbortSignal) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const timeoutSeconds = args.timeout && args.timeout > 0 ? args.timeout : undefined;
-		const toolResultMessage = await executeTool(this.options, "bash", toolCallId, {
-			command: args.command,
-			cwd: args.workingDirectory || undefined,
-			timeout: timeoutSeconds,
-		});
+		const toolResultMessage = await executeTool(
+			this.options,
+			"bash",
+			toolCallId,
+			{
+				command: args.command,
+				cwd: args.workingDirectory || undefined,
+				timeout: timeoutSeconds,
+			},
+			signal,
+		);
 		return toolResultMessage;
 	}
 
 	async shellStream(
 		args: Parameters<NonNullable<ICursorExecHandlers["shellStream"]>>[0],
 		callbacks: CursorShellStreamCallbacks,
+		signal?: AbortSignal,
 	) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const toolName = "bash";
@@ -295,7 +331,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		};
 
 		try {
-			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, this.options.getToolContext?.());
+			result = await tool.execute(toolCallId, toolArgs, signal, onUpdate, this.options.getToolContext?.());
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result = buildToolErrorResult(message);
@@ -332,16 +368,22 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		return createToolResultMessage(toolCallId, toolName, result, isError);
 	}
 
-	async diagnostics(args: Parameters<NonNullable<ICursorExecHandlers["diagnostics"]>>[0]) {
+	async diagnostics(args: Parameters<NonNullable<ICursorExecHandlers["diagnostics"]>>[0], signal?: AbortSignal) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const toolResultMessage = await executeTool(this.options, "lsp", toolCallId, {
-			action: "diagnostics",
-			file: args.path,
-		});
+		const toolResultMessage = await executeTool(
+			this.options,
+			"lsp",
+			toolCallId,
+			{
+				action: "diagnostics",
+				file: args.path,
+			},
+			signal,
+		);
 		return toolResultMessage;
 	}
 
-	async mcp(call: CursorMcpCall) {
+	async mcp(call: CursorMcpCall, signal?: AbortSignal) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
 		const tool = this.options.tools.get(toolName) ?? this.options.getTool?.(toolName);
@@ -353,7 +395,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		}
 
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
-		const toolResultMessage = await executeTool(this.options, toolName, toolCallId, args);
+		const toolResultMessage = await executeTool(this.options, toolName, toolCallId, args, signal);
 		return toolResultMessage;
 	}
 }

@@ -30,7 +30,8 @@
     "test": "bun test --parallel",
     "fix": "biome check --write --unsafe .",
     "fmt": "biome format --write .",
-    "gen:models": "bun scripts/generate-models.ts"
+    "gen:models": "bun scripts/generate-models.ts",
+    "generate:cursor-proto": "buf generate --template buf.gen.yaml src/discovery/cursor-proto && biome check --write src/discovery/cursor-gen/bidi_pb.ts src/discovery/cursor-gen/server_config_pb.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "catalog:",
@@ -39,6 +40,8 @@
     "zod": "catalog:"
   },
   "devDependencies": {
+    "@bufbuild/buf": "catalog:",
+    "@bufbuild/protoc-gen-es": "catalog:",
     "@oh-my-pi/pi-ai": "catalog:",
     "@types/bun": "catalog:"
   },

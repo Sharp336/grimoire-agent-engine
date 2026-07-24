@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, toBinary } from "@bufbuild/protobuf";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { __evictH2PoolEntry } from "@oh-my-pi/pi-ai/providers/cursor/h2-pool";
+import { __evictServerConfigEntry } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -21,6 +23,7 @@ type Scenario =
 	| { kind: "hang-after-turn" };
 
 let server: http2.Http2Server | undefined;
+let activeBaseUrl: string | undefined;
 const sessions = new Set<http2.Http2Session>();
 let scenario: Scenario = { kind: "success" };
 
@@ -136,7 +139,8 @@ async function startServer(): Promise<string> {
 	if (!address || typeof address === "string") {
 		throw new Error("expected http2 fixture server to bind a tcp port");
 	}
-	return `http://127.0.0.1:${address.port}`;
+	activeBaseUrl = `http://127.0.0.1:${address.port}`;
+	return activeBaseUrl;
 }
 
 function makeModel(baseUrl: string): Model<"cursor-agent"> {
@@ -189,6 +193,11 @@ async function stopServer(): Promise<void> {
 
 afterEach(async () => {
 	scenario = { kind: "success" };
+	if (activeBaseUrl) {
+		__evictH2PoolEntry(activeBaseUrl);
+		__evictServerConfigEntry(activeBaseUrl, "test-token");
+		activeBaseUrl = undefined;
+	}
 	await stopServer();
 });
 

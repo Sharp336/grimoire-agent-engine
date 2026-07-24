@@ -21,6 +21,7 @@
       "@babel/traverse": "^7.29.7",
       "@babel/types": "^7.29.7",
       "@biomejs/biome": "^2.5.3",
+      "@bufbuild/buf": "^1.72.0",
       "@bufbuild/protobuf": "^2.12.1",
       "@bufbuild/protoc-gen-es": "^2.12.1",
       "@connectrpc/connect": "^2.1.2",

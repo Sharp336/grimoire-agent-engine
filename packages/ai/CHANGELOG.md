@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed stateful OpenAI Responses explicit cache breakpoints being restored onto edited historical messages, ensuring full replays recompute the latest stable cache boundary.
+- Fixed Cursor transport recovery across transient Connect failures, stale HTTP/2 sessions, proxies, and HTTP/1 fallbacks ([#6465](https://github.com/can1357/oh-my-pi/issues/6465)).
 
 ## [17.1.0] - 2026-07-24
 

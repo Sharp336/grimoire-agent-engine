@@ -682,6 +682,7 @@ searxng:
 | `providers.tinyModelDevice` | enum | `default` | ONNX execution provider for local tiny models. Overridden by `PI_TINY_DEVICE`. |
 | `providers.tinyModelDtype` | enum | `default` | ONNX precision for local tiny models. Overridden by `PI_TINY_DTYPE`. |
 | `providers.openaiWebsockets` | enum | `auto` | `auto`, `off`, `on`. |
+ | `providers.cursor.useHttp1ForAgent` | boolean | `false` | Use Cursor's HTTP/1 streaming bridge unless the server forces a transport mode. |
 | `providers.openrouterVariant` | enum | `default` | `default`, `nitro`, `floor`, `online`, `exacto`. |
 | `providers.kimiApiFormat` | enum | `anthropic` | `openai`, `anthropic`. |
 | `provider.appendOnlyContext` | enum | `auto` | `auto`, `on`, `off`. |

@@ -4976,6 +4976,16 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"providers.cursor.useHttp1ForAgent": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Prefer Cursor HTTP/1",
+			description: "Use Cursor's HTTP/1 streaming bridge unless the server forces a transport mode.",
+		},
+	},
 
 	"providers.streamFirstEventTimeoutSeconds": {
 		type: "number",

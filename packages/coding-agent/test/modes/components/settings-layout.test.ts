@@ -150,4 +150,13 @@ describe("settings layout", () => {
 			group: "Available Tools",
 		});
 	});
+	it("exposes providers.cursor.useHttp1ForAgent as a boolean under Protocol", () => {
+		const def = getSettingsForTab("providers").find(def => def.path === "providers.cursor.useHttp1ForAgent");
+
+		expect(def).toMatchObject({
+			type: "boolean",
+			label: "Prefer Cursor HTTP/1",
+			group: "Protocol",
+		});
+	});
 });

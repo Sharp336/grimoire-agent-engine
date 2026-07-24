@@ -456,12 +456,11 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
 		const written: unknown[] = [];
-		const h2Request = {
-			write: (chunk: unknown) => {
-				written.push(chunk);
-				return true;
+		const channel = {
+			sendClientBytes: (bytes: unknown) => {
+				written.push(bytes);
 			},
-		} as unknown as Parameters<typeof handleServerMessage>[5];
+		} as Parameters<typeof handleServerMessage>[5];
 		const handlerGate = Promise.withResolvers<void>();
 		const execHandlers: CursorExecHandlers = {
 			async read(args) {
@@ -497,7 +496,7 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 			stream,
 			state,
 			new Map(),
-			h2Request,
+			channel,
 			execHandlers,
 			undefined,
 			{ sawTokenDelta: false },
@@ -520,7 +519,7 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
-		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+		const channel = { sendClientBytes: () => {} } as Parameters<typeof handleServerMessage>[5];
 		const serverMsg = create(AgentServerMessageSchema, {
 			message: {
 				case: "execServerMessage",
@@ -558,7 +557,7 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 			stream,
 			state,
 			new Map(),
-			h2Request,
+			channel,
 			execHandlers,
 			undefined,
 			{

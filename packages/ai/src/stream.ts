@@ -969,7 +969,12 @@ function extractStatusFromAssistantError(message: AssistantMessage): number | un
 	return AIError.status({ message: message.errorMessage });
 }
 
-function isRetryableUpstreamError(error: unknown, status: number | undefined, message: string | undefined): boolean {
+function isRetryableUpstreamError(
+	providerApi: Api,
+	error: unknown,
+	status: number | undefined,
+	message: string | undefined,
+): boolean {
 	// 401 means the credential is bad. Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
@@ -984,6 +989,10 @@ function isRetryableUpstreamError(error: unknown, status: number | undefined, me
 	if (AIError.isUsageLimit(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	if (status === 401) return true;
+	// Cursor normalizes its Connect/HTTP auth failures into a status-bearing
+	// credential error. Rotate credentials on 403 for cursor-agent only; other
+	// providers' 403 handling is unchanged.
+	if (providerApi === "cursor-agent" && status === 403) return true;
 	return isUsageLimitOutcome(status, message);
 }
 
@@ -1043,6 +1052,7 @@ export function streamSimple<TApi extends Api>(
 						!emittedReplayUnsafeEvent &&
 						event.type === "error" &&
 						isRetryableUpstreamError(
+							model.api,
 							event.error,
 							extractStatusFromAssistantError(event.error),
 							event.error.errorMessage,
@@ -1061,6 +1071,7 @@ export function streamSimple<TApi extends Api>(
 				if (
 					!emittedReplayUnsafeEvent &&
 					isRetryableUpstreamError(
+						model.api,
 						error,
 						AIError.status(error),
 						error instanceof Error ? error.message : undefined,
@@ -1844,6 +1855,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
+				useHttp1ForAgent: options?.cursorUseHttp1ForAgent,
 			});
 		}
 

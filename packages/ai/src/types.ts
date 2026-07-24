@@ -524,6 +524,8 @@ export interface StreamOptions {
 
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
+	/** Cursor transport mode override: prefer HTTP/1 streaming bridge when true. */
+	cursorUseHttp1ForAgent?: boolean;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
@@ -572,9 +574,10 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	syntheticApiFormat?: "openai" | "anthropic";
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
+	/** Cursor transport mode override: prefer HTTP/1 streaming bridge when true. */
+	cursorUseHttp1ForAgent?: boolean;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when
-	 * the request targets OpenRouter (`model.provider === "openrouter"`). Common
 	 * values: `"nitro"` (throughput), `"floor"` (cheapest), `"online"` (web
 	 * search plugin), `"exacto"` (cherry-picked high-quality providers, only
 	 * defined for some models). Ignored when the resolved model id already
@@ -829,18 +832,19 @@ export interface CursorShellStreamCallbacks {
 }
 
 export interface CursorExecHandlers {
-	read?: (args: ReadArgs) => Promise<CursorExecHandlerResult<ReadResult>>;
-	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
-	grep?: (args: GrepArgs) => Promise<CursorExecHandlerResult<GrepResult>>;
-	write?: (args: WriteArgs) => Promise<CursorExecHandlerResult<WriteResult>>;
-	delete?: (args: DeleteArgs) => Promise<CursorExecHandlerResult<DeleteResult>>;
-	shell?: (args: ShellArgs) => Promise<CursorExecHandlerResult<ShellResult>>;
+	read?: (args: ReadArgs, signal?: AbortSignal) => Promise<CursorExecHandlerResult<ReadResult>>;
+	ls?: (args: LsArgs, signal?: AbortSignal) => Promise<CursorExecHandlerResult<LsResult>>;
+	grep?: (args: GrepArgs, signal?: AbortSignal) => Promise<CursorExecHandlerResult<GrepResult>>;
+	write?: (args: WriteArgs, signal?: AbortSignal) => Promise<CursorExecHandlerResult<WriteResult>>;
+	delete?: (args: DeleteArgs, signal?: AbortSignal) => Promise<CursorExecHandlerResult<DeleteResult>>;
+	shell?: (args: ShellArgs, signal?: AbortSignal) => Promise<CursorExecHandlerResult<ShellResult>>;
 	shellStream?: (
 		args: ShellArgs,
 		callbacks: CursorShellStreamCallbacks,
+		signal?: AbortSignal,
 	) => Promise<CursorExecHandlerResult<ShellResult>>;
-	diagnostics?: (args: DiagnosticsArgs) => Promise<CursorExecHandlerResult<DiagnosticsResult>>;
-	mcp?: (call: CursorMcpCall) => Promise<CursorExecHandlerResult<McpResult>>;
+	diagnostics?: (args: DiagnosticsArgs, signal?: AbortSignal) => Promise<CursorExecHandlerResult<DiagnosticsResult>>;
+	mcp?: (call: CursorMcpCall, signal?: AbortSignal) => Promise<CursorExecHandlerResult<McpResult>>;
 	onToolResult?: CursorToolResultHandler;
 }
 

@@ -1,3 +1,5 @@
+import * as http from "node:http";
+import * as https from "node:https";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import * as AIError from "../error";
@@ -124,7 +126,13 @@ export function getProxyForProvider(provider: string): string | undefined {
 
 	const normalized = provider.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 	const envKey = `PI_PROXY_${normalized}`;
-	const value = Bun.env[envKey] || Bun.env.PI_PROXY;
+	const value =
+		Bun.env[envKey] ||
+		Bun.env.PI_PROXY ||
+		Bun.env.HTTPS_PROXY ||
+		Bun.env.https_proxy ||
+		Bun.env.HTTP_PROXY ||
+		Bun.env.http_proxy;
 	proxyCache.set(provider, value);
 	return value;
 }
@@ -167,6 +175,8 @@ export interface ConnectProxiedSocketOptions {
 	signal?: AbortSignal;
 	/** Maximum wall-clock time to establish the final TLS tunnel. Disabled when absent or non-positive. */
 	timeoutMs?: number;
+	/** ALPN protocols for TLS handshake (defaults to ["h2"]). */
+	alpnProtocols?: string[];
 }
 
 /**
@@ -189,7 +199,7 @@ export async function connectProxiedSocket(
 	const proxyPort = proxyUrl.port ? parseInt(proxyUrl.port, 10) : useProxySsl ? 443 : 80;
 	const proxyHost = proxyUrl.hostname;
 
-	const targetPort = targetUrl.port ? parseInt(targetUrl.port, 10) : 443;
+	const targetPort = targetUrl.port ? parseInt(targetUrl.port, 10) : targetUrl.protocol === "https:" ? 443 : 80;
 	const targetHost = targetUrl.hostname;
 
 	const { promise, resolve, reject } = Promise.withResolvers<tls.TLSSocket>();
@@ -210,6 +220,7 @@ export async function connectProxiedSocket(
 		rawSocket?.off("error", onRawError);
 		rawSocket?.off(readyEvent, onProxyReady);
 		rawSocket?.off("data", onProxyData);
+		rawSocket?.pause();
 		tunnelSocket?.off("secureConnect", onTunnelReady);
 		tunnelSocket?.off("error", onTunnelError);
 	};
@@ -240,7 +251,8 @@ export async function connectProxiedSocket(
 	const onProxyData = (chunk: Buffer): void => {
 		if (!rawSocket) return;
 		responseData += chunk.toString("binary");
-		if (!responseData.includes("\r\n\r\n")) return;
+		const headerEndIndex = responseData.indexOf("\r\n\r\n");
+		if (headerEndIndex === -1) return;
 
 		rawSocket.off("data", onProxyData);
 		rawSocket.off("error", onRawError);
@@ -251,10 +263,20 @@ export async function connectProxiedSocket(
 			return;
 		}
 
+		const unconsumedBytes = Buffer.from(responseData.slice(headerEndIndex + 4), "binary");
+		if (unconsumedBytes.length > 0) {
+			rawSocket.unshift(unconsumedBytes);
+		}
+
+		if (targetUrl.protocol === "http:") {
+			resolveOnce(rawSocket as unknown as tls.TLSSocket);
+			return;
+		}
+
 		tunnelSocket = tls.connect({
 			socket: rawSocket,
 			servername: targetHost,
-			ALPNProtocols: ["h2"],
+			ALPNProtocols: options?.alpnProtocols ?? ["h2"],
 		});
 		tunnelSocket.once("secureConnect", onTunnelReady);
 		tunnelSocket.once("error", onTunnelError);
@@ -297,4 +319,37 @@ export async function connectProxiedSocket(
 	rawSocket.once(readyEvent, onProxyReady);
 
 	return promise;
+}
+/**
+ * Create an HTTP/HTTPS Agent that tunnels requests through an HTTP proxy.
+ * Explicitly owned by the caller; call `agent.destroy()` to clean up.
+ */
+export function createProxiedAgent(
+	proxyUrlStr: string,
+	targetUrlStr: string,
+	options?: ConnectProxiedSocketOptions,
+): http.Agent | https.Agent {
+	const targetUrl = new URL(targetUrlStr);
+	const isHttps = targetUrl.protocol === "https:";
+	const AgentClass = isHttps ? https.Agent : http.Agent;
+
+	const agent = new AgentClass({
+		keepAlive: true,
+		lookup: (_hostname: string, _opts: unknown, cb: (err: Error | null, address: string, family: number) => void) =>
+			cb(null, "127.0.0.1", 4),
+	});
+	(agent as unknown as { createConnection: unknown }).createConnection = (
+		_opts: http.RequestOptions | https.RequestOptions,
+		callback: (err: Error | null, socket?: net.Socket) => void,
+	) => {
+		connectProxiedSocket(proxyUrlStr, targetUrlStr, {
+			signal: options?.signal,
+			timeoutMs: options?.timeoutMs,
+			alpnProtocols: options?.alpnProtocols ?? ["http/1.1"],
+		})
+			.then(socket => callback(null, socket))
+			.catch((err: Error) => callback(err));
+		return undefined as unknown as net.Socket;
+	};
+	return agent;
 }

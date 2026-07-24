@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Providers/Protocol setting to prefer Cursor HTTP/1 when the server does not force a mode.
+
 ## [17.1.0] - 2026-07-24
 
 ### Breaking Changes

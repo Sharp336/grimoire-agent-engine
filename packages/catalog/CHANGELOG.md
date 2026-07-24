@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Cursor server-config and fallback transport protocol descriptors.
+
 ## [17.1.0] - 2026-07-24
 
 ### Added

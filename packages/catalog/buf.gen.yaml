@@ -1,0 +1,8 @@
+version: v2
+clean: false
+plugins:
+  - local: protoc-gen-es
+    out: src/discovery/cursor-gen
+    opt:
+      - target=ts
+      - import_extension=none

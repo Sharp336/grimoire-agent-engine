@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderResponseError } from "@oh-my-pi/pi-ai/error";
 import { mapH2TransportError } from "@oh-my-pi/pi-ai/providers/cursor";
+import { __evictH2PoolEntry, __getH2PoolStats, __resetH2Pool, acquireH2Session } from "../src/providers/cursor/h2-pool";
 
 const BASE_URL = "https://api2.cursor.sh";
 
@@ -33,5 +34,18 @@ describe("mapH2TransportError", () => {
 	it("passes through a non-HTTP/2 error even when it mentions h2", () => {
 		const raw = Object.assign(new Error("h2 is not supported"), { code: "ECONNRESET" });
 		expect(mapH2TransportError(raw, BASE_URL)).toBe(raw);
+	});
+});
+
+describe("H2 pool delayed initialization cleanup", () => {
+	it("aborts created manager when slot is evicted during asynchronous initialization", async () => {
+		__resetH2Pool();
+		const testUrl = "https://127.0.0.1:59998";
+		const acqPromise = acquireH2Session(testUrl, "cursor").catch(() => null);
+		__evictH2PoolEntry(testUrl, "cursor");
+		await acqPromise;
+		const stats = __getH2PoolStats();
+		expect(stats.retiringCount).toBe(0);
+		__resetH2Pool();
 	});
 });

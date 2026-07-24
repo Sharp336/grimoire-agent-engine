@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package aiserver.v1;
+
+// Minimal, unknown-field-tolerant description of Cursor's GetServerConfig
+// response. Only the fields omp consumes to select and route the agent
+// transport are declared; proto3 decoding ignores every other vendor field, so
+// this stays forward-compatible with the full server schema. Field numbers
+// and types are pinned to the vendor wire contract:
+// http2_config = 7 (bare enum, not a submessage)
+// agent_url_config = 27
+
+// Server-forced bidi/HTTP2 policy. UNSPECIFIED leaves the choice to the local
+// `providers.cursor.useHttp1ForAgent` preference.
+enum Http2Config {
+  HTTP2_CONFIG_UNSPECIFIED = 0;
+  HTTP2_CONFIG_FORCE_ALL_DISABLED = 1;
+  HTTP2_CONFIG_FORCE_ALL_ENABLED = 2;
+  HTTP2_CONFIG_FORCE_BIDI_DISABLED = 3;
+  HTTP2_CONFIG_FORCE_BIDI_ENABLED = 4;
+}
+
+message AgentUrlConfig {
+  string agent_url = 1;
+  string agentn_url = 2;
+}
+
+message GetServerConfigRequest {}
+
+message GetServerConfigResponse {
+  // Server-forced transport policy (bare enum on the wire, field 7).
+  Http2Config http2_config = 7;
+  AgentUrlConfig agent_url_config = 27;
+}
+
+service ServerConfigService {
+  rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigResponse);
+}

@@ -142,25 +142,53 @@ import {
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import {
+	createRequestDebugSession,
+	isRequestDebugEnabled,
+	type RequestDebugResponseLog,
+	type RequestDebugSession,
+} from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
-import { acquireCursorStream } from "./cursor-h2-pool";
-
-export { disposeCursorTransport } from "./cursor-h2-pool";
+import { acquireH2Session, type H2Lease } from "./cursor/h2-pool";
+import { buildCursorHeaders } from "./cursor/headers";
+import { type CursorHttp1Bridge, createCursorHttp1Bridge } from "./cursor/http1-bridge";
+import { type CursorTransportMode, evictServerConfig, resolveCursorTransportMode } from "./cursor/server-config";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
+
 /**
- * Committed vendor protocol snapshot — the installed cursor-agent build these
- * wire descriptors were extracted from (2026.07.20-8cc9c0b). Bump this literal
- * only when the extracted vendor protocol fixtures change.
+ * Transport-agnostic outbound channel for sending `AgentClientMessage` bytes
+ * to the Cursor server. Both H2 (raw stream with Connect framing) and H1
+ * (bridge.send) implement this. The bytes are unframed `AgentClientMessage`
+ * protobuf; the transport layer applies framing.
  */
-const CURSOR_PROTOCOL_CLIENT_VERSION = "cli-2026.07.20-8cc9c0b";
+interface CursorChannel {
+	/** Send unframed AgentClientMessage protobuf bytes to the server. */
+	sendClientBytes(bytes: Uint8Array): void;
+}
+
 /**
- * Effective default `x-cursor-client-version`. Defaults to the committed
- * protocol snapshot; `$env.CURSOR_CLIENT_VERSION` is an explicit override, and
- * {@link CursorOptions.clientVersion} overrides per call.
+ * Select the agent URL for this turn.
+ *
+ * Production `CURSOR_API_URL` with both valid server-provided URLs routes
+ * via ghost mode for HTTP/2 only: ghost mode selects `agent_url`, normal mode
+ * selects `agentn_url`. HTTP/1 and all custom/local/staging endpoints retain
+ * the configured base URL.
  */
-export const CURSOR_CLIENT_VERSION = $env.CURSOR_CLIENT_VERSION?.trim() || CURSOR_PROTOCOL_CLIENT_VERSION;
+function resolveAgentUrl(
+	baseUrl: string,
+	mode: CursorTransportMode,
+	agentUrlConfig: { agentUrl: string; agentnUrl: string } | undefined,
+): string {
+	// H1 always uses the configured base URL.
+	if (mode === "http1") return baseUrl;
+	// Only production endpoints with both valid URLs are eligible for routing.
+	if (baseUrl === CURSOR_API_URL && agentUrlConfig && agentUrlConfig.agentUrl && agentUrlConfig.agentnUrl) {
+		// Ghost mode is enabled by default (x-ghost-mode: true).
+		return agentUrlConfig.agentUrl;
+	}
+	return baseUrl;
+}
 
 const conversationStateCache = new Map<string, ConversationStateStructure>();
 const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
@@ -170,86 +198,14 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
-	/** Per-call override for `x-cursor-client-version`. */
+	/** Explicit per-request `x-cursor-client-version` override. */
 	clientVersion?: string;
-}
-
-/**
- * Single source of truth for the Cursor Run request headers. Preserves bearer
- * auth, ghost mode, and the `cli` client type. `x-original-request-id` is stable
- * across every attempt of one logical turn; `x-request-id` is fresh per attempt
- * so the vendor can distinguish a replay from the original.
- */
-export function buildCursorHeaders(params: {
-	apiKey: string;
-	requestPath: string;
-	originalRequestId: string;
-	requestId: string;
-	clientVersion?: string;
-}): Record<string, string> {
-	return {
-		":method": "POST",
-		":path": params.requestPath,
-		"content-type": "application/connect+proto",
-		"connect-protocol-version": "1",
-		te: "trailers",
-		authorization: `Bearer ${params.apiKey}`,
-		"x-ghost-mode": "true",
-		"x-cursor-client-version": params.clientVersion?.trim() || CURSOR_CLIENT_VERSION,
-		"x-cursor-client-type": "cli",
-		"x-original-request-id": params.originalRequestId,
-		"x-request-id": params.requestId,
-	};
+	/** Prefer Cursor's HTTP/1 streaming bridge unless the server forces a transport mode. */
+	cursorUseHttp1ForAgent?: boolean;
+	useHttp1ForAgent?: boolean;
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
-
-/**
- * Tracks whether the current logical turn has crossed a boundary that makes
- * re-sending the initial request unsafe. A transient transport failure is only
- * replayed while every bit is still false: once the server has spoken, written
- * a checkpoint, or we have sent an outbound side effect (a server-executed tool
- * result / KV response), retrying would duplicate work or corrupt state.
- */
-export interface CursorReplayState {
-	sawServerMessage: boolean;
-	sawCheckpoint: boolean;
-	sentSideEffect: boolean;
-}
-
-/** Hard maximum of total Run attempts (initial try + replay-safe retries). */
-const CURSOR_MAX_ATTEMPTS = 3;
-const CURSOR_RETRY_BASE_MS = 250;
-const CURSOR_RETRY_CAP_MS = 2_000;
-
-/** Whether a failed attempt is a transient transport failure worth replaying. */
-function isCursorRetryableTransportError(error: unknown): boolean {
-	const id = AIError.classify(error, "cursor-agent" as Api);
-	if (
-		AIError.is(id, AIError.Flag.Abort) ||
-		AIError.is(id, AIError.Flag.UserInterrupt) ||
-		AIError.is(id, AIError.Flag.SilentAbort) ||
-		AIError.is(id, AIError.Flag.AuthFailed)
-	) {
-		return false;
-	}
-	return AIError.is(id, AIError.Flag.Transient);
-}
-
-/** Abortable capped full-jitter backoff between replay-safe retries. */
-async function cursorRetryDelay(attempt: number, signal?: AbortSignal): Promise<void> {
-	if (signal?.aborted) return;
-	const cap = Math.min(CURSOR_RETRY_CAP_MS, CURSOR_RETRY_BASE_MS * 2 ** (attempt - 1));
-	const delay = Math.random() * cap;
-	const aborted = Promise.withResolvers<void>();
-	const onAbort = () => aborted.resolve();
-	signal?.addEventListener("abort", onAbort, { once: true });
-	try {
-		await Promise.race([Bun.sleep(delay), aborted.promise]);
-	} finally {
-		signal?.removeEventListener("abort", onAbort);
-	}
-}
 
 interface CursorLogEntry {
 	ts: number;
@@ -293,6 +249,10 @@ function parseConnectEndStream(data: Uint8Array): Error | null {
 		if (error) {
 			const code = typeof error.code === "string" ? error.code : "unknown";
 			const message = typeof error.message === "string" ? error.message : "Unknown error";
+			const authStatus = connectCodeToAuthStatus(code);
+			if (authStatus) {
+				return new AIError.CursorCredentialError(`Connect error ${code}: ${message}`, authStatus);
+			}
 			return new AIError.ProviderResponseError(`Connect error ${code}: ${message}`, { kind: "envelope" });
 		}
 		return null;
@@ -434,6 +394,108 @@ function omitTypeName(record: Record<string, unknown>): Record<string, unknown> 
 	return rest;
 }
 
+/** Maximum total transport attempts for one logical Cursor turn. */
+const CURSOR_MAX_ATTEMPTS = 3;
+
+/**
+ * Monotonic replay markers for one logical turn. Retry is permitted only while
+ * all three are false; none is ever reset. Any decoded server message, any
+ * checkpoint mutation, or any outbound server-triggered side effect makes the
+ * turn non-replayable.
+ */
+interface CursorReplayState {
+	sawServerMessage: boolean;
+	sawCheckpoint: boolean;
+	sentSideEffect: boolean;
+}
+
+// Vendor gRPC status codes treated as transient: CANCELLED(1), UNKNOWN(2),
+// DEADLINE_EXCEEDED(4), ABORTED(10), INTERNAL(13), UNAVAILABLE(14), DATA_LOSS(15).
+const CURSOR_TRANSIENT_GRPC_CODES: Record<number, true> = {
+	1: true,
+	2: true,
+	4: true,
+	10: true,
+	13: true,
+	14: true,
+	15: true,
+};
+const CURSOR_TRANSIENT_CONNECT_CODES: Record<string, true> = {
+	cancelled: true,
+	unknown: true,
+	deadline_exceeded: true,
+	aborted: true,
+	internal: true,
+	unavailable: true,
+	data_loss: true,
+};
+const CURSOR_TRANSIENT_NETWORK_PATTERN =
+	/econnreset|econnrefused|etimedout|eai_again|socket hang up|other side closed|fetch failed|network.?error|stream stall|\bterminated\b|reset before headers|h2 is not supported/i;
+
+/**
+ * Whether a failed attempt may be replayed. Caller cancellation, auth, request
+ * validation, and quota/usage-limit are excluded (auth and quota rotate at the
+ * credential/model layer instead). Recognized transient signals are the vendor
+ * gRPC/Connect status codes and network-level transport faults.
+ */
+function isTransientCursorError(error: unknown): boolean {
+	if (error instanceof AIError.AbortError) return false;
+	if (error instanceof AIError.CursorCredentialError) return false;
+	if (error instanceof AIError.ValidationError) return false;
+	if (AIError.isUsageLimit(error)) return false;
+	const message = error instanceof Error ? error.message : String(error);
+	const grpc = message.match(/gRPC error (\d+):/i);
+	if (grpc) return CURSOR_TRANSIENT_GRPC_CODES[Number(grpc[1])] === true;
+	const connect = message.match(/Connect error ([a-z_]+):/i);
+	if (connect) return CURSOR_TRANSIENT_CONNECT_CODES[connect[1].toLowerCase()] === true;
+	return CURSOR_TRANSIENT_NETWORK_PATTERN.test(message);
+}
+
+/** Capped exponential backoff with 50% jitter, per the transport plan. */
+function cursorRetryDelayMs(retryIndex: number): number {
+	const base = Math.min(1000 * 2 ** retryIndex, 10000);
+	return Math.floor(base * (0.5 + 0.5 * Math.random()));
+}
+
+/** Abortable retry sleep; a caller abort rejects instead of resolving. */
+async function waitCursorRetry(
+	delayMs: number,
+	signal: AbortSignal | undefined,
+	providerRetryWait: StreamOptions["providerRetryWait"],
+): Promise<void> {
+	if (providerRetryWait) {
+		await providerRetryWait(delayMs, signal);
+		return;
+	}
+	if (signal?.aborted) throw signal.reason ?? new AIError.AbortError();
+	await new Promise<void>((resolve, reject) => {
+		const onAbort = (): void => {
+			clearTimeout(timer);
+			reject(signal?.reason ?? new AIError.AbortError());
+		};
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, delayMs);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+/** Map a Connect end-stream error code to an HTTP-equivalent auth status. */
+function connectCodeToAuthStatus(code: string): 401 | 403 | undefined {
+	const normalized = code.toLowerCase();
+	if (normalized === "unauthenticated") return 401;
+	if (normalized === "permission_denied") return 403;
+	return undefined;
+}
+
+/** Map a gRPC trailer status to an HTTP-equivalent auth status. */
+function grpcStatusToAuthStatus(status: number): 401 | 403 | undefined {
+	if (status === 16) return 401; // UNAUTHENTICATED
+	if (status === 7) return 403; // PERMISSION_DENIED
+	return undefined;
+}
+
 export const streamCursor: StreamFunction<"cursor-agent"> = (
 	model: Model<"cursor-agent">,
 	context: Context,
@@ -463,159 +525,322 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			timestamp: Date.now(),
 		};
 
-		const replayState: CursorReplayState = {
-			sawServerMessage: false,
-			sawCheckpoint: false,
-			sentSideEffect: false,
-		};
+		/**
+		 * Run a single transport attempt. Selects H2 (pooled) or H1 (bridge) based
+		 * on the resolved transport mode. Deltas, tool calls, checkpoints, and the
+		 * terminal `done` event are pushed to the shared outer stream; the public
+		 * `start` event is emitted once by the supervisor, not here. Resolves after
+		 * a clean turn-ended end; rejects with the (auth-normalized) transport
+		 * error otherwise.
+		 */
+		const runAttempt = async (attemptCtx: {
+			apiKey: string;
+			agentUrl: string;
+			mode: CursorTransportMode;
+			requestBytes: Uint8Array;
+			requestContextTools: McpToolDefinition[];
+			blobStore: Map<string, Uint8Array>;
+			conversationId: string;
+			originalRequestId: string;
+			requestId: string;
+			replay: CursorReplayState;
+		}): Promise<void> => {
+			const { apiKey, agentUrl, mode, requestBytes, requestContextTools, blobStore, conversationId, replay } =
+				attemptCtx;
+			let lease: H2Lease | null = null;
+			let h2Request: http2.ClientHttp2Stream | null = null;
+			let bridge: CursorHttp1Bridge | null = null;
+			let heartbeatTimer: NodeJS.Timeout | null = null;
+			let debugSession: RequestDebugSession | undefined;
+			let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
+			const completion = Promise.withResolvers<void>();
+			let settled = false;
+			let sawTurnEnded = false;
+			let endStreamError: Error | null = null;
+			const trackedTasks = new Set<Promise<unknown>>();
+			let taskGroupError: unknown;
+			let activeHandlerPromise: Promise<unknown> | null = null;
+			let channelSealed = false;
+			let isSealing = false;
 
-		let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
-		let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
-		let currentToolCall: ToolCallState | null = null;
-		const resolvedMcpToolCallIds = new Set<string>();
-		const usageState: UsageState = { sawTokenDelta: false };
-
-		const state: BlockState = {
-			get currentTextBlock() {
-				return currentTextBlock;
-			},
-			get currentThinkingBlock() {
-				return currentThinkingBlock;
-			},
-			get currentToolCall() {
-				return currentToolCall;
-			},
-			resolvedMcpToolCallIds,
-			get firstTokenTime() {
-				return firstTokenTime;
-			},
-			setTextBlock: b => {
-				currentTextBlock = b;
-			},
-			setThinkingBlock: b => {
-				currentThinkingBlock = b;
-			},
-			setToolCall: t => {
-				currentToolCall = t;
-			},
-			setFirstTokenTime: () => {
-				if (!firstTokenTime) firstTokenTime = performance.now();
-			},
-		};
-
-		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
+			const attemptController = new AbortController();
+			const optSignal = options?.signal;
+			if (optSignal) {
+				if (optSignal.aborted) {
+					attemptController.abort(optSignal.reason);
+				} else {
+					optSignal.addEventListener("abort", () => attemptController.abort(optSignal.reason), {
+						once: true,
+					});
+				}
 			}
 
-			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
-			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
-			conversationBlobStores.set(conversationId, blobStore);
-			const cachedState = conversationStateCache.get(conversationId);
-			const { requestBytes, conversationState } = buildGrpcRequest(model, context, options, {
-				conversationId,
-				blobStore,
-				conversationState: cachedState,
-			});
-			conversationStateCache.set(conversationId, conversationState);
-			const requestContextTools = buildMcpToolDefinitions(context.tools);
+			const settle = (error?: unknown): void => {
+				if (settled) return;
+				settled = true;
+				isSealing = true;
 
-			const baseUrl = model.baseUrl || CURSOR_API_URL;
-			const requestPath = "/agent.v1.AgentService/Run";
-			// Stable across every replay attempt of this logical turn.
-			const originalRequestId = crypto.randomUUID();
+				void (async () => {
+					channelSealed = true;
+					attemptController.abort(error);
 
-			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				replayState.sawCheckpoint = true;
-				conversationStateCache.set(conversationId, checkpoint);
-			};
-
-			stream.push({ type: "start", partial: output });
-
-			// One Run attempt: open the HTTP/2 stream, send the (replay-safe) request,
-			// pump server messages, and settle on clean end / error. Owns its own
-			// per-attempt transport so a replay-safe retry starts from a clean slate.
-			const runAttempt = async (): Promise<void> => {
-				let h2Request: http2.ClientHttp2Stream | null = null;
-				let heartbeatTimer: NodeJS.Timeout | null = null;
-				let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
-				let pendingBuffer = Buffer.alloc(0);
-				const h2Completion = Promise.withResolvers<void>();
-				let h2Settled = false;
-				let sawTurnEnded = false;
-				let endStreamError: Error | null = null;
-				const settleH2 = (error?: unknown): void => {
-					if (h2Settled) return;
-					h2Settled = true;
-					if (error !== undefined) {
-						h2Completion.reject(error);
-						return;
+					if (heartbeatTimer) {
+						clearInterval(heartbeatTimer);
+						heartbeatTimer = null;
 					}
-					if (endStreamError) {
-						h2Completion.reject(endStreamError);
-						return;
+
+					if (bridge) {
+						await bridge.close(error ? "fatal" : "success").catch(() => {});
 					}
-					if (!sawTurnEnded) {
-						h2Completion.reject(
+					if (h2Request && !h2Request.closed) {
+						h2Request.close();
+					}
+
+					const callerTask = activeHandlerPromise;
+					const tasksToAwait = Array.from(trackedTasks).filter(t => t !== callerTask);
+					await Promise.allSettled(tasksToAwait);
+
+					if (lease) {
+						lease.release();
+						lease = null;
+					}
+
+					const primaryError = error ?? endStreamError ?? taskGroupError;
+					if (primaryError !== undefined) {
+						completion.reject(primaryError);
+					} else if (!sawTurnEnded) {
+						completion.reject(
 							new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
 								kind: "incomplete-stream",
 							}),
 						);
-						return;
+					} else {
+						completion.resolve();
 					}
-					h2Completion.resolve();
-				};
-				const closeDebugLog = async (): Promise<void> => {
-					const log = await debugResponseLogPromise;
-					await log?.close();
-				};
+				})();
+			};
 
-				try {
-					const requestHeaders = buildCursorHeaders({
+			let pendingBuffer = Buffer.alloc(0);
+			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
+			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
+			let currentToolCall: ToolCallState | null = null;
+			const resolvedMcpToolCallIds = new Set<string>();
+			const usageState: UsageState = { sawTokenDelta: false };
+
+			const state: BlockState = {
+				get currentTextBlock() {
+					return currentTextBlock;
+				},
+				get currentThinkingBlock() {
+					return currentThinkingBlock;
+				},
+				get currentToolCall() {
+					return currentToolCall;
+				},
+				resolvedMcpToolCallIds,
+				get firstTokenTime() {
+					return firstTokenTime;
+				},
+				setTextBlock: b => {
+					currentTextBlock = b;
+				},
+				setThinkingBlock: b => {
+					currentThinkingBlock = b;
+				},
+				setToolCall: t => {
+					currentToolCall = t;
+				},
+				setFirstTokenTime: () => {
+					if (!firstTokenTime) firstTokenTime = performance.now();
+				},
+			};
+
+			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
+				replay.sawCheckpoint = true;
+				conversationStateCache.set(conversationId, checkpoint);
+			};
+
+			const closeDebugLog = async (): Promise<void> => {
+				const debugLog = await debugResponseLogPromise;
+				await debugLog?.close();
+			};
+
+			// Transport-agnostic outbound channel. For H2 it wraps the raw stream with
+			// Connect framing; for H1 it forwards raw bytes to the bridge.
+			let channel: CursorChannel;
+
+			// Shared message-processing callback for decoded server messages.
+			const processServerMessage = (serverMessage: AgentServerMessage): void => {
+				if (isSealing) return;
+				replay.sawServerMessage = true;
+				const msgCase = serverMessage.message.case;
+				if (msgCase === "execServerMessage" || msgCase === "kvServerMessage") {
+					replay.sentSideEffect = true;
+				}
+				const isTurnEnded =
+					serverMessage.message.case === "interactionUpdate" &&
+					serverMessage.message.value.message?.case === "turnEnded";
+				if (isTurnEnded) {
+					sawTurnEnded = true;
+				}
+
+				const { promise: taskPromise, resolve: resolveTask } = Promise.withResolvers<void>();
+				void (async () => {
+					try {
+						activeHandlerPromise = taskPromise;
+						await handleServerMessage(
+							serverMessage,
+							output,
+							stream,
+							state,
+							blobStore,
+							channel,
+							options?.execHandlers,
+							options?.onToolResult,
+							usageState,
+							requestContextTools,
+							onConversationCheckpoint,
+							attemptController.signal,
+						);
+					} catch (error) {
+						log("error", "handleServerMessage", { error: String(error) });
+						if (taskGroupError === undefined) {
+							taskGroupError = error;
+						}
+					} finally {
+						if (activeHandlerPromise === taskPromise) {
+							activeHandlerPromise = null;
+						}
+						resolveTask();
+					}
+				})();
+
+				trackedTasks.add(taskPromise);
+				taskPromise.finally(() => {
+					trackedTasks.delete(taskPromise);
+				});
+			};
+
+			// Shared heartbeat sender.
+			const sendHeartbeat = (): void => {
+				const heartbeatMessage = create(AgentClientMessageSchema, {
+					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
+				});
+				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
+				channel.sendClientBytes(heartbeatBytes);
+			};
+
+			try {
+				if (mode === "http1") {
+					// ---- HTTP/1 bridge branch ----
+					bridge = await createCursorHttp1Bridge({
+						baseUrl: agentUrl,
 						apiKey,
-						requestPath,
-						originalRequestId,
-						requestId: crypto.randomUUID(),
+						provider: model.provider,
 						clientVersion: options?.clientVersion,
+						originalRequestId: attemptCtx.originalRequestId,
+						requestId: attemptCtx.requestId,
+						requestBytes,
+						signal: options?.signal,
 					});
-					const debugSession = isRequestDebugEnabled()
+
+					// The bridge takes raw AgentClientMessage bytes (no Connect framing).
+					channel = {
+						sendClientBytes(bytes: Uint8Array): void {
+							if (channelSealed) return;
+							void bridge?.send(bytes).catch(() => {
+								// Send failures during close are teardown, not fatal.
+							});
+						},
+					};
+
+					heartbeatTimer = setInterval(sendHeartbeat, 5000);
+					heartbeatTimer.unref?.();
+
+					// Consume server messages from the bridge's async iterable.
+					(async () => {
+						try {
+							for await (const serverMessage of bridge.messages) {
+								processServerMessage(serverMessage);
+							}
+							void closeDebugLog()
+								.then(() => settle())
+								.catch(error => settle(error));
+						} catch (error) {
+							const mapped = mapH2TransportError(error, agentUrl);
+							void closeDebugLog().finally(() => settle(mapped));
+						}
+					})();
+
+					// Abort handling.
+					if (options?.signal) {
+						if (options.signal.aborted) {
+							void bridge.close("abort").finally(() => settle(new AIError.AbortError()));
+						} else {
+							options.signal.addEventListener(
+								"abort",
+								() => {
+									void bridge?.close("abort").finally(() => settle(new AIError.AbortError()));
+								},
+								{ once: true },
+							);
+						}
+					}
+
+					await completion.promise;
+				} else {
+					// ---- HTTP/2 pooled branch ----
+					const requestPath = "/agent.v1.AgentService/Run";
+					const requestHeaders = {
+						":method": "POST",
+						":path": requestPath,
+						"content-type": "application/connect+proto",
+						"connect-protocol-version": "1",
+						...buildCursorHeaders({
+							apiKey,
+							clientVersion: options?.clientVersion,
+							originalRequestId: attemptCtx.originalRequestId,
+							requestId: attemptCtx.requestId,
+						}),
+					};
+
+					debugSession = isRequestDebugEnabled()
 						? await createRequestDebugSession({
 								protocol: "http2",
 								method: "POST",
-								url: new URL(requestPath, baseUrl).toString(),
+								url: new URL(requestPath, agentUrl).toString(),
 								headers: requestHeaders,
 								bodyBase64: Buffer.from(requestBytes).toString("base64"),
-							})
+							}).catch(() => undefined)
 						: undefined;
 
-					let acquired: http2.ClientHttp2Stream;
-					try {
-						acquired = await acquireCursorStream({
-							baseUrl,
-							provider: model.provider,
-							requestPath,
-							headers: requestHeaders,
-							signal: options?.signal,
-						});
-					} catch (error) {
-						throw mapH2TransportError(error, baseUrl);
-					}
-					h2Request = acquired;
+					// Acquire a pooled H2 session lease.
+					lease = await acquireH2Session(agentUrl, model.provider, options?.signal);
+					const manager = lease.manager;
+
+					// Open the request through the pooled session manager.
+					h2Request = await manager.request("POST", requestPath, requestHeaders, {});
 					const activeRequest = h2Request;
 
-					const sendHeartbeat = () => {
-						if (activeRequest.closed) {
-							return;
-						}
-						const heartbeatMessage = create(AgentClientMessageSchema, {
-							message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
-						});
-						const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-						activeRequest.write(frameConnectMessage(heartbeatBytes));
+					// The channel wraps the raw H2 stream with Connect framing.
+					channel = {
+						sendClientBytes(bytes: Uint8Array): void {
+							if (channelSealed) return;
+							if (!activeRequest.closed) {
+								activeRequest.write(frameConnectMessage(bytes));
+							}
+						},
 					};
 
 					activeRequest.on("response", headers => {
+						const httpStatus = Number(headers[":status"]);
+						if ((httpStatus === 401 || httpStatus === 403) && !endStreamError) {
+							endStreamError = new AIError.CursorCredentialError(
+								`Cursor HTTP ${httpStatus}`,
+								httpStatus as 401 | 403,
+							);
+							activeRequest.close();
+						}
 						debugResponseLogPromise = debugSession?.openResponseLog(
 							`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
 							headers,
@@ -623,9 +848,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					});
 
 					activeRequest.on("data", (chunk: Buffer) => {
+						manager.notifyResponseByteRead(activeRequest);
 						if (debugResponseLogPromise) {
-							void debugResponseLogPromise.then(log => {
-								log?.write(chunk);
+							void debugResponseLogPromise.then(debugLog => {
+								debugLog?.write(chunk);
 							});
 						}
 						pendingBuffer = Buffer.concat([pendingBuffer, chunk]);
@@ -649,38 +875,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 							try {
 								const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
-								// A decoded server message means the turn has started; replaying the
-								// request would now duplicate server work.
-								replayState.sawServerMessage = true;
-								if (
-									serverMessage.message.case === "execServerMessage" ||
-									serverMessage.message.case === "kvServerMessage"
-								) {
-									replayState.sentSideEffect = true;
-								}
-								const isTurnEnded =
-									serverMessage.message.case === "interactionUpdate" &&
-									serverMessage.message.value.message?.case === "turnEnded";
-								void handleServerMessage(
-									serverMessage,
-									output,
-									stream,
-									state,
-									blobStore,
-									activeRequest,
-									options?.execHandlers,
-									options?.onToolResult,
-									usageState,
-									requestContextTools,
-									onConversationCheckpoint,
-								).catch(error => {
-									log("error", "handleServerMessage", { error: String(error) });
-								});
-
-								// Application completion is not protocol success; wait for a clean HTTP/2 end.
-								if (isTurnEnded) {
-									sawTurnEnded = true;
-								}
+								processServerMessage(serverMessage);
 							} catch (e) {
 								log("error", "parseServerMessage", { error: String(e) });
 							}
@@ -691,101 +886,187 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						const status = trailers["grpc-status"];
 						const msg = trailers["grpc-message"];
 						if (status && status !== "0" && !endStreamError) {
-							endStreamError = new AIError.ProviderResponseError(
-								`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
-								{ kind: "envelope" },
-							);
+							const numericStatus = Number(status);
+							const authStatus = grpcStatusToAuthStatus(numericStatus);
+							const decodedMessage = decodeURIComponent(String(msg || ""));
+							endStreamError = authStatus
+								? new AIError.CursorCredentialError(`gRPC error ${status}: ${decodedMessage}`, authStatus)
+								: new AIError.ProviderResponseError(`gRPC error ${status}: ${decodedMessage}`, {
+										kind: "envelope",
+									});
 						}
 					});
 
 					activeRequest.on("end", () => {
 						void closeDebugLog()
-							.then(() => settleH2())
-							.catch(error => settleH2(error));
+							.then(() => settle())
+							.catch(error => settle(error));
 					});
 
 					activeRequest.on("error", error => {
-						const mapped = mapH2TransportError(error, baseUrl);
-						void closeDebugLog().finally(() => settleH2(mapped));
+						const mapped = mapH2TransportError(error, agentUrl);
+						void closeDebugLog().finally(() => settle(mapped));
 					});
 
 					if (options?.signal) {
-						options.signal.addEventListener(
-							"abort",
-							() => {
-								activeRequest.close();
-								void closeDebugLog().finally(() => {
-									settleH2(new AIError.AbortError());
-								});
-							},
-							{ once: true },
-						);
+						if (options.signal.aborted) {
+							activeRequest.close();
+							void closeDebugLog().finally(() => settle(new AIError.AbortError()));
+						} else {
+							options.signal.addEventListener(
+								"abort",
+								() => {
+									activeRequest.close();
+									void closeDebugLog().finally(() => {
+										settle(new AIError.AbortError());
+									});
+								},
+								{ once: true },
+							);
+						}
 					}
 
+					// Send the initial request.
 					activeRequest.write(frameConnectMessage(requestBytes));
 					heartbeatTimer = setInterval(sendHeartbeat, 5000);
-					await h2Completion.promise;
-				} finally {
-					const log = await debugResponseLogPromise;
-					await log?.close();
-					if (heartbeatTimer) {
-						clearInterval(heartbeatTimer);
-						heartbeatTimer = null;
-					}
-					// Release only this turn's stream; the pooled session is shared.
-					h2Request?.close();
+					await completion.promise;
 				}
+
+				endCurrentTextBlock(output, stream, state);
+				endCurrentThinkingBlock(output, stream, state);
+				if (state.currentToolCall) {
+					const idx = output.content.indexOf(state.currentToolCall);
+					state.currentToolCall.arguments = parseStreamingJson(state.currentToolCall[kStreamingPartialJson]);
+					clearStreamingPartialJson(state.currentToolCall);
+					stream.push({
+						type: "toolcall_end",
+						contentIndex: idx,
+						toolCall: state.currentToolCall,
+						partial: output,
+					});
+				}
+
+				calculateCost(model, output.usage);
+
+				output.duration = performance.now() - startTime;
+				if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+				stream.push({
+					type: "done",
+					reason: output.stopReason as "stop" | "length" | "toolUse",
+					message: output,
+				});
+				stream.end();
+			} finally {
+				const debugLog = await debugResponseLogPromise;
+				await debugLog?.close();
+				if (heartbeatTimer) {
+					clearInterval(heartbeatTimer);
+					heartbeatTimer = null;
+				}
+				// Release H2 lease or close H1 bridge exactly once.
+				if (lease) {
+					lease.release();
+					lease = null;
+				}
+				if (bridge) {
+					await bridge.close("dispose").catch(() => {});
+					bridge = null;
+				}
+				h2Request?.close();
+			}
+		};
+
+		try {
+			const apiKey = options?.apiKey;
+			if (!apiKey) {
+				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
+			}
+
+			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
+			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
+			conversationBlobStores.set(conversationId, blobStore);
+			const cachedState = conversationStateCache.get(conversationId);
+			const { requestBytes, conversationState } = buildGrpcRequest(model, context, options, {
+				conversationId,
+				blobStore,
+				conversationState: cachedState,
+			});
+			conversationStateCache.set(conversationId, conversationState);
+			const requestContextTools = buildMcpToolDefinitions(context.tools);
+			const baseUrl = model.baseUrl || CURSOR_API_URL;
+			// One stable original-request-id per logical turn; each attempt mints a fresh request id.
+			const originalRequestId = crypto.randomUUID();
+			const replay: CursorReplayState = {
+				sawServerMessage: false,
+				sawCheckpoint: false,
+				sentSideEffect: false,
 			};
 
-			for (let attempt = 1; ; attempt++) {
+			// Public start event is created once per logical turn, before any attempt
+			// or config discovery. This ensures the start event is always first.
+			stream.push({ type: "start", partial: output });
+
+			// Resolve server config once per hashed identity to determine transport mode.
+			// Server force > local preference; transport errors never switch mode.
+			const { mode, agentUrlConfig } = await resolveCursorTransportMode({
+				baseUrl,
+				apiKey,
+				provider: model.provider,
+				useHttp1ForAgent: options?.useHttp1ForAgent ?? options?.cursorUseHttp1ForAgent ?? false,
+				clientVersion: options?.clientVersion,
+				originalRequestId,
+				signal: options?.signal,
+			}).catch((error: unknown) => {
+				// Auth failures from config discovery must propagate (and may trigger
+				// credential rotation). Ordinary discovery failures yield neutral policy.
+				if (error instanceof AIError.CursorCredentialError) throw error;
+				const message = error instanceof Error ? error.message : String(error);
+				if (/401|403|unauthenticated|permission_denied/i.test(message)) throw error;
+				return {
+					mode: (options?.cursorUseHttp1ForAgent ? "http1" : "http2") as CursorTransportMode,
+					agentUrlConfig: undefined,
+				};
+			});
+			const agentUrl = resolveAgentUrl(baseUrl, mode, agentUrlConfig);
+
+			for (let attempt = 0; attempt < CURSOR_MAX_ATTEMPTS; attempt++) {
+				if (attempt > 0) {
+					await waitCursorRetry(cursorRetryDelayMs(attempt - 1), options?.signal, options?.providerRetryWait);
+				}
 				try {
-					await runAttempt();
-					break;
+					await runAttempt({
+						apiKey,
+						agentUrl,
+						mode,
+						requestBytes,
+						requestContextTools,
+						blobStore,
+						conversationId,
+						originalRequestId,
+						requestId: crypto.randomUUID(),
+						replay,
+					});
+					return;
 				} catch (error) {
-					const replaySafe =
-						!replayState.sawServerMessage && !replayState.sawCheckpoint && !replayState.sentSideEffect;
-					if (
-						attempt >= CURSOR_MAX_ATTEMPTS ||
-						!replaySafe ||
-						options?.signal?.aborted ||
-						!isCursorRetryableTransportError(error)
-					) {
+					// Evict server config on credential failure before rotation.
+					if (error instanceof AIError.CursorCredentialError) {
+						evictServerConfig(baseUrl, apiKey);
+					}
+					const isLastAttempt = attempt === CURSOR_MAX_ATTEMPTS - 1;
+					const replaySafe = !replay.sawServerMessage && !replay.sawCheckpoint && !replay.sentSideEffect;
+					const aborted = options?.signal?.aborted === true || error instanceof AIError.AbortError;
+					if (isLastAttempt || aborted || !replaySafe || !isTransientCursorError(error)) {
 						throw error;
 					}
-					log("retry", "transient", { attempt, error: String(error) });
-					await cursorRetryDelay(attempt, options?.signal);
-					if (options?.signal?.aborted) {
-						throw new AIError.AbortError();
-					}
+					log("retry", "transient", { attempt: attempt + 1, error: String(error) });
 				}
 			}
-
-			endCurrentTextBlock(output, stream, state);
-			endCurrentThinkingBlock(output, stream, state);
-			if (state.currentToolCall) {
-				const idx = output.content.indexOf(state.currentToolCall);
-				state.currentToolCall.arguments = parseStreamingJson(state.currentToolCall[kStreamingPartialJson]);
-				clearStreamingPartialJson(state.currentToolCall);
-				stream.push({
-					type: "toolcall_end",
-					contentIndex: idx,
-					toolCall: state.currentToolCall,
-					partial: output,
-				});
-			}
-
-			calculateCost(model, output.usage);
-
-			output.duration = performance.now() - startTime;
-			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({
-				type: "done",
-				reason: output.stopReason as "stop" | "length" | "toolUse",
-				message: output,
-			});
-			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				provider: model.provider,
+				signal: options?.signal,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
@@ -832,12 +1113,13 @@ export async function handleServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	blobStore: Map<string, Uint8Array>,
-	h2Request: http2.ClientHttp2Stream,
+	channel: CursorChannel,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 	usageState: UsageState,
 	requestContextTools: McpToolDefinition[],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -846,7 +1128,7 @@ export async function handleServerMessage(
 	if (msgCase === "interactionUpdate") {
 		processInteractionUpdate(msg.message.value, output, stream, state, usageState);
 	} else if (msgCase === "kvServerMessage") {
-		handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request);
+		handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, channel);
 	} else if (msgCase === "execServerMessage") {
 		// The server is waiting on OUR local tool result during this window — no
 		// AssistantMessageEvent flows until the handler finishes. Mark the wait
@@ -855,13 +1137,14 @@ export async function handleServerMessage(
 		await stream.trackLocalWork(
 			handleExecServerMessage(
 				msg.message.value as ExecServerMessage,
-				h2Request,
+				channel,
 				execHandlers,
 				onToolResult,
 				requestContextTools,
 				output,
 				stream,
 				state,
+				signal,
 			),
 		);
 	} else if (msgCase === "conversationCheckpointUpdate") {
@@ -872,7 +1155,7 @@ export async function handleServerMessage(
 function handleKvServerMessage(
 	kvMsg: KvServerMessage,
 	blobStore: Map<string, Uint8Array>,
-	h2Request: http2.ClientHttp2Stream,
+	channel: CursorChannel,
 ): void {
 	const kvCase = kvMsg.message.case;
 
@@ -895,7 +1178,7 @@ function handleKvServerMessage(
 		});
 
 		const responseBytes = toBinary(AgentClientMessageSchema, kvClientMessage);
-		h2Request.write(frameConnectMessage(responseBytes));
+		channel.sendClientBytes(responseBytes);
 
 		log("kvClient", "getBlobResult", { blobId: blobIdKey.slice(0, 40) });
 	} else if (kvCase === "setBlobArgs") {
@@ -916,18 +1199,14 @@ function handleKvServerMessage(
 		});
 
 		const responseBytes = toBinary(AgentClientMessageSchema, kvClientMessage);
-		h2Request.write(frameConnectMessage(responseBytes));
+		channel.sendClientBytes(responseBytes);
 
 		log("kvClient", "setBlobResult", { blobId: blobIdKey.slice(0, 40) });
 	}
 }
 
-function sendShellStreamEvent(
-	h2Request: http2.ClientHttp2Stream,
-	execMsg: ExecServerMessage,
-	event: ShellStream["event"],
-): void {
-	sendExecClientMessage(h2Request, execMsg, "shellStream", create(ShellStreamSchema, { event }));
+function sendShellStreamEvent(channel: CursorChannel, execMsg: ExecServerMessage, event: ShellStream["event"]): void {
+	sendExecClientMessage(channel, execMsg, "shellStream", create(ShellStreamSchema, { event }));
 }
 
 function sanitizeShellExecResult(execResult: ShellResult): ShellResult {
@@ -958,9 +1237,10 @@ function sanitizeShellExecResult(execResult: ShellResult): ShellResult {
 async function handleShellStreamArgs(
 	args: ShellArgs,
 	execMsg: ExecServerMessage,
-	h2Request: http2.ClientHttp2Stream,
+	channel: CursorChannel,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const normalizedWorkingDirectory = args.workingDirectory || process.cwd();
 	const normalizedArgs: ShellArgs = { ...args, workingDirectory: normalizedWorkingDirectory };
@@ -974,7 +1254,7 @@ async function handleShellStreamArgs(
 		hasShellStream: !!execHandlers?.shellStream,
 	});
 
-	sendShellStreamEvent(h2Request, execMsg, { case: "start", value: create(ShellStreamStartSchema, {}) });
+	sendShellStreamEvent(channel, execMsg, { case: "start", value: create(ShellStreamStartSchema, {}) });
 
 	// Buffer for incomplete ANSI sequences across chunks
 	let stdoutBuffer = "";
@@ -992,7 +1272,7 @@ async function handleShellStreamArgs(
 			const toSend = stdoutBuffer.slice(0, safeEnd);
 			const remaining = stdoutBuffer.slice(safeEnd);
 			if (toSend) {
-				sendShellStreamEvent(h2Request, execMsg, {
+				sendShellStreamEvent(channel, execMsg, {
 					case: "stdout",
 					value: create(ShellStreamStdoutSchema, { data: sanitizeText(toSend) }),
 				});
@@ -1011,7 +1291,7 @@ async function handleShellStreamArgs(
 			const toSend = stderrBuffer.slice(0, safeEnd);
 			const remaining = stderrBuffer.slice(safeEnd);
 			if (toSend) {
-				sendShellStreamEvent(h2Request, execMsg, {
+				sendShellStreamEvent(channel, execMsg, {
 					case: "stderr",
 					value: create(ShellStreamStderrSchema, { data: sanitizeText(toSend) }),
 				});
@@ -1072,7 +1352,9 @@ async function handleShellStreamArgs(
 	// Falls back to the batch shell handler otherwise.
 	const streamHandler = execHandlers?.shellStream?.bind(execHandlers);
 	const batchHandler = execHandlers?.shell?.bind(execHandlers);
-	const handler = streamHandler ? (shellArgs: ShellArgs) => streamHandler(shellArgs, streamCallbacks) : batchHandler;
+	const handler = streamHandler
+		? (shellArgs: ShellArgs, sig?: AbortSignal) => streamHandler(shellArgs, streamCallbacks, sig)
+		: batchHandler;
 
 	const { execResult } = await resolveExecHandler(
 		args as any,
@@ -1083,6 +1365,7 @@ async function handleShellStreamArgs(
 			buildShellRejectedResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, reason),
 		error =>
 			buildShellFailureResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, error),
+		signal,
 	);
 
 	// When using the batch handler (no shellStream), send buffered stdout/stderr
@@ -1096,17 +1379,17 @@ async function handleShellStreamArgs(
 	flushStdout();
 	flushStderr();
 
-	sendShellStreamExitFromResult(h2Request, execMsg, sanitizedExecResult, sendBufferedOutput);
+	sendShellStreamExitFromResult(channel, execMsg, sanitizedExecResult, sendBufferedOutput);
 	// Cursor can keep the turn pending when it receives only stream deltas.
 	// Send the final structured shellResult as completion acknowledgement.
-	sendExecClientMessage(h2Request, execMsg, "shellResult", sanitizedExecResult);
-	sendExecClientStreamClose(h2Request, execMsg);
+	sendExecClientMessage(channel, execMsg, "shellResult", sanitizedExecResult);
+	sendExecClientStreamClose(channel, execMsg);
 
 	log("shellStream", "done", { elapsed: performance.now() - startTs });
 }
 
 function sendShellStreamExitFromResult(
-	h2Request: http2.ClientHttp2Stream,
+	channel: CursorChannel,
 	execMsg: ExecServerMessage,
 	execResult: ShellResult,
 	sendBufferedOutput: boolean,
@@ -1117,19 +1400,19 @@ function sendShellStreamExitFromResult(
 			const value = result.value;
 			if (sendBufferedOutput) {
 				if (value.stdout) {
-					sendShellStreamEvent(h2Request, execMsg, {
+					sendShellStreamEvent(channel, execMsg, {
 						case: "stdout",
 						value: create(ShellStreamStdoutSchema, { data: sanitizeText(value.stdout) }),
 					});
 				}
 				if (value.stderr) {
-					sendShellStreamEvent(h2Request, execMsg, {
+					sendShellStreamEvent(channel, execMsg, {
 						case: "stderr",
 						value: create(ShellStreamStderrSchema, { data: sanitizeText(value.stderr) }),
 					});
 				}
 			}
-			sendShellStreamEvent(h2Request, execMsg, {
+			sendShellStreamEvent(channel, execMsg, {
 				case: "exit",
 				value: create(ShellStreamExitSchema, {
 					code: value.exitCode,
@@ -1143,19 +1426,19 @@ function sendShellStreamExitFromResult(
 			const value = result.value;
 			if (sendBufferedOutput) {
 				if (value.stdout) {
-					sendShellStreamEvent(h2Request, execMsg, {
+					sendShellStreamEvent(channel, execMsg, {
 						case: "stdout",
 						value: create(ShellStreamStdoutSchema, { data: sanitizeText(value.stdout) }),
 					});
 				}
 				if (value.stderr) {
-					sendShellStreamEvent(h2Request, execMsg, {
+					sendShellStreamEvent(channel, execMsg, {
 						case: "stderr",
 						value: create(ShellStreamStderrSchema, { data: sanitizeText(value.stderr) }),
 					});
 				}
 			}
-			sendShellStreamEvent(h2Request, execMsg, {
+			sendShellStreamEvent(channel, execMsg, {
 				case: "exit",
 				value: create(ShellStreamExitSchema, {
 					code: value.exitCode,
@@ -1167,8 +1450,8 @@ function sendShellStreamExitFromResult(
 			return;
 		}
 		case "rejected": {
-			sendShellStreamEvent(h2Request, execMsg, { case: "rejected", value: result.value });
-			sendShellStreamEvent(h2Request, execMsg, {
+			sendShellStreamEvent(channel, execMsg, { case: "rejected", value: result.value });
+			sendShellStreamEvent(channel, execMsg, {
 				case: "exit",
 				value: create(ShellStreamExitSchema, {
 					code: 1,
@@ -1180,13 +1463,13 @@ function sendShellStreamExitFromResult(
 		}
 		case "timeout": {
 			const value = result.value;
-			sendShellStreamEvent(h2Request, execMsg, {
+			sendShellStreamEvent(channel, execMsg, {
 				case: "stderr",
 				value: create(ShellStreamStderrSchema, {
 					data: `Command timed out after ${value.timeoutMs}ms`,
 				}),
 			});
-			sendShellStreamEvent(h2Request, execMsg, {
+			sendShellStreamEvent(channel, execMsg, {
 				case: "exit",
 				value: create(ShellStreamExitSchema, {
 					code: 1,
@@ -1197,8 +1480,8 @@ function sendShellStreamExitFromResult(
 			return;
 		}
 		case "permissionDenied": {
-			sendShellStreamEvent(h2Request, execMsg, { case: "permissionDenied", value: result.value });
-			sendShellStreamEvent(h2Request, execMsg, {
+			sendShellStreamEvent(channel, execMsg, { case: "permissionDenied", value: result.value });
+			sendShellStreamEvent(channel, execMsg, {
 				case: "exit",
 				value: create(ShellStreamExitSchema, {
 					code: 1,
@@ -1215,13 +1498,14 @@ function sendShellStreamExitFromResult(
 
 async function handleExecServerMessage(
 	execMsg: ExecServerMessage,
-	h2Request: http2.ClientHttp2Stream,
+	channel: CursorChannel,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 	requestContextTools: McpToolDefinition[],
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
@@ -1244,7 +1528,7 @@ async function handleExecServerMessage(
 			},
 		});
 
-		sendExecClientMessage(h2Request, execMsg, "requestContextResult", requestContextResult);
+		sendExecClientMessage(channel, execMsg, "requestContextResult", requestContextResult);
 		log("execClient", "requestContextResult");
 		return;
 	}
@@ -1265,8 +1549,9 @@ async function handleExecServerMessage(
 				toolResult => buildReadResultFromToolResult(args.path, toolResult),
 				reason => buildReadRejectedResult(args.path, reason),
 				error => buildReadErrorResult(args.path, error),
+				signal,
 			);
-			sendExecClientMessage(h2Request, execMsg, "readResult", execResult);
+			sendExecClientMessage(channel, execMsg, "readResult", execResult);
 			return;
 		}
 		case "lsArgs": {
@@ -1283,8 +1568,9 @@ async function handleExecServerMessage(
 				toolResult => buildLsResultFromToolResult(args.path, toolResult),
 				reason => buildLsRejectedResult(args.path, reason),
 				error => buildLsErrorResult(args.path, error),
+				signal,
 			);
-			sendExecClientMessage(h2Request, execMsg, "lsResult", execResult);
+			sendExecClientMessage(channel, execMsg, "lsResult", execResult);
 			return;
 		}
 		case "grepArgs": {
@@ -1298,7 +1584,7 @@ async function handleExecServerMessage(
 			// synthesized block has already been persisted with a placeholder pattern.
 			const emptyPatternError = emptyGrepPatternRejection(args.pattern, args.glob);
 			if (emptyPatternError !== null) {
-				sendExecClientMessage(h2Request, execMsg, "grepResult", buildGrepErrorResult(emptyPatternError));
+				sendExecClientMessage(channel, execMsg, "grepResult", buildGrepErrorResult(emptyPatternError));
 				return;
 			}
 			// Mirror the coding-agent bridge's arg mapping so live UI (from
@@ -1317,8 +1603,9 @@ async function handleExecServerMessage(
 				toolResult => buildGrepResultFromToolResult(args, toolResult),
 				reason => buildGrepErrorResult(reason),
 				error => buildGrepErrorResult(error),
+				signal,
 			);
-			sendExecClientMessage(h2Request, execMsg, "grepResult", execResult);
+			sendExecClientMessage(channel, execMsg, "grepResult", execResult);
 			return;
 		}
 		case "writeArgs": {
@@ -1346,8 +1633,9 @@ async function handleExecServerMessage(
 					),
 				reason => buildWriteRejectedResult(args.path, reason),
 				error => buildWriteErrorResult(args.path, error),
+				signal,
 			);
-			sendExecClientMessage(h2Request, execMsg, "writeResult", execResult);
+			sendExecClientMessage(channel, execMsg, "writeResult", execResult);
 			return;
 		}
 		case "deleteArgs": {
@@ -1361,8 +1649,9 @@ async function handleExecServerMessage(
 				toolResult => buildDeleteResultFromToolResult(args.path, toolResult),
 				reason => buildDeleteRejectedResult(args.path, reason),
 				error => buildDeleteErrorResult(args.path, error),
+				signal,
 			);
-			sendExecClientMessage(h2Request, execMsg, "deleteResult", execResult);
+			sendExecClientMessage(channel, execMsg, "deleteResult", execResult);
 			return;
 		}
 		case "shellArgs": {
@@ -1384,9 +1673,10 @@ async function handleExecServerMessage(
 				toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
 				reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
 				error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
+				signal,
 			);
 			const sanitizedExecResult = sanitizeShellExecResult(execResult);
-			sendExecClientMessage(h2Request, execMsg, "shellResult", sanitizedExecResult);
+			sendExecClientMessage(channel, execMsg, "shellResult", sanitizedExecResult);
 			return;
 		}
 		case "shellStreamArgs": {
@@ -1398,7 +1688,7 @@ async function handleExecServerMessage(
 				cwd: args.workingDirectory || undefined,
 				timeout: shellStreamTimeout,
 			});
-			await handleShellStreamArgs(args, execMsg, h2Request, execHandlers, onToolResult);
+			await handleShellStreamArgs(args, execMsg, channel, execHandlers, onToolResult, signal);
 			return;
 		}
 		case "backgroundShellSpawnArgs": {
@@ -1414,7 +1704,7 @@ async function handleExecServerMessage(
 					}),
 				},
 			});
-			sendExecClientMessage(h2Request, execMsg, "backgroundShellSpawnResult", execResult);
+			sendExecClientMessage(channel, execMsg, "backgroundShellSpawnResult", execResult);
 			return;
 		}
 		case "writeShellStdinArgs": {
@@ -1426,7 +1716,7 @@ async function handleExecServerMessage(
 					}),
 				},
 			});
-			sendExecClientMessage(h2Request, execMsg, "writeShellStdinResult", execResult);
+			sendExecClientMessage(channel, execMsg, "writeShellStdinResult", execResult);
 			return;
 		}
 		case "fetchArgs": {
@@ -1440,7 +1730,7 @@ async function handleExecServerMessage(
 					}),
 				},
 			});
-			sendExecClientMessage(h2Request, execMsg, "fetchResult", execResult);
+			sendExecClientMessage(channel, execMsg, "fetchResult", execResult);
 			return;
 		}
 		case "diagnosticsArgs": {
@@ -1459,8 +1749,9 @@ async function handleExecServerMessage(
 				toolResult => buildDiagnosticsResultFromToolResult(args.path, toolResult),
 				reason => buildDiagnosticsRejectedResult(args.path, reason),
 				error => buildDiagnosticsErrorResult(args.path, error),
+				signal,
 			);
-			sendExecClientMessage(h2Request, execMsg, "diagnosticsResult", execResult);
+			sendExecClientMessage(channel, execMsg, "diagnosticsResult", execResult);
 			return;
 		}
 		case "mcpArgs": {
@@ -1480,28 +1771,29 @@ async function handleExecServerMessage(
 				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
 				_reason => buildMcpToolNotFoundResult(mcpCall),
 				error => buildMcpErrorResult(error),
+				signal,
 			);
-			sendExecClientMessage(h2Request, execMsg, "mcpResult", execResult);
+			sendExecClientMessage(channel, execMsg, "mcpResult", execResult);
 			return;
 		}
 		case "listMcpResourcesExecArgs": {
 			const execResult = create(ListMcpResourcesExecResultSchema, {});
-			sendExecClientMessage(h2Request, execMsg, "listMcpResourcesExecResult", execResult);
+			sendExecClientMessage(channel, execMsg, "listMcpResourcesExecResult", execResult);
 			return;
 		}
 		case "readMcpResourceExecArgs": {
 			const execResult = create(ReadMcpResourceExecResultSchema, {});
-			sendExecClientMessage(h2Request, execMsg, "readMcpResourceExecResult", execResult);
+			sendExecClientMessage(channel, execMsg, "readMcpResourceExecResult", execResult);
 			return;
 		}
 		case "recordScreenArgs": {
 			const execResult = create(RecordScreenResultSchema, {});
-			sendExecClientMessage(h2Request, execMsg, "recordScreenResult", execResult);
+			sendExecClientMessage(channel, execMsg, "recordScreenResult", execResult);
 			return;
 		}
 		case "computerUseArgs": {
 			const execResult = create(ComputerUseResultSchema, {});
-			sendExecClientMessage(h2Request, execMsg, "computerUseResult", execResult);
+			sendExecClientMessage(channel, execMsg, "computerUseResult", execResult);
 			return;
 		}
 		default: {
@@ -1515,13 +1807,31 @@ async function handleExecServerMessage(
 			const clientMessage = create(AgentClientMessageSchema, {
 				message: { case: "execClientMessage", value: ack },
 			});
-			h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+			sendClientBytes(channel, toBinary(AgentClientMessageSchema, clientMessage));
 		}
 	}
 }
 
+interface MinimalClientChannel {
+	sendClientBytes?: (bytes: Uint8Array) => void;
+	write?: (bytes: Uint8Array) => boolean;
+	send?: (bytes: Uint8Array) => Promise<void>;
+}
+
+function sendClientBytes(channel: CursorChannel | unknown, responseBytes: Uint8Array): void {
+	if (!channel || typeof channel !== "object") return;
+	const c = channel as MinimalClientChannel;
+	if (typeof c.sendClientBytes === "function") {
+		c.sendClientBytes(responseBytes);
+	} else if (typeof c.write === "function") {
+		c.write(frameConnectMessage(responseBytes));
+	} else if (typeof c.send === "function") {
+		void c.send(responseBytes);
+	}
+}
+
 function sendExecClientMessage<T>(
-	h2Request: http2.ClientHttp2Stream,
+	channel: CursorChannel,
 	execMsg: ExecServerMessage,
 	messageCase: ExecClientMessage["message"]["case"],
 	value: T,
@@ -1540,12 +1850,12 @@ function sendExecClientMessage<T>(
 	});
 
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
+	sendClientBytes(channel, responseBytes);
 
 	log("execClientMessage", messageCase, value);
 }
 
-function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: ExecServerMessage): void {
+function sendExecClientStreamClose(channel: CursorChannel, execMsg: ExecServerMessage): void {
 	const closeMessage = create(ExecClientControlMessageSchema, {
 		message: {
 			case: "streamClose",
@@ -1558,25 +1868,26 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
 		message: { case: "execClientControlMessage", value: closeMessage },
 	});
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
+	sendClientBytes(channel, responseBytes);
 	log("execClientControl", "streamClose", { id: execMsg.id, execId: execMsg.execId });
 }
 
 /** Exported for tests: verifies handler is invoked with correct `this` when passed as bound. */
 export async function resolveExecHandler<TArgs, TResult>(
 	args: TArgs,
-	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<TResult>>) | undefined,
+	handler: ((args: TArgs, signal?: AbortSignal) => Promise<CursorExecHandlerResult<TResult>>) | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 	buildFromToolResult: (toolResult: ToolResultMessage) => TResult,
 	buildRejected: (reason: string) => TResult,
 	buildError: (error: string) => TResult,
+	signal?: AbortSignal,
 ): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> {
 	if (!handler) {
 		return { execResult: buildRejected("Tool not available") };
 	}
 
 	try {
-		const handlerResult = await handler(args);
+		const handlerResult = await handler(args, signal);
 		const { execResult, toolResult } = splitExecHandlerResult(handlerResult);
 		const finalToolResult = await applyToolResultHandler(toolResult, onToolResult);
 

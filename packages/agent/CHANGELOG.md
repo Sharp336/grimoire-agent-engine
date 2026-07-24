@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Propagated Cursor transport selection through provider stream options.
+
 ## [17.1.0] - 2026-07-24
 
 ### Added

@@ -425,3 +425,58 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		expect(await Bun.file(movedTarget).exists()).toBe(false);
 	});
 });
+describe("CursorExecHandlers.delete signal propagation", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-delete-test-"));
+		await Bun.write(path.join(cwd, "to-delete.txt"), "delete me");
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("passes AbortSignal to tool.execute when a delete tool is registered", async () => {
+		let receivedSignal: AbortSignal | undefined;
+		const mockDeleteTool: AgentTool = {
+			name: "delete",
+			label: "delete",
+			description: "delete file tool",
+			parameters: type({ path: "string" }),
+			execute: async (_toolCallId, _args, signal) => {
+				receivedSignal = signal;
+				return { content: [{ type: "text", text: "deleted" }], details: {} };
+			},
+		};
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map([["delete", mockDeleteTool]]),
+		});
+
+		const controller = new AbortController();
+		const result = await handlers.delete(
+			create(DeleteArgsSchema, { toolCallId: "call-del", path: path.join(cwd, "to-delete.txt") }),
+			controller.signal,
+		);
+		expect(receivedSignal).toBe(controller.signal);
+		expect(result.isError).toBeFalsy();
+	});
+
+	it("aborts native delete when signal is already aborted", async () => {
+		const handlers = new CursorExecHandlers({ cwd, tools: new Map() });
+		const controller = new AbortController();
+		controller.abort();
+
+		const result = await handlers.delete(
+			create(DeleteArgsSchema, { toolCallId: "call-del-2", path: path.join(cwd, "to-delete.txt") }),
+			controller.signal,
+		);
+		expect(result.isError).toBe(true);
+		const exists = await fs
+			.stat(path.join(cwd, "to-delete.txt"))
+			.then(() => true)
+			.catch(() => false);
+		expect(exists).toBe(true);
+	});
+});

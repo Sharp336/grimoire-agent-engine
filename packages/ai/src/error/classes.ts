@@ -143,6 +143,16 @@ export class AuthGatewayError extends ProviderHttpError {
 	}
 }
 
+/**
+ * Cursor authentication failure, normalized by the Cursor provider from either
+ * a raw HTTP 401/403 or a Connect `Unauthenticated`/`PermissionDenied` status.
+ * Carries the HTTP-equivalent status so the credential resolver can rotate keys
+ * (cursor-agent only) before advisor model fallback.
+ */
+export class CursorCredentialError extends ProviderHttpError {
+	override readonly name = "CursorCredentialError";
+}
+
 export class CodexWebSocketTransportError extends Error {
 	constructor(detail: string) {
 		super(`Codex websocket transport failure: ${detail}`);
