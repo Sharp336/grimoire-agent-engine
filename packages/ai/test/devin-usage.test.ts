@@ -905,7 +905,7 @@ describe("devinUsageProvider", () => {
 });
 
 describe("fetchDevinConsumption", () => {
-	it("passes date query parameters to the selected org endpoint", async () => {
+	it("passes date query parameters without duplicating a versioned API root", async () => {
 		const urls: string[] = [];
 		const fetchImpl: FetchImpl = async input => {
 			const url = String(input instanceof Request ? input.url : input);
@@ -918,7 +918,7 @@ describe("fetchDevinConsumption", () => {
 
 		const summary = await fetchDevinConsumption({
 			apiKey: "cog_token",
-			baseUrl: "https://api.example.test/",
+			baseUrl: "https://api.example.test/v3/",
 			orgId: "org-xyz",
 			timeAfter: new Date("2026-01-01T00:00:00.000Z"),
 			timeBefore: 1767312000,

@@ -91,7 +91,8 @@ function normalizeBaseUrl(baseUrl?: string): string {
 	} catch {
 		return DEFAULT_DEVIN_API_BASE_URL;
 	}
-	return trimmed.replace(/\/+$/, "");
+	const normalized = trimmed.replace(/\/+$/, "");
+	return normalized.replace(/\/v3$/, "");
 }
 
 function normalizeDevinApiKey(apiKey: string | undefined): string | undefined {
