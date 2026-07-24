@@ -151,7 +151,7 @@ import {
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
-import type { StructuredSubagentSchemaMode } from "./task/types";
+import type { ExternalTaskExecutor, StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -1599,6 +1599,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				activeToolNames.add(name);
 			}
 		};
+		let externalTaskExecutor: ExternalTaskExecutor | undefined;
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
@@ -1626,6 +1627,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			},
 			refreshSkills: () => session.refreshSkills(),
 			rules: allRules,
+			get externalTaskExecutor() {
+				return externalTaskExecutor;
+			},
 			eventBus,
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
@@ -2400,6 +2404,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settings,
 			localProtocolOptions,
 		);
+		externalTaskExecutor = extensionRunner.getExternalTaskExecutor()?.executor;
 
 		credentialDisabledTarget = extensionRunner;
 		for (const event of startupCredentialDisabledEvents.splice(0)) {
@@ -2422,7 +2427,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
 
-		const registeredTools = restrictToolNames ? [] : extensionRunner.getAllRegisteredTools();
+		const registeredTools = restrictToolNames
+			? []
+			: extensionRunner.getAllRegisteredTools().filter(registeredTool => {
+					if (registeredTool.definition.name !== "task") return true;
+					logger.warn(
+						`Ignoring extension tool "task" from ${registeredTool.extensionPath}; extensions must use registerTaskExecutor() to augment the native Task tool.`,
+					);
+					return false;
+				});
 		const sdkCustomTools = restrictToolNames
 			? []
 			: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);

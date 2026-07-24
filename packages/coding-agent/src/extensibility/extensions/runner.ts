@@ -41,6 +41,7 @@ import type {
 	InputEventResult,
 	MessageRenderer,
 	RegisteredCommand,
+	RegisteredExternalTaskExecutor,
 	RegisteredTool,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
@@ -391,6 +392,25 @@ export class ExtensionRunner {
 			}
 		}
 		return tools;
+	}
+
+	/**
+	 * Resolve the one external Task executor allowed for this session.
+	 * Duplicate registrations fail instead of depending on extension load order.
+	 */
+	getExternalTaskExecutor(): RegisteredExternalTaskExecutor | undefined {
+		let registered: RegisteredExternalTaskExecutor | undefined;
+		for (const extension of this.extensions) {
+			const candidate = extension.externalTaskExecutor;
+			if (!candidate) continue;
+			if (registered) {
+				throw new Error(
+					`Multiple external Task executors registered for discriminator "recipe": "${registered.extensionPath}" and "${candidate.extensionPath}".`,
+				);
+			}
+			registered = candidate;
+		}
+		return registered;
 	}
 
 	/**

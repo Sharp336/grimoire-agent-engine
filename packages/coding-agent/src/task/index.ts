@@ -30,6 +30,8 @@ import { resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
+	type ExternalTaskExecution,
+	type ExternalTaskResult,
 	canSpawnAtDepth,
 	getTaskSchema,
 	type SingleResult,
@@ -104,10 +106,16 @@ export { AgentOutputManager } from "./output-manager";
 export type {
 	AgentDefinition,
 	AgentProgress,
+	ExternalTaskExecution,
+	ExternalTaskExecutor,
+	ExternalTaskExecutorRequest,
+	ExternalTaskProgress,
+	ExternalTaskResult,
 	SingleResult,
 	SubagentEventPayload,
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
+	TaskItem,
 	TaskParams,
 	TaskToolDetails,
 } from "./types";
@@ -115,6 +123,7 @@ export {
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
+	taskItemSchema,
 	taskSchema,
 } from "./types";
 
@@ -244,7 +253,34 @@ function hasInvalidModelSelector(model: unknown): boolean {
 	);
 }
 
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
+function validateRecipeItem(item: TaskItem, label: string, executorAvailable: boolean): string | undefined {
+	if (!Object.hasOwn(item, "recipe")) return undefined;
+	if (typeof item.recipe !== "string" || item.recipe.trim() === "") {
+		return `${label} has an invalid \`recipe\`. Provide a non-empty recipe identifier.`;
+	}
+	if (Object.hasOwn(item, "agent")) {
+		return `${label} cannot set both \`agent\` and \`recipe\`; choose native or external execution.`;
+	}
+	if (Object.hasOwn(item, "model")) {
+		return `${label} cannot set \`model\` for a recipe item; external model overrides are not supported.`;
+	}
+	if (Object.hasOwn(item, "outputSchema") || Object.hasOwn(item, "schemaMode")) {
+		return `${label} cannot set \`outputSchema\` or \`schemaMode\` for a recipe item; typed output schemas are not supported.`;
+	}
+	if (Object.hasOwn(item, "isolated")) {
+		return `${label} cannot set \`isolated\` for a recipe item; external worktree isolation is not supported.`;
+	}
+	if (!executorAvailable) {
+		return `${label} requested recipe execution, but no external Task executor is registered for discriminator \`recipe\`.`;
+	}
+	return undefined;
+}
+
+function validateSpawnParams(
+	params: TaskParams,
+	batchEnabled: boolean,
+	externalTaskExecutorAvailable: boolean,
+): string | undefined {
 	const hasTask = typeof params.task === "string" && params.task.trim() !== "";
 	const tasks = params.tasks;
 	if (batchEnabled && tasks !== undefined) {
@@ -259,7 +295,13 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
 				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
 			}
-			if (hasInvalidModelSelector(item.model)) {
+			const recipeError = validateRecipeItem(
+				item,
+				`Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`,
+				externalTaskExecutorAvailable,
+			);
+			if (recipeError) return recipeError;
+			if (!Object.hasOwn(item, "recipe") && hasInvalidModelSelector(item.model)) {
 				return `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""} has an invalid \`model\`. Provide a non-empty selector or a non-empty array of non-empty selectors.`;
 			}
 		}
@@ -284,7 +326,9 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	if (hasInvalidModelSelector(params.model)) {
+	const recipeError = validateRecipeItem(params, "Task", externalTaskExecutorAvailable);
+	if (recipeError) return recipeError;
+	if (!Object.hasOwn(params, "recipe") && hasInvalidModelSelector(params.model)) {
 		return "Invalid `model`. Provide a non-empty selector or a non-empty array of non-empty selectors.";
 	}
 	return undefined;
@@ -300,7 +344,13 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task, model: params.model };
+	const item: TaskItem = {
+		name: params.name,
+		agent: params.agent,
+		task: params.task,
+		model: params.model,
+	};
+	if ("recipe" in params) item.recipe = params.recipe;
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("isolated" in params) item.isolated = params.isolated;
@@ -317,7 +367,9 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  * `isolated` (batch form) wins over the top-level flag (flat form).
  */
 function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string): TaskParams {
-	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
+	const spawn: TaskParams = Object.hasOwn(item, "recipe")
+		? { recipe: item.recipe }
+		: { agent: item.agent?.trim() || defaultAgent };
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
 	if (item.model !== undefined) spawn.model = item.model;
@@ -585,7 +637,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.mode") !== "none";
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
-		return getTaskSchema({ isolationEnabled, batchEnabled: this.#isBatchEnabled(), defaultAgent });
+		return getTaskSchema({
+			isolationEnabled,
+			batchEnabled: this.#isBatchEnabled(),
+			defaultAgent,
+			externalTaskExecutor: this.session.externalTaskExecutor !== undefined,
+		});
 	}
 
 	renderCall(args: unknown, options: Parameters<typeof renderTaskCall>[1], theme: Theme) {
@@ -597,7 +654,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationMode = this.session.settings.get("task.isolation.mode");
-		return renderDescription(
+		const nativeDescription = renderDescription(
 			this.#discoveredAgents,
 			!planMode && isolationMode !== "none",
 			this.session.settings.get("task.isolation.apply"),
@@ -607,6 +664,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			this.session.getSessionSpawns() ?? "*",
 		);
+		if (!this.session.externalTaskExecutor) return nativeDescription;
+		return `${nativeDescription}
+
+Recipe items run through one external fresh-process executor. External runs do not support model overrides, typed output schemas, worktree isolation, or Hub send/park/revive. Task still owns batching, concurrency, cancellation, and result rendering.`;
 	}
 	private constructor(
 		private readonly session: ToolSession,
@@ -678,20 +739,26 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// item's agent type against the session's actual default agent.
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		const batchEnabled = this.#isBatchEnabled();
-		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
+		const validationError =
+			validateShapeParams(batchEnabled, params) ??
+			validateSpawnParams(params, batchEnabled, this.session.externalTaskExecutor !== undefined);
 		if (validationError) {
 			return createTaskModeError(validationError);
 		}
 
 		const spawnItems = resolveSpawnItems(params);
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
-		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
+		const resolvedAgents = normalizedSpawnParams.map(spawn =>
+			Object.hasOwn(spawn, "recipe") ? "recipe" : (spawn.agent ?? defaultAgent),
+		);
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
 		// result); every other item becomes a background job when async
 		// execution is available.
-		const provisionalBlocking = resolvedAgents.map(
-			name => this.#discoveredAgents.find(agent => agent.name === name)?.blocking === true,
+		const provisionalBlocking = normalizedSpawnParams.map((spawn, index) =>
+			Object.hasOwn(spawn, "recipe")
+				? false
+				: this.#discoveredAgents.find(agent => agent.name === resolvedAgents[index])?.blocking === true,
 		);
 		const asyncEnabled = this.session.settings.get("async.enabled");
 		const manager = asyncEnabled ? this.session.asyncJobManager : undefined;
@@ -745,15 +812,28 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// failures remain synchronous and cannot leave a queued invalid job.
 		const preflights = await Promise.all(
 			normalizedSpawnParams.map(async spawn => {
+				if (Object.hasOwn(spawn, "recipe")) {
+					return { external: true as const, policy: undefined, error: undefined };
+				}
 				try {
-					return { policy: await this.#resolveSpawnPreflight(spawn) };
+					return {
+						external: false as const,
+						policy: await this.#resolveSpawnPreflight(spawn),
+						error: undefined,
+					};
 				} catch (error) {
-					return { error: error instanceof StructuredSubagentError ? error.message : String(error) };
+					return {
+						external: false as const,
+						policy: undefined,
+						error: error instanceof StructuredSubagentError ? error.message : String(error),
+					};
 				}
 			}),
 		);
 		const preflightFailures = preflights
-			.map((preflight, index) => ("error" in preflight ? { index, error: preflight.error } : undefined))
+			.map((preflight, index) =>
+				preflight.error !== undefined ? { index, error: preflight.error } : undefined,
+			)
 			.filter((failure): failure is { index: number; error: string } => failure !== undefined);
 		const renderPreflightFailures = () =>
 			preflightFailures
@@ -766,7 +846,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			return createTaskModeError(renderPreflightFailures());
 		}
 
-		const validIndices = preflights.flatMap((preflight, index) => (preflight.policy ? [index] : []));
+		const validIndices = preflights.flatMap((preflight, index) =>
+			preflight.external || preflight.policy ? [index] : [],
+		);
 		const validSpawns = validIndices.map(index => ({ item: spawnItems[index]!, index }));
 		const itemBlocking = preflights.map(preflight => preflight.policy?.effectiveAgent.blocking === true);
 		const asyncItems = validIndices.filter(index => !itemBlocking[index]).map(index => spawnItems[index]!);
@@ -777,7 +859,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			? undefined
 			: composeSpawnAdvisory({
 					agents: validIndices.map(index => resolvedAgents[index]!),
-					items: asyncItems,
+					items: asyncItems.filter(item => !Object.hasOwn(item, "recipe")),
 					depthCapacity,
 					ircEnabled,
 					willRunAsync: asyncItems.length > 0,
@@ -840,8 +922,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const agentType = resolvedAgents[index]!;
 			const preflight = preflights[index]!;
 			const policy = preflight.policy;
-			if (!policy) continue;
-			const agentSource = policy.agent.source;
+			if (!policy && !preflight.external) continue;
+			const agentSource = policy?.agent.source ?? "bundled";
 			const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
 			const assignment = (item.task ?? "").trim();
 			spawns.push({
@@ -897,7 +979,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			},
 		});
 
-		const started: Array<{ agentId: string; jobId: string }> = [];
+		const started: Array<{ agentId: string; jobId: string; external: boolean }> = [];
 		const failedSchedules: string[] = [];
 		for (const spawn of asyncSpawns) {
 			try {
@@ -916,7 +998,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					},
 				});
 				if (started.length === 0) primaryJobId = jobId;
-				started.push({ agentId: spawn.agentId, jobId });
+				started.push({ agentId: spawn.agentId, jobId, external: Object.hasOwn(spawn.item, "recipe") });
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				failedSchedules.push(`${spawn.agentId}: ${message}`);
@@ -942,16 +1024,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const coordinationHint = [
-			started.length === 1
-				? ircEnabled
-					? `DM \`${started[0].agentId}\` via \`hub\` send to coordinate while it runs; use \`hub\` only to inspect (\`jobs\`), wait, or cancel a stuck task.`
-					: `Use \`hub\` to inspect (\`jobs\`), wait, or cancel a stuck task.`
-				: ircEnabled
-					? `DM these ids via \`hub\` send to coordinate while they run; use \`hub\` only to inspect (\`jobs\`), wait, or cancel a stuck task.`
-					: `Use \`hub\` to inspect (\`jobs\`), wait, or cancel a stuck task by id.`,
-			taskAsyncContractTemplate.trim(),
-		].join("\n");
+		const externalStarted = started.filter(spawn => spawn.external);
+		const coordinationText =
+			externalStarted.length === started.length
+				? "External recipe jobs do not support Hub send, park, or revive. Use `hub` only to inspect (`jobs`), wait, or cancel the Task-owned job."
+				: externalStarted.length > 0
+					? "Hub send/park/revive applies only to the native agent jobs in this mixed call, not external recipe jobs. Use `hub` to inspect (`jobs`), wait, or cancel any Task-owned job."
+					: started.length === 1
+						? ircEnabled
+							? `DM \`${started[0].agentId}\` via \`hub\` send to coordinate while it runs; use \`hub\` only to inspect (\`jobs\`), wait, or cancel a stuck task.`
+							: `Use \`hub\` to inspect (\`jobs\`), wait, or cancel a stuck task.`
+						: ircEnabled
+							? `DM these ids via \`hub\` send to coordinate while they run; use \`hub\` only to inspect (\`jobs\`), wait, or cancel a stuck task.`
+							: `Use \`hub\` to inspect (\`jobs\`), wait, or cancel a stuck task by id.`;
+		const coordinationHint = [coordinationText, taskAsyncContractTemplate.trim()].join("\n");
 
 		if (syncSpawns.length === 0) {
 			if (spawns.length === 1) {
@@ -1080,6 +1166,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
+			if (Object.hasOwn(spawnParams, "recipe")) return "";
 			if (aborted) {
 				const ref = AgentRegistry.global().get(agentId);
 				const transcript = (await hasResolvableTranscript(agentId))
@@ -1414,6 +1501,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		if (Object.hasOwn(params, "recipe")) {
+			return this.#runExternalTask(params, signal, onUpdate, preAllocatedId, spawnIndex);
+		}
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
@@ -1473,12 +1563,198 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 	}
 
+	/**
+	 * Run one external recipe item while retaining Task ownership of identity,
+	 * progress, cancellation, error policy, and the final result surface.
+	 */
+	async #runExternalTask(
+		params: TaskParams,
+		signal: AbortSignal | undefined,
+		onUpdate: AgentToolUpdateCallback<TaskToolDetails> | undefined,
+		preAllocatedId: string | undefined,
+		spawnIndex: number,
+	): Promise<AgentToolResult<TaskToolDetails>> {
+		const startTime = Date.now();
+		const assignment = (params.task ?? "").trim();
+		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
+		const executor = this.session.externalTaskExecutor;
+		if (!executor || typeof params.recipe !== "string") {
+			return createTaskModeError(
+				"Recipe execution requested, but no external Task executor is registered for discriminator `recipe`.",
+			);
+		}
+
+		let outputManager = this.session.agentOutputManager;
+		if (!outputManager) {
+			outputManager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+			this.session.agentOutputManager = outputManager;
+		}
+		const id = preAllocatedId ?? (await outputManager.allocate(params.name?.trim() || generateTaskName()));
+		const runSignal = signal ?? new AbortController().signal;
+		const progress: AgentProgress = {
+			index: spawnIndex,
+			id,
+			agent: "recipe",
+			agentSource: "bundled",
+			status: "running",
+			task: renderSubagentUserPrompt(assignment),
+			assignment,
+			description: params.recipe,
+			recentTools: [],
+			recentOutput: [],
+			toolCount: 0,
+			requests: 0,
+			tokens: 0,
+			cost: 0,
+			durationMs: 0,
+		};
+		const emitProgress = async (message: string): Promise<void> => {
+			const text = message.trim();
+			if (text) progress.recentOutput = [...progress.recentOutput, text].slice(-5);
+			progress.durationMs = Date.now() - startTime;
+			await onUpdate?.({
+				content: [{ type: "text", text: text || `Running external recipe task ${id}...` }],
+				details: {
+					projectAgentsDir: null,
+					results: [],
+					totalDurationMs: progress.durationMs,
+					progress: [{ ...progress, recentOutput: progress.recentOutput.slice() }],
+				},
+			});
+		};
+		const buildSingleResult = (
+			result: ExternalTaskResult,
+			options: { aborted?: boolean; abortReason?: string } = {},
+		): SingleResult => ({
+			index: spawnIndex,
+			id,
+			agent: "recipe",
+			agentSource: "bundled",
+			task: renderSubagentUserPrompt(assignment),
+			assignment,
+			description: params.recipe,
+			exitCode: result.error && result.exitCode === 0 ? 1 : result.exitCode,
+			output: result.output,
+			stderr: result.stderr ?? "",
+			truncated: false,
+			durationMs: Date.now() - startTime,
+			tokens: 0,
+			requests: 0,
+			...(result.error ? { error: result.error } : {}),
+			...(options.aborted ? { aborted: true } : {}),
+			...(options.abortReason ? { abortReason: options.abortReason } : {}),
+		});
+		const buildPayload = (result: SingleResult): AgentToolResult<TaskToolDetails> => {
+			progress.status = result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed";
+			progress.durationMs = result.durationMs;
+			return this.#buildResultPayload(result, null, result.durationMs, "", false);
+		};
+
+		let execution: ExternalTaskExecution | undefined;
+		let abortCleanup: Promise<{ error?: unknown }> | undefined;
+		try {
+			await emitProgress(`Starting external recipe task ${id}...`);
+			execution = await executor.start({
+				recipe: params.recipe.trim(),
+				assignment,
+				context,
+				cwd: this.session.cwd,
+				signal: runSignal,
+				onProgress: update => emitProgress(update.message),
+			});
+			if (
+				!execution ||
+				typeof execution.abort !== "function" ||
+				!execution.result ||
+				typeof execution.result.then !== "function"
+			) {
+				throw new Error("External Task executor returned an invalid execution handle.");
+			}
+
+			const abortSettled = Promise.withResolvers<{ error?: unknown }>();
+			const requestAbort = () => {
+				if (abortCleanup) return;
+				abortCleanup = Promise.resolve()
+					.then(() => execution!.abort())
+					.then(
+						() => ({}),
+						error => ({ error }),
+					);
+				void abortCleanup.then(abortSettled.resolve);
+			};
+			runSignal.addEventListener("abort", requestAbort, { once: true });
+			if (runSignal.aborted) requestAbort();
+			try {
+				const resultOutcome = Promise.resolve(execution.result).then(
+					result => ({ type: "result" as const, result }),
+					error => ({ type: "error" as const, error }),
+				);
+				const outcome = await Promise.race([
+					resultOutcome,
+					abortSettled.promise.then(cleanup => ({ type: "aborted" as const, cleanup })),
+				]);
+				const cleanup = abortCleanup ? await abortCleanup : undefined;
+				if (runSignal.aborted || outcome.type === "aborted") {
+					const reason =
+						runSignal.reason instanceof Error
+							? runSignal.reason.message
+							: typeof runSignal.reason === "string"
+								? runSignal.reason
+								: "Parent task cancelled";
+					const cleanupError = cleanup?.error;
+					const error = cleanupError
+						? `External Task abort cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
+						: undefined;
+					return buildPayload(
+						buildSingleResult(
+							{ output: "", stderr: error, exitCode: 1, error },
+							{ aborted: true, abortReason: reason },
+						),
+					);
+				}
+				if (outcome.type === "error") throw outcome.error;
+				const result = outcome.result;
+				if (
+					!result ||
+					typeof result.output !== "string" ||
+					!Number.isInteger(result.exitCode) ||
+					(result.stderr !== undefined && typeof result.stderr !== "string") ||
+					(result.error !== undefined && typeof result.error !== "string")
+				) {
+					throw new Error("External Task executor returned an invalid result.");
+				}
+				return buildPayload(buildSingleResult(result));
+			} finally {
+				runSignal.removeEventListener("abort", requestAbort);
+			}
+		} catch (error) {
+			if (abortCleanup) await abortCleanup;
+			const message = error instanceof Error ? error.message : String(error);
+			const aborted = runSignal.aborted;
+			const reason =
+				aborted && runSignal.reason instanceof Error
+					? runSignal.reason.message
+					: aborted && typeof runSignal.reason === "string"
+						? runSignal.reason
+						: aborted
+							? "Parent task cancelled"
+							: undefined;
+			return buildPayload(
+				buildSingleResult(
+					{ output: "", stderr: message, exitCode: 1, error: message },
+					{ aborted, abortReason: reason },
+				),
+			);
+		}
+	}
+
 	/** Build the tool result (summary text + details) for a settled run. */
 	#buildResultPayload(
 		result: SingleResult,
 		projectAgentsDir: string | null,
 		totalDurationMs: number,
 		mergeSummary: string,
+		agentOutputResolvable = true,
 	): AgentToolResult<TaskToolDetails> {
 		const status = result.aborted
 			? "cancelled"
@@ -1492,7 +1768,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const fullOutputThreshold = 5000;
 		let preview = output;
 		let truncated = false;
-		if (outputCharCount > fullOutputThreshold) {
+		if (agentOutputResolvable && outputCharCount > fullOutputThreshold) {
 			const slice = output.slice(0, fullOutputThreshold);
 			const lastNewline = slice.lastIndexOf("\n");
 			preview = lastNewline >= 0 ? slice.slice(0, lastNewline) : slice;

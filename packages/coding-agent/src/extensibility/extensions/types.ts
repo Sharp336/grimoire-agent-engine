@@ -49,6 +49,7 @@ import type { Theme } from "../../modes/theme/theme";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+import type { ExternalTaskExecutor } from "../../task/types";
 import type {
 	BashToolDetails,
 	BashToolInput,
@@ -1132,6 +1133,14 @@ export interface ExtensionAPI {
 	/** Register a tool that the LLM can call. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
 
+	/**
+	 * Register the session's external Task item executor.
+	 *
+	 * Only one `recipe` executor may be registered across all loaded extensions.
+	 * This augments the native `task` tool; it does not register or replace a tool.
+	 */
+	registerTaskExecutor(executor: ExternalTaskExecutor): void;
+
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
@@ -1361,6 +1370,11 @@ export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = un
 	extensionPath: string;
 }
 
+export interface RegisteredExternalTaskExecutor {
+	executor: ExternalTaskExecutor;
+	extensionPath: string;
+}
+
 export interface ExtensionFlag {
 	name: string;
 	description?: string;
@@ -1470,6 +1484,7 @@ export interface Extension {
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;
+	externalTaskExecutor?: RegisteredExternalTaskExecutor;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
 	messageRenderers: Map<string, MessageRenderer>;
 	commands: Map<string, RegisteredCommand>;

@@ -109,18 +109,45 @@ export const LABEL_MAX = 80;
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
 
-export const taskItemSchema = type({
+const nativeTaskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
+	"recipe?": "never",
 	task: "string",
 	"model?": "string | string[]",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
 });
-const taskItemSchemaIsolated = type({
+const externalEnabledNativeTaskItemSchema = type({
+	"name?": "string",
+	"agent?": "string",
+	"recipe?": "never",
+	task: "string",
+	"model?": "string | string[]",
+	"outputSchema?": outputSchemaInputSchema,
+	"schemaMode?": '"permissive" | "strict"',
+	"+": "delete",
+});
+function createRecipeTaskItemSchema(): BaseType {
+	return type({
+		"name?": "string",
+		"agent?": "never",
+		recipe: "string",
+		task: "string",
+		"model?": "never",
+		"outputSchema?": "never",
+		"schemaMode?": "never",
+		"isolated?": "never",
+		"+": "delete",
+	});
+}
+/** Task batch item schema when an external executor is available. */
+export const taskItemSchema = externalEnabledNativeTaskItemSchema.or(createRecipeTaskItemSchema());
+const nativeTaskItemSchemaIsolated = type({
 	"name?": "string",
 	agent: "string = 'task'",
+	"recipe?": "never",
 	task: "string",
 	"model?": "string | string[]",
 	"outputSchema?": outputSchemaInputSchema,
@@ -128,6 +155,18 @@ const taskItemSchemaIsolated = type({
 	"isolated?": "boolean",
 	"+": "delete",
 });
+const externalEnabledNativeTaskItemSchemaIsolated = type({
+	"name?": "string",
+	"agent?": "string",
+	"recipe?": "never",
+	task: "string",
+	"model?": "string | string[]",
+	"outputSchema?": outputSchemaInputSchema,
+	"schemaMode?": '"permissive" | "strict"',
+	"isolated?": "boolean",
+	"+": "delete",
+});
+const taskItemSchemaIsolated = externalEnabledNativeTaskItemSchemaIsolated.or(createRecipeTaskItemSchema());
 
 /** Single task item. Fields are optional defensively: args stream in token by token. */
 export interface TaskItem {
@@ -135,6 +174,8 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
+	/** External execution recipe. Mutually exclusive with `agent`. */
+	recipe?: string;
 	/** The work; required by the schema. */
 	task?: string;
 	/** Explicit model selector or fallback chain for this spawn, including optional reasoning suffixes. */
@@ -150,6 +191,7 @@ export interface TaskItem {
 export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
+	"recipe?": "never",
 	task: "string",
 	"model?": "string | string[]",
 	"outputSchema?": outputSchemaInputSchema,
@@ -160,23 +202,64 @@ export const taskSchema = type({
 const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",
+	"recipe?": "never",
 	task: "string",
 	"model?": "string | string[]",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
 });
+const taskSchemaWithExternalExecutor = type({
+	"name?": "string",
+	"agent?": "string",
+	"recipe?": "never",
+	task: "string",
+	"model?": "string | string[]",
+	"outputSchema?": outputSchemaInputSchema,
+	"schemaMode?": '"permissive" | "strict"',
+	"isolated?": "boolean",
+	"+": "delete",
+}).or(createRecipeTaskItemSchema());
+const taskSchemaNoIsolationWithExternalExecutor = type({
+	"name?": "string",
+	"agent?": "string",
+	"recipe?": "never",
+	task: "string",
+	"model?": "string | string[]",
+	"outputSchema?": outputSchemaInputSchema,
+	"schemaMode?": '"permissive" | "strict"',
+	"+": "delete",
+}).or(createRecipeTaskItemSchema());
 const taskSchemaBatch = type({
 	context: "string",
-	tasks: taskItemSchemaIsolated.array(),
+	tasks: nativeTaskItemSchemaIsolated.array(),
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
+	tasks: nativeTaskItemSchema.array(),
+	"+": "delete",
+});
+const taskSchemaBatchWithExternalExecutor = type({
+	context: "string",
+	tasks: taskItemSchemaIsolated.array(),
+	"+": "delete",
+});
+const taskSchemaBatchNoIsolationWithExternalExecutor = type({
+	context: "string",
 	tasks: taskItemSchema.array(),
 	"+": "delete",
 });
-const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
+const ALL_TASK_SCHEMAS = [
+	taskSchema,
+	taskSchemaNoIsolation,
+	taskSchemaWithExternalExecutor,
+	taskSchemaNoIsolationWithExternalExecutor,
+	taskSchemaBatch,
+	taskSchemaBatchNoIsolation,
+	taskSchemaBatchWithExternalExecutor,
+	taskSchemaBatchNoIsolationWithExternalExecutor,
+] as const;
 
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
@@ -198,84 +281,109 @@ function createTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	defaultAgent: string;
+	externalTaskExecutor: boolean;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	if (options.batchEnabled) {
-		if (options.isolationEnabled) {
-			const item = type.raw({
-				"name?": "string",
-				agent,
-				task: "string",
-				"model?": "string | string[]",
-				"outputSchema?": outputSchemaInputSchema,
-				"schemaMode?": '"permissive" | "strict"',
-				"isolated?": "boolean",
-				"+": "delete",
-			});
-			return type.raw({
-				context: "string",
-				tasks: item.array(),
-				"+": "delete",
-			});
-		}
-		const item = type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			"model?": "string | string[]",
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			"+": "delete",
-		});
+		const nativeItem = options.isolationEnabled
+			? type.raw({
+					"name?": "string",
+					...(options.externalTaskExecutor
+						? { "agent?": "string" as const, "recipe?": "never" as const }
+						: { agent, "recipe?": "never" as const }),
+					task: "string",
+					"model?": "string | string[]",
+					"outputSchema?": outputSchemaInputSchema,
+					"schemaMode?": '"permissive" | "strict"',
+					"isolated?": "boolean",
+					"+": "delete",
+				})
+			: type.raw({
+					"name?": "string",
+					...(options.externalTaskExecutor
+						? { "agent?": "string" as const, "recipe?": "never" as const }
+						: { agent, "recipe?": "never" as const }),
+					task: "string",
+					"model?": "string | string[]",
+					"outputSchema?": outputSchemaInputSchema,
+					"schemaMode?": '"permissive" | "strict"',
+					"+": "delete",
+				});
+		const item = options.externalTaskExecutor
+			? nativeItem.or(createRecipeTaskItemSchema())
+			: nativeItem;
 		return type.raw({
 			context: "string",
 			tasks: item.array(),
 			"+": "delete",
 		});
 	}
-	if (options.isolationEnabled) {
-		return type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			"model?": "string | string[]",
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			"isolated?": "boolean",
-			"+": "delete",
-		});
-	}
-	return type.raw({
-		"name?": "string",
-		agent,
-		task: "string",
-		"model?": "string | string[]",
-		"outputSchema?": outputSchemaInputSchema,
-		"schemaMode?": '"permissive" | "strict"',
-		"+": "delete",
-	});
+	const nativeItem = options.isolationEnabled
+		? type.raw({
+				"name?": "string",
+				...(options.externalTaskExecutor
+					? { "agent?": "string" as const, "recipe?": "never" as const }
+					: { agent, "recipe?": "never" as const }),
+				task: "string",
+				"model?": "string | string[]",
+				"outputSchema?": outputSchemaInputSchema,
+				"schemaMode?": '"permissive" | "strict"',
+				"isolated?": "boolean",
+				"+": "delete",
+			})
+		: type.raw({
+				"name?": "string",
+				...(options.externalTaskExecutor
+					? { "agent?": "string" as const, "recipe?": "never" as const }
+					: { agent, "recipe?": "never" as const }),
+				task: "string",
+				"model?": "string | string[]",
+				"outputSchema?": outputSchemaInputSchema,
+				"schemaMode?": '"permissive" | "strict"',
+				"+": "delete",
+			});
+	return options.externalTaskExecutor
+		? nativeItem.or(createRecipeTaskItemSchema())
+		: nativeItem;
 }
 
-export function getTaskSchema(options: { isolationEnabled: boolean; batchEnabled: boolean }): DynamicTaskSchema;
+export function getTaskSchema(options: {
+	isolationEnabled: boolean;
+	batchEnabled: boolean;
+	externalTaskExecutor?: boolean;
+}): DynamicTaskSchema;
 export function getTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	defaultAgent: string;
+	externalTaskExecutor?: boolean;
 }): TaskToolSchemaInstance;
 export function getTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	defaultAgent?: string;
+	externalTaskExecutor?: boolean;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
+	const externalTaskExecutor = options.externalTaskExecutor === true;
 	if (defaultAgent === "task") {
-		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
+		if (options.batchEnabled) {
+			if (externalTaskExecutor) {
+				return options.isolationEnabled
+					? taskSchemaBatchWithExternalExecutor
+					: taskSchemaBatchNoIsolationWithExternalExecutor;
+			}
+			return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
+		}
+		if (externalTaskExecutor) {
+			return options.isolationEnabled ? taskSchemaWithExternalExecutor : taskSchemaNoIsolationWithExternalExecutor;
+		}
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${externalTaskExecutor ? "external" : "native"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
-	const schema = createTaskSchema({ ...options, defaultAgent });
+	const schema = createTaskSchema({ ...options, defaultAgent, externalTaskExecutor });
 	taskSchemaCache.set(key, schema);
 	return schema;
 }
@@ -291,6 +399,8 @@ export interface TaskParams {
 	name?: string;
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
+	/** External execution recipe (flat form). Mutually exclusive with `agent`. */
+	recipe?: string;
 	/** The work (flat form). */
 	task?: string;
 	/** Explicit model selector or fallback chain for the spawn, including optional reasoning suffixes. */
@@ -305,6 +415,52 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+}
+
+/** A progress message emitted by one external Task execution. */
+export interface ExternalTaskProgress {
+	message: string;
+}
+
+/** Settled output from one external Task execution. */
+export interface ExternalTaskResult {
+	output: string;
+	exitCode: number;
+	stderr?: string;
+	error?: string;
+}
+
+/**
+ * Handle for one external fresh-process execution.
+ *
+ * `abort()` must resolve only after process shutdown and owned-resource cleanup
+ * complete. Task invokes and awaits it when the parent signal aborts.
+ */
+export interface ExternalTaskExecution {
+	result: Promise<ExternalTaskResult>;
+	abort(): void | Promise<void>;
+}
+
+/** Inputs owned by Task and supplied to the external executor. */
+export interface ExternalTaskExecutorRequest {
+	recipe: string;
+	assignment: string;
+	context?: string;
+	cwd: string;
+	signal: AbortSignal;
+	onProgress(progress: ExternalTaskProgress): void | Promise<void>;
+}
+
+/**
+ * Single external Task executor hook.
+ *
+ * This first contract supports only the `recipe` discriminator. Typed output
+ * schemas, model overrides, isolation, and Hub send/park/revive parity are not
+ * available for external executions and must not be silently emulated.
+ */
+export interface ExternalTaskExecutor {
+	readonly discriminator: "recipe";
+	start(request: ExternalTaskExecutorRequest): ExternalTaskExecution | Promise<ExternalTaskExecution>;
 }
 
 /**

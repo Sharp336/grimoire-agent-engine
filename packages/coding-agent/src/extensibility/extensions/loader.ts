@@ -20,6 +20,7 @@ import { execCommand } from "../../exec/exec";
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import { EventBus } from "../../utils/event-bus";
+import type { ExternalTaskExecutor } from "../../task/types";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 import * as TypeBox from "../typebox";
@@ -152,6 +153,21 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			definition: tool,
 			extensionPath: this.extension.path,
 		});
+	}
+
+	registerTaskExecutor(executor: ExternalTaskExecutor): void {
+		if (!executor || executor.discriminator !== "recipe" || typeof executor.start !== "function") {
+			throw new Error('registerTaskExecutor() requires a valid executor for discriminator "recipe".');
+		}
+		if (this.extension.externalTaskExecutor) {
+			throw new Error(
+				`Extension "${this.extension.path}" registered more than one external Task executor for discriminator "recipe".`,
+			);
+		}
+		this.extension.externalTaskExecutor = {
+			executor,
+			extensionPath: this.extension.path,
+		};
 	}
 
 	registerCommand(
