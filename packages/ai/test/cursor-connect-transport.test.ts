@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { once } from "node:events";
 import * as http2 from "node:http2";
 import { create, toBinary } from "@bufbuild/protobuf";
-import { buildCursorHeaders, CURSOR_CLIENT_VERSION, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import {
+	buildCursorHeaders,
+	CURSOR_CLIENT_VERSION,
+	disposeCursorTransport,
+	streamCursor,
+} from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -21,6 +27,7 @@ const sessions = new Set<http2.Http2Session>();
 let attemptCount = 0;
 let behavior: PerAttempt = () => "success";
 const capturedHeaders: http2.IncomingHttpHeaders[] = [];
+let openedSessions = 0;
 
 function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	const frame = Buffer.alloc(5 + data.length);
@@ -62,6 +69,7 @@ function connectEndErrorFrame(code: string, message: string): Buffer {
 async function startServer(): Promise<string> {
 	server = http2.createServer();
 	server.on("session", session => {
+		openedSessions += 1;
 		sessions.add(session);
 		session.on("close", () => sessions.delete(session));
 	});
@@ -145,6 +153,8 @@ afterEach(async () => {
 	attemptCount = 0;
 	behavior = () => "success";
 	capturedHeaders.length = 0;
+	openedSessions = 0;
+	disposeCursorTransport();
 	await stopServer();
 });
 
@@ -215,5 +225,54 @@ describe("Cursor request identity", () => {
 			requestId: "req",
 		});
 		expect(fallback["x-cursor-client-version"]).toBe(CURSOR_CLIENT_VERSION);
+	});
+});
+
+async function allSessionsClosed(): Promise<void> {
+	const live = [...sessions];
+	if (live.length === 0) return;
+	await Promise.all(live.map(session => once(session, "close")));
+}
+
+describe("Cursor HTTP/2 session pool", () => {
+	it("serves many turns from a bounded set of reused sessions and disposes them", async () => {
+		disposeCursorTransport();
+		const baseUrl = await startServer();
+		const model = makeModel(baseUrl);
+		for (let i = 0; i < 8; i++) {
+			const { result } = await collectStream(model);
+			expect(result.stopReason).toBe("stop");
+		}
+		// Eight turns are serviced by at most four round-robin slots — proof of
+		// pooling, not a fresh connection per turn.
+		expect(openedSessions).toBeLessThanOrEqual(4);
+		expect(openedSessions).toBeGreaterThan(1);
+		expect(sessions.size).toBeGreaterThan(0);
+
+		disposeCursorTransport();
+		await allSessionsClosed();
+		expect(sessions.size).toBe(0);
+	});
+
+	it("reconnects after every pooled session is dropped mid-idle", async () => {
+		disposeCursorTransport();
+		const baseUrl = await startServer();
+		const model = makeModel(baseUrl);
+		for (let i = 0; i < 4; i++) {
+			await collectStream(model);
+		}
+		const openedBeforeDrop = openedSessions;
+		expect(openedBeforeDrop).toBeGreaterThan(0);
+
+		const dropped = allSessionsClosed();
+		for (const session of sessions) session.destroy();
+		await dropped;
+
+		for (let i = 0; i < 4; i++) {
+			const { result } = await collectStream(model);
+			expect(result.stopReason).toBe("stop");
+		}
+		// Dropped slots were evicted and re-established, so new sessions opened.
+		expect(openedSessions).toBeGreaterThan(openedBeforeDrop);
 	});
 });

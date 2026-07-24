@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
-import http2 from "node:http2";
+import type http2 from "node:http2";
 import { create, fromBinary, fromJson, type JsonValue, toBinary, toJson } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
 import type { McpToolDefinition } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
@@ -142,9 +142,11 @@ import {
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
+import { acquireCursorStream } from "./cursor-h2-pool";
+
+export { disposeCursorTransport } from "./cursor-h2-pool";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 /**
@@ -159,8 +161,6 @@ const CURSOR_PROTOCOL_CLIENT_VERSION = "cli-2026.07.20-8cc9c0b";
  * {@link CursorOptions.clientVersion} overrides per call.
  */
 export const CURSOR_CLIENT_VERSION = $env.CURSOR_CLIENT_VERSION?.trim() || CURSOR_PROTOCOL_CLIENT_VERSION;
-
-const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
 const conversationStateCache = new Map<string, ConversationStateStructure>();
 const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
@@ -537,7 +537,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			// pump server messages, and settle on clean end / error. Owns its own
 			// per-attempt transport so a replay-safe retry starts from a clean slate.
 			const runAttempt = async (): Promise<void> => {
-				let h2Client: http2.ClientHttp2Session | null = null;
 				let h2Request: http2.ClientHttp2Stream | null = null;
 				let heartbeatTimer: NodeJS.Timeout | null = null;
 				let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
@@ -590,21 +589,19 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							})
 						: undefined;
 
-					const proxyUrl = shouldBypassProxy(new URL(baseUrl)) ? undefined : getProxyForProvider(model.provider);
-					if (proxyUrl) {
-						const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
+					let acquired: http2.ClientHttp2Stream;
+					try {
+						acquired = await acquireCursorStream({
+							baseUrl,
+							provider: model.provider,
+							requestPath,
+							headers: requestHeaders,
 							signal: options?.signal,
-							timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
 						});
-						h2Client = http2.connect(baseUrl, {
-							createConnection: () => tlsSocket,
-						});
-					} else {
-						h2Client = http2.connect(baseUrl);
+					} catch (error) {
+						throw mapH2TransportError(error, baseUrl);
 					}
-					h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
-
-					h2Request = h2Client.request(requestHeaders);
+					h2Request = acquired;
 					const activeRequest = h2Request;
 
 					const sendHeartbeat = () => {
@@ -735,8 +732,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						clearInterval(heartbeatTimer);
 						heartbeatTimer = null;
 					}
+					// Release only this turn's stream; the pooled session is shared.
 					h2Request?.close();
-					h2Client?.close();
 				}
 			};
 
