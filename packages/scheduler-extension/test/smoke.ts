@@ -1925,6 +1925,49 @@ export async function runSmoke(): Promise<void> {
 	);
 	await wv.command("stop", ctxWv);
 
+	// 44. a resume timer armed before shutdown (rate-limit hold) must not dispatch
+	// after the session is torn down — the sink guard in tryDispatch makes any
+	// surviving timer callback inert.
+	{
+		fs.rmSync(configFile, { force: true });
+		const st = {
+			version: 2,
+			run: "stopped",
+			tasks: [{ id: "t105", prompt: "x", status: "queued", addedAt: new Date().toISOString(), attempts: 0 }],
+			currentTaskId: null,
+			rateLimitedUntil: null,
+			windows: [],
+			nextTaskSeq: 106,
+		};
+		fs.writeFileSync(stateFile, JSON.stringify(st));
+	}
+	const rz = makeMockPi();
+	const ctxRz = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(rz.api);
+	await rz.emit("session_start", {}, ctxRz);
+	{
+		const c = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+		c.dispatchDelayMs = 20;
+		c.watchdogIntervalMs = 60_000;
+		c.stallTimeoutMs = 600_000;
+		fs.writeFileSync(configFile, JSON.stringify(c));
+	}
+	await rz.command("start", ctxRz);
+	await sleep(600);
+	assert.equal(rz.sentPrompts.length, 1, "t105 dispatched");
+	await rz.emit("agent_start", {}, ctxRz);
+	await rz.emit(
+		"auto_retry_end",
+		{ success: false, finalError: "Provider requested 1000ms wait. Original error: 429 retry-after-ms=1000" },
+		ctxRz,
+	);
+	await rz.emit("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] }, ctxRz);
+	await sleep(100); // a resume timer (~1s) is now armed
+	await rz.emit("session_shutdown", {}, ctxRz);
+	const afterShutdownRz = rz.sentPrompts.length;
+	await sleep(1400); // past the resume time — the timer must not dispatch
+	assert.equal(rz.sentPrompts.length, afterShutdownRz, "a resume timer does not dispatch after shutdown");
+
 	console.log("smoke: all assertions passed");
 	console.log(`smoke: data dir was ${tmpAgentDir}`);
 }

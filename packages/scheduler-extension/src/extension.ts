@@ -1145,6 +1145,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	 * Long-running turns are untouched: recovery requires an *idle* agent.
 	 */
 	function watchdogTick(): void {
+		if (shuttingDown) return; // session torn down — the watchdog must not act
 		const st = getState();
 		if (st.run !== "running") return;
 		if (st.currentTaskId !== null) {
@@ -1446,6 +1447,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	}
 
 	function armResumeTimer(atMs: number): void {
+		if (shuttingDown) return; // don't arm a resume timer against a dead session
 		resumeTimer = stopTimer(resumeTimer);
 		const delay = Math.max(1000, atMs - Date.now());
 		resumeTimer = startTimer(delay, () => {
@@ -1515,6 +1517,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		if (st.currentTaskId !== null) return; // a task is already in flight
 		if (agentActive) return; // manual/other turn in progress
 		if (resetInFlight) return; // a context purge is running — don't dispatch until it completes
+		if (shuttingDown) return; // session torn down — no timer callback may dispatch
 		// extensions.md § "2) Handler context": isIdle(), hasPendingMessages().
 		// Defer to user-queued messages; re-check after the next agent_end.
 		if (liveCtx && (!liveCtx.isIdle() || liveCtx.hasPendingMessages())) {
