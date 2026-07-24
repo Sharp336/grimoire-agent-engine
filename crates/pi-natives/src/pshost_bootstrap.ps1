@@ -126,6 +126,23 @@ $script:consoleOut = [System.IO.StringWriter]::new()
 $script:consoleErr = [System.IO.StringWriter]::new()
 [Console]::SetOut($script:consoleOut)
 [Console]::SetError($script:consoleErr)
+# DetachStdin only repoints the OS stdin slot/handle; a managed Console.In
+# reader PowerShell/.NET already resolved before detach still targets the
+# original OS handle, so [Console]::ReadLine()/In.Read* from a submitted
+# command or a loaded .NET library could block on -- or consume bytes from
+# -- the protocol pipe instead of seeing EOF, desyncing the host exactly
+# like an unredirected native stdin read would. TextReader.Null always
+# returns EOF immediately without touching any handle. Verified this
+# specific race doesn't independently reproduce in THIS bootstrap's actual
+# control flow -- DetachStdin is the very first executable statement, well
+# before any code (ours or the non-interactive host's own startup) has a
+# chance to touch Console.In, so its lazy resolution here always happens
+# after the OS-level handle is already NUL-redirected either way. Kept as
+# defense-in-depth: SetIn unconditionally replaces whatever reference
+# exists (even one a future refactor lets get cached earlier), and it's
+# free -- there is no legitimate reason a submitted PowerShell command
+# should read interactive stdin from this sidecar.
+[Console]::SetIn([System.IO.TextReader]::Null)
 
 function Write-Frame([hashtable] $Object) {
     $json  = $Object | ConvertTo-Json -Depth 8 -Compress
@@ -365,11 +382,22 @@ function Publish-Streams([hashtable] $Cur) {
     # published: a long-running high-volume command (e.g. Write-Host in a
     # tight million-iteration loop) would otherwise retain every record for
     # the command's full duration even though its text already left via
-    # Write-Chunk, growing the sidecar's memory unbounded. RemoveAt(0) `n`
-    # times shifts the collection so anything the pipeline appended AFTER
-    # `n` (concurrently, while we were reading/removing) is left untouched —
-    # appends only ever land at the end. The index resets to 0 to match the
-    # now-empty-up-to-`n` collection.
+    # Write-Chunk, growing the sidecar's memory unbounded. Indices `0..n-1`
+    # (everything published since the last poll) are what's removed each
+    # time; anything the pipeline appended AFTER `n` concurrently, while we
+    # were reading/removing, is left untouched -- appends only ever land at
+    # the end. The index resets to 0 to match the now-empty-up-to-`n`
+    # collection.
+    #
+    # RemoveAt runs from `n-1` down to `0`, NOT ascending from `0`:
+    # PSDataCollection has no RemoveRange, and removing index 0 repeatedly
+    # shifts every remaining element down by one on EVERY call, making an
+    # n-record burst O(n^2) instead of O(n) -- exactly the high-volume
+    # bursts this release exists to stay responsive under. Removing from
+    # the highest index first only shifts whatever was appended
+    # concurrently past `n` (typically nothing, since the whole snapshot up
+    # to `n` is being cleared in one pass) instead of the whole remaining
+    # collection on every single removal.
     #
     # Error records are released the same way as the streams above: a
     # high-volume error loop (e.g. Write-Error ... -ErrorAction Continue in
@@ -381,28 +409,28 @@ function Publish-Streams([hashtable] $Cur) {
     $n = $s.Information.Count
     if ($n -gt $Cur.InfoIdx) {
         $lines = for ($i = $Cur.InfoIdx; $i -lt $n; $i++) { [string]$s.Information[$i].MessageData }
-        for ($i = 0; $i -lt $n; $i++) { $s.Information.RemoveAt(0) }
+        for ($i = $n - 1; $i -ge 0; $i--) { $s.Information.RemoveAt($i) }
         $Cur.InfoIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'information' -Text (@($lines) -join $NL)
     }
     $n = $s.Warning.Count
     if ($n -gt $Cur.WarnIdx) {
         $lines = for ($i = $Cur.WarnIdx; $i -lt $n; $i++) { "WARNING: $($s.Warning[$i].Message)" }
-        for ($i = 0; $i -lt $n; $i++) { $s.Warning.RemoveAt(0) }
+        for ($i = $n - 1; $i -ge 0; $i--) { $s.Warning.RemoveAt($i) }
         $Cur.WarnIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'warning' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
     }
     $n = $s.Verbose.Count
     if ($n -gt $Cur.VerboseIdx) {
         $lines = for ($i = $Cur.VerboseIdx; $i -lt $n; $i++) { "VERBOSE: $($s.Verbose[$i].Message)" }
-        for ($i = 0; $i -lt $n; $i++) { $s.Verbose.RemoveAt(0) }
+        for ($i = $n - 1; $i -ge 0; $i--) { $s.Verbose.RemoveAt($i) }
         $Cur.VerboseIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'verbose' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
     }
     $n = $s.Debug.Count
     if ($n -gt $Cur.DebugIdx) {
         $lines = for ($i = $Cur.DebugIdx; $i -lt $n; $i++) { "DEBUG: $($s.Debug[$i].Message)" }
-        for ($i = 0; $i -lt $n; $i++) { $s.Debug.RemoveAt(0) }
+        for ($i = $n - 1; $i -ge 0; $i--) { $s.Debug.RemoveAt($i) }
         $Cur.DebugIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'debug' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
     }
@@ -410,7 +438,7 @@ function Publish-Streams([hashtable] $Cur) {
     if ($n -gt $Cur.ErrorIdx) {
         $Cur.HadErrorRecords = $true
         $text = $(for ($i = $Cur.ErrorIdx; $i -lt $n; $i++) { $s.Error[$i] }) | Out-String -Width $Cur.Width
-        for ($i = 0; $i -lt $n; $i++) { $s.Error.RemoveAt(0) }
+        for ($i = $n - 1; $i -ge 0; $i--) { $s.Error.RemoveAt($i) }
         $Cur.ErrorIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'error' -Text (Format-AnsiText $text '31;1')
     }

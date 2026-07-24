@@ -219,6 +219,36 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(result)).toContain("boom-from-console-error");
 	});
 
+	test("a direct [Console]::In read returns immediately instead of touching the protocol pipe", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-console-in-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// A submitted command that calls [Console]::In.ReadLine()/Read() must
+		// return immediately (EOF) rather than blocking on -- or consuming
+		// bytes from -- the protocol pipe, which would either hang this call
+		// or desync the framed reader for every later command on the same
+		// host. `[Console]::SetIn(TextReader.Null)` in the bootstrap pins
+		// this. Note: verified this specific race (a Console.In reader
+		// PowerShell/.NET already cached BEFORE the stdin detach) does not
+		// independently reproduce in this bootstrap's actual control flow --
+		// detach runs as the very first executable statement, before
+		// anything could touch Console.In first -- so this guards the
+		// observable contract (never hangs, host stays usable after) rather
+		// than proving a specific pre/post regression.
+		const result = await tool.execute("cin1", {
+			command: '$r = [Console]::In.ReadLine(); "read-result:[$r] is-null:$($null -eq $r)"',
+			timeout: 10,
+		});
+		expect(result.isError ?? false).toBe(false);
+		expect(textOf(result)).toContain("is-null:True");
+
+		// The host must still be usable afterward -- proves the read didn't
+		// desync the framed protocol reader.
+		const result2 = await tool.execute("cin2", { command: "'still-alive'" });
+		expect(textOf(result2)).toContain("still-alive");
+	});
+
 	test("a timed-out command with truncated output still surfaces the truncation notice", async () => {
 		const tool = await loadPowerShellTool(fakeSession("ps-timeout-truncation-test"));
 		expect(tool).not.toBeNull();
