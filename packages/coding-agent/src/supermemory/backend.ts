@@ -522,7 +522,7 @@ async function searchWithState(
 			containerTag: scope.containerTag,
 			searchMode: scope.config.searchMode,
 			signal: options?.signal,
-			limit: Math.min(options?.limit ?? scope.config.recallLimit, scope.config.recallLimit),
+			limit: Math.max(2, Math.min(options?.limit ?? scope.config.recallLimit, scope.config.recallLimit)),
 			threshold: scope.config.threshold,
 		});
 		if (options?.signal?.aborted)

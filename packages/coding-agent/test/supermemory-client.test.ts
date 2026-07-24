@@ -55,6 +55,11 @@ describe("Supermemory configuration", () => {
 				SUPERMEMORY_API_KEY: "test-secret",
 			}).recallLimit,
 		).toBe(8);
+		expect(
+			loadSupermemoryConfig(fakeSettings({ "supermemory.recallLimit": 1 }), {
+				SUPERMEMORY_API_KEY: "test-secret",
+			}).recallLimit,
+		).toBe(2);
 	});
 
 	it("allows HTTPS and loopback HTTP process-only origin overrides but rejects remote plaintext origins", () => {
