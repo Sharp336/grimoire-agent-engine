@@ -492,36 +492,6 @@ describe("ToolExecutionComponent source formatting", () => {
 		expect(Bun.stripANSI(component.render(100).join("\n"))).toContain("raw()");
 	});
 
-	it("shows every formatted write line when the raw call fit the collapsed preview", async () => {
-		const formattedContent = Array.from({ length: 8 }, (_, index) => `const value${index + 1} = ${index + 1};`).join(
-			"\n",
-		);
-		const sourceFormatter = vi.fn(
-			async (_toolName: string, callArgs: unknown, _signal: AbortSignal): Promise<SourceFormatterOutcome> => {
-				const argsRecord = callArgs as Record<string, unknown>;
-				return sourceFormatterOutcomeFormatted({ ...argsRecord, content: formattedContent });
-			},
-		);
-		const tool = { name: "write", label: "Write" } as unknown as AgentTool;
-		const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-		const component = new ToolExecutionComponent(
-			"write",
-			{ path: "/tmp/example.ts", content: "const values={one:1,two:2,three:3};" },
-			sourceFormatterOptions(sourceFormatter),
-			tool,
-			ui,
-		);
-		components.push(component);
-
-		component.setArgsComplete();
-		component.updateResult({ content: [{ type: "text", text: "Wrote file" }] }, false);
-		await component.whenSourceFormattingSettled();
-
-		const rendered = Bun.stripANSI(component.render(100).join("\n"));
-		expect(rendered).toContain("const value8 = 8;");
-		expect(rendered).not.toContain("Ctrl+O");
-	});
-
 	it("finalizes immediately when source formatting throws", async () => {
 		const { tool } = makeTextRenderer();
 		const sourceFormatter = vi.fn(

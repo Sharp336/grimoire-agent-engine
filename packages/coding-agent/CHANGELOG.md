@@ -16,7 +16,6 @@
 ### Fixed
 
 - Fixed coding-agent startup failing while compiling tool execution rendering.
-- Fixed source formatting collapsing completed write previews that previously fit without expansion.
 
 ### Changed
 
