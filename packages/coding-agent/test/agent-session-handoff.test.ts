@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
@@ -8,6 +8,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ContextManagerController } from "@oh-my-pi/pi-coding-agent/context-manager/controller";
 import {
 	ExtensionRunner,
 	loadExtensionFromFactory,
@@ -60,6 +61,36 @@ describe("AgentSession handoff", () => {
 	async function drainMaintenance(): Promise<void> {
 		await Bun.sleep(0);
 		await session.waitForIdle();
+	}
+
+	interface ManagedFallbackCompactionSpies {
+		prepareSpy: Mock<typeof compactionModule.prepareCompaction>;
+		compactSpy: Mock<typeof compactionModule.compact>;
+	}
+
+	function installManagedFallbackCompactionSpies(): ManagedFallbackCompactionSpies {
+		const lastEntryId = sessionManager.getBranch().at(-1)?.id;
+		if (!lastEntryId) throw new Error("Expected a seeded entry id");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction").mockImplementation((_entries, settings) => ({
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			previousSummary: undefined,
+			previousPreserveData: undefined,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings,
+		}));
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "fallback summary",
+			shortSummary: undefined,
+			firstKeptEntryId: lastEntryId,
+			tokensBefore: 100,
+			details: {},
+		});
+		return { prepareSpy, compactSpy };
 	}
 
 	beforeAll(async () => {
@@ -448,6 +479,53 @@ describe("AgentSession handoff", () => {
 		expect(trailingText).not.toContain(HANDOFF_SECRET);
 		expect(result?.document).toContain(HANDOFF_SECRET);
 		expect(result?.document).not.toContain(placeholder);
+	});
+
+	it("uses the configured legacy fallback when managed context is inactive", async () => {
+		session.settings.set("compaction.strategy", "managed");
+		session.settings.set("compaction.managedFallback", "context-full");
+		const { prepareSpy, compactSpy } = installManagedFallbackCompactionSpies();
+
+		await expect(session.compact()).resolves.toMatchObject({ summary: "fallback summary" });
+		expect(prepareSpy.mock.calls[0]?.[1].strategy).toBe("context-full");
+		expect(compactSpy.mock.calls[0]?.[0].settings.strategy).toBe("context-full");
+	});
+
+	it("uses the configured legacy fallback when managed wrapup fails", async () => {
+		await session.dispose();
+		const settings = Settings.isolated({
+			"compaction.enabled": true,
+			"compaction.strategy": "managed",
+			"compaction.managedFallback": "context-full",
+		});
+		const contextManager = await ContextManagerController.create({
+			mode: "primary",
+			settings,
+			sessionManager,
+			storePath: ":memory:",
+		});
+		vi.spyOn(contextManager, "wrapup").mockResolvedValue({
+			status: "failed",
+			compartments: 0,
+			facts: 0,
+			error: "historian unavailable",
+		});
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			obfuscator,
+			contextManager,
+		});
+		const { prepareSpy, compactSpy } = installManagedFallbackCompactionSpies();
+
+		await expect(session.compact()).resolves.toMatchObject({ summary: "fallback summary" });
+		expect(prepareSpy.mock.calls[0]?.[1].strategy).toBe("context-full");
+		expect(compactSpy.mock.calls[0]?.[0].settings.strategy).toBe("context-full");
 	});
 
 	it("obfuscates the previous compaction summary but preserves opaque replay data", async () => {
@@ -1351,7 +1429,7 @@ describe("AgentSession handoff", () => {
 
 		expect(session.autoCompactionEnabled).toBe(false);
 		session.setAutoCompactionEnabled(true);
-		expect(session.settings.get("compaction.strategy")).toBe("snapcompact");
+		expect(session.settings.get("compaction.strategy")).toBe("managed");
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
 

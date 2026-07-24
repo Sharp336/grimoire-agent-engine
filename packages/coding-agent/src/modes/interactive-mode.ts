@@ -1080,6 +1080,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Subscribe to agent events
 		this.#subscribeToAgent();
+		this.session.contextManager?.startBackgroundMaintenance();
 
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribe(event => {
@@ -4373,8 +4374,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleToolsCommand();
 	}
 
-	handleContextCommand(): void {
-		this.#commandController.handleContextCommand();
+	async handleContextCommand(): Promise<void> {
+		await this.#commandController.handleContextCommand();
 	}
 
 	#prepareSessionSwitch(): void {

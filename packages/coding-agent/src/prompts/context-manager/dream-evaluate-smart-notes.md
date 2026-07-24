@@ -1,0 +1,1 @@
+Evaluate whether each pending note's surface condition is currently satisfied by the supplied session/project state. Output `{ "actions": [{ "id": string, "action": "activate" | "keep-pending" | "dismiss", "reason": string }] }`. Activate only with positive evidence, dismiss only when permanently obsolete, otherwise keep pending.

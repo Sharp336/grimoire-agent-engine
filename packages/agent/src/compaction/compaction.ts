@@ -161,7 +161,7 @@ export interface CompactionResult<T = unknown> {
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy?: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	strategy?: "managed" | "context-full" | "handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent?: number;
 	thresholdTokens?: number;
 	midTurnEnabled?: boolean;
@@ -350,7 +350,7 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
  * Image content has no tokenizer representation; charge a fixed estimate
  * matching what providers typically bill for inline images.
  */
-const IMAGE_TOKEN_ESTIMATE = 1200;
+export const IMAGE_TOKEN_ESTIMATE = 1200;
 
 /**
  * Estimate token count for a message using cl100k_base via the native
@@ -1331,6 +1331,9 @@ export async function compact(
 	signal?: AbortSignal,
 	options?: SummaryOptions,
 ): Promise<CompactionResult> {
+	if (preparation.settings.strategy === "managed") {
+		throw new Error("Managed compaction must be orchestrated by the coding-agent context manager");
+	}
 	const {
 		firstKeptEntryId,
 		messagesToSummarize,

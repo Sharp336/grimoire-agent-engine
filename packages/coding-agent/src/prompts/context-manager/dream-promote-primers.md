@@ -1,0 +1,1 @@
+Convert the supplied recurring standing questions into concise reusable user-profile instructions that help future sessions retrieve the right context. Output `{ "memories": [{ "content": string, "sourceIndexes": number[] }] }`. Each instruction must remain broadly useful, avoid assuming an answer, and preserve the user's intent. Do not promote one-off questions.

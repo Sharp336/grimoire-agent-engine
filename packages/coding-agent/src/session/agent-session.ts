@@ -102,6 +102,7 @@ import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-temp
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
 import { onAppendOnlyModeChanged, onModelRolesChanged } from "../config/settings";
+import type { SessionContextManager } from "../context-manager/types";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { getFileSnapshotStore } from "../edit/file-snapshot-store";
 import type { PythonResult } from "../eval/py/executor";
@@ -490,6 +491,7 @@ export class AgentSession {
 	#movedFromEmptySessionFile?: string;
 
 	readonly #maintenance: SessionMaintenance;
+	readonly #contextManager: SessionContextManager | undefined;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -860,6 +862,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#contextManager = config.contextManager;
 		this.#modelRegistry = config.modelRegistry;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
@@ -1032,7 +1035,20 @@ export class AgentSession {
 		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#pruneToolDescriptions = config.pruneToolDescriptions === true;
-		this.#transformContext = config.transformContext ?? (messages => messages);
+		const configuredTransformContext = config.transformContext ?? ((messages: AgentMessage[]) => messages);
+		const contextManager = this.#contextManager;
+		this.#transformContext = contextManager?.active
+			? async (messages, signal) => {
+					const canonicalMessages = await contextManager.prepareCanonicalMessages(messages, signal);
+					const transformedMessages = await configuredTransformContext(canonicalMessages, signal);
+					return contextManager.transformContext(
+						transformedMessages,
+						signal,
+						this.model,
+						computeNonMessageTokens(this),
+					);
+				}
+			: configuredTransformContext;
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#preferWebsockets = config.preferWebsockets;
 		this.#onPayload = config.onPayload;
@@ -1333,6 +1349,12 @@ export class AgentSession {
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			isGeneratingHandoff: () => this.isGeneratingHandoff,
+			isManagedContextActive: () => {
+				const status = this.#contextManager?.status();
+				return status?.active === true && status.fallbackRequired !== true;
+			},
+			runManagedContextWrapup: () =>
+				this.#contextManager?.wrapup() ?? Promise.resolve({ status: "unavailable", compartments: 0, facts: 0 }),
 			promptGeneration: () => this.#promptGeneration,
 			sessionId: () => this.sessionId,
 			messages: () => this.messages,
@@ -2068,6 +2090,7 @@ export class AgentSession {
 		const cache = this.#persistedMessageKeys;
 		const wasFresh = cache !== undefined && cache.anchor === this.#persistedMessageKeysAnchor();
 		const entryId = this.sessionManager.appendMessage(message);
+		this.#contextManager?.bindPersistedMessage(message, entryId);
 		const key = sessionMessagePersistenceKey(message);
 		if (wasFresh && cache && key) {
 			cache.keys.add(key);
@@ -3383,6 +3406,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#contextManager?.beginDispose();
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
@@ -3524,6 +3548,7 @@ export class AgentSession {
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+			this.#contextManager?.dispose() ?? Promise.resolve(),
 		]);
 		for (const result of results) {
 			if (result.status === "rejected") {
@@ -4142,6 +4167,11 @@ export class AgentSession {
 	/** Current session file path, or undefined if sessions are disabled */
 	get sessionFile(): string | undefined {
 		return this.sessionManager.getSessionFile();
+	}
+
+	/** Managed-context facade for tools, commands, and status renderers. */
+	get contextManager(): SessionContextManager | undefined {
+		return this.#contextManager;
 	}
 
 	/** Current session ID */
@@ -4918,14 +4948,14 @@ export class AgentSession {
 			const disposingBeforeTransition = this.#isDisposed;
 			await this.#memory.transition;
 			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return;
-			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
+			let resolvedSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
 
-			// Emit before_agent_start extension event
+			// Emit before_agent_start extension event.
 			if (this.#extensionRunner) {
 				const result = await this.#extensionRunner.emitBeforeAgentStart(
 					expandedText,
 					options?.images,
-					beforeAgentStartSystemPrompt,
+					resolvedSystemPrompt,
 				);
 				if (result?.messages) {
 					const promptAttribution: "user" | "agent" | undefined =
@@ -4952,15 +4982,16 @@ export class AgentSession {
 						);
 					}
 				}
-
-				if (result?.systemPrompt !== undefined) {
-					this.agent.setSystemPrompt(result.systemPrompt);
-				} else {
-					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
-				}
-			} else {
-				this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+				resolvedSystemPrompt = result?.systemPrompt ?? resolvedSystemPrompt;
 			}
+			if (this.#contextManager?.active) {
+				resolvedSystemPrompt = await this.#contextManager.decorateSystemPrompt(
+					resolvedSystemPrompt,
+					undefined,
+					expandedText,
+				);
+			}
+			this.agent.setSystemPrompt(resolvedSystemPrompt);
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
 			if (this.#promptGeneration !== generation) {
@@ -5008,6 +5039,7 @@ export class AgentSession {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			this.#contextManager?.prepareOutgoingMessages(messages);
 			try {
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
@@ -5923,6 +5955,7 @@ export class AgentSession {
 				...options,
 				additionalDirectories: this.settings.get("workspace.additionalDirectories"),
 			});
+			await this.#contextManager?.rebind();
 			this.#bash.markSessionTransition(bashTransition);
 			sessionTransitioned = true;
 		} finally {
@@ -6013,6 +6046,7 @@ export class AgentSession {
 		}
 		this.#bash.markSessionTransition(bashTransition);
 		this.#bash.finishSessionTransition(bashTransition, true);
+		await this.#contextManager?.rebind();
 
 		// Copy artifacts directory if it exists
 		const oldArtifactDir = forkResult.oldSessionFile.slice(0, -6);
@@ -7053,6 +7087,7 @@ export class AgentSession {
 			if (switchingToDifferentSession) {
 				this.#clearSessionScopedToolState();
 			}
+			await this.#contextManager?.rebind();
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
@@ -7175,6 +7210,7 @@ export class AgentSession {
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 		}
+		await this.#contextManager?.rebind();
 		this.#clearSessionScopedToolState();
 		this.#rehydrateCheckpointRewindState();
 		this.#todo.syncFromBranch();
@@ -7272,6 +7308,7 @@ export class AgentSession {
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 		}
+		await this.#contextManager?.rebind();
 
 		this.#clearSessionScopedToolState();
 

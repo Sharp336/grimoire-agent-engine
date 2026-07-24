@@ -22,11 +22,13 @@ import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/mode
 import { tinyModelClient } from "../tiny/title-client";
 import { shortenPath } from "../tools/render-utils";
 import {
+	bindMnemopiConfigToProject,
 	loadMnemopiConfig,
 	type MnemopiBackendConfig,
 	type MnemopiProviderOptions,
 	truncateApproxTokens,
 } from "./config";
+import { MnemopiContextAdapter } from "./context-adapter";
 import {
 	getMnemopiScopedBanks,
 	getMnemopiScopedDbPaths,
@@ -68,8 +70,12 @@ async function installMnemopiState(session: AgentSession, config: MnemopiBackend
 	await previous?.dispose();
 	try {
 		state.attachSessionListeners();
+		if (session.contextManager?.active) {
+			session.contextManager.setMemoryAdapter(new MnemopiContextAdapter(state));
+		}
 		return state;
 	} catch (error) {
+		session.contextManager?.setMemoryAdapter(undefined);
 		setMnemopiSessionState(session, undefined);
 		await state.dispose({ consolidate: false });
 		throw error;
@@ -102,10 +108,16 @@ export const mnemopiBackend: MemoryBackend = {
 		}
 
 		try {
-			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
+			const loadedConfig = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
+			const contextStatus = session.contextManager?.status();
+			const config =
+				contextStatus?.active && contextStatus.projectId
+					? bindMnemopiConfigToProject(loadedConfig, contextStatus.projectId)
+					: loadedConfig;
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 			await installMnemopiState(session, config);
 		} catch (error) {
+			session.contextManager?.setMemoryAdapter(undefined);
 			logger.warn("Mnemopi: backend startup failed; memory backend inert.", { error: String(error) });
 		}
 	},
@@ -114,18 +126,20 @@ export const mnemopiBackend: MemoryBackend = {
 		const state = getMnemopiSessionState(session);
 		const primary = state?.aliasOf ?? state;
 		const parts = [STATIC_INSTRUCTIONS];
-		if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
+		if (!session?.contextManager?.active && primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
 		const rendered = parts.join("\n\n").trim();
 		if (!rendered) return undefined;
 		return truncateApproxTokens(rendered, settings.get("mnemopi.injectionTokenLimit"));
 	},
 
 	async beforeAgentStartPrompt(session, promptText): Promise<string | undefined> {
+		if (session.contextManager?.active) return undefined;
 		const state = getMnemopiSessionState(session);
 		return await state?.beforeAgentStartPrompt(promptText);
 	},
 
 	async clear(agentDir, _cwd, session): Promise<void> {
+		session?.contextManager?.setMemoryAdapter(undefined);
 		const previous = session ? setMnemopiSessionState(session, undefined) : undefined;
 		await previous?.dispose({ consolidate: false });
 		const config = previous?.config ?? (session ? loadMnemopiConfig(session.settings, agentDir) : undefined);

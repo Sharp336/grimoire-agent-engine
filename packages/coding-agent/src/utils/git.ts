@@ -31,6 +31,20 @@ export interface GitRepository {
 	isReftable?: boolean;
 }
 
+export interface GitCommitMetadata {
+	readonly sha: string;
+	readonly subject: string;
+	readonly body: string;
+	readonly author: string;
+	readonly committedAt: number;
+}
+
+export interface GitCommitMetadataOptions {
+	readonly since: number;
+	readonly maxCommits: number;
+	readonly signal?: AbortSignal;
+}
+
 export interface GitStatusSummary {
 	staged: number;
 	unstaged: number;
@@ -1676,6 +1690,43 @@ export const log = {
 			await runText(cwd, ["log", `-${count}`, "--oneline", "--no-decorate"], { readOnly: true, signal }),
 		);
 	},
+	/**
+	 * Non-merge commits reachable from HEAD, newest first. The NUL-delimited
+	 * format preserves multiline bodies without shell parsing or ambiguous
+	 * newline records.
+	 */
+	async metadata(cwd: string, options: GitCommitMetadataOptions): Promise<GitCommitMetadata[] | undefined> {
+		const maxCommits = Math.max(0, Math.floor(options.maxCommits));
+		if (maxCommits === 0) return [];
+		const result = await git(
+			cwd,
+			[
+				"log",
+				"HEAD",
+				"--no-merges",
+				`--since=${new Date(options.since).toISOString()}`,
+				`--max-count=${maxCommits}`,
+				"--format=%H%x00%ct%x00%an%x00%s%x00%b%x00",
+			],
+			{ readOnly: true, signal: options.signal },
+		);
+		if (result.exitCode !== 0) return undefined;
+		const fields = result.stdout.split("\0");
+		const commits: GitCommitMetadata[] = [];
+		for (let index = 0; index + 4 < fields.length; index += 5) {
+			const sha = fields[index]?.trim();
+			const committedSeconds = Number.parseInt(fields[index + 1] ?? "", 10);
+			if (!sha || !Number.isFinite(committedSeconds)) continue;
+			commits.push({
+				sha,
+				committedAt: committedSeconds * 1_000,
+				author: fields[index + 2] ?? "",
+				subject: fields[index + 3] ?? "",
+				body: (fields[index + 4] ?? "").trimEnd(),
+			});
+		}
+		return commits;
+	},
 };
 
 export const revList = {
@@ -2273,6 +2324,13 @@ export const repo = {
 		});
 		if (path.basename(commonDir.trim()) === ".git") return path.dirname(commonDir.trim());
 		return repoRoot;
+	},
+
+	/** Resolve the stable root commit shared by every clone/worktree of this repository. */
+	async rootCommit(cwd: string, signal?: AbortSignal): Promise<string | null> {
+		const result = await git(cwd, ["rev-list", "--max-parents=0", "HEAD"], { readOnly: true, signal });
+		if (result.exitCode !== 0) return null;
+		return splitLines(result.stdout).sort()[0] ?? null;
 	},
 
 	/**

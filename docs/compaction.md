@@ -106,14 +106,14 @@ The automatic paths are intentionally different:
   - Trigger: current-model assistant error is detected as context overflow and the error is not older than the latest compaction.
   - The failing assistant error message is removed from active agent state before retry.
   - Context promotion is tried first; if a configured larger model is available, the agent switches model and retries without compacting.
-  - If promotion is unavailable and compaction is enabled, context-full compaction runs with `reason: "overflow"` and `willRetry: true`; handoff strategy is not used for overflow because the handoff request would reuse the overflowing input.
+  - If promotion is unavailable and compaction is enabled, recovery uses the selected legacy strategy. With the default `managed` strategy this is `compaction.managedFallback` (`context-full` by default), because an already-overflowing request cannot run another managed-context pass.
   - On success, `agent.continue()` is scheduled to retry the turn.
 
 - **Incomplete-output recovery**
   - Trigger: same-model assistant message ends with `stopReason === "length"` and the message is not older than the latest compaction.
   - The incomplete assistant message is removed from active agent state before recovery.
   - Context promotion is tried first.
-  - If promotion is unavailable and compaction is enabled, auto maintenance runs with `reason: "incomplete"` and `willRetry: true`.
+  - If promotion is unavailable and compaction is enabled, auto maintenance runs with `reason: "incomplete"` and `willRetry: true`; `managed` delegates this recovery to `compaction.managedFallback`.
   - Unlike overflow, `compaction.strategy: "handoff"` is allowed for incomplete-output recovery because the input context is still usable.
   - On context-full success, `agent.continue()` is scheduled to retry the turn.
 
@@ -122,13 +122,38 @@ The automatic paths are intentionally different:
   - Mid-turn maintenance also checks safe tool-loop boundaries before the next provider request when `compaction.midTurnEnabled !== false`.
   - Tool-output pruning can reduce the measured token count before threshold comparison.
   - Context promotion is tried before post-turn compaction.
-  - If promotion is unavailable, auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
+  - If promotion is unavailable, legacy strategies run auto maintenance with `reason: "threshold"` and `willRetry: false`. Active `managed` context owns this threshold path inside the provider-context transform instead.
   - With `compaction.strategy: "handoff"`, post-turn threshold maintenance normally schedules a post-prompt auto-handoff task instead of writing a compaction entry; pre-prompt and mid-turn checks run inline to avoid racing the next turn. Mid-turn checks suppress handoff session resets and fall back to context-full compaction.
   - On success, if `compaction.autoContinue !== false`, post-turn maintenance schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`; mid-turn maintenance never schedules a separate continuation because the core loop already owns the next provider request.
 
 - **Idle maintenance**
   - Trigger: `runIdleCompaction()` when not streaming or already compacting.
   - Uses `reason: "idle"` and does not auto-continue afterward.
+
+### Managed strategy
+
+`compaction.strategy: "managed"` is the default. The coding agent—not `packages/agent` core compaction—owns this strategy through `packages/coding-agent/src/context-manager/`.
+
+- The append-only session JSONL remains canonical truth. Managed context never deletes or rewrites canonical messages; it stores only rebuildable SQLite state (stable message tags, drops, history compartments, facts, notes, search documents, embeddings, and leased jobs).
+- Provider-bound clones receive stable `§N§` markers. Queued reductions expand to complete user/assistant/tool protocol units, protect the newest tail and incomplete tool batches, and materialize only after the configured provider/model cache TTL or pressure threshold.
+- The historian summarizes older canonical units into validated P1/P2/P3 compartments. Results stage under a SQLite lease and publish atomically; invalid output leaves the active generation unchanged. Tier selection decays older compartments to fit the live history budget.
+- `/compact` first requests a managed wrapup. If managed context is inactive, fails validation, or cannot reclaim enough headroom, the request cleanly runs `compaction.managedFallback` instead of passing the `managed` marker to core compaction. Overflow and incomplete-output recovery use the same fallback (`context-full` by default).
+- Branch visibility is scoped to the leaf that created a drop or compartment. Rewinding before that leaf hides the derived state; file-backed session forks copy only state visible on the forked branch.
+- Retrieval combines SQLite FTS, optional Mnemopi embeddings, notes, facts, compartments, and opt-in bounded Git history. When `memory.backend: mnemopi`, Mnemopi is the only project/user long-term-memory store and the managed controller owns its single recall injection.
+- The hidden historian has no tools by default. Sidekick is disabled by default. Dreamer maintenance is activity-gated and SQLite-leased; Mnemopi-dependent tasks are cost-free no-ops while that backend is unavailable, and `maintain-docs` has no default schedule.
+
+User commands:
+
+- `/ctx-status` — tags, reductions, compartments, memory, search/embedding, historian, and job state.
+- `/ctx-flush` — force pending derived operations to a materialization boundary.
+- `/ctx-recomp [full|start-end]` — rebuild history compartments in the background.
+- `/ctx-wrapup [messages-to-keep]` — synchronously reduce older history before handoff/exit.
+- `/ctx-aug <prompt>` — optional fail-open sidekick augmentation.
+- `/ctx-embed [start|pause|status]` — control semantic embedding indexing; bounded Git indexing runs through configured background maintenance.
+- `/ctx-session-upgrade` — rebind/rebuild managed state for the current session.
+- `/ctx-dream [--force] [task|all]` — run one or all of the eleven maintenance tasks.
+
+Model tools available while managed context is active are `ctx_reduce`, `ctx_expand`, `ctx_search`, and `ctx_note`; `ctx_memory` appears only with an active Mnemopi adapter. See the matching pages under [`docs/tools/`](./tools/).
 
 ### Snapcompact strategy
 
@@ -399,6 +424,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
   - overflow path emits `Context overflow recovery failed: ...`
   - incomplete-output path emits `Incomplete response recovery failed: ...`
   - threshold/idle paths emit `Auto-compaction failed: ...`
+- Managed-context failures emit one warning and fail open through `compaction.managedFallback`; the core compaction package never executes the `managed` marker directly.
 - Branch summarization can be cancelled via abort signal (e.g., Escape), returning canceled/aborted navigation result.
 
 ## Settings and defaults
@@ -406,7 +432,8 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
-- `compaction.strategy` = `"snapcompact"` (`"context-full"`, `"handoff"`, `"shake"`, and `"off"` are also supported)
+- `compaction.strategy` = `"managed"` (`"context-full"`, `"handoff"`, `"shake"`, `"snapcompact"`, and `"off"` are also supported)
+- `compaction.managedFallback` = `"context-full"`
 - `compaction.reserveTokens` = `16384`
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`

@@ -1,0 +1,1 @@
+Refresh the supplied stale primer memories against current repository evidence. Search/read before deciding. Output `{ "actions": [{ "id": string, "action": "keep" | "update" | "invalidate", "content"?: string, "reason": string }] }`. Keep only still-useful standing retrieval instructions; update with a complete replacement; invalidate obsolete primers.

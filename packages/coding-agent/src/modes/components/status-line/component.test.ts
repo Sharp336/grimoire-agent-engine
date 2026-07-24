@@ -4,7 +4,11 @@ import type { AgentSession } from "../../../session/agent-session";
 import { getThemeByName, setThemeInstance } from "../../theme/theme";
 import { StatusLineComponent } from "./component";
 
-function makeSessionWithLastMessage(lastMessage: unknown, prewalkArmed: boolean = false) {
+function makeSessionWithLastMessage(
+	lastMessage: unknown,
+	prewalkArmed = false,
+	managedState?: "pending" | "historian" | "error",
+) {
 	return {
 		messages: lastMessage ? [lastMessage] : [],
 		model: { contextWindow: 128000 },
@@ -13,6 +17,7 @@ function makeSessionWithLastMessage(lastMessage: unknown, prewalkArmed: boolean 
 		agent: { state: { tools: [] } },
 		skills: [],
 		getContextUsage: () => ({ tokens: 42, contextWindow: 128000 }),
+		contextManager: managedState ? { statusLineState: () => managedState } : undefined,
 		state: {
 			messages: lastMessage ? [lastMessage] : [],
 			model: { contextWindow: 128000 },
@@ -80,5 +85,16 @@ describe("StatusLineComponent", () => {
 		// SGR codes might be included, so we check if the stripped content contains "Prewalk"
 		const stripped = border.content.replace(/\x1b\[[0-9;]*m/g, "");
 		expect(stripped).toContain("Prewalk");
+	});
+
+	it("annotates the existing context segment only while managed context has activity", () => {
+		const managed = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, "historian") as unknown as AgentSession,
+		);
+		const inactive = new StatusLineComponent(makeSessionWithLastMessage(null) as unknown as AgentSession);
+		const managedText = managed.getTopBorder(120).content.replace(/\x1b\[[0-9;]*m/g, "");
+		const inactiveText = inactive.getTopBorder(120).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(managedText).toContain("historian");
+		expect(inactiveText).not.toContain("historian");
 	});
 });

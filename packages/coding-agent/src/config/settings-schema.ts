@@ -133,7 +133,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Agent",
 		"Git",
 	],
-	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
+	context: ["General", "Compaction", "Managed Context", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
@@ -2104,15 +2104,20 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.strategy": {
 		type: "enum",
-		values: ["context-full", "handoff", "shake", "snapcompact", "off"] as const,
-		default: "snapcompact",
+		values: ["managed", "context-full", "handoff", "shake", "snapcompact", "off"] as const,
+		default: "managed",
 		ui: {
 			tab: "context",
 			group: "Compaction",
 			label: "Compaction Strategy",
 			description:
-				"Choose in-place context-full maintenance, auto-handoff, surgical shake (drop heavy content), snapcompact (archive history as dense images), or disable auto maintenance (off)",
+				"Choose managed tiered history, in-place context-full maintenance, auto-handoff, surgical shake, snapcompact image archives, or disable auto maintenance",
 			options: [
+				{
+					value: "managed",
+					label: "Managed",
+					description: "Continuously reduce and tier history while preserving the canonical session",
+				},
 				{
 					value: "context-full",
 					label: "Context-full",
@@ -2136,6 +2141,370 @@ export const SETTINGS_SCHEMA = {
 				},
 			],
 		},
+	},
+
+	"compaction.managedFallback": {
+		type: "enum",
+		values: ["context-full", "handoff", "shake", "snapcompact"] as const,
+		default: "context-full",
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Managed Fallback",
+			description: "Legacy strategy used when managed context cannot recover enough provider headroom",
+			options: [
+				{ value: "context-full", label: "Context-full" },
+				{ value: "handoff", label: "Handoff" },
+				{ value: "shake", label: "Shake" },
+				{ value: "snapcompact", label: "Snapcompact" },
+			],
+		},
+	},
+
+	"contextManager.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Managed Context",
+			description: "Enable branch-aware reductions, tiered history, retrieval, and background maintenance",
+		},
+	},
+	"contextManager.language": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.cacheTtl": {
+		type: "record",
+		default: { default: "5m" } as Record<string, string>,
+	},
+	"contextManager.executeThresholdPercent": {
+		type: "record",
+		default: { default: 65 } as Record<string, number>,
+	},
+	"contextManager.executeThresholdTokens": {
+		type: "record",
+		default: {} as Record<string, number>,
+	},
+	"contextManager.protectedTags": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.clearReasoningAge": {
+		type: "number",
+		default: 50,
+	},
+	"contextManager.historyBudgetPercent": {
+		type: "number",
+		default: 0.15,
+	},
+	"contextManager.temporalAwareness": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Temporal Awareness",
+			description: "Annotate stable user-message gaps and compartment date ranges",
+		},
+	},
+	"contextManager.smartDrops": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Smart Drops",
+			description: "Enable deterministic cleanup for stale todo, status, note, and edit evidence",
+		},
+	},
+	"contextManager.caveman.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Caveman Compression",
+			description: "Compress eligible old prose while preserving structured content",
+		},
+	},
+	"contextManager.caveman.minChars": {
+		type: "number",
+		default: 1200,
+	},
+	"contextManager.historian.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Historian",
+			description: "Build validated multi-tier compartments from canonical session history",
+		},
+	},
+	"contextManager.historian.chunkTokens": {
+		type: "number",
+		default: 30000,
+	},
+	"contextManager.historian.timeoutMs": {
+		type: "number",
+		default: 300000,
+	},
+	"contextManager.historian.twoPass": {
+		type: "boolean",
+		default: false,
+	},
+	"contextManager.historian.tools": {
+		type: "array",
+		default: [] as string[],
+	},
+	"contextManager.commitCluster.enabled": {
+		type: "boolean",
+		default: true,
+	},
+	"contextManager.commitCluster.minClusters": {
+		type: "number",
+		default: 3,
+	},
+	"contextManager.memory.injectionBudgetTokens": {
+		type: "number",
+		default: 4000,
+	},
+	"contextManager.memory.autoPromote": {
+		type: "boolean",
+		default: true,
+	},
+	"contextManager.memory.retrievalPromotionThreshold": {
+		type: "number",
+		default: 3,
+	},
+	"contextManager.autoSearch.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Automatic Recall",
+			description: "Attach a bounded, stable retrieval hint to substantive new user turns",
+		},
+	},
+	"contextManager.autoSearch.scoreThreshold": {
+		type: "number",
+		default: 0.6,
+	},
+	"contextManager.autoSearch.minPromptChars": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.gitCommitIndexing.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Git Commit Index",
+			description: "Index bounded HEAD-reachable non-merge commit history for retrieval",
+		},
+	},
+	"contextManager.gitCommitIndexing.sinceDays": {
+		type: "number",
+		default: 365,
+	},
+	"contextManager.gitCommitIndexing.maxCommits": {
+		type: "number",
+		default: 2000,
+	},
+	"contextManager.embeddings.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Semantic Index",
+			description: "Use the configured Mnemopi embedding provider in addition to full-text search",
+		},
+	},
+	"contextManager.sidekick.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Sidekick",
+			description: "Allow /ctx-aug to gather bounded read-only context before sending a prompt",
+		},
+	},
+	"contextManager.sidekick.timeoutMs": {
+		type: "number",
+		default: 30000,
+	},
+	"contextManager.dreamer.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Managed Context",
+			label: "Dreamer Scheduler",
+			description: "Enable activity-gated background context and memory maintenance",
+		},
+	},
+	"contextManager.dreamer.injectDocs": {
+		type: "boolean",
+		default: true,
+	},
+	"contextManager.sqlite.cacheSizeMb": {
+		type: "number",
+		default: 64,
+	},
+	"contextManager.sqlite.mmapSizeMb": {
+		type: "number",
+		default: 0,
+	},
+	"contextManager.debug": {
+		type: "boolean",
+		default: false,
+	},
+
+	"contextManager.dreamer.tasks.map-memories.schedule": {
+		type: "string",
+		default: "0 2 * * *",
+	},
+	"contextManager.dreamer.tasks.map-memories.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.map-memories.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.verify.schedule": {
+		type: "string",
+		default: "0 3 * * *",
+	},
+	"contextManager.dreamer.tasks.verify.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.verify.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.verify-broad.schedule": {
+		type: "string",
+		default: "0 4 * * 0",
+	},
+	"contextManager.dreamer.tasks.verify-broad.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.verify-broad.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.curate.schedule": {
+		type: "string",
+		default: "0 4 * * 0",
+	},
+	"contextManager.dreamer.tasks.curate.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.curate.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.classify-memories.schedule": {
+		type: "string",
+		default: "0 6 * * *",
+	},
+	"contextManager.dreamer.tasks.classify-memories.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.classify-memories.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.retrospective.schedule": {
+		type: "string",
+		default: "0 5 * * *",
+	},
+	"contextManager.dreamer.tasks.retrospective.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.retrospective.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.maintain-docs.schedule": {
+		type: "string",
+		default: "",
+	},
+	"contextManager.dreamer.tasks.maintain-docs.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.maintain-docs.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.promote-primers.schedule": {
+		type: "string",
+		default: "0 3 * * *",
+	},
+	"contextManager.dreamer.tasks.promote-primers.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.promote-primers.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.promote-primers.promotionThreshold": {
+		type: "number",
+		default: 2,
+	},
+	"contextManager.dreamer.tasks.refresh-primers.schedule": {
+		type: "string",
+		default: "0 3 * * *",
+	},
+	"contextManager.dreamer.tasks.refresh-primers.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.refresh-primers.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.evaluate-smart-notes.schedule": {
+		type: "string",
+		default: "0 3 * * *",
+	},
+	"contextManager.dreamer.tasks.evaluate-smart-notes.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.evaluate-smart-notes.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.review-user-memories.schedule": {
+		type: "string",
+		default: "0 3 * * *",
+	},
+	"contextManager.dreamer.tasks.review-user-memories.model": {
+		type: "string",
+		default: undefined,
+	},
+	"contextManager.dreamer.tasks.review-user-memories.timeoutMinutes": {
+		type: "number",
+		default: 20,
+	},
+	"contextManager.dreamer.tasks.review-user-memories.promotionThreshold": {
+		type: "number",
+		default: 3,
 	},
 
 	"compaction.thresholdPercent": {
@@ -5442,7 +5811,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	strategy: "managed" | "context-full" | "handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number | undefined;

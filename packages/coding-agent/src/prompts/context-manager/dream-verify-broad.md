@@ -1,0 +1,1 @@
+Broadly verify the sampled stale or unmapped project memories against the current repository. Search and read evidence before deciding. Output `{ "actions": [{ "id": string, "action": "keep" | "update" | "invalidate", "content"?: string, "backingFiles"?: string[], "fileIndependent"?: boolean, "reason": string }] }`. Omit unsupported claims rather than guessing.
