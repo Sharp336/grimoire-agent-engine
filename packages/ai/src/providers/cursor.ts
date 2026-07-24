@@ -163,6 +163,53 @@ export interface CursorOptions extends StreamOptions {
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 
+/**
+ * Tracks whether the current logical turn has crossed a boundary that makes
+ * re-sending the initial request unsafe. A transient transport failure is only
+ * replayed while every bit is still false: once the server has spoken, written
+ * a checkpoint, or we have sent an outbound side effect (a server-executed tool
+ * result / KV response), retrying would duplicate work or corrupt state.
+ */
+export interface CursorReplayState {
+	sawServerMessage: boolean;
+	sawCheckpoint: boolean;
+	sentSideEffect: boolean;
+}
+
+/** Hard maximum of total Run attempts (initial try + replay-safe retries). */
+const CURSOR_MAX_ATTEMPTS = 3;
+const CURSOR_RETRY_BASE_MS = 250;
+const CURSOR_RETRY_CAP_MS = 2_000;
+
+/** Whether a failed attempt is a transient transport failure worth replaying. */
+function isCursorRetryableTransportError(error: unknown): boolean {
+	const id = AIError.classify(error, "cursor-agent" as Api);
+	if (
+		AIError.is(id, AIError.Flag.Abort) ||
+		AIError.is(id, AIError.Flag.UserInterrupt) ||
+		AIError.is(id, AIError.Flag.SilentAbort) ||
+		AIError.is(id, AIError.Flag.AuthFailed)
+	) {
+		return false;
+	}
+	return AIError.is(id, AIError.Flag.Transient);
+}
+
+/** Abortable capped full-jitter backoff between replay-safe retries. */
+async function cursorRetryDelay(attempt: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return;
+	const cap = Math.min(CURSOR_RETRY_CAP_MS, CURSOR_RETRY_BASE_MS * 2 ** (attempt - 1));
+	const delay = Math.random() * cap;
+	const aborted = Promise.withResolvers<void>();
+	const onAbort = () => aborted.resolve();
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		await Promise.race([Bun.sleep(delay), aborted.promise]);
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 interface CursorLogEntry {
 	ts: number;
 	type: string;
@@ -375,34 +422,44 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			timestamp: Date.now(),
 		};
 
-		let h2Client: http2.ClientHttp2Session | null = null;
-		let h2Request: http2.ClientHttp2Stream | null = null;
-		let heartbeatTimer: NodeJS.Timeout | null = null;
-		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
-		const h2Completion = Promise.withResolvers<void>();
-		let h2Settled = false;
-		let sawTurnEnded = false;
-		let endStreamError: Error | null = null;
-		const settleH2 = (error?: unknown): void => {
-			if (h2Settled) return;
-			h2Settled = true;
-			if (error !== undefined) {
-				h2Completion.reject(error);
-				return;
-			}
-			if (endStreamError) {
-				h2Completion.reject(endStreamError);
-				return;
-			}
-			if (!sawTurnEnded) {
-				h2Completion.reject(
-					new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
-						kind: "incomplete-stream",
-					}),
-				);
-				return;
-			}
-			h2Completion.resolve();
+		const replayState: CursorReplayState = {
+			sawServerMessage: false,
+			sawCheckpoint: false,
+			sentSideEffect: false,
+		};
+
+		let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
+		let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
+		let currentToolCall: ToolCallState | null = null;
+		const resolvedMcpToolCallIds = new Set<string>();
+		const usageState: UsageState = { sawTokenDelta: false };
+
+		const state: BlockState = {
+			get currentTextBlock() {
+				return currentTextBlock;
+			},
+			get currentThinkingBlock() {
+				return currentThinkingBlock;
+			},
+			get currentToolCall() {
+				return currentToolCall;
+			},
+			resolvedMcpToolCallIds,
+			get firstTokenTime() {
+				return firstTokenTime;
+			},
+			setTextBlock: b => {
+				currentTextBlock = b;
+			},
+			setThinkingBlock: b => {
+				currentThinkingBlock = b;
+			},
+			setToolCall: t => {
+				currentToolCall = t;
+			},
+			setFirstTokenTime: () => {
+				if (!firstTokenTime) firstTokenTime = performance.now();
+			},
 		};
 
 		try {
@@ -425,198 +482,248 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
-			const requestHeaders = {
-				":method": "POST",
-				":path": requestPath,
-				"content-type": "application/connect+proto",
-				"connect-protocol-version": "1",
-				te: "trailers",
-				authorization: `Bearer ${apiKey}`,
-				"x-ghost-mode": "true",
-				"x-cursor-client-version": CURSOR_CLIENT_VERSION,
-				"x-cursor-client-type": "cli",
-				"x-request-id": crypto.randomUUID(),
-			};
-			const debugSession = isRequestDebugEnabled()
-				? await createRequestDebugSession({
-						protocol: "http2",
-						method: "POST",
-						url: new URL(requestPath, baseUrl).toString(),
-						headers: requestHeaders,
-						bodyBase64: Buffer.from(requestBytes).toString("base64"),
-					})
-				: undefined;
-
-			const proxyUrl = shouldBypassProxy(new URL(baseUrl)) ? undefined : getProxyForProvider(model.provider);
-			if (proxyUrl) {
-				const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
-					signal: options?.signal,
-					timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
-				});
-				h2Client = http2.connect(baseUrl, {
-					createConnection: () => tlsSocket,
-				});
-			} else {
-				h2Client = http2.connect(baseUrl);
-			}
-			h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
-
-			h2Request = h2Client.request(requestHeaders);
-
-			stream.push({ type: "start", partial: output });
-
-			let pendingBuffer = Buffer.alloc(0);
-			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
-			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
-			let currentToolCall: ToolCallState | null = null;
-			const resolvedMcpToolCallIds = new Set<string>();
-			const usageState: UsageState = { sawTokenDelta: false };
-
-			const state: BlockState = {
-				get currentTextBlock() {
-					return currentTextBlock;
-				},
-				get currentThinkingBlock() {
-					return currentThinkingBlock;
-				},
-				get currentToolCall() {
-					return currentToolCall;
-				},
-				resolvedMcpToolCallIds,
-				get firstTokenTime() {
-					return firstTokenTime;
-				},
-				setTextBlock: b => {
-					currentTextBlock = b;
-				},
-				setThinkingBlock: b => {
-					currentThinkingBlock = b;
-				},
-				setToolCall: t => {
-					currentToolCall = t;
-				},
-				setFirstTokenTime: () => {
-					if (!firstTokenTime) firstTokenTime = performance.now();
-				},
-			};
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
+				replayState.sawCheckpoint = true;
 				conversationStateCache.set(conversationId, checkpoint);
 			};
 
-			h2Request.on("response", headers => {
-				debugResponseLogPromise = debugSession?.openResponseLog(
-					`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
-					headers,
-				);
-			});
+			stream.push({ type: "start", partial: output });
 
-			h2Request.on("data", (chunk: Buffer) => {
-				if (debugResponseLogPromise) {
-					void debugResponseLogPromise.then(log => {
-						log?.write(chunk);
-					});
-				}
-				pendingBuffer = Buffer.concat([pendingBuffer, chunk]);
-
-				while (pendingBuffer.length >= 5) {
-					const flags = pendingBuffer[0];
-					const msgLen = pendingBuffer.readUInt32BE(1);
-					if (pendingBuffer.length < 5 + msgLen) break;
-
-					const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
-					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
-
-					if (flags & CONNECT_END_STREAM_FLAG) {
-						const endError = parseConnectEndStream(messageBytes);
-						if (endError) {
-							endStreamError = endError;
-							h2Request?.close();
-						}
-						continue;
+			// One Run attempt: open the HTTP/2 stream, send the (replay-safe) request,
+			// pump server messages, and settle on clean end / error. Owns its own
+			// per-attempt transport so a replay-safe retry starts from a clean slate.
+			const runAttempt = async (): Promise<void> => {
+				let h2Client: http2.ClientHttp2Session | null = null;
+				let h2Request: http2.ClientHttp2Stream | null = null;
+				let heartbeatTimer: NodeJS.Timeout | null = null;
+				let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
+				let pendingBuffer = Buffer.alloc(0);
+				const h2Completion = Promise.withResolvers<void>();
+				let h2Settled = false;
+				let sawTurnEnded = false;
+				let endStreamError: Error | null = null;
+				const settleH2 = (error?: unknown): void => {
+					if (h2Settled) return;
+					h2Settled = true;
+					if (error !== undefined) {
+						h2Completion.reject(error);
+						return;
 					}
+					if (endStreamError) {
+						h2Completion.reject(endStreamError);
+						return;
+					}
+					if (!sawTurnEnded) {
+						h2Completion.reject(
+							new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
+								kind: "incomplete-stream",
+							}),
+						);
+						return;
+					}
+					h2Completion.resolve();
+				};
+				const closeDebugLog = async (): Promise<void> => {
+					const log = await debugResponseLogPromise;
+					await log?.close();
+				};
 
-					try {
-						const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
-						const isTurnEnded =
-							serverMessage.message.case === "interactionUpdate" &&
-							serverMessage.message.value.message?.case === "turnEnded";
-						void handleServerMessage(
-							serverMessage,
-							output,
-							stream,
-							state,
-							blobStore,
-							h2Request!,
-							options?.execHandlers,
-							options?.onToolResult,
-							usageState,
-							requestContextTools,
-							onConversationCheckpoint,
-						).catch(error => {
-							log("error", "handleServerMessage", { error: String(error) });
+				try {
+					const requestHeaders = {
+						":method": "POST",
+						":path": requestPath,
+						"content-type": "application/connect+proto",
+						"connect-protocol-version": "1",
+						te: "trailers",
+						authorization: `Bearer ${apiKey}`,
+						"x-ghost-mode": "true",
+						"x-cursor-client-version": CURSOR_CLIENT_VERSION,
+						"x-cursor-client-type": "cli",
+						"x-request-id": crypto.randomUUID(),
+					};
+					const debugSession = isRequestDebugEnabled()
+						? await createRequestDebugSession({
+								protocol: "http2",
+								method: "POST",
+								url: new URL(requestPath, baseUrl).toString(),
+								headers: requestHeaders,
+								bodyBase64: Buffer.from(requestBytes).toString("base64"),
+							})
+						: undefined;
+
+					const proxyUrl = shouldBypassProxy(new URL(baseUrl)) ? undefined : getProxyForProvider(model.provider);
+					if (proxyUrl) {
+						const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
+							signal: options?.signal,
+							timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
 						});
+						h2Client = http2.connect(baseUrl, {
+							createConnection: () => tlsSocket,
+						});
+					} else {
+						h2Client = http2.connect(baseUrl);
+					}
+					h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
 
-						// Application completion is not protocol success; wait for a clean HTTP/2 end.
-						if (isTurnEnded) {
-							sawTurnEnded = true;
+					h2Request = h2Client.request(requestHeaders);
+					const activeRequest = h2Request;
+
+					const sendHeartbeat = () => {
+						if (activeRequest.closed) {
+							return;
 						}
-					} catch (e) {
-						log("error", "parseServerMessage", { error: String(e) });
+						const heartbeatMessage = create(AgentClientMessageSchema, {
+							message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
+						});
+						const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
+						activeRequest.write(frameConnectMessage(heartbeatBytes));
+					};
+
+					activeRequest.on("response", headers => {
+						debugResponseLogPromise = debugSession?.openResponseLog(
+							`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
+							headers,
+						);
+					});
+
+					activeRequest.on("data", (chunk: Buffer) => {
+						if (debugResponseLogPromise) {
+							void debugResponseLogPromise.then(log => {
+								log?.write(chunk);
+							});
+						}
+						pendingBuffer = Buffer.concat([pendingBuffer, chunk]);
+
+						while (pendingBuffer.length >= 5) {
+							const flags = pendingBuffer[0];
+							const msgLen = pendingBuffer.readUInt32BE(1);
+							if (pendingBuffer.length < 5 + msgLen) break;
+
+							const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
+							pendingBuffer = pendingBuffer.subarray(5 + msgLen);
+
+							if (flags & CONNECT_END_STREAM_FLAG) {
+								const endError = parseConnectEndStream(messageBytes);
+								if (endError) {
+									endStreamError = endError;
+									activeRequest.close();
+								}
+								continue;
+							}
+
+							try {
+								const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
+								// A decoded server message means the turn has started; replaying the
+								// request would now duplicate server work.
+								replayState.sawServerMessage = true;
+								if (
+									serverMessage.message.case === "execServerMessage" ||
+									serverMessage.message.case === "kvServerMessage"
+								) {
+									replayState.sentSideEffect = true;
+								}
+								const isTurnEnded =
+									serverMessage.message.case === "interactionUpdate" &&
+									serverMessage.message.value.message?.case === "turnEnded";
+								void handleServerMessage(
+									serverMessage,
+									output,
+									stream,
+									state,
+									blobStore,
+									activeRequest,
+									options?.execHandlers,
+									options?.onToolResult,
+									usageState,
+									requestContextTools,
+									onConversationCheckpoint,
+								).catch(error => {
+									log("error", "handleServerMessage", { error: String(error) });
+								});
+
+								// Application completion is not protocol success; wait for a clean HTTP/2 end.
+								if (isTurnEnded) {
+									sawTurnEnded = true;
+								}
+							} catch (e) {
+								log("error", "parseServerMessage", { error: String(e) });
+							}
+						}
+					});
+
+					activeRequest.on("trailers", trailers => {
+						const status = trailers["grpc-status"];
+						const msg = trailers["grpc-message"];
+						if (status && status !== "0" && !endStreamError) {
+							endStreamError = new AIError.ProviderResponseError(
+								`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
+								{ kind: "envelope" },
+							);
+						}
+					});
+
+					activeRequest.on("end", () => {
+						void closeDebugLog()
+							.then(() => settleH2())
+							.catch(error => settleH2(error));
+					});
+
+					activeRequest.on("error", error => {
+						const mapped = mapH2TransportError(error, baseUrl);
+						void closeDebugLog().finally(() => settleH2(mapped));
+					});
+
+					if (options?.signal) {
+						options.signal.addEventListener(
+							"abort",
+							() => {
+								activeRequest.close();
+								void closeDebugLog().finally(() => {
+									settleH2(new AIError.AbortError());
+								});
+							},
+							{ once: true },
+						);
+					}
+
+					activeRequest.write(frameConnectMessage(requestBytes));
+					heartbeatTimer = setInterval(sendHeartbeat, 5000);
+					await h2Completion.promise;
+				} finally {
+					const log = await debugResponseLogPromise;
+					await log?.close();
+					if (heartbeatTimer) {
+						clearInterval(heartbeatTimer);
+						heartbeatTimer = null;
+					}
+					h2Request?.close();
+					h2Client?.close();
+				}
+			};
+
+			for (let attempt = 1; ; attempt++) {
+				try {
+					await runAttempt();
+					break;
+				} catch (error) {
+					const replaySafe =
+						!replayState.sawServerMessage && !replayState.sawCheckpoint && !replayState.sentSideEffect;
+					if (
+						attempt >= CURSOR_MAX_ATTEMPTS ||
+						!replaySafe ||
+						options?.signal?.aborted ||
+						!isCursorRetryableTransportError(error)
+					) {
+						throw error;
+					}
+					log("retry", "transient", { attempt, error: String(error) });
+					await cursorRetryDelay(attempt, options?.signal);
+					if (options?.signal?.aborted) {
+						throw new AIError.AbortError();
 					}
 				}
-			});
-
-			const sendHeartbeat = () => {
-				if (!h2Request || h2Request.closed) {
-					return;
-				}
-				const heartbeatMessage = create(AgentClientMessageSchema, {
-					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
-				});
-				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				h2Request.write(frameConnectMessage(heartbeatBytes));
-			};
-
-			const closeDebugLog = async (): Promise<void> => {
-				const log = await debugResponseLogPromise;
-				await log?.close();
-			};
-
-			h2Request.on("trailers", trailers => {
-				const status = trailers["grpc-status"];
-				const msg = trailers["grpc-message"];
-				if (status && status !== "0" && !endStreamError) {
-					endStreamError = new AIError.ProviderResponseError(
-						`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
-						{ kind: "envelope" },
-					);
-				}
-			});
-
-			h2Request.on("end", () => {
-				void closeDebugLog()
-					.then(() => settleH2())
-					.catch(error => settleH2(error));
-			});
-
-			h2Request.on("error", error => {
-				const mapped = mapH2TransportError(error, baseUrl);
-				void closeDebugLog().finally(() => settleH2(mapped));
-			});
-
-			if (options?.signal) {
-				options.signal.addEventListener("abort", () => {
-					h2Request?.close();
-					void closeDebugLog().finally(() => {
-						settleH2(new AIError.AbortError());
-					});
-				});
 			}
-
-			h2Request.write(frameConnectMessage(requestBytes));
-			heartbeatTimer = setInterval(sendHeartbeat, 5000);
-			await h2Completion.promise;
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
@@ -652,15 +759,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
-		} finally {
-			const log = await debugResponseLogPromise;
-			await log?.close();
-			if (heartbeatTimer) {
-				clearInterval(heartbeatTimer);
-				heartbeatTimer = null;
-			}
-			h2Request?.close();
-			h2Client?.close();
 		}
 	})();
 
