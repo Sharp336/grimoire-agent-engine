@@ -183,6 +183,101 @@ pub struct PsRunResult {
 	pub exec_id:    u32,
 }
 
+/// Windows Job Object wrapper: catches descendants whose immediate parent
+/// has already exited by the time `dispose()` runs, which the ppid-based
+/// `core_process::Process::children()`/`descendants()` walk can never find —
+/// once an intermediate process exits, Windows drops its process-table entry
+/// entirely and does not reparent orphaned children to anything discoverable
+/// from the root. Any process created (directly or transitively) by a job
+/// member automatically joins the same job unless it opts out with
+/// `CREATE_BREAKAWAY_FROM_JOB`, so `TerminateJobObject` reaches the whole
+/// tree regardless of how many intermediates have already died — the
+/// Windows analogue of the POSIX process-group kill above. Declared as raw
+/// `kernel32` FFI (matching `pi_shell::process`'s convention) rather than
+/// pulling in `windows-sys`'s `Win32_System_JobObjects` feature for four
+/// functions.
+#[cfg(windows)]
+mod win_job {
+	use std::os::windows::io::RawHandle;
+
+	#[link(name = "kernel32")]
+	unsafe extern "system" {
+		fn CreateJobObjectW(
+			lpJobAttributes: *const core::ffi::c_void,
+			lpName: *const u16,
+		) -> RawHandle;
+		fn AssignProcessToJobObject(hJob: RawHandle, hProcess: RawHandle) -> i32;
+		fn TerminateJobObject(hJob: RawHandle, uExitCode: u32) -> i32;
+		fn CloseHandle(hObject: RawHandle) -> i32;
+	}
+
+	/// Owned job object handle. `Drop` only closes the handle (no
+	/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is set), so letting a `JobHandle`
+	/// go out of scope on the normal exit path never kills a still-running
+	/// tree — `terminate()` is the only thing that does that, called
+	/// explicitly from `dispose()`'s clean-exit branch.
+	pub struct JobHandle(RawHandle);
+
+	// SAFETY: a Win32 HANDLE has no thread affinity; every job-object call
+	// here is safe to issue from any thread.
+	unsafe impl Send for JobHandle {}
+	// SAFETY: see the `Send` impl above — same rationale.
+	unsafe impl Sync for JobHandle {}
+
+	impl JobHandle {
+		/// Create an unnamed job object and assign `process_handle` (the pwsh
+		/// sidecar's own process handle) to it. Returns `None` on failure
+		/// (e.g. a sandboxed environment that denies job-object creation) —
+		/// callers fall back to the existing direct-children sweep in that
+		/// case, so this is a best-effort improvement, not a hard dependency.
+		pub fn create_for(process_handle: RawHandle) -> Option<Self> {
+			// SAFETY: `CreateJobObjectW` takes only by-value/null arguments and
+			// does not dereference caller memory; a null name creates an
+			// unnamed job.
+			let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+			if job.is_null() {
+				return None;
+			}
+			// SAFETY: `job` was just created above and `process_handle` is a
+			// valid handle owned by the caller (the sidecar's own `Child`);
+			// neither argument is dereferenced.
+			if unsafe { AssignProcessToJobObject(job, process_handle) } == 0 {
+				// SAFETY: `job` is a valid handle this function owns exclusively
+				// up to this point; closing it here (the assign failed) leaks
+				// nothing and nothing else can reference it yet.
+				unsafe { CloseHandle(job) };
+				return None;
+			}
+			Some(Self(job))
+		}
+
+		/// Terminate every process still in the job — root and every live
+		/// descendant, including ones whose immediate parent already exited.
+		pub fn terminate(&self) {
+			// SAFETY: `self.0` is a valid job handle for the lifetime of `self`.
+			unsafe { TerminateJobObject(self.0, 1) };
+		}
+	}
+
+	impl Drop for JobHandle {
+		fn drop(&mut self) {
+			// SAFETY: `self.0` is a valid handle owned solely by this `JobHandle`;
+			// nothing else holds or uses it after this point.
+			unsafe { CloseHandle(self.0) };
+		}
+	}
+}
+
+/// Platform-specific job/group handle slot on `HostCore`. On Windows this is
+/// the `win_job::JobHandle` assigned at spawn; elsewhere it's an uninhabited
+/// placeholder (`Mutex<Option<Infallible>>` is always `None`) so the field
+/// itself needs no `#[cfg]` attribute — keeping it out of `HostCore`'s
+/// rustfmt alignment group.
+#[cfg(windows)]
+type PsHostJob = win_job::JobHandle;
+#[cfg(not(windows))]
+type PsHostJob = std::convert::Infallible;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Host core
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,6 +303,7 @@ struct HostCore {
 	req_rx:         Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
 	pending:        Mutex<HashMap<u32, Pending>>,
 	process:        Mutex<Option<core_process::Process>>,
+	job:            Mutex<Option<PsHostJob>>,
 	ready_tx:       watch::Sender<ReadyState>,
 	ready_rx:       watch::Receiver<ReadyState>,
 	stderr_tail:    Mutex<String>,
@@ -618,6 +714,7 @@ impl PsHost {
 			req_rx: Mutex::new(Some(req_rx)),
 			pending: Mutex::new(HashMap::new()),
 			process: Mutex::new(None),
+			job: Mutex::new(None),
 			ready_tx,
 			ready_rx,
 			stderr_tail: Mutex::new(String::new()),
@@ -782,11 +879,25 @@ impl PsHost {
 				// `kill_process_group` has no root-Running gate, so it works
 				// even though the root is already dead by this point. A
 				// no-op on Windows (`group_id()` is always `None` there; no
-				// POSIX process-group equivalent), where the direct-children
-				// sweep below remains the only cross-depth-1 cleanup.
+				// POSIX process-group equivalent) — `TerminateJobObject` below
+				// covers that platform instead.
 				if let Some(pgid) = pgid_before_exit {
 					let _ = core_process::kill_process_group(pgid, core_process::TERM_SIGNAL);
 					let _ = core_process::kill_process_group(pgid, core_process::KILL_SIGNAL);
+				}
+				// Windows has no process-group equivalent, and `children()`'s
+				// ppid-chain walk can't find a grandchild once its immediate
+				// parent has already exited (the OS drops that process-table
+				// entry entirely rather than reparenting). `TerminateJobObject`
+				// reaches every process the sidecar or any of its descendants
+				// ever spawned, independent of how many intermediates in the
+				// chain have since died — see `win_job` for why.
+				#[cfg(windows)]
+				{
+					let job = self.core.job.lock().take();
+					if let Some(job) = job {
+						job.terminate();
+					}
 				}
 				for child in children_before_exit {
 					let _ = child
@@ -954,6 +1065,14 @@ async fn supervise(core: Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>
 	let pid = child.id().map_or(0, |pid| pid as i32);
 	core.pid.store(pid, Ordering::Relaxed);
 	*core.process.lock() = core_process::Process::from_pid(pid);
+	// Assign to a job object immediately after spawn, before pwsh has had any
+	// realistic chance to spawn its own children — job membership is what
+	// lets `dispose()` reap descendants even after an intermediate process
+	// (e.g. a wrapper `cmd.exe`) has already exited by teardown time.
+	#[cfg(windows)]
+	if let Some(handle) = child.raw_handle() {
+		*core.job.lock() = win_job::JobHandle::create_for(handle);
+	}
 
 	let stdin = child.stdin.take().expect("child stdin piped");
 	let stdout = child.stdout.take().expect("child stdout piped");
@@ -1973,6 +2092,99 @@ mod tests {
 			reaped,
 			"dispose() must reap a reparented grandchild via process-group signaling even when the \
 			 root exits cleanly (pid {pid})"
+		);
+	}
+
+	/// Windows has no process-group equivalent, and `children()`'s
+	/// ppid-chain walk can't find a grandchild once its immediate parent has
+	/// already exited -- Windows drops the parent's process-table entry
+	/// entirely rather than reparenting, so by the time `dispose()`
+	/// snapshots `children_before_exit` the wrapper (`cmd.exe` here) is
+	/// already gone and the grandchild is invisible to any ppid-based walk
+	/// from the root. The Job Object every sidecar descendant automatically
+	/// joins at spawn time is the only thing that still reaches it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dispose_reaps_a_windows_grandchild_after_its_wrapper_parent_already_exited() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+		if !cfg!(windows) {
+			eprintln!(
+				"skipping pshost test: Windows-only (Job Object reap path; POSIX is covered above)"
+			);
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// A distinctive ping buffer-size marker so this test's grandchild is
+		// identifiable even if something else spawns ping.exe concurrently.
+		let marker = "31415";
+		let spawn_cmd = format!(
+			"$psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = 'cmd.exe'; \
+			 $psi.Arguments = '/c start /b ping.exe -n 30 -l {marker} 127.0.0.1'; \
+			 $psi.UseShellExecute = $false; $p = [System.Diagnostics.Process]::Start($psi); \
+			 \"wrapper-pid:$($p.Id)\""
+		);
+		let (out, _) = run_cmd(&host, &spawn_cmd, task::CancelToken::default()).await;
+		let wrapper_pid: i32 = out
+			.lines()
+			.find_map(|line| line.trim().strip_prefix("wrapper-pid:"))
+			.and_then(|s| s.trim().parse().ok())
+			.unwrap_or_else(|| panic!("wrapper pid printed: {out:?}"));
+
+		let is_running = |pid: i32| {
+			super::core_process::Process::from_pid(pid)
+				.is_some_and(|p| matches!(p.status(), super::core_process::ProcessStatus::Running))
+		};
+
+		// Wait for the cmd.exe wrapper to exit -- `start /b` returns as soon
+		// as ping.exe launches, well before ping's own 30s run. This is the
+		// exact gap from the finding: dispose()'s `children_before_exit`
+		// snapshot only ever sees a wrapper that's already gone by now.
+		let mut wrapper_exited = false;
+		for _ in 0..50 {
+			if !is_running(wrapper_pid) {
+				wrapper_exited = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+		assert!(
+			wrapper_exited,
+			"cmd.exe wrapper (pid {wrapper_pid}) must exit before dispose() runs"
+		);
+
+		let find_grandchild = format!(
+			"(Get-CimInstance Win32_Process -Filter \"Name='PING.EXE'\" | Where-Object {{ \
+			 $_.CommandLine -like '*{marker}*' }} | Select-Object -First 1 -ExpandProperty ProcessId)"
+		);
+		let (out, _) = run_cmd(&host, &find_grandchild, task::CancelToken::default()).await;
+		let grandchild_pid: i32 = out
+			.trim()
+			.parse()
+			.unwrap_or_else(|_| panic!("grandchild pid printed: {out:?}"));
+		assert!(
+			is_running(grandchild_pid),
+			"grandchild is alive before dispose (pid {grandchild_pid})"
+		);
+
+		host.dispose().await.expect("host disposes");
+
+		let mut reaped = false;
+		for _ in 0..20 {
+			if !is_running(grandchild_pid) {
+				reaped = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+		assert!(
+			reaped,
+			"dispose() must reap a grandchild even after its immediate parent already exited (pid \
+			 {grandchild_pid})"
 		);
 	}
 }

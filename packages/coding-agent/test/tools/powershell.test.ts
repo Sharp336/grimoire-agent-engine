@@ -5,7 +5,7 @@ import { Settings } from "../../src/config/settings";
 import { getThemeByName } from "../../src/modes/theme/theme";
 import type { ToolSession } from "../../src/tools";
 import { loadPowerShellTool, type PowerShellToolDetails, powershellToolRenderer } from "../../src/tools/powershell";
-import { acquirePsHost, disposeAllPsHosts } from "../../src/tools/pshost-manager";
+import { acquirePsHost, disposeAllPsHosts, setPsHostSpawnerForTests } from "../../src/tools/pshost-manager";
 
 const hasPwsh = Boolean(await $which("pwsh"));
 const settings = Settings.isolated({});
@@ -307,6 +307,29 @@ suite("PowerShellTool (persistent host)", () => {
 			command: "if ($global:__preabort_marker) { 'ran' } else { 'never-ran' }",
 		});
 		expect(textOf(result).trim()).toBe("never-ran");
+	});
+
+	test("a pre-aborted ephemeral call never spawns a throwaway host", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-ephemeral-preabort-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// A spy spawner that fails loudly if it's ever reached — proves the
+		// pre-check runs before `spawnEphemeralPsHost()`, not just before
+		// `host.run()`. If the pre-fix ordering regresses, this rejection
+		// message replaces the abort-error one below and the assertion fails.
+		setPsHostSpawnerForTests(async () => {
+			throw new Error("SPAWNER_UNEXPECTEDLY_REACHED: ephemeral host must not spawn for a cancelled call");
+		});
+		try {
+			const controller = new AbortController();
+			controller.abort();
+			await expect(
+				tool.execute("aborted", { command: "'unreachable'", host: "ephemeral" }, controller.signal),
+			).rejects.toThrow(/abort/i);
+		} finally {
+			setPsHostSpawnerForTests(null);
+		}
 	});
 
 	test("a pre-aborted new-session call never destroys the existing session host's state", async () => {

@@ -151,6 +151,10 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		let host: PsHost;
 		let teardown: () => void | Promise<void>;
 		if (hostMode === "ephemeral") {
+			// Mirror the session/new-session pre-check below: a call already
+			// cancelled by the time execute() reaches the mode dispatch must
+			// never spawn a throwaway pwsh just to tear it down unused.
+			throwIfAborted(signal);
 			const lease = await spawnEphemeralPsHost(spawnOptions);
 			host = lease.host;
 			teardown = lease.dispose;
