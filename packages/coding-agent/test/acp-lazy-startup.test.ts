@@ -266,6 +266,7 @@ describe("ACP lazy startup", () => {
 			"advisor.subagents": true,
 			"advisor.syncBacklog": "5",
 			"advisor.immuneTurns": 7,
+			"advisor.lateConcern": "steer",
 		} as const;
 		const rpcOnlyExplicit = {
 			"async.enabled": false,
