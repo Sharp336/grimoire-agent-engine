@@ -1395,12 +1395,15 @@ function renderContentPreview(
 	language: string | undefined,
 	uiTheme: Theme,
 	cache?: RenderedStringCache,
+	originalContent?: string,
 ): string {
 	if (!content) return "";
 	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
 		const rawLines = normalizeDisplayText(content).split("\n");
 		const totalLines = rawLines.length;
-		const maxLines = expanded ? totalLines : Math.min(totalLines, WRITE_PREVIEW_LINES);
+		const originalLineCount = originalContent === undefined ? totalLines : countLines(originalContent);
+		const showAllLines = expanded || originalLineCount <= WRITE_PREVIEW_LINES;
+		const maxLines = showAllLines ? totalLines : Math.min(totalLines, WRITE_PREVIEW_LINES);
 		const visibleLines = rawLines.slice(0, maxLines);
 		const highlighted = highlightCode(visibleLines.join("\n"), language);
 		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
@@ -1413,7 +1416,7 @@ function renderContentPreview(
 			const body = replaceTabs(highlighted[i] ?? "");
 			text += `${gutter}${body}\n`;
 		}
-		if (!expanded && hidden > 0) {
+		if (!showAllLines && hidden > 0) {
 			const hint = formatExpandHint(uiTheme, expanded, hidden > 0);
 			const moreLine = `${formatMoreItems(hidden, "line")}${hint ? ` ${hint}` : ""}`;
 			text += uiTheme.fg("dim", moreLine);
@@ -1435,6 +1438,7 @@ function renderSourceFormatterHint(
 export interface WriteRenderContext {
 	resolveXdevMounted?: (name: string) => AgentTool | undefined;
 	sourceFormatterHint?: string;
+	sourceOriginalContent?: string;
 }
 
 export const writeToolRenderer = {
@@ -1566,7 +1570,14 @@ export const writeToolRenderer = {
 		const previewCache = createRenderedStringCache();
 		return framedBlock(uiTheme, width => {
 			const { expanded } = options;
-			let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
+			let body = renderContentPreview(
+				fileContent,
+				expanded,
+				lang,
+				uiTheme,
+				previewCache,
+				options.renderContext?.sourceOriginalContent,
+			);
 			if (isPartial && progressText) {
 				const safeProgressText = truncateToWidth(
 					replaceTabs(progressText),

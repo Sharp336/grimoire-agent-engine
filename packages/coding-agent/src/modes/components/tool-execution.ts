@@ -1160,7 +1160,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 						},
 						this.#renderState,
 						theme,
-						this.#args,
+						this.#getCallArgsForRender(),
 					);
 					if (resultComponent) {
 						this.#contentBox.addChild(
@@ -1466,6 +1466,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			}
 			context.renderDiff = renderDiff;
 		} else if (this.#toolName === "write") {
+			const rawContent =
+				typeof this.#args === "object" && this.#args !== null && "content" in this.#args
+					? this.#args.content
+					: undefined;
+			if (typeof rawContent === "string") context.sourceOriginalContent = rawContent;
 			// Device-dispatch previews delegate to the mounted tool's own renderer;
 			// expose the session's xd:// registry so custom/MCP renderers survive dispatch.
 			const writeTool = this.#tool as
