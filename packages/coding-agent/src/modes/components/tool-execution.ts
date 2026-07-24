@@ -275,6 +275,22 @@ export function sharedSpinnerFrame(frameCount: number, now: number = performance
 let toolExecutionInstanceSeq = 0;
 
 /**
+ * Lifecycle of a mutable tool block's provisional-result paint evidence, used
+ * to decide whether settling a painted partial into its final render requires
+ * one full-viewport repaint. A zero-allocation string union tracked
+ * independently of {@link ToolExecutionComponent}'s other lifecycle flags:
+ * - `live-unpainted`: still in the repaintable live region; no partial-result
+ *   frame in the current result cycle has been composed.
+ * - `live-painted`: `render()` composed at least one partial-result frame while
+ *   live. Sticky across later partial updates that may settle before the next
+ *   render, so coalesced partials cannot erase the evidence.
+ * - `history`: the block was sealed or a detached async task left the live
+ *   region. Absorbing — a later partial/final render can never re-arm a
+ *   settlement reset from here.
+ */
+type ResultSettlementRepaintState = "live-unpainted" | "live-painted" | "history";
+
+/**
  * Component that renders a tool call with its result (updateable)
  */
 export class ToolExecutionComponent extends Container implements NativeScrollbackLiveRegion {
@@ -362,7 +378,12 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	// terminals wipes native scrollback and flashes the user's history —
 	// reviewer note on PR #4315).
 	#firstResultViewportRepaintShapePainted = false;
-	#partialResultShapePainted = false;
+	// Provisional-result paint lifecycle. Armed to `live-painted` by `render()`
+	// once a partial-result frame is composed, consumed back to `live-unpainted`
+	// when that partial settles into its final render, and absorbed into
+	// `history` at seal/detached-task retirement. Not rendered data — excluded
+	// from the display memo key.
+	#settlementState: ResultSettlementRepaintState = "live-unpainted";
 	#renderState: {
 		spinnerFrame?: number;
 		expanded: boolean;
@@ -558,21 +579,42 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		isPartial = false,
 		_toolCallId?: string,
 	): void {
-		// A detached task spawn keeps streaming progress snapshots after the
-		// block froze (left the transcript live region). Drop them: the rows are
-		// static gray history now, and repainting would rewrite rows the engine
-		// may already have committed to native scrollback. The terminal snapshot
-		// (async completed/failed → isPartial=false) still applies so a block
-		// that is still on screen settles on real results.
-		if (isPartial && this.#toolName === "task" && this.#maybeFreezeBackgroundTask()) {
-			return;
+		// Retire a detached task the instant it leaves the transcript live region,
+		// before any settlement eligibility is computed. This runs for BOTH an
+		// incoming partial and an incoming final: a running task can leave the
+		// live region and receive its terminal (completed/failed) snapshot as its
+		// very next update, and without retiring here first a painted running
+		// partial would look like a live settlement and destructively reset the
+		// rows the engine may already have committed to native scrollback.
+		if (this.#toolName === "task") {
+			if (isPartial) {
+				// Incoming progress snapshot after the seam: freeze the rows to
+				// static gray and drop the snapshot.
+				if (this.#maybeFreezeBackgroundTask()) return;
+			} else {
+				// Incoming terminal snapshot: retire without emitting a stale gray
+				// partial render, then fall through to apply the final content.
+				this.#retireDetachedTaskAtSeam();
+			}
 		}
 		const hadNoResult = this.#result === undefined;
 		const wasPartialResult = this.#result !== undefined && this.#isPartial;
 		const firstResultRepaintShapePainted = this.#firstResultViewportRepaintShapePainted;
-		const partialResultPainted = this.#partialResultShapePainted;
+		// Settlement eligibility is read from the post-retirement lifecycle: a
+		// block absorbed into `history` at the seam can never arm a reset here.
+		const provisionalResultSettled =
+			wasPartialResult &&
+			!isPartial &&
+			this.#settlementState === "live-painted" &&
+			this.#rendererFlag("forceResultViewportRepaintOnSettle");
+		// Clear only the pending-to-first-result latch; `render()` re-arms it.
 		this.#firstResultViewportRepaintShapePainted = false;
-		this.#partialResultShapePainted = false;
+		// Consume live paint evidence before any display mutation or the
+		// synchronous resetDisplay() below, so a duplicate final or reentrant
+		// render cannot replay the reset. A partial keeps the evidence intact.
+		if (!isPartial && this.#settlementState === "live-painted") {
+			this.#settlementState = "live-unpainted";
+		}
 		this.#result = result;
 		this.#resultVersion++;
 		this.#isPartial = isPartial;
@@ -586,8 +628,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#updateDisplay();
 		this.#resetDisplayForResultTopologyChange(
 			hadNoResult && firstResultRepaintShapePainted,
-			wasPartialResult && partialResultPainted,
-			isPartial,
+			provisionalResultSettled,
 		);
 		// Convert non-PNG images to PNG for Kitty protocol (async)
 		this.#maybeConvertImagesForKitty();
@@ -713,19 +754,51 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	/**
-	 * Freeze a detached (`async.state === "running"`) task block once it leaves
-	 * the transcript's live region. Past that seam its rows are commit-eligible
-	 * native-scrollback history: repaint the progress rows static gray and drop
-	 * further partial snapshots. One-way — blocks never re-enter the live
-	 * region. Returns whether the block is frozen.
+	 * Enter the absorbing `history` lifecycle: the block left the repaintable
+	 * live region (detached-task seam) or was sealed. The single owner of every
+	 * `#backgroundTaskFrozen` assignment paired with the settlement `history`
+	 * transition, so paint evidence can never re-arm a destructive reset past
+	 * this point. Pure state — no render side effect; callers own their render.
 	 */
-	#maybeFreezeBackgroundTask(): boolean {
-		if (this.#backgroundTaskFrozen) return true;
+	#enterSettlementHistory(): void {
+		this.#backgroundTaskFrozen = true;
+		this.#settlementState = "history";
+	}
+
+	/**
+	 * Whether a detached (`async.state === "running"`) task block has crossed the
+	 * seam where it leaves the transcript live region. Pure probe.
+	 */
+	#detachedTaskLeftLiveRegion(): boolean {
 		if (this.#toolName !== "task" || this.#liveRegion === undefined) return false;
 		const asyncState = (this.#result?.details as { async?: { state?: string } } | undefined)?.async?.state;
 		if (asyncState !== "running") return false;
-		if (this.#liveRegion.isBlockInLiveRegion(this)) return false;
-		this.#backgroundTaskFrozen = true;
+		return !this.#liveRegion.isBlockInLiveRegion(this);
+	}
+
+	/**
+	 * Retire a detached task block at the seam where it leaves the live region:
+	 * past that point its rows are commit-eligible native-scrollback history.
+	 * Idempotent; returns whether the block is (now or already) retired. Pure
+	 * lifecycle with no render effect, so the direct-final update path can retire
+	 * without emitting a stale gray partial frame before applying the result.
+	 */
+	#retireDetachedTaskAtSeam(): boolean {
+		if (this.#backgroundTaskFrozen) return true;
+		if (!this.#detachedTaskLeftLiveRegion()) return false;
+		this.#enterSettlementHistory();
+		return true;
+	}
+
+	/**
+	 * Freeze wrapper for spinner-tick and incoming-partial callers: retire the
+	 * block at the seam and, only on the newly-retired transition, repaint the
+	 * progress rows static gray and request a render so the animation settles.
+	 * Returns whether the block is frozen.
+	 */
+	#maybeFreezeBackgroundTask(): boolean {
+		if (this.#backgroundTaskFrozen) return true;
+		if (!this.#retireDetachedTaskAtSeam()) return false;
 		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
 		this.#ui.requestRender();
@@ -826,9 +899,10 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		if (this.#sealed) return;
 		this.#sealed = true;
 		this.#displaceableByToolName = undefined;
-		// A sealed detached task is abandoned history: settle its progress rows
-		// on static gray.
-		this.#backgroundTaskFrozen = true;
+		// A sealed block is history: enter the absorbing lifecycle before stopping
+		// animation and rebuilding the static display, so a render after seal can
+		// never revive paint evidence into a late destructive reset.
+		this.#enterSettlementHistory();
 		this.stopAnimation();
 		this.#updateDisplay();
 		this.#ui.requestRender();
@@ -919,26 +993,34 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		return value === true;
 	}
 
+	/**
+	 * Emit exactly one full-viewport reset when a result update changed the
+	 * block's terminal topology. Both effects are precomputed by the caller
+	 * (which owns the renderer-flag and lifecycle checks); this only ORs them so
+	 * the settlement state is already consumed before the synchronous reset.
+	 */
 	#resetDisplayForResultTopologyChange(
-		firstResultAfterRepaintShapePaint: boolean,
-		partialResultPaintedBeforeSettle: boolean,
-		isPartial: boolean,
+		paintedPendingShapeReplaced: boolean,
+		eligiblePaintedPartialSettled: boolean,
 	): void {
-		const provisionalResultSettled =
-			partialResultPaintedBeforeSettle && !isPartial && this.#rendererFlag("forceResultViewportRepaintOnSettle");
-		if (firstResultAfterRepaintShapePaint || provisionalResultSettled) {
+		if (paintedPendingShapeReplaced || eligiblePaintedPartialSettled) {
 			this.#ui.resetDisplay();
 		}
 	}
 
 	override render(width: number): readonly string[] {
 		const lines = super.render(width);
-		// Update the paint-tracking flags after `super.render(width)` — the
-		// override runs on every compose the parent Container performs, so a
-		// frame that never gets composed leaves the flags false and prevents a
-		// spurious `resetDisplay()`.
+		// Paint evidence originates only after a real compose. The parent
+		// Container runs this override on every compose; a frame that never
+		// composes leaves the state untouched and cannot arm a spurious
+		// `resetDisplay()`.
 		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
-		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
+		// A composed partial-result frame arms `live-painted`. It never clears the
+		// evidence (so coalesced partials that settle before the next render keep
+		// it) and never revives an absorbed `history` block.
+		if (this.#settlementState === "live-unpainted" && this.#result !== undefined && this.#isPartial) {
+			this.#settlementState = "live-painted";
+		}
 		return lines;
 	}
 

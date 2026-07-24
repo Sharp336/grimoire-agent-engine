@@ -1,10 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import {
+	ToolExecutionComponent,
+	type ToolExecutionUi,
+} from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { TUI } from "@oh-my-pi/pi-tui";
 
 function progressEntry(description: string): AgentProgress {
 	return {
@@ -71,6 +73,37 @@ function finalSnapshot(output: string): {
 	};
 }
 
+function failedSnapshot(output: string): {
+	content: Array<{ type: string; text: string }>;
+	details: TaskToolDetails;
+	isError: boolean;
+} {
+	const result: SingleResult = {
+		index: 0,
+		id: "Anna",
+		agent: "scout",
+		agentSource: "bundled",
+		task: "investigate the auth flow",
+		exitCode: 1,
+		output,
+		stderr: "",
+		truncated: false,
+		durationMs: 1234,
+		tokens: 10,
+		requests: 1,
+	};
+	return {
+		content: [{ type: "text", text: output }],
+		details: {
+			projectAgentsDir: null,
+			results: [result],
+			totalDurationMs: 1234,
+			async: { state: "failed", jobId: "job-1", type: "task" },
+		},
+		isError: true,
+	};
+}
+
 // Contract under test: a detached (`async.state === "running"`) task block keeps
 // progress rows static, avoids a redraw driver, freezes once a later partial
 // snapshot observes that it left the live region, drops further partial
@@ -89,7 +122,8 @@ describe("ToolExecutionComponent detached task freeze", () => {
 	function makeComponent(live: () => boolean) {
 		const requestRender = vi.fn();
 		const requestComponentRender = vi.fn();
-		const ui = { requestRender, requestComponentRender } as unknown as TUI;
+		const resetDisplay = vi.fn();
+		const ui: ToolExecutionUi = { requestRender, requestComponentRender, resetDisplay };
 		const component = new ToolExecutionComponent(
 			"task",
 			{ agent: "scout", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
@@ -97,7 +131,7 @@ describe("ToolExecutionComponent detached task freeze", () => {
 			undefined,
 			ui,
 		);
-		return { component, requestRender, requestComponentRender };
+		return { component, requestRender, requestComponentRender, resetDisplay };
 	}
 
 	it("does not drive redraws while live and keeps progress bytes static", () => {
@@ -138,5 +172,64 @@ describe("ToolExecutionComponent detached task freeze", () => {
 		component.updateResult(finalSnapshot("found it in src/auth.ts"), false);
 		const final = stripVTControlCharacters(component.render(100).join("\n"));
 		expect(final).toContain("found it in src/auth.ts");
+	});
+
+	// Regression: a painted running task can leave the live region and receive its
+	// terminal snapshot as the very next update (no intermediate partial, timer,
+	// or frozen render). The seam retirement must run before settlement
+	// eligibility so the painted partial is absorbed into history and never
+	// destructively resets committed native scrollback.
+	for (const kind of ["completed", "failed"] as const) {
+		it(`applies a ${kind} final directly after the seam with zero settlement resets and no stale render`, () => {
+			let live = true;
+			const { component, resetDisplay, requestRender } = makeComponent(() => live);
+
+			component.updateResult(asyncSnapshot("scouting the auth flow"), true);
+			// The running partial reaches the terminal → live-painted.
+			component.render(100);
+			requestRender.mockClear();
+			resetDisplay.mockClear();
+
+			live = false;
+			const terminal =
+				kind === "completed"
+					? finalSnapshot("found it in src/auth.ts")
+					: failedSnapshot("scan failed in src/auth.ts");
+			component.updateResult(terminal, false);
+
+			// No settlement reset (the seam absorbed the block into history) and no
+			// stale gray partial render before the final content is applied.
+			expect(resetDisplay).not.toHaveBeenCalled();
+			expect(requestRender).not.toHaveBeenCalled();
+			const rendered = stripVTControlCharacters(component.render(100).join("\n"));
+			expect(rendered).toContain("src/auth.ts");
+		});
+	}
+
+	it("freezes and drops a post-seam partial, then applies the final with zero settlement resets", () => {
+		let live = true;
+		const { component, resetDisplay, requestRender } = makeComponent(() => live);
+
+		component.updateResult(asyncSnapshot("scouting the auth flow"), true);
+		// The running partial reaches the terminal → live-painted.
+		component.render(100);
+		resetDisplay.mockClear();
+
+		// Left the live region: the next partial freezes the block to static gray,
+		// is dropped, and requests exactly one render.
+		live = false;
+		requestRender.mockClear();
+		component.updateResult(asyncSnapshot("a much newer description"), true);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+		const frozen = stripVTControlCharacters(component.render(100).join("\n"));
+		expect(frozen).toContain("scouting the auth flow");
+		expect(frozen).not.toContain("a much newer description");
+
+		// The terminal snapshot settles the block; no settlement reset fires at any
+		// point after the painted partial.
+		component.updateResult(finalSnapshot("found it in src/auth.ts"), false);
+		const final = stripVTControlCharacters(component.render(100).join("\n"));
+		expect(final).toContain("found it in src/auth.ts");
+		expect(resetDisplay).not.toHaveBeenCalled();
 	});
 });

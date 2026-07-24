@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed mutable tool progress duplicating or overlapping final output after settlement ([#6466](https://github.com/can1357/oh-my-pi/issues/6466)).
+
 ## [17.1.0] - 2026-07-24
 
 ### Breaking Changes

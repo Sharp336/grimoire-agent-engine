@@ -493,6 +493,9 @@ function formatCellOutputLines(
 export const evalToolRenderer = {
 	animatedPendingPreview: true,
 	animatedPartialResult: true,
+	// Progress tree topology (subagent rows, current-tool lines) differs between
+	// the partial and final render; force one viewport repaint at settlement.
+	forceResultViewportRepaintOnSettle: true,
 	renderCall(args: EvalRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		const cells = getRenderCells(args);
 

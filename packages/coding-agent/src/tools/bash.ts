@@ -1702,6 +1702,9 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 		},
 		mergeCallAndResult: true,
 		inline: true,
+		// Streaming shell output settles from a pending frame to a final framed
+		// block whose chrome differs; force one viewport repaint at settlement.
+		forceResultViewportRepaintOnSettle: true,
 	};
 }
 

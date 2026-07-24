@@ -716,6 +716,10 @@ function wrapEditRendererLine(line: string, width: number): string[] {
 
 export const editToolRenderer = {
 	mergeCallAndResult: true,
+	// Shared by the `edit` and `apply_patch` registry aliases. Streaming diff
+	// previews settle to a different final diff topology; force one viewport
+	// repaint at settlement.
+	forceResultViewportRepaintOnSettle: true,
 
 	renderCall(
 		args: EditRenderArgs,

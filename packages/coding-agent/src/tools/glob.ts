@@ -509,6 +509,9 @@ function globStatusIcon(uiTheme: Theme): string {
 
 export const globToolRenderer = {
 	inline: true,
+	// Execution emits growing partial file-list snapshots that settle to a
+	// different final list topology; force one viewport repaint at settlement.
+	forceResultViewportRepaintOnSettle: true,
 	renderCall(args: GlobRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const meta: string[] = [];
 		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);

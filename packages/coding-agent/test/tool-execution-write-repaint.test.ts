@@ -137,4 +137,46 @@ describe("ToolExecutionComponent write repaint seam", () => {
 			await term.flush();
 		}
 	});
+
+	it("forces one viewport repaint when a painted write partial settles into its final", () => {
+		// 12 lines fit the streaming window, so the first result never re-anchors
+		// (no first-result repaint). This isolates the partial -> final settlement
+		// repaint driven by forceResultViewportRepaintOnSettle.
+		const { component, resetDisplay } = makeComponent(writeArgs(12));
+		component.updateResult(partialWriteResult(), true);
+		component.render(80);
+		resetDisplay.mockClear();
+
+		component.updateResult({ content: [{ type: "text", text: "Wrote notes.txt" }] }, false);
+
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not repaint a painted write partial that fits the window and never settles a topology change", () => {
+		// Pending-tail coverage remains: a 12-line preview neither re-anchors on
+		// its first result nor, without a subsequent settle, resets again.
+		const { component, resetDisplay } = makeComponent(writeArgs(12));
+		component.render(80);
+
+		component.updateResult(partialWriteResult(), true);
+
+		expect(resetDisplay).not.toHaveBeenCalled();
+	});
+
+	it("settles a delegated xd://glob device result through the outer write renderer exactly once", () => {
+		const { component, resetDisplay } = makeComponent({ path: "xd://glob", content: "**/*.ts" });
+		const dispatch = { tool: "glob", mode: "execute", args: { paths: ["**/*.ts"] } };
+		component.updateResult({ content: [{ type: "text", text: "scanning…" }], details: { xdev: dispatch } }, true);
+		component.render(80);
+		resetDisplay.mockClear();
+
+		component.updateResult(
+			{ content: [{ type: "text", text: "src/a.ts\nsrc/b.ts" }], details: { xdev: dispatch } },
+			false,
+		);
+
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		// The delegated device output is rendered inside the outer write block.
+		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("src/a.ts");
+	});
 });

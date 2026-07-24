@@ -416,6 +416,11 @@ function renderWatchCall(args: GithubToolRenderArgs, options: RenderResultOption
 }
 
 export const githubToolRenderer = {
+	// Only `run_watch` emits partials; its live watch frame settles to a
+	// different final topology, so force one viewport repaint at settlement.
+	// Safe for the non-watch ops because settlement still requires an actual
+	// painted partial-result transition.
+	forceResultViewportRepaintOnSettle: true,
 	// No animatedPendingPreview: renderCall materializes plain Text components
 	// once per display rebuild (no render closure), so a live spinner interval
 	// would request 30fps repaints while the visible glyph stays frozen.

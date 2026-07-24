@@ -537,6 +537,10 @@ function toLaunchArgs(args: HubRenderArgs | undefined): LaunchRenderArgs {
 export const hubToolRenderer = {
 	inline: true,
 	mergeCallAndResult: true,
+	// Only `wait` emits partials; its live wait frame settles to a different
+	// final topology, so force one viewport repaint at settlement. Safe for the
+	// other ops because settlement still requires an actual painted partial.
+	forceResultViewportRepaintOnSettle: true,
 	// Only launch pending frames consume the spinner (broker RPC in flight);
 	// messaging/job pending frames are static, exactly as before the merge.
 	animatedPendingPreview: (args: unknown): boolean => isLaunchStyleArgs(args as HubRenderArgs | undefined),

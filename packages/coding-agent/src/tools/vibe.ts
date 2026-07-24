@@ -485,6 +485,10 @@ export function createVibeToolRenderer(op: VibeOp) {
 		mergeCallAndResult: true,
 		animatedPendingPreview: composerOp,
 		animatedPartialResult: op === "wait",
+		// Only `vibe_wait` emits partials (the live TV wall) that settle to a
+		// different final topology; force one viewport repaint at settlement for
+		// that op alone.
+		forceResultViewportRepaintOnSettle: op === "wait",
 
 		renderCall(args: VibeRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 			const title = uiTheme.fg("muted", `vibe ${describeCall(op, args)}`);

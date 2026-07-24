@@ -1585,6 +1585,10 @@ export const writeToolRenderer = {
 		});
 	},
 	mergeCallAndResult: true,
+	// The streaming write preview (and delegated xd://xdev device output) settles
+	// from a pending frame to a final framed block whose chrome differs; force
+	// one viewport repaint at settlement.
+	forceResultViewportRepaintOnSettle: true,
 	// The collapsed pending preview follows the streaming edge with a tail
 	// window once the content outgrows it (`… (N earlier lines)` + last rows);
 	// the first partial result re-anchors the frame to the top of the file, so
