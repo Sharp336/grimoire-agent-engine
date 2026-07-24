@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ClinePass as a native `clinepass` provider with an API-key login flow (`CLINE_API_KEY`, `sk_…` keys). ClinePass is Cline's flat-rate subscription gateway at `https://api.cline.bot/api/v1` that re-hosts open coding models (GLM, DeepSeek, Kimi, Qwen, MiMo, MiniMax) behind one OpenAI-compatible endpoint; its keys reject `/v1/models`, so login validation pings chat completions against the default model directly. Added a `clinepass` `wireModelIdMode` that translates the friendly bare catalog id (`glm-5.2`) to the `cline-pass/glm-5.2` wire form at request time. The compat is gated on the `clinepass` provider id (not the shared `api.cline.bot` host, which also serves generic passthrough model ids), forwards `reasoning_effort` verbatim across `minimal`..`xhigh`, and streams chain-of-thought via `delta.reasoning`. ClinePass also reuses WorkOS OAuth credentials from the Cline CLI (`cline auth`) when present, refreshing short-lived tokens via `POST /api/v1/auth/refresh`.
+- Added Cline's pay-as-you-go usage-credit gateway as a separate native `cline-api` provider with its own login and credential namespace. Requests preserve documented `provider/model` wire ids, while both Cline routes share the gateway's `delta.reasoning` and reasoning-effort compatibility. ClinePass now prefers `CLINEPASS_API_KEY` while retaining `CLINE_API_KEY` as a compatibility fallback, allowing both billing routes to be configured simultaneously.
+
+### Fixed
+
+- Fixed ClinePass WorkOS auto-login treating a missing or non-numeric Cline CLI `expiresAt` as fresh, which stored a stale access token instead of refreshing it; unknown expiry now forces a refresh.
+- Fixed ClinePass auto-login accepting a Cline CLI usage-billing WorkOS token, which shadowed a valid static key until logout; the imported token is now validated against the ClinePass gateway, falling back to the API-key path when the account has no ClinePass subscription.
+
 ## [17.1.1] - 2026-07-24
 
 ### Added

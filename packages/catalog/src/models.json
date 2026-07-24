@@ -94799,5 +94799,474 @@
 				]
 			}
 		}
+	},
+	"cline-api": {
+		"deepseek/deepseek-v4-flash": {
+			"id": "deepseek/deepseek-v4-flash",
+			"name": "DeepSeek V4 Flash (Cline API)",
+			"api": "openai-completions",
+			"provider": "cline-api",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.0028,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"deepseek/deepseek-v4-pro": {
+			"id": "deepseek/deepseek-v4-pro",
+			"name": "DeepSeek V4 Pro (Cline API)",
+			"api": "openai-completions",
+			"provider": "cline-api",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.435,
+				"output": 0.87,
+				"cacheRead": 0.003625,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"moonshotai/kimi-k2.6": {
+			"id": "moonshotai/kimi-k2.6",
+			"name": "Kimi K2.6 (Cline API)",
+			"api": "openai-completions",
+			"provider": "cline-api",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.16,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"moonshotai/kimi-k2.7-code": {
+			"id": "moonshotai/kimi-k2.7-code",
+			"name": "Kimi K2.7 Code (Cline API)",
+			"api": "openai-completions",
+			"provider": "cline-api",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.16,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 262144,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"zai/glm-5.2": {
+			"id": "zai/glm-5.2",
+			"name": "GLM 5.2 (Cline API)",
+			"api": "openai-completions",
+			"provider": "cline-api",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.4,
+				"output": 4.4,
+				"cacheRead": 0.26,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		}
+	},
+	"clinepass": {
+		"deepseek-v4-flash": {
+			"id": "deepseek-v4-flash",
+			"name": "DeepSeek V4 Flash (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"deepseek-v4-pro": {
+			"id": "deepseek-v4-pro",
+			"name": "DeepSeek V4 Pro (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"glm-5.2": {
+			"id": "glm-5.2",
+			"name": "GLM 5.2 (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"kimi-k2.6": {
+			"id": "kimi-k2.6",
+			"name": "Kimi K2.6 (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"kimi-k2.7-code": {
+			"id": "kimi-k2.7-code",
+			"name": "Kimi K2.7 Code (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 262144,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"kimi-k3": {
+			"id": "kimi-k3",
+			"name": "Kimi K3 (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			}
+		},
+		"mimo-v2.5": {
+			"id": "mimo-v2.5",
+			"name": "MiMo V2.5 (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		},
+		"mimo-v2.5-pro": {
+			"id": "mimo-v2.5-pro",
+			"name": "MiMo V2.5 Pro (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		},
+		"minimax-m3": {
+			"id": "minimax-m3",
+			"name": "MiniMax M3 (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"qwen3.7-max": {
+			"id": "qwen3.7-max",
+			"name": "Qwen3.7 Max (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"qwen3.7-plus": {
+			"id": "qwen3.7-plus",
+			"name": "Qwen3.7 Plus (ClinePass)",
+			"api": "openai-completions",
+			"provider": "clinepass",
+			"baseUrl": "https://api.cline.bot/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		}
 	}
 }

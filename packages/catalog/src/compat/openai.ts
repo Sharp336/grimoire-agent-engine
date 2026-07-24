@@ -424,26 +424,40 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	// namespace (`accounts/fireworks/routers/<id>-fast`), like Fire Pass, rather
 	// than the `models/` namespace the rest of the `fireworks` provider uses.
 	const isFireworksFastRouter = provider === "fireworks" && isFireworksFastModelId(spec.id);
+	// ClinePass and Cline API share one gateway (`api.cline.bot`), but gate on
+	// the provider id — the same host also serves generic passthrough ids for
+	// custom OpenAI-compat providers that must NOT get the `cline-pass/` wire
+	// prefix or the `reasoning` field.
+	const isClineGateway = provider === "clinepass" || provider === "cline-api";
 	const wireModelIdMode: ResolvedOpenAISharedCompat["wireModelIdMode"] =
 		provider === "firepass" || isFireworksFastRouter
 			? "firepass"
 			: provider === "fireworks"
 				? "fireworks"
+				: provider === "clinepass"
+					? "clinepass"
+					: isOpenRouter
+						? "openrouter"
+						: "raw";
+	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
+		// Cline's gateway drives reasoning through plain `reasoning_effort` for
+		// every backend (including Qwen SKUs) and tolerates the Qwen
+		// `enable_thinking` params without needing them. Pin `openai` so Qwen
+		// models keep the full effort ladder and no vendor-specific thinking
+		// fields are emitted.
+		isClineGateway
+			? "openai"
+			: (isMoonshotKimi && !isMoonshotKimiK3) || isZai || isZhipu || isXiaomiMimo
+				? "zai"
 				: isOpenRouter
 					? "openrouter"
-					: "raw";
-	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
-		(isMoonshotKimi && !isMoonshotKimiK3) || isZai || isZhipu || isXiaomiMimo
-			? "zai"
-			: isOpenRouter
-				? "openrouter"
-				: isQwen && isNvidiaNim
-					? "qwen-chat-template"
-					: isQwen && isFireworks
-						? "openai"
-						: isAlibaba || isQwen
-							? "qwen"
-							: "openai";
+					: isQwen && isNvidiaNim
+						? "qwen-chat-template"
+						: isQwen && isFireworks
+							? "openai"
+							: isAlibaba || isQwen
+								? "qwen"
+								: "openai";
 
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
@@ -502,7 +516,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		includeEncryptedReasoning: true,
 		filterReasoningHistory: isOpenRouter && isAnthropicModel,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
-		reasoningContentField: "reasoning_content",
+		// Both Cline billing routes stream chain-of-thought in `delta.reasoning`.
+		reasoningContentField: isClineGateway ? "reasoning" : "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
 		//   - Kimi: documented invariant on its native API.
 		//   - DeepSeek-family reasoning models, including aliased OpenCode Zen models

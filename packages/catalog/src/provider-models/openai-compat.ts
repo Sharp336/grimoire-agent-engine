@@ -1867,7 +1867,238 @@ export function firepassModelManagerOptions(
 		providerId: "firepass",
 	};
 }
+// ---------------------------------------------------------------------------
+// 7.6b Cline API (usage-credit gateway)
+// ---------------------------------------------------------------------------
 
+/** Cline's pay-as-you-go gateway; requests preserve `provider/model` wire ids. */
+export function clineApiModelManagerOptions(
+	_config?: ClineModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return {
+		providerId: "cline-api",
+	};
+}
+
+const CLINE_API_BASE_URL = "https://api.cline.bot/api/v1";
+const CLINE_API_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+
+function createClineApiStaticModel(
+	id: string,
+	name: string,
+	contextWindow: number,
+	maxTokens: number,
+	input: ModelSpec<"openai-completions">["input"],
+	cost: ModelSpec<"openai-completions">["cost"],
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "cline-api",
+		baseUrl: CLINE_API_BASE_URL,
+		reasoning: true,
+		input: [...input],
+		cost,
+		contextWindow,
+		maxTokens,
+		thinking: { mode: "effort", efforts: [...CLINE_API_EFFORTS] },
+	};
+}
+
+/** Curated agentic models available through Cline usage credits. */
+export const CLINE_API_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createClineApiStaticModel("zai/glm-5.2", "GLM 5.2 (Cline API)", 1_000_000, 131_072, ["text"], {
+		input: 1.4,
+		output: 4.4,
+		cacheRead: 0.26,
+		cacheWrite: 0,
+	}),
+	createClineApiStaticModel(
+		"moonshotai/kimi-k2.7-code",
+		"Kimi K2.7 Code (Cline API)",
+		262_144,
+		262_144,
+		["text", "image"],
+		{
+			input: 0.95,
+			output: 4,
+			cacheRead: 0.16,
+			cacheWrite: 0,
+		},
+	),
+	createClineApiStaticModel("moonshotai/kimi-k2.6", "Kimi K2.6 (Cline API)", 262_144, 65_536, ["text", "image"], {
+		input: 0.95,
+		output: 4,
+		cacheRead: 0.16,
+		cacheWrite: 0,
+	}),
+	createClineApiStaticModel("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro (Cline API)", 1_000_000, 384_000, ["text"], {
+		input: 0.435,
+		output: 0.87,
+		cacheRead: 0.003_625,
+		cacheWrite: 0,
+	}),
+	createClineApiStaticModel(
+		"deepseek/deepseek-v4-flash",
+		"DeepSeek V4 Flash (Cline API)",
+		1_000_000,
+		384_000,
+		["text"],
+		{
+			input: 0.14,
+			output: 0.28,
+			cacheRead: 0.0028,
+			cacheWrite: 0,
+		},
+	),
+];
+
+export function buildClineApiSeed(): ModelSpec<"openai-completions">[] {
+	return CLINE_API_STATIC_MODELS.map(model => ({ ...model }));
+}
+
+// ---------------------------------------------------------------------------
+// 7.6c ClinePass (Cline subscription gateway)
+// ---------------------------------------------------------------------------
+
+export interface ClineModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * ClinePass is Cline's flat-rate subscription (https://docs.cline.bot/getting-started/clinepass)
+ * that re-hosts open coding models behind one OpenAI-compatible endpoint at
+ * `https://api.cline.bot/api/v1`. Its keys do not authorize `/v1/models`
+ * (discovery 404s), so this manager never performs dynamic discovery — the
+ * bundled `models.json` entries are canonical, like Fire Pass.
+ */
+export function clinepassModelManagerOptions(
+	_config?: ClineModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return {
+		providerId: "clinepass",
+	};
+}
+
+const CLINEPASS_BASE_URL = "https://api.cline.bot/api/v1";
+const CLINEPASS_ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+/** Full effort ladder ClinePass accepts on the wire (`minimal`..`xhigh`). */
+const CLINEPASS_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+/** MiMo's family caps the ladder at `low`..`high`. */
+const CLINEPASS_MIMO_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
+/** Kimi K3's wire-exact mandatory scale (`low`/`high`/`max`) — no xhigh, no minimal/medium. */
+const CLINEPASS_K3_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High, Effort.Max];
+
+function createClinepassStaticModel(
+	id: string,
+	name: string,
+	contextWindow: number,
+	maxTokens: number,
+	input: ModelSpec<"openai-completions">["input"],
+	efforts: readonly Effort[],
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "clinepass",
+		baseUrl: CLINEPASS_BASE_URL,
+		reasoning: true,
+		input: [...input],
+		cost: { ...CLINEPASS_ZERO_COST },
+		contextWindow,
+		maxTokens,
+		thinking: { mode: "effort", efforts: [...efforts] },
+	};
+}
+
+/**
+ * Curated ClinePass catalog. ClinePass has no `/v1/models` endpoint (discovery
+ * 404s), so — like Fire Pass — the bundled entries are the source of truth.
+ * `generate-models.ts` pushes this seed so a credential-free regen reproduces
+ * the eleven models. The `clinepass` `wireModelIdMode` keeps the friendly bare
+ * catalog id (`glm-5.2`) while translating to the `cline-pass/glm-5.2` wire
+ * form at request time, so selection stays `clinepass/glm-5.2` rather than a
+ * doubled prefix.
+ */
+export const CLINEPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createClinepassStaticModel("glm-5.2", "GLM 5.2 (ClinePass)", 1_000_000, 131_072, ["text"], CLINEPASS_EFFORTS),
+	createClinepassStaticModel(
+		"kimi-k3",
+		"Kimi K3 (ClinePass)",
+		1_048_576,
+		131_072,
+		["text", "image"],
+		CLINEPASS_K3_EFFORTS,
+	),
+	createClinepassStaticModel(
+		"kimi-k2.7-code",
+		"Kimi K2.7 Code (ClinePass)",
+		262_144,
+		262_144,
+		["text", "image"],
+		CLINEPASS_EFFORTS,
+	),
+	createClinepassStaticModel(
+		"kimi-k2.6",
+		"Kimi K2.6 (ClinePass)",
+		262_144,
+		65_536,
+		["text", "image"],
+		CLINEPASS_EFFORTS,
+	),
+	createClinepassStaticModel(
+		"deepseek-v4-pro",
+		"DeepSeek V4 Pro (ClinePass)",
+		1_000_000,
+		384_000,
+		["text"],
+		CLINEPASS_EFFORTS,
+	),
+	createClinepassStaticModel(
+		"deepseek-v4-flash",
+		"DeepSeek V4 Flash (ClinePass)",
+		1_000_000,
+		384_000,
+		["text"],
+		CLINEPASS_EFFORTS,
+	),
+	createClinepassStaticModel(
+		"mimo-v2.5",
+		"MiMo V2.5 (ClinePass)",
+		1_048_576,
+		128_000,
+		["text", "image"],
+		CLINEPASS_MIMO_EFFORTS,
+	),
+	createClinepassStaticModel(
+		"mimo-v2.5-pro",
+		"MiMo V2.5 Pro (ClinePass)",
+		1_048_576,
+		128_000,
+		["text"],
+		CLINEPASS_MIMO_EFFORTS,
+	),
+	createClinepassStaticModel("minimax-m3", "MiniMax M3 (ClinePass)", 1_000_000, 131_072, ["text"], CLINEPASS_EFFORTS),
+	createClinepassStaticModel("qwen3.7-max", "Qwen3.7 Max (ClinePass)", 1_000_000, 65_536, ["text"], CLINEPASS_EFFORTS),
+	createClinepassStaticModel(
+		"qwen3.7-plus",
+		"Qwen3.7 Plus (ClinePass)",
+		1_000_000,
+		65_536,
+		["text", "image"],
+		CLINEPASS_EFFORTS,
+	),
+];
+
+/** Render the curated ClinePass catalog as generator seed specs. */
+export function buildClinepassSeed(): ModelSpec<"openai-completions">[] {
+	return CLINEPASS_STATIC_MODELS.map(model => ({ ...model }));
+}
 // ---------------------------------------------------------------------------
 // 7.7 Wafer Serverless
 // ---------------------------------------------------------------------------
