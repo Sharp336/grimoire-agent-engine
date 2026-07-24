@@ -627,6 +627,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 
+		// Establish the unchanged tool signature before the deferred mount.
+		await session.refreshMCPTools([]);
 		await session.refreshMCPTools([search]);
 		await session.prompt("hello");
 
@@ -634,6 +636,29 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("## mcp__nucleus_search");
 		expect(notices[0]).toContain("## Schema");
+	});
+
+	it("omits inline docs from notices after an MCP prompt rebuild", async () => {
+		const registry = new XdevRegistry([]);
+		let rebuildCount = 0;
+		const { session, contexts } = newSession(
+			async () => {
+				rebuildCount++;
+				return registry.docsAll("inline");
+			},
+			{ xdevRegistry: registry, responses: [{ content: ["ok"] }] },
+		);
+		session.settings.set("tools.xdevDocs", "inline");
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+
+		await session.refreshMCPTools([search]);
+		expect(rebuildCount).toBe(1);
+		await session.prompt("hello");
+
+		const notices = mountNoticesIn(contexts[0]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+		expect(notices[0]).not.toContain("## mcp__nucleus_search");
 	});
 
 	it("drops a mount delta that cancels out before the next prompt", async () => {

@@ -2180,7 +2180,7 @@ export class AgentSession {
 	#mountedXdevToolNames = new Set<string>();
 	/** Coalesced xd:// mount delta not yet announced to the model; delivered as a
 	 *  hidden notice alongside the next prompt (see {@link #notifyXdevMountDelta}). */
-	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
+	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string>; docsInBasePrompt: Set<string> } | undefined;
 
 	// TTSR manager for time-traveling stream rules
 	#ttsrManager: TtsrManager | undefined = undefined;
@@ -7690,7 +7690,7 @@ export class AgentSession {
 			throw error;
 		}
 
-		this.#notifyXdevMountDelta(previousMounted);
+		this.#notifyXdevMountDelta(previousMounted, rebuiltSystemPrompt !== undefined);
 		this.agent.setTools(tools);
 		if (rebuiltSystemPrompt && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#clearInheritedProviderPromptCacheKey();
@@ -7713,7 +7713,7 @@ export class AgentSession {
 	 * docs join the system prompt opportunistically on the next unrelated
 	 * rebuild.
 	 */
-	#notifyXdevMountDelta(previousMounted: ReadonlySet<string>): void {
+	#notifyXdevMountDelta(previousMounted: ReadonlySet<string>, rebuiltSystemPrompt: boolean): void {
 		const registry = this.#xdevRegistry;
 		if (!registry) return;
 		const current = this.#mountedXdevToolNames;
@@ -7723,12 +7723,21 @@ export class AgentSession {
 		// Coalesce against the unannounced delta: an unmount cancels a pending
 		// mount the model never learned about, and a remount cancels a pending
 		// unmount.
-		const pending = this.#pendingXdevMountDelta ?? { added: new Set<string>(), removed: new Set<string>() };
+		const pending = this.#pendingXdevMountDelta ?? {
+			added: new Set<string>(),
+			removed: new Set<string>(),
+			docsInBasePrompt: new Set<string>(),
+		};
 		for (const name of addedNames) {
 			if (!pending.removed.delete(name)) pending.added.add(name);
 		}
 		for (const name of removedNames) {
 			if (!pending.added.delete(name)) pending.removed.add(name);
+		}
+		if (rebuiltSystemPrompt) {
+			pending.docsInBasePrompt = new Set(current);
+		} else {
+			for (const name of addedNames) pending.docsInBasePrompt.delete(name);
 		}
 		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
 		if (this.settings.get("startup.quiet")) return;
@@ -7752,7 +7761,7 @@ export class AgentSession {
 		const added = [...pending.added].map(name => ({ name, summary: summaries.get(name) ?? "" }));
 		const removed = [...pending.removed].map(name => ({ name }));
 		const docs = this.#xdevRegistry?.docsFor(
-			pending.added,
+			[...pending.added].filter(name => !pending.docsInBasePrompt.has(name)),
 			this.settings.get("tools.xdevDocs"),
 			this.settings.get("tools.xdevInlineDevices"),
 		);
