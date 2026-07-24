@@ -85,6 +85,7 @@ import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-
 import type { MCPManager } from "../mcp";
 import {
 	formatMCPConnectionStatusMessage,
+	formatMCPReconnectNotice,
 	isMcpConnectionStatusEvent,
 	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
 	type McpConnectionStatusEvent,
@@ -803,6 +804,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
+		// Reconnect notices (mcp.reconnectNotices) are one-shot runtime messages,
+		// not startup connect noise — deliver them even under startup.quiet.
+		if (event.type !== "connecting" && event.type !== "connected" && event.type !== "failed") {
+			this.showStatus(formatMCPReconnectNotice(event));
+			return;
+		}
 		if (this.settings.get("startup.quiet")) return;
 		if (event.type === "connecting") {
 			this.#mcpStatusOrder = [];

@@ -1774,7 +1774,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let startDeferredMCPDiscovery: ((liveSession: AgentSession) => void) | undefined;
 		const startupQuiet = settings.get("startup.quiet");
 		const onMCPStatus = (event: McpConnectionStatusEvent) => {
-			if (!options.hasUI || startupQuiet) return;
+			if (!options.hasUI) return;
+			// Reconnect notices are a runtime instability signal the user explicitly
+			// opted into via mcp.reconnectNotices — startup.quiet only suppresses
+			// startup connect noise, so it must not gate them.
+			if (startupQuiet && !event.type.startsWith("reconnect")) return;
 			if (event.type === "connecting" && event.serverNames.length === 0) return;
 			eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 		};
@@ -1796,6 +1800,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (settings.get("mcp.notifications")) {
 					mcpManager.setNotificationsEnabled(true);
 				}
+				mcpManager.setReconnectNoticesEnabled(settings.get("mcp.reconnectNotices"));
+				mcpManager.setOnConnectionStatus(onMCPStatus);
 
 				const deferredMCPManager = mcpManager;
 				startDeferredMCPDiscovery = liveSession => {

@@ -6,7 +6,14 @@ export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 export type McpConnectionStatusEvent =
 	| { type: "connecting"; serverNames: string[] }
 	| { type: "connected"; serverName: string }
-	| { type: "failed"; serverName: string; error: string };
+	| { type: "failed"; serverName: string; error: string }
+	| { type: "reconnecting"; serverName: string }
+	| { type: "reconnected"; serverName: string }
+	| { type: "reconnect-failed"; serverName: string; error: string }
+	| { type: "reconnect-suspended"; serverName: string; crashes: number };
+
+/** Reconnect-phase subset of {@link McpConnectionStatusEvent}. */
+export type McpReconnectStatusEvent = Extract<McpConnectionStatusEvent, { type: `reconnect${string}` }>;
 
 export type McpConnectionStatusSnapshot = {
 	pendingServers: readonly string[];
@@ -88,6 +95,24 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 	return "";
 }
 
+export function formatMCPReconnectNotice(event: McpReconnectStatusEvent): string {
+	const name = sanitizeMcpServerName(event.serverName);
+	// Recovery commands embed the FULL server name (sanitized for control
+	// chars only): sanitizeMcpServerName truncates to 40 cells, which would
+	// point the command at a nonexistent truncated server.
+	const fullName = sanitizeText(event.serverName);
+	switch (event.type) {
+		case "reconnecting":
+			return `MCP server "${name}" lost its connection — reconnecting…`;
+		case "reconnected":
+			return `MCP server "${name}" reconnected.`;
+		case "reconnect-failed":
+			return `MCP server "${name}" could not reconnect: ${sanitizeMcpStatusError(event.error)} Run /mcp reconnect ${fullName} to retry.`;
+		case "reconnect-suspended":
+			return `MCP server "${name}" crashed ${event.crashes} times in quick succession — automatic reconnects suspended. Fix the server, then run /mcp reconnect ${fullName}.`;
+	}
+}
+
 function isRecord(data: unknown): data is Record<string, unknown> {
 	return typeof data === "object" && data !== null;
 }
@@ -110,6 +135,13 @@ export function isMcpConnectionStatusEvent(data: unknown): data is McpConnection
 			return typeof data.serverName === "string";
 		case "failed":
 			return typeof data.serverName === "string" && typeof data.error === "string";
+		case "reconnecting":
+		case "reconnected":
+			return typeof data.serverName === "string";
+		case "reconnect-failed":
+			return typeof data.serverName === "string" && typeof data.error === "string";
+		case "reconnect-suspended":
+			return typeof data.serverName === "string" && typeof data.crashes === "number";
 		default:
 			return false;
 	}

@@ -4236,6 +4236,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"mcp.reconnectNotices": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Reconnect Notices",
+			description:
+				"Show a status notice when an MCP server loses its connection, reconnects, fails to reconnect, or has automatic reconnects suspended after repeated crashes",
+		},
+	},
+
 	// ────────────────────────────────────────────────────────────────────────
 	// Tasks
 	// ────────────────────────────────────────────────────────────────────────

@@ -198,6 +198,9 @@ export class MCPManager {
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void;
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
+	/** Channel for user-visible reconnect notices (`mcp.reconnectNotices`). */
+	#onConnectionStatus?: (event: McpConnectionStatusEvent) => void;
+	#reconnectNoticesEnabled = false;
 	#notificationsEnabled = false;
 	#notificationsEpoch = 0;
 	#subscribedResources = new Map<string, Set<string>>();
@@ -230,6 +233,26 @@ export class MCPManager {
 	 */
 	setOnToolsChanged(handler: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void): void {
 		this.#onToolsChanged = handler;
+	}
+
+	/** Enable/disable user-visible reconnect notices (`mcp.reconnectNotices`). */
+	setReconnectNoticesEnabled(enabled: boolean): void {
+		this.#reconnectNoticesEnabled = enabled;
+	}
+
+	/** Register the channel reconnect notices are emitted on (interactive sessions). */
+	setOnConnectionStatus(handler: ((event: McpConnectionStatusEvent) => void) | undefined): void {
+		this.#onConnectionStatus = handler;
+	}
+
+	/** Fire a reconnect notice when enabled; a throwing consumer must never break reconnects. */
+	#emitReconnectNotice(event: McpConnectionStatusEvent): void {
+		if (!this.#reconnectNoticesEnabled) return;
+		try {
+			this.#onConnectionStatus?.(event);
+		} catch {
+			// notice delivery is best-effort by design
+		}
 	}
 
 	/**
@@ -841,7 +864,9 @@ export class MCPManager {
 			return null;
 		}
 
-		const attempt = this.#doReconnect(name, options?.authChallenge);
+		if (!options?.manual) this.#emitReconnectNotice({ type: "reconnecting", serverName: name });
+
+		const attempt = this.#doReconnect(name, options?.authChallenge, options?.manual);
 		this.#pendingReconnections.set(name, attempt);
 		return attempt.finally(() => this.#pendingReconnections.delete(name));
 	}
@@ -881,12 +906,17 @@ export class MCPManager {
 			}
 			this.#pendingConnections.delete(name);
 			this.#pendingToolLoads.delete(name);
+			this.#emitReconnectNotice({ type: "reconnect-suspended", serverName: name, crashes: recent.length });
 			return true;
 		}
 		return false;
 	}
 
-	async #doReconnect(name: string, authChallenge?: MCPAuthChallenge): Promise<MCPServerConnection | null> {
+	async #doReconnect(
+		name: string,
+		authChallenge?: MCPAuthChallenge,
+		manual = false,
+	): Promise<MCPServerConnection | null> {
 		const oldConnection = this.#connections.get(name);
 		let config = oldConnection?.config ?? this.#serverConfigs.get(name);
 		const source = this.#sources.get(name) ?? oldConnection?._source;
@@ -941,6 +971,7 @@ export class MCPManager {
 			try {
 				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
+				if (!manual) this.#emitReconnectNotice({ type: "reconnected", serverName: name });
 				return connection;
 			} catch (error) {
 				if (this.#epoch !== reconnectEpoch) {
@@ -962,6 +993,7 @@ export class MCPManager {
 					await Bun.sleep(delays[attempt]);
 				} else {
 					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
+					if (!manual) this.#emitReconnectNotice({ type: "reconnect-failed", serverName: name, error: msg });
 					// Don't remove stale tools — keep them in the registry so they
 					// remain selected. Calls will fail with MCP errors, which
 					// triggers the tool-level reconnect, or the user can run
