@@ -193,6 +193,7 @@ import {
 	WebSearchTool,
 	WriteTool,
 	warmupLspServers,
+	XdevRegistry,
 } from "./tools";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
@@ -2685,6 +2686,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					toolSession.xdevRegistry?.docsAll(
 						settings.get("tools.xdevDocs"),
 						settings.get("tools.xdevInlineDevices"),
+						XdevRegistry.resolveDocsTotalBudget(
+							settings.get("tools.xdevDocsMaxPercent"),
+							(agent?.state.model ?? model)?.contextWindow,
+						),
 					) ?? "",
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				resolvedCustomPrompt: options.customSystemPrompt,

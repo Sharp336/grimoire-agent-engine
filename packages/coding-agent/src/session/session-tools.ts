@@ -19,7 +19,7 @@ import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { isMountableUnderXdev, type XdevRegistry } from "../tools/xdev";
+import { isMountableUnderXdev, XdevRegistry } from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { formatLocalCalendarDate } from "../utils/local-date";
 import {
@@ -578,6 +578,10 @@ export class SessionTools {
 			pending.added,
 			this.#host.settings.get("tools.xdevDocs"),
 			this.#host.settings.get("tools.xdevInlineDevices"),
+			XdevRegistry.resolveDocsTotalBudget(
+				this.#host.settings.get("tools.xdevDocsMaxPercent"),
+				this.#host.model()?.contextWindow,
+			),
 		);
 		return {
 			role: "custom",

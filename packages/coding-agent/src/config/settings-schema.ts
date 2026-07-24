@@ -4210,6 +4210,25 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.xdevDocsMaxPercent": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "xd:// Docs Budget %",
+			description:
+				"When above 0, cap the total inlined xd:// device docs at this percent of the model's context window (e.g. 10 = 10%); devices past the budget stay catalog entries with docs on demand. 0 uses the built-in 48k-char budget.",
+			options: [
+				{ value: "0", label: "Disabled (48k-char budget)" },
+				{ value: "1", label: "1% (minimal)" },
+				{ value: "5", label: "5%" },
+				{ value: "10", label: "10% (Claude Code-style)" },
+				{ value: "20", label: "20% (generous)" },
+			],
+		},
+	},
+
 	// MCP
 	"mcp.enableProjectConfig": {
 		type: "boolean",

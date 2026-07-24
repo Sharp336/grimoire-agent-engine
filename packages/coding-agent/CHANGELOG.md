@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tools.xdevExternalDescriptionCap` (default `200`): makes the previously hardcoded 200-character truncation of external (MCP/custom/extension) `xd://` device descriptions in the system prompt and catalog listings configurable. Schemas are never truncated and `read xd://<tool>` still returns the full description.
+- Added `tools.xdevDocsMaxPercent` (default `0`): when above 0, caps the total inlined `xd://` device docs in the system prompt at that percent of the active model's context window (~4 chars/token) instead of the fixed 48,000-char budget; devices past the budget degrade to catalog entries with docs on demand.
 
 ## [17.1.3] - 2026-07-24
 

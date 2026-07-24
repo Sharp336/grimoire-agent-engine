@@ -306,6 +306,23 @@ export class XdevRegistry {
 	static readonly EXTERNAL_DESCRIPTION_CAP = 200;
 
 	/**
+	 * Resolve the total docs-inline budget in chars: a percent of the model's
+	 * context window when `percent` > 0 and the window is known (converted at
+	 * the standard ~4 chars/token estimate), otherwise the built-in absolute
+	 * default. Mirrors the "tool text may not exceed N% of context" precedent
+	 * from other agents, but as an opt-in over the fixed budget.
+	 */
+	static resolveDocsTotalBudget(percent: number, contextWindow: number | null | undefined): number {
+		if (percent > 0 && contextWindow && contextWindow > 0) {
+			return Math.floor((Math.min(percent, 100) / 100) * contextWindow * XdevRegistry.DOCS_BUDGET_CHARS_PER_TOKEN);
+		}
+		return XdevRegistry.DOCS_TOTAL_BUDGET;
+	}
+
+	/** Chars-per-token estimate for percent-of-context budget conversion. */
+	static readonly DOCS_BUDGET_CHARS_PER_TOKEN = 4;
+
+	/**
 	 * Docs + schema for mounted devices, nested under `##` headings for
 	 * system-prompt embedding. Inlines full docs in catalog order (built-ins
 	 * first) until {@link DOCS_TOTAL_BUDGET} is spent; the rest are listed by
@@ -313,10 +330,11 @@ export class XdevRegistry {
 	 * Dynamic mounts embed at most {@link EXTERNAL_DESCRIPTION_CAP} description
 	 * chars (schema always intact); `read xd://<tool>` returns the full text.
 	 */
-	docsAll(mode: XdevDocsMode = "inline", inlinePatterns: readonly string[] = []): string {
+	docsAll(mode: XdevDocsMode = "inline", inlinePatterns: readonly string[] = [], totalBudget?: number): string {
 		const sections: string[] = [];
 		const overflow: Tool[] = [];
 		const inlineGlobs = compileInlineGlobs(inlinePatterns);
+		const budget = totalBudget ?? XdevRegistry.DOCS_TOTAL_BUDGET;
 		let used = 0;
 		for (const tool of this.list()) {
 			if (!this.#shouldInline(tool, mode, inlineGlobs)) {
@@ -325,7 +343,7 @@ export class XdevRegistry {
 			}
 			const descriptionCap = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
-			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET) {
+			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > budget) {
 				overflow.push(tool);
 				continue;
 			}
@@ -349,17 +367,22 @@ export class XdevRegistry {
 	}
 
 	/** Docs for selected mounted devices under the configured prompt-doc policy. */
-	docsFor(names: Iterable<string>, mode: XdevDocsMode, inlinePatterns: readonly string[] = []): string {
+	docsFor(
+		names: Iterable<string>,
+		mode: XdevDocsMode,
+		inlinePatterns: readonly string[] = [],
+		totalBudget?: number,
+	): string {
 		const sections: string[] = [];
 		const inlineGlobs = compileInlineGlobs(inlinePatterns);
+		const budget = totalBudget ?? XdevRegistry.DOCS_TOTAL_BUDGET;
 		let used = 0;
 		for (const name of names) {
 			const tool = this.get(name);
 			if (!tool || !this.#shouldInline(tool, mode, inlineGlobs)) continue;
 			const descriptionCap = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
-			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET)
-				continue;
+			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > budget) continue;
 			used += docs.length;
 			sections.push(docs);
 		}
