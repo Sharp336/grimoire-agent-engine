@@ -1,0 +1,82 @@
+import { describe, expect, it } from "bun:test";
+import type { Tool } from "@oh-my-pi/pi-coding-agent/tools";
+import { XdevRegistry } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { type } from "arktype";
+
+// Contract: `tools.xdevExternalDescriptionCap` controls how much of an
+// EXTERNAL (dynamic-mount: MCP/custom/extension) device's description is
+// embedded into the system prompt and catalog lines. Built-in devices are
+// never capped, schemas are never capped, and `read xd://<tool>` (docs())
+// always returns the full text regardless of the cap.
+
+const LONG_DESCRIPTION = `gitnexus-style tool. ${"x".repeat(400)}`;
+
+function fakeTool(name: string, description: string): Tool {
+	return {
+		name,
+		label: name,
+		description,
+		parameters: type({}),
+		execute: async () => ({ content: [] }),
+	} as unknown as Tool;
+}
+
+const builtin = fakeTool("ast_grep", "Structural code search via ast-grep.");
+const dynamic = fakeTool("mcp__gateway_gitnexus_search_code_flows", LONG_DESCRIPTION);
+
+function makeRegistry(cap?: number): XdevRegistry {
+	const registry = cap === undefined ? new XdevRegistry([builtin]) : new XdevRegistry([builtin], cap);
+	registry.reconcile([dynamic]);
+	return registry;
+}
+
+describe("XdevRegistry external description cap", () => {
+	it("truncates dynamic descriptions to the custom cap in entries and docsAll", () => {
+		const registry = makeRegistry(50);
+
+		const entries = registry.entries();
+		const dynamicEntry = entries.find(entry => entry.name === dynamic.name);
+		const builtinEntry = entries.find(entry => entry.name === builtin.name);
+		expect(dynamicEntry).toBeDefined();
+		expect(dynamicEntry!.summary.length).toBeLessThanOrEqual(51); // 50 + ellipsis
+		// Built-ins are never capped.
+		expect(builtinEntry!.summary).toBe(builtin.description);
+
+		const docs = registry.docsAll("inline");
+		expect(docs).toContain("… (full docs: read xd://");
+		expect(docs).not.toContain(LONG_DESCRIPTION);
+		// The schema survives truncation intact.
+		expect(docs).toContain('"type": "object"');
+	});
+
+	it("keeps the 200-char default when no cap is given", () => {
+		const registry = makeRegistry();
+		const docs = registry.docsAll("inline");
+		expect(docs).not.toContain(LONG_DESCRIPTION);
+		expect(docs).toContain("… (full docs: read xd://");
+	});
+
+	it("embeds the full description when the cap exceeds its length", () => {
+		const registry = makeRegistry(10_000);
+		expect(registry.docsAll("inline")).toContain(LONG_DESCRIPTION);
+	});
+
+	it("applies setExternalDescriptionCap live", () => {
+		const registry = makeRegistry(50);
+		expect(registry.docsAll("inline")).not.toContain(LONG_DESCRIPTION);
+		registry.setExternalDescriptionCap(10_000);
+		expect(registry.docsAll("inline")).toContain(LONG_DESCRIPTION);
+	});
+
+	it("never truncates single-device docs (read xd://<tool>)", () => {
+		const registry = makeRegistry(50);
+		expect(registry.docs(dynamic.name)).toContain(LONG_DESCRIPTION);
+	});
+
+	it("caps docsFor the same way as docsAll", () => {
+		const registry = makeRegistry(50);
+		const docs = registry.docsFor([dynamic.name], "inline");
+		expect(docs).not.toContain(LONG_DESCRIPTION);
+		expect(docs).toContain("… (full docs: read xd://");
+	});
+});

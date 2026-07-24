@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tools.xdevExternalDescriptionCap` (default `200`): makes the previously hardcoded 200-character truncation of external (MCP/custom/extension) `xd://` device descriptions in the system prompt and catalog listings configurable. Schemas are never truncated and `read xd://<tool>` still returns the full description.
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed
