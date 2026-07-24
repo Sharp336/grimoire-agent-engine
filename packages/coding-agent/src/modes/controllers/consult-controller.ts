@@ -8,7 +8,7 @@ import {
 	registerPersistedConsultations,
 	retryPersistedConsultationTitle,
 } from "../../registry/persisted-agents";
-import type { ReadOnlySideRequestSnapshot } from "../../session/agent-session";
+import type { ReadOnlySideRequestSnapshot } from "../../session/agent-session-types";
 import {
 	CONSULTATION_STATUS_MESSAGE_TYPE,
 	CONSULTATION_THREAD_CUSTOM_TYPE,

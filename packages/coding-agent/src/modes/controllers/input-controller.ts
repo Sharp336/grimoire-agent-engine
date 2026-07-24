@@ -277,6 +277,8 @@ export class InputController {
 				if (!this.ctx.keybindings.matches(data, "app.clipboard.pasteImage")) return undefined;
 				void this.handleImagePaste();
 				return { consume: true };
+			});
+		}
 		if (!this.#consultActionListenerInstalled) {
 			this.#consultActionListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {

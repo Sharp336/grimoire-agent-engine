@@ -20,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/consultation";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { discoverTitleSystemPromptFile } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 
 const cleanupDirs: string[] = [];
@@ -396,6 +397,7 @@ describe("consultation editor ownership", () => {
 			modelRegistry,
 		});
 		const mode = new InteractiveMode(session, "test");
+		const quit = vi.spyOn(piUtils.postmortem, "quit").mockImplementation(async () => undefined as never);
 
 		try {
 			mode.editor.setText("parent first line\nparent second line");
@@ -432,6 +434,7 @@ describe("consultation editor ownership", () => {
 			await session.dispose();
 			authStorage.close();
 			tempDir.removeSync();
+			quit.mockRestore();
 			resetSettingsForTest();
 		}
 	});
