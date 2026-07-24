@@ -604,13 +604,17 @@ while ($alive) {
             # fire-and-forget child, etc. Signal the group directly from
             # here instead, so those descendants don't survive as orphans
             # just because the watchdog's own exit path below only ever
-            # tears down this one process. `kill -TERM -- "-$PID"` (negative
-            # pid) targets every member of the group, including this
-            # process itself, which is about to exit anyway. Windows has no
-            # process-group equivalent -- the win_job kill-on-close set at
-            # spawn time (pi-natives) is what covers that platform instead.
+            # tears down this one process. `-- "-$PID"` (negative pid)
+            # targets every member of the group, including this process
+            # itself, which is about to exit anyway. TERM then KILL
+            # (matching dispose()'s own two-signal pattern) so a descendant
+            # that ignores or traps SIGTERM still gets reaped rather than
+            # surviving with file locks held. Windows has no process-group
+            # equivalent -- the win_job kill-on-close set at spawn time
+            # (pi-natives) is what covers that platform instead.
             if (-not $IsWindows) {
                 try { & kill -TERM -- "-$PID" 2>$null } catch { } # best-effort
+                try { & kill -KILL -- "-$PID" 2>$null } catch { } # best-effort
             }
             break
         }
