@@ -2728,12 +2728,17 @@ export class AgentSession {
 			// Mid-run sync is handled separately via #takeMidRunTodoNudge so a long
 			// tool-use loop still gets prodded to keep the live HUD honest (issue #3651).
 
-			// When compaction queued recovery, skip periodic shake and any
-			// rewind/todo/session_stop passes: any reminder or hook continuation
-			// we append here would race the handoff, retry, auto-continue prompt,
-			// or queued-message drain that already owns the next turn.
-			if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
-				await emitAgentEndNotification({ willContinue: true });
+			// When compaction queued recovery or blocked automatic continuation,
+			// skip periodic shake and any rewind/todo/session_stop passes:
+			// any reminder or hook continuation we append here would race the
+			// handoff, retry, auto-continue prompt, or queued-message drain
+			// that already owns the next turn.
+			if (
+				compactionResult.deferredHandoff ||
+				compactionResult.continuationScheduled ||
+				compactionResult.automaticContinuationBlocked
+			) {
+				await emitAgentEndNotification(compactionResult.continuationScheduled ? { willContinue: true } : undefined);
 				return;
 			}
 
