@@ -489,6 +489,19 @@ impl HostCore {
 								.terminate_tree(true, 0, 5_000, core_cancel::CancelToken::default())
 								.await;
 						}
+						// The pool releases this dead host by `alive` check alone —
+						// dispose() is never called on this path, so its job-object
+						// termination never runs either. A background grandchild
+						// this wedged command spawned (e.g. `cmd /c start /b ...`)
+						// would otherwise survive the force-kill on Windows, the
+						// same gap `dispose()`'s clean-exit branch closes.
+						#[cfg(windows)]
+						{
+							let job = self.job.lock().take();
+							if let Some(job) = job {
+								job.terminate();
+							}
+						}
 						Some(PsRunResult {
 							exit_code:  None,
 							had_errors: true,
@@ -1819,6 +1832,93 @@ mod tests {
 		assert!(res.had_errors, "unacknowledged stop is a failed run");
 		assert!(started.elapsed() < Duration::from_secs(20), "kill path returns promptly");
 		assert!(!host.alive(), "sidecar is dead after an unacknowledged stop");
+	}
+
+	/// The stop-timeout force-kill above (an uncooperative pipeline that
+	/// never acknowledges `Stop`) only ever called `terminate_tree(true,
+	/// ...)` -- sufficient on POSIX, where `group=true` already reaches a
+	/// process-group-spawned sidecar's whole tree (round-4), but a no-op for
+	/// reaping descendants on Windows, which has no process-group
+	/// equivalent. Without also terminating the Windows job object here, a
+	/// background grandchild the wedged command spawned (e.g. `cmd /c start
+	/// /b ...`) would survive: the pool just marks the host dead by `alive`
+	/// and respawns lazily -- `dispose()`'s job-object termination is never
+	/// reached on this path.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kills_the_windows_job_when_stop_is_not_acknowledged() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+		if !cfg!(windows) {
+			eprintln!(
+				"skipping pshost test: Windows-only (POSIX's group=true kill already covers this \
+				 path, verified by kills_host_when_stop_is_not_acknowledged above)"
+			);
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		let marker = "27182";
+		let spawn_cmd = format!(
+			"$psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = 'cmd.exe'; \
+			 $psi.Arguments = '/c start /b ping.exe -n 30 -l {marker} 127.0.0.1'; \
+			 $psi.UseShellExecute = $false; $p = [System.Diagnostics.Process]::Start($psi); \
+			 \"wrapper-pid:$($p.Id)\""
+		);
+		let (out, _) = run_cmd(&host, &spawn_cmd, task::CancelToken::default()).await;
+		assert!(
+			out.lines()
+				.any(|line| line.trim().starts_with("wrapper-pid:")),
+			"wrapper spawned: {out:?}"
+		);
+
+		let find_grandchild = format!(
+			"(Get-CimInstance Win32_Process -Filter \"Name='PING.EXE'\" | Where-Object {{ \
+			 $_.CommandLine -like '*{marker}*' }} | Select-Object -First 1 -ExpandProperty ProcessId)"
+		);
+		let (out, _) = run_cmd(&host, &find_grandchild, task::CancelToken::default()).await;
+		let grandchild_pid: i32 = out
+			.trim()
+			.parse()
+			.unwrap_or_else(|_| panic!("grandchild pid printed: {out:?}"));
+
+		let is_running = |pid: i32| {
+			super::core_process::Process::from_pid(pid)
+				.is_some_and(|p| matches!(p.status(), super::core_process::ProcessStatus::Running))
+		};
+		assert!(
+			is_running(grandchild_pid),
+			"grandchild is alive before the wedge (pid {grandchild_pid})"
+		);
+
+		// [Thread]::Sleep blocks inside .NET, so BeginStop cannot interrupt it:
+		// no done frame arrives, and the stop-ack timeout force-kills the
+		// sidecar (same wedge as kills_host_when_stop_is_not_acknowledged).
+		let (_, res) = run_cmd(
+			&host,
+			"[System.Threading.Thread]::Sleep(60000)",
+			task::CancelToken::new(Some(500), None),
+		)
+		.await;
+		assert!(res.timed_out, "wedged pipeline reports timed_out");
+		assert!(!host.alive(), "sidecar is dead after an unacknowledged stop");
+
+		let mut reaped = false;
+		for _ in 0..20 {
+			if !is_running(grandchild_pid) {
+				reaped = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+		assert!(
+			reaped,
+			"the force-kill on an unacknowledged stop must also reap a Windows grandchild via the \
+			 job object (pid {grandchild_pid})"
+		);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
