@@ -604,17 +604,34 @@ while ($alive) {
             # fire-and-forget child, etc. Signal the group directly from
             # here instead, so those descendants don't survive as orphans
             # just because the watchdog's own exit path below only ever
-            # tears down this one process. `-- "-$PID"` (negative pid)
-            # targets every member of the group, including this process
-            # itself, which is about to exit anyway. TERM then KILL
-            # (matching dispose()'s own two-signal pattern) so a descendant
-            # that ignores or traps SIGTERM still gets reaped rather than
-            # surviving with file locks held. Windows has no process-group
-            # equivalent -- the win_job kill-on-close set at spawn time
-            # (pi-natives) is what covers that platform instead.
+            # tears down this one process.
+            #
+            # The TERM/KILL pair must NOT be sent directly from this pwsh
+            # process: `-- "-$PID"` (negative pid) targets every member of
+            # the group, INCLUDING this process itself, and pwsh's default
+            # SIGTERM disposition is immediate termination -- signal
+            # delivery can beat the interpreter back to the very next
+            # statement, so a direct `kill -TERM` here could kill pwsh
+            # before the follow-up `kill -KILL` escalation ever runs,
+            # leaving a descendant that ignores/traps SIGTERM to survive
+            # with its file locks held. Instead, spawn a detached bash
+            # helper to run the whole TERM-then-KILL sequence: `set -m`
+            # (job control, portable to both Linux and macOS bash without
+            # depending on the Linux-only `setsid` binary) places the
+            # backgrounded subshell in its OWN new process group, so it
+            # survives regardless of what happens to this process or the
+            # wrapper bash that spawned it.
             if (-not $IsWindows) {
-                try { & kill -TERM -- "-$PID" 2>$null } catch { } # best-effort
-                try { & kill -KILL -- "-$PID" 2>$null } catch { } # best-effort
+                try {
+                    $killScript = "set -m; ( kill -TERM -- -$PID 2>/dev/null; sleep 0.3; " +
+                        "kill -KILL -- -$PID 2>/dev/null ) & disown"
+                    $psi = New-Object System.Diagnostics.ProcessStartInfo
+                    $psi.FileName = '/bin/bash'
+                    $psi.ArgumentList.Add('-c')
+                    $psi.ArgumentList.Add($killScript)
+                    $psi.UseShellExecute = $false
+                    [void][System.Diagnostics.Process]::Start($psi)
+                } catch { } # best-effort
             }
             break
         }
