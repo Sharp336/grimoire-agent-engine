@@ -577,7 +577,6 @@ export const SETTINGS_SCHEMA = {
 		default: "light",
 		ui: {
 			tab: "appearance",
-			group: "Theme",
 			label: "Light Theme",
 			description: "Theme used when the terminal has a light background",
 			options: "runtime",
@@ -5277,7 +5276,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "Claude Code Hooks",
 			description:
-				"Execute PreToolUse/PostToolUse hooks from ~/.claude/settings.json and .claude/settings.json. Off by default — enabling project hooks from untrusted repos can run arbitrary shell commands",
+			"Execute PreToolUse/PostToolUse hooks from ~/.claude/settings.json. Off by default — only user-level hooks are loaded (not project-level .claude/settings.json) to prevent untrusted repos from running arbitrary shell commands",
 		},
 	},
 
