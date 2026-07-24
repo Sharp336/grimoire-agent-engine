@@ -193,6 +193,9 @@
 ### Added
 
 - Added `externalThinking` setting for private scratchpad reasoning via the new `think` tool
+### Added
+
+- Added GitHub issue workflow support: one-hop hierarchy context in `issue://` reads (parent/direct sub-issue links and completion progress), parent-first routing guidance with explicit assignee terminology, approval-gated `issue_create` hierarchy attachment and `issue_state` close/reopen, and forced-fresh single issue/PR reads. Hierarchy/state operations preserve compatibility fallbacks for older `gh` and GitHub Enterprise Server versions; mutations invalidate cached parent summaries.
 
 ## [17.2.13] - 2026-08-11
 
@@ -961,16 +964,6 @@
 - Added opt-in `omp bench --cache` for independent cold/warm prompt-cache benchmarking with stable-prefix controls.
 - Added `tools.xdevDocs` prompt-doc modes and the `tools.xdevInlineDevices` glob allowlist to control which mounted device documentation is inlined into the system prompt.
 - Added the opt-in `read.renderMarkdown` setting for formatted Markdown read previews.
-- Added GitHub issue workflow support: one-hop hierarchy context in `issue://` reads (parent/direct sub-issue links and completion progress), parent-first routing guidance with explicit assignee terminology, approval-gated `issue_create` hierarchy attachment and `issue_state` close/reopen, and forced-fresh single issue/PR reads. Hierarchy/state operations preserve compatibility fallbacks for older `gh` and GitHub Enterprise Server versions; mutations invalidate cached parent summaries.
-- Added `error.notify` so failed model turns can emit distinct terminal/desktop notifications without changing completion notifications ([#2691](https://github.com/can1357/oh-my-pi/issues/2691)).
-- Added auto-following light and dark themes to HTML session exports, with a `/export --themes` option to bundle the user's selected TUI themes.
-- Added owner-routed async job delivery: every session (including subagents) registers its own delivery sink, so background bash/task results are injected into the owning agent's run instead of the first top-level session; deliveries whose owner is gone are dead-lettered with the result retained on the job row.
-- Added `AsyncJobManager.registerDeliverySink` and `AsyncJobManager.waitForOwnerJobs` (with an `excludeSuppressed` filter for quiescence checks).
-- Added background-on-steer for auto-backgrounded bash: an incoming user/peer message backgrounds the running command (instead of waiting it out or killing it) so the message is handled promptly.
-- Added `friendlyName` support for hidden secrets so model-visible placeholders can carry sanitized semantic labels, content-derived hashes, and case hints while preserving exact deobfuscation ([#2465](https://github.com/can1357/oh-my-pi/issues/2465)).
-- Made the statusline `git` segment jj-aware: in a Jujutsu repo it shows the nearest bookmark (falling back to the short change-id) instead of git's `detached` label or nothing, and working-copy change counts come from jj where there is no `.git` to read ([#3582](https://github.com/can1357/oh-my-pi/issues/3582))
-- Added `block`/`unblock` todo operations and a `blocked` status for tasks waiting on external input; blocked tasks stay visible in the todo HUD and summary but are excluded from the incomplete-todo stop reminder, and an optional blocker note records what the task is waiting for.
-- Added a toggle-list editor in `/settings` for array-of-enum settings: `providers.webSearchOrder` and `providers.imageOrder` (ordered — Enter/Space toggles, ←/→ nudges, 1-9 splices the hovered provider into that position) and `providers.webSearchExclude` now appear under Providers → Services instead of being config-file only.
 
 ### Changed
 
