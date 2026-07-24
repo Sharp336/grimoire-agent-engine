@@ -7,7 +7,12 @@ import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
-import { expandRoleAlias, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
+import {
+	expandRoleAlias,
+	formatModelString,
+	getModelMatchPreferences,
+	resolveCliModel,
+} from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
@@ -36,6 +41,7 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { computerExposureMode } from "../tools/computer/exposure";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
@@ -93,13 +99,8 @@ function formatComputerUseStatus(session: AgentSession): string {
 	const enabled = session.settings.get("computer.enabled");
 	const active = session.getEnabledToolNames().includes("computer");
 	const model = session.model;
-	const modelName = model ? `${model.provider}/${model.id}` : "none";
-	const exposure =
-		!enabled || !active
-			? "not exposed"
-			: model?.supportsComputerUse === true && model.api !== "openai-codex-responses"
-				? "native"
-				: "function";
+	const modelName = model ? formatModelString(model) : "none";
+	const exposure = !enabled || !active ? "not exposed" : computerExposureMode(model);
 	const toolState = active ? "active" : enabled ? "unavailable" : "inactive";
 	return [
 		`Computer use: ${enabled ? "enabled" : "disabled"}`,

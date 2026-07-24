@@ -17,6 +17,7 @@ import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
+import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { isMountableUnderXdev, type XdevRegistry } from "../tools/xdev";
@@ -294,19 +295,13 @@ export class SessionTools {
 		return usesCodexTaskPrompt(model) ? "task-policy:gpt-5.6" : "task-policy:default";
 	}
 
-	#computerExposureMode(): "native" | "function" | "unavailable" {
-		const model = this.#host.model();
-		if (!model) return "unavailable";
-		return model.supportsComputerUse === true && model.api !== "openai-codex-responses" ? "native" : "function";
-	}
-
 	#logComputerState(message: string, enabled: boolean): void {
 		const model = this.#host.model();
 		logger.debug(message, {
 			enabled,
 			active: this.getEnabledToolNames().includes("computer"),
 			model: model ? formatModelString(model) : undefined,
-			exposure: this.#computerExposureMode(),
+			exposure: computerExposureMode(model),
 		});
 	}
 
