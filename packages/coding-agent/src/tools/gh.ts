@@ -11,6 +11,11 @@ import githubDescription from "../prompts/tools/github.md" with { type: "text" }
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
 import { buildTextResult, normalizeOptionalString, requireNonEmpty, resolveGitHubRepo } from "./gh-common";
+import {
+	assertRepositorySelectorSupportedForOperation,
+	executeIssueCreate,
+	executeIssueState,
+} from "./gh-issue-mutations";
 import { executePrCheckout, executePrCreate, executePrPush } from "./gh-pr-checkout";
 import { executeRunWatch } from "./gh-run-watch";
 import {
@@ -20,6 +25,7 @@ import {
 	executeSearchPrs,
 	executeSearchRepos,
 } from "./gh-search";
+import type { GithubInput } from "./gh-types";
 import { executeRepoView } from "./gh-view";
 import type { OutputMeta } from "./output-meta";
 import { ToolError } from "./tool-errors";
@@ -34,13 +40,17 @@ export {
 } from "./gh-pr-diff";
 export { buildSearchDateQualifier, parseSearchDateBound } from "./gh-search";
 export {
+	GH_ISSUE_HIERARCHY_FIELDS,
 	getOrFetchIssue,
 	getOrFetchPr,
+	githubIssueJsonWithHierarchyFallback,
 	githubIssueJsonWithStateReasonFallback,
+	type IssueHierarchyAvailability,
 	type IssueViewLookupOptions,
 	type PrViewLookupOptions,
 	type ViewLookupResult,
 } from "./gh-view";
+
 
 const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"repo_view",
@@ -55,16 +65,17 @@ const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 
 const githubSchema = type({
 	op: type(
-		"'repo_view' | 'file_read' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
+		"'repo_view' | 'file_read' | 'issue_create' | 'issue_state' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
 	).describe("github operation"),
 	"repo?": type("string").describe("owner/repo"),
 	"branch?": type("string").describe("branch"),
 	"path?": type("string").describe("repository-relative file path"),
 	"pr?": type("string | string[]").describe("pr number, url, or branch"),
+	"issue?": type("string | string[]").describe("issue number or issue numbers"),
 	"force?": type("boolean").describe("reset existing local branch"),
 	"forceWithLease?": type("boolean").describe("force-with-lease push"),
-	"title?": type("string").describe("pr title"),
-	"body?": type("string").describe("pr body markdown"),
+	"title?": type("string").describe("issue or pr title"),
+	"body?": type("string").describe("issue or pr body markdown"),
 	"base?": type("string").describe("pr base branch"),
 	"head?": type("string").describe("pr head branch"),
 	"draft?": type("boolean").describe("open pr as draft"),
@@ -72,6 +83,11 @@ const githubSchema = type({
 	"reviewer?": type("string[]").describe("reviewers"),
 	"assignee?": type("string[]").describe("assignees"),
 	"label?": type("string[]").describe("labels"),
+	"parent?": type("string").describe("parent issue number or canonical issue URL"),
+	"subIssues?": type("string[]").describe("existing issue numbers or canonical issue URLs to attach as sub-issues"),
+	"replaceParent?": type("boolean").describe("allow attached sub-issues to be moved from their current parents"),
+	"state?": type("'open' | 'closed'").describe("issue state"),
+	"stateReason?": type("'completed' | 'not_planned'").describe("reason for closing an issue"),
 	"query?": type("string").describe("search query"),
 	"since?": type("string").describe("lower-bound date filter"),
 	"until?": type("string").describe("upper-bound date filter"),
@@ -80,8 +96,6 @@ const githubSchema = type({
 	"run?": type("string").describe("actions run id or url"),
 	"tail?": type("number").describe("log lines per failed job"),
 });
-
-type GithubInput = typeof githubSchema.infer;
 
 export interface GhToolDetails {
 	meta?: OutputMeta;
@@ -154,6 +168,7 @@ export interface GhRunWatchViewDetails {
 	failedLogs?: GhRunWatchFailedLogDetails[];
 }
 
+
 export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {
 	readonly name = "github";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -161,7 +176,7 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 		const op = typeof rawOp === "string" ? rawOp : "";
 		return GITHUB_READONLY_OPS.has(op) ? "read" : "exec";
 	};
-	readonly summary = "Interact with GitHub repositories, files, pull requests, and Actions";
+	readonly summary = "Interact with GitHub repositories, files, issues, pull requests, and Actions";
 	readonly loadMode = "discoverable";
 	readonly label = "GitHub";
 	readonly description = prompt.render(githubDescription);
@@ -182,8 +197,15 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 		onUpdate?: AgentToolUpdateCallback<GhToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GhToolDetails>> {
+		const op = params.op;
+		if (op === "issue_create") {
+			return executeIssueCreate(this.session, params, signal);
+		}
+		if (op === "issue_state") {
+			return executeIssueState(this.session, params, signal);
+		}
 		return untilAborted(signal, async () => {
-			switch (params.op) {
+			switch (op) {
 				case "repo_view":
 					return executeRepoView(this.session, params, signal);
 				case "file_read":
@@ -244,3 +266,4 @@ async function executeFileRead(
 	const sourceUrl = `https://github.com/${repo}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
 	return buildTextResult(text, sourceUrl, { repo, branch });
 }
+

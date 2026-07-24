@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -53,11 +54,15 @@ function issuePayload(number: number, body: string, commentBodies: string[] = []
 		state: "OPEN",
 		stateReason: null,
 		author: { login: "octocat" },
+		assignees: [{ login: "maintainer" }, { name: "Release Manager" }],
 		body,
 		createdAt: "2026-04-01T09:00:00Z",
 		updatedAt: "2026-04-01T10:00:00Z",
 		url: `https://github.com/owner/example/issues/${number}`,
 		labels: [],
+		parent: null,
+		subIssues: { nodes: [], totalCount: 0 },
+		subIssuesSummary: { total: 0, completed: 0, percentCompleted: 0 },
 		comments: commentBodies.map((cb, idx) => ({
 			author: { login: `user${idx}` },
 			body: cb,
@@ -164,6 +169,7 @@ describe("issue:// protocol handler", () => {
 		expect(first.contentType).toBe("text/markdown");
 		expect(first.url).toBe("issue://owner/example/42");
 		expect(first.content).toContain("# Issue #42: Issue #42");
+		expect(first.content).toContain("Assignees: @maintainer, Release Manager");
 		expect(first.immutable).toBe(true);
 		expect(first.notes?.[0]).toBe("Fetched live");
 		expect(spy).toHaveBeenCalledTimes(1);
@@ -173,6 +179,184 @@ describe("issue:// protocol handler", () => {
 		expect(second.notes?.[0]).toMatch(/^Cached:/);
 		// Same key, soft TTL hit — no additional gh invocation.
 		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("renders one visible hierarchy hop from one supported gh issue view call", async () => {
+		const spy = vi.spyOn(git.github, "json").mockResolvedValue({
+			...issuePayload(42, "issue body"),
+			url: "https://ghe.example.test/owner/example/issues/42",
+			parent: {
+				number: 7,
+				title: "Parent roadmap",
+				state: "OPEN",
+				url: "https://ghe.example.test/platform/roadmap/issues/7",
+				repository: { nameWithOwner: "ignored/metadata" },
+			},
+			subIssues: {
+				nodes: [
+					{
+						number: 43,
+						title: "Same-repo child",
+						state: "CLOSED",
+						url: "https://ghe.example.test/owner/example/issues/43",
+					},
+					{
+						number: 9,
+						title: "Cross-repo child",
+						state: "OPEN",
+						url: "https://ghe.example.test/other/widgets/issues/9",
+					},
+				],
+				totalCount: 2,
+			},
+			subIssuesSummary: { total: 2, completed: 1, percentCompleted: 49.6 },
+		} as never);
+
+		const resource = await InternalUrlRouter.instance().resolve("issue://owner/example/42");
+		const hierarchyIndex = resource.content.indexOf("## Issue hierarchy");
+		const bodyIndex = resource.content.indexOf("## Body");
+
+		expect(hierarchyIndex).toBeGreaterThan(-1);
+		expect(bodyIndex).toBeGreaterThan(hierarchyIndex);
+		expect(resource.content).toContain("Parent: OPEN platform/roadmap#7 — Parent roadmap");
+		expect(resource.content).toContain("issue://platform/roadmap/7");
+		expect(resource.content).toContain("Sub-issues: 1/2 complete (50%)");
+		expect(resource.content).toContain("- CLOSED owner/example#43 — Same-repo child");
+		expect(resource.content).toMatch(/\n {2,}issue:\/\/owner\/example\/43/);
+		expect(resource.content).toContain("- OPEN other/widgets#9 — Cross-repo child");
+		expect(resource.content).toMatch(/\n {2,}issue:\/\/other\/widgets\/9/);
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(requestedJsonFields(spy.mock.calls[0]?.[1] as string[])).toEqual(
+			new Set([
+				"author",
+				"assignees",
+				"body",
+				"comments",
+				"createdAt",
+				"labels",
+				"number",
+				"parent",
+				"state",
+				"stateReason",
+				"subIssues",
+				"subIssuesSummary",
+				"title",
+				"updatedAt",
+				"url",
+			]),
+		);
+	});
+
+	it("omits foreign-host hierarchy links and marks the response partial", async () => {
+		vi.spyOn(git.github, "json").mockResolvedValue({
+			...issuePayload(44, "foreign hierarchy"),
+			subIssues: {
+				nodes: [
+					{
+						number: 45,
+						title: "Same-host child",
+						state: "OPEN",
+						url: "https://github.com/owner/example/issues/45",
+					},
+					{
+						number: 46,
+						title: "Foreign-host child",
+						state: "OPEN",
+						url: "https://ghe.example.test/owner/example/issues/46",
+					},
+				],
+				totalCount: 2,
+			},
+			subIssuesSummary: { total: 2, completed: 0, percentCompleted: 0 },
+		} as never);
+
+		const resource = await InternalUrlRouter.instance().resolve("issue://owner/example/44");
+
+		expect(resource.content).toContain("- OPEN owner/example#45 — Same-host child");
+		expect(resource.content).not.toContain("Foreign-host child");
+		expect(resource.content).toContain(
+			"> WARNING: Issue hierarchy data is partial; only valid visible relationships are shown.",
+		);
+	});
+
+	it("renders an explicit supported-empty hierarchy result", async () => {
+		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(44, "standalone") as never);
+
+		const resource = await InternalUrlRouter.instance().resolve("issue://owner/example/44");
+
+		expect(resource.content).toContain("## Issue hierarchy");
+		expect(resource.content).toContain("No visible parent or direct sub-issues for the current GitHub identity.");
+		expect(resource.content).not.toContain("Issue hierarchy unavailable");
+		expect(resource.content).not.toContain("Issue hierarchy data is partial");
+		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("retains valid hierarchy links and warns when other relationships are malformed", async () => {
+		const spy = vi.spyOn(git.github, "json").mockResolvedValue({
+			...issuePayload(45, "partial hierarchy"),
+			parent: {
+				number: 6,
+				title: "Malformed parent",
+				state: "OPEN",
+				url: "https://github.enterprise.test/owner/example/pull/6",
+			},
+			subIssues: {
+				nodes: [
+					{
+						number: 46,
+						title: "Visible child",
+						state: "OPEN",
+						url: "https://github.com/valid/project/issues/46",
+					},
+					{
+						number: 47,
+						title: "Malformed child",
+						state: "CLOSED",
+						url: "not a canonical issue URL",
+					},
+				],
+				totalCount: 2,
+			},
+			subIssuesSummary: { total: 2, completed: 1, percentCompleted: 50 },
+		} as never);
+
+		const resource = await InternalUrlRouter.instance().resolve("issue://owner/example/45");
+
+		expect(resource.content).toContain("- OPEN valid/project#46 — Visible child");
+		expect(resource.content).toContain("issue://valid/project/46");
+		expect(resource.content).not.toContain("Malformed parent");
+		expect(resource.content).not.toContain("issue://owner/example/6");
+		expect(resource.content).not.toContain("Malformed child");
+		expect(resource.content).not.toContain("issue://owner/example/47");
+		expect(resource.content).toContain(
+			"> WARNING: Issue hierarchy data is partial; only valid visible relationships are shown.",
+		);
+		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("warns when the direct-child connection is truncated", async () => {
+		vi.spyOn(git.github, "json").mockResolvedValue({
+			...issuePayload(46, "truncated hierarchy"),
+			subIssues: {
+				nodes: [
+					{
+						number: 47,
+						title: "Visible child",
+						state: "OPEN",
+						url: "https://github.com/owner/example/issues/47",
+					},
+				],
+				totalCount: 2,
+			},
+			subIssuesSummary: { total: 2, completed: 0, percentCompleted: 0 },
+		} as never);
+
+		const resource = await InternalUrlRouter.instance().resolve("issue://owner/example/46");
+
+		expect(resource.content).toContain("issue://owner/example/47");
+		expect(resource.content).toContain(
+			"> WARNING: Issue hierarchy data is partial; only valid visible relationships are shown.",
+		);
 	});
 
 	it("marks soft-expired issue fallback content as stale when live refresh fails", async () => {
@@ -195,6 +379,49 @@ describe("issue:// protocol handler", () => {
 		expect(resource.content).toContain("cached body");
 		expect(spy).toHaveBeenCalledTimes(2);
 	});
+	it("explicit fresh issue reads bypass and replace a soft-fresh cache row", async () => {
+		const spy = vi
+			.spyOn(git.github, "json")
+			.mockResolvedValueOnce(issuePayload(43, "cached body") as never)
+			.mockResolvedValueOnce(issuePayload(43, "live body") as never);
+		const router = InternalUrlRouter.instance();
+
+		const cached = await router.resolve("issue://owner/example/43");
+		const live = await router.resolve("issue://owner/example/43?fresh=1");
+		const replaced = await router.resolve("issue://owner/example/43");
+
+		expect(cached.content).toContain("cached body");
+		expect(live.content).toContain("live body");
+		expect(live.notes?.[0]).toBe("Fetched live");
+		expect(replaced.content).toContain("live body");
+		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("explicit fresh issue read failures reject instead of returning stale content", async () => {
+		const spy = vi.spyOn(git.github, "json").mockResolvedValueOnce(issuePayload(43, "cached body") as never);
+		const router = InternalUrlRouter.instance();
+		await router.resolve("issue://owner/example/43");
+		spy.mockRejectedValue(new Error("live issue unavailable") as never);
+
+		await expect(router.resolve("issue://owner/example/43?fresh=true")).rejects.toThrow("live issue unavailable");
+		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("rejects unsupported or repeated fresh values before invoking gh", async () => {
+		const spy = vi.spyOn(git.github, "json");
+		const router = InternalUrlRouter.instance();
+
+		for (const url of [
+			"issue://owner/example/43?fresh=0",
+			"issue://owner/example/43?fresh=false",
+			"issue://owner/example/43?fresh=TRUE",
+			"issue://owner/example/43?fresh=1&fresh=true",
+			"pr://owner/example/77?fresh=",
+		]) {
+			await expect(router.resolve(url)).rejects.toThrow(/Invalid (?:issue|pr):\/\/ fresh value/);
+		}
+		expect(spy).not.toHaveBeenCalled();
+	});
 
 	it("retries issue://owner/repo/<n> without stateReason when gh does not support it", async () => {
 		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
@@ -212,6 +439,114 @@ describe("issue:// protocol handler", () => {
 		expect(spy).toHaveBeenCalledTimes(2);
 		expect(requestedJsonFields(spy.mock.calls[0]?.[1] as string[]).has("stateReason")).toBe(true);
 		expect(requestedJsonFields(spy.mock.calls[1]?.[1] as string[]).has("stateReason")).toBe(false);
+		for (const hierarchyField of ["parent", "subIssues", "subIssuesSummary"]) {
+			expect(requestedJsonFields(spy.mock.calls[0]?.[1] as string[]).has(hierarchyField)).toBe(true);
+			expect(requestedJsonFields(spy.mock.calls[1]?.[1] as string[]).has(hierarchyField)).toBe(true);
+		}
+	});
+
+	it("retries old local gh once without hierarchy fields and renders the CLI version notice", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			const fields = requestedJsonFields(args);
+			if (fields.has("parent") || fields.has("subIssues") || fields.has("subIssuesSummary")) {
+				throw new Error('Unknown JSON field: "parent"');
+			}
+			return {
+				...issuePayload(48, "old gh"),
+				parent: undefined,
+				subIssues: undefined,
+				subIssuesSummary: undefined,
+			} as never;
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("issue://owner/example/48");
+
+		expect(resource.content).toContain("Issue hierarchy unavailable: GitHub CLI 2.94.0 or later is required.");
+		expect(resource.content).not.toContain("No visible parent or direct sub-issues for the current GitHub identity.");
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(requestedJsonFields(spy.mock.calls[0]?.[1] as string[])).toEqual(
+			new Set([
+				"author",
+				"assignees",
+				"body",
+				"comments",
+				"createdAt",
+				"labels",
+				"number",
+				"parent",
+				"state",
+				"stateReason",
+				"subIssues",
+				"subIssuesSummary",
+				"title",
+				"updatedAt",
+				"url",
+			]),
+		);
+		expect(requestedJsonFields(spy.mock.calls[1]?.[1] as string[])).toEqual(
+			new Set([
+				"author",
+				"assignees",
+				"body",
+				"comments",
+				"createdAt",
+				"labels",
+				"number",
+				"state",
+				"stateReason",
+				"title",
+				"updatedAt",
+				"url",
+			]),
+		);
+	});
+
+	it("retries a GHES hierarchy schema mismatch once and renders the server notice", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			const fields = requestedJsonFields(args);
+			if (fields.has("parent") || fields.has("subIssues") || fields.has("subIssuesSummary")) {
+				throw new Error("GraphQL: Field 'subIssues' doesn't exist on type 'Issue'");
+			}
+			return {
+				...issuePayload(49, "old server"),
+				parent: undefined,
+				subIssues: undefined,
+				subIssuesSummary: undefined,
+			} as never;
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("issue://owner/example/49");
+
+		expect(resource.content).toContain("Issue hierarchy unavailable on this GitHub server.");
+		expect(resource.content).not.toContain("No visible parent or direct sub-issues for the current GitHub identity.");
+		expect(spy).toHaveBeenCalledTimes(2);
+		for (const hierarchyField of ["parent", "subIssues", "subIssuesSummary"]) {
+			expect(requestedJsonFields(spy.mock.calls[0]?.[1] as string[]).has(hierarchyField)).toBe(true);
+			expect(requestedJsonFields(spy.mock.calls[1]?.[1] as string[]).has(hierarchyField)).toBe(false);
+		}
+	});
+
+	it.each([
+		["network", new Error("network unreachable")],
+		["authentication", new Error("GraphQL: authentication required")],
+		["rate limit", new Error("GraphQL: API rate limit exceeded")],
+		["hierarchy runtime", new Error("GraphQL: subIssues resolver returned an undefined field value")],
+		["abort", new ToolAbortError("cancelled issue request")],
+	])("does not retry or misclassify a generic %s failure", async (_kind: string, failure: Error) => {
+		const spy = vi.spyOn(git.github, "json").mockRejectedValue(failure as never);
+
+		try {
+			await InternalUrlRouter.instance().resolve("issue://owner/example/50");
+			expect.unreachable("Expected issue resolution to reject");
+		} catch (error: unknown) {
+			expect(error).toBeInstanceOf(Error);
+			if (!(error instanceof Error)) throw error;
+			expect(error.message).toContain(failure.message);
+			expect(error.message).not.toContain("GitHub CLI 2.94.0");
+			expect(error.message).not.toContain("Issue hierarchy unavailable");
+			expect(error.message).not.toContain("No visible parent or direct sub-issues");
+		}
+		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
 	it("?comments=0 selects a separate cache row with comments suppressed", async () => {
@@ -229,6 +564,43 @@ describe("issue:// protocol handler", () => {
 		expect(without.content).not.toContain("visible comment");
 		// Note metadata reflects the toggle on the comments-off variant.
 		expect(without.notes).toContain("Comments disabled");
+		expect(requestedJsonFields(spy.mock.calls[0]?.[1] as string[])).toEqual(
+			new Set([
+				"author",
+				"assignees",
+				"body",
+				"comments",
+				"createdAt",
+				"labels",
+				"number",
+				"parent",
+				"state",
+				"stateReason",
+				"subIssues",
+				"subIssuesSummary",
+				"title",
+				"updatedAt",
+				"url",
+			]),
+		);
+		expect(requestedJsonFields(spy.mock.calls[1]?.[1] as string[])).toEqual(
+			new Set([
+				"author",
+				"assignees",
+				"body",
+				"createdAt",
+				"labels",
+				"number",
+				"parent",
+				"state",
+				"stateReason",
+				"subIssues",
+				"subIssuesSummary",
+				"title",
+				"updatedAt",
+				"url",
+			]),
+		);
 	});
 
 	it("rejects invalid issue:// URLs with a friendly message", async () => {
@@ -302,6 +674,27 @@ describe("pr:// protocol handler", () => {
 		await expect(router.resolve("issue://owner/./repo/1")).rejects.toThrow(
 			/Invalid issue:\/\/ URL: empty or unsafe path segment/,
 		);
+	});
+	it("explicit fresh PR reads bypass and replace cache rows without stale fallback", async () => {
+		const spy = vi
+			.spyOn(git.github, "json")
+			.mockResolvedValueOnce(prPayload(77, "cached PR body") as never)
+			.mockResolvedValueOnce(prPayload(77, "live PR body") as never);
+		const router = InternalUrlRouter.instance();
+
+		const cached = await router.resolve("pr://owner/example/77?comments=0");
+		const live = await router.resolve("pr://owner/example/77?comments=0&fresh=true");
+		const replaced = await router.resolve("pr://owner/example/77?comments=0");
+
+		expect(cached.content).toContain("cached PR body");
+		expect(live.content).toContain("live PR body");
+		expect(live.notes?.[0]).toBe("Fetched live");
+		expect(replaced.content).toContain("live PR body");
+		expect(spy).toHaveBeenCalledTimes(2);
+
+		spy.mockRejectedValue(new Error("live PR unavailable") as never);
+		await expect(router.resolve("pr://owner/example/77?comments=0&fresh=1")).rejects.toThrow("live PR unavailable");
+		expect(spy).toHaveBeenCalledTimes(3);
 	});
 });
 

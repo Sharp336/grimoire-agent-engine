@@ -15,6 +15,7 @@ import {
 	parseSearchDateBound,
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir, WhichCachePolicy } from "@oh-my-pi/pi-utils";
@@ -545,6 +546,959 @@ describe("github tool", () => {
 		);
 		expect(textSpy).not.toHaveBeenCalled();
 		expect(jsonSpy).not.toHaveBeenCalled();
+	});
+
+	describe("issue_create", () => {
+		const hierarchyCapabilityResponse = {
+			data: { __type: { fields: [{ name: "addSubIssue" }] } },
+		};
+		function successfulIssueCreateGraphqlResponse(args: readonly string[]) {
+			if (args.some(arg => arg.includes("IssueHierarchyMutationCapability"))) {
+				return hierarchyCapabilityResponse;
+			}
+			return { data: {} };
+		}
+		it("exposes hierarchy inputs in the schema and requires exec approval", () => {
+			const tool = new GithubTool(createSession());
+			const wire = toolWireSchema(tool);
+			const properties = wire.properties as Record<string, unknown>;
+			const request: ToolCall = {
+				type: "toolCall",
+				id: "issue-create-schema",
+				name: tool.name,
+				arguments: {
+					op: "issue_create",
+					title: "Coordinate release",
+					parent: "7",
+					subIssues: ["8"],
+					replaceParent: false,
+				},
+			};
+
+			expect(properties.parent).toBeDefined();
+			expect(properties.subIssues).toBeDefined();
+			expect(properties.replaceParent).toBeDefined();
+			expect(tool.parameters.assert(validateToolArguments(tool, request))).toMatchObject(request.arguments);
+			expect(tool.approval(request.arguments)).toBe("exec");
+		});
+
+		it("creates an issue noninteractively with an explicit empty body", async () => {
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/owner/repo/issues/42\n");
+			const jsonSpy = vi.spyOn(git.github, "json");
+			const tool = new GithubTool(createSession());
+
+			const result = await tool.execute("issue-create-basic", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Coordinate release",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(textSpy.mock.calls[0]?.[1]).toEqual([
+				"issue",
+				"create",
+				"--repo",
+				"owner/repo",
+				"--title",
+				"Coordinate release",
+				"--body",
+				"",
+			]);
+			expect(jsonSpy).not.toHaveBeenCalled();
+			expect(text).toContain("https://github.com/owner/repo/issues/42");
+			expect(result.details?.meta?.source).toEqual({
+				type: "url",
+				value: "https://github.com/owner/repo/issues/42",
+			});
+			expect(result.details?.status).toBe("created");
+		});
+
+		it("attaches a newly created issue beneath an existing parent", async () => {
+			const createdUrl = "https://github.com/owner/repo/issues/43";
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === "7") {
+					return { id: "I_parent", number: 7, url: "https://github.com/owner/repo/issues/7" } as never;
+				}
+				if (args[2] === createdUrl) {
+					return { id: "I_created", number: 43, url: createdUrl } as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+			const tool = new GithubTool(createSession());
+
+			const result = await tool.execute("issue-create-parent-only", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Child issue",
+				parent: "7",
+			});
+
+			expect(jsonSpy.mock.calls.filter(call => call[1][0] === "issue").map(call => call[1])).toEqual([
+				["issue", "view", "7", "--repo", "owner/repo", "--json", "id,number,url"],
+				["issue", "view", createdUrl, "--json", "id,number,url"],
+			]);
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(jsonSpy).toHaveBeenCalledTimes(5);
+			const mutationArgs = jsonSpy.mock.calls[4]?.[1] ?? [];
+			expect(mutationArgs.slice(0, 2)).toEqual(["api", "graphql"]);
+			expect(mutationArgs.find(arg => arg.startsWith("query="))).toContain("replaceParent: false");
+			expect(mutationArgs.slice(-4)).toEqual(["-f", "parentId0=I_parent", "-f", "childId0=I_created"]);
+			expect(result.details?.status).toBe("created");
+		});
+
+		it("uses a body file and repeated assignee and label flags", async () => {
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/owner/repo/issues/43\n");
+			const jsonSpy = vi.spyOn(git.github, "json");
+			const tool = new GithubTool(createSession());
+
+			await tool.execute("issue-create-body", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Write release notes",
+				body: "First line\n\nSecond line",
+				assignee: ["octocat", "hubot"],
+				label: ["release", "documentation"],
+			});
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			const args = textSpy.mock.calls[0]?.[1] ?? [];
+			expect(args.slice(0, 6)).toEqual([
+				"issue",
+				"create",
+				"--repo",
+				"owner/repo",
+				"--title",
+				"Write release notes",
+			]);
+			expect(args.slice(6, 14)).toEqual([
+				"--assignee",
+				"octocat",
+				"--assignee",
+				"hubot",
+				"--label",
+				"release",
+				"--label",
+				"documentation",
+			]);
+			const bodyFileIndex = args.indexOf("--body-file");
+			expect(bodyFileIndex).toBe(14);
+			expect(args[bodyFileIndex + 1]).toMatch(/body\.md$/);
+			expect(args).not.toContain("--body");
+			expect(jsonSpy).not.toHaveBeenCalled();
+		});
+
+		it("preflights a parent and same/cross-repo children before one GraphQL attachment", async () => {
+			const createdUrl = "https://github.example.com/owner/repo/issues/42";
+			const crossRepoChild = "https://github.example.com/other/project/issues/9";
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.example.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				const reference = args[2];
+				if (reference === "7") {
+					return {
+						id: "I_parent",
+						parent: null,
+						number: 7,
+						url: "https://github.example.com/owner/repo/issues/7",
+					} as never;
+				}
+				if (reference === "8") {
+					return {
+						id: "I_same",
+						parent: null,
+						number: 8,
+						url: "https://github.example.com/owner/repo/issues/8",
+					} as never;
+				}
+				if (reference === crossRepoChild) {
+					return { id: "I_cross", parent: null, number: 9, url: crossRepoChild } as never;
+				}
+				if (reference === createdUrl) {
+					return { id: "I_created", parent: null, number: 42, url: createdUrl } as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+			const tool = new GithubTool(createSession());
+
+			const result = await tool.execute("issue-create-hierarchy", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Release umbrella",
+				parent: "7",
+				subIssues: ["8", crossRepoChild],
+			});
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(textSpy.mock.calls[0]?.[1]).toEqual([
+				"issue",
+				"create",
+				"--repo",
+				"owner/repo",
+				"--title",
+				"Release umbrella",
+				"--body",
+				"",
+			]);
+			expect(jsonSpy.mock.invocationCallOrder[0]).toBeLessThan(textSpy.mock.invocationCallOrder[0] ?? 0);
+			expect(jsonSpy.mock.invocationCallOrder[5]).toBeGreaterThan(textSpy.mock.invocationCallOrder[0] ?? 0);
+			expect(jsonSpy.mock.invocationCallOrder[6]).toBeGreaterThan(jsonSpy.mock.invocationCallOrder[5] ?? 0);
+			expect(jsonSpy.mock.calls.filter(call => call[1][0] === "issue").map(call => call[1])).toEqual([
+				["issue", "view", "7", "--repo", "owner/repo", "--json", "id,number,url"],
+				["issue", "view", "8", "--repo", "owner/repo", "--json", "id,parent,number,url"],
+				["issue", "view", crossRepoChild, "--json", "id,parent,number,url"],
+				["issue", "view", createdUrl, "--json", "id,number,url"],
+			]);
+			expect(jsonSpy).toHaveBeenCalledTimes(7);
+			expect(jsonSpy.mock.calls[1]?.[1].slice(0, 4)).toEqual(["api", "graphql", "--hostname", "github.example.com"]);
+			const mutationArgs = jsonSpy.mock.calls[6]?.[1] ?? [];
+			expect(mutationArgs.slice(0, 5)).toEqual(["api", "graphql", "--hostname", "github.example.com", "-f"]);
+			const queryArg = mutationArgs[5];
+			expect(queryArg).toStartWith("query=mutation AddSubIssues(");
+			expect(queryArg).toContain("addSubIssue");
+			expect(queryArg.match(/addSubIssue/g)).toHaveLength(3);
+			expect(queryArg.match(/replaceParent: false/g)).toHaveLength(3);
+			expect(mutationArgs.slice(6)).toEqual([
+				"-f",
+				"parentId0=I_parent",
+				"-f",
+				"childId0=I_created",
+				"-f",
+				"parentId1=I_created",
+				"-f",
+				"childId1=I_same",
+				"-f",
+				"parentId2=I_created",
+				"-f",
+				"childId2=I_cross",
+			]);
+			expect(result.details?.meta?.source).toEqual({ type: "url", value: createdUrl });
+			expect(result.details?.status).toBe("created");
+		});
+
+		it("rejects an already-parented child before creating the issue by default", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				return {
+					id: "I_child",
+					parent: {
+						id: "I_existing_parent",
+						number: 3,
+						url: "https://github.com/owner/repo/issues/3",
+					},
+					number: 8,
+					url: "https://github.com/owner/repo/issues/8",
+				} as never;
+			});
+			const tool = new GithubTool(createSession());
+
+			await expect(
+				tool.execute("issue-create-parented-child", {
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "New umbrella",
+					subIssues: ["8"],
+				}),
+			).rejects.toThrow(/already has a parent/i);
+
+			expect(jsonSpy).toHaveBeenCalledTimes(3);
+			expect(jsonSpy.mock.calls[2]?.[1]).toEqual([
+				"issue",
+				"view",
+				"8",
+				"--repo",
+				"owner/repo",
+				"--json",
+				"id,parent,number,url",
+			]);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
+		it("rejects when a child's current-parent status cannot be determined safely", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				return {
+					id: "I_child",
+					number: 8,
+					url: "https://github.com/owner/repo/issues/8",
+				} as never;
+			});
+			const tool = new GithubTool(createSession());
+
+			await expect(
+				tool.execute("issue-create-unknown-parent", {
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "New umbrella",
+					subIssues: ["8"],
+				}),
+			).rejects.toThrow(/parent status|determine.*parent/i);
+			expect(jsonSpy).toHaveBeenCalledTimes(3);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
+		it("sets replaceParent only for existing children after explicit opt-in", async () => {
+			const createdUrl = "https://github.com/owner/repo/issues/44";
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === "7") {
+					return {
+						id: "I_parent",
+						parent: null,
+						number: 7,
+						url: "https://github.com/owner/repo/issues/7",
+					} as never;
+				}
+				if (args[2] === "8") {
+					return {
+						id: "I_child",
+						parent: { id: "I_old_parent", number: 2, url: "https://github.com/owner/repo/issues/2" },
+						number: 8,
+						url: "https://github.com/owner/repo/issues/8",
+					} as never;
+				}
+				if (args[2] === createdUrl) {
+					return { id: "I_created", parent: null, number: 44, url: createdUrl } as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+			const tool = new GithubTool(createSession());
+
+			const result = await tool.execute("issue-create-reparent", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Replacement umbrella",
+				parent: "7",
+				subIssues: ["8"],
+				replaceParent: true,
+			});
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(jsonSpy).toHaveBeenCalledTimes(6);
+			const mutationArgs = jsonSpy.mock.calls[5]?.[1] ?? [];
+			const queryArg = mutationArgs.find(arg => arg.startsWith("query="));
+			expect(queryArg?.match(/addSubIssue/g)).toHaveLength(2);
+			expect(queryArg?.match(/replaceParent: false/g)).toHaveLength(1);
+			expect(queryArg?.match(/replaceParent: true/g)).toHaveLength(1);
+			expect(result.details?.status).toBe("created");
+		});
+
+		it("deduplicates syntactically distinct references before preflight and attachment", async () => {
+			const childUrl = "https://github.com/owner/repo/issues/8";
+			const createdUrl = "https://github.com/owner/repo/issues/45";
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === "8" || args[2] === childUrl) {
+					return {
+						id: "I_child",
+						parent: null,
+						number: 8,
+						url: childUrl,
+					} as never;
+				}
+				if (args[2] === createdUrl) {
+					return { id: "I_created", parent: null, number: 45, url: createdUrl } as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+			const tool = new GithubTool(createSession());
+
+			await tool.execute("issue-create-dedupe", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Deduplicated umbrella",
+				subIssues: ["8", childUrl],
+			});
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(jsonSpy).toHaveBeenCalledTimes(5);
+			expect(
+				jsonSpy.mock.calls.filter(
+					call => call[1][0] === "issue" && (call[1][2] === "8" || call[1][2] === childUrl),
+				),
+			).toHaveLength(1);
+			const mutationArgs = jsonSpy.mock.calls[4]?.[1] ?? [];
+			const queryArg = mutationArgs.find(arg => arg.startsWith("query="));
+			expect(queryArg?.match(/addSubIssue/g)).toHaveLength(1);
+		});
+
+		it("enforces the child cap after same-target number and URL deduplication", async () => {
+			const childCount = 51;
+			const references = Array.from({ length: childCount }, (_, index) => {
+				const issueNumber = index + 1;
+				return [String(issueNumber), `https://github.com/owner/repo/issues/${issueNumber}`];
+			}).flat();
+			const createdUrl = "https://github.com/owner/repo/issues/200";
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === createdUrl) {
+					return { id: "I_created", parent: null, number: 200, url: createdUrl } as never;
+				}
+				const match = args[2]?.match(/(?:issues\/)?(\d+)$/);
+				if (match) {
+					const issueNumber = Number(match[1]);
+					return {
+						id: `I_child_${issueNumber}`,
+						parent: null,
+						number: issueNumber,
+						url: `https://github.com/owner/repo/issues/${issueNumber}`,
+					} as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+			const tool = new GithubTool(createSession());
+
+			await tool.execute("issue-create-target-dedupe-cap", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Deduplicated umbrella",
+				subIssues: references,
+			});
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(jsonSpy.mock.calls.filter(call => call[1][0] === "issue")).toHaveLength(childCount + 1);
+			const mutationArgs =
+				jsonSpy.mock.calls.find(call => call[1].some(arg => arg.startsWith("query=mutation AddSubIssues")))?.[1] ??
+				[];
+			const queryArg = mutationArgs.find(arg => arg.startsWith("query="));
+			expect(queryArg?.match(/addSubIssue/g)).toHaveLength(childCount);
+		});
+
+		it("validates titles and hierarchy references before running gh", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi.spyOn(git.github, "json");
+			const tool = new GithubTool(createSession());
+			const tooManyChildren = Array.from({ length: 101 }, (_, index) => String(index + 1));
+			const invalidInputs = [
+				{ op: "issue_create" as const, title: "   " },
+				{ op: "issue_create" as const, title: "Invalid parent", parent: "0" },
+				{ op: "issue_create" as const, title: "Invalid child", subIssues: ["not-an-issue"] },
+				{
+					op: "issue_create" as const,
+					title: "Wrong URL kind",
+					subIssues: ["https://github.com/owner/repo/pull/8"],
+				},
+				{ op: "issue_create" as const, title: "Missing children", replaceParent: true },
+				{ op: "issue_create" as const, title: "Cycle", parent: "7", subIssues: ["7"] },
+				{ op: "issue_create" as const, title: "Too many", subIssues: tooManyChildren },
+			];
+
+			for (const input of invalidInputs) {
+				await expect(tool.execute("issue-create-invalid", input)).rejects.toThrow();
+			}
+			expect(textSpy).not.toHaveBeenCalled();
+			expect(jsonSpy).not.toHaveBeenCalled();
+		});
+
+		it("rejects unsupported hierarchy mutations before creating an issue", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") {
+					return { data: { __type: { fields: [{ name: "createIssue" }] } } } as never;
+				}
+				throw new Error(`Unexpected reference preflight: ${args.join(" ")}`);
+			});
+			const tool = new GithubTool(createSession());
+
+			await expect(
+				tool.execute("issue-create-unsupported", {
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "Unsupported hierarchy",
+					parent: "7",
+				}),
+			).rejects.toThrow(/does not support issue hierarchy mutations/i);
+
+			expect(jsonSpy).toHaveBeenCalledTimes(2);
+			expect(jsonSpy.mock.calls[1]?.[1].slice(0, 2)).toEqual(["api", "graphql"]);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
+		it("rejects cross-host and protocol-downgrade URLs before reference preflights or creation", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi
+				.spyOn(git.github, "json")
+				.mockResolvedValue({ url: "https://github.com/owner/repo" } as never);
+			const tool = new GithubTool(createSession());
+
+			for (const reference of [
+				"https://github.example.com/other/project/issues/8",
+				"http://github.com/owner/repo/issues/8",
+				"http://127.0.0.1/owner/repo/issues/8",
+			]) {
+				await expect(
+					tool.execute("issue-create-cross-host", {
+						op: "issue_create",
+						repo: "owner/repo",
+						title: "Invalid hierarchy host",
+						subIssues: [reference],
+					}),
+				).rejects.toThrow(/issue creation repository is on https:\/\/github\.com/i);
+			}
+			const foreignReference = "https://github.example.com/owner/repo/issues/8";
+			for (const subIssues of [
+				["8", foreignReference],
+				[foreignReference, "8"],
+			]) {
+				await expect(
+					tool.execute("issue-create-cross-host-dedupe", {
+						op: "issue_create",
+						repo: "owner/repo",
+						title: "Invalid hierarchy host",
+						subIssues,
+					}),
+				).rejects.toThrow(/issue creation repository is on https:\/\/github\.com/i);
+			}
+
+			expect(jsonSpy).toHaveBeenCalledTimes(5);
+			expect(jsonSpy.mock.calls.every(call => call[1][0] === "repo")).toBe(true);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
+		it("rejects a preflight response from another GitHub host before creation", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				return {
+					id: "I_child",
+					parent: null,
+					number: 8,
+					url: "https://github.example.com/owner/repo/issues/8",
+				} as never;
+			});
+			const tool = new GithubTool(createSession());
+
+			await expect(
+				tool.execute("issue-create-reflected-host", {
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "Invalid reflected host",
+					subIssues: ["8"],
+				}),
+			).rejects.toThrow(/issue creation repository is on https:\/\/github\.com/i);
+
+			expect(jsonSpy).toHaveBeenCalledTimes(3);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
+		it("returns the created URL and partial status when aborted after creation", async () => {
+			const createdUrl = "https://github.com/owner/repo/issues/47";
+			const controller = new AbortController();
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === "8") {
+					return {
+						id: "I_child",
+						parent: null,
+						number: 8,
+						url: "https://github.com/owner/repo/issues/8",
+					} as never;
+				}
+				if (args[2] === createdUrl) {
+					controller.abort(new Error("cancelled after create"));
+					throw new Error("created issue lookup cancelled");
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+			const tool = new GithubTool(createSession());
+
+			const result = await tool.execute(
+				"issue-create-post-create-abort",
+				{
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "Created before cancellation",
+					subIssues: ["8"],
+				},
+				controller.signal,
+			);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(controller.signal.aborted).toBe(true);
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(text).toContain("created issue lookup cancelled");
+			expect(result.details?.meta?.source).toEqual({ type: "url", value: createdUrl });
+			expect(result.details?.status).toBe("partial");
+		});
+
+		it("returns the created URL and partial status when GraphQL attachment fails", async () => {
+			const createdUrl = "https://github.com/owner/repo/issues/46";
+			const createOutput = `Creating issue...\n${createdUrl}\n`;
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(createOutput);
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") {
+					if (args.some(arg => arg.includes("IssueHierarchyMutationCapability"))) {
+						return hierarchyCapabilityResponse as never;
+					}
+					return {
+						data: { r0: { issue: { id: "I_created" } } },
+						errors: [{ message: "GraphQL addSubIssue failed" }],
+					} as never;
+				}
+				if (args[2] === "8") {
+					return {
+						id: "I_child",
+						parent: null,
+						number: 8,
+						url: "https://github.com/owner/repo/issues/8",
+					} as never;
+				}
+				if (args[2] === createdUrl) {
+					return { id: "I_created", parent: null, number: 46, url: createdUrl } as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+			const tool = new GithubTool(createSession());
+
+			const result = await tool.execute("issue-create-partial", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Partially attached umbrella",
+				subIssues: ["8"],
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(jsonSpy.mock.calls[4]?.[1].slice(0, 2)).toEqual(["api", "graphql"]);
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(jsonSpy).toHaveBeenCalledTimes(5);
+			expect(text).toContain("WARNING");
+			expect(text).toContain(createdUrl);
+			expect(text).toContain("GraphQL addSubIssue failed");
+			expect(text).toContain("may already have been applied");
+			expect(result.details?.meta?.source).toEqual({ type: "url", value: createdUrl });
+			expect(result.details?.status).toBe("partial");
+		});
+	});
+
+	describe("issue_state", () => {
+		it("exposes issue state inputs in the schema and requires exec approval", () => {
+			const tool = new GithubTool(createSession());
+			const properties = toolWireSchema(tool).properties as Record<string, unknown>;
+			const request: ToolCall = {
+				type: "toolCall",
+				id: "issue-state-schema",
+				name: tool.name,
+				arguments: {
+					op: "issue_state",
+					repo: "owner/repo",
+					issue: ["7", "8"],
+					state: "closed",
+					stateReason: "completed",
+				},
+			};
+
+			expect(properties.issue).toBeDefined();
+			expect(properties.state).toBeDefined();
+			expect(properties.stateReason).toBeDefined();
+			expect(tool.parameters.assert(validateToolArguments(tool, request))).toMatchObject(request.arguments);
+			expect(tool.approval(request.arguments)).toBe("exec");
+		});
+
+		it("preflights deduplicated targets, closes only open issues, and defaults the reason", async () => {
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: issueNumber === 8 ? "CLOSED" : "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("closed");
+			const tool = new GithubTool(createSession());
+
+			const result = await tool.execute("issue-state-close", {
+				op: "issue_state",
+				repo: "owner/repo",
+				issue: ["7", "7", "8"],
+				state: "closed",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(jsonSpy.mock.calls.map(call => call[1])).toEqual([
+				["issue", "view", "7", "--repo", "owner/repo", "--json", "number,state,url"],
+				["issue", "view", "8", "--repo", "owner/repo", "--json", "number,state,url"],
+			]);
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(textSpy.mock.calls[0]?.[1]).toEqual([
+				"issue",
+				"close",
+				"7",
+				"--repo",
+				"owner/repo",
+				"--reason",
+				"completed",
+			]);
+			expect(
+				jsonSpy.mock.invocationCallOrder.every(order => order < (textSpy.mock.invocationCallOrder[0] ?? 0)),
+			).toBe(true);
+			expect(text).toContain("## Updated (1)");
+			expect(text).toContain("#7 → CLOSED");
+			expect(text).toContain("## Already CLOSED (1)");
+			expect(text).toContain("#8");
+			expect(result.details?.status).toBe("updated");
+		});
+
+		it("reopens closed issues without a reason flag", async () => {
+			vi.spyOn(git.github, "json").mockResolvedValue({
+				number: 12,
+				state: "CLOSED",
+				url: "https://github.com/owner/repo/issues/12",
+			} as never);
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("reopened");
+
+			await new GithubTool(createSession()).execute("issue-state-reopen", {
+				op: "issue_state",
+				repo: "owner/repo",
+				issue: "12",
+				state: "open",
+			});
+
+			expect(textSpy.mock.calls[0]?.[1]).toEqual(["issue", "reopen", "12", "--repo", "owner/repo"]);
+		});
+
+		it("returns an observable partial result when only some state mutations succeed", async () => {
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text").mockImplementation(async (_cwd, args) => {
+				if (args[2] === "8") throw new Error("permission denied for #8");
+				return "closed";
+			});
+
+			const result = await new GithubTool(createSession()).execute("issue-state-partial", {
+				op: "issue_state",
+				repo: "owner/repo",
+				issue: ["7", "8"],
+				state: "closed",
+				stateReason: "not_planned",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(jsonSpy).toHaveBeenCalledTimes(2);
+			expect(textSpy).toHaveBeenCalledTimes(2);
+			for (const call of textSpy.mock.calls) {
+				expect(call[1].slice(-2)).toEqual(["--reason", "not planned"]);
+			}
+			expect(text).toContain("#7 → CLOSED");
+			expect(text).toContain("## Failed (1)");
+			expect(text).toContain("#8: permission denied for #8");
+			expect(result.details?.status).toBe("partial");
+		});
+
+		it("skips all mutations when every fresh preflight already has the desired state", async () => {
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text");
+
+			const result = await new GithubTool(createSession()).execute("issue-state-noop", {
+				op: "issue_state",
+				issue: ["20", "21"],
+				state: "open",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(jsonSpy).toHaveBeenCalledTimes(2);
+			expect(textSpy).not.toHaveBeenCalled();
+			expect(text).toContain("## Already OPEN (2)");
+			expect(result.details?.status).toBe("noop");
+		});
+
+		it("finishes all live preflights and performs no mutations when any preflight fails", async () => {
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				const issueNumber = Number(args[2]);
+				if (issueNumber === 21) throw new Error("issue #21 is inaccessible");
+				return {
+					number: issueNumber,
+					state: "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text");
+
+			await expect(
+				new GithubTool(createSession()).execute("issue-state-preflight", {
+					op: "issue_state",
+					repo: "owner/repo",
+					issue: ["20", "21", "22"],
+					state: "closed",
+				}),
+			).rejects.toThrow("issue #21 is inaccessible");
+
+			expect(jsonSpy).toHaveBeenCalledTimes(3);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
+		it("bounds subprocess concurrency for a maximum-size batch", async () => {
+			const preflightGate = Promise.withResolvers<void>();
+			const preflightWaveStarted = Promise.withResolvers<void>();
+			const mutationGate = Promise.withResolvers<void>();
+			const mutationWaveStarted = Promise.withResolvers<void>();
+			let activePreflights = 0;
+			let peakPreflights = 0;
+			let activeMutations = 0;
+			let peakMutations = 0;
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				activePreflights++;
+				peakPreflights = Math.max(peakPreflights, activePreflights);
+				if (activePreflights === 4) preflightWaveStarted.resolve();
+				await preflightGate.promise;
+				activePreflights--;
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			vi.spyOn(git.github, "text").mockImplementation(async () => {
+				activeMutations++;
+				peakMutations = Math.max(peakMutations, activeMutations);
+				if (activeMutations === 4) mutationWaveStarted.resolve();
+				await mutationGate.promise;
+				activeMutations--;
+				return "closed";
+			});
+
+			const pending = new GithubTool(createSession()).execute("issue-state-concurrency", {
+				op: "issue_state",
+				repo: "owner/repo",
+				issue: Array.from({ length: 100 }, (_, index) => String(index + 1)),
+				state: "closed",
+			});
+
+			await preflightWaveStarted.promise;
+			expect(peakPreflights).toBeGreaterThanOrEqual(4);
+			expect(peakPreflights).toBeLessThanOrEqual(8);
+			preflightGate.resolve();
+			await mutationWaveStarted.promise;
+			expect(peakMutations).toBeGreaterThanOrEqual(4);
+			expect(peakMutations).toBeLessThanOrEqual(8);
+			mutationGate.resolve();
+			const result = await pending;
+			expect(result.details?.status).toBe("updated");
+		});
+
+		it("preserves cancellation after a settled preflight batch", async () => {
+			const controller = new AbortController();
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				controller.abort();
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text");
+
+			await expect(
+				new GithubTool(createSession()).execute(
+					"issue-state-preflight-abort",
+					{
+						op: "issue_state",
+						repo: "owner/repo",
+						issue: ["20", "21"],
+						state: "closed",
+					},
+					controller.signal,
+				),
+			).rejects.toBeInstanceOf(ToolAbortError);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
+		it("preserves cancellation after a settled mutation batch", async () => {
+			const controller = new AbortController();
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text").mockImplementation(async () => {
+				controller.abort();
+				return "closed";
+			});
+
+			await expect(
+				new GithubTool(createSession()).execute(
+					"issue-state-mutation-abort",
+					{
+						op: "issue_state",
+						repo: "owner/repo",
+						issue: ["20", "21"],
+						state: "closed",
+					},
+					controller.signal,
+				),
+			).rejects.toBeInstanceOf(ToolAbortError);
+			expect(textSpy).toHaveBeenCalledTimes(2);
+		});
+
+		it("rejects invalid issue lists and close reasons before invoking gh", async () => {
+			const jsonSpy = vi.spyOn(git.github, "json");
+			const textSpy = vi.spyOn(git.github, "text");
+			const tool = new GithubTool(createSession());
+			const invalidIssues: Array<string | string[]> = [
+				[],
+				["0"],
+				["1e2"],
+				["-1"],
+				Array.from({ length: 101 }, (_, index) => String(index + 1)),
+			];
+
+			for (const issue of invalidIssues) {
+				await expect(
+					tool.execute("issue-state-invalid", {
+						op: "issue_state",
+						issue,
+						state: "closed",
+					}),
+				).rejects.toThrow();
+			}
+			await expect(
+				tool.execute("issue-state-invalid-reason", {
+					op: "issue_state",
+					issue: "7",
+					state: "open",
+					stateReason: "completed",
+				}),
+			).rejects.toThrow(/stateReason.*only.*closed/);
+
+			expect(jsonSpy).not.toHaveBeenCalled();
+			expect(textSpy).not.toHaveBeenCalled();
+		});
 	});
 
 	it("formats pull request search results", async () => {

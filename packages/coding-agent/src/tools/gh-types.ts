@@ -2,6 +2,8 @@ export interface GithubInput {
 	op:
 		| "repo_view"
 		| "file_read"
+		| "issue_create"
+		| "issue_state"
 		| "pr_create"
 		| "pr_checkout"
 		| "pr_push"
@@ -15,6 +17,7 @@ export interface GithubInput {
 	branch?: string;
 	path?: string;
 	pr?: string | string[];
+	issue?: string | string[];
 	force?: boolean;
 	forceWithLease?: boolean;
 	title?: string;
@@ -26,6 +29,11 @@ export interface GithubInput {
 	reviewer?: string[];
 	assignee?: string[];
 	label?: string[];
+	parent?: string;
+	subIssues?: string[];
+	replaceParent?: boolean;
+	state?: "open" | "closed";
+	stateReason?: "completed" | "not_planned";
 	query?: string;
 	since?: string;
 	until?: string;
@@ -159,9 +167,28 @@ export interface GhRepoViewData {
 	viewerPermission?: string | null;
 	visibility?: string | null;
 }
+export interface GhIssueHierarchyLink {
+	id: string;
+	number: number;
+	state: "OPEN" | "CLOSED";
+	title: string;
+	url: string;
+}
+
+export interface GhIssueSubIssues {
+	nodes: GhIssueHierarchyLink[];
+	totalCount: number;
+}
+
+export interface GhIssueSubIssuesSummary {
+	total: number;
+	completed: number;
+	percentCompleted: number;
+}
 
 export interface GhIssueViewData {
 	author?: GhUser | null;
+	assignees?: GhUser[];
 	body?: string | null;
 	comments?: GhComment[];
 	createdAt?: string;
@@ -172,6 +199,9 @@ export interface GhIssueViewData {
 	title?: string;
 	updatedAt?: string;
 	url?: string;
+	parent?: GhIssueHierarchyLink | null;
+	subIssues?: GhIssueSubIssues;
+	subIssuesSummary?: GhIssueSubIssuesSummary;
 }
 
 export interface GhPrFile {

@@ -10,7 +10,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getOrFetchIssue, getOrFetchPr } from "@oh-my-pi/pi-coding-agent/tools/gh";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { GithubTool, getOrFetchIssue, getOrFetchPr } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import {
 	clearAll,
 	getCached,
@@ -180,6 +181,29 @@ describe("github-cache db layer", () => {
 		expect(getCached(TEST_REPO, "pr", 1, true)).toBeNull();
 		const db = openDb();
 		expect(db).not.toBeNull();
+	});
+
+	it("drops legacy rendered rows when the cache content version changes", () => {
+		putCached({
+			repo: TEST_REPO,
+			kind: "issue",
+			number: 2,
+			includeComments: true,
+			payload: issuePayload(2, "legacy"),
+			rendered: "legacy rendering",
+			fetchedAt: Date.now(),
+		});
+		const legacy = openDb();
+		expect(legacy).not.toBeNull();
+		legacy?.run("PRAGMA user_version = 3");
+		resetCacheForTests();
+
+		const migrated = openDb();
+		expect(migrated).not.toBeNull();
+		expect(getCached(TEST_REPO, "issue", 2, true)).toBeNull();
+		expect((migrated?.query("PRAGMA user_version").get() as { user_version: number } | undefined)?.user_version).toBe(
+			4,
+		);
 	});
 
 	it("does not chmod an existing cache parent directory", async () => {
@@ -551,6 +575,64 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(result.rendered).toBe("always-fresh");
 		expect(fetchFresh).toHaveBeenCalledTimes(1);
 	});
+	it("force refresh bypasses a soft-fresh row and replaces it on success", async () => {
+		putCached({
+			repo: TEST_REPO,
+			kind: "issue",
+			number: 61,
+			includeComments: true,
+			payload: { number: 61, version: "cached" },
+			rendered: "cached",
+			fetchedAt: Date.now(),
+		});
+		const fetchFresh = vi.fn(async () => ({
+			rendered: "live",
+			sourceUrl: `https://github.com/${TEST_REPO}/issues/61`,
+			payload: { number: 61, version: "live" },
+		}));
+
+		const result = await getOrFetchView({
+			repo: TEST_REPO,
+			kind: "issue",
+			number: 61,
+			includeComments: true,
+			forceRefresh: true,
+			fetchFresh,
+		});
+
+		expect(result.status).toBe("refreshed");
+		expect(result.rendered).toBe("live");
+		expect(fetchFresh).toHaveBeenCalledTimes(1);
+		expect(getCached<{ version: string }>(TEST_REPO, "issue", 61, true)?.payload.version).toBe("live");
+	});
+
+	it("force refresh propagates live failures without substituting or replacing stale content", async () => {
+		putCached({
+			repo: TEST_REPO,
+			kind: "issue",
+			number: 62,
+			includeComments: true,
+			payload: { number: 62, version: "cached" },
+			rendered: "cached",
+			fetchedAt: Date.now() - 60_000,
+		});
+		const fetchFresh = vi.fn(async () => {
+			throw new Error("live fetch failed");
+		});
+
+		await expect(
+			getOrFetchView({
+				repo: TEST_REPO,
+				kind: "issue",
+				number: 62,
+				includeComments: true,
+				forceRefresh: true,
+				fetchFresh,
+			}),
+		).rejects.toThrow("live fetch failed");
+		expect(fetchFresh).toHaveBeenCalledTimes(1);
+		expect(getCached(TEST_REPO, "issue", 62, true)?.rendered).toBe("cached");
+	});
 });
 
 describe("getOrFetchIssue (gh-wired wrapper)", () => {
@@ -656,5 +738,206 @@ describe("getOrFetchPr (gh-wired wrapper)", () => {
 		expect(second.status).toBe("fresh");
 		expect(second.rendered).toBe(first.rendered);
 		expect(spy).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("issue_state cache invalidation", () => {
+	const issueStateSession = {
+		cwd: "/tmp/test",
+		hasUI: false,
+		getSessionFile: () => null,
+		getArtifactsDir: () => null,
+		getSessionSpawns: () => null,
+		settings: Settings.isolated({ "github.enabled": true }),
+	} satisfies ToolSession;
+
+	function seedCacheRows(): void {
+		for (const [repo, number] of [
+			[TEST_REPO, 70],
+			["other/project", 71],
+		] as const) {
+			putCached({
+				repo,
+				kind: "issue",
+				number,
+				includeComments: true,
+				payload: issuePayload(number, "cached"),
+				rendered: "cached",
+				fetchedAt: Date.now(),
+			});
+		}
+		for (const [kind, number] of [
+			["pr", 72],
+			["pr-diff", 73],
+		] as const) {
+			putCached({
+				repo: TEST_REPO,
+				kind,
+				number,
+				includeComments: true,
+				payload: { number, kind },
+				rendered: `cached ${kind}`,
+				fetchedAt: Date.now(),
+			});
+		}
+	}
+
+	it("globally invalidates issue views after all targets preflight as no-ops", async () => {
+		seedCacheRows();
+		const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			const issueNumber = Number(args[2]);
+			return {
+				number: issueNumber,
+				state: "OPEN",
+				url: `https://github.com/${TEST_REPO}/issues/${issueNumber}`,
+			} as never;
+		});
+		const textSpy = vi.spyOn(git.github, "text");
+
+		const result = await new GithubTool(issueStateSession).execute("issue-state-cache-noop", {
+			op: "issue_state",
+			repo: TEST_REPO,
+			issue: ["70", "71"],
+			state: "open",
+		});
+
+		expect(result.details?.status).toBe("noop");
+		expect(jsonSpy).toHaveBeenCalledTimes(2);
+		expect(textSpy).not.toHaveBeenCalled();
+		expect(getCached(TEST_REPO, "issue", 70, true)).toBeNull();
+		expect(getCached("other/project", "issue", 71, true)).toBeNull();
+		expect(getCached(TEST_REPO, "pr", 72, true)).not.toBeNull();
+		expect(getCached(TEST_REPO, "pr-diff", 73, true)).not.toBeNull();
+	});
+
+	it("globally invalidates issue views after partial mutation failure", async () => {
+		seedCacheRows();
+		vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			const issueNumber = Number(args[2]);
+			return {
+				number: issueNumber,
+				state: "OPEN",
+				url: `https://github.com/${TEST_REPO}/issues/${issueNumber}`,
+			} as never;
+		});
+		vi.spyOn(git.github, "text").mockImplementation(async (_cwd, args) => {
+			if (args[2] === "71") throw new Error("mutation denied");
+			return "closed";
+		});
+
+		const result = await new GithubTool(issueStateSession).execute("issue-state-cache-partial", {
+			op: "issue_state",
+			repo: TEST_REPO,
+			issue: ["70", "71"],
+			state: "closed",
+		});
+
+		expect(result.details?.status).toBe("partial");
+		expect(getCached(TEST_REPO, "issue", 70, true)).toBeNull();
+		expect(getCached("other/project", "issue", 71, true)).toBeNull();
+		expect(getCached(TEST_REPO, "pr", 72, true)).not.toBeNull();
+		expect(getCached(TEST_REPO, "pr-diff", 73, true)).not.toBeNull();
+	});
+
+	it("invalidates issue views when cancellation follows a successful preflight", async () => {
+		seedCacheRows();
+		const controller = new AbortController();
+		vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			controller.abort();
+			const issueNumber = Number(args[2]);
+			return {
+				number: issueNumber,
+				state: "OPEN",
+				url: `https://github.com/${TEST_REPO}/issues/${issueNumber}`,
+			} as never;
+		});
+		const textSpy = vi.spyOn(git.github, "text");
+
+		await expect(
+			new GithubTool(issueStateSession).execute(
+				"issue-state-cache-abort",
+				{
+					op: "issue_state",
+					repo: TEST_REPO,
+					issue: ["70", "71"],
+					state: "closed",
+				},
+				controller.signal,
+			),
+		).rejects.toBeInstanceOf(ToolAbortError);
+
+		expect(textSpy).not.toHaveBeenCalled();
+		expect(getCached(TEST_REPO, "issue", 70, true)).toBeNull();
+		expect(getCached("other/project", "issue", 71, true)).toBeNull();
+		expect(getCached(TEST_REPO, "pr", 72, true)).not.toBeNull();
+		expect(getCached(TEST_REPO, "pr-diff", 73, true)).not.toBeNull();
+	});
+});
+
+describe("issue_create cache invalidation", () => {
+	it("issue_create invalidates all cached issue views after a failed hierarchy mutation", async () => {
+		const createdUrl = `https://github.com/${TEST_REPO}/issues/42`;
+		for (const [repo, number] of [
+			[TEST_REPO, 8],
+			["other/project", 9],
+		] as const) {
+			putCached({
+				repo,
+				kind: "issue",
+				number,
+				includeComments: true,
+				payload: issuePayload(number, "cached"),
+				rendered: "cached",
+				sourceUrl: `https://github.com/${repo}/issues/${number}`,
+				fetchedAt: 1000,
+			});
+		}
+		putCached({
+			repo: TEST_REPO,
+			kind: "pr",
+			number: 10,
+			includeComments: true,
+			payload: prPayload(10, "cached"),
+			rendered: "cached PR",
+			fetchedAt: 1000,
+		});
+
+		vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args[0] === "repo") return { url: `https://github.com/${TEST_REPO}` } as never;
+			if (args[0] === "api") {
+				if (args.some(arg => arg.includes("IssueHierarchyMutationCapability"))) {
+					return { data: { __type: { fields: [{ name: "addSubIssue" }] } } } as never;
+				}
+				return { errors: [{ message: "GraphQL addSubIssue failed" }] } as never;
+			}
+			if (args[2] === "8") {
+				return { id: "I_child", parent: null, number: 8, url: `https://github.com/${TEST_REPO}/issues/8` } as never;
+			}
+			if (args[2] === createdUrl) {
+				return { id: "I_created", parent: null, number: 42, url: createdUrl } as never;
+			}
+			throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+		});
+		vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+		const session = {
+			cwd: "/tmp/test",
+			hasUI: false,
+			getSessionFile: () => null,
+			getArtifactsDir: () => null,
+			getSessionSpawns: () => null,
+			settings: Settings.isolated({ "github.enabled": true }),
+		} satisfies ToolSession;
+
+		const result = await new GithubTool(session).execute("issue-create-cache", {
+			op: "issue_create",
+			repo: TEST_REPO,
+			title: "Umbrella",
+			subIssues: ["8"],
+		});
+
+		expect(result.details?.status).toBe("partial");
+		expect(getCached(TEST_REPO, "issue", 8, true)).toBeNull();
+		expect(getCached("other/project", "issue", 9, true)).toBeNull();
+		expect(getCached(TEST_REPO, "pr", 10, true)).not.toBeNull();
 	});
 });

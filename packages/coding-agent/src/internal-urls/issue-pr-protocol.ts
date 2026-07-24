@@ -39,6 +39,7 @@ interface ParsedSingle {
 	repo?: string;
 	number: number;
 	comments: boolean;
+	fresh: boolean;
 }
 
 interface ParsedPrDiff {
@@ -99,6 +100,13 @@ function parseListOptions(url: InternalUrl, scheme: Scheme, repo: string | undef
 		author: url.searchParams.get("author") ?? undefined,
 		label: url.searchParams.get("label") ?? undefined,
 	};
+}
+
+function parseFreshOption(url: InternalUrl, scheme: Scheme): boolean {
+	const values = url.searchParams.getAll("fresh");
+	if (values.length === 0) return false;
+	if (values.length === 1 && (values[0] === "1" || values[0] === "true")) return true;
+	throw new Error(`Invalid ${scheme}:// fresh value. Expected exactly one of: 1, true.`);
 }
 
 function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
@@ -188,7 +196,7 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		const commentsParam = url.searchParams.get("comments");
 		const comments =
 			commentsParam === null ? true : !(commentsParam === "0" || commentsParam.toLowerCase() === "false");
-		return { kind: "single", repo, number: num, comments };
+		return { kind: "single", repo, number: num, comments, fresh: parseFreshOption(url, scheme) };
 	}
 
 	// diffParts has already been validated above; scheme is `pr`.
@@ -512,6 +520,7 @@ export class IssueProtocolHandler implements ProtocolHandler {
 				includeComments: parsed.comments,
 				signal: context?.signal,
 				settings: settingsFromContext(context),
+				forceRefresh: parsed.fresh,
 			});
 			return buildSingleResource({
 				url,
@@ -576,6 +585,7 @@ export class PrProtocolHandler implements ProtocolHandler {
 				includeComments: parsed.comments,
 				signal: context?.signal,
 				settings: settingsFromContext(context),
+				forceRefresh: parsed.fresh,
 			});
 			return buildSingleResource({
 				url,
