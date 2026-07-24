@@ -15,6 +15,12 @@ Pass `actions`: an ordered batch executed in sequence. A successful call returns
 
 Pointer actions accept optional `keys` as held modifiers.
 
+## Routing and verification
+- The presence of this tool means host computer use is explicitly enabled and available in the current session. Never claim it is unavailable while this tool is present.
+- MUST use this tool for requests to view or control host desktop applications, including Safari. NEVER substitute Browser, Bash, Eval, AppleScript, accessibility commands, or `screencapture` unless the user explicitly requests that mechanism or this tool returns an error.
+- Inspect the fresh screenshot returned by each successful call before choosing the next action.
+- A successful fallback command proves only that the command ran; it does not verify the resulting UI state.
+
 ## Coordinates
 - `x`/`y` are nonnegative integer pixels in the MOST RECENT screenshot returned by a prior successful call.
 - Every coordinate in one batch uses that same prior frame. Screenshot first; after the UI changes, finish the call and use its returned image for coordinates in the next call.

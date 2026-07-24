@@ -9,6 +9,14 @@
 - Exposed `computer` to models without native OpenAI computer-use support as a regular function tool with a typed GA action schema; the same native desktop backend and approval policy apply on both paths.
 - Hardened computer action ingress: action-specific fields, modifier/key arrays, coordinates, drag points, and scroll deltas fail closed before native input; numeric fields must be signed 32-bit integers and coordinates must be non-negative.
 
+### Changed
+
+- Expanded explicit computer-use diagnostics with model exposure details, lifecycle logging, model-switch retention checks, and guidance to verify visual UI actions from returned screenshots rather than shell exit status.
+
+### Fixed
+
+- Fixed `/computer` reporting native exposure for ChatGPT Codex sessions even though the transport did not provide a callable native tool; Codex now receives the computer controller as a named function tool.
+
 ## [17.1.0] - 2026-07-24
 
 ### Breaking Changes
