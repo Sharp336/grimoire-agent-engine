@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, toBinary } from "@bufbuild/protobuf";
-import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { buildCursorHeaders, CURSOR_CLIENT_VERSION, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -20,6 +20,7 @@ let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
 let attemptCount = 0;
 let behavior: PerAttempt = () => "success";
+const capturedHeaders: http2.IncomingHttpHeaders[] = [];
 
 function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	const frame = Buffer.alloc(5 + data.length);
@@ -64,13 +65,14 @@ async function startServer(): Promise<string> {
 		sessions.add(session);
 		session.on("close", () => sessions.delete(session));
 	});
-	server.on("stream", (stream: http2.ServerHttp2Stream, headers) => {
+	server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
 		stream.on("data", () => {});
 		if (headers[":path"] !== "/agent.v1.AgentService/Run") {
 			stream.respond({ ":status": 404 });
 			stream.end();
 			return;
 		}
+		capturedHeaders.push(headers);
 		attemptCount += 1;
 		const kind = behavior(attemptCount);
 		stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
@@ -142,6 +144,7 @@ async function stopServer(): Promise<void> {
 afterEach(async () => {
 	attemptCount = 0;
 	behavior = () => "success";
+	capturedHeaders.length = 0;
 	await stopServer();
 });
 
@@ -176,5 +179,41 @@ describe("Cursor replay-safe transient retry", () => {
 		expect(eventTypes.at(-1)).toBe("error");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Connect error unavailable");
+	});
+});
+
+describe("Cursor request identity", () => {
+	it("keeps one original-request-id per turn but a fresh request-id per attempt", async () => {
+		behavior = attempt => (attempt === 1 ? "transient-before-message" : "success");
+		const baseUrl = await startServer();
+		await collectStream(makeModel(baseUrl));
+		expect(capturedHeaders).toHaveLength(2);
+		const [first, second] = capturedHeaders;
+		expect(first["x-original-request-id"]).toBeTruthy();
+		expect(first["x-request-id"]).toBeTruthy();
+		expect(first["x-original-request-id"]).toBe(second["x-original-request-id"]);
+		expect(first["x-request-id"]).not.toBe(second["x-request-id"]);
+		expect(first["x-cursor-client-version"]).toBe(CURSOR_CLIENT_VERSION);
+		expect(first["x-cursor-client-type"]).toBe("cli");
+		expect(first["x-ghost-mode"]).toBe("true");
+		expect(first.authorization).toBe("Bearer test-token");
+	});
+
+	it("prefers an explicit clientVersion override over the snapshot default", () => {
+		const headers = buildCursorHeaders({
+			apiKey: "k",
+			requestPath: "/agent.v1.AgentService/Run",
+			originalRequestId: "orig",
+			requestId: "req",
+			clientVersion: "cli-override-1.2.3",
+		});
+		expect(headers["x-cursor-client-version"]).toBe("cli-override-1.2.3");
+		const fallback = buildCursorHeaders({
+			apiKey: "k",
+			requestPath: "/agent.v1.AgentService/Run",
+			originalRequestId: "orig",
+			requestId: "req",
+		});
+		expect(fallback["x-cursor-client-version"]).toBe(CURSOR_CLIENT_VERSION);
 	});
 });

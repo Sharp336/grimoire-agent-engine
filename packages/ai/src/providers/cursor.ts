@@ -147,7 +147,18 @@ import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResp
 import { toolWireSchema } from "../utils/schema/wire";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
-export const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
+/**
+ * Committed vendor protocol snapshot — the installed cursor-agent build these
+ * wire descriptors were extracted from (2026.07.20-8cc9c0b). Bump this literal
+ * only when the extracted vendor protocol fixtures change.
+ */
+const CURSOR_PROTOCOL_CLIENT_VERSION = "cli-2026.07.20-8cc9c0b";
+/**
+ * Effective default `x-cursor-client-version`. Defaults to the committed
+ * protocol snapshot; `$env.CURSOR_CLIENT_VERSION` is an explicit override, and
+ * {@link CursorOptions.clientVersion} overrides per call.
+ */
+export const CURSOR_CLIENT_VERSION = $env.CURSOR_CLIENT_VERSION?.trim() || CURSOR_PROTOCOL_CLIENT_VERSION;
 
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
@@ -159,6 +170,36 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
+	/** Per-call override for `x-cursor-client-version`. */
+	clientVersion?: string;
+}
+
+/**
+ * Single source of truth for the Cursor Run request headers. Preserves bearer
+ * auth, ghost mode, and the `cli` client type. `x-original-request-id` is stable
+ * across every attempt of one logical turn; `x-request-id` is fresh per attempt
+ * so the vendor can distinguish a replay from the original.
+ */
+export function buildCursorHeaders(params: {
+	apiKey: string;
+	requestPath: string;
+	originalRequestId: string;
+	requestId: string;
+	clientVersion?: string;
+}): Record<string, string> {
+	return {
+		":method": "POST",
+		":path": params.requestPath,
+		"content-type": "application/connect+proto",
+		"connect-protocol-version": "1",
+		te: "trailers",
+		authorization: `Bearer ${params.apiKey}`,
+		"x-ghost-mode": "true",
+		"x-cursor-client-version": params.clientVersion?.trim() || CURSOR_CLIENT_VERSION,
+		"x-cursor-client-type": "cli",
+		"x-original-request-id": params.originalRequestId,
+		"x-request-id": params.requestId,
+	};
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -482,6 +523,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
+			// Stable across every replay attempt of this logical turn.
+			const originalRequestId = crypto.randomUUID();
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
 				replayState.sawCheckpoint = true;
@@ -530,18 +573,13 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				};
 
 				try {
-					const requestHeaders = {
-						":method": "POST",
-						":path": requestPath,
-						"content-type": "application/connect+proto",
-						"connect-protocol-version": "1",
-						te: "trailers",
-						authorization: `Bearer ${apiKey}`,
-						"x-ghost-mode": "true",
-						"x-cursor-client-version": CURSOR_CLIENT_VERSION,
-						"x-cursor-client-type": "cli",
-						"x-request-id": crypto.randomUUID(),
-					};
+					const requestHeaders = buildCursorHeaders({
+						apiKey,
+						requestPath,
+						originalRequestId,
+						requestId: crypto.randomUUID(),
+						clientVersion: options?.clientVersion,
+					});
 					const debugSession = isRequestDebugEnabled()
 						? await createRequestDebugSession({
 								protocol: "http2",
