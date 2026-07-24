@@ -1608,12 +1608,8 @@ mod tests {
 	/// handle WITHOUT calling `terminate()` -- simulating omp disappearing
 	/// without a graceful shutdown.
 	#[test]
+	#[cfg(windows)]
 	fn win_job_kill_on_close_reaps_a_child_when_the_handle_is_simply_dropped() {
-		if !cfg!(windows) {
-			eprintln!("skipping pshost test: Windows-only (win_job is a no-op elsewhere)");
-			return;
-		}
-
 		use std::os::windows::io::AsRawHandle;
 
 		let mut child = std::process::Command::new("ping.exe")
