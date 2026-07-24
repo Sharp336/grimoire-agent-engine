@@ -1016,6 +1016,10 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	// so guard dispatch (and the watchdog re-arm) from sending the interrupted
 	// task back into the not-yet-purged transcript mid-reset.
 	let resetInFlight = false;
+	// Set once session_shutdown begins. A content-policy purge (newSession/compact)
+	// can still be in flight then; its `.finally` must not arm a fresh dispatch
+	// timer against the torn-down session. Reset on a new session_start.
+	let shuttingDown = false;
 
 	/**
 	 * Run a timer callback so a throw can never escape as a process-fatal
@@ -1340,6 +1344,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 
 	// ---- dispatch loop -------------------------------------------------------
 	function scheduleDispatch(delayMs: number): void {
+		if (shuttingDown) return; // session torn down — never arm a timer against a dead session
 		dispatchTimer = stopTimer(dispatchTimer);
 		dispatchTimer = startTimer(delayMs, () => {
 			dispatchTimer = null;
@@ -1624,6 +1629,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	// Event names below are from extensions.md § "Event surface".
 
 	pi.on("session_start", async (_event, ctx) => {
+		shuttingDown = false;
 		liveCtx = ctx as unknown as CtxLike;
 		ensureDataDir();
 		loadConfig();
@@ -1856,6 +1862,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		shuttingDown = true;
 		// Persist in-flight work as interrupted so the next launch resumes it.
 		const st = getState();
 		if (st.currentTaskId !== null) {

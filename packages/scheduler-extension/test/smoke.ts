@@ -1805,6 +1805,61 @@ export async function runSmoke(): Promise<void> {
 	await cx.command("stop", ctxCx);
 	fs.rmSync(path.join(tmpCwd, ".codex"), { recursive: true, force: true });
 
+	// 40. if the session shuts down while a content-policy purge is in flight, the
+	// purge's `.finally` must NOT arm a dispatch against the torn-down session.
+	{
+		fs.rmSync(configFile, { force: true });
+		const st = {
+			version: 2,
+			run: "stopped",
+			tasks: [{ id: "t104", prompt: "Poisoned", status: "queued", addedAt: new Date().toISOString(), attempts: 0 }],
+			currentTaskId: null,
+			rateLimitedUntil: null,
+			windows: [],
+			nextTaskSeq: 105,
+		};
+		fs.writeFileSync(stateFile, JSON.stringify(st));
+	}
+	const sd = makeMockPi();
+	const ctxSd = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	ctxSd.newSessionDelayMs = 300; // slow purge so shutdown lands mid-reset
+	schedulerExtension(sd.api);
+	await sd.emit("session_start", {}, ctxSd);
+	{
+		const c = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+		c.dispatchDelayMs = 20;
+		c.watchdogIntervalMs = 30;
+		c.stallTimeoutMs = 600_000;
+		fs.writeFileSync(configFile, JSON.stringify(c));
+	}
+	await sd.command("start", ctxSd);
+	await sleep(600);
+	assert.equal(sd.sentPrompts.length, 1, "t104 dispatched");
+	await sd.emit("agent_start", {}, ctxSd);
+	await sd.emit(
+		"agent_end",
+		{
+			messages: [
+				{
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage: "blocked: usage policy violation (cyber)",
+				},
+			],
+		},
+		ctxSd,
+	);
+	await sleep(80); // reset now in flight (newSession sleeping 300ms)
+	await sd.emit("session_shutdown", {}, ctxSd); // shut down mid-purge
+	const afterShutdown = sd.sentPrompts.length;
+	await sleep(400); // let the purge resolve — its .finally must not re-dispatch
+	assert.equal(
+		sd.sentPrompts.length,
+		afterShutdown,
+		"no dispatch is armed after shutdown, even when an in-flight purge resolves later",
+	);
+
 	console.log("smoke: all assertions passed");
 	console.log(`smoke: data dir was ${tmpAgentDir}`);
 }
