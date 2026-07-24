@@ -68,6 +68,14 @@ interface EvalRenderContext {
 	expanded?: boolean;
 	previewLines?: number;
 	timeout?: number;
+	sourceFormatterHint?: string;
+}
+
+function getSourceFormatterHint(
+	options: RenderResultOptions & { renderContext?: EvalRenderContext },
+): string | undefined {
+	const raw = options.renderContext?.sourceFormatterHint;
+	return typeof raw === "string" ? raw : undefined;
 }
 
 interface EvalRenderCell {
@@ -493,7 +501,11 @@ function formatCellOutputLines(
 export const evalToolRenderer = {
 	animatedPendingPreview: true,
 	animatedPartialResult: true,
-	renderCall(args: EvalRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
+	renderCall(
+		args: EvalRenderArgs,
+		options: RenderResultOptions & { renderContext?: EvalRenderContext },
+		uiTheme: Theme,
+	): Component {
 		const cells = getRenderCells(args);
 
 		if (cells.length === 0) {
@@ -511,6 +523,7 @@ export const evalToolRenderer = {
 					return cached.result;
 				}
 
+				const headerNote = getSourceFormatterHint(options);
 				const lines: string[] = [];
 				for (let i = 0; i < cells.length; i++) {
 					const cell = cells[i];
@@ -524,6 +537,7 @@ export const evalToolRenderer = {
 							title: cell.title,
 							status: options.spinnerFrame !== undefined ? "running" : "pending",
 							spinnerFrame: options.spinnerFrame,
+							headerNote,
 							width,
 							// Viewport-sized tail window following the newest streamed code
 							// line; renderResult keeps the same cap so the cell never snaps
@@ -593,6 +607,7 @@ export const evalToolRenderer = {
 			return markFramedBlockComponent({
 				render: (width: number): readonly string[] => {
 					const expanded = options.renderContext?.expanded ?? options.expanded;
+					const headerNote = getSourceFormatterHint(options);
 					const previewLines = Math.min(
 						options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
 						previewWindowRows(),
@@ -633,6 +648,7 @@ export const evalToolRenderer = {
 								title: cell.title,
 								status: cell.status,
 								spinnerFrame: options.spinnerFrame,
+								headerNote,
 								duration: cell.durationMs,
 								output: outputLines.length > 0 ? outputLines.join("\n") : undefined,
 								outputMaxLines: outputLines.length,

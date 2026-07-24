@@ -63,6 +63,31 @@ function createSubprocess(
 	return { process: proc, getWritten: () => written };
 }
 
+type SourceFormatterOutcome = Awaited<ReturnType<ReturnType<typeof createSourceFormatter>>>;
+
+function expectFormatted(outcome: SourceFormatterOutcome): Record<string, unknown> & object {
+	expect(outcome.status).toBe("formatted");
+	if (outcome.status !== "formatted") {
+		throw new Error(`Expected formatted outcome, got ${outcome.status}`);
+	}
+	return outcome.args;
+}
+
+function expectUnchanged(outcome: SourceFormatterOutcome): void {
+	expect(outcome.status).toBe("unchanged");
+	if (outcome.status !== "unchanged") {
+		throw new Error(`Expected unchanged outcome, got ${outcome.status}`);
+	}
+}
+
+function expectMissingExecutable(outcome: SourceFormatterOutcome, formatter: string): void {
+	expect(outcome.status).toBe("missing");
+	if (outcome.status !== "missing") {
+		throw new Error(`Expected missing executable outcome, got ${outcome.status}`);
+	}
+	expect(outcome.formatter).toBe(formatter);
+}
+
 describe("createSourceFormatter", () => {
 	it("formats eval JS code via prettier and replaces only code", async () => {
 		const which = vi.fn().mockReturnValue("/tmp/prettier");
@@ -73,9 +98,9 @@ describe("createSourceFormatter", () => {
 		});
 
 		const args = { language: "js", code: "const  x =1", keep: true, nested: { level: 1 } };
-		const formatted = await formatter("eval", args, new AbortController().signal);
+		const result = await formatter("eval", args, new AbortController().signal);
+		const formatted = expectFormatted(result);
 
-		expect(formatted).toBeDefined();
 		expect(formatted).not.toBe(args);
 		expect(formatted).toEqual({
 			language: "js",
@@ -83,8 +108,8 @@ describe("createSourceFormatter", () => {
 			keep: true,
 			nested: args.nested,
 		});
-		expect(formatted!.nested).toBe(args.nested);
-		expect(formatted!.code).not.toBe(args.code);
+		expect(formatted.nested).toBe(args.nested);
+		expect(formatted.code).not.toBe(args.code);
 		expect(spawn).toHaveBeenCalledTimes(1);
 		expect(spawn).toHaveBeenCalledWith(["/tmp/prettier", "--no-config", "--stdin-filepath", "tool-call.js"], {
 			stdin: "pipe",
@@ -102,7 +127,7 @@ describe("createSourceFormatter", () => {
 		const formatter = createSourceFormatter({ runtime: { which, spawn } });
 
 		const args = { language: "py", code: "print('raw')" };
-		const formatted = await formatter("eval", args, new AbortController().signal);
+		const formatted = expectFormatted(await formatter("eval", args, new AbortController().signal));
 
 		expect(formatted).toEqual({
 			language: "py",
@@ -121,7 +146,7 @@ describe("createSourceFormatter", () => {
 		const formatter = createSourceFormatter({ runtime: { which, spawn } });
 
 		const args = { command: "echo  hi" };
-		const formatted = await formatter("bash", args, new AbortController().signal);
+		const formatted = expectFormatted(await formatter("bash", args, new AbortController().signal));
 
 		expect(formatted).toEqual({
 			command: "formatted-bash\n",
@@ -162,7 +187,7 @@ describe("createSourceFormatter", () => {
 			const formatter = createSourceFormatter({ runtime: { which, spawn } });
 
 			const args = { path: writeCase.path, content: `raw-${writeCase.name}` };
-			const formatted = await formatter("write", args, new AbortController().signal);
+			const formatted = expectFormatted(await formatter("write", args, new AbortController().signal));
 
 			expect(formatted).toEqual({
 				path: writeCase.path,
@@ -182,9 +207,9 @@ describe("createSourceFormatter", () => {
 		const formatter = createSourceFormatter({ runtime: { which, spawn } });
 
 		const args = { path: "README.md", content: "# heading" };
-		const formatted = await formatter("write", args, new AbortController().signal);
+		const result = await formatter("write", args, new AbortController().signal);
 
-		expect(formatted).toBeUndefined();
+		expectUnchanged(result);
 		expect(spawn).not.toHaveBeenCalled();
 		expect(which).not.toHaveBeenCalled();
 	});
@@ -196,9 +221,24 @@ describe("createSourceFormatter", () => {
 		const formatter = createSourceFormatter({ runtime: { which, spawn } });
 
 		const args = { language: "js", code: "const x = 1" };
-		const formatted = await formatter("eval", args, new AbortController().signal);
+		const result = await formatter("eval", args, new AbortController().signal);
 
-		expect(formatted).toBeUndefined();
+		expectUnchanged(result);
+		expect(spawn).toHaveBeenCalledTimes(1);
+	});
+
+	it("falls back when formatter spawn throws", async () => {
+		const which = vi.fn().mockReturnValue("/tmp/prettier");
+		const spawn = vi.fn<SpawnCommand>(() => {
+			throw new Error("spawn should fail");
+		});
+		const formatter = createSourceFormatter({ runtime: { which, spawn } });
+
+		const args = { language: "js", code: "const x = 1" };
+		const result = await formatter("eval", args, new AbortController().signal);
+
+		expectUnchanged(result);
+		expect(which).toHaveBeenCalledTimes(1);
 		expect(spawn).toHaveBeenCalledTimes(1);
 	});
 
@@ -210,9 +250,11 @@ describe("createSourceFormatter", () => {
 		const formatter = createSourceFormatter({ runtime: { which, spawn } });
 		const args = { language: "js", code: "const x = 1" };
 
-		await formatter("eval", args, new AbortController().signal);
-		await formatter("eval", args, new AbortController().signal);
+		const first = await formatter("eval", args, new AbortController().signal);
+		const second = await formatter("eval", args, new AbortController().signal);
 
+		expectMissingExecutable(first, "prettier");
+		expectMissingExecutable(second, "prettier");
 		expect(which).toHaveBeenCalledTimes(1);
 		expect(spawn).not.toHaveBeenCalled();
 	});
@@ -227,6 +269,8 @@ describe("createSourceFormatter", () => {
 		const first = await formatter("eval", args, new AbortController().signal);
 		const second = await formatter("eval", args, new AbortController().signal);
 
+		expectFormatted(first);
+		expectFormatted(second);
 		expect(first).toEqual(second);
 		expect(spawn).toHaveBeenCalledTimes(1);
 	});
@@ -242,9 +286,9 @@ describe("createSourceFormatter", () => {
 		});
 
 		const args = { language: "js", code: "longer than four bytes" };
-		const formatted = await formatter("eval", args, new AbortController().signal);
+		const result = await formatter("eval", args, new AbortController().signal);
 
-		expect(formatted).toBeUndefined();
+		expectUnchanged(result);
 		expect(spawn).not.toHaveBeenCalled();
 	});
 
@@ -258,9 +302,9 @@ describe("createSourceFormatter", () => {
 		});
 
 		const args = { language: "js", code: "x = 1" };
-		const formatted = await formatter("eval", args, new AbortController().signal);
+		const result = await formatter("eval", args, new AbortController().signal);
 
-		expect(formatted).toBeUndefined();
+		expectUnchanged(result);
 		expect(spawn).toHaveBeenCalledTimes(1);
 	});
 
@@ -274,9 +318,9 @@ describe("createSourceFormatter", () => {
 		});
 
 		const args = { command: "printf 'hello'" };
-		const formatted = await formatter("bash", args, new AbortController().signal);
+		const result = await formatter("bash", args, new AbortController().signal);
 
-		expect(formatted).toBeUndefined();
+		expectUnchanged(result);
 		expect(spawn).not.toHaveBeenCalled();
 		expect(which).not.toHaveBeenCalled();
 	});
@@ -290,9 +334,9 @@ describe("createSourceFormatter", () => {
 			runtime: { which, spawn },
 		});
 
-		const formatted = await formatter("eval", "not-an-object" as unknown, new AbortController().signal);
+		const result = await formatter("eval", "not-an-object" as unknown, new AbortController().signal);
 
-		expect(formatted).toBeUndefined();
+		expectUnchanged(result);
 		expect(spawn).not.toHaveBeenCalled();
 		expect(which).not.toHaveBeenCalled();
 	});
@@ -306,9 +350,9 @@ describe("createSourceFormatter", () => {
 			runtime: { which, spawn },
 		});
 
-		const formatted = await formatter("unknown", { code: "console.log(1)" }, new AbortController().signal);
+		const result = await formatter("unknown", { code: "console.log(1)" }, new AbortController().signal);
 
-		expect(formatted).toBeUndefined();
+		expectUnchanged(result);
 		expect(spawn).not.toHaveBeenCalled();
 		expect(which).not.toHaveBeenCalled();
 	});

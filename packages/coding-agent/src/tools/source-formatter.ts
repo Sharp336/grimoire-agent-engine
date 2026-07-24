@@ -25,11 +25,11 @@ type FormatterProcess = {
 
 type CachedExecutable = { readonly kind: "found"; readonly path: string } | { readonly kind: "missing" };
 
-export type SourceFormatter = (
-	toolName: string,
-	args: unknown,
-	signal: AbortSignal,
-) => Promise<Record<string, unknown> | undefined>;
+export type SourceFormatterOutcome =
+	| { status: "formatted"; args: Record<string, unknown> }
+	| { status: "missing"; formatter: string }
+	| { status: "unchanged" };
+export type SourceFormatter = (toolName: string, args: unknown, signal: AbortSignal) => Promise<SourceFormatterOutcome>;
 
 export interface SourceFormatterRuntime {
 	which: (name: string) => string | undefined;
@@ -356,15 +356,16 @@ async function runFormatter(
 	signal: AbortSignal,
 	options: NormalizedSourceFormatterOptions,
 ): Promise<string | undefined> {
-	const child = runtime.spawn([executable, ...formatter.args], {
-		stdin: "pipe",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
 	const outputController = new AbortController();
-
+	let child: FormatterProcess | undefined;
 	try {
+		child = runtime.spawn([executable, ...formatter.args], {
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
 		const stdoutStream = child.stdout;
+
 		const stderrStream = child.stderr;
 		if (!child.stdin || !stdoutStream || !stderrStream) {
 			await terminateSubprocess(child, options.terminateGraceMs);
@@ -409,7 +410,9 @@ async function runFormatter(
 
 		return stdout.value.text;
 	} catch {
-		await terminateSubprocess(child, options.terminateGraceMs);
+		if (child !== undefined) {
+			await terminateSubprocess(child, options.terminateGraceMs);
+		}
 		return undefined;
 	} finally {
 		outputController.abort();
@@ -443,33 +446,33 @@ export function createSourceFormatter({ runtime, options }: SourceFormatterFacto
 		return resolved;
 	};
 
-	return async (toolName, args, signal): Promise<Record<string, unknown> | undefined> => {
-		if (signal.aborted) return undefined;
+	return async (toolName, args, signal): Promise<SourceFormatterOutcome> => {
+		if (signal.aborted) return { status: "unchanged" };
 
 		const argsRecord = toRecord(args);
-		if (!argsRecord) return undefined;
+		if (!argsRecord) return { status: "unchanged" };
 
 		const formatter = createFormatterCommand(toolName, argsRecord);
-		if (!formatter) return undefined;
+		if (!formatter) return { status: "unchanged" };
 		const sourceBytes = textEncoder.encode(formatter.source);
-		if (sourceBytes.length > normalized.maxInputBytes) return undefined;
-		if (normalized.timeoutMs <= 0) return undefined;
-		if (normalized.maxOutputBytes <= 0) return undefined;
+		if (sourceBytes.length > normalized.maxInputBytes) return { status: "unchanged" };
+		if (normalized.timeoutMs <= 0) return { status: "unchanged" };
+		if (normalized.maxOutputBytes <= 0) return { status: "unchanged" };
 
 		const executable = resolveExecutable(formatter.binary);
-		if (!executable) return undefined;
+		if (!executable) return { status: "missing", formatter: formatter.binary };
 
 		const cacheKey = buildCacheKey(executable, formatter.args, formatter.source);
 		const cached = formattedCache.get(cacheKey);
 		if (cached !== undefined) {
-			return { ...argsRecord, [formatter.field]: cached };
+			return { status: "formatted", args: { ...argsRecord, [formatter.field]: cached } };
 		}
 
 		const formatted = await runFormatter(mergedRuntime, executable, formatter, signal, normalized);
-		if (!formatted) return undefined;
+		if (!formatted) return { status: "unchanged" };
 
 		formattedCache.set(cacheKey, formatted);
-		return { ...argsRecord, [formatter.field]: formatted };
+		return { status: "formatted", args: { ...argsRecord, [formatter.field]: formatted } };
 	};
 }
 

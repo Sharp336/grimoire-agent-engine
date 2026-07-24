@@ -24,7 +24,11 @@ import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
 import { isWaitingPollDetails } from "../../tools/hub";
 import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../../tools/render-utils";
 import { type FirstResultViewportRepaint, toolRenderers } from "../../tools/renderers";
-import { formatToolCallSourceArgs, type SourceFormatter } from "../../tools/source-formatter";
+import {
+	formatToolCallSourceArgs,
+	type SourceFormatter,
+	type SourceFormatterOutcome,
+} from "../../tools/source-formatter";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
@@ -70,6 +74,22 @@ function isTodoToolDetails(details: unknown): details is TodoToolDetails {
 		"phases" in details &&
 		Array.isArray((details as { phases?: unknown }).phases)
 	);
+}
+function isSourceFormatterOutcome(value: unknown): value is SourceFormatterOutcome {
+	if (typeof value !== "object" || value === null) return false;
+	const record = value as { status?: unknown };
+	if (record.status !== "formatted" && record.status !== "missing" && record.status !== "unchanged") return false;
+	if (record.status === "formatted") {
+		return (
+			typeof (record as { args?: unknown }).args === "object" &&
+			(record as { args?: unknown }).args !== null &&
+			!Array.isArray((record as { args?: unknown }).args)
+		);
+	}
+	if (record.status === "missing") {
+		return typeof (record as { formatter?: unknown }).formatter === "string";
+	}
+	return true;
 }
 
 function displaceableToolName(
@@ -280,6 +300,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#sourceFormatPass = 0;
 	#sourceFormattingAbort?: AbortController;
 	#formattedSourceArgs?: Record<string, unknown>;
+	#sourceFormatterHint?: string;
 	#expanded = false;
 	#showImages: boolean;
 	#editFuzzyThreshold: number | undefined;
@@ -440,6 +461,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#args = args;
 		this.#sourceFormatArgsVersion += 1;
 		this.#formattedSourceArgs = undefined;
+		this.#sourceFormatterHint = undefined;
 		this.#displayInputVersion++;
 		this.#abortSourceFormatting();
 		this.#updateSpinnerAnimation();
@@ -479,13 +501,16 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			try {
 				const formatted = await this.#sourceFormatter(this.#toolName, args, controller.signal);
 				if (controller.signal.aborted || this.#sealed || generation !== this.#sourceFormatArgsVersion) return;
-				this.#formattedSourceArgs = formatted;
+				this.#setSourceFormatterOutcome(isSourceFormatterOutcome(formatted) ? formatted : { status: "unchanged" });
 				this.#displayInputVersion++;
 				this.#updateDisplay();
 				this.#ui.requestComponentRender(this);
 			} catch (err) {
 				if (controller.signal.aborted) return;
-				this.#formattedSourceArgs = undefined;
+				this.#setSourceFormatterOutcome({ status: "unchanged" });
+				this.#displayInputVersion++;
+				this.#updateDisplay();
+				this.#ui.requestComponentRender(this);
 				logger.warn("Source formatter failed", { tool: this.#toolName, error: String(err) });
 			} finally {
 				if (this.#sourceFormattingAbort === controller) {
@@ -494,6 +519,26 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				this.#releaseSourceFormatFinalizationHold(formatPass);
 			}
 		})();
+	}
+
+	#setSourceFormatterOutcome(outcome: SourceFormatterOutcome): void {
+		switch (outcome.status) {
+			case "formatted": {
+				this.#formattedSourceArgs = outcome.args;
+				this.#sourceFormatterHint = undefined;
+				break;
+			}
+			case "missing": {
+				this.#formattedSourceArgs = undefined;
+				this.#sourceFormatterHint = `Install ${outcome.formatter} for pretty formatting`;
+				break;
+			}
+			case "unchanged": {
+				this.#formattedSourceArgs = undefined;
+				this.#sourceFormatterHint = undefined;
+				break;
+			}
+		}
 	}
 
 	/**
@@ -1296,7 +1341,6 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 					if (TERMINAL.imageProtocol === ImageProtocol.Kitty && imageMimeType !== "image/png") {
 						continue;
 					}
-
 					const spacer = new Spacer(1);
 					this.addChild(spacer);
 					this.#imageSpacers.push(spacer);
@@ -1338,12 +1382,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * Build render context for tools that need extra state (bash, python, edit)
 	 */
 	#buildRenderContext(): Record<string, unknown> {
-		const context: Record<string, unknown> = {};
+		const context: Record<string, unknown> = { sourceFormatterHint: this.#sourceFormatterHint };
 		const normalizeTimeoutSeconds = (value: unknown, maxSeconds: number): number | undefined => {
 			if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
 			return Math.max(1, Math.min(maxSeconds, value));
 		};
-
 		if (this.#toolName === "bash") {
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
 			// plus this context to keep the inline command preview visible while tool-call JSON is still streaming.

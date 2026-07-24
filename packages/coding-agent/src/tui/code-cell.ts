@@ -1,7 +1,9 @@
 /**
  * Render a code or markdown cell with optional output section.
  */
+
 import { Markdown } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, highlightCode, type Theme } from "../modes/theme/theme";
 import {
 	formatDuration,
@@ -22,6 +24,10 @@ export interface CodeCellOptions {
 	status?: "pending" | "running" | "warning" | "complete" | "error";
 	spinnerFrame?: number;
 	duration?: number;
+	/**
+	 * Optional hint to render in the header metadata row, e.g. formatter guidance.
+	 */
+	headerNote?: string;
 	output?: string;
 	outputMaxLines?: number;
 	codeMaxLines?: number;
@@ -44,6 +50,12 @@ export interface CodeCellOptions {
 	codeLineNumbers?: Array<number | null>;
 }
 
+function sanitizeHeaderNote(headerNote: string | undefined): string | undefined {
+	if (!headerNote) return undefined;
+	const sanitized = sanitizeText(headerNote).replace(/\s+/gu, " ").trim();
+	return sanitized.length > 0 ? sanitized : undefined;
+}
+
 function getState(status?: CodeCellOptions["status"]): State | undefined {
 	if (!status) return undefined;
 	if (status === "complete") return "success";
@@ -54,7 +66,7 @@ function getState(status?: CodeCellOptions["status"]): State | undefined {
 }
 
 function formatHeader(options: CodeCellOptions, theme: Theme): { title: string; meta?: string } {
-	const { index, total, title, status, spinnerFrame, duration, language, showLanguage } = options;
+	const { index, total, title, status, spinnerFrame, duration, headerNote, language, showLanguage } = options;
 	const parts: string[] = [];
 	if (showLanguage && language) {
 		const langIcon = theme.getLangIconStyled(language);
@@ -89,6 +101,10 @@ function formatHeader(options: CodeCellOptions, theme: Theme): { title: string; 
 	const headerTitle = parts.length > 0 ? parts.join(" ") : theme.fg("toolTitle", "Code");
 
 	const metaParts: string[] = [];
+	const note = sanitizeHeaderNote(headerNote);
+	if (note) {
+		metaParts.push(theme.fg("dim", note));
+	}
 	if (duration !== undefined) {
 		metaParts.push(theme.fg("dim", `(${formatDuration(duration)})`));
 	}

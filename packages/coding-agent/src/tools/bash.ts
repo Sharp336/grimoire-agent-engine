@@ -8,7 +8,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
-import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isEnoent, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -1393,6 +1393,12 @@ export interface BashRenderArgs {
 	[key: string]: unknown;
 }
 
+function sanitizeSourceFormatterHint(sourceFormatterHint: string | undefined): string | undefined {
+	if (!sourceFormatterHint) return undefined;
+	const sanitized = sanitizeText(sourceFormatterHint).replace(/\s+/gu, " ").trim();
+	return sanitized.length > 0 ? sanitized : undefined;
+}
+
 export interface BashRenderContext {
 	/** Raw output text */
 	output?: string;
@@ -1404,6 +1410,8 @@ export interface BashRenderContext {
 	previewLines?: number;
 	/** Timeout in seconds */
 	timeout?: number;
+	/** Optional note to render in tool header when source formatting is unavailable */
+	sourceFormatterHint?: string;
 }
 
 export interface ShellRendererConfig<TArgs> {
@@ -1461,20 +1469,26 @@ function toBashRenderArgs<TArgs>(args: TArgs | undefined, config: ShellRendererC
 
 export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 	return {
-		renderCall(args: TArgs, options: RenderResultOptions, uiTheme: Theme): Component {
+		renderCall(
+			args: TArgs,
+			options: RenderResultOptions & { renderContext?: BashRenderContext },
+			uiTheme: Theme,
+		): Component {
 			const renderArgs = toBashRenderArgs(args, config);
 			const cmdLines = formatBashCommandLines(renderArgs, uiTheme);
+			const sourceFormatterHint = sanitizeSourceFormatterHint(options.renderContext?.sourceFormatterHint);
 			const outputBlock = new CachedOutputBlock();
 			return markFramedBlockComponent({
 				render: (width: number): readonly string[] => {
 					const header =
-						config.showHeader === false
+						config.showHeader === false && !sourceFormatterHint
 							? undefined
 							: renderStatusLine(
 									{
 										icon: options.spinnerFrame !== undefined ? "running" : "pending",
 										spinnerFrame: options.spinnerFrame,
 										title: config.resolveTitle(args, options),
+										meta: sourceFormatterHint ? [sourceFormatterHint] : undefined,
 									},
 									uiTheme,
 								);
@@ -1505,6 +1519,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			args?: TArgs,
 		): Component {
 			const renderArgs = toBashRenderArgs(args, config);
+			const sourceFormatterHint = sanitizeSourceFormatterHint(options.renderContext?.sourceFormatterHint);
 			const cmdLines = args ? formatBashCommandLines(renderArgs, uiTheme) : undefined;
 			const isError = result.isError === true;
 			const isPartial = options.isPartial === true;
@@ -1512,17 +1527,19 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const details = result.details;
 			const isTimeout = details?.timedOut === true;
 			const header =
-				config.showHeader === false
+				config.showHeader === false && !sourceFormatterHint
 					? undefined
 					: renderStatusLine(
 							success
 								? {
 										iconOverride: uiTheme.styledSymbol("tool.bash", "accent"),
 										title: config.resolveTitle(args, options),
+										meta: sourceFormatterHint ? [sourceFormatterHint] : undefined,
 									}
 								: {
 										icon: isPartial ? "pending" : isTimeout ? "warning" : "error",
 										title: config.resolveTitle(args, options),
+										meta: sourceFormatterHint ? [sourceFormatterHint] : undefined,
 									},
 							uiTheme,
 						);
