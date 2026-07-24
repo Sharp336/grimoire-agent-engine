@@ -204,7 +204,6 @@ describe("OpenAI-family output-token cap", () => {
 		expect(body.max_output_tokens).toBe(100_000);
 	});
 
-
 	it("omits default max_output_tokens for OpenRouter Responses so provider routing is not filtered", async () => {
 		const body = await drainResponses(openRouterResponsesModel(131_072));
 		expect(body.max_output_tokens).toBeUndefined();

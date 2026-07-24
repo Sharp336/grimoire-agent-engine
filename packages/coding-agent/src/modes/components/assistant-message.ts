@@ -349,7 +349,8 @@ export class AssistantMessageComponent extends Container {
 		// text label keeps the pulse descriptive for terminals and screen readers.
 		// The liveness flag also stops the session-wide gauge from leaking a previous
 		// turn's rate onto a fresh token-less block.
-		if (!this.#thinkingRateLive || rate < 0.05) return coloredGlyph + thinkingLabel + reasoningSummaryLabelSuffix(this.#lastMessage?.provider);
+		if (!this.#thinkingRateLive || rate < 0.05)
+			return coloredGlyph + thinkingLabel + reasoningSummaryLabelSuffix(this.#lastMessage?.provider);
 		// Total provider tokens, dimmed, sit next to the pulse.
 		const totalSpan = this.#thinkingTokens > 0 ? theme.fg("dim", ` · ${formatNumber(this.#thinkingTokens)}`) : "";
 		// Speed badge color: dim gray at rest, brightening toward the theme accent as
@@ -360,7 +361,9 @@ export class AssistantMessageComponent extends Container {
 		const hex = lerpHex(theme.getColorHex("dim"), theme.getAccentColorHex(), ratio);
 		const rateText = ` · ${rate.toFixed(1)} toks/s`;
 		const rateSpan = theme.getColorMode() === "truecolor" ? chalk.hex(hex)(rateText) : theme.fg("muted", rateText);
-		return coloredGlyph + thinkingLabel + reasoningSummaryLabelSuffix(this.#lastMessage?.provider) + totalSpan + rateSpan;
+		return (
+			coloredGlyph + thinkingLabel + reasoningSummaryLabelSuffix(this.#lastMessage?.provider) + totalSpan + rateSpan
+		);
 	}
 
 	#startThinkingAnimation(): void {
