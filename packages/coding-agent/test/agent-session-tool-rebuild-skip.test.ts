@@ -638,6 +638,28 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices[0]).toContain("## Schema");
 	});
 
+	it("omits inline docs from notices after a settings prompt refresh", async () => {
+		const registry = new XdevRegistry([]);
+		const { session, contexts } = newSession(async () => registry.docsAll("inline"), {
+			xdevRegistry: registry,
+			responses: [{ content: ["ok"] }],
+		});
+		session.settings.set("tools.xdevDocs", "inline");
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+
+		// The mount is deferred because its xd:// inventory does not affect the
+		// applied-tool signature; the explicit refresh then includes its docs.
+		await session.refreshMCPTools([]);
+		await session.refreshMCPTools([search]);
+		await session.refreshBaseSystemPrompt();
+		await session.prompt("hello");
+
+		const notices = mountNoticesIn(contexts[0]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+		expect(notices[0]).not.toContain("## mcp__nucleus_search");
+	});
+
 	it("omits inline docs from notices after an MCP prompt rebuild", async () => {
 		const registry = new XdevRegistry([]);
 		let rebuildCount = 0;

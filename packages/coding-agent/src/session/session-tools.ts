@@ -709,6 +709,9 @@ export class SessionTools {
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
+		if (this.#pendingXdevMountDelta) {
+			this.#pendingXdevMountDelta.docsInBasePrompt = new Set(this.#mountedXdevToolNames);
+		}
 		this.#host.clearMemoryPromotionSnapshot();
 		if (
 			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
