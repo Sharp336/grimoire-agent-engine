@@ -33,7 +33,6 @@ import type {
 	SessionCompactingResult,
 	SessionEvent,
 	SessionShutdownEvent,
-	SessionShutdownReason,
 	SessionStartEvent,
 	SessionSwitchEvent,
 	SessionTreeEvent,

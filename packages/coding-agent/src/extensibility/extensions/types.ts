@@ -88,7 +88,6 @@ import type {
 	SessionCompactingResult,
 	SessionEvent,
 	SessionShutdownEvent,
-	SessionShutdownReason,
 	SessionStartEvent,
 	SessionStopEvent,
 	SessionStopEventResult,
