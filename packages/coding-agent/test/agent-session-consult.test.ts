@@ -356,6 +356,45 @@ describe("AgentSession durable consultation side turn", () => {
 		await child.manager.close();
 	});
 
+	it("preserves a persisted empty parent journal while pinning its child at the null boundary", async () => {
+		using temp = TempDir.createSync("@omp-consult-empty-parent-state-");
+		const parentManager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions"));
+		parentManager.appendThinkingLevelChange("high", "high");
+		parentManager.appendServiceTierChange(null);
+		parentManager.appendModeChange("plan");
+		parentManager.appendSessionInit({
+			systemPrompt: "parent system",
+			task: "persist parent setup",
+			tools: ["read"],
+		});
+		await parentManager.ensureOnDisk();
+		await parentManager.flush();
+		const persistedParentEntries = parentManager.getEntries();
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: model("consult-model"), systemPrompt: ["system"], messages: [], tools: [] },
+			}),
+			sessionManager: parentManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: { resolver: vi.fn(() => async () => "key") } as never,
+		});
+		sessions.push(session);
+
+		const child = await session.createCommittedChildSession("__consult.empty-parent", {
+			materializeParent: true,
+		});
+
+		expect(child).toMatchObject({ parentLeafId: null, hasCommittedContext: false, messages: [] });
+		expect(child.manager.getEntries()).toEqual([]);
+		expect(parentManager.getEntries()).toEqual(persistedParentEntries);
+		const parentFile = parentManager.getSessionFile();
+		if (!parentFile) throw new Error("expected persisted parent session file");
+		const reopenedParent = await SessionManager.open(parentFile, undefined, undefined, { suppressBreadcrumb: true });
+		expect(reopenedParent.getEntries()).toEqual(persistedParentEntries);
+		await reopenedParent.close();
+		await child.manager.close();
+	});
+
 	it("keeps /consult unavailable without a model and does not materialize its lazy parent", async () => {
 		using temp = TempDir.createSync("@omp-consult-no-model-");
 
@@ -1132,6 +1171,85 @@ describe("AgentSession durable consultation side turn", () => {
 		expect(resumedPanel).toContain("Cancelled");
 		expect(resumedPanel).toContain("saved partial answer");
 		expect(resumedPanel).not.toContain("first complete answer");
+	});
+
+	it("finalizes a process-exited running turn before cold resume renders it", async () => {
+		using temp = TempDir.createSync("@omp-consult-crash-recovery-");
+		const parentManager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions"));
+		await parentManager.ensureOnDisk();
+		await parentManager.flush();
+		const parentFile = parentManager.getSessionFile();
+		if (!parentFile) throw new Error("expected persisted parent session file");
+		const consultationId = "crash-12345678";
+		const sessionFile = path.join(parentFile.slice(0, -".jsonl".length), `__consult.${consultationId}.jsonl`);
+		await fs.mkdir(path.dirname(sessionFile), { recursive: true });
+		await Bun.write(
+			sessionFile,
+			[
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: consultationId,
+					timestamp: "2026-07-24T00:00:00.000Z",
+					cwd: temp.path(),
+				}),
+				JSON.stringify({
+					type: "custom",
+					id: "thread",
+					parentId: null,
+					timestamp: "2026-07-24T00:00:00.000Z",
+					customType: CONSULTATION_THREAD_CUSTOM_TYPE,
+					data: { version: 1, consultationId, parentSessionId: "parent", parentLeafId: null, createdAt: 1 },
+				}),
+				JSON.stringify({
+					type: "custom",
+					id: "running",
+					parentId: "thread",
+					timestamp: "2026-07-24T00:00:00.000Z",
+					customType: CONSULTATION_TURN_CUSTOM_TYPE,
+					data: {
+						version: 1,
+						consultationId,
+						turnId: "turn",
+						turnIndex: 1,
+						question: "recover this turn",
+						promptText: "recover this turn",
+						provider: "provider",
+						model: "model",
+						status: "running",
+						startedAt: 1,
+					},
+				}),
+			].join("\n"),
+		);
+
+		const btwContainer = new Container();
+		const controller = new ConsultController({
+			session: { getAgentId: () => "Main", sessionManager: { getSessionFile: () => parentFile } },
+			sessionManager: { getSessionFile: () => parentFile },
+			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			btwContainer,
+			beginConsultComposer: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext);
+		await controller.resume();
+
+		expect(controller.getVisibleTurnPresentation()).toMatchObject({
+			consultationId,
+			turnIndex: 1,
+			turnCount: 1,
+			status: "cancelled",
+			isLatest: true,
+		});
+		const resumedPanel = Bun.stripANSI(btwContainer.render(120).join("\n"));
+		expect(resumedPanel).toContain("Cancelled");
+		expect(resumedPanel).not.toContain("Streaming");
+		const recovered = await SessionManager.open(sessionFile, undefined, undefined, { suppressBreadcrumb: true });
+		expect(consultationTurnStates(recovered.getEntries(), consultationId)[0]?.terminal).toMatchObject({
+			status: "cancelled",
+		});
+		await recovered.close();
+		await parentManager.close();
 	});
 	it("resumes the last selected, full, and unique-short consultation ids but rejects ambiguous prefixes", async () => {
 		AgentRegistry.resetGlobalForTests();

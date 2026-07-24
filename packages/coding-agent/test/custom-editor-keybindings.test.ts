@@ -45,7 +45,17 @@ describe("CustomEditor keybindings", () => {
 		expect(onRetry).not.toHaveBeenCalled();
 	});
 
-	it("routes a configured consultation chord through handleInput", () => {
+	it("routes the default legacy-safe consultation chord through handleInput", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onConsult = vi.fn();
+
+		editor.onConsult = onConsult;
+		editor.handleInput("\x1bQ");
+
+		expect(onConsult).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes a configured consultation override through handleInput", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onConsult = vi.fn();
 
@@ -56,7 +66,7 @@ describe("CustomEditor keybindings", () => {
 		expect(onConsult).toHaveBeenCalledTimes(1);
 	});
 
-	it("distinguishes Ctrl+C clear from Kitty Ctrl+Shift+C consultation", () => {
+	it("keeps raw Ctrl+C clear when consultation is user-remapped to Ctrl+Shift+C", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onClear = vi.fn();
 		const onConsult = vi.fn();

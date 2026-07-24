@@ -26,7 +26,6 @@ import {
 	type Agent,
 	AgentBusyError,
 	type AgentEvent,
-	type AgentLoopConfig,
 	type AgentMessage,
 	type AgentState,
 	type AgentTool,
@@ -51,13 +50,6 @@ import {
 	generateBranchSummary,
 	type ShakeConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import {
-	DEFAULT_PRUNE_CONFIG,
-	pruneSupersededToolResults,
-	pruneToolOutputs,
-	readToolSupersedeKey,
-} from "@oh-my-pi/pi-agent-core/compaction/pruning";
-import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import { failChatSpan, finishChatSpan, runInActiveSpan, startChatSpan } from "@oh-my-pi/pi-agent-core/telemetry";
 import type {
 	AssistantMessage,
@@ -185,8 +177,8 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "../thinking";
+import { formatTitleConversationContext } from "../tiny/message-preproc";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
@@ -216,16 +208,16 @@ import type {
 	AgentSessionDisposeOptions,
 	AsyncJobSnapshot,
 	CommandMetadataChangedListener,
-	ContextUsageBreakdown,
 	CommittedSessionFork,
+	ContextUsageBreakdown,
 	FollowUpOptions,
 	FreshSessionResult,
 	HandoffResult,
 	ModelCycleResult,
 	Prewalk,
+	PromptOptions,
 	ReadOnlySideRequestSnapshot,
 	ReadOnlySideTransforms,
-	PromptOptions,
 	ResolvedRoleModel,
 	RestoredQueuedMessage,
 	RoleModelCycle,
@@ -456,46 +448,6 @@ type SetSessionNameWithTrigger = (
 	trigger?: SessionNameTrigger,
 ) => Promise<boolean>;
 
-function textFromContent(content: unknown): string {
-	if (typeof content === "string") return content.trim();
-	if (!Array.isArray(content)) return "";
-	const parts: string[] = [];
-	for (const block of content) {
-		if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
-		const text = block.text.trim();
-		if (text) parts.push(text);
-	}
-	return parts.join("\n\n");
-}
-
-function thinkingFromContent(content: unknown): string {
-	if (!Array.isArray(content)) return "";
-	const parts: string[] = [];
-	for (const block of content) {
-		if (!isRecord(block) || block.type !== "thinking" || typeof block.thinking !== "string") continue;
-		const thinking = block.thinking.trim();
-		if (thinking) parts.push(thinking);
-	}
-	return parts.join("\n\n");
-}
-
-function toolCallOpFromMessage(message: AgentMessage, toolCallId: string): string | undefined {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) return undefined;
-	for (const block of message.content) {
-		if (!isRecord(block) || block.type !== "toolCall" || block.id !== toolCallId) continue;
-		return isRecord(block.arguments) ? stringProperty(block.arguments, "op") : undefined;
-	}
-	return undefined;
-}
-
-function titleConversationTurnFromMessage(message: AgentMessage): TitleConversationTurn | undefined {
-	if (message.role !== "user" && message.role !== "assistant") return undefined;
-	const text = textFromContent(message.content);
-	const thinking = message.role === "assistant" ? thinkingFromContent(message.content) : undefined;
-	if (!text && !thinking) return undefined;
-	return { role: message.role, ...(text ? { text } : {}), ...(thinking ? { thinking } : {}) };
-}
-
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -504,7 +456,6 @@ export class AgentSession {
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
-	#autoApprove: boolean;
 	#sessionIdentityBarrier: Promise<void> = Promise.resolve();
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
@@ -1550,7 +1501,11 @@ export class AgentSession {
 		await prior;
 		try {
 			let sourceSessionFile = parentSessionFile;
-			if (hasCommittedContext && sourceSessionFile) {
+			if ((hasPersistedParent || hasCommittedContext) && sourceSessionFile) {
+				// An existing parent journal can contain durable state with no LLM
+				// messages (model/thinking/mode/session-init). Never replace it
+				// with a metadata-only materialization merely because this child
+				// intentionally starts at the empty committed boundary.
 				await manager.ensureOnDisk();
 				await manager.flush();
 			} else {

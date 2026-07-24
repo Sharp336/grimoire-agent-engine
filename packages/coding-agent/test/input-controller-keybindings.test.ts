@@ -23,6 +23,7 @@ type FakeEditor = {
 	onToggleThinking?: () => void;
 	onExternalEditor?: () => void;
 	onRetry?: () => void;
+	onDequeue?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
@@ -63,7 +64,8 @@ async function createContext() {
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
 		"app.clipboard.pasteImage": ["ctrl+v"],
-		"app.consult": ["ctrl+shift+c"],
+		"app.consult": ["alt+shift+q"],
+		"app.message.dequeue": ["alt+shift+d"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -679,7 +681,7 @@ describe("InputController keybinding setup", () => {
 
 		controller.setupKeyHandlers();
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.clear", ["ctrl+c"]);
-		expect(spies.setActionKeys).toHaveBeenCalledWith("app.consult", ["ctrl+shift+c"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.consult", ["alt+shift+q"]);
 		expect(editor.onClear).toBeDefined();
 		expect(editor.onConsult).toBeDefined();
 
@@ -726,21 +728,28 @@ describe("InputController keybinding setup", () => {
 		expect(getFocused()).toBe(editor);
 	});
 
-	it("disables parent model, retry, and external-editor actions while composing a consultation", async () => {
+	it("disables parent model, retry, dequeue, and external-editor actions while composing a consultation", async () => {
 		const { InputController, ctx, editor, setConsultComposerActive, spies } = await createContext();
 		setConsultComposerActive(true);
 		const controller = new InputController(ctx);
+		const dequeue = vi.spyOn(controller, "handleDequeue");
 
 		controller.setupKeyHandlers();
 		editor.setText("consultation draft");
 		editor.onSelectModel?.();
 		editor.onSelectModelTemporary?.();
 		editor.onRetry?.();
+		// This represents a user-configured non-navigation dequeue chord. It
+		// bypasses the consultation panel's Alt+Up listener and must still not
+		// restore the parent queue or its images into this draft.
+		editor.onDequeue?.();
 		editor.onExternalEditor?.();
 		await Promise.resolve();
 
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.message.dequeue", ["alt+shift+d"]);
 		expect(spies.showModelSelector).not.toHaveBeenCalled();
 		expect(spies.retry).not.toHaveBeenCalled();
+		expect(dequeue).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("consultation draft");
 	});
 

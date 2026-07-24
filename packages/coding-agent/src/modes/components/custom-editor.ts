@@ -63,7 +63,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
-	"app.consult": ["ctrl+shift+c"],
+	"app.consult": ["alt+shift+q"],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -767,8 +767,8 @@ export class CustomEditor extends Editor {
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
 		// Legacy terminals encode both Ctrl+C and Ctrl+Shift+C as raw ETX. Keep
-		// the default clear action bound to that unambiguous legacy byte; only
-		// CSI-u/Kitty (or another unambiguous remap) may invoke consultation.
+		// clear bound to that unambiguous byte; the default consultation chord is
+		// an Alt sequence with distinct terminal encoding.
 		if (data === "\x03" && this.#matchesAction("ctrl+c", "app.clear") && this.onClear) {
 			this.onClear();
 			return;

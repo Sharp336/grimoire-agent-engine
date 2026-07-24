@@ -8,6 +8,8 @@
 ### Changed
 
 - Saved consultations now appear as parked read-only Agent Hub transcripts and remain hidden from messaging, collaboration, and `history://` peer surfaces.
+- Changed the default consultation shortcut to `Alt+Shift+Q` so legacy terminals do not confuse it with `Ctrl+C`; configured overrides remain supported.
+
 
 
 ### Added

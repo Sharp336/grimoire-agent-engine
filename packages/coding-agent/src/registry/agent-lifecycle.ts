@@ -352,7 +352,7 @@ export class AgentLifecycleManager {
 		}
 	}
 
-/**
+	/**
 	 * Hard removal: dispose if live, unregister from registry, drop timers.
 	 * When `expected` is given, only a ref matching it is released; a stale
 	 * release can never take down a newer same-id ref. Returns true when a

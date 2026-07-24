@@ -3,8 +3,10 @@ import * as path from "node:path";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import type { AgentSession } from "../session/agent-session";
 import {
+	CONSULTATION_STATUS_MESSAGE_TYPE,
 	CONSULTATION_TITLE_CUSTOM_TYPE,
 	CONSULTATION_TITLE_STATE_CUSTOM_TYPE,
+	CONSULTATION_TURN_CUSTOM_TYPE,
 	type ConsultationThreadRecord,
 	type ConsultationTitleRecord,
 	type ConsultationTitleStateRecord,
@@ -43,7 +45,6 @@ async function readPersistedVibeChildIds(sessionFile: string): Promise<Set<strin
 	}
 }
 
-
 export interface PersistedConsultationState {
 	thread: ConsultationThreadRecord;
 	latestTurn: ConsultationTurnRecord | undefined;
@@ -68,6 +69,41 @@ function titlesFor(registry: AgentRegistry): Map<string, ConsultationDisplayTitl
 		consultationTitles.set(registry, titles);
 	}
 	return titles;
+}
+
+/**
+ * A running side turn has no surviving worker after a process restart. Append
+ * its terminal cancellation before any registry or resume UI reads the file so
+ * recovery cannot present stale output as live streaming.
+ */
+async function finalizeInterruptedConsultationTurns(sessionFile: string, consultationId: string) {
+	const manager = await SessionManager.open(sessionFile, undefined, undefined, { suppressBreadcrumb: true });
+	try {
+		const interruptedTurns = consultationTurnStates(manager.getEntries(), consultationId)
+			.filter(state => state.terminal === undefined)
+			.map(state => state.turn);
+		if (interruptedTurns.length === 0) return manager.getEntries();
+
+		const finishedAt = Date.now();
+		for (const turn of interruptedTurns) {
+			manager.appendMessage({
+				role: "custom",
+				customType: CONSULTATION_STATUS_MESSAGE_TYPE,
+				content: "[Consultation interrupted by process exit.]",
+				display: true,
+				timestamp: finishedAt,
+			});
+			manager.appendCustomEntry(CONSULTATION_TURN_CUSTOM_TYPE, {
+				...turn,
+				status: "cancelled",
+				finishedAt,
+			} satisfies ConsultationTurnRecord);
+		}
+		await manager.flush();
+		return manager.getEntries();
+	} finally {
+		await manager.close().catch(() => {});
+	}
 }
 
 function refreshConsultationDisplayNames(registry: AgentRegistry, ownerId: string): void {
@@ -280,7 +316,9 @@ async function registerPersistedTranscriptsFromDir(
 		const sessionFile = path.join(dir, entry.name);
 		const consultationId = parseConsultationTranscriptName(entry.name);
 		if (consultationId) {
-			const sessionEntries = await loadEntriesFromFile(sessionFile).catch(() => []);
+			const sessionEntries = await finalizeInterruptedConsultationTurns(sessionFile, consultationId).catch(() =>
+				loadEntriesFromFile(sessionFile).catch(() => []),
+			);
 			const lookup = lookupConsultationThread(sessionEntries, consultationId);
 			const thread = lookup.hasCollision ? undefined : lookup.thread;
 			if (!thread) {

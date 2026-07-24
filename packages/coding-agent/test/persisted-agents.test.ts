@@ -353,7 +353,7 @@ describe("persisted consultation discovery", () => {
 		const list = selections.find(selection => selection.title === "Consultations");
 		expect(list?.choices).toEqual(
 			expect.arrayContaining([
-				expect.stringMatching(/^First durable title · consult:cdef0one · running · 2 turns · /),
+				expect.stringMatching(/^First durable title · consult:cdef0one · cancelled · 2 turns · /),
 				expect.stringMatching(/^Second durable title · consult:cdef0two · completed · 1 turn · /),
 			]),
 		);

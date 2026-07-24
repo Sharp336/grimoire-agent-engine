@@ -18,6 +18,12 @@ describe("KeybindingsManager.getDisplayString", () => {
 		expect(keybindings.getDisplayString("app.retry")).toBe("Alt+R");
 	});
 
+	it("defaults consultation to the legacy-safe Alt+Shift+Q chord", () => {
+		const keybindings = KeybindingsManager.inMemory();
+
+		expect(keybindings.getDisplayString("app.consult")).toBe("Alt+Shift+Q");
+	});
+
 	it("formats multiple bindings with the existing separator", () => {
 		const keybindings = KeybindingsManager.inMemory({
 			"app.clipboard.copyPrompt": ["alt+shift+c", "ctrl+shift+c"],

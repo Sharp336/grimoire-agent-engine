@@ -551,7 +551,9 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.tools.expand", this.ctx.keybindings.getKeys("app.tools.expand"));
 		this.ctx.editor.onExpandTools = () => this.toggleToolOutputExpansion();
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
-		this.ctx.editor.onDequeue = () => this.handleDequeue();
+		this.ctx.editor.onDequeue = () => {
+			if (!this.ctx.isConsultComposerActive) this.handleDequeue();
+		};
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => {
 			if (!this.ctx.isConsultComposerActive) void this.handleRetry();

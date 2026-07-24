@@ -136,7 +136,7 @@ export const KEYBINDINGS = {
 		description: "Send follow-up message",
 	},
 	"app.consult": {
-		defaultKeys: "ctrl+shift+c",
+		defaultKeys: "alt+shift+q",
 		description: "Start a new consultation",
 	},
 	"app.retry": {
