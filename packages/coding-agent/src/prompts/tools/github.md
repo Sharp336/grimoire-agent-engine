@@ -2,7 +2,7 @@
 
 <instruction>
 Select via `op`.
-- Specific issue or hierarchy? Read its `issue://` URL first. Read parent once for direct-child status/progress; follow only returned child links for nested descendants or child body, comments, or assignees.
+- Specific issue or hierarchy? Read its `issue://` URL first. GHES hierarchy links retain source as `?host=<github-host>`; preserve query when following them. Read parent once for direct-child status/progress; follow only returned child links for nested descendants or child body, comments, or assignees.
 - Use `search_issues` for repository-wide discovery or assignee queries. GitHub “assigned” means assignees, NEVER attached/sub-issues.
 - `repo_view`: omit `repo` → current checkout.
 - `file_read`: read `path` from `repo`; omit `repo` → current checkout, `branch` → default branch.

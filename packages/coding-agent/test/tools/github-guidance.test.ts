@@ -19,6 +19,8 @@ describe("rendered GitHub issue workflow guidance", () => {
 		expect(description).toContain("Read the parent once for direct-child status/progress");
 		expect(description).toContain("follow only returned child links");
 		expect(description).toContain("child body, comments, or assignees");
+		expect(description).toContain("GHES hierarchy links retain their source as `?host=<github-host>`");
+		expect(description).toContain("preserve that query when following them");
 		expect(description).toContain("`search_issues` for repository-wide discovery or assignee queries");
 		expect(description).toContain("“assigned” means assignees, NEVER attached/sub-issues");
 		expect(description).toContain("Close or reopen with `issue_state`, NEVER raw `gh issue close`/`reopen`");
@@ -61,6 +63,8 @@ describe("rendered GitHub issue workflow guidance", () => {
 		expect(rendered).toContain("Read the parent first for one-hop direct-child status/progress");
 		expect(rendered).toContain("follow only returned child links");
 		expect(rendered).toContain("child body, comments, or assignees");
+		expect(rendered).toContain("GHES hierarchy links retain their source as `?host=<github-host>`");
+		expect(rendered).toContain("preserve that query when following them");
 		expect(rendered).toContain("`search_issues` for repository-wide or assignee queries");
 		expect(rendered).toContain("“assigned issues” means assignee matches, NEVER attached/sub-issues");
 		expect(rendered).toContain("use `?fresh=1` only after external/raw mutation or when cache state is uncertain");

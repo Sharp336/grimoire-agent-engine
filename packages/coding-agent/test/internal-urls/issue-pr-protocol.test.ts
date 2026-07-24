@@ -181,7 +181,7 @@ describe("issue:// protocol handler", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
-	it("renders one visible hierarchy hop from one supported gh issue view call", async () => {
+	it("renders hierarchy links and routes GHES follow-up reads to their source host", async () => {
 		const spy = vi.spyOn(git.github, "json").mockResolvedValue({
 			...issuePayload(42, "issue body"),
 			url: "https://ghe.example.test/owner/example/issues/42",
@@ -219,12 +219,12 @@ describe("issue:// protocol handler", () => {
 		expect(hierarchyIndex).toBeGreaterThan(-1);
 		expect(bodyIndex).toBeGreaterThan(hierarchyIndex);
 		expect(resource.content).toContain("Parent: OPEN platform/roadmap#7 — Parent roadmap");
-		expect(resource.content).toContain("issue://platform/roadmap/7");
+		expect(resource.content).toContain("issue://platform/roadmap/7?host=ghe.example.test");
 		expect(resource.content).toContain("Sub-issues: 1/2 complete (50%)");
 		expect(resource.content).toContain("- CLOSED owner/example#43 — Same-repo child");
-		expect(resource.content).toMatch(/\n {2,}issue:\/\/owner\/example\/43/);
+		expect(resource.content).toMatch(/\n {2,}issue:\/\/owner\/example\/43\?host=ghe\.example\.test/);
 		expect(resource.content).toContain("- OPEN other/widgets#9 — Cross-repo child");
-		expect(resource.content).toMatch(/\n {2,}issue:\/\/other\/widgets\/9/);
+		expect(resource.content).toMatch(/\n {2,}issue:\/\/other\/widgets\/9\?host=ghe\.example\.test/);
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(requestedJsonFields(spy.mock.calls[0]?.[1] as string[])).toEqual(
 			new Set([
@@ -245,6 +245,31 @@ describe("issue:// protocol handler", () => {
 				"url",
 			]),
 		);
+
+		const routedChild = "issue://other/widgets/9?host=ghe.example.test";
+		const followed = await InternalUrlRouter.instance().resolve(routedChild);
+		expect(followed.url).toBe(routedChild);
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect((spy.mock.calls[1]?.[1] as string[] | undefined)?.slice(0, 5)).toEqual([
+			"issue",
+			"view",
+			"9",
+			"--repo",
+			"ghe.example.test/other/widgets",
+		]);
+
+		// The routed read has its own host-qualified cache key.
+		await InternalUrlRouter.instance().resolve(routedChild);
+		expect(spy).toHaveBeenCalledTimes(2);
+		await InternalUrlRouter.instance().resolve("issue://other/widgets/9");
+		expect(spy).toHaveBeenCalledTimes(3);
+		expect((spy.mock.calls[2]?.[1] as string[] | undefined)?.slice(0, 5)).toEqual([
+			"issue",
+			"view",
+			"9",
+			"--repo",
+			"other/widgets",
+		]);
 	});
 
 	it("omits foreign-host hierarchy links and marks the response partial", async () => {
@@ -603,12 +628,21 @@ describe("issue:// protocol handler", () => {
 		);
 	});
 
-	it("rejects invalid issue:// URLs with a friendly message", async () => {
+	it("rejects invalid issue:// URLs and host selectors with a friendly message", async () => {
 		const router = InternalUrlRouter.instance();
 		// 4-or-more segments fall through to the catch-all "Invalid …" error.
 		await expect(router.resolve("issue://owner/example/foo/bar")).rejects.toThrow(/Invalid issue:\/\/ URL/);
 		// Non-numeric single segment fails the number check.
 		await expect(router.resolve("issue://abc")).rejects.toThrow(/Invalid issue:\/\/ number/);
+		await expect(router.resolve("issue://123?host=ghe.example.test")).rejects.toThrow(
+			/Invalid issue:\/\/ host option/,
+		);
+		await expect(router.resolve("issue://owner/example/123?host=ghe.example.test&host=github.com")).rejects.toThrow(
+			/Invalid issue:\/\/ host value/,
+		);
+		await expect(router.resolve("issue://owner/example/123?host=ghe.example.test%2Fpath")).rejects.toThrow(
+			/Invalid issue:\/\/ host value/,
+		);
 	});
 });
 
@@ -654,10 +688,13 @@ describe("pr:// protocol handler", () => {
 		expect(resource.content).toContain("Approved from the formal review flow.");
 	});
 
-	it("rejects invalid pr:// URLs with a friendly message", async () => {
+	it("rejects invalid pr:// URLs and issue-only host selectors with a friendly message", async () => {
 		const router = InternalUrlRouter.instance();
 		await expect(router.resolve("pr://owner/example/foo/bar")).rejects.toThrow(/Invalid pr:\/\/ URL/);
 		await expect(router.resolve("pr://owner/example/abc")).rejects.toThrow(/Invalid pr:\/\/ number/);
+		await expect(router.resolve("pr://owner/example/77?host=ghe.example.test")).rejects.toThrow(
+			/Invalid pr:\/\/ host option/,
+		);
 	});
 
 	it("rejects empty / dot / dotdot path segments", async () => {
