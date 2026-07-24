@@ -3676,17 +3676,15 @@ export class AgentSession {
 	}
 
 	#disposeMemoryBackend(): Promise<void> {
-		if (!this.#memoryBackendDisposePromise) {
+		this.#memoryBackendDisposePromise ??= (async () => {
+			await Promise.allSettled([this.#memoryBackendReady, this.#memoryBackendFallbackReady ?? Promise.resolve()]);
 			const backend = this.#memoryBackend;
 			try {
-				this.#memoryBackendDisposePromise = Promise.resolve(backend?.disposeSession?.(this));
+				await backend?.disposeSession?.(this);
 			} catch (error) {
-				this.#memoryBackendDisposePromise = Promise.reject(error);
-			}
-			this.#memoryBackendDisposePromise = this.#memoryBackendDisposePromise.catch(error => {
 				logger.warn("Memory backend disposal failed", { backend: backend?.id, error: String(error) });
-			});
-		}
+			}
+		})();
 		return this.#memoryBackendDisposePromise;
 	}
 

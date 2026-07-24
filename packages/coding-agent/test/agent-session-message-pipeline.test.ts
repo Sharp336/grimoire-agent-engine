@@ -1650,6 +1650,62 @@ describe("AgentSession message pipeline", () => {
 		}
 	});
 
+	it("disposes backend state installed by delayed SDK startup", async () => {
+		const api = "test-sdk-memory-startup-dispose";
+		const startupStarted = Promise.withResolvers<void>();
+		const releaseStartup = Promise.withResolvers<void>();
+		const lifecycle: string[] = [];
+		const fakeBackend: MemoryBackend = {
+			id: "supermemory",
+			async start() {
+				startupStarted.resolve();
+				await releaseStartup.promise;
+				lifecycle.push("installed");
+			},
+			async buildDeveloperInstructions() {
+				return "";
+			},
+			async clear() {},
+			async enqueue() {},
+			async disposeSession() {
+				lifecycle.push("disposed");
+			},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
+		registerCustomApi(api, () => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") }));
+			return stream;
+		});
+		using tempDir = TempDir.createSync("@pi-sdk-memory-startup-dispose-");
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model: createPipelineModel(api),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		sessions.push(session);
+		await startupStarted.promise;
+		const teardown = session.dispose();
+		releaseStartup.resolve();
+		await teardown;
+		expect(lifecycle).toEqual(["installed", "disposed"]);
+		authStorage.close();
+	});
+
 	it("preserves append-only prefixes in subagent sessions when context handlers rewrite prior turns", async () => {
 		using tempDir = TempDir.createSync("@pi-subagent-append-only-");
 		const api = "test-subagent-append-only-cache";
