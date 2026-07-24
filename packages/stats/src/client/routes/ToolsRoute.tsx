@@ -445,7 +445,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 				),
 			},
 		],
-		[],
+		[t, locale],
 	);
 
 	return (

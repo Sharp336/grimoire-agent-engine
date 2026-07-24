@@ -312,7 +312,8 @@ export function renderRootHelp(config: CliConfig<CommandMetadata>, translator?: 
 	// The default command is the one marked hidden (it's the implicit entry point).
 	const defaultCmd = [...commands.values()].find(command => command.hidden);
 	if (defaultCmd) {
-		renderCommandBody(lines, defaultCmd, translator);
+		const defaultId = [...commands.entries()].find(([, C]) => C === defaultCmd)?.[0] ?? "";
+		renderCommandBody(lines, defaultCmd, defaultId, translator);
 	}
 
 	// List visible subcommands
@@ -371,23 +372,16 @@ export function renderCommandHelp(
 	translator?: (text: string, key: string) => string,
 ): void {
 	const lines: string[] = [];
-	const t = translator
-		? (text: string, key: string) => {
-				const result = translator(text, key);
-				return result === key ? text : result;
-			}
-		: (text: string, _key: string) => text;
 
-	if (Cmd.description) lines.push(`${t(Cmd.description, `commands.${id}.description`)}\n`);
-	lines.push(t("USAGE", "cli.usage"));
 	lines.push(`  ${commandUsageLine(bin, id, Cmd, translator)}\n`);
-	renderCommandBody(lines, Cmd, translator);
+	renderCommandBody(lines, Cmd, id, translator);
 	process.stdout.write(lines.join("\n"));
 }
 
 function renderCommandBody(
 	lines: string[],
-	command: CommandMetadata,
+command: CommandMetadata,
+	commandId: string,
 	translator?: (text: string, key: string) => string,
 ): void {
 	const argDefs = command.args ?? {};
@@ -407,7 +401,7 @@ function renderCommandBody(
 		const maxLen = Math.max(...argEntries.map(([n]) => n.length));
 		for (const [name, desc] of argEntries) {
 			const parts = [name.toUpperCase().padEnd(maxLen + 2)];
-			if (desc.description) parts.push(t(desc.description, `args.${name}.description`));
+			if (desc.description) parts.push(t(desc.description, `${commandId}.args.${name}.description`));
 			if (desc.options) parts.push(`(${[...desc.options].join("|")})`);
 			lines.push(`  ${parts.join(" ")}`);
 		}
@@ -423,7 +417,7 @@ function renderCommandBody(
 			const charPart = desc.char ? `-${desc.char}, ` : "    ";
 			const namePart = `--${name}`;
 			const typePart = desc.kind === "boolean" ? "" : desc.kind === "integer" ? "=<int>" : "=<value>";
-			const descText = desc.description ? t(desc.description, `flags.${name}.description`) : "";
+			const descText = desc.description ? t(desc.description, `${commandId}.flags.${name}.description`) : "";
 			formatted.push([`  ${charPart}${namePart}${typePart}`, descText]);
 		}
 		const maxLeft = Math.max(...formatted.map(([l]) => l.length));

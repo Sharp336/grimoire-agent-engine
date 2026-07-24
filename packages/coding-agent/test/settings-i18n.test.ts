@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { i18n } from "../src/i18n";
+import { invalidateSettingDefsCache } from "../src/modes/components/settings-defs";
 
 describe("settings i18n integration", () => {
 	let tempDir: string;
@@ -20,8 +21,9 @@ describe("settings i18n integration", () => {
 		} else {
 			delete process.env.OMP_LANG;
 		}
-		// Restore the i18n singleton to its default state to prevent test pollution
+		// Restore the i18n singleton and settings defs cache to prevent test pollution
 		i18n.reset();
+		invalidateSettingDefsCache();
 		await fs.promises.rm(tempDir, { recursive: true, force: true });
 	});
 

@@ -170,7 +170,6 @@ export type StatusLineSegmentId =
 	| "subagents"
 	| "token_in"
 	| "token_out"
-	| "token_io"
 	| "token_total"
 	| "token_rate"
 	| "cost"

@@ -54,6 +54,7 @@ export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
 
 function CostOverviewPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 	const { t, locale } = useTranslation();
+	useExchangeRate();
 	const summary = useMemo(() => buildCostSummary(costSeries), [costSeries]);
 
 	const cards = [
@@ -91,7 +92,7 @@ const BAR_LABEL_COLORS = {
 } as const;
 
 // Inline Chart.js plugin to draw cost value above bars
-function makeBarLabelPlugin(color: string): Plugin<"bar"> {
+function makeBarLabelPlugin(color: string, locale: string): Plugin<"bar"> {
 	return {
 		id: "costBarLabels",
 		afterDatasetsDraw(chart) {
@@ -108,7 +109,7 @@ function makeBarLabelPlugin(color: string): Plugin<"bar"> {
 				// Accessing Chart.js internal parsed coordinates via unknown cast
 				const value = (bar as unknown as { $context: { parsed: { y: number } } }).$context.parsed.y;
 				if (!value) continue;
-				const label = `$${Math.round(value)}`;
+				const label = formatCost(value, 0, locale);
 				// Accessing internal getProps for positioning via unknown cast
 				const { x, y } = bar.getProps(["x", "y"], true) as {
 					x: number;
@@ -171,8 +172,8 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 	}, [chartTheme, locale]);
 
 	const barLabelPlugin = useMemo(() => {
-		return makeBarLabelPlugin(BAR_LABEL_COLORS[theme]);
-	}, [theme]);
+		return makeBarLabelPlugin(BAR_LABEL_COLORS[theme], locale);
+	}, [theme, locale]);
 
 	const lineData = useMemo(() => {
 		if (!byModel) return null;

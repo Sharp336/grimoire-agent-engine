@@ -128,11 +128,15 @@ class I18nManager {
 	async init(): Promise<void> {
 		if (this.#initialized) {
 			// 构造函数已从嵌入式数据同步初始化；异步检查 config.yml 覆盖
-			const configLang = await this.#detectLanguageFromConfig();
-			if (configLang && configLang !== this.#lang) {
-				this.#lang = configLang;
-				this.#dict = {};
-				this.#loadEmbedded(configLang);
+			// 但如果 OMP_LANG 环境变量已设置，跳过 config 读取（env 优先级高于 config）
+			const ompLangSet = process.env.OMP_LANG === "zh" || process.env.OMP_LANG === "en";
+			if (!ompLangSet) {
+				const configLang = await this.#detectLanguageFromConfig();
+				if (configLang && configLang !== this.#lang) {
+					this.#lang = configLang;
+					this.#dict = {};
+					this.#loadEmbedded(configLang);
+				}
 			}
 			// 加载用户目录覆盖
 			await this.#loadTranslationFromDir(this.#lang, this.#lanDir, this.#dict);

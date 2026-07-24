@@ -7,7 +7,7 @@
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { APP_NAME, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
-import { shouldConvertCurrency } from "../i18n/exchange-rate";
+import { getExchangeRate, shouldConvertCurrency } from "../i18n/exchange-rate";
 import { openPath } from "../utils/open";
 
 /**
@@ -160,7 +160,6 @@ async function printStatsSummary(): Promise<void> {
 	const convert = shouldConvertCurrency();
 	let rate = 0;
 	if (convert) {
-		const { getExchangeRate } = await import("../i18n/exchange-rate");
 		rate = await getExchangeRate();
 	}
 	function formatLocalCost(n: number): string {

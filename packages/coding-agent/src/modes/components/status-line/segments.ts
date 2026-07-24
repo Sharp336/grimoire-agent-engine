@@ -402,18 +402,6 @@ const tokenOutSegment: StatusLineSegment = {
 	},
 };
 
-const tokenIoSegment: StatusLineSegment = {
-	id: "token_io",
-	render(ctx) {
-		const { input, output } = ctx.usageStats;
-		if (!input && !output) return { content: "", visible: false };
-
-		const inText = input ? `${theme.icon.input} ${formatNumber(input)}` : `${theme.icon.input} 0`;
-		const outText = output ? `${theme.icon.output} ${formatNumber(output)}` : `${theme.icon.output} 0`;
-		const content = `${theme.fg("statusLineSpend", inText)}${theme.fg("dim", "/")}${theme.fg("statusLineOutput", outText)}`;
-		return { content, visible: true };
-	},
-};
 
 const tokenTotalSegment: StatusLineSegment = {
 	id: "token_total",
@@ -695,7 +683,6 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	subagents: subagentsSegment,
 	token_in: tokenInSegment,
 	token_out: tokenOutSegment,
-	token_io: tokenIoSegment,
 	token_total: tokenTotalSegment,
 	token_rate: tokenRateSegment,
 	cost: costSegment,

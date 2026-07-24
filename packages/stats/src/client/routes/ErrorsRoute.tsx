@@ -27,7 +27,7 @@ export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: E
 
 	const offset = (page - 1) * PAGE_SIZE;
 
-	const { data: models } = useResource(["models-list"], signal => getModelList(signal), {
+	const { data: models } = useResource(["models-list", refreshTrigger], signal => getModelList(signal), {
 		enabled: active,
 	});
 

@@ -7,7 +7,6 @@
  * 找不到翻译则使用原始英文版本
  */
 
-import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
@@ -33,7 +32,7 @@ registerCacheInvalidator(clearPromptCache);
  */
 async function tryLoadPrompt(filePath: string): Promise<string | null> {
 	try {
-		return await fs.readFile(filePath, "utf-8");
+		return await Bun.file(filePath).text();
 	} catch (error) {
 		if (isEnoent(error)) {
 			return null;

@@ -29,7 +29,7 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 	const offset = (page - 1) * PAGE_SIZE;
 
 	// Fetch model list for the filter dropdown
-	const { data: models } = useResource(["models-list"], signal => getModelList(signal), {
+	const { data: models } = useResource(["models-list", refreshTrigger], signal => getModelList(signal), {
 		enabled: active,
 	});
 
