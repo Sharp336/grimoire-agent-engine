@@ -4554,6 +4554,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleForkCommand();
 	}
 
+	handleForkLiveCommand(): Promise<void> {
+		return this.#commandController.handleForkLiveCommand();
+	}
+
 	handleMoveCommand(targetPath?: string): Promise<void> {
 		return this.#commandController.handleMoveCommand(targetPath);
 	}

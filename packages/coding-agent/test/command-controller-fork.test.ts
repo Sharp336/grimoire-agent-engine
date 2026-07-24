@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 
 function streamingContext(options: { persisted?: boolean } = {}) {
 	const appendSessionInit = vi.fn();
@@ -21,6 +22,7 @@ function streamingContext(options: { persisted?: boolean } = {}) {
 		};
 	});
 	const showStatus = vi.fn();
+	const showWarning = vi.fn();
 	const showError = vi.fn();
 	const fork = vi.fn();
 	const abort = vi.fn();
@@ -43,7 +45,7 @@ function streamingContext(options: { persisted?: boolean } = {}) {
 		fork,
 		abort,
 	};
-	const ctx = { session, showStatus, showError, switchSession } as unknown as InteractiveModeContext;
+	const ctx = { session, showStatus, showError, showWarning, switchSession } as unknown as InteractiveModeContext;
 	return {
 		ctx,
 		session,
@@ -57,6 +59,7 @@ function streamingContext(options: { persisted?: boolean } = {}) {
 		abort,
 		switchSession,
 		showStatus,
+		showWarning,
 		showError,
 	};
 }
@@ -66,7 +69,7 @@ describe("CommandController streaming /fork", () => {
 
 	it("parks a committed-boundary child without switching the parent", async () => {
 		const harness = streamingContext();
-		await new CommandController(harness.ctx).handleForkCommand();
+		await new CommandController(harness.ctx).handleForkLiveCommand();
 		expect(harness.createCommittedChildSession).toHaveBeenCalledTimes(1);
 		expect(harness.appendSessionInit).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -96,11 +99,33 @@ describe("CommandController streaming /fork", () => {
 
 	it("materializes a lazy parent before parking the committed-boundary child", async () => {
 		const harness = streamingContext({ persisted: false });
-		await new CommandController(harness.ctx).handleForkCommand();
+		await new CommandController(harness.ctx).handleForkLiveCommand();
 		expect(harness.createCommittedChildSession).toHaveBeenCalledWith(expect.stringMatching(/^Fork-/), {
 			materializeParent: true,
 		});
 		expect(harness.showError).not.toHaveBeenCalled();
 		expect(AgentRegistry.global().list()).toHaveLength(1);
 	});
+
+	it("keeps /fork blocking while a response is streaming", async () => {
+		const harness = streamingContext();
+		await new CommandController(harness.ctx).handleForkCommand();
+
+		expect(harness.showWarning).toHaveBeenCalledWith(
+			"Wait for the current response to finish or abort it before forking.",
+		);
+		expect(harness.createCommittedChildSession).not.toHaveBeenCalled();
+		expect(harness.fork).not.toHaveBeenCalled();
+		expect(harness.session.isStreaming).toBe(true);
+	});
+});
+
+it("routes /fork-live to the explicit committed-fork action", async () => {
+	const editor = { setText: vi.fn() };
+	const handleForkLiveCommand = vi.fn(async () => {});
+	const runtime = { ctx: { editor, handleForkLiveCommand } } as never;
+
+	expect(await executeBuiltinSlashCommand("/fork-live", runtime)).toBe(true);
+	expect(handleForkLiveCommand).toHaveBeenCalledTimes(1);
+	expect(editor.setText).toHaveBeenCalledWith("");
 });

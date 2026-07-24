@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Added
 
-- Added durable `/consult` read-only side questions and committed-boundary `/fork` creation while the parent response continues streaming.
+- Added durable `/consult` read-only side questions and committed-boundary `/fork-live` creation while the parent response continues streaming.
 
 ### Changed
 

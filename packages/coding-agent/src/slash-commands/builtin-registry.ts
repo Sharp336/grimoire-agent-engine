@@ -1322,6 +1322,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "fork-live",
+		description: "Create a detached committed fork during a live response",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleForkLiveCommand();
+		},
+	},
+	{
 		name: "tree",
 		description: "Navigate session tree (switch branches)",
 		handleTui: (_command, runtime) => {

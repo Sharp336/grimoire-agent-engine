@@ -42,7 +42,7 @@ import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import liveForkTaskPrompt from "../../prompts/system/live-fork-task.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
-import type { AsyncJobSnapshotItem, CommittedSessionFork } from "../../session/agent-session";
+import type { AsyncJobSnapshotItem, CommittedSessionFork } from "../../session/agent-session-types";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
@@ -973,50 +973,7 @@ export class CommandController {
 
 	async handleForkCommand(): Promise<void> {
 		if (this.ctx.session.isStreaming) {
-			const session = this.ctx.session;
-			const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
-			const systemPrompt = [...session.agent.state.systemPrompt];
-			const tools = [...session.getActiveToolNames()];
-			const readSummarize = session.settings.get("read.summarize.enabled");
-			const inherited = session.sessionManager.peekSessionInit();
-			const outputSchema = structuredClone(inherited?.outputSchema);
-			const outputSchemaMode = structuredClone(inherited?.outputSchemaMode);
-			const restrictToolNames = structuredClone(inherited?.restrictToolNames);
-			const id = `Fork-${Snowflake.next()}`;
-			let child: CommittedSessionFork | undefined;
-			try {
-				child = await session.createCommittedChildSession(id, { materializeParent: true });
-				child.manager.appendSessionInit({
-					systemPrompt: systemPrompt.join("\n\n"),
-					task: prompt.render(liveForkTaskPrompt, {}),
-					tools,
-					spawns: "",
-					readSummarize,
-					outputSchema,
-					outputSchemaMode,
-					restrictToolNames,
-				});
-				await child.manager.flush();
-				await child.manager.close();
-				AgentRegistry.global().register({
-					id,
-					displayName: id,
-					kind: "sub",
-					parentId: ownerId,
-					session: null,
-					sessionFile: child.sessionFile,
-					status: "parked",
-				});
-				this.ctx.showStatus(`Forked committed session to ${id}; open /hub to continue it.`);
-			} catch (error) {
-				if (child) await child.manager.dropSession(child.sessionFile).catch(() => {});
-				const message = error instanceof Error ? error.message : String(error);
-				this.ctx.showError(
-					message === "Committed child sessions require a persisted parent session"
-						? "Fork failed (session not persisted)"
-						: message,
-				);
-			}
+			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
 			return;
 		}
 		if (this.ctx.loadingAnimation) {
@@ -1040,6 +997,58 @@ export class CommandController {
 			new Spacer(1),
 			new Text(`${theme.fg("accent", `${theme.status.success} Session forked to ${shortPath}`)}`, 1, 1),
 		]);
+	}
+
+	async handleForkLiveCommand(): Promise<void> {
+		if (!this.ctx.session.isStreaming) {
+			this.ctx.showWarning("/fork-live is only available while a response is streaming.");
+			return;
+		}
+
+		const session = this.ctx.session;
+		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
+		const systemPrompt = [...session.agent.state.systemPrompt];
+		const tools = [...session.getActiveToolNames()];
+		const readSummarize = session.settings.get("read.summarize.enabled");
+		const inherited = session.sessionManager.peekSessionInit();
+		const outputSchema = structuredClone(inherited?.outputSchema);
+		const outputSchemaMode = structuredClone(inherited?.outputSchemaMode);
+		const restrictToolNames = structuredClone(inherited?.restrictToolNames);
+		const id = `Fork-${Snowflake.next()}`;
+		let child: CommittedSessionFork | undefined;
+		try {
+			child = await session.createCommittedChildSession(id, { materializeParent: true });
+			child.manager.appendSessionInit({
+				systemPrompt: systemPrompt.join("\n\n"),
+				task: prompt.render(liveForkTaskPrompt, {}),
+				tools,
+				spawns: "",
+				readSummarize,
+				outputSchema,
+				outputSchemaMode,
+				restrictToolNames,
+			});
+			await child.manager.flush();
+			await child.manager.close();
+			AgentRegistry.global().register({
+				id,
+				displayName: id,
+				kind: "sub",
+				parentId: ownerId,
+				session: null,
+				sessionFile: child.sessionFile,
+				status: "parked",
+			});
+			this.ctx.showStatus(`Forked committed session to ${id}; open /hub to continue it.`);
+		} catch (error) {
+			if (child) await child.manager.dropSession(child.sessionFile).catch(() => {});
+			const message = error instanceof Error ? error.message : String(error);
+			this.ctx.showError(
+				message === "Committed child sessions require a persisted parent session"
+					? "Fork failed (session not persisted)"
+					: message,
+			);
+		}
 	}
 
 	/**
