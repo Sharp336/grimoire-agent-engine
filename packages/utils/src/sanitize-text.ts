@@ -20,6 +20,59 @@ const CONTROL_RE = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/g;
 
 const REPLACEMENT_CHAR = "\ufffd";
 
+export interface EscapedSurrogates {
+	text: string;
+	escapedCodeUnits: number;
+}
+
+/**
+ * Preserve well-formed UTF-16 while spelling each unmatched surrogate as an
+ * uppercase ASCII `\\uXXXX` escape before a UTF-8 persistence boundary.
+ */
+export function escapeUnpairedSurrogates(text: string): EscapedSurrogates {
+	let firstInvalid = -1;
+	for (let index = 0; index < text.length; index++) {
+		const codeUnit = text.charCodeAt(index);
+		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+			const next = text.charCodeAt(index + 1);
+			if (next >= 0xdc00 && next <= 0xdfff) {
+				index++;
+				continue;
+			}
+			firstInvalid = index;
+			break;
+		}
+		if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+			firstInvalid = index;
+			break;
+		}
+	}
+	if (firstInvalid === -1) return { text, escapedCodeUnits: 0 };
+
+	let escaped = text.slice(0, firstInvalid);
+	let segmentStart = firstInvalid;
+	let escapedCodeUnits = 0;
+	for (let index = firstInvalid; index < text.length; index++) {
+		const codeUnit = text.charCodeAt(index);
+		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+			const next = text.charCodeAt(index + 1);
+			if (next >= 0xdc00 && next <= 0xdfff) {
+				index++;
+				continue;
+			}
+		} else if (codeUnit < 0xdc00 || codeUnit > 0xdfff) {
+			continue;
+		}
+
+		escaped += text.slice(segmentStart, index);
+		escaped += `\\u${codeUnit.toString(16).toUpperCase().padStart(4, "0")}`;
+		escapedCodeUnits++;
+		segmentStart = index + 1;
+	}
+	escaped += text.slice(segmentStart);
+	return { text: escaped, escapedCodeUnits };
+}
+
 export function sanitizeText(text: string): string {
 	const wellFormed = text.toWellFormed();
 	if (wellFormed !== text) {

@@ -332,6 +332,25 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(session.conflictHistory?.get(1)).toBeUndefined();
 	});
 
+	it("escapes lone surrogates in conflict replacements before the file write", async () => {
+		const filePath = path.join(tempDir, "unicode.ts");
+		await Bun.write(filePath, TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-unicode", { path: "unicode.ts" });
+		const result = await write.execute("write-unicode", {
+			path: "conflict://1",
+			content: `한 \ud800 😀\n`,
+		});
+
+		expect(await Bun.file(filePath).text()).toBe(`line 1\n한 ${String.raw`\uD800`} 😀\nline N\n`);
+		const text = getText(result);
+		expect(text).toContain("Resolved conflict #1");
+		expect(text).toContain("Escaped 1 invalid Unicode code unit(s) before writing unicode.ts.");
+		expect(text.match(/Escaped 1 invalid Unicode/g)).toHaveLength(1);
+	});
 	it("drops trailing lines that echo the context below the region and notes the repair", async () => {
 		const filePath = path.join(tempDir, "echo.ts");
 		const content = [
@@ -699,6 +718,32 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(session.conflictHistory?.entries()).toHaveLength(0);
 	});
 
+	it("reports Unicode counts from committed files before a later bulk sink failure", async () => {
+		const fileA = path.join(tempDir, "unicode-bulk-a.ts");
+		const fileB = path.join(tempDir, "unicode-bulk-b.ts");
+		await Bun.write(fileA, TWO_WAY);
+		await Bun.write(fileB, TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+		await read.execute("read-unicode-bulk-a", { path: "unicode-bulk-a.ts:conflicts" });
+		await read.execute("read-unicode-bulk-b", { path: "unicode-bulk-b.ts:conflicts" });
+		await fs.chmod(fileB, 0o444);
+
+		const result = await write.execute("write-unicode-bulk", {
+			path: "conflict://*",
+			content: `resolved \ud800\n`,
+		});
+		const details = result.details as { escapedCodeUnits?: number } | undefined;
+		const text = getText(result);
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(fileA).text()).toBe(`line 1\nresolved ${String.raw`\uD800`}\nline N\n`);
+		expect(await Bun.file(fileB).text()).toBe(TWO_WAY);
+		expect(details?.escapedCodeUnits).toBe(1);
+		expect(text.match(/Escaped 1 invalid Unicode/g)).toHaveLength(1);
+		expect(text).toContain("registered entries left intact for retry");
+	});
 	it("`write conflict://*` errors when no conflicts are registered", async () => {
 		const session = createTestSession(tempDir);
 		const write = await getTool(session, "write");

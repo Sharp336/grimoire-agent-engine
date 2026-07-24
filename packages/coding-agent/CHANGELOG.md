@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed file-writing tools replacing malformed Unicode arguments with replacement characters ([#6464](https://github.com/can1357/oh-my-pi/issues/6464)).
+
 ## [17.1.0] - 2026-07-24
 
 ### Breaking Changes

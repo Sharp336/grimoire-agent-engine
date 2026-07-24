@@ -182,6 +182,7 @@ async function executeApplyPatchPerFile(
 				oldText: details?.oldText,
 				newText: details?.newText,
 				snapshotsPruned: details?.snapshotsPruned,
+				escapedCodeUnits: details?.escapedCodeUnits,
 			});
 			const text = result.content?.find(c => c.type === "text")?.text ?? "";
 			if (text) contentTexts.push(text);
@@ -233,6 +234,7 @@ async function executeApplyPatchPerFile(
 						.join("\n"),
 					firstChangedLine: perFileResults.find(r => r.firstChangedLine)?.firstChangedLine,
 					perFileResults: [...perFileResults],
+					escapedCodeUnits: perFileResults.reduce((sum, r) => sum + (r.escapedCodeUnits ?? 0), 0),
 				},
 			});
 		}
@@ -247,6 +249,7 @@ async function executeApplyPatchPerFile(
 				.join("\n"),
 			firstChangedLine: perFileResults.find(r => r.firstChangedLine)?.firstChangedLine,
 			perFileResults,
+			escapedCodeUnits: perFileResults.reduce((sum, r) => sum + (r.escapedCodeUnits ?? 0), 0),
 		}),
 		// Any per-file failure marks the aggregate result as an error so the
 		// agent loop and renderer take the error branch instead of treating
@@ -281,6 +284,7 @@ async function executeSinglePathEntries(
 	// would describe a transition the file never made. Suppress aggregate
 	// snapshots and stamp the marker so ACP/downstream can degrade cleanly.
 	let snapshotsPruned = false;
+	let escapedCodeUnits = 0;
 
 	for (let i = 0; i < runs.length; i++) {
 		const isLast = i === runs.length - 1;
@@ -305,6 +309,7 @@ async function executeSinglePathEntries(
 				hasLastNewText = true;
 			}
 			if (details?.snapshotsPruned) snapshotsPruned = true;
+			escapedCodeUnits += details?.escapedCodeUnits ?? 0;
 			const text = result.content?.find(c => c.type === "text")?.text ?? "";
 			if (text) contentTexts.push(text);
 		} catch (err) {
@@ -337,6 +342,7 @@ async function executeSinglePathEntries(
 				details: {
 					diff: diffTexts.join("\n"),
 					firstChangedLine,
+					escapedCodeUnits,
 				},
 				...(hasError ? { isError: true } : {}),
 			});
@@ -355,6 +361,7 @@ async function executeSinglePathEntries(
 						...(hasFirstOldText ? { oldText: firstOldText } : {}),
 						...(hasLastNewText ? { newText: lastNewText } : {}),
 					}),
+			escapedCodeUnits,
 		}),
 		// Any per-entry failure marks the aggregate result as an error so the
 		// renderer takes the error branch instead of falling through to the

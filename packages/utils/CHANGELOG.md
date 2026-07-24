@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added lossless escaping for lone UTF-16 surrogates before UTF-8 file writes.
+
 ## [17.0.9] - 2026-07-23
 
 ### Breaking Changes

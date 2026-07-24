@@ -11,11 +11,12 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { escapeUnpairedSurrogates, isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
+import { formatEscapedCodeUnitsNotice, type SerializedEditFileText, toPersistedEdit } from "../edit/read-file";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import { parseInternalUrl } from "../internal-urls/parse";
@@ -271,6 +272,8 @@ export interface WriteToolDetails {
 	resolvedPath?: string;
 	/** Set when the write dispatched an `xd://` tool device; drives renderer delegation. */
 	xdev?: XdevDispatch;
+	/** Count of lone UTF-16 surrogates escaped to literal `\uXXXX` before persistence. */
+	escapedCodeUnits?: number;
 }
 
 /**
@@ -340,6 +343,189 @@ function appendNoteToResult(result: AgentToolResult<WriteToolDetails>, note: str
 	} else {
 		result.content.push({ type: "text", text: note });
 	}
+}
+
+/**
+ * Record the escaped-surrogate count on a successful write result and append
+ * the exact user-facing notice once when any code unit was escaped. Only the
+ * persisted (non-delegated) branches call this after their sink succeeds.
+ */
+function finalizeEscapeReport(
+	result: AgentToolResult<WriteToolDetails>,
+	escapedCodeUnits: number,
+	displayPath: string,
+): AgentToolResult<WriteToolDetails> {
+	result.details = { ...result.details, escapedCodeUnits };
+	if (escapedCodeUnits > 0) {
+		appendNoteToResult(result, formatEscapedCodeUnitsNotice(escapedCodeUnits, displayPath));
+	}
+	return result;
+}
+
+/** Collect every string value/key reachable in a parsed JSON5 value. */
+function collectSemanticStrings(value: unknown, acc: string[]): void {
+	if (typeof value === "string") {
+		acc.push(value);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) collectSemanticStrings(item, acc);
+		return;
+	}
+	if (isRecord(value)) {
+		for (const [key, item] of Object.entries(value)) {
+			acc.push(key);
+			collectSemanticStrings(item, acc);
+		}
+	}
+}
+
+/** Pick a deterministic ASCII sentinel base that appears in neither the raw source nor any parsed string. */
+function chooseSqliteShieldNonce(source: string, semanticStrings: string[]): string {
+	for (let attempt = 0; ; attempt++) {
+		const nonce = `\u0001OMPU${attempt}_`;
+		if (!source.includes(nonce) && !semanticStrings.some(text => text.includes(nonce))) return nonce;
+	}
+}
+
+interface PreparedSqliteContent {
+	value: unknown;
+	escapedCodeUnits: number;
+}
+
+/**
+ * Parse SQLite write content as JSON5 while preserving lone UTF-16 surrogates.
+ *
+ * `Bun.JSON5.parse` decodes lone surrogates in string tokens to U+FFFD, so the
+ * raw code units are shielded with a collision-free ASCII sentinel before the
+ * parse and each sentinel is swapped for the literal `\uXXXX` output of
+ * {@link escapeUnpairedSurrogates} in the parsed keys/values afterward. Only
+ * surrogates that survive into a persisted string are counted; those in
+ * comments or discarded syntax never reach the parsed value.
+ */
+function prepareSqliteContent(content: string): PreparedSqliteContent {
+	// Inventory parse (surrogates already mangled here) only informs nonce choice.
+	const inventory: string[] = [];
+	collectSemanticStrings(Bun.JSON5.parse(content), inventory);
+	const nonce = chooseSqliteShieldNonce(content, inventory);
+
+	const replacements = new Map<string, string>();
+	let shielded = "";
+	let shieldIndex = 0;
+	let state: "top" | "string" | "line" | "block" = "top";
+	let quote = "";
+	let escaped = false;
+	for (let i = 0; i < content.length; i++) {
+		const char = content[i] ?? "";
+		const code = content.charCodeAt(i);
+		const nextCode = content.charCodeAt(i + 1);
+		const isHighSurrogate = code >= 0xd800 && code <= 0xdbff;
+		const hasFollowingLow = nextCode >= 0xdc00 && nextCode <= 0xdfff;
+		const isLoneSurrogate = (isHighSurrogate && !hasFollowingLow) || (code >= 0xdc00 && code <= 0xdfff);
+		if (state === "string") {
+			if (escaped) {
+				escaped = false;
+				if (isHighSurrogate && hasFollowingLow) {
+					shielded += content.slice(i, i + 2);
+					i++;
+					continue;
+				}
+				if (isLoneSurrogate) {
+					// JSON5 consumes the preceding backslash as a permissive
+					// escape prefix. Remove it with the code unit and shield the
+					// semantic character the parser would otherwise replace.
+					shielded = shielded.slice(0, -1);
+					const placeholder = `${nonce}${shieldIndex++}Z`;
+					replacements.set(placeholder, escapeUnpairedSurrogates(char).text);
+					shielded += placeholder;
+					continue;
+				}
+				shielded += char;
+				continue;
+			}
+			if (char === "\\") {
+				shielded += char;
+				escaped = true;
+				continue;
+			}
+			if (char === quote) {
+				shielded += char;
+				state = "top";
+				continue;
+			}
+			if (isHighSurrogate && hasFollowingLow) {
+				shielded += content.slice(i, i + 2);
+				i++;
+				continue;
+			}
+			if (!isLoneSurrogate) {
+				shielded += char;
+				continue;
+			}
+			const placeholder = `${nonce}${shieldIndex++}Z`;
+			replacements.set(placeholder, escapeUnpairedSurrogates(char).text);
+			shielded += placeholder;
+			continue;
+		}
+		if (state === "line") {
+			if (char === "\n") state = "top";
+			shielded += char;
+			continue;
+		}
+		if (state === "block") {
+			if (char === "*" && content[i + 1] === "/") {
+				shielded += "*/";
+				i++;
+				state = "top";
+				continue;
+			}
+			shielded += char;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			quote = char;
+			state = "string";
+		} else if (char === "/" && content[i + 1] === "/") {
+			shielded += "//";
+			i++;
+			state = "line";
+			continue;
+		} else if (char === "/" && content[i + 1] === "*") {
+			shielded += "/*";
+			i++;
+			state = "block";
+			continue;
+		}
+		shielded += char;
+	}
+
+	if (replacements.size === 0) {
+		return { value: Bun.JSON5.parse(content), escapedCodeUnits: 0 };
+	}
+
+	let escapedCodeUnits = 0;
+	const restore = (value: unknown): unknown => {
+		if (typeof value === "string") {
+			let text = value;
+			for (const [placeholder, literal] of replacements) {
+				if (!text.includes(placeholder)) continue;
+				escapedCodeUnits += text.split(placeholder).length - 1;
+				text = text.split(placeholder).join(literal);
+			}
+			return text;
+		}
+		if (Array.isArray(value)) return value.map(restore);
+		if (isRecord(value)) {
+			const out: Record<string, unknown> = {};
+			for (const [key, item] of Object.entries(value)) {
+				out[restore(key) as string] = restore(item);
+			}
+			return out;
+		}
+		return value;
+	};
+	const value = restore(Bun.JSON5.parse(shielded));
+	return { value, escapedCodeUnits };
 }
 
 function emitWriteProgress(
@@ -550,11 +736,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {
 		const candidates = parseArchivePathCandidates(writePath).filter(candidate => candidate.archivePath !== writePath);
-		if (candidates.length === 0) {
-			return null;
-		}
+		if (candidates.length === 0) return null;
 
-		const fallbackCandidate = candidates[candidates.length - 1]!;
+		const fallbackCandidate = candidates.at(-1);
+		if (!fallbackCandidate) return null;
 		const fallback: ResolvedArchiveWritePath = {
 			absolutePath: resolvePlanPath(this.session, fallbackCandidate.archivePath),
 			archivePath: fallbackCandidate.archivePath,
@@ -566,10 +751,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const absolutePath = resolvePlanPath(this.session, candidate.archivePath);
 			try {
 				const stat = await Bun.file(absolutePath).stat();
-				if (stat.isDirectory()) {
-					continue;
-				}
-
+				if (stat.isDirectory()) continue;
 				return {
 					absolutePath,
 					archivePath: candidate.archivePath,
@@ -577,9 +759,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					exists: true,
 				};
 			} catch (error) {
-				if (!isArchivePathNotFound(error)) {
-					throw error;
-				}
+				if (!isEnoent(error)) throw error;
 			}
 		}
 
@@ -587,21 +767,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	}
 
 	async #writeArchiveEntry(
-		content: string,
+		prepared: SerializedEditFileText,
 		resolvedArchivePath: ResolvedArchiveWritePath,
 	): Promise<AgentToolResult<WriteToolDetails>> {
-		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
-		// replaces the link itself with a regular file instead of writing
-		// through to its target.
 		const finalPath = resolvedArchivePath.exists
 			? await fs.realpath(resolvedArchivePath.absolutePath).catch(() => resolvedArchivePath.absolutePath)
 			: resolvedArchivePath.absolutePath;
-		// A realpath swap can land on a name without an archive extension; a
-		// whole-archive rewrite then defaults to an uncompressed tar, matching the
-		// previous `isZip`/`isGzip`/else fallthrough.
 		const format = archiveFormatFromPath(finalPath) ?? "tar";
-		// Rewrites are whole-archive: write to a temp file and rename so a
-		// crash/disk-full mid-write can't destroy the original archive.
 		const tmpPath = `${finalPath}.tmp-${process.pid}`;
 
 		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
@@ -613,19 +785,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (resolvedArchivePath.exists) {
 			try {
 				const existing = await readArchiveEntries({ bytes: await Bun.file(finalPath).bytes(), format });
-				for (const [entryPath, data] of existing) {
-					entries.set(entryPath, data);
-				}
+				for (const [entryPath, data] of existing) entries.set(entryPath, data);
 			} catch (error) {
 				throw new ToolError(error instanceof Error ? error.message : String(error));
 			}
 		}
 		const writeTarget = `${resolvedArchivePath.archivePath}:${resolvedArchivePath.archiveSubPath}`;
-		const sel = readSelectorForEmptyWrite(writeTarget, content);
+		const sel = readSelectorForEmptyWrite(writeTarget, prepared.content);
 		if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
 			throwReadSelectorMisfire(writeTarget, sel);
 		}
-		entries.set(resolvedArchivePath.archiveSubPath, content);
+		entries.set(resolvedArchivePath.archiveSubPath, prepared.content);
 
 		try {
 			await writeArchive(tmpPath, format, entries);
@@ -639,10 +809,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
 			resolvedArchivePath.archiveSubPath
 		}`;
-		return {
-			content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${outputPath}` }],
-			details: { resolvedPath: resolvedArchivePath.absolutePath },
-		};
+		return finalizeEscapeReport(
+			{
+				content: [{ type: "text", text: `Successfully wrote ${prepared.content.length} bytes to ${outputPath}` }],
+				details: { resolvedPath: resolvedArchivePath.absolutePath },
+			},
+			prepared.escapedCodeUnits,
+			outputPath,
+		);
 	}
 
 	async #resolveSqliteWritePath(writePath: string): Promise<ResolvedSqliteWritePath | null> {
@@ -712,6 +886,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			const trimmedContent = content.trim();
 			let resultText: string;
+			let escapedCodeUnits = 0;
 			if (trimmedContent.length === 0) {
 				if (!resolvedSqlitePath.key) {
 					throw new ToolError("SQLite deletes require a row key in the path");
@@ -729,7 +904,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			} else {
 				let parsedContent: unknown;
 				try {
-					parsedContent = Bun.JSON5.parse(content);
+					const prepared = prepareSqliteContent(content);
+					parsedContent = prepared.value;
+					escapedCodeUnits = prepared.escapedCodeUnits;
 				} catch (error) {
 					throw new ToolError(
 						`SQLite write content must be valid JSON5: ${error instanceof Error ? error.message : String(error)}`,
@@ -757,10 +934,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 
 			invalidateFsScanAfterWrite(resolvedSqlitePath.absolutePath);
-			return toolResult<WriteToolDetails>({ resolvedPath: resolvedSqlitePath.absolutePath })
+			const sqliteResult = toolResult<WriteToolDetails>({ resolvedPath: resolvedSqlitePath.absolutePath })
 				.text(resultText)
 				.sourcePath(resolvedSqlitePath.absolutePath)
 				.done();
+			return finalizeEscapeReport(sqliteResult, escapedCodeUnits, displayPath);
 		} catch (error) {
 			if (isEnoent(error)) {
 				throw new ToolError(`SQLite database '${displayPath}' not found`);
@@ -800,7 +978,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const expanded = expandContentTokens(replacementContent, entry);
 		const originalText = await Bun.file(absolutePath).text();
 		const splice = spliceConflict(originalText, entry, expanded);
-		const newContent = splice.text;
+		const prepared = toPersistedEdit(splice.text);
+		const newContent = prepared.content;
 
 		await writethroughNoop(absolutePath, newContent, signal);
 		invalidateFsScanAfterWrite(absolutePath);
@@ -840,10 +1019,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			resultText += `\nNote: dropped ${echoTrimmed} content line(s) that duplicated the code adjacent to the conflict region — writes replace only the marker block; surrounding lines stay in place.`;
 		}
 
-		return {
-			content: [{ type: "text", text: resultText }],
-			details: { resolvedPath: absolutePath },
-		};
+		return finalizeEscapeReport(
+			{
+				content: [{ type: "text", text: resultText }],
+				details: { resolvedPath: absolutePath },
+			},
+			prepared.escapedCodeUnits,
+			entry.displayPath,
+		);
 	}
 
 	/**
@@ -921,13 +1104,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			byFile.set(entry.absolutePath, bucket);
 		}
 
-		const succeededFiles: { displayPath: string; count: number; header?: string }[] = [];
+		const succeededFiles: { displayPath: string; count: number; header?: string; escaped: number }[] = [];
 		const failedFiles: { displayPath: string; count: number; error: string }[] = [];
 		let totalResolvedIds = 0;
 		let totalEchoTrimmed = 0;
 
 		for (const [absolutePath, fileEntries] of byFile) {
-			const sample = fileEntries[0]!;
+			const sample = fileEntries[0];
+			if (!sample) continue;
 			if (!(await fs.exists(absolutePath))) {
 				failedFiles.push({
 					displayPath: sample.displayPath,
@@ -981,15 +1165,29 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				continue;
 			}
 
-			await writethroughNoop(absolutePath, text, signal);
-			invalidateFsScanAfterWrite(absolutePath);
-			this.session.bumpFileMutationVersion?.(absolutePath);
-			this.session.fileSnapshotStore?.invalidate(absolutePath);
-			for (const entry of resolvedEntries) history.invalidate(entry.id);
-			for (const entry of staleEntries) history.invalidate(entry.id);
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, text);
-			succeededFiles.push({ displayPath: sample.displayPath, count: resolvedEntries.length, header });
-			totalResolvedIds += resolvedEntries.length;
+			try {
+				const prepared = toPersistedEdit(text);
+				await writethroughNoop(absolutePath, prepared.content, signal);
+				invalidateFsScanAfterWrite(absolutePath);
+				this.session.bumpFileMutationVersion?.(absolutePath);
+				this.session.fileSnapshotStore?.invalidate(absolutePath);
+				for (const entry of resolvedEntries) history.invalidate(entry.id);
+				for (const entry of staleEntries) history.invalidate(entry.id);
+				const header = maybeWriteSnapshotHeader(this.session, absolutePath, prepared.content);
+				succeededFiles.push({
+					displayPath: sample.displayPath,
+					count: resolvedEntries.length,
+					header,
+					escaped: prepared.escapedCodeUnits,
+				});
+				totalResolvedIds += resolvedEntries.length;
+			} catch (error) {
+				failedFiles.push({
+					displayPath: sample.displayPath,
+					count: fileEntries.length,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 		}
 
 		const summaryLines: string[] = [];
@@ -1032,6 +1230,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (stripped && !directives) {
 			summaryLines.push("Note: auto-stripped hashline display prefixes from content before writing.");
 		}
+		let totalEscaped = 0;
+		for (const file of succeededFiles) {
+			if (file.escaped > 0) {
+				totalEscaped += file.escaped;
+				summaryLines.push(formatEscapedCodeUnitsNotice(file.escaped, file.displayPath));
+			}
+		}
 		const resultText = summaryLines.join("\n");
 
 		if (failedFiles.length > 0 && succeededFiles.length === 0) {
@@ -1039,7 +1244,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		}
 		return {
 			content: [{ type: "text", text: resultText }],
-			details: {},
+			details: { escapedCodeUnits: totalEscaped },
 			isError: failedFiles.length > 0 ? true : undefined,
 		};
 	}
@@ -1072,11 +1277,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
 				const handler = internalRouter.getHandler(scheme);
 				if (handler?.write) {
-					// Handler-owned writes mutate user data outside the local
-					// sandbox. xd:// dispatches retain each wrapped tool's tier.
 					if (scheme !== "xd") {
 						enforcePlanModeWrite(this.session, path, { op: "update" });
-						emitWriteProgress(onUpdate, cleanContent, path);
+						emitWriteProgress(onUpdate, toPersistedEdit(cleanContent).content, path);
 					}
 					let xdResult: AgentToolResult<WriteToolDetails> | undefined;
 					await internalRouter.write(path, cleanContent, {
@@ -1117,9 +1320,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 									_toolCallId,
 									signal,
 									onUpdate as AgentToolUpdateCallback,
-									// The write tool's own gate just resolved approval at this
-									// device's tier (see #approval above) — mark it so a wrapped
-									// inner tool does not prompt a second time.
 									context ? { ...context, xdevApproved: true } : undefined,
 								);
 								xdResult = {
@@ -1134,13 +1334,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					if (xdResult) return xdResult;
 					let resultText = `Successfully wrote ${cleanContent.length} bytes to ${path}`;
 					if (stripped) {
-						resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+						resultText += "\nNote: auto-stripped hashline display prefixes from content before writing.";
 					}
 					return { content: [{ type: "text", text: resultText }], details: {} };
 				}
 				if (scheme !== "local") await internalRouter.write(path, cleanContent);
-				// local:// is backed by the session-local artifact sandbox and is
-				// resolved by resolvePlanPath below so write/read share the same root.
 			}
 
 			const conflictUri = parseConflictUri(path);
@@ -1150,7 +1348,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						`Conflict URI scope '/${conflictUri.scope}' is read-only — read \`conflict://${conflictUri.id}/${conflictUri.scope}\` to inspect that side. To write, drop the scope (\`conflict://${conflictUri.id}\`) and put the chosen content (or shorthand like \`@${conflictUri.scope}\`) in \`content\`.`,
 					);
 				}
-				emitWriteProgress(onUpdate, cleanContent, path);
+				emitWriteProgress(onUpdate, toPersistedEdit(cleanContent).content, path);
 				const result =
 					conflictUri.id === "*"
 						? await this.#resolveAllConflicts(cleanContent, stripped, signal, content)
@@ -1163,28 +1361,29 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				}
 				return result;
 			}
+
 			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
 			if (resolvedArchivePath) {
 				enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
 					op: resolvedArchivePath.exists ? "update" : "create",
 				});
-
+				const preparedArchive = toPersistedEdit(cleanContent);
 				emitWriteProgress(
 					onUpdate,
-					cleanContent,
+					preparedArchive.content,
 					`${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
 						resolvedArchivePath.archiveSubPath
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
+				const archiveResult = await this.#writeArchiveEntry(preparedArchive, resolvedArchivePath);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>
 							block.type === "text" && typeof block.text === "string",
 					);
 					if (firstText) {
-						firstText.text += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+						firstText.text += "\nNote: auto-stripped hashline display prefixes from content before writing.";
 					}
 				}
 				return archiveResult;
@@ -1193,8 +1392,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
 			if (resolvedSqlitePath) {
 				enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
-
-				emitWriteProgress(onUpdate, cleanContent, path, resolvedSqlitePath.absolutePath);
+				emitWriteProgress(onUpdate, toPersistedEdit(cleanContent).content, path, resolvedSqlitePath.absolutePath);
 				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
 				if (stripped) {
 					const firstText = sqliteResult.content.find(
@@ -1202,7 +1400,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 							block.type === "text" && typeof block.text === "string",
 					);
 					if (firstText) {
-						firstText.text += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+						firstText.text += "\nNote: auto-stripped hashline display prefixes from content before writing.";
 					}
 				}
 				return sqliteResult;
@@ -1212,21 +1410,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
-
-			// Check if file exists and is auto-generated before overwriting
 			if (await fs.exists(absolutePath)) {
 				await assertEditableFile(absolutePath, path);
 			}
 
 			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
-			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
-
+			const prepared = toPersistedEdit(cleanContent);
+			emitWriteProgress(onUpdate, prepared.content, displayPath, absolutePath);
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
-			if (await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal)) {
-				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, cleanContent);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
-				const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
+			if (await routeWriteThroughBridge(this.session, path, absolutePath, prepared.content, signal)) {
+				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, prepared.content);
+				const header = maybeWriteSnapshotHeader(this.session, absolutePath, prepared.content);
+				const writeLine = `Successfully wrote ${prepared.content.length} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
 					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
@@ -1234,15 +1430,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (madeExecutable) {
 					resultText += `\n${EXECUTABLE_NOTICE}`;
 				}
-				return {
-					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
-				};
+				return finalizeEscapeReport(
+					{
+						content: [{ type: "text", text: resultText }],
+						details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					},
+					prepared.escapedCodeUnits,
+					displayPath,
+				);
 			}
 
 			const diagnostics = await this.#writethrough(
 				absolutePath,
-				cleanContent,
+				prepared.content,
 				signal,
 				undefined,
 				batchRequest,
@@ -1252,10 +1452,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (!this.#deferredDiagnostics || batchRequest?.flush === false) {
 				this.session.bumpFileMutationVersion?.(absolutePath);
 			}
-			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, cleanContent);
+			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, prepared.content);
 
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
-			const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
+			const header = maybeWriteSnapshotHeader(this.session, absolutePath, prepared.content);
+			const writeLine = `Successfully wrote ${prepared.content.length} bytes to ${displayPath}`;
 			let resultText = header ? `${header}\n${writeLine}` : writeLine;
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
@@ -1264,23 +1464,31 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				resultText += `\n${EXECUTABLE_NOTICE}`;
 			}
 			if (!diagnostics) {
-				return {
-					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
-				};
+				return finalizeEscapeReport(
+					{
+						content: [{ type: "text", text: resultText }],
+						details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					},
+					prepared.escapedCodeUnits,
+					displayPath,
+				);
 			}
 
-			return {
-				content: [{ type: "text", text: resultText }],
-				details: {
-					resolvedPath: absolutePath,
-					diagnostics,
-					madeExecutable: madeExecutable || undefined,
-					meta: outputMeta()
-						.diagnostics(diagnostics.summary, diagnostics.messages ?? [])
-						.get(),
+			return finalizeEscapeReport(
+				{
+					content: [{ type: "text", text: resultText }],
+					details: {
+						resolvedPath: absolutePath,
+						diagnostics,
+						madeExecutable: madeExecutable || undefined,
+						meta: outputMeta()
+							.diagnostics(diagnostics.summary, diagnostics.messages ?? [])
+							.get(),
+					},
 				},
-			};
+				prepared.escapedCodeUnits,
+				displayPath,
+			);
 		});
 	}
 }

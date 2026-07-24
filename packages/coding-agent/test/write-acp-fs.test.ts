@@ -83,6 +83,36 @@ describe("write tool ACP fs routing", () => {
 		}
 	});
 
+	it("sends prepared Unicode text through ACP and reports the persisted escape count", async () => {
+		const filePath = path.join(tmpDir, "unicode.txt");
+		const bridge: ClientBridge = {
+			capabilities: { writeTextFile: true },
+			writeTextFile: async () => undefined,
+		};
+		const bridgeSpy = spyOn(bridge, "writeTextFile");
+		const bunWriteSpy = spyOn(Bun, "write");
+		try {
+			const tool = new WriteTool(createSession(tmpDir, { bridge }));
+			const result = await tool.execute("call-unicode", {
+				path: filePath,
+				content: `한 \ud800 😀`,
+			});
+
+			expect(bridgeSpy).toHaveBeenCalledTimes(1);
+			expect(bridgeSpy).toHaveBeenCalledWith({
+				path: filePath,
+				content: `한 ${String.raw`\uD800`} 😀`,
+			});
+			expect(bunWriteSpy).not.toHaveBeenCalled();
+			expect(result.details?.escapedCodeUnits).toBe(1);
+			expect(resultText(result)).toContain(
+				`Escaped 1 invalid Unicode code unit(s) before writing ${path.basename(filePath)}.`,
+			);
+		} finally {
+			bunWriteSpy.mockRestore();
+		}
+	});
+
 	it("emits a progress snapshot before filesystem writes complete", async () => {
 		const filePath = path.join(tmpDir, "progress.txt");
 		const session = createSession(tmpDir);

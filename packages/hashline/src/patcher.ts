@@ -97,6 +97,8 @@ export interface PatchSectionResult {
 	persisted: string;
 	/** Final text that the {@link Filesystem} actually wrote (may differ if the FS transformed it). */
 	written: string;
+	/** Count of lone UTF-16 surrogates the filesystem escaped before persisting `after`. */
+	escapedCodeUnits: number;
 	/** 4-hex content-hash tag for `after`. Use to anchor follow-up edits. */
 	fileHash: string;
 	/** Hashline section header (`[path#tag]`) of the post-edit content. */
@@ -421,6 +423,7 @@ export class Patcher {
 				after: normalized,
 				persisted: prepared.rawContent,
 				written: prepared.rawContent,
+				escapedCodeUnits: 0,
 				fileHash: computeFileHash(normalized),
 				header: formatHashlineHeader(section.path, computeFileHash(normalized)),
 				warnings,
@@ -437,6 +440,7 @@ export class Patcher {
 				after: normalized,
 				persisted: prepared.rawContent,
 				written: prepared.rawContent,
+				escapedCodeUnits: 0,
 				fileHash: hash,
 				header: formatHashlineHeader(section.path, hash),
 				warnings,
@@ -447,17 +451,21 @@ export class Patcher {
 
 		if (moveDest !== undefined) {
 			const destCanonical = this.fs.canonicalPath(moveDest);
+			// Write the destination first; only a successful move may relocate
+			// snapshot ownership and delete the source (owned by the adapter).
+			const write = await this.fs.move(section.path, moveDest, persisted);
 			this.snapshots.relocate(canonicalPath, destCanonical);
-			await this.fs.move(section.path, moveDest, persisted);
-			const fileHash = this.#recordFullSnapshot(destCanonical, after);
+			const canonicalAfter = normalizeToLF(stripBom(write.text).text);
+			const fileHash = this.#recordFullSnapshot(destCanonical, canonicalAfter);
 			return {
 				path: resultPath,
 				canonicalPath: destCanonical,
 				op: "update",
 				before: normalized,
-				after,
-				persisted,
-				written: persisted,
+				after: canonicalAfter,
+				persisted: write.text,
+				written: write.text,
+				escapedCodeUnits: write.escapedCodeUnits,
 				fileHash,
 				header: formatHashlineHeader(moveDest, fileHash),
 				firstChangedLine: applyResult.firstChangedLine,
@@ -468,7 +476,10 @@ export class Patcher {
 		}
 
 		const write: WriteResult = await this.fs.writeText(section.path, persisted);
-		const fileHash = this.#recordFullSnapshot(canonicalPath, after);
+		// Hash/header/snapshot follow the logical text the adapter reports (with
+		// surrogates escaped), so an immediate re-read's tag matches on-disk bytes.
+		const canonicalAfter = normalizeToLF(stripBom(write.text).text);
+		const fileHash = this.#recordFullSnapshot(canonicalPath, canonicalAfter);
 		const op = exists ? "update" : "create";
 
 		return {
@@ -476,9 +487,10 @@ export class Patcher {
 			canonicalPath,
 			op,
 			before: normalized,
-			after,
-			persisted,
+			after: canonicalAfter,
+			persisted: write.text,
 			written: write.text,
+			escapedCodeUnits: write.escapedCodeUnits,
 			fileHash,
 			header: formatHashlineHeader(section.path, fileHash),
 			firstChangedLine: applyResult.firstChangedLine,

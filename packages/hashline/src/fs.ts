@@ -12,13 +12,18 @@ import * as fs from "node:fs/promises";
 import * as pathModule from "node:path";
 
 /**
- * Result returned by {@link Filesystem.writeText}. The patcher echoes back
- * `text` so adapters that transform on serialization (e.g. notebooks) can
- * report what actually landed on disk.
+ * Result returned by {@link Filesystem.writeText} (and content-bearing
+ * {@link Filesystem.move}). The patcher echoes back `text` — the LOGICAL text
+ * that maps to what a re-read yields (virtual cell text for notebooks) — so
+ * hashes, headers, snapshots, and diffs derive from it. `escapedCodeUnits`
+ * reports how many lone UTF-16 surrogates the adapter spelled as `\\uXXXX`
+ * before persisting; generic adapters that transform nothing report `0`.
  */
 export interface WriteResult {
-	/** Final text that was persisted. May differ from the input if the FS transformed it. */
+	/** Logical text that maps to what a re-read yields. May differ from the physical bytes (notebooks). */
 	text: string;
+	/** Count of lone UTF-16 surrogates escaped before persistence. */
+	escapedCodeUnits: number;
 }
 
 import type { FileOp } from "./types";
@@ -80,14 +85,15 @@ export abstract class Filesystem {
 	}
 
 	/**
-	 * Move/rename `from` to `to`. When `content` is provided the destination
-	 * receives that text; otherwise implementations may preserve the source bytes.
+	 * Move/rename `from` to `to`. A content-bearing move must return the
+	 * logical text and escape count accepted by the destination adapter.
 	 */
-	async move(from: string, to: string, content?: string): Promise<void> {
+	async move(from: string, to: string, content: string): Promise<WriteResult>;
+	async move(from: string, to: string, content?: undefined): Promise<undefined>;
+	async move(from: string, to: string, content?: string): Promise<WriteResult | undefined> {
 		void content;
 		throw new Error(`Filesystem does not support move: ${from} -> ${to}`);
 	}
-
 	/** Return true when the path exists and can be read. Default: probe via {@link readText}. */
 	async exists(path: string): Promise<boolean> {
 		try {
@@ -147,21 +153,23 @@ export class InMemoryFilesystem extends Filesystem {
 
 	async writeText(path: string, content: string): Promise<WriteResult> {
 		this.#files.set(path, content);
-		return { text: content };
+		return { text: content, escapedCodeUnits: 0 };
 	}
 
 	async delete(path: string): Promise<void> {
 		if (!this.#files.delete(path)) throw new NotFoundError(path);
 	}
 
-	async move(from: string, to: string, content?: string): Promise<void> {
+	async move(from: string, to: string, content: string): Promise<WriteResult>;
+	async move(from: string, to: string, content?: undefined): Promise<undefined>;
+	async move(from: string, to: string, content?: string): Promise<WriteResult | undefined> {
 		const existing = this.#files.get(from);
 		if (existing === undefined) throw new NotFoundError(from);
 		const finalContent = content ?? existing;
 		this.#files.set(to, finalContent);
 		this.#files.delete(from);
+		return content === undefined ? undefined : { text: finalContent, escapedCodeUnits: 0 };
 	}
-
 	async exists(path: string): Promise<boolean> {
 		return this.#files.has(path);
 	}
@@ -210,7 +218,7 @@ export class NodeFilesystem extends Filesystem {
 
 	async writeText(path: string, content: string): Promise<WriteResult> {
 		await Bun.write(path, content);
-		return { text: content };
+		return { text: content, escapedCodeUnits: 0 };
 	}
 
 	async delete(path: string): Promise<void> {
@@ -222,11 +230,13 @@ export class NodeFilesystem extends Filesystem {
 		}
 	}
 
-	async move(from: string, to: string, content?: string): Promise<void> {
+	async move(from: string, to: string, content: string): Promise<WriteResult>;
+	async move(from: string, to: string, content?: undefined): Promise<undefined>;
+	async move(from: string, to: string, content?: string): Promise<WriteResult | undefined> {
 		if (content !== undefined) {
 			await Bun.write(to, content);
 			await this.delete(from);
-			return;
+			return { text: content, escapedCodeUnits: 0 };
 		}
 		try {
 			await fs.rename(from, to);

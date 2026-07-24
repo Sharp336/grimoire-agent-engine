@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
+import { escapeUnpairedSurrogates, sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 
 describe("sanitizeText", () => {
 	it("strips ANSI CSI and removes C0/C1 control chars while keeping tab + LF", () => {
@@ -49,5 +49,43 @@ describe("sanitizeText", () => {
 
 	it("strips DEL and normalizes lone CR", () => {
 		expect(sanitizeText("a\x7fb\rc")).toBe("abc");
+	});
+});
+
+describe("escapeUnpairedSurrogates", () => {
+	it("preserves valid Unicode and returns the original string on the fast path", () => {
+		const values = [
+			"한",
+			"한",
+			"ㅎㅏㄴ",
+			"😀",
+			"A😀B",
+			String.fromCharCode(0xd83d, 0xde00),
+			String.raw`literal \uD800`,
+			"�",
+		];
+		for (const value of values) {
+			const escaped = escapeUnpairedSurrogates(value);
+			expect(escaped.text).toBe(value);
+			expect(escaped.escapedCodeUnits).toBe(0);
+		}
+	});
+
+	it("escapes each unmatched UTF-16 surrogate with uppercase hex", () => {
+		const cases: Array<[string, string, number]> = [
+			["a\ud800b", String.raw`a\uD800b`, 1],
+			["a\udc00b", String.raw`a\uDC00b`, 1],
+			["\ud800\ud800\udc00", `${String.raw`\uD800`}𐀀`, 1],
+			["\udc00\ud800\udc00", `${String.raw`\uDC00`}𐀀`, 1],
+			["\ud800x\udc00y\udfff", String.raw`\uD800x\uDC00y\uDFFF`, 3],
+		];
+		for (const [input, expected, count] of cases) {
+			expect(escapeUnpairedSurrogates(input)).toEqual({ text: expected, escapedCodeUnits: count });
+		}
+	});
+
+	it("is idempotent", () => {
+		const once = escapeUnpairedSurrogates("a\ud800b\udc00c");
+		expect(escapeUnpairedSurrogates(once.text)).toEqual({ text: once.text, escapedCodeUnits: 0 });
 	});
 });

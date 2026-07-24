@@ -26,6 +26,7 @@ import { outputMeta } from "../../tools/output-meta";
 import { ToolError } from "../../tools/tool-errors";
 import { generateDiffString } from "../diff";
 import { getFileSnapshotStore } from "../file-snapshot-store";
+import { formatEscapedCodeUnitsNotice } from "../read-file";
 import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "../renderer";
 import { pruneOversizedEditSnapshots } from "../snapshot-details";
 import { nativeBlockResolver } from "./block-resolver";
@@ -158,13 +159,16 @@ function renderSection(
 			? `\n${result.blockResolutions.map(formatBlockResolution).join("\n")}`
 			: "";
 	const moveBlock = result.moveDest ? `\nMoved to ${result.moveDest}` : "";
+	const noticePath = result.moveDest ?? result.path;
+	const escapeBlock =
+		result.escapedCodeUnits > 0 ? `\n${formatEscapedCodeUnitsNotice(result.escapedCodeUnits, noticePath)}` : "";
 	const firstChangedLine = result.firstChangedLine ?? diff.firstChangedLine;
 	return {
 		toolResult: {
 			content: [
 				{
 					type: "text",
-					text: `${result.header}${blockBlock}${moveBlock}${previewBlock}${warningsBlock}`,
+					text: `${result.header}${blockBlock}${moveBlock}${previewBlock}${warningsBlock}${escapeBlock}`,
 				},
 			],
 			details: pruneOversizedEditSnapshots({
@@ -177,6 +181,7 @@ function renderSection(
 				sourcePath: result.moveDest ? sourcePath : undefined,
 				oldText: result.before,
 				newText: result.after,
+				escapedCodeUnits: result.escapedCodeUnits,
 				meta,
 			}),
 		},
@@ -190,6 +195,7 @@ function renderSection(
 			sourcePath: result.moveDest ? sourcePath : undefined,
 			oldText: result.before,
 			newText: result.after,
+			escapedCodeUnits: result.escapedCodeUnits,
 		}),
 	};
 }
@@ -273,6 +279,7 @@ export async function executeHashlineSingle(
 		details: pruneOversizedEditSnapshots({
 			diff: rendered.map(r => r.toolResult.details?.diff ?? "").join("\n"),
 			perFileResults: rendered.map(r => r.perFileResult),
+			escapedCodeUnits: rendered.reduce((sum, r) => sum + (r.perFileResult.escapedCodeUnits ?? 0), 0),
 		}),
 	};
 }

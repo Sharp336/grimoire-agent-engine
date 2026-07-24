@@ -47,7 +47,12 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "../normalize";
-import { readEditFileText, serializeEditFileText } from "../read-file";
+import {
+	formatEscapedCodeUnitsNotice,
+	readEditFileText,
+	type SerializedEditFileText,
+	serializeEditFileText,
+} from "../read-file";
 import type { EditToolDetails, LspBatchRequest } from "../renderer";
 import { pruneOversizedEditSnapshots } from "../snapshot-details";
 import {
@@ -69,22 +74,52 @@ export interface PatchInput {
 	diff?: string;
 }
 
+export interface PrepareWriteArgs {
+	/** Present for moves so notebook metadata can be templated from the source. */
+	sourcePath?: string;
+	/** Destination path; its extension decides the physical format. */
+	targetPath: string;
+	/** Logical candidate text (BOM + line endings restored). */
+	candidate: string;
+}
+
 export interface FileSystem {
 	exists(path: string): Promise<boolean>;
 	read(path: string): Promise<string>;
 	readBinary?: (path: string) => Promise<Uint8Array>;
+	/** Prepare a finalized write: escape surrogates and (for notebooks) serialize to JSON. Never mutates. */
+	prepareWrite(args: PrepareWriteArgs): Promise<SerializedEditFileText>;
+	/** Effect-only persistence of already-prepared physical `content`. */
 	write(path: string, content: string): Promise<void>;
 	delete(path: string): Promise<void>;
 	mkdir(path: string): Promise<void>;
 }
 
-interface FileChange {
-	type: Operation;
-	path: string;
-	newPath?: string;
-	oldContent?: string;
-	newContent?: string;
-}
+type FileChange =
+	| {
+			type: "create";
+			path: string;
+			newContent: string;
+			prepared: SerializedEditFileText;
+			newPath?: never;
+			oldContent?: never;
+	  }
+	| {
+			type: "update";
+			path: string;
+			newPath?: string;
+			oldContent: string;
+			newContent: string;
+			prepared: SerializedEditFileText;
+	  }
+	| {
+			type: "delete";
+			path: string;
+			oldContent: string;
+			newPath?: never;
+			newContent?: never;
+			prepared?: never;
+	  };
 
 export interface ApplyPatchResult {
 	change: FileChange;
@@ -122,8 +157,11 @@ export const defaultFileSystem: FileSystem = {
 	async readBinary(path: string): Promise<Uint8Array> {
 		return fs.promises.readFile(path);
 	},
+	async prepareWrite({ sourcePath, targetPath, candidate }: PrepareWriteArgs): Promise<SerializedEditFileText> {
+		return serializeEditFileText(sourcePath ?? targetPath, targetPath, targetPath, candidate);
+	},
 	async write(path: string, content: string): Promise<void> {
-		await Bun.write(path, await serializeEditFileText(path, path, content));
+		await Bun.write(path, content);
 	},
 	async delete(path: string): Promise<void> {
 		await fs.promises.unlink(path);
@@ -1531,20 +1569,24 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 		// Strip + prefixes if present (handles diffs formatted as additions)
 		const normalizedContent = normalizeCreateContent(input.diff);
 		const content = normalizedContent.endsWith("\n") ? normalizedContent : `${normalizedContent}\n`;
+		// Prepare for both dry-run and commit so preview and final diffs share the
+		// escaped/serialized representation; only the write is gated on !dryRun.
+		const prepared = await fs.prepareWrite({ targetPath: absolutePath, candidate: content });
 
 		if (!dryRun) {
 			const parentDir = path.dirname(absolutePath);
 			if (parentDir && parentDir !== ".") {
 				await fs.mkdir(parentDir);
 			}
-			await fs.write(absolutePath, content);
+			await fs.write(absolutePath, prepared.content);
 		}
 
 		return {
 			change: {
 				type: "create",
 				path: absolutePath,
-				newContent: content,
+				newContent: prepared.editContent,
+				prepared,
 			},
 		};
 	}
@@ -1597,6 +1639,9 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 	const finalContent = bom + restoreLineEndings(newContent, lineEnding);
 	const destPath = input.rename ? resolvePath(input.rename) : absolutePath;
 	const isMove = Boolean(input.rename) && destPath !== absolutePath;
+	// The destination extension decides the physical format; source templates
+	// notebook metadata on a move. Prepared in dry-run too for preview parity.
+	const prepared = await fs.prepareWrite({ sourcePath: absolutePath, targetPath: destPath, candidate: finalContent });
 
 	if (!dryRun) {
 		if (isMove) {
@@ -1604,10 +1649,10 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 			if (parentDir && parentDir !== ".") {
 				await fs.mkdir(parentDir);
 			}
-			await fs.write(destPath, finalContent);
+			await fs.write(destPath, prepared.content);
 			await fs.delete(absolutePath);
 		} else {
-			await fs.write(absolutePath, finalContent);
+			await fs.write(absolutePath, prepared.content);
 		}
 	}
 
@@ -1617,7 +1662,8 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 			path: absolutePath,
 			newPath: isMove ? destPath : undefined,
 			oldContent: originalContent,
-			newContent: finalContent,
+			newContent: prepared.editContent,
+			prepared,
 		},
 		warnings: warnings.length > 0 ? warnings : undefined,
 	};
@@ -1729,11 +1775,14 @@ class LspFileSystem implements FileSystem {
 		return bytes;
 	}
 
-	async write(path: string, content: string): Promise<void> {
-		const finalContent = await serializeEditFileText(path, path, content);
+	async prepareWrite({ sourcePath, targetPath, candidate }: PrepareWriteArgs): Promise<SerializedEditFileText> {
+		return serializeEditFileText(sourcePath ?? targetPath, targetPath, targetPath, candidate);
+	}
 
+	async write(path: string, content: string): Promise<void> {
+		// `content` is already the prepared physical text (escaped, notebook JSON).
 		// Route through ACP bridge when available; skips internal artifacts and local:// paths.
-		if (await routeWriteThroughBridge(this.session, this.requestedPath, path, finalContent, this.signal)) {
+		if (await routeWriteThroughBridge(this.session, this.requestedPath, path, content, this.signal)) {
 			return;
 		}
 
@@ -1741,7 +1790,7 @@ class LspFileSystem implements FileSystem {
 		const deferredForPath = this.deferredForPath;
 		const result = await this.writethrough(
 			path,
-			finalContent,
+			content,
 			this.signal,
 			file,
 			this.batchRequest,
@@ -1935,6 +1984,11 @@ export async function executePatchSingle(
 
 	const oldText = result.change.type !== "create" ? result.change.oldContent : undefined;
 	const newText = result.change.type !== "delete" ? result.change.newContent : undefined;
+	const escapedCodeUnits = result.change.prepared?.escapedCodeUnits ?? 0;
+	if (escapedCodeUnits > 0) {
+		const noticePath = effectiveRename ?? path;
+		resultText += `\n${formatEscapedCodeUnitsNotice(escapedCodeUnits, noticePath)}`;
+	}
 
 	return {
 		content: [{ type: "text", text: resultText }],
@@ -1953,6 +2007,7 @@ export async function executePatchSingle(
 			meta,
 			oldText,
 			newText,
+			escapedCodeUnits,
 		}),
 	};
 }

@@ -22,7 +22,7 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "../normalize";
-import { readEditFileText, serializeEditFileText } from "../read-file";
+import { formatEscapedCodeUnitsNotice, readEditFileText, serializeEditFileText } from "../read-file";
 import type { EditToolDetails, LspBatchRequest } from "../renderer";
 import { pruneOversizedEditSnapshots } from "../snapshot-details";
 
@@ -1095,7 +1095,8 @@ export async function executeReplaceSingle(
 		throw new Error(`Edits to ${path} resulted in no changes being made.`);
 	}
 
-	const finalContent = await serializeEditFileText(
+	const prepared = await serializeEditFileText(
+		absolutePath,
 		absolutePath,
 		path,
 		bom + restoreLineEndings(result.content, originalEnding),
@@ -1103,20 +1104,31 @@ export async function executeReplaceSingle(
 
 	// Route through ACP bridge when available; skips internal artifacts.
 	let diagnostics: FileDiagnosticsResult | undefined;
-	if (await routeWriteThroughBridge(session, path, absolutePath, finalContent, signal)) {
+	if (await routeWriteThroughBridge(session, path, absolutePath, prepared.content, signal)) {
 		// bridge handled the write; diagnostics not available via writethrough
 	} else {
-		diagnostics = await writethrough(absolutePath, finalContent, signal, Bun.file(absolutePath), batchRequest, dst =>
-			dst === absolutePath ? beginDeferredDiagnosticsForPath(absolutePath) : undefined,
+		diagnostics = await writethrough(
+			absolutePath,
+			prepared.content,
+			signal,
+			Bun.file(absolutePath),
+			batchRequest,
+			dst => (dst === absolutePath ? beginDeferredDiagnosticsForPath(absolutePath) : undefined),
 		);
 		invalidateFsScanAfterWrite(absolutePath);
 	}
 
-	const diffResult = generateDiffString(normalizedContent, result.content, undefined, { path });
-	const resultText =
+	// Diff and reported text derive from the logical persisted text, so an
+	// escaped surrogate shows as `\uXXXX` and a notebook shows virtual cells.
+	const editedLogical = normalizeToLF(stripBom(prepared.editContent).text);
+	const diffResult = generateDiffString(normalizedContent, editedLogical, undefined, { path });
+	let resultText =
 		result.count > 1
 			? `Successfully replaced ${result.count} occurrences in ${path}.`
 			: `Successfully replaced text in ${path}.`;
+	if (prepared.escapedCodeUnits > 0) {
+		resultText += `\n${formatEscapedCodeUnitsNotice(prepared.escapedCodeUnits, path)}`;
+	}
 
 	const meta = outputMeta()
 		.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
@@ -1131,7 +1143,8 @@ export async function executeReplaceSingle(
 			diagnostics,
 			meta,
 			oldText: rawContent,
-			newText: finalContent,
+			newText: prepared.editContent,
+			escapedCodeUnits: prepared.escapedCodeUnits,
 		}),
 	};
 }

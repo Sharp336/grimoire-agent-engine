@@ -74,6 +74,8 @@ export interface EditToolPerFileResult {
 	snapshotsPruned?: boolean;
 	/** Pre-move source path; set only when the edit moved/renamed the file. The header renders `sourcePath → path`. */
 	sourcePath?: string;
+	/** Count of lone UTF-16 surrogates escaped before this file was written. */
+	escapedCodeUnits?: number;
 }
 
 export interface EditToolDetails {
@@ -101,6 +103,8 @@ export interface EditToolDetails {
 	snapshotsPruned?: boolean;
 	/** Pre-move source path; set only when the edit moved/renamed the file. The header renders `sourcePath → path`. */
 	sourcePath?: string;
+	/** Count of lone UTF-16 surrogates escaped before writing (summed across children for aggregates). */
+	escapedCodeUnits?: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

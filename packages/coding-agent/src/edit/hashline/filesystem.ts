@@ -168,13 +168,21 @@ export class HashlineFilesystem extends Filesystem {
 		invalidateFsScanAfterWrite(absolutePath);
 	}
 
-	async move(fromRelative: string, toRelative: string, content?: string): Promise<void> {
+	async move(fromRelative: string, toRelative: string, content: string): Promise<WriteResult>;
+	async move(fromRelative: string, toRelative: string, content?: undefined): Promise<undefined>;
+	async move(fromRelative: string, toRelative: string, content?: string): Promise<WriteResult | undefined> {
 		enforcePlanModeWrite(this.session, fromRelative, { op: "update", move: toRelative });
 		const fromAbsolute = this.resolveAbsolute(fromRelative);
 		const toAbsolute = this.resolveAbsolute(toRelative);
+		let result: WriteResult | undefined;
 		if (content !== undefined) {
-			await Bun.write(toAbsolute, content);
+			// Destination extension decides the physical format; the source is a
+			// metadata template only when both ends are notebooks. Write the
+			// destination first so a failure leaves the source intact.
+			const prepared = await serializeEditFileText(fromAbsolute, toAbsolute, toRelative, content);
+			await Bun.write(toAbsolute, prepared.content);
 			await fs.rm(fromAbsolute);
+			result = { text: prepared.editContent, escapedCodeUnits: prepared.escapedCodeUnits };
 		} else {
 			await fs.rename(fromAbsolute, toAbsolute);
 		}
@@ -190,22 +198,23 @@ export class HashlineFilesystem extends Filesystem {
 		}
 		invalidateFsScanAfterWrite(fromAbsolute);
 		invalidateFsScanAfterWrite(toAbsolute);
+		return result;
 	}
 
 	async writeText(relativePath: string, content: string): Promise<WriteResult> {
 		await this.preflightWrite(relativePath);
 		const absolutePath = this.resolveAbsolute(relativePath);
-		const finalContent = await serializeEditFileText(absolutePath, relativePath, content);
+		const prepared = await serializeEditFileText(absolutePath, absolutePath, relativePath, content);
 
 		// Route through ACP bridge when available; skips internal artifacts.
-		if (await routeWriteThroughBridge(this.session, relativePath, absolutePath, finalContent, this.#signal)) {
+		if (await routeWriteThroughBridge(this.session, relativePath, absolutePath, prepared.content, this.#signal)) {
 			this.#diagnosticsByPath.set(relativePath, undefined);
-			return { text: finalContent };
+			return { text: prepared.editContent, escapedCodeUnits: prepared.escapedCodeUnits };
 		}
 
 		const diagnostics = await this.#writethrough(
 			absolutePath,
-			finalContent,
+			prepared.content,
 			this.#signal,
 			Bun.file(absolutePath),
 			this.#batchRequest,
@@ -213,7 +222,7 @@ export class HashlineFilesystem extends Filesystem {
 		);
 		invalidateFsScanAfterWrite(absolutePath);
 		this.#diagnosticsByPath.set(relativePath, diagnostics);
-		return { text: finalContent };
+		return { text: prepared.editContent, escapedCodeUnits: prepared.escapedCodeUnits };
 	}
 
 	async exists(relativePath: string): Promise<boolean> {

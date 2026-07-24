@@ -96,6 +96,34 @@ describe("EditTool apply_patch multi-file aggregate (#4074-B)", () => {
 		expect(perFile.some(r => r.path.endsWith("c.txt"))).toBe(false);
 	});
 
+	test("sums committed Unicode escapes before a partial failure without duplicating child notices", async () => {
+		await Bun.write(path.join(tempDir, "a.txt"), "a\n");
+		const tool = new EditTool(makeApplyPatchSession(tempDir));
+		const patch = [
+			"*** Begin Patch",
+			"*** Update File: a.txt",
+			"@@",
+			"-a",
+			`+A \ud800`,
+			"*** Update File: missing.txt",
+			"@@",
+			"-x",
+			`+Y \udc00`,
+			"*** End Patch",
+			"",
+		].join("\n");
+
+		const result = await tool.execute("call-unicode-partial", { input: patch });
+		const details = result.details as EditToolDetails | undefined;
+		const text = result.content?.find(block => block.type === "text")?.text ?? "";
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(path.join(tempDir, "a.txt")).text()).toBe(`A ${String.raw`\uD800`}\n`);
+		expect(details?.escapedCodeUnits).toBe(1);
+		expect(details?.perFileResults?.[0]?.escapedCodeUnits).toBe(1);
+		expect(text.match(/Escaped 1 invalid Unicode/g)).toHaveLength(1);
+		expect(text).not.toContain("Escaped 2 invalid Unicode");
+	});
 	test("all-success multi-file apply_patch does not set isError", async () => {
 		await Bun.write(path.join(tempDir, "a.txt"), "a\n");
 		await Bun.write(path.join(tempDir, "b.txt"), "b\n");
