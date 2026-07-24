@@ -304,6 +304,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#activeSourceFormatPass = 0;
 	#sourceFormatPass = 0;
 	#sourceFormattingAbort?: AbortController;
+	#sourceFormattingInFlight?: Promise<void>;
 	#formattedSourceArgs?: Record<string, unknown>;
 	#sourceFormatterHint?: string;
 	#expanded = false;
@@ -505,7 +506,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		const args = this.#args;
 		const formatter = this.#sourceFormatter;
 
-		void (async () => {
+		const sourceFormattingPass = (async () => {
 			try {
 				const formatted = await formatter?.(this.#toolName, args, controller.signal);
 				if (controller.signal.aborted || this.#sealed || generation !== this.#sourceFormatArgsVersion) return;
@@ -524,9 +525,13 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				if (this.#sourceFormattingAbort === controller) {
 					this.#sourceFormattingAbort = undefined;
 				}
+				if (this.#activeSourceFormatPass === formatPass) {
+					this.#sourceFormattingInFlight = undefined;
+				}
 				this.#releaseSourceFormatFinalizationHold(formatPass);
 			}
 		})();
+		this.#sourceFormattingInFlight = sourceFormattingPass;
 	}
 
 	#setSourceFormatterOutcome(outcome: SourceFormatterOutcome): void {
@@ -562,6 +567,13 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	/**
+	 * Await source formatting kicked off by the most recent args update.
+	 */
+	async whenSourceFormattingSettled(): Promise<void> {
+		await this.#sourceFormattingInFlight;
+	}
+
+	/**
 	 * Await the streaming diff recompute kicked off by the most recent
 	 * `updateArgs`/`setArgsComplete`. The recompute reads the file and re-runs the
 	 * whole-file Myers diff off the render path, signalling completion only via a
@@ -571,7 +583,6 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	async whenPreviewSettled(): Promise<void> {
 		await this.#editDiffInFlight;
 	}
-
 	/**
 	 * Schedule a streaming diff preview recompute, coalescing bursts of
 	 * `updateArgs` into one compute at a time: run the current compute to

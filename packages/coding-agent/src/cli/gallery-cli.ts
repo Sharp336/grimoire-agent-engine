@@ -133,6 +133,7 @@ export async function renderGalleryState(
 	state: GalleryState,
 	width: number,
 	expanded = false,
+	formatCallSource = false,
 ): Promise<readonly string[]> {
 	if (fixture.renderState) {
 		return await fixture.renderState(state, width, expanded);
@@ -153,7 +154,7 @@ export async function renderGalleryState(
 	const component = new ToolExecutionComponent(
 		componentName,
 		streamingArgs,
-		{ showImages: false },
+		{ showImages: false, formatCallSource },
 		tool,
 		ui,
 		getProjectDir(),
@@ -173,6 +174,7 @@ export async function renderGalleryState(
 	// for it to settle so the snapshot is deterministic instead of racing a tick.
 	await component.whenPreviewSettled();
 
+	await component.whenSourceFormattingSettled();
 	const lines = component.render(width);
 	component.stopAnimation();
 	return lines;
@@ -200,6 +202,7 @@ async function renderGallerySections(
 	states: GalleryState[],
 	width: number,
 	expanded: boolean,
+	formatCallSource: boolean,
 ): Promise<GallerySection[]> {
 	const sections: GallerySection[] = [];
 	for (const name of names) {
@@ -209,7 +212,8 @@ async function renderGallerySections(
 		for (const state of states) {
 			lines.push("", theme.fg("dim", `  · ${GALLERY_STATE_LABELS[state]}`));
 			try {
-				for (const line of await renderGalleryState(name, fixture, state, width, expanded)) lines.push(line);
+				for (const line of await renderGalleryState(name, fixture, state, width, expanded, formatCallSource))
+					lines.push(line);
 			} catch (err) {
 				lines.push(theme.fg("error", `  render failed: ${String(err)}`));
 			}
@@ -252,7 +256,13 @@ export async function runGalleryCommand(args: GalleryCommandArgs): Promise<void>
 		return;
 	}
 
-	const sections = await renderGallerySections(names, states, width, expanded);
+	const sections = await renderGallerySections(
+		names,
+		states,
+		width,
+		expanded,
+		settingsInstance.get("tools.formatCallSource"),
+	);
 
 	if (args.screenshot) {
 		const paths = await captureGalleryScreenshots(sections, {

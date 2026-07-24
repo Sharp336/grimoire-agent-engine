@@ -45,6 +45,11 @@ describe("gallery harness", () => {
 		}
 	});
 
+	it("renders with call-source formatting enabled", async () => {
+		const lines = await renderGalleryState("bash", resolveFixture("bash"), "success", 100, false, true);
+		expect(lines.length).toBeGreaterThan(0);
+	});
+
 	it("routes each state to the matching args/result (streaming args vs result, success vs error)", async () => {
 		const fixture: GalleryFixture = {
 			label: "Bash",
