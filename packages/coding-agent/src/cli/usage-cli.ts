@@ -216,6 +216,10 @@ const UNIT_SUFFIX: Record<UsageUnit, string> = {
 	unknown: "",
 };
 
+function formatHistoryUnitValue(value: number, unit: UsageUnit | undefined): string {
+	return unit ? `${formatUnitValue(value, unit)}${UNIT_SUFFIX[unit]}` : `${formatNumber(value)} units`;
+}
+
 function describeAmount(limit: UsageLimit): string {
 	const amount = limit.amount;
 	const parts: string[] = [];
@@ -742,8 +746,9 @@ export function formatUsageHistory(
 				if (latestFraction !== undefined) details.push(`latest ${(latestFraction * 100).toFixed(1)}%`);
 				if (peakFraction !== undefined) details.push(`peak ${(peakFraction * 100).toFixed(1)}%`);
 				if (latestFraction === undefined && latestAbsolute !== undefined) {
-					details.push(`latest ${latestAbsolute} ${latestEntry?.unit ?? "units"}`);
-					if (peakAbsolute !== undefined) details.push(`peak ${peakAbsolute} ${latestEntry?.unit ?? "units"}`);
+					const unit = latestEntry?.unit;
+					details.push(`latest ${formatHistoryUnitValue(latestAbsolute, unit)}`);
+					if (peakAbsolute !== undefined) details.push(`peak ${formatHistoryUnitValue(peakAbsolute, unit)}`);
 				}
 				details.push(`${series.entries.length} snapshot${series.entries.length === 1 ? "" : "s"}`);
 				lines.push(

@@ -503,6 +503,30 @@ describe("formatUsageHistory", () => {
 		expect(text).toContain("3 snapshots");
 	});
 
+	it("renders absolute ACU history with normalized units", () => {
+		const absoluteEntries = [
+			historyEntry(SINCE + HOUR, undefined, {
+				provider: "devin",
+				limitId: "devin:acus:total",
+				label: "Devin ACU consumption",
+				used: 12.5,
+				unit: "acus",
+			}),
+			historyEntry(NOW - HOUR, undefined, {
+				provider: "devin",
+				limitId: "devin:acus:total",
+				label: "Devin ACU consumption",
+				used: 15,
+				unit: "acus",
+			}),
+		];
+
+		const text = stripVTControlCharacters(formatUsageHistory(absoluteEntries, SINCE, NOW));
+		expect(text).toContain("latest 15 ACU");
+		expect(text).toContain("peak 15 ACU");
+		expect(text).not.toContain("latest 15 acus");
+	});
+
 	it("redacts account labels through the provided map", () => {
 		const redaction = buildRedactionMap(["dummy.primary@example.test"]);
 		const text = stripVTControlCharacters(formatUsageHistory(entries, SINCE, NOW, redaction));

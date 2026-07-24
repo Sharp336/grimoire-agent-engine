@@ -161,7 +161,7 @@ describe("CommandController /usage", () => {
 	it("renders single and multiple Devin used-only ACUs as summed totals, plus neighboring fallback acct count", async () => {
 		const present = vi.fn();
 		const ctx = {
-			session: {},
+			session: createUsageSessionDouble(),
 			ui: { terminal: { columns: 100 } },
 			present,
 			showWarning: vi.fn(),
