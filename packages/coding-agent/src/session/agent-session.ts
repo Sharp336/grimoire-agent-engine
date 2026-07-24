@@ -1474,7 +1474,7 @@ export class AgentSession {
 		}
 		const manager = this.sessionManager;
 		const parentSessionFile = manager.getSessionFile();
-		if (!manager.isPersistent()) {
+		if (!manager.isPersistent() || !parentSessionFile) {
 			throw new Error("Committed child sessions require a persisted parent session");
 		}
 		const hasPersistedParent = manager.hasPersistedSessionFile();
@@ -1482,49 +1482,31 @@ export class AgentSession {
 			throw new Error("Committed child sessions require a persisted parent session");
 		}
 		const parentSessionId = manager.getSessionId();
-		const materializedHeader = structuredClone(manager.getHeader());
 		const capturedLeafId = manager.getLeafId();
 		const committedContext = manager.buildSessionContextAt(capturedLeafId);
 		const hasCommittedContext = committedContext.messages.length > 0;
 		const parentLeafId = hasCommittedContext ? capturedLeafId : null;
 		const messages = structuredClone(hasCommittedContext ? committedContext.messages : []);
-		const sessionFile = parentSessionFile
-			? path.join(path.dirname(parentSessionFile), path.basename(parentSessionFile, ".jsonl"), `${childId}.jsonl`)
-			: undefined;
-		const model = this.model;
-		const materializedModel = model ? `${model.provider}/${model.id}` : undefined;
-		const materializedPromptCacheKey = this.agent.promptCacheKey ?? this.agent.sessionId;
+		const sessionFile = path.join(
+			path.dirname(parentSessionFile),
+			path.basename(parentSessionFile, ".jsonl"),
+			`${childId}.jsonl`,
+		);
 
 		const prior = this.#sessionIdentityBarrier;
 		const { promise, resolve: release } = Promise.withResolvers<void>();
 		this.#sessionIdentityBarrier = promise;
 		await prior;
 		try {
-			let sourceSessionFile = parentSessionFile;
-			if ((hasPersistedParent || hasCommittedContext) && sourceSessionFile) {
-				// An existing parent journal can contain durable state with no LLM
-				// messages (model/thinking/mode/session-init). Never replace it
-				// with a metadata-only materialization merely because this child
-				// intentionally starts at the empty committed boundary.
-				await manager.ensureOnDisk();
-				await manager.flush();
-			} else {
-				const materializedParent = await manager.materializeHeaderAndModelState({
-					model: materializedModel,
-					header: materializedHeader ?? undefined,
-					providerPromptCacheKey: materializedPromptCacheKey,
-					sessionFile: parentSessionFile,
-				});
-				sourceSessionFile = materializedParent.getSessionFile();
-				if (!sourceSessionFile) {
-					throw new Error("Committed child sessions require a persisted parent session");
-				}
-			}
-			const childSessionFile =
-				sessionFile ??
-				path.join(path.dirname(sourceSessionFile), path.basename(sourceSessionFile, ".jsonl"), `${childId}.jsonl`);
+			// Materialize the owning manager, not a detached metadata-only sibling.
+			// That keeps this manager authoritative after the first empty-boundary
+			// child, so a second child cannot rewrite the assigned journal without
+			// its thinking, mode, or session-init entries.
+			await manager.ensureOnDisk();
+			await manager.flush();
+			const childSessionFile = sessionFile;
 			const childManager = await manager.forkDetached({
-				sourceSessionFile,
+				sourceSessionFile: parentSessionFile,
 				sessionFile: childSessionFile,
 				throughLeafId: parentLeafId,
 				suppressBreadcrumb: true,

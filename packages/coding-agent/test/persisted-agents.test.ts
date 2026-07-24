@@ -7,6 +7,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import {
 	registerPersistedConsultation,
 	registerPersistedSubagents,
+	retryPersistedConsultationTitle,
 } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import {
 	CONSULTATION_THREAD_CUSTOM_TYPE,
@@ -167,6 +168,111 @@ describe("persisted consultation discovery", () => {
 		expect(restarted.get("Sub/consult:nested")?.sessionFile).toBe(
 			path.join(artifacts, "Sub", "__consult.nested.jsonl"),
 		);
+	});
+
+	it("does not cancel a registered live consultation during Agent Hub discovery", async () => {
+		using temp = TempDir.createSync("@omp-consult-live-hub-discovery-");
+		const parentFile = path.join(temp.path(), "parent.jsonl");
+		const artifacts = parentFile.slice(0, -6);
+		const consultationId = "live";
+		const consultationFile = path.join(artifacts, `__consult.${consultationId}.jsonl`);
+		const contents = sessionContent(consultationId, [
+			thread(consultationId),
+			turn(consultationId, "live-turn", 0, "running"),
+		]);
+		await fs.mkdir(artifacts, { recursive: true });
+		await Bun.write(parentFile, sessionContent("parent", []));
+		await Bun.write(consultationFile, contents);
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: `Main/consult:${consultationId}`,
+			displayName: `consult:${consultationId}`,
+			kind: "consultation",
+			parentId: "Main",
+			session: null,
+			sessionFile: consultationFile,
+			status: "running",
+		});
+
+		await registerPersistedSubagents(registry, parentFile);
+
+		expect(registry.get(`Main/consult:${consultationId}`)).toMatchObject({ status: "running" });
+		expect(await Bun.file(consultationFile).text()).toBe(contents);
+	});
+
+	it("keeps a live consultation running when its async title completes", async () => {
+		using temp = TempDir.createSync("@omp-consult-live-title-");
+		const parentFile = path.join(temp.path(), "parent.jsonl");
+		const artifacts = parentFile.slice(0, -6);
+		const consultationId = "live-title";
+		const consultationFile = path.join(artifacts, `__consult.${consultationId}.jsonl`);
+		await fs.mkdir(artifacts, { recursive: true });
+		await Bun.write(parentFile, sessionContent("parent", []));
+		await Bun.write(
+			consultationFile,
+			sessionContent(consultationId, [
+				thread(consultationId),
+				turn(consultationId, "first-turn", 0, "running"),
+				message("first-answer", "assistant", "completed answer"),
+				turn(consultationId, "first-turn", 0, "completed"),
+				turn(consultationId, "follow-up", 1, "running"),
+			]),
+		);
+
+		const registry = new AgentRegistry();
+		registerPersistedConsultation(registry, {
+			ownerId: "Main",
+			consultationId,
+			sessionFile: consultationFile,
+		});
+		const session = {
+			generateConsultationTitle: vi.fn(async () => "Generated while live"),
+		} as unknown as Parameters<typeof retryPersistedConsultationTitle>[1]["session"];
+
+		await retryPersistedConsultationTitle(registry, {
+			ownerId: "Main",
+			consultationId,
+			sessionFile: consultationFile,
+			session,
+		});
+
+		expect(registry.get(`Main/consult:${consultationId}`)).toMatchObject({
+			displayName: "Generated while live · consult:ve-title",
+			status: "running",
+		});
+		const titledContents = await Bun.file(consultationFile).text();
+		await registerPersistedSubagents(registry, parentFile);
+		expect(registry.get(`Main/consult:${consultationId}`)?.status).toBe("running");
+		expect(await Bun.file(consultationFile).text()).toBe(titledContents);
+	});
+
+	it("cancels unmatched running consultations during process recovery exactly once", async () => {
+		using temp = TempDir.createSync("@omp-consult-recovery-");
+		const parentFile = path.join(temp.path(), "parent.jsonl");
+		const artifacts = parentFile.slice(0, -6);
+		const consultationId = "interrupted";
+		const consultationFile = path.join(artifacts, `__consult.${consultationId}.jsonl`);
+		await fs.mkdir(artifacts, { recursive: true });
+		await Bun.write(parentFile, sessionContent("parent", []));
+		await Bun.write(
+			consultationFile,
+			sessionContent(consultationId, [
+				thread(consultationId),
+				turn(consultationId, "interrupted-turn", 0, "running"),
+			]),
+		);
+
+		await registerPersistedSubagents(new AgentRegistry(), parentFile);
+		const recovered = await Bun.file(consultationFile).text();
+		const recoveredEntries = parseSessionEntries(recovered);
+		expect(consultationTurnStates(recoveredEntries, consultationId).map(state => state.terminal?.status)).toEqual([
+			"cancelled",
+		]);
+		expect(recovered).toContain("[Consultation interrupted by process exit.]");
+
+		await registerPersistedSubagents(new AgentRegistry(), parentFile);
+		expect(await Bun.file(consultationFile).text()).toBe(recovered);
 	});
 
 	it("retains the persisted title and short id after cold registry discovery", async () => {

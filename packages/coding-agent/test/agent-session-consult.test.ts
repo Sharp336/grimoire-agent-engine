@@ -177,6 +177,13 @@ describe("AgentSession durable consultation side turn", () => {
 		const parentFile = parentManager.getSessionFile();
 		if (!parentFile) throw new Error("expected lazy parent session file");
 		expect(await Bun.file(parentFile).exists()).toBe(false);
+		parentManager.appendThinkingLevelChange("high", "high");
+		parentManager.appendModeChange("plan", { goal: "preserve empty-parent metadata" });
+		parentManager.appendSessionInit({
+			systemPrompt: "empty parent system",
+			task: "preserve durable metadata",
+			tools: ["read"],
+		});
 
 		let providerContext: Context | undefined;
 		const sideStreamFn: StreamFn = (_streamModel, context) => {
@@ -234,9 +241,14 @@ describe("AgentSession durable consultation side turn", () => {
 			return child;
 		});
 
-		const { promise: consultationSaved, resolve: resolveSaved } = Promise.withResolvers<void>();
+		const { promise: firstConsultationSaved, resolve: resolveFirstConsultation } = Promise.withResolvers<void>();
+		const { promise: secondConsultationSaved, resolve: resolveSecondConsultation } = Promise.withResolvers<void>();
+		let savedConsultations = 0;
 		const showStatus = vi.fn((message: string) => {
-			if (message.startsWith("Consultation saved as consult:")) resolveSaved();
+			if (!message.startsWith("Consultation saved as consult:")) return;
+			savedConsultations += 1;
+			if (savedConsultations === 1) resolveFirstConsultation();
+			if (savedConsultations === 2) resolveSecondConsultation();
 		});
 		let composerActive = false;
 		const container = new Container();
@@ -262,7 +274,9 @@ describe("AgentSession durable consultation side turn", () => {
 		const controller = new ConsultController(ctx);
 
 		await controller.start("What is safe to do?");
-		await consultationSaved;
+		await firstConsultationSaved;
+		await controller.start("How do I keep the metadata?");
+		await secondConsultationSaved;
 
 		expect(committedChild).toMatchObject({
 			parentLeafId: null,
@@ -273,18 +287,26 @@ describe("AgentSession durable consultation side turn", () => {
 			materializeParent: true,
 		});
 		expect(await Bun.file(parentFile).exists()).toBe(true);
-		expect(parentManager.getEntries()).toEqual([]);
+		expect(parentManager.getEntries().map(entry => entry.type)).toEqual([
+			"thinking_level_change",
+			"mode_change",
+			"session_init",
+		]);
 		expect(agent.state.messages).toEqual(uncommittedParentMessages);
 		const materializedParent = await SessionManager.open(parentFile, undefined, undefined, {
 			suppressBreadcrumb: true,
 		});
-		expect(materializedParent.getEntries().some(entry => entry.type === "message")).toBe(false);
+		expect(materializedParent.getEntries().map(entry => entry.type)).toEqual([
+			"thinking_level_change",
+			"mode_change",
+			"session_init",
+		]);
 		await materializedParent.close();
 
 		expect(providerContext?.systemPrompt).toEqual(["consult system"]);
 		expect(providerContext?.messages).toHaveLength(2);
 		expect(providerContext?.messages.map(message => message.role)).toEqual(["developer", "user"]);
-		expect(JSON.stringify(providerContext?.messages)).toContain("What is safe to do?");
+		expect(JSON.stringify(providerContext?.messages)).toContain("How do I keep the metadata?");
 		expect(JSON.stringify(providerContext?.messages)).not.toContain("queued draft that must not leak");
 		expect(JSON.stringify(providerContext?.messages)).not.toContain("uncommitted partial");
 		expect(JSON.stringify(providerContext?.messages)).not.toContain("draft-call");
@@ -308,7 +330,7 @@ describe("AgentSession durable consultation side turn", () => {
 		expect(persistedMessages).toEqual([
 			expect.objectContaining({
 				role: "user",
-				content: [{ type: "text", text: "What is safe to do?" }],
+				content: [{ type: "text", text: "How do I keep the metadata?" }],
 			}),
 			expect.objectContaining({
 				role: "assistant",

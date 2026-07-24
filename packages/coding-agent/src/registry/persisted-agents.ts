@@ -71,6 +71,21 @@ function titlesFor(registry: AgentRegistry): Map<string, ConsultationDisplayTitl
 	return titles;
 }
 
+function isLiveLocalConsultation(
+	registry: AgentRegistry,
+	ownerId: string,
+	consultationId: string,
+	sessionFile: string,
+): boolean {
+	const ref = registry.get(consultationAgentId(ownerId, consultationId));
+	return (
+		ref?.kind === "consultation" &&
+		ref.status === "running" &&
+		ref.sessionFile !== null &&
+		path.resolve(ref.sessionFile) === path.resolve(sessionFile)
+	);
+}
+
 /**
  * A running side turn has no surviving worker after a process restart. Append
  * its terminal cancellation before any registry or resume UI reads the file so
@@ -145,7 +160,10 @@ export function registerPersistedConsultation(
 	const displayTitle = options.displayTitle ?? options.state?.displayTitle ?? generatedTitle ?? prior?.displayTitle;
 	const titles = titlesFor(registry);
 	titles.set(id, { generatedTitle, displayTitle });
-	const status = options.parked || options.state?.currentStatus !== "running" ? "parked" : "running";
+	const status =
+		options.parked || (options.state !== undefined && options.state.currentStatus !== "running")
+			? "parked"
+			: "running";
 	if (existing?.sessionFile === options.sessionFile) {
 		registry.setStatus(id, status);
 		refreshConsultationDisplayNames(registry, options.ownerId);
@@ -264,6 +282,7 @@ async function persistCanonicalConsultationTitle(
 			sessionFile: options.sessionFile,
 			generatedTitle: presentation.generatedTitle,
 			displayTitle: presentation.displayTitle,
+			parked: !isLiveLocalConsultation(registry, options.ownerId, options.consultationId, options.sessionFile),
 		});
 		options.onGenerated?.(presentation.generatedTitle);
 	} finally {
@@ -316,13 +335,19 @@ async function registerPersistedTranscriptsFromDir(
 		const sessionFile = path.join(dir, entry.name);
 		const consultationId = parseConsultationTranscriptName(entry.name);
 		if (consultationId) {
-			const sessionEntries = await finalizeInterruptedConsultationTurns(sessionFile, consultationId).catch(() =>
-				loadEntriesFromFile(sessionFile).catch(() => []),
-			);
+			// A consultation registered as running belongs to this process. Agent Hub
+			// discovery is not recovery in that case: leave its durable turn open for
+			// the local worker to finish instead of appending a false cancellation.
+			const liveLocal = isLiveLocalConsultation(registry, ownerId, consultationId, sessionFile);
+			const sessionEntries = liveLocal
+				? await loadEntriesFromFile(sessionFile).catch(() => [])
+				: await finalizeInterruptedConsultationTurns(sessionFile, consultationId).catch(() =>
+						loadEntriesFromFile(sessionFile).catch(() => []),
+					);
 			const lookup = lookupConsultationThread(sessionEntries, consultationId);
 			const thread = lookup.hasCollision ? undefined : lookup.thread;
 			if (!thread) {
-				if (lookup.hasCollision || !options.includeAgents) continue;
+				if (liveLocal || lookup.hasCollision || !options.includeAgents) continue;
 			} else {
 				const turnStates = consultationTurnStates(sessionEntries, consultationId);
 				const latestTurn = latestTerminalConsultationTurn(sessionEntries, consultationId);
@@ -339,7 +364,7 @@ async function registerPersistedTranscriptsFromDir(
 						latestTurn,
 						currentStatus: currentTurn?.terminal?.status ?? currentTurn?.turn.status ?? "running",
 					},
-					parked: true,
+					parked: !liveLocal,
 				});
 				const ownerSession = registry.get(ownerId)?.session;
 				if (!title.generatedTitle && ownerSession) {

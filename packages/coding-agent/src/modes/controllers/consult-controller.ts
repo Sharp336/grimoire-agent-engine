@@ -15,6 +15,7 @@ import {
 	CONSULTATION_TURN_CUSTOM_TYPE,
 	type ConsultationThreadRecord,
 	type ConsultationTurnRecord,
+	consultationAgentId,
 	consultationThreadMetadata,
 	consultationThreadTitlePresentation,
 	consultationTranscriptStem,
@@ -800,6 +801,7 @@ export class ConsultController {
 			if (!threadRecord) throw new Error(`Consultation thread ${request.consultationId} not found`);
 			const threadManager = manager;
 			if (!threadManager) throw new Error(`Consultation thread ${request.consultationId} manager not found`);
+			this.#registerThread(request, false);
 
 			const previousMessages = [
 				...threadManager.buildSessionContextAt(threadRecord.parentLeafId).messages,
@@ -889,8 +891,10 @@ export class ConsultController {
 				const sessionFile = request.thread?.sessionFile;
 				if (createdThread && sessionFile) {
 					await manager.dropSession(sessionFile).catch(() => {});
+					this.#unregisterThread(request);
 				} else {
 					await manager.close().catch(() => {});
+					this.#registerThread(request);
 				}
 				manager = undefined;
 				if (this.#activeRequest === request) this.#updateLatestView(request, { status: "failed" });
@@ -956,7 +960,7 @@ export class ConsultController {
 		}
 	}
 
-	#registerThread(request: ConsultRequest): void {
+	#registerThread(request: ConsultRequest, parked = true): void {
 		if (!request.thread) throw new Error("Consultation thread was not created");
 		registerPersistedConsultation(AgentRegistry.global(), {
 			ownerId: request.ownerId,
@@ -964,8 +968,19 @@ export class ConsultController {
 			sessionFile: request.thread.sessionFile,
 			generatedTitle: request.generatedTitle,
 			displayTitle: request.latestView.title,
+			parked,
 		});
-		this.ctx.showStatus(`Consultation saved as consult:${request.consultationId}; open /hub to view it.`);
+		if (parked) this.ctx.showStatus(`Consultation saved as consult:${request.consultationId}; open /hub to view it.`);
+	}
+
+	#unregisterThread(request: ConsultRequest): void {
+		if (!request.thread) return;
+		const registry = AgentRegistry.global();
+		const id = consultationAgentId(request.ownerId, request.consultationId);
+		const ref = registry.get(id);
+		if (ref?.kind === "consultation" && ref.sessionFile === request.thread.sessionFile) {
+			registry.unregister(id, ref);
+		}
 	}
 
 	#closeActiveRequest(abort: boolean): void {
