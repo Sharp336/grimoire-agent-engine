@@ -1216,11 +1216,16 @@ export function buildParams(
 		filterReasoningHistory: options?.filterReasoningHistory,
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
+	// SuperGrok streams reasoning summaries only. Default to `detailed` when
+	// thinking is requested so the summary is as long as the API allows; callers
+	// can still pass `reasoningSummary: null` to omit the field entirely.
 	const reasoningSummary =
 		model.provider === "xai-oauth"
 			? options?.reasoning === undefined
 				? undefined
-				: null
+				: options?.reasoningSummary === undefined
+					? "detailed"
+					: options.reasoningSummary
 			: options?.reasoningSummary;
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
 		reasoningSummary,

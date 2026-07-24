@@ -59,11 +59,25 @@ describe("xAI OAuth Responses reasoning payload (regression)", () => {
 		expect(params.reasoning).toBeUndefined();
 	});
 
-	test("xai-oauth/grok-4.5 omits unsupported reasoning summary", () => {
+	test("xai-oauth/grok-4.5 defaults reasoning summary to detailed when thinking", () => {
 		const grok45 = getBundledModel<"openai-responses">("xai-oauth", "grok-4.5");
 		if (!grok45) throw new Error("xai-oauth/grok-4.5 must be in bundled models.json");
 
 		const { params } = buildParams(grok45, singleUserContext, { reasoning: Effort.High }, undefined);
+
+		expect(params.reasoning).toEqual({ effort: "high", summary: "detailed" });
+	});
+
+	test("xai-oauth/grok-4.5 still allows omitting reasoning summary", () => {
+		const grok45 = getBundledModel<"openai-responses">("xai-oauth", "grok-4.5");
+		if (!grok45) throw new Error("xai-oauth/grok-4.5 must be in bundled models.json");
+
+		const { params } = buildParams(
+			grok45,
+			singleUserContext,
+			{ reasoning: Effort.High, reasoningSummary: null },
+			undefined,
+		);
 
 		expect(params.reasoning).toEqual({ effort: "high" });
 	});
