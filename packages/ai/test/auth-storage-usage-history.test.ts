@@ -137,6 +137,7 @@ describe("AuthStorage usage history recording", () => {
 	afterEach(() => {
 		storage.close();
 		vi.restoreAllMocks();
+		setSystemTime();
 	});
 
 	it("appends one row per limit on a fresh fetch, attributed to the credential", async () => {
@@ -224,6 +225,103 @@ describe("AuthStorage usage history recording", () => {
 		expect(reports).toHaveLength(1);
 		expect(reports?.[0]?.limits).toHaveLength(2);
 		expect(storage.listUsageHistory({ provider: "devin" })).toHaveLength(2);
+	});
+
+	it("keeps Devin org history stable across credential order and key rotation without persisting the org ID", async () => {
+		storage.close();
+		store.close();
+		store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider =>
+				provider === "devin"
+					? ({
+							id: "devin",
+							async fetchUsage(): Promise<UsageReport> {
+								return {
+									provider: "devin",
+									fetchedAt: Date.now(),
+									limits: [
+										{
+											id: "devin:acus:total",
+											label: "ACUs",
+											scope: { provider: "devin", shared: true },
+											amount: { used: 5, unit: "acus" },
+											status: "ok",
+										},
+									],
+									metadata: { orgId: "org-history-shared", principalId: "service-history" },
+								};
+							},
+						} satisfies UsageProvider)
+					: undefined,
+		});
+		await storage.reload();
+
+		setSystemTime(new Date(T0));
+		await storage.set("devin", [
+			{ type: "api_key", key: "cog_second-key" },
+			{ type: "api_key", key: "cog_first-key" },
+		]);
+		await storage.fetchUsageReports();
+
+		setSystemTime(new Date(T0 + HOUR));
+		await storage.set("devin", [
+			{ type: "api_key", key: "cog_first-key" },
+			{ type: "api_key", key: "cog_rotated-key" },
+		]);
+		await storage.fetchUsageReports();
+
+		const history = storage.listUsageHistory({ provider: "devin" });
+		expect(history).toHaveLength(2);
+		const accountKeys = new Set(history.map(entry => entry.accountKey));
+		expect(accountKeys.size).toBe(1);
+		const [accountKey] = [...accountKeys];
+		expect(accountKey).toStartWith("devin:org:");
+		expect(accountKey).not.toContain("org-history-shared");
+	});
+
+	it("keeps distinct per-credential history when a Devin report has no shared identity", async () => {
+		storage.close();
+		store.close();
+		store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider =>
+				provider === "devin"
+					? ({
+							id: "devin",
+							async fetchUsage(): Promise<UsageReport> {
+								return {
+									provider: "devin",
+									fetchedAt: T0,
+									limits: [
+										{
+											id: "devin:acus:total",
+											label: "ACUs",
+											scope: { provider: "devin", shared: true },
+											amount: { used: 5, unit: "acus" },
+											status: "ok",
+										},
+									],
+								};
+							},
+						} satisfies UsageProvider)
+					: undefined,
+		});
+		await storage.reload();
+		await storage.set("devin", [
+			{ type: "api_key", key: "cog_unidentified-one" },
+			{ type: "api_key", key: "cog_unidentified-two" },
+		]);
+
+		await storage.fetchUsageReports();
+
+		const history = storage.listUsageHistory({ provider: "devin" });
+		expect(history).toHaveLength(2);
+		expect(new Set(history.map(entry => entry.accountKey)).size).toBe(2);
+		for (const entry of history) {
+			expect(entry.accountKey).toContain("secret:");
+			expect(entry.accountKey).not.toContain("cog_unidentified");
+		}
 	});
 });
 

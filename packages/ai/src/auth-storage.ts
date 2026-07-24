@@ -734,6 +734,11 @@ type UsageRequestDescriptor = {
 	baseUrl?: string;
 };
 
+type UsageRequestCollection = {
+	requests: UsageRequestDescriptor[];
+	fallbackRequests: UsageRequestDescriptor[];
+};
+
 type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
@@ -3077,11 +3082,29 @@ export class AuthStorage {
 	 * supports it). The usage cache is latest-snapshot-only — these rows are
 	 * the only place limit utilization is kept over time.
 	 */
+	#buildUsageHistoryAccountKey(request: UsageRequestDescriptor, report: UsageReport): string {
+		if (request.provider !== "devin") return this.#buildUsageCacheIdentity(request.credential);
+
+		const orgId = this.#getUsageReportMetadataValue(report, "orgId");
+		const principalId = this.#getUsageReportMetadataValue(report, "principalId");
+		const identity = orgId
+			? { kind: "org", value: orgId }
+			: principalId
+				? { kind: "principal", value: principalId }
+				: undefined;
+		if (!identity) return this.#buildUsageCacheIdentity(request.credential);
+
+		const fingerprint = createHash("sha256")
+			.update(`${request.provider}:${identity.kind}:${identity.value}`)
+			.digest("base64url");
+		return `${request.provider}:${identity.kind}:${fingerprint}`;
+	}
+
 	#recordUsageHistory(request: UsageRequestDescriptor, report: UsageReport): void {
 		const record = this.#store.recordUsageSnapshots;
 		if (!record || report.limits.length === 0) return;
 		const recordedAt = Number.isFinite(report.fetchedAt) && report.fetchedAt > 0 ? report.fetchedAt : Date.now();
-		const accountKey = this.#buildUsageCacheIdentity(request.credential);
+		const accountKey = this.#buildUsageHistoryAccountKey(request, report);
 		const metadata = report.metadata ?? {};
 		const metaEmail = typeof metadata.email === "string" ? metadata.email : undefined;
 		const metaAccountId = typeof metadata.accountId === "string" ? metadata.accountId : undefined;
@@ -3259,13 +3282,14 @@ export class AuthStorage {
 		return true;
 	}
 
-	#collectUsageRequests(options?: {
+	async #collectUsageRequests(options?: {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
-	}): UsageRequestDescriptor[] {
+	}): Promise<UsageRequestCollection> {
 		const resolver = this.#usageProviderResolver;
-		if (!resolver) return [];
+		if (!resolver) return { requests: [], fallbackRequests: [] };
 
 		const requests: UsageRequestDescriptor[] = [];
+		const fallbackRequests: UsageRequestDescriptor[] = [];
 		const providers = new Set<string>([
 			...this.#data.keys(),
 			...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
@@ -3308,28 +3332,49 @@ export class AuthStorage {
 				continue;
 			}
 
-			const providerRequestStart = requests.length;
+			let hasUsableStoredCredential = false;
 			for (const entry of entries) {
 				const credential = entry.credential;
-				const request =
-					credential.type === "api_key"
-						? this.#buildUsageRequest(provider, { type: "api_key", apiKey: credential.key }, baseUrl)
-						: this.#buildUsageRequestForOauth(provider, credential, baseUrl);
+				let request: UsageRequestDescriptor;
+				if (credential.type === "api_key") {
+					const apiKey = await this.#configValueResolver(credential.key);
+					if (!apiKey) continue;
+					request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+				} else {
+					request = this.#buildUsageRequestForOauth(provider, credential, baseUrl);
+				}
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
 				requests.push(request);
+				hasUsableStoredCredential = true;
 			}
-			if (requests.length !== providerRequestStart) continue;
 
 			const runtimeKey = this.#runtimeOverrides.get(providerId);
 			const envKey = getEnvApiKey(providerId);
 			const apiKey = runtimeKey ?? this.#configOverrides.get(providerId) ?? envKey;
 			if (!apiKey) continue;
-			const request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
-			if (providerImpl.supports && !providerImpl.supports(request)) continue;
-			requests.push(request);
+			const resolvedApiKey = await this.#configValueResolver(apiKey);
+			if (!resolvedApiKey) continue;
+			const fallbackRequest = this.#buildUsageRequest(
+				provider,
+				{ type: "api_key", apiKey: resolvedApiKey },
+				baseUrl,
+			);
+			if (providerImpl.supports && !providerImpl.supports(fallbackRequest)) continue;
+			if (!hasUsableStoredCredential) {
+				requests.push(fallbackRequest);
+				continue;
+			}
+			if (
+				requests.some(
+					request => this.#buildUsageReportCacheKey(request) === this.#buildUsageReportCacheKey(fallbackRequest),
+				)
+			) {
+				continue;
+			}
+			fallbackRequests.push(fallbackRequest);
 		}
 
-		return requests;
+		return { requests, fallbackRequests };
 	}
 
 	#getUsageReportMetadataValue(report: UsageReport, key: string): string | undefined {
@@ -3793,7 +3838,7 @@ export class AuthStorage {
 		}
 		if (!this.#usageProviderResolver) return null;
 
-		const requests = this.#collectUsageRequests(options);
+		const { requests, fallbackRequests } = await this.#collectUsageRequests(options);
 		if (requests.length === 0) return [];
 
 		this.#usageLogger?.debug("Usage fetch requested", {
@@ -3825,6 +3870,19 @@ export class AuthStorage {
 				requests.map(request => this.#fetchUsageCached(request, this.#usageRequestTimeoutMs)),
 			);
 			const reportPairs = results.flatMap((report, index) => (report ? [{ report, request: requests[index] }] : []));
+			const pendingFallbacks = fallbackRequests.filter(
+				fallback => !reportPairs.some(pair => pair.request.provider === fallback.provider),
+			);
+			if (pendingFallbacks.length > 0) {
+				const fallbackResults = await Promise.all(
+					pendingFallbacks.map(request => this.#fetchUsageCached(request, this.#usageRequestTimeoutMs)),
+				);
+				reportPairs.push(
+					...fallbackResults.flatMap((report, index) =>
+						report ? [{ report, request: pendingFallbacks[index] }] : [],
+					),
+				);
+			}
 			const deduped = this.#dedupeUsageReports(reportPairs.map(pair => pair.report));
 			for (const report of deduped) {
 				const identifiers = new Set(this.#getUsageReportIdentifiers(report));

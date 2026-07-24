@@ -142,10 +142,14 @@ describe("devinUsageProvider", () => {
 		expect(validatedReport).not.toBeInstanceOf(type.errors);
 	});
 
-	it("supports Devin API-key credentials before resolving their values", () => {
-		const referencedApiKey: UsageFetchParams = {
+	it("requires a resolved cog_ Devin API key for usage eligibility", () => {
+		const unresolvedReference: UsageFetchParams = {
 			provider: "devin",
 			credential: { type: "api_key", apiKey: "DEVIN_API_KEY" },
+		};
+		const supportedApiKey: UsageFetchParams = {
+			provider: "devin",
+			credential: { type: "api_key", apiKey: "cog_valid-token" },
 		};
 		const unsupportedOauth: UsageFetchParams = {
 			provider: "devin",
@@ -156,7 +160,8 @@ describe("devinUsageProvider", () => {
 			credential: { type: "api_key", apiKey: "cog_valid-token" },
 		};
 
-		expect(devinUsageProvider.supports?.(referencedApiKey)).toBe(true);
+		expect(devinUsageProvider.supports?.(unresolvedReference)).toBe(false);
+		expect(devinUsageProvider.supports?.(supportedApiKey)).toBe(true);
 		expect(devinUsageProvider.supports?.(unsupportedOauth)).toBe(false);
 		expect(devinUsageProvider.supports?.(wrongProvider)).toBe(false);
 	});
@@ -275,6 +280,116 @@ describe("devinUsageProvider", () => {
 			]);
 			expect(reports?.map(report => report.provider)).toEqual(["devin"]);
 			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 2, unit: "acus" });
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("uses a configured cog_ fallback when a stored Devin reference resolves unsupported", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const authorization: Array<string | null> = [];
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => value,
+			usageFetch: (async (input, init) => {
+				authorization.push(new Headers(init?.headers).get("authorization"));
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				if (path.endsWith("/v3/self")) return new Response(JSON.stringify({}), { status: 404 });
+				const payload = path.includes("consumption")
+					? { total_acus: 6, consumption_by_date: [] }
+					: { sessions_count: 2 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [{ type: "api_key", key: "DEVIN_STALE_REFERENCE" }]);
+			storage.setConfigApiKey("devin", "cog_config-fallback");
+
+			const reports = await storage.fetchUsageReports();
+
+			expect(authorization).toEqual([
+				"Bearer cog_config-fallback",
+				"Bearer cog_config-fallback",
+				"Bearer cog_config-fallback",
+			]);
+			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 6, unit: "acus" });
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("keeps a resolved stored Devin key ahead of the configured fallback", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const authorization: Array<string | null> = [];
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => (value === "DEVIN_STORED_REFERENCE" ? "cog_stored-key" : value),
+			usageFetch: (async (input, init) => {
+				authorization.push(new Headers(init?.headers).get("authorization"));
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				if (path.endsWith("/v3/self")) return new Response(JSON.stringify({}), { status: 404 });
+				const payload = path.includes("consumption")
+					? { total_acus: 6, consumption_by_date: [] }
+					: { sessions_count: 2 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [{ type: "api_key", key: "DEVIN_STORED_REFERENCE" }]);
+			storage.setConfigApiKey("devin", "cog_config-fallback");
+
+			const reports = await storage.fetchUsageReports();
+
+			expect(authorization).toEqual(["Bearer cog_stored-key", "Bearer cog_stored-key", "Bearer cog_stored-key"]);
+			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 6, unit: "acus" });
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("uses the configured fallback after all stored Devin credentials return no usage data", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const authorization: Array<string | null> = [];
+		const storage = new AuthStorage(store, {
+			usageFetch: (async (input, init) => {
+				const authorizationValue = new Headers(init?.headers).get("authorization");
+				authorization.push(authorizationValue);
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				if (authorizationValue === "Bearer cog_stored-no-data") {
+					return new Response("not found", { status: 404 });
+				}
+				if (path.endsWith("/v3/self")) return new Response(JSON.stringify({}), { status: 404 });
+				const payload = path.includes("consumption")
+					? { total_acus: 8, consumption_by_date: [] }
+					: { sessions_count: 2 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [{ type: "api_key", key: "cog_stored-no-data" }]);
+			storage.setConfigApiKey("devin", "cog_config-fallback");
+
+			const reports = await storage.fetchUsageReports();
+
+			expect(authorization).toEqual([
+				"Bearer cog_stored-no-data",
+				"Bearer cog_stored-no-data",
+				"Bearer cog_stored-no-data",
+				"Bearer cog_config-fallback",
+				"Bearer cog_config-fallback",
+				"Bearer cog_config-fallback",
+			]);
+			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 8, unit: "acus" });
 		} finally {
 			storage.close();
 		}

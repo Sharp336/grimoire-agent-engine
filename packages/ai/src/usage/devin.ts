@@ -515,21 +515,12 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	};
 }
 
-function isDevinApiKeyLike(key: string): boolean {
-	const trimmed = key.trim();
-	if (trimmed.startsWith(DEVIN_API_KEY_PREFIX)) return true;
-	if (trimmed.startsWith("!")) return true;
-	if (/^[A-Z_0-9]+$/.test(trimmed)) return true;
-	return false;
-}
-
 export const devinUsageProvider: UsageProvider = {
 	id: "devin",
 	fetchUsage: fetchDevinUsage,
 	supports: params =>
 		params.provider === "devin" &&
 		params.credential.type === "api_key" &&
-		!!params.credential.apiKey &&
-		isDevinApiKeyLike(params.credential.apiKey),
+		normalizeDevinApiKey(params.credential.apiKey) !== undefined,
 	validatesCredentials: true,
 };

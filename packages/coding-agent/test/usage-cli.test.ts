@@ -377,6 +377,41 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("12.5 ACU used");
 	});
 
+	it("renders Devin activity metrics with and without ACU consumption", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const metricsOnly: UsageReport = {
+			provider: "devin",
+			fetchedAt: now,
+			limits: [],
+			metadata: {
+				metrics: { sessionsCount: 10, searchesCount: 5, prsCreatedCount: 2, prsMergedCount: 1 },
+			},
+		};
+		const consumptionAndMetrics: UsageReport = {
+			provider: "devin",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "devin:acus:total",
+					label: "Devin ACU consumption",
+					scope: { provider: "devin", shared: true },
+					amount: { unit: "acus", used: 12.5 },
+					status: "ok",
+				},
+			],
+			metadata: { metrics: { sessionsCount: 3, prsMergedCount: 2 } },
+		};
+
+		const metricsOnlyText = stripVTControlCharacters(formatUsageBreakdown([metricsOnly], [], now));
+		expect(metricsOnlyText).toContain("activity: 10 sessions · 5 searches · 2 PRs created · 1 PR merged");
+
+		const consumptionAndMetricsText = stripVTControlCharacters(
+			formatUsageBreakdown([consumptionAndMetrics], [], now),
+		);
+		expect(consumptionAndMetricsText).toContain("12.5 ACU used");
+		expect(consumptionAndMetricsText).toContain("activity: 3 sessions · 2 PRs merged");
+	});
+
 	it("renders Cursor request quotas in the usage breakdown", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const reports: UsageReport[] = [

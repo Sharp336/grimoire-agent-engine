@@ -272,4 +272,56 @@ describe("CommandController /usage", () => {
 		// Assert fallback provider falls back to "2 accts" since it has no amount values
 		expect(output).toContain("2 accts");
 	});
+
+	it("renders Devin activity metrics for metrics-only and consumption reports", async () => {
+		const present = vi.fn();
+		const ctx = {
+			session: createUsageSessionDouble(),
+			ui: { terminal: { columns: 100 } },
+			present,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new CommandController(ctx);
+		const now = Date.now();
+
+		await controller.handleUsageCommand([
+			{
+				provider: "devin",
+				fetchedAt: now,
+				limits: [],
+				metadata: {
+					metrics: { sessionsCount: 10, searchesCount: 5, prsCreatedCount: 2, prsMergedCount: 1 },
+				},
+			},
+		]);
+
+		let output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+		expect(output).toContain("Devin activity");
+		expect(output).toContain("10 sessions · 5 searches · 2 PRs created · 1 PR merged");
+		expect(output).not.toContain("-- no limits");
+		present.mockClear();
+
+		await controller.handleUsageCommand([
+			{
+				provider: "devin",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "devin:acus:total",
+						label: "Devin ACU consumption",
+						scope: { provider: "devin", shared: true },
+						amount: { unit: "acus", used: 12.5 },
+						status: "ok",
+					},
+				],
+				metadata: { metrics: { sessionsCount: 3, prsMergedCount: 2 } },
+			},
+		]);
+
+		output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+		expect(output).toContain("12.5 ACU used");
+		expect(output).toContain("Devin activity");
+		expect(output).toContain("3 sessions · 2 PRs merged");
+	});
 });

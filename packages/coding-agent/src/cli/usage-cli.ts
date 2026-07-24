@@ -19,6 +19,7 @@ import type { Provider } from "@oh-my-pi/pi-catalog/types";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils/format";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import chalk from "chalk";
+import { getDevinUsageMetrics } from "../usage/devin-metrics";
 
 const BAR_WIDTH = 28;
 
@@ -233,15 +234,6 @@ function describeAmount(limit: UsageLimit): string {
 		parts.push(`${formatUnitValue(amount.used, amount.unit)}${UNIT_SUFFIX[amount.unit]} used`);
 	} else if (absoluteUnit && amount.remaining !== undefined) {
 		parts.push(`${formatUnitValue(amount.remaining, amount.unit)}${UNIT_SUFFIX[amount.unit]} left`);
-	} else if (
-		absoluteUnit &&
-		amount.used !== undefined &&
-		Number.isFinite(amount.used) &&
-		amount.limit === undefined &&
-		amount.remaining === undefined &&
-		fraction === undefined
-	) {
-		parts.push(`${formatUnitValue(amount.used, amount.unit)}${UNIT_SUFFIX[amount.unit]} used`);
 	}
 	if (fraction !== undefined) {
 		parts.push(`${(fraction * 100).toFixed(1)}% used`);
@@ -581,17 +573,23 @@ export function formatUsageBreakdown(
 			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
 			if (report.limits.length === 0) {
 				lines.push(`      ${chalk.dim("no limits reported")}`);
-				return;
-			}
-			const limitsById = new Map<string, UsageLimit>();
-			for (const limit of report.limits) limitsById.set(limit.id, limit);
-			for (const template of providerLimitTemplates) {
-				const limit = limitsById.get(template.id);
-				if (limit) {
-					lines.push(...formatLimitLine(limit, labelWidth, nowMs));
-				} else {
-					lines.push(formatMissingLimitLine(template, labelWidth));
+			} else {
+				const limitsById = new Map<string, UsageLimit>();
+				for (const limit of report.limits) limitsById.set(limit.id, limit);
+				for (const template of providerLimitTemplates) {
+					const limit = limitsById.get(template.id);
+					if (limit) {
+						lines.push(...formatLimitLine(limit, labelWidth, nowMs));
+					} else {
+						lines.push(formatMissingLimitLine(template, labelWidth));
+					}
 				}
+			}
+
+			const metrics = getDevinUsageMetrics(report);
+			if (metrics.length > 0) {
+				const activity = metrics.map(metric => `${formatNumber(metric.value)} ${metric.label}`).join(" · ");
+				lines.push(`      ${chalk.dim(`activity: ${activity}`)}`);
 			}
 		});
 

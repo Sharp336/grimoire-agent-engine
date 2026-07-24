@@ -11,6 +11,8 @@
 
 - Fixed stateful OpenAI Responses explicit cache breakpoints being restored onto edited historical messages, ensuring full replays recompute the latest stable cache boundary.
 - Fixed ChatGPT Codex standard and Lite transports rejecting or hiding native computer-use payloads by unrolling the tool definition, forced choice, `computer_call`, and `computer_call_output` into ordinary function-tool forms.
+- Fixed Devin usage polling to resolve stored API-key references before eligibility checks, preserving valid runtime/config fallbacks when stored references are stale or return no data.
+- Fixed Devin usage history to retain one opaque org/principal series across service-key rotation instead of splitting trends by credential secret.
 
 ## [17.1.0] - 2026-07-24
 
