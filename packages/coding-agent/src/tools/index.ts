@@ -627,7 +627,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			const mountable = mountBuiltinTools && isMountableUnderXdev(tool) && tool.name in BUILTIN_TOOLS;
 			(mountable ? mounted : kept).push(tool);
 		}
-		session.xdevRegistry = new XdevRegistry(mounted);
+		session.xdevRegistry = new XdevRegistry(mounted, session.settings.get("tools.xdevExternalDescriptionCap"));
 		tools = kept;
 		const finalActiveNames = new Set(tools.map(tool => tool.name));
 		if (session.setActiveToolNames) {

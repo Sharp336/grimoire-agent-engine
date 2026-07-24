@@ -4190,6 +4190,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.xdevExternalDescriptionCap": {
+		type: "number",
+		default: 200,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "xd:// Description Cap",
+			description:
+				"Maximum description characters embedded per external (MCP/custom/extension) xd:// device in the system prompt and catalog listings. Schemas are never truncated; the full description stays one `read xd://<tool>` away. Applies to new sessions.",
+			options: [
+				{ value: "100", label: "100 chars (tight)" },
+				{ value: "200", label: "200 chars (default)" },
+				{ value: "500", label: "500 chars" },
+				{ value: "1000", label: "1000 chars" },
+				{ value: "2000", label: "2000 chars" },
+				{ value: "4000", label: "4000 chars (full lede)" },
+			],
+		},
+	},
+
 	// MCP
 	"mcp.enableProjectConfig": {
 		type: "boolean",

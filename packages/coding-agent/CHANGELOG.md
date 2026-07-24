@@ -12,6 +12,7 @@
 - Fixed the Docker `natives-builder` stage failing to build releases ≥ 17.1.1: the native audio stack added bindgen (miniaudio needs libclang) and a bundled-opus CMake build (needs cmake + make), none of which were installed in the slim builder image.
 - Fixed `omp usage` duplicating org-less legacy accounts as "no usage data" rows whenever any sibling report carried an organization (mixed pools of pre-org-capture rows and fresh org-scoped logins): an org-less account is now covered by its own org-less report, while org-attributed sibling reports still never count as its coverage.
 - `omp usage` revalidates the broker credential snapshot before rendering: live usage reports were previously paired with a disk-cached account list up to an hour old, so a just-completed re-login (org-less row upserted to org-scoped) rendered as a phantom duplicate until the cache expired.
+- Added `tools.xdevExternalDescriptionCap` (default `200`): makes the previously hardcoded 200-character truncation of external (MCP/custom/extension) `xd://` device descriptions in the system prompt and catalog listings configurable. Schemas are never truncated and `read xd://<tool>` still returns the full description.
 
 ## [17.1.3] - 2026-07-24
 

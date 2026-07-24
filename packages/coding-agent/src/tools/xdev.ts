@@ -223,8 +223,19 @@ export class XdevRegistry {
 	 */
 	#dynamic = new Map<string, Tool>();
 
-	constructor(builtins: Iterable<Tool>) {
+	/** Active cap for external (dynamic-mount) description embedding; see
+	 *  {@link EXTERNAL_DESCRIPTION_CAP} for the default and rationale. Settable
+	 *  per session via `tools.xdevExternalDescriptionCap`. */
+	#externalDescriptionCap: number;
+
+	constructor(builtins: Iterable<Tool>, externalDescriptionCap: number = XdevRegistry.EXTERNAL_DESCRIPTION_CAP) {
 		for (const tool of builtins) this.#builtins.set(tool.name, tool);
+		this.#externalDescriptionCap = Math.max(0, externalDescriptionCap);
+	}
+
+	/** Update the external description cap (e.g. after a settings change). */
+	setExternalDescriptionCap(cap: number): void {
+		this.#externalDescriptionCap = Math.max(0, cap);
 	}
 
 	/**
@@ -258,10 +269,7 @@ export class XdevRegistry {
 	entries(): Array<{ name: string; summary: string }> {
 		return this.list().map(tool => ({
 			name: tool.name,
-			summary: promptCatalogSummary(
-				tool,
-				this.#dynamic.has(tool.name) ? XdevRegistry.EXTERNAL_DESCRIPTION_CAP : undefined,
-			),
+			summary: promptCatalogSummary(tool, this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined),
 		}));
 	}
 
@@ -315,7 +323,7 @@ export class XdevRegistry {
 				overflow.push(tool);
 				continue;
 			}
-			const descriptionCap = this.#dynamic.has(tool.name) ? XdevRegistry.EXTERNAL_DESCRIPTION_CAP : undefined;
+			const descriptionCap = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
 			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET) {
 				overflow.push(tool);
@@ -329,7 +337,7 @@ export class XdevRegistry {
 				[
 					"## Additional devices (docs on demand)",
 					...overflow.map(tool => {
-						const maxLength = this.#dynamic.has(tool.name) ? XdevRegistry.EXTERNAL_DESCRIPTION_CAP : undefined;
+						const maxLength = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 						return `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxLength)}`;
 					}),
 					"",
@@ -348,7 +356,7 @@ export class XdevRegistry {
 		for (const name of names) {
 			const tool = this.get(name);
 			if (!tool || !this.#shouldInline(tool, mode, inlineGlobs)) continue;
-			const descriptionCap = this.#dynamic.has(tool.name) ? XdevRegistry.EXTERNAL_DESCRIPTION_CAP : undefined;
+			const descriptionCap = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
 			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET)
 				continue;
