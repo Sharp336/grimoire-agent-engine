@@ -748,7 +748,7 @@ describe("github tool", () => {
 			expect(jsonSpy.mock.invocationCallOrder[5]).toBeGreaterThan(textSpy.mock.invocationCallOrder[0] ?? 0);
 			expect(jsonSpy.mock.invocationCallOrder[6]).toBeGreaterThan(jsonSpy.mock.invocationCallOrder[5] ?? 0);
 			expect(jsonSpy.mock.calls.filter(call => call[1][0] === "issue").map(call => call[1])).toEqual([
-				["issue", "view", "7", "--repo", "owner/repo", "--json", "id,number,url"],
+				["issue", "view", "7", "--repo", "owner/repo", "--json", "id,parent,number,url"],
 				["issue", "view", "8", "--repo", "owner/repo", "--json", "id,parent,number,url"],
 				["issue", "view", crossRepoChild, "--json", "id,parent,number,url"],
 				["issue", "view", createdUrl, "--json", "id,number,url"],
@@ -778,6 +778,49 @@ describe("github tool", () => {
 			]);
 			expect(result.details?.meta?.source).toEqual({ type: "url", value: createdUrl });
 			expect(result.details?.status).toBe("created");
+		});
+
+		it("rejects a child that is already an ancestor of the requested parent before creation", async () => {
+			const middleUrl = "https://github.com/owner/repo/issues/6";
+			const childUrl = "https://github.com/owner/repo/issues/5";
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === "7") {
+					return {
+						id: "I_parent",
+						parent: { id: "I_middle", number: 6, url: middleUrl },
+						number: 7,
+						url: "https://github.com/owner/repo/issues/7",
+					} as never;
+				}
+				if (args[2] === "5") {
+					return { id: "I_child", parent: null, number: 5, url: childUrl } as never;
+				}
+				if (args[2] === middleUrl) {
+					return {
+						id: "I_middle",
+						parent: { id: "I_child", number: 5, url: childUrl },
+						number: 6,
+						url: middleUrl,
+					} as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+
+			await expect(
+				new GithubTool(createSession()).execute("issue-create-ancestor-cycle", {
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "Cyclic umbrella",
+					parent: "7",
+					subIssues: ["5"],
+				}),
+			).rejects.toThrow(/subIssues cannot contain an ancestor of parent/);
+
+			expect(jsonSpy.mock.calls.filter(call => call[1][0] === "issue")).toHaveLength(3);
+			expect(textSpy).not.toHaveBeenCalled();
 		});
 
 		it("rejects an already-parented child before creating the issue by default", async () => {
@@ -1219,6 +1262,7 @@ describe("github tool", () => {
 				return {
 					number: issueNumber,
 					state: issueNumber === 8 ? "CLOSED" : "OPEN",
+					stateReason: issueNumber === 8 ? "COMPLETED" : null,
 					url: `https://github.com/owner/repo/issues/${issueNumber}`,
 				} as never;
 			});
@@ -1234,8 +1278,8 @@ describe("github tool", () => {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 			expect(jsonSpy.mock.calls.map(call => call[1])).toEqual([
-				["issue", "view", "7", "--repo", "owner/repo", "--json", "number,state,url"],
-				["issue", "view", "8", "--repo", "owner/repo", "--json", "number,state,url"],
+				["issue", "view", "7", "--repo", "owner/repo", "--json", "number,state,stateReason,url"],
+				["issue", "view", "8", "--repo", "owner/repo", "--json", "number,state,stateReason,url"],
 			]);
 			expect(textSpy).toHaveBeenCalledTimes(1);
 			expect(textSpy.mock.calls[0]?.[1]).toEqual([
@@ -1261,6 +1305,7 @@ describe("github tool", () => {
 			vi.spyOn(git.github, "json").mockResolvedValue({
 				number: 12,
 				state: "CLOSED",
+				stateReason: "COMPLETED",
 				url: "https://github.com/owner/repo/issues/12",
 			} as never);
 			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("reopened");
@@ -1273,6 +1318,150 @@ describe("github tool", () => {
 			});
 
 			expect(textSpy.mock.calls[0]?.[1]).toEqual(["issue", "reopen", "12", "--repo", "owner/repo"]);
+		});
+
+		it("reopens with the state-reason field fallback on older GitHub CLI versions", async () => {
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args.at(-1)?.includes("stateReason")) {
+					throw new Error('Unknown JSON field: "stateReason"');
+				}
+				return {
+					number: 12,
+					state: "CLOSED",
+					url: "https://github.com/owner/repo/issues/12",
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("reopened");
+
+			await new GithubTool(createSession()).execute("issue-state-reopen-old-gh", {
+				op: "issue_state",
+				repo: "owner/repo",
+				issue: "12",
+				state: "open",
+			});
+
+			expect(jsonSpy.mock.calls.map(call => call[1].at(-1))).toEqual([
+				"number,state,stateReason,url",
+				"number,state,url",
+			]);
+			expect(textSpy.mock.calls[0]?.[1]).toEqual(["issue", "reopen", "12", "--repo", "owner/repo"]);
+		});
+
+		it("does not claim an already-closed reason when older GitHub CLI omits it", async () => {
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args.at(-1)?.includes("stateReason")) {
+					throw new Error('Unknown JSON field: "stateReason"');
+				}
+				return {
+					number: 12,
+					state: "CLOSED",
+					url: "https://github.com/owner/repo/issues/12",
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text");
+
+			const result = await new GithubTool(createSession()).execute("issue-state-close-old-gh", {
+				op: "issue_state",
+				repo: "owner/repo",
+				issue: "12",
+				state: "closed",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(textSpy).not.toHaveBeenCalled();
+			expect(text).toContain("#12 — https://github.com/owner/repo/issues/12");
+			expect(text).not.toContain("state reason");
+			expect(result.details?.status).toBe("noop");
+		});
+
+		it("rejects pull request numbers before close or reopen mutations", async () => {
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: issueNumber === 41 ? "OPEN" : "CLOSED",
+					stateReason: issueNumber === 41 ? null : "COMPLETED",
+					url: `https://github.com/owner/repo/pull/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text");
+			const tool = new GithubTool(createSession());
+
+			await expect(
+				tool.execute("issue-state-reject-pr-close", {
+					op: "issue_state",
+					repo: "owner/repo",
+					issue: "41",
+					state: "closed",
+				}),
+			).rejects.toThrow(/pull requests are not supported/);
+			await expect(
+				tool.execute("issue-state-reject-pr-reopen", {
+					op: "issue_state",
+					repo: "owner/repo",
+					issue: "42",
+					state: "open",
+				}),
+			).rejects.toThrow(/pull requests are not supported/);
+
+			expect(jsonSpy).toHaveBeenCalledTimes(2);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
+		it("reports an explicit reason mismatch without claiming an already-closed issue changed", async () => {
+			const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({
+				number: 7,
+				state: "CLOSED",
+				stateReason: "NOT_PLANNED",
+				url: "https://github.com/owner/repo/issues/7",
+			} as never);
+			const textSpy = vi.spyOn(git.github, "text");
+
+			const result = await new GithubTool(createSession()).execute("issue-state-reason-mismatch", {
+				op: "issue_state",
+				repo: "owner/repo",
+				issue: "7",
+				state: "closed",
+				stateReason: "completed",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(jsonSpy.mock.calls[0]?.[1]).toEqual([
+				"issue",
+				"view",
+				"7",
+				"--repo",
+				"owner/repo",
+				"--json",
+				"number,state,stateReason,url",
+			]);
+			expect(textSpy).not.toHaveBeenCalled();
+			expect(text).toContain("#7 (state reason: not_planned; requested: completed, unchanged)");
+			expect(text).not.toContain("## Updated");
+			expect(result.details?.status).toBe("noop");
+		});
+
+		it("preserves and reports an existing close reason when no reason is requested", async () => {
+			vi.spyOn(git.github, "json").mockResolvedValue({
+				number: 7,
+				state: "CLOSED",
+				stateReason: "NOT_PLANNED",
+				url: "https://github.com/owner/repo/issues/7",
+			} as never);
+			const textSpy = vi.spyOn(git.github, "text");
+
+			const result = await new GithubTool(createSession()).execute("issue-state-reason-noop", {
+				op: "issue_state",
+				repo: "owner/repo",
+				issue: "7",
+				state: "closed",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(textSpy).not.toHaveBeenCalled();
+			expect(text).toContain("#7 (state reason: not_planned)");
+			expect(text).not.toContain("state reason: completed");
+			expect(result.details?.status).toBe("noop");
 		});
 
 		it("returns an observable partial result when only some state mutations succeed", async () => {
