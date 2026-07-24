@@ -90,6 +90,8 @@ export class SessionTools {
 	#xdevRegistry: XdevRegistry | undefined;
 	#mountedXdevToolNames: Set<string>;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string>; docsInBasePrompt: Set<string> } | undefined;
+	/** Mounted devices whose docs are already part of the current base prompt. */
+	#xdevDocsInBasePrompt = new Set<string>();
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
@@ -156,6 +158,11 @@ export class SessionTools {
 	/** Settings snapshot used for the current skill discovery. */
 	get skillsSettings(): SkillsSettings | undefined {
 		return this.#skillsSettings;
+	}
+
+	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
+	clearAcpPermissionDecisions(): void {
+		this.#acpPermissionDecisions.clear();
 	}
 
 	/** Re-wraps active and mounted tools after the ACP client changes. */
@@ -397,7 +404,7 @@ export class SessionTools {
 					if (outcome.outcome === "cancelled") {
 						throw new ToolAbortError("Permission request cancelled");
 					}
-					const selectedOption = PERMISSION_OPTIONS_BY_ID[outcome.optionId];
+					const selectedOption = PERMISSION_OPTIONS_BY_ID.get(outcome.optionId);
 					if (!selectedOption) {
 						throw new ToolError(`Tool permission response used unknown option ID: ${outcome.optionId}`);
 					}
@@ -546,7 +553,7 @@ export class SessionTools {
 		const pending = this.#pendingXdevMountDelta ?? {
 			added: new Set<string>(),
 			removed: new Set<string>(),
-			docsInBasePrompt: new Set<string>(),
+			docsInBasePrompt: new Set(this.#xdevDocsInBasePrompt),
 		};
 		for (const name of addedNames) {
 			if (!pending.removed.delete(name)) pending.added.add(name);
@@ -555,9 +562,12 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		if (rebuiltSystemPrompt) {
-			pending.docsInBasePrompt = new Set(current);
+			this.#xdevDocsInBasePrompt = new Set(current);
+			pending.docsInBasePrompt = new Set(this.#xdevDocsInBasePrompt);
 		} else {
-			for (const name of addedNames) pending.docsInBasePrompt.delete(name);
+			for (const name of addedNames) {
+				if (!this.#xdevDocsInBasePrompt.has(name)) pending.docsInBasePrompt.delete(name);
+			}
 		}
 		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
 		if (this.#host.settings.get("startup.quiet")) return;
@@ -709,8 +719,9 @@ export class SessionTools {
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
+		this.#xdevDocsInBasePrompt = new Set(this.#mountedXdevToolNames);
 		if (this.#pendingXdevMountDelta) {
-			this.#pendingXdevMountDelta.docsInBasePrompt = new Set(this.#mountedXdevToolNames);
+			this.#pendingXdevMountDelta.docsInBasePrompt = new Set(this.#xdevDocsInBasePrompt);
 		}
 		this.#host.clearMemoryPromotionSnapshot();
 		if (

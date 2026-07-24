@@ -660,6 +660,30 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices[0]).not.toContain("## mcp__nucleus_search");
 	});
 
+	it("omits inline docs when a rebuilt device remounts without another rebuild", async () => {
+		const registry = new XdevRegistry([]);
+		const { session, contexts } = newSession(async () => registry.docsAll("inline"), {
+			xdevRegistry: registry,
+			responses: [{ content: ["ok"] }, { content: ["ok"] }, { content: ["ok"] }],
+		});
+		session.settings.set("tools.xdevDocs", "inline");
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+
+		await session.refreshMCPTools([]);
+		await session.refreshMCPTools([search]);
+		await session.refreshBaseSystemPrompt();
+		await session.prompt("mounted");
+		await session.refreshMCPTools([]);
+		await session.prompt("unmounted");
+		await session.refreshMCPTools([search]);
+		await session.prompt("remounted");
+
+		const notices = mountNoticesIn(contexts[2]);
+		const remountNotice = notices.at(-1);
+		expect(remountNotice).toContain("xd://mcp__nucleus_search");
+		expect(remountNotice).not.toContain("## mcp__nucleus_search");
+	});
+
 	it("omits inline docs from notices after an MCP prompt rebuild", async () => {
 		const registry = new XdevRegistry([]);
 		let rebuildCount = 0;
