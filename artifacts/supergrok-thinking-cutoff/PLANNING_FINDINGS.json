@@ -1,0 +1,11 @@
+{
+  "live_dump_dir": "/tmp/omp-supergrok-thinking-dump",
+  "findings": [
+    "max_output_tokens=256 => response.incomplete reason=max_output_tokens; thinking/text cut mid-structure (proven clamp risk).",
+    "Completed SuperGrok turns still expose only reasoning_summary_text deltas; no reasoning_text.delta; summary often ends mid-list (e.g. \"11.\", \"27.\").",
+    "reasoning_tokens (1k-4k) >> visible summary chars (0.8k-2.6k): full CoT not exposed as plaintext.",
+    "include=reasoning.encrypted_content works and returns encrypted blobs, but not human-readable thinking.",
+    "reasoning.summary=detailed is accepted by api.x.ai (no 400), but does not reliably produce complete non-truncated summaries.",
+    "Cursor path is a different transport (protobuf thinking), which explains fuller thinking UX there."
+  ]
+}

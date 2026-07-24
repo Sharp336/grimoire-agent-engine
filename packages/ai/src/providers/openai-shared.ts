@@ -1140,6 +1140,12 @@ export function resolveOpenAIResponsesOutputClamp(model: Pick<Model, "provider" 
 	if (model.provider === "meta") {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
+	// SuperGrok and paid xAI Responses advertise output caps well above the
+	// conservative OpenAI-compatible 64k ceiling; clamping there truncates long
+	// reasoning turns even when the catalog maxTokens is higher.
+	if (model.provider === "xai-oauth" || model.provider === "xai") {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
 	return undefined;
 }
 

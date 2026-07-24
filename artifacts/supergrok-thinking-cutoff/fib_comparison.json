@@ -1,0 +1,137 @@
+{
+  "low": {
+    "label": "fib_low_cap_256",
+    "elapsed_s": 74.68,
+    "terminal_event": "response.incomplete",
+    "status": "incomplete",
+    "incomplete_details": {
+      "reason": "max_output_tokens"
+    },
+    "usage": {
+      "input_tokens": 273,
+      "input_tokens_details": {
+        "cached_tokens": 128
+      },
+      "output_tokens": 4462,
+      "output_tokens_details": {
+        "reasoning_tokens": 4206
+      },
+      "total_tokens": 4735,
+      "num_sources_used": 0,
+      "num_server_side_tools_used": 0,
+      "cost_in_usd_ticks": 271004000,
+      "context_details": {
+        "input_tokens": 273,
+        "output_tokens": 4462
+      }
+    },
+    "thinking_chars": 2652,
+    "thinking_endswith_alnum": false,
+    "thinking_tail": "n\n13. 2^n approximation: Simple but poor accuracy\n14. Cassini's: Gives exact but not helpful for large n\n15. Hyperbolic: Exact but requires cosh computation\n16.",
+    "text_chars": 1087,
+    "error": null,
+    "event_type_counts": {
+      "response.created": 1,
+      "response.in_progress": 1,
+      "response.output_item.added": 2,
+      "response.reasoning_summary_part.added": 1,
+      "response.reasoning_summary_text.delta": 68,
+      "response.reasoning_summary_text.done": 1,
+      "response.reasoning_summary_part.done": 1,
+      "response.output_item.done": 1,
+      "response.content_part.added": 1,
+      "response.output_text.delta": 256,
+      "response.incomplete": 1
+    }
+  },
+  "omp64k": {
+    "label": "fib_omp_64k",
+    "elapsed_s": 70.82,
+    "terminal_event": "response.completed",
+    "status": "completed",
+    "incomplete_details": null,
+    "usage": {
+      "input_tokens": 273,
+      "input_tokens_details": {
+        "cached_tokens": 256
+      },
+      "output_tokens": 3287,
+      "output_tokens_details": {
+        "reasoning_tokens": 1191
+      },
+      "total_tokens": 3560,
+      "num_sources_used": 0,
+      "num_server_side_tools_used": 0,
+      "cost_in_usd_ticks": 198328000,
+      "context_details": {
+        "input_tokens": 273,
+        "output_tokens": 3287
+      }
+    },
+    "thinking_chars": 991,
+    "thinking_endswith_alnum": false,
+    "thinking_tail": "n / \u221a5.\n9. Continued fraction convergents for \u03c6 to get better approximations.\n10. Solving the recurrence via characteristic equation with quadratic formula.\n11.",
+    "text_chars": 8998,
+    "error": null,
+    "event_type_counts": {
+      "response.created": 1,
+      "response.in_progress": 1,
+      "response.output_item.added": 2,
+      "response.reasoning_summary_part.added": 1,
+      "response.reasoning_summary_text.delta": 65,
+      "response.reasoning_summary_text.done": 1,
+      "response.reasoning_summary_part.done": 1,
+      "response.output_item.done": 2,
+      "response.content_part.added": 1,
+      "response.output_text.delta": 2096,
+      "response.output_text.done": 1,
+      "response.content_part.done": 1,
+      "response.completed": 1
+    }
+  },
+  "uncap": {
+    "label": "fib_uncapped",
+    "elapsed_s": 104.64,
+    "terminal_event": "response.completed",
+    "status": "completed",
+    "incomplete_details": null,
+    "usage": {
+      "input_tokens": 273,
+      "input_tokens_details": {
+        "cached_tokens": 256
+      },
+      "output_tokens": 4798,
+      "output_tokens_details": {
+        "reasoning_tokens": 1812
+      },
+      "total_tokens": 5071,
+      "num_sources_used": 0,
+      "num_server_side_tools_used": 0,
+      "cost_in_usd_ticks": 288988000,
+      "context_details": {
+        "input_tokens": 273,
+        "output_tokens": 4798
+      }
+    },
+    "thinking_chars": 1552,
+    "thinking_endswith_alnum": false,
+    "thinking_tail": ".  Zeckendorf representation analysis\n24.  Modular arithmetic digit estimation\n25.  Geometric series summation\n26.  Vector iteration with norm approximation\n27.",
+    "text_chars": 12073,
+    "error": null,
+    "event_type_counts": {
+      "response.created": 1,
+      "response.in_progress": 1,
+      "response.output_item.added": 2,
+      "response.reasoning_summary_part.added": 1,
+      "response.reasoning_summary_text.delta": 73,
+      "response.reasoning_summary_text.done": 1,
+      "response.reasoning_summary_part.done": 1,
+      "response.output_item.done": 2,
+      "response.content_part.added": 1,
+      "response.output_text.delta": 2986,
+      "response.output_text.done": 1,
+      "response.content_part.done": 1,
+      "response.completed": 1
+    }
+  }
+}

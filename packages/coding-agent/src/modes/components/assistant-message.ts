@@ -24,6 +24,14 @@ const CODE_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
 
+function isReasoningSummaryProvider(provider: string | undefined): boolean {
+	return provider === "xai-oauth" || provider === "xai";
+}
+
+function reasoningSummaryLabelSuffix(provider: string | undefined): string {
+	return isReasoningSummaryProvider(provider) ? theme.fg("dim", " · summary") : "";
+}
+
 function resolveThinkingDisplay(block: ThinkingContentBlock, proseOnly: boolean): { text: string; visible: boolean } {
 	const rawThinking = (block as DisplayThinkingContentBlock).rawThinking;
 	// When rawThinking is set, `block.thinking` is already the formatted display
@@ -341,7 +349,7 @@ export class AssistantMessageComponent extends Container {
 		// text label keeps the pulse descriptive for terminals and screen readers.
 		// The liveness flag also stops the session-wide gauge from leaking a previous
 		// turn's rate onto a fresh token-less block.
-		if (!this.#thinkingRateLive || rate < 0.05) return coloredGlyph + thinkingLabel;
+		if (!this.#thinkingRateLive || rate < 0.05) return coloredGlyph + thinkingLabel + reasoningSummaryLabelSuffix(this.#lastMessage?.provider);
 		// Total provider tokens, dimmed, sit next to the pulse.
 		const totalSpan = this.#thinkingTokens > 0 ? theme.fg("dim", ` · ${formatNumber(this.#thinkingTokens)}`) : "";
 		// Speed badge color: dim gray at rest, brightening toward the theme accent as
@@ -352,7 +360,7 @@ export class AssistantMessageComponent extends Container {
 		const hex = lerpHex(theme.getColorHex("dim"), theme.getAccentColorHex(), ratio);
 		const rateText = ` · ${rate.toFixed(1)} toks/s`;
 		const rateSpan = theme.getColorMode() === "truecolor" ? chalk.hex(hex)(rateText) : theme.fg("muted", rateText);
-		return coloredGlyph + thinkingLabel + totalSpan + rateSpan;
+		return coloredGlyph + thinkingLabel + reasoningSummaryLabelSuffix(this.#lastMessage?.provider) + totalSpan + rateSpan;
 	}
 
 	#startThinkingAnimation(): void {
@@ -823,6 +831,11 @@ export class AssistantMessageComponent extends Container {
 							(c.type === "thinking" && resolveThinkingDisplay(c, this.proseOnlyThinking).visible),
 					);
 
+				if (isReasoningSummaryProvider(message.provider)) {
+					this.#contentContainer.addChild(
+						new Text(theme.fg("thinkingText", "Thinking") + reasoningSummaryLabelSuffix(message.provider), 1, 0),
+					);
+				}
 				// Thinking traces in thinkingText color, italic
 				const md = new Markdown(thinkingText, 1, 0, getMarkdownTheme(), {
 					color: (text: string) => theme.fg("thinkingText", text),

@@ -1,0 +1,3 @@
+I found a key clue - the theme watcher for `~/.cache/current-theme` and memory about THEME_MODE / AcceptEnv. Let me dig deeper into the theme switching setup and run headless nvim to capture actual er...
+
+

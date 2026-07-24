@@ -192,6 +192,18 @@ describe("OpenAI-family output-token cap", () => {
 		const body = await drainResponses(model);
 		expect(body.max_output_tokens).toBe(131_072);
 	});
+	it("lets native xAI OAuth Responses requests use the advertised model cap", async () => {
+		const model = getBundledModel("xai-oauth", "grok-4.5") as Model<"openai-responses">;
+		const body = await drainResponses(model);
+		expect(body.max_output_tokens).toBe(model.maxTokens);
+	});
+
+	it("honors explicit caller caps above the 64k ceiling for xAI OAuth Responses", async () => {
+		const model = getBundledModel("xai-oauth", "grok-4.5") as Model<"openai-responses">;
+		const body = await drainResponses(model, 100_000);
+		expect(body.max_output_tokens).toBe(100_000);
+	});
+
 
 	it("omits default max_output_tokens for OpenRouter Responses so provider routing is not filtered", async () => {
 		const body = await drainResponses(openRouterResponsesModel(131_072));
