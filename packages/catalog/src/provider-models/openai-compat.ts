@@ -167,8 +167,11 @@ function buildAnthropicReferenceMap(
 	for (const model of modelsDevModels) {
 		merged.set(model.id, model);
 	}
-	// Anthropic /v1/models does not carry token limits, so bundled metadata stays canonical
-	// for known models while models.dev only fills gaps for newly discovered ids.
+	for (const model of ANTHROPIC_CURATED_FALLBACK_MODELS) {
+		merged.set(model.id, model);
+	}
+	// Curated entries override models.dev gaps, while bundled metadata stays canonical
+	// for known models.
 	const bundledModels = getBundledModels("anthropic").filter(
 		(model): model is Model<"anthropic-messages"> => model.api === "anthropic-messages",
 	);
@@ -188,6 +191,18 @@ function buildAnthropicReferenceMap(
  * by the generator's policy pass (scripts/generated-policies.ts).
  */
 export const ANTHROPIC_CURATED_FALLBACK_MODELS: readonly ModelSpec<"anthropic-messages">[] = [
+	{
+		id: "claude-opus-5",
+		name: "Claude Opus 5",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	},
 	{
 		id: "claude-sonnet-5",
 		name: "Claude Sonnet 5",

@@ -11628,6 +11628,37 @@
 				"supportsDisplay": true
 			}
 		},
+		"claude-opus-5": {
+			"id": "claude-opus-5",
+			"name": "Claude Opus 5",
+			"api": "anthropic-messages",
+			"provider": "anthropic",
+			"baseUrl": "https://api.anthropic.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 5,
+				"output": 25,
+				"cacheRead": 0.5,
+				"cacheWrite": 6.25
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				],
+				"supportsDisplay": true
+			}
+		},
 		"claude-sonnet-4-0": {
 			"id": "claude-sonnet-4-0",
 			"name": "Claude Sonnet 4",
@@ -11778,10 +11809,10 @@
 				"image"
 			],
 			"cost": {
-				"input": 2,
-				"output": 10,
-				"cacheRead": 0.2,
-				"cacheWrite": 2.5
+				"input": 3,
+				"output": 15,
+				"cacheRead": 0.3,
+				"cacheWrite": 3.75
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
@@ -13860,7 +13891,7 @@
 				"cacheRead": 0.3,
 				"cacheWrite": 3.75
 			},
-			"contextWindow": 1000000,
+			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"thinking": {
 				"mode": "budget",
@@ -16681,7 +16712,8 @@
 				"effortMap": {
 					"minimal": "none"
 				}
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"glm-5.2": {
 			"id": "glm-5.2",
@@ -16859,7 +16891,8 @@
 				"effortMap": {
 					"minimal": "none"
 				}
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"kimi-k2.7-code": {
 			"id": "kimi-k2.7-code",
@@ -16925,7 +16958,8 @@
 				"effortMap": {
 					"minimal": "none"
 				}
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"minimax-m2.5": {
 			"id": "minimax-m2.5",
@@ -18563,7 +18597,8 @@
 					"medium",
 					"high"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-gpt-5-2": {
 			"id": "duo-chat-gpt-5-2",
@@ -18592,7 +18627,8 @@
 					"medium",
 					"high"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-gpt-5-2-codex": {
 			"id": "duo-chat-gpt-5-2-codex",
@@ -18621,7 +18657,8 @@
 					"medium",
 					"high"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-gpt-5-codex": {
 			"id": "duo-chat-gpt-5-codex",
@@ -18650,7 +18687,8 @@
 					"medium",
 					"high"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-gpt-5-mini": {
 			"id": "duo-chat-gpt-5-mini",
@@ -18679,7 +18717,8 @@
 					"medium",
 					"high"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-haiku-4-5": {
 			"id": "duo-chat-haiku-4-5",
@@ -18709,7 +18748,8 @@
 					"high",
 					"xhigh"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-opus-4-5": {
 			"id": "duo-chat-opus-4-5",
@@ -18739,7 +18779,8 @@
 					"high",
 					"xhigh"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-opus-4-6": {
 			"id": "duo-chat-opus-4-6",
@@ -18769,7 +18810,8 @@
 					"high",
 					"xhigh"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-sonnet-4-5": {
 			"id": "duo-chat-sonnet-4-5",
@@ -18799,7 +18841,8 @@
 					"high",
 					"xhigh"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"duo-chat-sonnet-4-6": {
 			"id": "duo-chat-sonnet-4-6",
@@ -18829,7 +18872,8 @@
 					"high",
 					"xhigh"
 				]
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"gpt-5-codex": {
 			"id": "gpt-5-codex",
@@ -50423,8 +50467,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": null,
-			"maxTokens": null
+			"contextWindow": 983616,
+			"maxTokens": 131072
 		},
 		"qwq-32b": {
 			"id": "qwq-32b",
@@ -62536,8 +62580,6 @@
 			},
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
-			"requestModelId": "gpt-5.6-luna",
-			"reasoningMode": "pro",
 			"applyPatchToolType": "freeform",
 			"thinking": {
 				"mode": "effort",
@@ -62548,7 +62590,9 @@
 					"xhigh",
 					"max"
 				]
-			}
+			},
+			"requestModelId": "gpt-5.6-luna",
+			"reasoningMode": "pro"
 		},
 		"gpt-5.6-sol": {
 			"id": "gpt-5.6-sol",
@@ -62600,8 +62644,6 @@
 			},
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
-			"requestModelId": "gpt-5.6-sol",
-			"reasoningMode": "pro",
 			"applyPatchToolType": "freeform",
 			"thinking": {
 				"mode": "effort",
@@ -62612,7 +62654,9 @@
 					"xhigh",
 					"max"
 				]
-			}
+			},
+			"requestModelId": "gpt-5.6-sol",
+			"reasoningMode": "pro"
 		},
 		"gpt-5.6-terra": {
 			"id": "gpt-5.6-terra",
@@ -62664,8 +62708,6 @@
 			},
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
-			"requestModelId": "gpt-5.6-terra",
-			"reasoningMode": "pro",
 			"applyPatchToolType": "freeform",
 			"thinking": {
 				"mode": "effort",
@@ -62676,7 +62718,9 @@
 					"xhigh",
 					"max"
 				]
-			}
+			},
+			"requestModelId": "gpt-5.6-terra",
+			"reasoningMode": "pro"
 		},
 		"gpt-realtime-2.1": {
 			"id": "gpt-realtime-2.1",
@@ -87928,6 +87972,16 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
+			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -87940,16 +87994,6 @@
 				"effortMap": {
 					"minimal": "low"
 				}
-			},
-			"compat": {
-				"reasoningEffortMap": {
-					"minimal": "low"
-				},
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
 			}
 		},
 		"grok-4.3": {
@@ -87971,6 +88015,16 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 1000000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
+			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -87983,16 +88037,6 @@
 				"effortMap": {
 					"minimal": "low"
 				}
-			},
-			"compat": {
-				"reasoningEffortMap": {
-					"minimal": "low"
-				},
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
 			}
 		},
 		"grok-4.5": {
@@ -88014,6 +88058,16 @@
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
+			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -88026,16 +88080,6 @@
 				"effortMap": {
 					"minimal": "low"
 				}
-			},
-			"compat": {
-				"reasoningEffortMap": {
-					"minimal": "low"
-				},
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
 			}
 		},
 		"grok-build": {

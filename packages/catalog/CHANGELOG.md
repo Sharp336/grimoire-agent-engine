@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `claude-opus-5` to the curated Anthropic fallback catalog ([#6534](https://github.com/can1357/oh-my-pi/pull/6534) by [@wolfiesch](https://github.com/wolfiesch)).
+
 ## [17.1.1] - 2026-07-24
 
 ### Added
