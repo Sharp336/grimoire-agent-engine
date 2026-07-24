@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import { createSourceFormatter } from "@oh-my-pi/pi-coding-agent/tools/source-formatter";
 
 function streamFromText(text: string): ReadableStream<Uint8Array> {
@@ -11,12 +12,12 @@ type SpawnOptions = {
 	readonly stdin: "pipe";
 	readonly stdout: "pipe";
 	readonly stderr: "pipe";
+	readonly cwd: string;
 };
 
 type MockSubprocessStdin = {
 	write(chunk: string | Uint8Array): number | Promise<number>;
-	end(chunk?: string | Uint8Array): void | Promise<void>;
-	flush?: () => void;
+	end(): number | undefined | Promise<number | undefined>;
 };
 
 type MockSubprocessResult = {
@@ -25,7 +26,7 @@ type MockSubprocessResult = {
 	readonly stderr: ReadableStream<Uint8Array> | null;
 	readonly exited: Promise<number | null>;
 	exitCode: number | null;
-	kill: (signal?: Parameters<Bun.Subprocess["kill"]>[0]) => void;
+	kill: (signal?: number | NodeJS.Signals) => void;
 };
 
 type SpawnCommand = (command: readonly string[], options: SpawnOptions) => MockSubprocessResult;
@@ -40,27 +41,48 @@ function createSubprocess(
 	options: {
 		exitCode?: number;
 		stderr?: string;
+		write?: MockSubprocessStdin["write"];
+		end?: MockSubprocessStdin["end"];
+		exited?: Promise<number | null>;
 	} = {},
 ): MockSubprocess {
+	const exit = Promise.withResolvers<number | null>();
 	let written = "";
 	const proc: MockSubprocessResult = {
 		stdin: {
-			write: vi.fn((chunk: string | Uint8Array) => {
-				const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-				written += text;
-				return text.length;
-			}),
-			end: vi.fn(),
-			flush: vi.fn(),
+			write:
+				options.write ??
+				vi.fn((chunk: string | Uint8Array) => {
+					const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+					written += text;
+					return text.length;
+				}),
+			end:
+				options.end ??
+				vi.fn(() => {
+					exit.resolve(options.exitCode ?? 0);
+					return undefined;
+				}),
 		},
 		stdout: streamFromText(source),
 		stderr: streamFromText(options.stderr ?? ""),
-		exited: Promise.resolve(options.exitCode ?? 0),
+		exited: options.exited ?? exit.promise,
 		exitCode: null,
 		kill: vi.fn(),
 	};
 
 	return { process: proc, getWritten: () => written };
+}
+
+const EXPECTED_FORMATTER_SPAWN_OPTIONS: SpawnOptions = {
+	stdin: "pipe",
+	stdout: "pipe",
+	stderr: "pipe",
+	cwd: os.tmpdir(),
+};
+
+function neverSettlingPromise<T>(): Promise<T> {
+	return Promise.withResolvers<T>().promise;
 }
 
 type SourceFormatterOutcome = Awaited<ReturnType<ReturnType<typeof createSourceFormatter>>>;
@@ -111,11 +133,10 @@ describe("createSourceFormatter", () => {
 		expect(formatted.nested).toBe(args.nested);
 		expect(formatted.code).not.toBe(args.code);
 		expect(spawn).toHaveBeenCalledTimes(1);
-		expect(spawn).toHaveBeenCalledWith(["/tmp/prettier", "--no-config", "--stdin-filepath", "tool-call.js"], {
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-		});
+		expect(spawn).toHaveBeenCalledWith(
+			["/tmp/prettier", "--no-config", "--stdin-filepath", "tool-call.js"],
+			EXPECTED_FORMATTER_SPAWN_OPTIONS,
+		);
 		expect(subprocess.getWritten()).toBe(args.code);
 		expect(which).toHaveBeenCalledTimes(1);
 	});
@@ -134,8 +155,8 @@ describe("createSourceFormatter", () => {
 			code: "formatted-py\n",
 		});
 		expect(spawn).toHaveBeenCalledWith(
-			["/tmp/ruff", "format", "--stdin-filename", "tool-call.py", "-"],
-			expect.anything(),
+			["/tmp/ruff", "format", "--isolated", "--stdin-filename", "tool-call.py", "-"],
+			EXPECTED_FORMATTER_SPAWN_OPTIONS,
 		);
 	});
 
@@ -151,7 +172,7 @@ describe("createSourceFormatter", () => {
 		expect(formatted).toEqual({
 			command: "formatted-bash\n",
 		});
-		expect(spawn).toHaveBeenCalledWith(["/tmp/shfmt"], expect.anything());
+		expect(spawn).toHaveBeenCalledWith(["/tmp/shfmt"], EXPECTED_FORMATTER_SPAWN_OPTIONS);
 	});
 
 	type WriteCase = {
@@ -172,7 +193,7 @@ describe("createSourceFormatter", () => {
 			name: "python",
 			path: "/tmp/source.py",
 			binary: "ruff",
-			args: ["format", "--stdin-filename", "/tmp/source.py", "-"],
+			args: ["format", "--isolated", "--stdin-filename", "/tmp/source.py", "-"],
 		},
 		{ name: "rust", path: "/tmp/source.rs", binary: "rustfmt", args: ["--emit", "stdout"] },
 		{ name: "go", path: "/tmp/source.go", binary: "gofmt", args: [] },
@@ -193,11 +214,10 @@ describe("createSourceFormatter", () => {
 				path: writeCase.path,
 				content: `formatted-write-${writeCase.name}`,
 			});
-			expect(spawn).toHaveBeenCalledWith([`/tmp/${writeCase.binary}`, ...writeCase.args], {
-				stdin: "pipe",
-				stdout: "pipe",
-				stderr: "pipe",
-			});
+			expect(spawn).toHaveBeenCalledWith(
+				[`/tmp/${writeCase.binary}`, ...writeCase.args],
+				EXPECTED_FORMATTER_SPAWN_OPTIONS,
+			);
 		});
 	}
 
@@ -325,6 +345,32 @@ describe("createSourceFormatter", () => {
 		expect(which).not.toHaveBeenCalled();
 	});
 
+	for (const stalledInput of ["write", "end"] as const) {
+		it(`falls back when stdin.${stalledInput} and process exit never settle`, async () => {
+			const which = vi.fn().mockReturnValue("/tmp/prettier");
+			const subprocess = createSubprocess("formatted-js\n", {
+				write: stalledInput === "write" ? () => neverSettlingPromise<number>() : undefined,
+				end: stalledInput === "end" ? () => neverSettlingPromise<undefined>() : undefined,
+				exited: neverSettlingPromise<number | null>(),
+			});
+			const spawn = vi.fn<SpawnCommand>(() => subprocess.process);
+			const formatter = createSourceFormatter({
+				runtime: { which, spawn },
+				options: { timeoutMs: 20, terminateGraceMs: 5 },
+			});
+
+			const result = await formatter(
+				"eval",
+				{ language: "js", code: "const value = 1;" },
+				new AbortController().signal,
+			);
+
+			expectUnchanged(result);
+			expect(subprocess.process.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
+			expect(subprocess.process.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+		});
+	}
+
 	it("falls back when args are non-object", async () => {
 		const which = vi.fn();
 		const spawn = vi.fn<SpawnCommand>(() => {
@@ -334,7 +380,7 @@ describe("createSourceFormatter", () => {
 			runtime: { which, spawn },
 		});
 
-		const result = await formatter("eval", "not-an-object" as unknown, new AbortController().signal);
+		const result = await formatter("eval", "not-an-object", new AbortController().signal);
 
 		expectUnchanged(result);
 		expect(spawn).not.toHaveBeenCalled();

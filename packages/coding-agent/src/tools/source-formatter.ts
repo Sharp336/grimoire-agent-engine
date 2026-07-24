@@ -1,26 +1,29 @@
+import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "lru-cache/raw";
 
-type SpawnOptions = {
+type FormatterProcessKillSignal = number | NodeJS.Signals;
+
+type SpawnOptions = Readonly<{
 	stdin: "pipe";
 	stdout: "pipe";
 	stderr: "pipe";
-};
+	cwd: string;
+}>;
+type FormatterSubprocess = Bun.PipedSubprocess;
 
 type FormatterProcessStdin = {
 	write(chunk: string | Uint8Array): number | Promise<number>;
-	end(chunk?: string | Uint8Array): void | Promise<void>;
-	flush?: () => void;
+	end(): number | undefined | Promise<number | undefined>;
 };
-
 type FormatterProcess = {
 	readonly stdin: FormatterProcessStdin | null;
 	readonly stdout: ReadableStream<Uint8Array> | null;
 	readonly stderr: ReadableStream<Uint8Array> | null;
 	readonly exited: Promise<number | null>;
 	exitCode: number | null;
-	kill: (signal?: Parameters<Bun.Subprocess["kill"]>[0]) => void;
+	kill: (signal?: FormatterProcessKillSignal) => void;
 };
 
 type CachedExecutable = { readonly kind: "found"; readonly path: string } | { readonly kind: "missing" };
@@ -90,10 +93,32 @@ const DEFAULT_OPTIONS: NormalizedSourceFormatterOptions = {
 const FALLBACK_PY_FILE = "tool-call.py";
 const FALLBACK_JS_FILE = "tool-call.js";
 const MISSING_EXECUTABLE: CachedExecutable = { kind: "missing" };
+const NEUTRAL_FORMATTER_CWD = os.tmpdir();
+
+function toFormatterProcess(child: FormatterSubprocess): FormatterProcess {
+	const stdin = child.stdin
+		? {
+				write: (chunk: string | Uint8Array) => child.stdin.write(chunk),
+				end: () => child.stdin.end() ?? undefined,
+			}
+		: null;
+	return {
+		stdin,
+		stdout: child.stdout ?? null,
+		stderr: child.stderr ?? null,
+		exited: child.exited,
+		get exitCode(): number | null {
+			return child.exitCode ?? null;
+		},
+		kill: (signal?: FormatterProcessKillSignal) => {
+			child.kill(signal);
+		},
+	};
+}
 
 const defaultRuntime: SourceFormatterRuntime = {
 	which: name => $which(name) ?? undefined,
-	spawn: (command, options) => Bun.spawn([...command], options) as unknown as FormatterProcess,
+	spawn: (command, options) => toFormatterProcess(Bun.spawn([...command], options)),
 };
 
 const textEncoder = new TextEncoder();
@@ -190,7 +215,7 @@ function inferEvalFormatter(argsRecord: Record<string, unknown>): FormatterComma
 			return {
 				field: "code",
 				binary: "ruff",
-				args: ["format", "--stdin-filename", FALLBACK_PY_FILE, "-"],
+				args: ["format", "--isolated", "--stdin-filename", FALLBACK_PY_FILE, "-"],
 				source,
 			};
 		case "js":
@@ -246,7 +271,7 @@ function inferWriteFormatter(argsRecord: Record<string, unknown>): FormatterComm
 		return {
 			field: "content",
 			binary: "ruff",
-			args: ["format", "--stdin-filename", writePath, "-"],
+			args: ["format", "--isolated", "--stdin-filename", writePath, "-"],
 			source,
 		};
 	}
@@ -298,20 +323,25 @@ type ProcessCompletion = { kind: "exit"; exitCode: number | null } | { kind: "ab
 
 async function waitForProcessExitOrAbort(child: FormatterProcess, signal: AbortSignal): Promise<ProcessCompletion> {
 	const { promise, resolve } = Promise.withResolvers<ProcessCompletion>();
-	const settleAborted = (): void => resolve({ kind: "aborted" });
+	const settleAborted = (): void => {
+		signal.removeEventListener("abort", settleAborted);
+		resolve({ kind: "aborted" });
+	};
+	const settleExited = (code?: number | null): void => {
+		signal.removeEventListener("abort", settleAborted);
+		resolve({ kind: "exit", exitCode: code ?? null });
+	};
 
 	if (signal.aborted) {
 		settleAborted();
 		return promise;
 	}
 
-	const settleExited = (code?: number | null): void => {
-		signal.removeEventListener("abort", settleAborted);
-		resolve({ kind: "exit", exitCode: code ?? null });
-	};
-
 	signal.addEventListener("abort", settleAborted, { once: true });
-	void child.exited.then(settleExited, () => settleExited());
+	void child.exited.then(
+		exitCode => settleExited(exitCode),
+		() => settleExited(),
+	);
 
 	return promise;
 }
@@ -346,7 +376,7 @@ async function terminateSubprocess(child: FormatterProcess, graceMs: number): Pr
 		return;
 	}
 
-	await child.exited.catch(() => {});
+	await waitForProcessExit(child, graceMs);
 }
 
 async function runFormatter(
@@ -358,14 +388,18 @@ async function runFormatter(
 ): Promise<string | undefined> {
 	const outputController = new AbortController();
 	let child: FormatterProcess | undefined;
+	const timeoutSignal = AbortSignal.timeout(options.timeoutMs);
+	const formatterSignal = signal.aborted ? signal : AbortSignal.any([signal, timeoutSignal]);
+
 	try {
-		child = runtime.spawn([executable, ...formatter.args], {
+		const spawned = runtime.spawn([executable, ...formatter.args], {
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
+			cwd: NEUTRAL_FORMATTER_CWD,
 		});
+		child = spawned;
 		const stdoutStream = child.stdout;
-
 		const stderrStream = child.stderr;
 		if (!child.stdin || !stdoutStream || !stderrStream) {
 			await terminateSubprocess(child, options.terminateGraceMs);
@@ -374,33 +408,39 @@ async function runFormatter(
 
 		const stdoutPromise = readBounded(stdoutStream, options.maxOutputBytes, outputController.signal);
 		const stderrPromise = readBounded(stderrStream, options.maxOutputBytes, outputController.signal);
+		const processCompletion = waitForProcessExitOrAbort(child, formatterSignal);
+		const cleanupDrains: Promise<unknown>[] = [stdoutPromise, stderrPromise];
+		const cleanup = async (formatterProcess: FormatterProcess): Promise<undefined> => {
+			outputController.abort();
+			await terminateSubprocess(formatterProcess, options.terminateGraceMs);
+			await Promise.allSettled(cleanupDrains);
+			return undefined;
+		};
 
 		const sourceBytes = textEncoder.encode(formatter.source);
-		const written = child.stdin.write(sourceBytes);
-		if (written instanceof Promise) {
-			await written;
-		}
-		const ended = child.stdin.end();
-		if (ended instanceof Promise) {
-			await ended;
-		}
-
-		const completion = await Promise.race<ProcessCompletion>([
-			waitForProcessExitOrAbort(child, signal),
-			Bun.sleep(options.timeoutMs).then(() => ({ kind: "aborted" }) as const),
+		const written = await Promise.race<ProcessCompletion | number>([
+			Promise.resolve(child.stdin.write(sourceBytes)),
+			processCompletion,
 		]);
+		if (typeof written !== "number") {
+			return cleanup(child);
+		}
 
+		const ended = await Promise.race<ProcessCompletion | undefined>([
+			Promise.resolve(child.stdin.end()).then(() => undefined),
+			processCompletion,
+		]);
+		if (ended !== undefined && typeof ended === "object") {
+			return cleanup(child);
+		}
+
+		const completion = await processCompletion;
 		if (completion.kind !== "exit") {
-			outputController.abort();
-			await terminateSubprocess(child, options.terminateGraceMs);
-			await Promise.allSettled([stdoutPromise, stderrPromise]);
-			return undefined;
+			return cleanup(child);
 		}
 
 		if (completion.exitCode !== 0) {
-			await terminateSubprocess(child, options.terminateGraceMs);
-			await Promise.allSettled([stdoutPromise, stderrPromise]);
-			return undefined;
+			return cleanup(child);
 		}
 
 		const [stdout, stderr] = await Promise.allSettled([stdoutPromise, stderrPromise]);
