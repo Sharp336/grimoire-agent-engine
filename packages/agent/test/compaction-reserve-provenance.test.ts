@@ -57,6 +57,18 @@ describe("compaction reserve provenance", () => {
 		expect(shouldCompact(16151, cw, settings)).toBe(true);
 	});
 
+	it("clamps a fixed threshold to the configured prompt budget without a 50K discontinuity", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdPercent: -1,
+			thresholdTokens: 100000,
+			keepRecentTokens: 20000,
+		};
+		expect(resolveThresholdTokens(50000, settings)).toBe(33616);
+		expect(resolveThresholdTokens(50001, settings)).toBe(33617);
+		expect(resolveThresholdTokens(50001, { ...settings, reserveTokens: 8000 })).toBe(42001);
+	});
+
 	it("clamps the proportional fallback to >= 1 and the threshold below the window on tiny windows", () => {
 		const settings: CompactionSettings = {
 			enabled: true,

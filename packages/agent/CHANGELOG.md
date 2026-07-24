@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Clamped a configured `compaction.thresholdTokens` to the usable prompt budget (`contextWindow - reserveTokens`) instead of `contextWindow - 1`. The old bound was unreachable: a threshold one token below the window means compaction can only fire once the prompt has already consumed the whole context, so the request that would cross it fails first and compaction never runs. The ceiling now matches the one the percentage path already used, so it scales with the window and follows a configured `reserveTokens`, and a reduced value is logged rather than silently rewritten
+
 ## [17.1.2] - 2026-07-24
 
 ### Added

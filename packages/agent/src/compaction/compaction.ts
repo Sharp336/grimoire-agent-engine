@@ -182,6 +182,10 @@ export interface CompactionSettings {
 	v2RetainedMessageBudget?: number;
 }
 
+export interface ThresholdResolutionOptions {
+	warnOnClamp?: boolean;
+}
+
 /** Reserve applied when {@link CompactionSettings.reserveTokens} is unset. */
 export const DEFAULT_RESERVE_TOKENS = 16384;
 
@@ -293,7 +297,7 @@ export function resolveBudgetReserveTokens(contextWindow: number, settings: Comp
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled || settings.strategy === "off" || contextWindow <= 0) return false;
-	const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+	const thresholdTokens = resolveThresholdTokens(contextWindow, settings, { warnOnClamp: true });
 	return contextTokens > thresholdTokens;
 }
 
@@ -316,12 +320,35 @@ export function compactionContextTokens(providerContextTokens: number, storedCon
 	return Math.max(Math.max(0, providerContextTokens), Math.max(0, storedConversationEstimate));
 }
 
-export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
-	// Fixed token limit takes priority over percentage
+export function resolveThresholdTokens(
+	contextWindow: number,
+	settings: CompactionSettings,
+	options: ThresholdResolutionOptions = {},
+): number {
+	// Fixed token limit takes priority over percentage.
 	const thresholdTokens = settings.thresholdTokens;
 	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
-		// Clamp to [1, contextWindow - 1] so there's always room
-		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
+		// Clamp to the same prompt budget the percentage path uses, rather than a
+		// separate constant. The budget is the point at which a prompt stops
+		// fitting, so a threshold above it can never fire: the request that would
+		// cross it fails first. Deriving the ceiling from `reserveTokens` also
+		// keeps it proportional to the window and leaves it configurable, which
+		// matters because how much headroom a maintenance pass needs depends on
+		// how it runs. A provider-side compaction re-sends roughly the context it
+		// is compacting, while a local summary must also fit the summarization
+		// call and its output.
+		const reserveTokens = resolveBudgetReserveTokens(contextWindow, settings);
+		const maxThresholdTokens = Math.max(1, contextWindow - reserveTokens);
+		const clampedThresholdTokens = Math.min(maxThresholdTokens, Math.max(1, thresholdTokens));
+		if (thresholdTokens > maxThresholdTokens && options.warnOnClamp) {
+			logger.warn("compaction.thresholdTokens exceeds the usable prompt budget; clamping", {
+				thresholdTokens,
+				contextWindow,
+				maxThresholdTokens: clampedThresholdTokens,
+				reserveTokens,
+			});
+		}
+		return clampedThresholdTokens;
 	}
 
 	// Percentage-based threshold. The default absolute reserve can exceed bundled
