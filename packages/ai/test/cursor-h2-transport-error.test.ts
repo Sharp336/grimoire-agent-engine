@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { ProviderResponseError } from "@oh-my-pi/pi-ai/error";
 import { mapH2TransportError } from "@oh-my-pi/pi-ai/providers/cursor";
 import { __evictH2PoolEntry, __getH2PoolStatsForOrigin, acquireH2Session } from "../src/providers/cursor/h2-pool";
+import { __resetProxyCache } from "../src/utils/proxy";
 
 const BASE_URL = "https://api2.cursor.sh";
 
@@ -52,6 +53,7 @@ describe("H2 pool setup error propagation", () => {
 	it("reports the underlying setup error rather than the generic aggregate when every slot fails", async () => {
 		const envKey = "PI_PROXY_CURSOR_REVIEW_ERROR";
 		const previousProxy = Bun.env[envKey];
+		__resetProxyCache();
 		Bun.env[envKey] = "http://127.0.0.1:59997";
 		try {
 			await expect(acquireH2Session("https://cursor-review-error.example", "cursor-review-error")).rejects.toThrow(
@@ -61,6 +63,7 @@ describe("H2 pool setup error propagation", () => {
 			if (previousProxy === undefined) delete Bun.env[envKey];
 			else Bun.env[envKey] = previousProxy;
 			__evictH2PoolEntry("https://cursor-review-error.example", "cursor-review-error");
+			__resetProxyCache();
 		}
 	});
 });
