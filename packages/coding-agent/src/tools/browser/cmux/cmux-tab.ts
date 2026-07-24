@@ -21,7 +21,7 @@ import {
 } from "../run-cancellation";
 import { cloneSafe, RunOutput } from "../run-output";
 import type { Observation, ReadyInfo, RunResultOk, ScreenshotResult, SessionSnapshot } from "../tab-protocol";
-import { CmuxCodexBrowserAdapter } from "./codex-adapter";
+import { CmuxCodexBrowserAdapter, type CmuxCodexBrowserSessionState } from "./codex-adapter";
 import {
 	type CmuxEvalResult,
 	type CmuxGeometry,
@@ -104,6 +104,16 @@ interface ViewportOptions {
 }
 
 const PAGE_SELECTOR_HELPERS = `
+const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
+const composedParent = element => element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
+const disabled = target => {
+	if (target.matches?.(":disabled") || target.disabled === true) return true;
+	for (let current = target; current; current = composedParent(current)) {
+		if (trueState(current.getAttribute?.("aria-disabled"))) return true;
+	}
+	return false;
+};
+const readOnly = target => target.readOnly === true || trueState(target.getAttribute?.("aria-readonly"));
 const isVisible = element => {
 	const style = getComputedStyle(element);
 	const rect = element.getBoundingClientRect();
@@ -183,25 +193,32 @@ const inputEvent = target => {
 	event(target, "change");
 };
 const isEditable = target => {
-	if (target.disabled || target.readOnly) return false;
+	if (disabled(target) || readOnly(target)) return false;
 	const tag = String(target.tagName || "").toLowerCase();
 	if (tag === "textarea") return true;
 	if (tag === "input") {
 		const type = String(target.type || target.getAttribute("type") || "text").toLowerCase();
-		return !["button", "checkbox", "file", "hidden", "image", "radio", "reset", "submit"].includes(type);
+		return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(type);
 	}
 	return target.isContentEditable === true;
 };
 const assertReceivesPointerAtCenter = target => {
-	for (let current = target; current; current = current.parentElement) {
-		if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || current.getAttribute?.("aria-hidden") === "true") throw new Error("Element is not actionable");
+	for (let current = target; current; current = composedParent(current)) {
+		if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || trueState(current.getAttribute?.("aria-hidden"))) throw new Error("Element is not actionable");
 	}
-	if (target.disabled || target.getAttribute?.("aria-disabled") === "true" || target.isConnected === false) throw new Error("Element is not actionable");
+	if (disabled(target) || target.isConnected === false) throw new Error("Element is not actionable");
 	const rect = target.getBoundingClientRect();
 	if (rect.width <= 0 || rect.height <= 0) throw new Error("Element is not actionable");
+	const x = (rect.left ?? rect.x) + rect.width / 2;
+	const y = (rect.top ?? rect.y) + rect.height / 2;
 	const ownerDocument = target.ownerDocument || document;
-	const hit = ownerDocument.elementFromPoint?.((rect.left ?? rect.x) + rect.width / 2, (rect.top ?? rect.y) + rect.height / 2);
-	for (let current = hit; current; current = current.parentElement) {
+	let hit = ownerDocument.elementFromPoint?.(x, y) ?? null;
+	while (hit?.shadowRoot?.elementFromPoint) {
+		const nested = hit.shadowRoot.elementFromPoint(x, y);
+		if (!nested || nested === hit) break;
+		hit = nested;
+	}
+	for (let current = hit; current; current = composedParent(current)) {
 		if (current === target) return;
 	}
 	throw new Error("Element does not receive pointer events at its center");
@@ -210,6 +227,31 @@ const editableValue = (target, label) => {
 	if (!isEditable(target)) throw new Error(label + " requires an editable element");
 	const tag = String(target.tagName || "").toLowerCase();
 	return tag === "input" || tag === "textarea" ? String(target.value ?? "") : String(target.textContent ?? "");
+};
+const editableTypeState = (target, text, label) => {
+	const current = editableValue(target, label);
+	if (target.ownerDocument?.activeElement !== target && typeof target.focus === "function") target.focus();
+	const tag = String(target.tagName || "").toLowerCase();
+	if (tag === "input" || tag === "textarea") {
+		const start = typeof target.selectionStart === "number" ? target.selectionStart : current.length;
+		const end = typeof target.selectionEnd === "number" ? target.selectionEnd : start;
+		return { expected: current.slice(0, start) + text + current.slice(end) };
+	}
+	const view = target.ownerDocument?.defaultView || window;
+	const selection = view.getSelection?.();
+	const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+	if (!range || !target.contains?.(range.commonAncestorContainer)) return { expected: current + text };
+	try {
+		const prefix = target.ownerDocument.createRange();
+		prefix.selectNodeContents(target);
+		prefix.setEnd(range.startContainer, range.startOffset);
+		const suffix = target.ownerDocument.createRange();
+		suffix.selectNodeContents(target);
+		suffix.setEnd(range.endContainer, range.endOffset);
+		return { expected: current.slice(0, String(prefix).length) + text + current.slice(String(suffix).length) };
+	} catch {
+		return { expected: current + text };
+	}
 };
 const setValue = (target, value, append, label) => {
 	const prior = editableValue(target, label);
@@ -308,12 +350,13 @@ export class CmuxTab {
 	readonly #elementRefs = new Map<number, CachedElementRef>();
 	#pageFacade: CmuxPageFacade | undefined;
 	#browserFacade: CmuxBrowserFacade | undefined;
-	#codexAdapter: CmuxCodexBrowserAdapter | undefined;
+	readonly #codexSessionState: CmuxCodexBrowserSessionState;
 	constructor(opts: { client: CmuxSocketClient; surfaceId: string; url?: string; title?: string }) {
 		this.#client = opts.client;
 		this.#surfaceId = opts.surfaceId;
 		if (opts.url) this.#lastUrl = opts.url;
 		this.#lastTitle = opts.title;
+		this.#codexSessionState = { currentTabNumber: 1, active: true, sessionName: this.#surfaceId };
 	}
 
 	get surfaceId(): string {
@@ -331,8 +374,7 @@ export class CmuxTab {
 	}
 
 	codexAdapter(): CmuxCodexBrowserAdapter {
-		this.#codexAdapter ??= new CmuxCodexBrowserAdapter(this);
-		return this.#codexAdapter;
+		return new CmuxCodexBrowserAdapter(this, this.#codexSessionState);
 	}
 
 	viewport(): ReadyInfo["viewport"] {
@@ -429,13 +471,21 @@ export class CmuxTab {
 		const snapshotScript = buildAriaSnapshotScript(selector, opts);
 		const script = opts?.preserveRefs
 			? `(() => {
+				const allElements = root => {
+					const elements = [];
+					for (const element of root.querySelectorAll("*")) {
+						elements.push(element);
+						if (element.shadowRoot) elements.push(...allElements(element.shadowRoot));
+					}
+					return elements;
+				};
 				const priorRefs = [];
-				for (const element of document.querySelectorAll("*")) {
+				for (const element of allElements(document)) {
 					if (Object.prototype.hasOwnProperty.call(element, "_ariaRef")) priorRefs.push([element, element._ariaRef]);
 				}
 				try { return (${snapshotScript}); }
 				finally {
-					for (const element of document.querySelectorAll("*")) delete element._ariaRef;
+					for (const element of allElements(document)) delete element._ariaRef;
 					for (const [element, ref] of priorRefs) element._ariaRef = ref;
 				}
 			})()`
@@ -1068,22 +1118,33 @@ export class CmuxTab {
 					return undefined as TResult;
 				case "type": {
 					const text = String(args.text ?? "");
-					const before =
-						spec.kind === "css"
-							? await this.#evalSelectorAction<string>(spec, "editableValue", { label: "tab.type" }, remaining())
-							: undefined;
-					await this.#request("browser.type", { selector: nativeSelector, text }, remaining());
-					if (spec.kind === "css") {
-						const after = await this.#evalSelectorAction<string>(
-							spec,
-							"editableValue",
-							{ label: "tab.type" },
-							remaining(),
-						);
-						if (typeof before !== "string" || after !== before + text) {
-							throw new ToolError("tab.type did not update the editable element");
-						}
+					const state = await this.#evalSelectorAction<unknown>(
+						spec,
+						"editableTypeState",
+						{ label: "tab.type", text },
+						remaining(),
+					);
+					if (
+						!state ||
+						typeof state !== "object" ||
+						!("expected" in state) ||
+						typeof state.expected !== "string"
+					) {
+						throw new ToolError("tab.type could not determine the expected editable value");
 					}
+					const expected = state.expected;
+					if (text.length === 0 || text.trim().length !== text.length) {
+						await this.#request("browser.fill", { selector: nativeSelector, text: expected }, remaining());
+					} else {
+						await this.#request("browser.type", { selector: nativeSelector, text }, remaining());
+					}
+					const after = await this.#evalSelectorAction<string>(
+						spec,
+						"editableValue",
+						{ label: "tab.type" },
+						remaining(),
+					);
+					if (after !== expected) throw new ToolError("tab.type did not update the editable element");
 					return undefined as TResult;
 				}
 				case "fill": {
@@ -1125,6 +1186,7 @@ export class CmuxTab {
 			const element = findElement(spec);
 			if (!element) throw new Error("No element matched " + spec.raw);
 			if (action === "editableValue") return editableValue(element, String(args.label || "selector action"));
+			if (action === "editableTypeState") return editableTypeState(element, String(args.text || ""), String(args.label || "selector action"));
 			if (action !== "exists") element.scrollIntoView({ block: "center", inline: "center" });
 			switch (action) {
 				case "click":
@@ -1628,7 +1690,7 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 	const output = new RunOutput();
 	const screenshots: ScreenshotResult[] = [];
 	const runId = crypto.randomUUID();
-	tab.setRunContext({ session: opts.snapshot, output, screenshots, signal, timeoutMs: opts.timeoutMs });
+	let ownsRunContext = false;
 	let codexAdapter: CmuxCodexBrowserAdapter | undefined;
 	let codexRunStarted = false;
 	let attachedAgent: object | undefined;
@@ -1681,6 +1743,8 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 							},
 				),
 		});
+		tab.setRunContext({ session: opts.snapshot, output, screenshots, signal, timeoutMs: opts.timeoutMs });
+		ownsRunContext = true;
 
 		const globalScope: object = globalThis;
 		if (!("agent" in globalScope) || typeof globalScope.agent !== "function") {
@@ -1729,7 +1793,7 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 			} finally {
 				signal.removeEventListener("abort", onAbort);
 				runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
-				tab.clearRunContext();
+				if (ownsRunContext) tab.clearRunContext();
 			}
 		}
 	}

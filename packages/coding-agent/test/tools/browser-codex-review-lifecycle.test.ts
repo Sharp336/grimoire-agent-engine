@@ -437,6 +437,9 @@ describe("Codex agent.browser cmux run lifecycle", () => {
 		const secondTab = new CmuxTab({ client: makeClient(), surfaceId: "facade-contender" });
 		const firstRuntime = firstTab.ensureRuntime(snapshot);
 		const secondRuntime = secondTab.ensureRuntime(snapshot);
+		const runtimeOwner = spyOn(firstTab, "ensureRuntime")
+			.mockImplementationOnce(() => firstRuntime)
+			.mockImplementationOnce(() => secondRuntime);
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const control: { activeBrowser?: unknown; entered: typeof entered; release: typeof release } = {
@@ -465,7 +468,10 @@ describe("Codex agent.browser cmux run lifecycle", () => {
 				control.activeBrowser = agent.browser;
 				control.entered.resolve();
 				await control.release.promise;
-				return { sameFacade: agent.browser === control.activeBrowser };`,
+				let runContextPreserved = false;
+				try { await tab.uploadFile("#missing", "missing-upload-fixture"); }
+				catch (error) { runContextPreserved = !String(error).includes("requires an active cmux browser run"); }
+				return { sameFacade: agent.browser === control.activeBrowser, runContextPreserved };`,
 				timeoutMs: 5_000,
 				session,
 				snapshot,
@@ -474,7 +480,7 @@ describe("Codex agent.browser cmux run lifecycle", () => {
 
 			let concurrentFailure: string | undefined;
 			try {
-				await runCmuxCode(secondTab, { code: "return true;", timeoutMs: 5_000, session, snapshot });
+				await runCmuxCode(firstTab, { code: "return true;", timeoutMs: 5_000, session, snapshot });
 			} catch (error) {
 				concurrentFailure = error instanceof Error ? error.message : String(error);
 			}
@@ -499,7 +505,7 @@ describe("Codex agent.browser cmux run lifecycle", () => {
 				concurrentFailure: "Cannot set run scope while another same-realm JS runtime is running",
 				callableAgentPreserved: true,
 				activeFacadePreserved: true,
-				activeRunFacadePreserved: { sameFacade: true },
+				activeRunFacadePreserved: { sameFacade: true, runContextPreserved: true },
 				priorBrowserRestored: true,
 				priorDescriptorRestored: true,
 			});
@@ -507,6 +513,7 @@ describe("Codex agent.browser cmux run lifecycle", () => {
 			release.resolve();
 			await activeRun?.catch(() => undefined);
 			restoreProperty(activeAgent, "browser", originalBrowserDescriptor);
+			runtimeOwner.mockRestore();
 			firstRuntime.dispose();
 			secondRuntime.dispose();
 			delete globals[CONTROL_KEY];

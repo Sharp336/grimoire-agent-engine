@@ -6,6 +6,7 @@ import {
 	type CodexClipboardItem,
 	createCodexBrowserFacade,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/codex-facade";
+import { parseHTML } from "linkedom";
 
 type RpcCall = {
 	method: string;
@@ -91,7 +92,7 @@ function runPageEvaluator(
 
 function runCmuxEvalScript(
 	script: string,
-	bindings: { document: unknown; window: unknown; Event: unknown; MouseEvent: unknown },
+	bindings: { document: unknown; window: unknown; Event: unknown; MouseEvent: unknown; getComputedStyle?: unknown },
 ): unknown {
 	const globals = globalThis as unknown as Record<string, unknown>;
 	const descriptors = new Map<string, PropertyDescriptor | undefined>();
@@ -1630,6 +1631,11 @@ describe("cmux Codex browser review regressions", () => {
 			async codexRequest(method: string) {
 				throw new Error(`unsupported_method: ${method}`);
 			},
+			async waitForNavigation(options: { signal?: AbortSignal }) {
+				return await new Promise<null>((_resolve, reject) => {
+					options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+				});
+			},
 		});
 		const reloadTab = await selectedTab(reloadBrowser);
 		const contentBrowser = facadeFor({
@@ -1800,134 +1806,134 @@ describe("cmux Codex browser review regressions", () => {
 		).toEqual([1, 1, 1, 0, 0, 2, 1, 1, 1, 1, 0, 0]);
 	});
 
-	it("preserves selections and appends writable non-selection inputs for CUA typing", async () => {
-		type EventInitProbe = { bubbles?: boolean; cancelable?: boolean; data?: string; inputType?: string };
-		class InputEventProbe {
-			readonly bubbles: boolean;
-			readonly cancelable: boolean;
-			readonly data: string | undefined;
-			readonly inputType: string | undefined;
-			constructor(
-				readonly type: string,
-				init: EventInitProbe = {},
-			) {
-				this.bubbles = init.bubbles ?? false;
-				this.cancelable = init.cancelable ?? false;
-				this.data = init.data;
-				this.inputType = init.inputType;
-			}
+	it("normalizes ARIA true states while keeping visual visibility independent", async () => {
+		const { document, window } = parseHTML(`
+			<html><body>
+				<button id="visual" aria-label="Visually Present" aria-hidden=" TrUe " inert>visible</button>
+				<div id="aria-disabled" aria-disabled=" TRUE "><button aria-label="ARIA Disabled">disabled</button></div>
+				<fieldset id="disabled-fieldset" disabled>
+					<legend><input id="legend-enabled" aria-label="Legend Enabled"></legend>
+					<input id="native-disabled" aria-label="Native Disabled">
+				</fieldset>
+				<input id="readonly" aria-label="Read only" aria-readonly=" tRuE " value="unchanged">
+				<input id="search" type="search" aria-label="Canonical Search">
+			</body></html>
+		`);
+		const visual = document.getElementById("visual");
+		const disabledFieldset = document.getElementById("disabled-fieldset");
+		const legendEnabled = document.getElementById("legend-enabled");
+		const nativeDisabled = document.getElementById("native-disabled");
+		const readonlyInput = document.getElementById("readonly");
+		if (!visual || !disabledFieldset || !legendEnabled || !nativeDisabled || !readonlyInput)
+			throw new Error("Expected normalized ARIA fixtures");
+		Reflect.set(window, "getComputedStyle", (element: Element) => ({
+			display: "block",
+			visibility: "visible",
+			opacity: element === visual ? "0" : "1",
+		}));
+		Reflect.set(disabledFieldset, "matches", (selector: string) => selector === ":disabled");
+		Reflect.set(legendEnabled, "matches", () => false);
+		Reflect.set(nativeDisabled, "matches", (selector: string) => selector === ":disabled");
+		for (const element of document.querySelectorAll("*")) {
+			Reflect.set(element, "getBoundingClientRect", () => ({ x: 0, y: 0, width: 100, height: 20 }));
+			Reflect.set(element, "scrollIntoView", () => undefined);
 		}
-		const events: Array<{ target: "input" | "number" | "editable"; event: InputEventProbe }> = [];
-		const view: Record<string, unknown> = { Event: InputEventProbe, InputEvent: InputEventProbe };
-		const document: Record<string, unknown> = { defaultView: view };
-		const rangeTextCalls: unknown[][] = [];
-		const input: Record<string, unknown> = {
-			tagName: "INPUT",
-			type: "text",
-			value: "abcdef",
-			selectionStart: 2,
-			selectionEnd: 4,
-			disabled: false,
-			readOnly: false,
-			ownerDocument: document,
-			getAttribute: () => null,
-			setRangeText(text: string, start: number, end: number, mode: string) {
-				rangeTextCalls.push([text, start, end, mode]);
-				this.value = String(this.value).slice(0, start) + text + String(this.value).slice(end);
-				this.selectionStart = start + text.length;
-				this.selectionEnd = start + text.length;
-			},
-			dispatchEvent(event: InputEventProbe) {
-				events.push({ target: "input", event });
-				return true;
-			},
-		};
-		const numberInput: Record<string, unknown> = {
-			tagName: "INPUT",
-			type: "number",
-			value: "12",
-			selectionStart: null,
-			selectionEnd: null,
-			disabled: false,
-			readOnly: false,
-			ownerDocument: document,
-			getAttribute: () => null,
-			setRangeText() {
-				throw new Error("number inputs do not support setRangeText");
-			},
-			dispatchEvent(event: InputEventProbe) {
-				events.push({ target: "number", event });
-				return true;
+		const inputEvents: string[] = [];
+		readonlyInput.addEventListener("input", (event: { type: string }) => inputEvents.push(event.type));
+		readonlyInput.addEventListener("change", (event: { type: string }) => inputEvents.push(event.type));
+		let nativeTypeCalls = 0;
+		const client = {
+			async request(method: string, params: Record<string, unknown>) {
+				if (method === "browser.url.get") return { url: "https://fixture.test/current" };
+				if (method === "browser.type") {
+					nativeTypeCalls++;
+					return {};
+				}
+				if (method !== "browser.eval") throw new Error(`Unexpected normalized-state RPC: ${method}`);
+				if (params.script === "document.title") return { value: "Normalized states" };
+				return {
+					value: runCmuxEvalScript(String(params.script), {
+						document,
+						window,
+						Event: window.Event,
+						MouseEvent: window.MouseEvent,
+						getComputedStyle: Reflect.get(window, "getComputedStyle"),
+					}),
+				};
 			},
 		};
-		const textNode = { kind: "text" };
-		const insertedNodes: Array<{ data: string }> = [];
-		const editable: Record<string, unknown> = {
-			tagName: "DIV",
-			textContent: "hello world",
-			isContentEditable: true,
-			ownerDocument: document,
-			getAttribute: () => null,
-			contains: (node: unknown) => node === textNode,
-			dispatchEvent(event: InputEventProbe) {
-				events.push({ target: "editable", event });
-				return true;
-			},
-		};
-		let insertionOffset = 6;
-		const range = {
-			commonAncestorContainer: textNode,
-			deleteContents() {
-				editable.textContent = String(editable.textContent).slice(0, 6);
-			},
-			insertNode(node: { data: string }) {
-				insertedNodes.push(node);
-				const current = String(editable.textContent);
-				editable.textContent = current.slice(0, insertionOffset) + node.data + current.slice(insertionOffset);
-				insertionOffset += node.data.length;
-			},
-			setStartAfter() {},
-			collapse() {},
-		};
-		const selection = {
-			rangeCount: 1,
-			getRangeAt: () => range,
-			removeAllRanges() {},
-			addRange() {},
-		};
-		view.getSelection = () => selection;
-		document.createTextNode = (text: string) => ({ data: text });
-		document.createRange = () => range;
-		document.activeElement = input;
 		const current = await selectedTab(
-			facadeFor({
-				async codexEvaluate(source: string, args: unknown[]) {
-					return runPageEvaluator(source, args, { document, window: view });
-				},
-			}),
+			createCodexBrowserFacade(
+				new CmuxCodexBrowserAdapter(new CmuxTab({ client: client as never, surfaceId: "surface-contract" })),
+			),
 		);
 
-		await current.cua.type({ text: "XY" });
-		document.activeElement = numberInput;
-		await current.cua.type({ text: "3" });
-		document.activeElement = editable;
-		await current.dom_cua.type({ text: "cmux" });
+		expect(await current.playwright.locator("#visual").isVisible()).toBe(true);
+		expect(await current.playwright.getByRole("button", { name: "Visually Present", exact: true }).count()).toBe(0);
+		expect(await current.playwright.getByRole("button", { name: "ARIA Disabled", exact: true }).isEnabled()).toBe(
+			false,
+		);
+		expect(await current.playwright.getByRole("textbox", { name: "Native Disabled", exact: true }).isEnabled()).toBe(
+			false,
+		);
+		expect(await current.playwright.getByRole("textbox", { name: "Legend Enabled", exact: true }).isEnabled()).toBe(
+			true,
+		);
+		expect(await current.playwright.getByRole("searchbox", { name: "Canonical Search", exact: true }).count()).toBe(
+			1,
+		);
 
-		expect(input.value).toBe("abXYef");
-		expect(numberInput.value).toBe("123");
-		expect(rangeTextCalls).toEqual([["XY", 2, 4, "end"]]);
-		expect(editable.textContent).toBe("hello cmux");
-		expect(insertedNodes).toEqual([{ data: "cmux" }]);
-		expect(
-			events.map(({ target, event }) => [target, event.type, event.cancelable, event.data, event.inputType]),
-		).toEqual([
-			["input", "beforeinput", true, "XY", "insertText"],
-			["input", "input", false, "XY", "insertText"],
-			["number", "beforeinput", true, "3", "insertText"],
-			["number", "input", false, "3", "insertText"],
-			["editable", "beforeinput", true, "cmux", "insertText"],
-			["editable", "input", false, "cmux", "insertText"],
-		]);
+		const readonlyLocator = current.playwright.locator("#readonly");
+		expect((await caughtError(() => readonlyLocator.fill("changed"))).name).not.toBe("NO_ERROR");
+		expect((await caughtError(() => readonlyLocator.type("changed"))).name).not.toBe("NO_ERROR");
+		expect(Reflect.get(readonlyInput, "value")).toBe("unchanged");
+		expect(inputEvents).toEqual([]);
+		expect(nativeTypeCalls).toBe(0);
+	});
+
+	it("uses exactly one native type call with selection-aware CUA and locator state", async () => {
+		const { document, window } = parseHTML('<html><body><input id="field" type="text"></body></html>');
+		const input = document.getElementById("field");
+		if (!input) throw new Error("Expected native typing input");
+		Reflect.set(input, "value", "abcdef");
+		Reflect.set(input, "selectionStart", 2);
+		Reflect.set(input, "selectionEnd", 4);
+		Reflect.set(input, "getBoundingClientRect", () => ({ x: 0, y: 0, width: 100, height: 20 }));
+		Reflect.set(input, "scrollIntoView", () => undefined);
+		Reflect.set(input, "focus", () => Reflect.set(document, "activeElement", input));
+		Reflect.set(document, "activeElement", input);
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible", opacity: "0" }));
+		const nativeCalls: Array<{ selector: string; text: string }> = [];
+		const evaluate = (source: string, args: unknown[]) => runPageEvaluator(source, args, { document, window });
+		const { adapter, browser } = adapterAndFacadeFor({
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async codexWait() {
+				throw new Error("Typing target should be immediately actionable");
+			},
+			async type(selector: string, text: string) {
+				nativeCalls.push({ selector, text });
+				const start = Number(Reflect.get(input, "selectionStart"));
+				const end = Number(Reflect.get(input, "selectionEnd"));
+				const value = String(Reflect.get(input, "value"));
+				Reflect.set(input, "value", value.slice(0, start) + text + value.slice(end));
+				Reflect.set(input, "selectionStart", start + text.length);
+				Reflect.set(input, "selectionEnd", start + text.length);
+			},
+		});
+		const current = await selectedTab(browser);
+
+		await current.cua.type({ text: "XY" });
+		expect(Reflect.get(input, "value")).toBe("abXYef");
+		Reflect.set(input, "selectionStart", 6);
+		Reflect.set(input, "selectionEnd", 6);
+		await current.playwright.locator("#field").type("!");
+
+		expect(Reflect.get(input, "value")).toBe("abXYef!");
+		expect(nativeCalls).toHaveLength(2);
+		expect(nativeCalls.map(call => call.text)).toEqual(["XY", "!"]);
+		expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
+		await adapter.dispose();
 	});
 
 	it("rejects fill and type on non-editable targets without mutating them", async () => {
@@ -1983,7 +1989,7 @@ describe("cmux Codex browser review regressions", () => {
 		expect(events).toEqual([]);
 	});
 
-	it("excludes headings and images from default elementInfo and allows opt-in metadata", async () => {
+	it("keeps elementInfo interactable-only even when metadata is requested", async () => {
 		const view = { getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }) };
 		for (const [tagName, attributes] of [
 			["H1", { role: "heading" }],
@@ -2011,9 +2017,7 @@ describe("cmux Codex browser review regressions", () => {
 				}),
 			);
 			expect(await current.playwright.elementInfo({ x: 1, y: 1 })).toEqual([]);
-			expect(await current.playwright.elementInfo({ x: 1, y: 1, includeNonInteractable: true })).toEqual([
-				expect.objectContaining({ tagName: tagName.toLowerCase() }),
-			]);
+			expect(await current.playwright.elementInfo({ x: 1, y: 1, includeNonInteractable: true })).toEqual([]);
 		}
 	});
 
@@ -2218,7 +2222,7 @@ describe("cmux Codex browser review regressions", () => {
 		expect(refTimeouts[0]).toBeGreaterThan(0);
 	});
 
-	it("removes every Codex page global on endRun, dispose, and timeout cleanup", async () => {
+	it("removes every Codex page global on endRun and dispose", async () => {
 		const globals = globalThis as unknown as Record<string, unknown>;
 		const names = [
 			"__ompCodexBrowserState",
@@ -2230,23 +2234,12 @@ describe("cmux Codex browser review regressions", () => {
 		const cleanupModes = [
 			async (adapter: CmuxCodexBrowserAdapter) => adapter.endRun(),
 			async (adapter: CmuxCodexBrowserAdapter) => adapter.dispose(),
-			async (adapter: CmuxCodexBrowserAdapter) => {
-				await caughtError(() =>
-					adapter.invoke("playwright.waitForEvent", {
-						tabId: "1",
-						event: "filechooser",
-						timeoutMs: 1,
-					}),
-				);
-			},
 		];
 
 		try {
 			for (const cleanup of cleanupModes) {
 				for (const name of names) delete globals[name];
-				const adapter = adapterForObserver(observerProbe(), async () => {
-					throw new Error("poll timeout");
-				});
+				const adapter = adapterForObserver(observerProbe());
 				await adapter.beginRun();
 				globals.__ompCodexClipboardWrites = { pending: true };
 				globals.__ompCodexDomRefs = { e1: {} };
@@ -2261,6 +2254,7 @@ describe("cmux Codex browser review regressions", () => {
 
 	it("focuses an aria-ref fallback click target before immediate DOM CUA typing", async () => {
 		const events: string[] = [];
+		const attributes = new Map<string, string>();
 		class EventProbe {
 			constructor(readonly type: string) {}
 		}
@@ -2268,6 +2262,7 @@ describe("cmux Codex browser review regressions", () => {
 		const document = {
 			activeElement: null as Record<string, unknown> | null,
 			querySelectorAll: () => [input],
+			querySelector: () => input,
 			elementFromPoint: () => input,
 		};
 		const input: Record<string, unknown> = {
@@ -2285,7 +2280,9 @@ describe("cmux Codex browser review regressions", () => {
 			ownerDocument: document,
 			getBoundingClientRect: () => ({ x: 10, y: 20, width: 120, height: 32 }),
 			scrollIntoView: () => undefined,
-			getAttribute: () => null,
+			getAttribute: (name: string) => attributes.get(name) ?? null,
+			setAttribute: (name: string, value: string) => attributes.set(name, String(value)),
+			removeAttribute: (name: string) => attributes.delete(name),
 			setRangeText(text: string, start: number, end: number) {
 				this.value = String(this.value).slice(0, start) + text + String(this.value).slice(end);
 				this.selectionStart = start + text.length;
@@ -2302,9 +2299,30 @@ describe("cmux Codex browser review regressions", () => {
 			click: () => events.push("click"),
 		};
 		const window = {};
+		const nativeMethods: string[] = [];
 		const client = {
 			async request(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
 				if (method === "browser.url.get") return { url: "https://fixture.test/current" };
+				if (method === "browser.type") {
+					nativeMethods.push(method);
+					const text = String(params.text ?? "").trim();
+					(input.dispatchEvent as (event: EventProbe) => boolean)(new EventProbe("beforeinput"));
+					Reflect.apply(input.setRangeText as (...args: unknown[]) => unknown, input, [
+						text,
+						Number(input.selectionStart),
+						Number(input.selectionEnd),
+					]);
+					(input.dispatchEvent as (event: EventProbe) => boolean)(new EventProbe("input"));
+					return {};
+				}
+				if (method === "browser.fill") {
+					nativeMethods.push(method);
+					input.value = String(params.text ?? "");
+					input.selectionStart = String(input.value).length;
+					input.selectionEnd = String(input.value).length;
+					(input.dispatchEvent as (event: EventProbe) => boolean)(new EventProbe("input"));
+					return {};
+				}
 				if (method !== "browser.eval") throw new Error(`Unexpected cmux RPC: ${method}`);
 				return {
 					value: runCmuxEvalScript(String(params.script), {
@@ -2327,6 +2345,77 @@ describe("cmux Codex browser review regressions", () => {
 
 		expect(input.value).toBe("typed");
 		expect(events).toEqual(["focus", "mousedown", "mouseup", "click", "beforeinput", "input"]);
+		expect(nativeMethods).toEqual(["browser.type"]);
+
+		await current.dom_cua.type({ text: " padded " });
+		expect(input.value).toBe("typed padded ");
+		expect(nativeMethods).toEqual(["browser.type", "browser.fill"]);
+	});
+
+	it("keeps shadow-root DOM refs actionable through composed hit testing", async () => {
+		const events: string[] = [];
+		class EventProbe {
+			constructor(readonly type: string) {}
+		}
+		class MouseEventProbe extends EventProbe {}
+		let button: Record<string, unknown>;
+		let host: Record<string, unknown>;
+		let shadowRoot: Record<string, unknown>;
+		const view = {
+			Event: EventProbe,
+			MouseEvent: MouseEventProbe,
+			getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+		};
+		const document = {
+			defaultView: view,
+			querySelectorAll: () => [button],
+			elementFromPoint: () => host,
+		};
+		host = { parentElement: null };
+		shadowRoot = { host, elementFromPoint: () => button };
+		Reflect.set(host, "shadowRoot", shadowRoot);
+		button = {
+			_ariaRef: { ref: "e1" },
+			isConnected: true,
+			tagName: "BUTTON",
+			ownerDocument: document,
+			parentElement: null,
+			getRootNode: () => shadowRoot,
+			getBoundingClientRect: () => ({ x: 10, y: 20, width: 100, height: 30 }),
+			scrollIntoView: () => undefined,
+			matches: () => false,
+			inert: false,
+			disabled: false,
+			hasAttribute: () => false,
+			getAttribute: () => null,
+			dispatchEvent: (event: EventProbe) => {
+				events.push(event.type);
+				return true;
+			},
+		};
+		const client = {
+			async request(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+				if (method === "browser.url.get") return { url: "https://fixture.test/current" };
+				if (method !== "browser.eval") throw new Error(`Unexpected shadow-root RPC: ${method}`);
+				return {
+					value: runCmuxEvalScript(String(params.script), {
+						document,
+						window: view,
+						Event: EventProbe,
+						MouseEvent: MouseEventProbe,
+						getComputedStyle: view.getComputedStyle,
+					}),
+				};
+			},
+		};
+		const current = await selectedTab(
+			createCodexBrowserFacade(
+				new CmuxCodexBrowserAdapter(new CmuxTab({ client: client as never, surfaceId: "surface-contract" })),
+			),
+		);
+
+		await current.dom_cua.click({ node_id: "e1" });
+		expect(events).toEqual(["mousedown", "mouseup", "click"]);
 	});
 
 	it("dispatches two complete aria-ref mouse sequences before dblclick", async () => {
@@ -2686,5 +2775,252 @@ describe("cmux Codex browser review regressions", () => {
 		const tab = new CmuxTab({ client: client as never, surfaceId: "surface-contract" });
 
 		await expect(tab.waitForUrl(pattern, { timeout: 1 })).resolves.toBe("https://fixture.test/ready");
+	});
+
+	it("treats selectOption constraints conjunctively without mutating on a partial match", async () => {
+		const probe = selectProbe(["preferred", "backup"], "backup");
+		const current = await selectedTab(facadeForSelect(probe));
+
+		const outcome = await caughtError(() =>
+			current.playwright.locator("#choice").selectOption({ value: "preferred", label: "backup" }),
+		);
+
+		expect(outcome.name).not.toBe("NO_ERROR");
+		expect(probe.selectedValues()).toEqual(["backup"]);
+		expect(probe.events).toEqual([]);
+	});
+
+	it("respects requested developer-log limits above one thousand", async () => {
+		const entries = Array.from({ length: 1_205 }, (_, index) => ({ level: "info", text: `entry-${index}` }));
+		const current = await selectedTab(
+			facadeFor({
+				async codexRequest(method: string) {
+					if (method === "browser.console.list") return { entries };
+					if (method === "browser.errors.list") return { entries: [] };
+					throw new Error(`Unexpected log RPC: ${method}`);
+				},
+			}),
+		);
+
+		const logs = await current.dev.logs({ limit: 1_200 });
+		expect(logs).toHaveLength(1_200);
+		expect(logs[0]).toEqual(entries[5]);
+	});
+
+	it("closes every ambiguous native tab created by tabs.content and restores original focus", async () => {
+		let listCalls = 0;
+		const cleanupCalls: RpcCall[] = [];
+		const browser = facadeFor({
+			async codexRequest(method: string) {
+				switch (method) {
+					case "browser.tab.list":
+						return listCalls++ === 0
+							? { tabs: [{ id: "original", focused: true }] }
+							: {
+									tabs: [
+										{ id: "original", focused: false },
+										{ id: "temporary-a", focused: true },
+										{ id: "temporary-b", focused: false },
+									],
+								};
+					case "browser.tab.new":
+						return { surface_id: "temporary-surface" };
+					case "browser.wait":
+						return {};
+					case "browser.snapshot":
+						return { page: { title: "Temporary" } };
+					case "browser.eval":
+						return { value: "temporary content" };
+					default:
+						throw new Error(`Unexpected content RPC: ${method}`);
+				}
+			},
+			async codexCleanupRequest(method: string, params: Record<string, unknown>, timeoutMs: number) {
+				cleanupCalls.push({ method, params, timeoutMs });
+				return {};
+			},
+		});
+
+		await browser.tabs.content({ urls: ["https://fixture.test/ambiguous"], contentType: "text" });
+
+		expect(cleanupCalls.map(call => [call.method, call.params])).toEqual([
+			["browser.tab.close", { tab_id: "temporary-a" }],
+			["browser.tab.close", { tab_id: "temporary-b" }],
+			["browser.tab.switch", { tab_id: "original" }],
+		]);
+	});
+
+	it("keeps chooser-timeout cleanup isolated until endRun owns full cleanup", async () => {
+		const globals = globalThis as unknown as Record<string, unknown>;
+		const probe = observerProbe();
+		const adapter = adapterForObserver(probe, async () => {
+			throw new Error("poll timeout");
+		});
+		try {
+			await adapter.beginRun();
+			globals.__ompCodexDomRefs = { unrelated: true };
+			globals.__ompCodexMediaTransfers = { unrelated: { controller: { abort: () => undefined } } };
+			globals.__ompCodexClipboardWrites = { unrelated: { done: false } };
+
+			await caughtError(() =>
+				adapter.invoke("playwright.waitForEvent", { tabId: "1", event: "filechooser", timeoutMs: 1 }),
+			);
+
+			expect(globals.__ompCodexBrowserState).toBeDefined();
+			expect(globals.__ompCodexDomRefs).toEqual({ unrelated: true });
+			expect(globals.__ompCodexMediaTransfers).toBeDefined();
+			expect(globals.__ompCodexClipboardWrites).toBeDefined();
+			await adapter.endRun();
+			expect(globals.__ompCodexBrowserState).toBeUndefined();
+			expect(globals.__ompCodexDomRefs).toBeUndefined();
+			expect(globals.__ompCodexMediaTransfers).toBeUndefined();
+			expect(globals.__ompCodexClipboardWrites).toBeUndefined();
+		} finally {
+			delete globals.__ompCodexBrowserState;
+			delete globals.__ompCodexBrowserTokenSequence;
+			delete globals.__ompCodexDomRefs;
+			delete globals.__ompCodexMediaTransfers;
+			delete globals.__ompCodexClipboardWrites;
+		}
+	});
+
+	it("preserves aria refs recursively in nested open shadow roots", async () => {
+		const { document, window } = parseHTML("<html><body><div id=host></div></body></html>");
+		const host = document.getElementById("host");
+		if (!host) throw new Error("Expected shadow host");
+		const firstRoot = host.attachShadow({ mode: "open" });
+		const nestedHost = document.createElement("section");
+		firstRoot.appendChild(nestedHost);
+		const secondRoot = nestedHost.attachShadow({ mode: "open" });
+		const button = document.createElement("button");
+		secondRoot.appendChild(button);
+		Reflect.set(host, "_ariaRef", { ref: "e1" });
+		Reflect.set(nestedHost, "_ariaRef", { ref: "e2" });
+		Reflect.set(button, "_ariaRef", { ref: "e3" });
+		const original = [host, nestedHost, button].map(element => Reflect.get(element, "_ariaRef"));
+		Reflect.set(document, "__mutateAriaRefs", () => {
+			for (const element of [host, nestedHost, button]) Reflect.set(element, "_ariaRef", { ref: "replacement" });
+		});
+		const client = {
+			async request(method: string, params: Record<string, unknown>) {
+				if (method !== "browser.eval") throw new Error(`Unexpected snapshot RPC: ${method}`);
+				const script = String(params.script);
+				const tryStart = script.indexOf("try { return (");
+				const finallyStart = script.indexOf("finally {", tryStart);
+				if (tryStart < 0 || finallyStart < 0) throw new Error("Expected preserveRefs wrapper");
+				const fixtureScript = `${script.slice(0, tryStart)}try {
+					document.__mutateAriaRefs();
+					return "snapshot";
+				}
+				${script.slice(finallyStart)}`;
+				return {
+					value: runCmuxEvalScript(fixtureScript, {
+						document,
+						window,
+						Event: window.Event,
+						MouseEvent: window.MouseEvent,
+					}),
+				};
+			},
+		};
+		const tab = new CmuxTab({ client: client as never, surfaceId: "surface-contract" });
+
+		expect(await tab.ariaSnapshot(undefined, { preserveRefs: true })).toBe("snapshot");
+		expect([host, nestedHost, button].map(element => Reflect.get(element, "_ariaRef"))).toEqual(original);
+	});
+
+	it("returns fresh run adapters while preserving CmuxTab logical session state", async () => {
+		let pageOwner: string | undefined;
+		const client = {
+			async request(method: string, params: Record<string, unknown>) {
+				if (method === "browser.eval") {
+					const script = String(params.script);
+					if (script === "document.title") return { value: "Current fixture" };
+					throw new Error("Lifecycle fixture must not execute the full page runtime");
+				}
+				if (method === "browser.url.get") return { url: "https://fixture.test/current" };
+				throw new Error(`Unexpected run-state RPC: ${method}`);
+			},
+		};
+		const tab = new CmuxTab({ client: client as never, surfaceId: "surface-contract" });
+		Reflect.set(tab, "codexEvaluate", async (_source: string, args: unknown[]) => {
+			const owner = String(args[0]);
+			if (pageOwner && pageOwner !== owner) throw new Error("Page runtime already has an owner");
+			pageOwner = owner;
+			return 0;
+		});
+		Reflect.set(tab, "codexEvaluateCleanup", async (_source: string, args: unknown[]) => {
+			if (pageOwner === String(args[0])) pageOwner = undefined;
+			return true;
+		});
+
+		const first = tab.codexAdapter();
+		await first.beginRun();
+		await first.invoke("browser.nameSession", { name: "logical session" });
+		await first.invoke("tab.close", { tabId: "1" });
+		await first.endRun();
+
+		const second = tab.codexAdapter();
+		expect(second).not.toBe(first);
+		await second.beginRun();
+		const tabs = await second.invoke("tab.list", {});
+		expect(tabs as unknown[]).toEqual([]);
+		expect(await caughtError(() => first.invoke("tab.list", {}))).toEqual({
+			name: "Error",
+			message: "Browser adapter run has ended",
+		});
+		await second.endRun();
+		await second.endRun();
+		expect(pageOwner).toBeUndefined();
+	});
+
+	it("rolls back failed beginRun setup and permits a clean retry", async () => {
+		let installs = 0;
+		let cleanups = 0;
+		const adapter = new CmuxCodexBrowserAdapter({
+			surfaceId: "surface-contract",
+			async codexEvaluate() {
+				if (installs++ === 0) throw new Error("prepare failed");
+				return 0;
+			},
+			async codexEvaluateCleanup() {
+				cleanups++;
+				return true;
+			},
+		} as never);
+
+		await expect(adapter.beginRun()).rejects.toThrow("prepare failed");
+		await adapter.beginRun();
+		await adapter.endRun();
+		await adapter.endRun();
+		expect(cleanups).toBe(2);
+	});
+
+	it("arms reload navigation before the native reload and aborts the waiter after settlement", async () => {
+		const sequence: string[] = [];
+		let navigationSignal: AbortSignal | undefined;
+		const navigation = Promise.withResolvers<null>();
+		const adapter = new CmuxCodexBrowserAdapter({
+			surfaceId: "surface-contract",
+			waitForNavigation(options: { signal?: AbortSignal }) {
+				sequence.push("arm");
+				navigationSignal = options.signal;
+				return navigation.promise;
+			},
+			async codexRequest(method: string) {
+				expect(method).toBe("browser.reload");
+				sequence.push("reload");
+				navigation.resolve(null);
+				return {};
+			},
+			async codexEvaluate() {
+				sequence.push("prepare");
+				return 0;
+			},
+		} as never);
+
+		await adapter.invoke("tab.reload", { tabId: "1", timeoutMs: 100 });
+		expect(sequence).toEqual(["arm", "reload", "prepare"]);
+		expect(navigationSignal?.aborted).toBe(true);
 	});
 });

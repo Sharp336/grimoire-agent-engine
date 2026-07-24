@@ -768,19 +768,25 @@ export class CodexLocator {
 		const normalized = input.map(item => {
 			if (typeof item === "string") return { value: item };
 			const value = requireObject(item, "locator.selectOption");
-			const present = [value.value, value.label, value.index].filter(entry => entry !== undefined);
-			if (present.length === 0) throw new Error("locator.selectOption requires a value, label, or index");
-			if (value.value !== undefined && typeof value.value !== "string")
-				throw new Error("locator.selectOption value must be a string");
-			if (value.label !== undefined && typeof value.label !== "string")
-				throw new Error("locator.selectOption label must be a string");
-			if (
-				value.index !== undefined &&
-				(typeof value.index !== "number" || !Number.isInteger(value.index) || value.index < 0)
-			) {
-				throw new Error("locator.selectOption index must be a non-negative integer");
+			if (value.value === undefined && value.label === undefined && value.index === undefined) {
+				throw new Error("locator.selectOption requires a value, label, or index");
 			}
-			return { value: value.value, label: value.label, index: value.index };
+			const result: { value?: string; label?: string; index?: number } = {};
+			if (value.value !== undefined) {
+				if (typeof value.value !== "string") throw new Error("locator.selectOption value must be a string");
+				result.value = value.value;
+			}
+			if (value.label !== undefined) {
+				if (typeof value.label !== "string") throw new Error("locator.selectOption label must be a string");
+				result.label = value.label;
+			}
+			if (value.index !== undefined) {
+				if (typeof value.index !== "number" || !Number.isInteger(value.index) || value.index < 0) {
+					throw new Error("locator.selectOption index must be a non-negative integer");
+				}
+				result.index = value.index;
+			}
+			return result;
 		});
 		return await this.#adapter.invoke<string[]>(
 			"locator.selectOption",

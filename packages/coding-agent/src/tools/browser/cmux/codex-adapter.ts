@@ -34,6 +34,7 @@ const NAVIGATION_TIMEOUT_MS = 10_000;
 const INSTALL_ARIA_RUNTIME_SOURCE = buildAriaRuntimeInstallerSource();
 const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	const normalizeText = value => String(value ?? "").replace(/\\s+/g, " ").trim();
+	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const canonicalState = element => typeof globalThis.__ompCodexAriaState === "function" ? globalThis.__ompCodexAriaState(element) : null;
 	const textOf = element => normalizeText(element.innerText ?? element.textContent ?? "");
 	const patternMatches = (pattern, value) => {
@@ -44,21 +45,30 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		return pattern.exact ? normalized === expected : normalized.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
 	};
 	const viewOf = element => element?.ownerDocument?.defaultView || window;
+	const composedParent = element => element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
 	const accessibilityHidden = element => {
 		if (canonicalState(element)?.hidden === true) return true;
-		for (let current = element; current; current = current.parentElement) {
-			if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || current.getAttribute?.("aria-hidden") === "true") return true;
+		for (let current = element; current; current = composedParent(current)) {
+			if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || trueState(current.getAttribute?.("aria-hidden"))) return true;
 			const style = viewOf(current).getComputedStyle?.(current);
 			if (style && (style.display === "none" || style.visibility === "hidden")) return true;
 		}
 		return false;
 	};
 	const visible = element => {
-		if (!element || typeof element.getBoundingClientRect !== "function" || accessibilityHidden(element)) return false;
-		const style = viewOf(element).getComputedStyle(element);
+		if (!element || typeof element.getBoundingClientRect !== "function") return false;
+		const style = viewOf(element).getComputedStyle?.(element);
 		const rect = element.getBoundingClientRect();
-		return Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
+		return (!style || (style.display !== "none" && style.visibility !== "hidden")) && rect.width > 0 && rect.height > 0;
 	};
+	const disabled = element => {
+		if (element.matches?.(":disabled") || element.disabled === true) return true;
+		for (let current = element; current; current = composedParent(current)) {
+			if (trueState(current.getAttribute?.("aria-disabled"))) return true;
+		}
+		return false;
+	};
+	const readOnly = element => element.readOnly === true || trueState(element.getAttribute?.("aria-readonly"));
 	const implicitRole = element => {
 		const canonicalRole = canonicalState(element)?.role;
 		if (typeof canonicalRole === "string") return canonicalRole;
@@ -153,11 +163,11 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	};
 	const elements = typeof globalThis.__ompCodexAriaQuery === "function" ? globalThis.__ompCodexAriaQuery(descriptor) : query(descriptor);
 	const element = elements[0];
-	if (command === "status") return { attached: elements.length > 0, visible: !!element && visible(element), enabled: !!element && !element.disabled && element.getAttribute("aria-disabled") !== "true" };
+	if (command === "status") return { attached: elements.length > 0, visible: !!element && visible(element), enabled: !!element && !disabled(element) };
 	if (command === "count") return elements.length;
 	if (command === "allTextContents") return elements.map(item => String(item.textContent ?? ""));
 	if (command === "isVisible") return !!element && visible(element);
-	if (command === "isEnabled") return !!element && !element.disabled && element.getAttribute("aria-disabled") !== "true";
+	if (command === "isEnabled") return !!element && !disabled(element);
 	if (!element) throw new Error("Locator did not resolve to an element");
 	if (command === "bindNativeSelector") {
 		const token = String(payload.token || "");
@@ -186,7 +196,7 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		return target.dispatchEvent(new view.MouseEvent(type, { bubbles: true, cancelable: true, view, ...init }));
 	};
 	const editable = target => {
-		if (target.disabled || target.readOnly || String(target.getAttribute?.("aria-readonly") || "").trim().toLocaleLowerCase() === "true") return false;
+		if (disabled(target) || readOnly(target)) return false;
 		const tag = String(target.tagName || "").toLowerCase();
 		if (tag === "textarea") return true;
 		if (tag === "input") {
@@ -201,8 +211,14 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	}
 	const setValue = (target, value, append, label) => {
 		if (!editable(target)) throw new Error(label + " requires an editable element");
-		const next = append ? String(target.value ?? target.textContent ?? "") + value : value;
 		const tag = String(target.tagName || "").toLowerCase();
+		const current = String(target.value ?? target.textContent ?? "");
+		let next = value;
+		if (append && (tag === "input" || tag === "textarea")) {
+			const start = typeof target.selectionStart === "number" ? target.selectionStart : current.length;
+			const end = typeof target.selectionEnd === "number" ? target.selectionEnd : start;
+			next = current.slice(0, start) + value + current.slice(end);
+		} else if (append) next = current + value;
 		if (tag === "input" || tag === "textarea") {
 			const view = viewOf(target);
 			const prototype = tag === "textarea" ? view.HTMLTextAreaElement?.prototype : view.HTMLInputElement?.prototype;
@@ -219,7 +235,7 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	if (command === "selectOption") {
 		if (String(element.tagName || "").toLowerCase() !== "select") throw new Error("locator.selectOption requires a select element");
 		const options = Array.from(element.options);
-		const resolved = payload.selections.map(selection => options.find(option => selection.value !== undefined ? option.value === selection.value : selection.label !== undefined ? option.label === selection.label : option.index === selection.index));
+		const resolved = payload.selections.map(selection => options.find(option => (selection.value === undefined || option.value === selection.value) && (selection.label === undefined || option.label === selection.label) && (selection.index === undefined || option.index === selection.index)));
 		if (resolved.some(option => !option)) throw new Error("locator.selectOption could not resolve every requested option");
 		const selected = new Set(element.multiple ? resolved : resolved.slice(0, 1));
 		for (const option of options) option.selected = selected.has(option);
@@ -235,7 +251,7 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	if (typeof element.focus === "function") element.focus();
 	if (command === "focus") return true;
 	const assertReceivesPointerAtCenter = target => {
-		if (accessibilityHidden(target) || target.disabled || target.getAttribute?.("aria-disabled") === "true") throw new Error("Locator target is not actionable");
+		if (accessibilityHidden(target) || disabled(target)) throw new Error("Locator target is not actionable");
 		const rect = target.getBoundingClientRect();
 		if (rect.width <= 0 || rect.height <= 0) throw new Error("Locator target is not actionable");
 		const ownerDocument = target.ownerDocument || document;
@@ -282,14 +298,15 @@ const DISARM_NATIVE_FILE_ACTIVATION_SOURCE = `() => {
 	return true;
 }`;
 
-const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
+const ELEMENT_INFO_SOURCE = `(x, y) => {
 	const textOf = element => String(element.innerText ?? element.textContent ?? "").replace(/\\s+/g, " ").trim();
+	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const canonicalState = element => typeof globalThis.__ompCodexAriaState === "function" ? globalThis.__ompCodexAriaState(element) : null;
 	const viewOf = element => element?.ownerDocument?.defaultView || window;
 	const accessibilityHidden = element => {
 		if (canonicalState(element)?.hidden === true) return true;
 		for (let current = element; current; current = current.parentElement) {
-			if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || current.getAttribute?.("aria-hidden") === "true") return true;
+			if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || trueState(current.getAttribute?.("aria-hidden"))) return true;
 			const style = viewOf(current).getComputedStyle?.(current);
 			if (style && (style.display === "none" || style.visibility === "hidden")) return true;
 		}
@@ -327,7 +344,8 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 	const interactable = element => {
 		const tag = element.tagName.toLowerCase();
 		const role = implicitRole(element);
-		return ["button", "input", "select", "textarea", "option"].includes(tag) || (tag === "a" && element.hasAttribute("href")) || interactiveRoles[role] === true || element.hasAttribute("tabindex") || element.tabIndex >= 0 || element.isContentEditable === true || element.hasAttribute("contenteditable");
+		if (tag === "input" && String(element.type || element.getAttribute("type") || "text").toLowerCase() === "hidden") return false;
+		return ["button", "input", "select", "textarea", "option"].includes(tag) || (tag === "a" && element.hasAttribute("href")) || interactiveRoles[role] === true || element.hasAttribute("tabindex") || element.tabIndex >= 0 || element.isContentEditable === true;
 	};
 	const labelledByText = element => {
 		const labelledBy = element.getAttribute("aria-labelledby");
@@ -348,9 +366,7 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 		String(element.getAttribute("alt") || element.getAttribute("title") || valueName(element) || textOf(element) || descendantAlternative(element)).replace(/\\s+/g, " ").trim();
 	let element = document.elementFromPoint(x, y);
 	if (element && accessibilityHidden(element)) return [];
-	if (!includeNonInteractable) {
-		while (element && !interactable(element)) element = element.parentElement;
-	}
+	while (element && !interactable(element)) element = element.parentElement;
 	if (!element) return [];
 	const text = textOf(element);
 	const ariaName = accessibleName(element);
@@ -375,12 +391,14 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 
 const VISIBLE_DOM_SOURCE = `() => {
 	const textOf = element => String(element.innerText ?? element.textContent ?? "").replace(/\\s+/g, " ").trim();
+	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const canonicalState = element => typeof globalThis.__ompCodexAriaState === "function" ? globalThis.__ompCodexAriaState(element) : null;
 	const viewOf = element => element?.ownerDocument?.defaultView || window;
+	const composedParent = element => element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
 	const accessibilityHidden = element => {
 		if (canonicalState(element)?.hidden === true) return true;
-		for (let current = element; current; current = current.parentElement) {
-			if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || current.getAttribute?.("aria-hidden") === "true") return true;
+		for (let current = element; current; current = composedParent(current)) {
+			if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || trueState(current.getAttribute?.("aria-hidden"))) return true;
 			const style = viewOf(current).getComputedStyle?.(current);
 			if (style && (style.display === "none" || style.visibility === "hidden")) return true;
 		}
@@ -418,7 +436,8 @@ const VISIBLE_DOM_SOURCE = `() => {
 	const interactable = element => {
 		const tag = element.tagName.toLowerCase();
 		const role = implicitRole(element);
-		return ["button", "input", "select", "textarea", "option"].includes(tag) || (tag === "a" && element.hasAttribute("href")) || interactiveRoles[role] === true || element.hasAttribute("tabindex") || element.tabIndex >= 0 || element.isContentEditable === true || element.hasAttribute("contenteditable");
+		if (tag === "input" && String(element.type || element.getAttribute("type") || "text").toLowerCase() === "hidden") return false;
+		return ["button", "input", "select", "textarea", "option"].includes(tag) || (tag === "a" && element.hasAttribute("href")) || interactiveRoles[role] === true || element.hasAttribute("tabindex") || element.tabIndex >= 0 || element.isContentEditable === true;
 	};
 	const labelledByText = element => {
 		const labelledBy = element.getAttribute("aria-labelledby");
@@ -437,15 +456,23 @@ const VISIBLE_DOM_SOURCE = `() => {
 		String(element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim() ||
 		associatedLabelText(element) ||
 		String(element.getAttribute("alt") || element.getAttribute("title") || valueName(element) || textOf(element) || descendantAlternative(element)).replace(/\\s+/g, " ").trim();
+	const allElements = root => {
+		const elements = [];
+		for (const element of root.querySelectorAll("*")) {
+			elements.push(element);
+			if (element.shadowRoot) elements.push(...allElements(element.shadowRoot));
+		}
+		return elements;
+	};
 	const nodes = [];
 	const refs = Object.create(null);
-	for (const element of document.querySelectorAll("*")) {
+	for (const element of allElements(document)) {
 		const node_id = element._ariaRef?.ref;
 		if (typeof node_id !== "string" || !/^e\\d+$/.test(node_id) || !interactable(element) || accessibilityHidden(element)) continue;
 		const role = implicitRole(element);
 		const rect = element.getBoundingClientRect();
-		const style = viewOf(element).getComputedStyle(element);
-		if (Number(style.opacity) === 0 || rect.width <= 0 || rect.height <= 0) continue;
+		const style = viewOf(element).getComputedStyle?.(element);
+		if ((style && (style.display === "none" || style.visibility === "hidden")) || rect.width <= 0 || rect.height <= 0) continue;
 		refs[node_id] = element;
 		nodes.push({
 			node_id,
@@ -462,99 +489,39 @@ const VISIBLE_DOM_SOURCE = `() => {
 	return { nodes };
 }`;
 
-const TYPE_ACTIVE_ELEMENT_SOURCE = `(text, label) => {
+const PREPARE_ACTIVE_NATIVE_TYPE_SOURCE = `(token, label) => {
 	const target = document.activeElement;
 	if (!target || typeof target !== "object") throw new Error(label + " requires an editable active element");
+	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
+	const composedParent = element => element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
+	const disabled = element => {
+		if (element.matches?.(":disabled") || element.disabled === true) return true;
+		for (let current = element; current; current = composedParent(current)) {
+			if (trueState(current.getAttribute?.("aria-disabled"))) return true;
+		}
+		return false;
+	};
 	const tag = String(target.tagName || "").toLowerCase();
 	const type = String(target.type || target.getAttribute?.("type") || "text").toLowerCase();
-	const readOnly = target.readOnly || target.getAttribute?.("aria-readonly") === "true";
-	const editableInput = tag === "input" && !target.disabled && !readOnly && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(type);
-	const editableControl = editableInput || (tag === "textarea" && !target.disabled && !readOnly);
-	if (!editableControl && !(target.isContentEditable === true && !readOnly)) throw new Error(label + " requires an editable active element");
-	const ownerDocument = target.ownerDocument;
-	const view = ownerDocument?.defaultView || window;
-	const EventConstructor = view.InputEvent || view.Event || globalThis.InputEvent || globalThis.Event;
-	const event = (type, cancelable) => new EventConstructor(type, { bubbles: true, cancelable, data: text, inputType: "insertText" });
-	if (!target.dispatchEvent(event("beforeinput", true))) throw new Error(label + " beforeinput was cancelled");
-	if (editableControl) {
-		const current = String(target.value ?? "");
-		if (typeof target.setRangeText === "function" && typeof target.selectionStart === "number" && typeof target.selectionEnd === "number") {
-			target.setRangeText(text, target.selectionStart, target.selectionEnd, "end");
-		} else {
-			target.value = current + text;
-			if (String(target.value) !== current + text) throw new Error(label + " could not update the editable value");
-		}
-		target.dispatchEvent(event("input", false));
-		return true;
+	const readOnly = target.readOnly === true || trueState(target.getAttribute?.("aria-readonly"));
+	const editableInput = tag === "input" && !disabled(target) && !readOnly && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(type);
+	if (!editableInput && !(tag === "textarea" && !disabled(target) && !readOnly) && !(target.isContentEditable === true && !readOnly)) {
+		throw new Error(label + " requires an editable active element");
 	}
-	const selection = view.getSelection();
-	let range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-	if (!range || !target.contains(range.commonAncestorContainer)) {
-		range = ownerDocument.createRange();
-		range.selectNodeContents(target);
-		range.collapse(false);
-	}
-	range.deleteContents();
-	const node = ownerDocument.createTextNode(text);
-	range.insertNode(node);
-	range.setStartAfter(node);
-	range.collapse(true);
-	selection.removeAllRanges();
-	selection.addRange(range);
-	target.dispatchEvent(event("input", false));
-	return true;
-}`;
-
-const INSERT_ACTIVE_WHITESPACE_SOURCE = `(text) => {
-	const target = document.activeElement;
-	if (!target || typeof target !== "object") throw new Error("locator.type requires an editable active element");
-	const tag = String(target.tagName || "").toLowerCase();
-	const type = String(target.type || target.getAttribute?.("type") || "text").toLowerCase();
-	const readOnly = target.readOnly || target.getAttribute?.("aria-readonly") === "true";
-	const editableInput = tag === "input" && !target.disabled && !readOnly && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(type);
-	if (!editableInput && !(tag === "textarea" && !target.disabled && !readOnly) && !(target.isContentEditable === true && !readOnly)) throw new Error("locator.type requires an editable active element");
-	const ownerDocument = target.ownerDocument;
-	const view = ownerDocument?.defaultView || window;
-	const EventConstructor = view.InputEvent || view.Event || globalThis.InputEvent || globalThis.Event;
-	const event = (type, cancelable) => new EventConstructor(type, { bubbles: true, cancelable, data: text, inputType: "insertText" });
-	if (!target.dispatchEvent(event("beforeinput", true))) throw new Error("locator.type beforeinput was cancelled");
-	if (editableInput || tag === "textarea") {
-		const current = String(target.value ?? "");
-		if (typeof target.setRangeText === "function" && typeof target.selectionStart === "number" && typeof target.selectionEnd === "number") {
-			target.setRangeText(text, target.selectionStart, target.selectionEnd, "end");
-		} else {
-			target.value = current + text;
-			if (String(target.value) !== current + text) throw new Error("locator.type could not update the editable value");
-		}
-		target.dispatchEvent(event("input", false));
-		return true;
-	}
-	if (target.isContentEditable) {
-		const selection = view.getSelection();
-		let range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-		if (!range || !target.contains(range.commonAncestorContainer)) {
-			range = ownerDocument.createRange();
-			range.selectNodeContents(target);
-			range.collapse(false);
-		}
-		range.deleteContents();
-		const node = ownerDocument.createTextNode(text);
-		range.insertNode(node);
-		range.setStartAfter(node);
-		range.collapse(true);
-		selection.removeAllRanges();
-		selection.addRange(range);
-		target.dispatchEvent(event("input", false));
-		return true;
-	}
-	throw new Error("locator.type requires an editable active element");
+	if (!/^[A-Za-z0-9-]+$/.test(token)) throw new Error("Invalid native action token");
+	target.setAttribute("data-omp-codex-action-token", token);
+	return '[data-omp-codex-action-token="' + token + '"]';
 }`;
 
 const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
+	const preparation = String(_preparation);
+	if (globalThis.__ompCodexBrowserState && globalThis.__ompCodexBrowserState.tokenNamespace !== preparation) {
+		throw new Error("Browser adapter page observer is owned by another run");
+	}
 	if (!globalThis.__ompCodexBrowserState) {
-		const tokenNamespace = String(_preparation) + "-" + String(globalThis.__ompCodexBrowserTokenSequence = (Number(globalThis.__ompCodexBrowserTokenSequence) || 0) + 1);
+		globalThis.__ompCodexBrowserTokenSequence = (Number(globalThis.__ompCodexBrowserTokenSequence) || 0) + 1;
 		const state = {
-			tokenNamespace,
+			tokenNamespace: preparation,
 			nextToken: 1,
 			fileEventSequence: 0,
 			fileEvents: [],
@@ -583,23 +550,29 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 }`;
 
 const INSTALL_PAGE_RUNTIME_SOURCE = `(_preparation) => {
+	const fileEventSequence = (${INSTALL_PAGE_OBSERVERS_SOURCE})(_preparation);
 	(${INSTALL_ARIA_RUNTIME_SOURCE})();
-	return (${INSTALL_PAGE_OBSERVERS_SOURCE})(_preparation);
+	return fileEventSequence;
 }`;
-const CLEANUP_PAGE_OBSERVERS_SOURCE = `() => {
+const CLEANUP_PAGE_OBSERVERS_SOURCE = `(tokenNamespace) => {
 	const state = globalThis.__ompCodexBrowserState;
-	if (state) {
-		state.active = false;
-		if (state.clickListener) document.removeEventListener("click", state.clickListener, true);
-	}
+	if (state?.tokenNamespace !== tokenNamespace) return false;
+	state.active = false;
+	if (state.clickListener) document.removeEventListener("click", state.clickListener, true);
 	for (const element of document.querySelectorAll("[data-omp-codex-file-token]")) {
-		element.removeAttribute("data-omp-codex-file-token");
+		if (String(element.getAttribute("data-omp-codex-file-token") || "").startsWith("file-" + tokenNamespace + "-")) element.removeAttribute("data-omp-codex-file-token");
 	}
 	for (const element of document.querySelectorAll("[data-omp-codex-action-token]")) {
-		element.removeAttribute("data-omp-codex-action-token");
+		if (String(element.getAttribute("data-omp-codex-action-token") || "").startsWith(tokenNamespace)) element.removeAttribute("data-omp-codex-action-token");
 	}
 	const transfers = globalThis.__ompCodexMediaTransfers;
-	if (transfers) for (const transfer of Object.values(transfers)) transfer?.controller?.abort();
+	if (transfers) for (const [token, transfer] of Object.entries(transfers)) {
+		if (!token.startsWith(tokenNamespace)) continue;
+		transfer?.controller?.abort();
+		delete transfers[token];
+	}
+	const writes = globalThis.__ompCodexClipboardWrites;
+	if (writes) for (const token of Object.keys(writes)) if (token.startsWith(tokenNamespace)) delete writes[token];
 	delete globalThis.__ompCodexMediaTransfers;
 	delete globalThis.__ompCodexDomRefs;
 	delete globalThis.__ompCodexBrowserState;
@@ -609,6 +582,7 @@ const CLEANUP_PAGE_OBSERVERS_SOURCE = `() => {
 	delete globalThis.__ompCodexAriaState;
 	return true;
 }`;
+const CLEAR_DOM_REFS_SOURCE = `() => { delete globalThis.__ompCodexDomRefs; return true; }`;
 
 const READ_FILE_EVENT_AFTER_SOURCE = `(baseline) => {
 	const event = globalThis.__ompCodexBrowserState?.fileEvents.find(event => event.sequence > baseline);
@@ -878,28 +852,43 @@ function waitUntilArg(value: unknown): "load" | "domcontentloaded" | "networkidl
 	return value === "load" || value === "domcontentloaded" || value === "networkidle" ? value : undefined;
 }
 
+export interface CmuxCodexBrowserSessionState {
+	currentTabNumber: number;
+	active: boolean;
+	sessionName: string;
+}
+
 export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	readonly #tab: CmuxTab;
-	#currentTabNumber = 1;
-	#active = true;
+	readonly #state: CmuxCodexBrowserSessionState;
 	readonly #navigationCancels = new Map<string, () => void>();
 	readonly #tokenNamespace = crypto.randomUUID();
-	#sessionName: string;
+	#runState: "new" | "active" | "ended" = "new";
 
-	constructor(tab: CmuxTab) {
+	constructor(tab: CmuxTab, state?: CmuxCodexBrowserSessionState) {
 		this.#tab = tab;
-		this.#sessionName = tab.surfaceId;
+		this.#state = state ?? { currentTabNumber: 1, active: true, sessionName: tab.surfaceId };
 	}
 
 	get currentTabId(): string {
-		return String(this.#currentTabNumber);
+		return String(this.#state.currentTabNumber);
 	}
 
 	async beginRun(): Promise<void> {
-		await this.prepare();
+		if (this.#runState === "ended") throw new Error("Browser adapter run has ended");
+		if (this.#runState === "active") return;
+		try {
+			await this.prepare();
+			this.#runState = "active";
+		} catch (error) {
+			await this.#cleanupPageState().catch(() => undefined);
+			throw error;
+		}
 	}
 
 	async endRun(): Promise<void> {
+		if (this.#runState === "ended") return;
+		this.#runState = "ended";
 		for (const cancel of this.#navigationCancels.values()) cancel();
 		this.#navigationCancels.clear();
 		await this.#cleanupPageState();
@@ -923,9 +912,15 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	async #cleanupPageState(timeoutMs = SELECTOR_TIMEOUT_MS): Promise<void> {
 		try {
-			await this.#tab.codexEvaluateCleanup<boolean>(CLEANUP_PAGE_OBSERVERS_SOURCE, [], timeoutMs);
+			await this.#tab.codexEvaluateCleanup<boolean>(
+				CLEANUP_PAGE_OBSERVERS_SOURCE,
+				[this.#tokenNamespace],
+				timeoutMs,
+			);
 		} catch {
-			await this.#tab.codexEvaluate<boolean>(CLEANUP_PAGE_OBSERVERS_SOURCE, [], timeoutMs).catch(() => undefined);
+			await this.#tab
+				.codexEvaluate<boolean>(CLEANUP_PAGE_OBSERVERS_SOURCE, [this.#tokenNamespace], timeoutMs)
+				.catch(() => undefined);
 		}
 	}
 
@@ -943,12 +938,13 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	#assertCurrentTab(args: Readonly<Record<string, unknown>>): void {
 		if (typeof args.tabId !== "string") return;
-		if (this.#active && args.tabId === this.currentTabId) return;
-		const current = this.#active ? this.currentTabId : "none";
+		if (this.#state.active && args.tabId === this.currentTabId) return;
+		const current = this.#state.active ? this.currentTabId : "none";
 		throw new Error(`Browser tab id ${args.tabId} is stale; current tab id is ${current}`);
 	}
 
 	async invoke<T>(operation: CodexBrowserOperation, args: Readonly<Record<string, unknown>>): Promise<T> {
+		if (this.#runState === "ended") throw new Error("Browser adapter run has ended");
 		if (
 			operation !== "browser.nameSession" &&
 			operation !== "browser.user.openTabs" &&
@@ -964,26 +960,26 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 
 		switch (operation) {
 			case "browser.nameSession":
-				if (this.#sessionName !== stringArg(args, "name")) this.#sessionName = stringArg(args, "name");
+				if (this.#state.sessionName !== stringArg(args, "name")) this.#state.sessionName = stringArg(args, "name");
 				return undefined as T;
 			case "browser.user.openTabs":
 				return (await this.#openTabs()) as T;
 			case "browser.user.history":
 				throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.USER_HISTORY);
 			case "tab.new": {
-				const nextTabNumber = this.#currentTabNumber + 1;
+				const nextTabNumber = this.#state.currentTabNumber + 1;
 				await this.prepare();
 				const summary = await this.#summary(String(nextTabNumber));
-				this.#currentTabNumber = nextTabNumber;
-				this.#active = true;
+				this.#state.currentTabNumber = nextTabNumber;
+				this.#state.active = true;
 				return summary as T;
 			}
 			case "tab.selected":
-				return (this.#active ? await this.#summary() : null) as T;
+				return (this.#state.active ? await this.#summary() : null) as T;
 			case "tab.get":
-				return (this.#active && args.id === this.currentTabId ? await this.#summary() : null) as T;
+				return (this.#state.active && args.id === this.currentTabId ? await this.#summary() : null) as T;
 			case "tab.list":
-				return (this.#active ? [await this.#summary()] : []) as T;
+				return (this.#state.active ? [await this.#summary()] : []) as T;
 			case "tabs.content":
 				return (await this.#content(args)) as T;
 			case "tab.goto": {
@@ -1004,19 +1000,37 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			case "tab.reload": {
 				const timeoutMs = numberArg(args, "timeoutMs", NAVIGATION_TIMEOUT_MS);
 				const deadline = Date.now() + timeoutMs;
+				const controller = new AbortController();
+				const navigation = this.#tab
+					.waitForNavigation({
+						waitUntil: "load",
+						timeout: remainingMs(deadline, "tab.reload"),
+						signal: controller.signal,
+					})
+					.then(
+						() => ({ error: undefined }),
+						(error: unknown) => ({ error }),
+					);
 				try {
-					await this.#tab.codexRequest("browser.reload", {}, remainingMs(deadline, "tab.reload"));
-				} catch (error) {
-					if (isUnavailableRpc(error, "browser.reload")) {
-						throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.TAB_RELOAD);
+					try {
+						await this.#tab.codexRequest("browser.reload", {}, remainingMs(deadline, "tab.reload"));
+					} catch (error) {
+						if (isUnavailableRpc(error, "browser.reload")) {
+							throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.TAB_RELOAD);
+						}
+						throw error;
 					}
-					throw error;
+					const outcome = await navigation;
+					if (outcome.error !== undefined) throw outcome.error;
+					await this.prepare(remainingMs(deadline, "tab.reload"));
+					return undefined as T;
+				} finally {
+					controller.abort(new ToolError("tab.reload settled"));
+					await navigation;
 				}
-				await this.prepare(remainingMs(deadline, "tab.reload"));
-				return undefined as T;
 			}
 			case "tab.close":
-				this.#active = false;
+				this.#state.active = false;
 				return undefined as T;
 			case "tab.title":
 				return (await this.#tab.title()) as T;
@@ -1040,7 +1054,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				return undefined as T;
 			}
 			case "tab.clipboard.write": {
-				const token = crypto.randomUUID();
+				const token = `${this.#tokenNamespace}-clipboard-${crypto.randomUUID()}`;
 				const deadline = Date.now() + SELECTOR_TIMEOUT_MS;
 				let settled = false;
 				try {
@@ -1208,12 +1222,20 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			case "dom_cua.type":
 			case "cua.type": {
 				const operationDeadline = Date.now() + selectorTimeoutArg(args);
-				await this.#tab.codexEvaluate<boolean>(
-					TYPE_ACTIVE_ELEMENT_SOURCE,
-					[stringArg(args, "text"), operation],
-					remainingMs(operationDeadline, operation),
-				);
-				return undefined as T;
+				const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
+				try {
+					const selector = await this.#tab.codexEvaluate<string>(
+						PREPARE_ACTIVE_NATIVE_TYPE_SOURCE,
+						[token, operation],
+						remainingMs(operationDeadline, operation),
+					);
+					await this.#tab.type(selector, stringArg(args, "text"), remainingMs(operationDeadline, operation));
+					return undefined as T;
+				} finally {
+					await this.#tab
+						.codexEvaluateCleanup<boolean>(DISPOSE_NATIVE_ACTION_TOKEN_SOURCE, [token], SELECTOR_TIMEOUT_MS)
+						.catch(() => undefined);
+				}
 			}
 			case "dom_cua.keypress":
 			case "cua.keypress":
@@ -1301,7 +1323,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			let focusedTabId: string | undefined;
 			let temporarySurface: string | undefined;
 			let distinctSplitSurface: string | undefined;
-			let temporaryTabId: string | undefined;
+			let temporaryTabIds: string[] = [];
 			try {
 				let before: NativeTabEntry[] | undefined;
 				let nativeTabListingAvailable = true;
@@ -1319,8 +1341,10 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 					distinctSplitSurface = temporarySurface;
 					const after = await this.#nativeTabs(remainingTimeoutMs());
 					if (!after) throw new ToolError("browser.tab.list returned an invalid tab list");
-					temporaryTabId = after.find(tab => !before.some(previous => previous.id === tab.id))?.id;
-					if (temporaryTabId) distinctSplitSurface = undefined;
+					temporaryTabIds = after
+						.filter(tab => !before.some(previous => previous.id === tab.id))
+						.map(tab => tab.id);
+					if (temporaryTabIds.length > 0) distinctSplitSurface = undefined;
 				}
 				if (!temporarySurface) {
 					const openedSurface = await this.#tab.codexRequest("browser.open_split", { url }, remainingTimeoutMs());
@@ -1372,7 +1396,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				if (error instanceof BrowserCapabilityError) throw error;
 				results.push({ url, title: null, content: null });
 			} finally {
-				if (temporaryTabId) {
+				for (const temporaryTabId of temporaryTabIds) {
 					await this.#tab
 						.codexCleanupRequest("browser.tab.close", { tab_id: temporaryTabId }, SELECTOR_TIMEOUT_MS)
 						.catch(() => undefined);
@@ -1382,7 +1406,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 						.codexCleanupRequest("surface.close", { surface_id: distinctSplitSurface }, SELECTOR_TIMEOUT_MS)
 						.catch(() => undefined);
 				}
-				if (temporaryTabId && focusedTabId) {
+				if (temporaryTabIds.length > 0 && focusedTabId) {
 					await this.#tab
 						.codexCleanupRequest("browser.tab.switch", { tab_id: focusedTabId }, SELECTOR_TIMEOUT_MS)
 						.catch(() => undefined);
@@ -1419,7 +1443,9 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		const levels = Array.isArray(args.levels)
 			? new Set(args.levels.filter((value): value is string => typeof value === "string"))
 			: undefined;
-		const limit = Math.min(typeof args.limit === "number" ? args.limit : 1000, 1000);
+		const limit =
+			typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.max(0, Math.trunc(args.limit)) : 1000;
+		if (limit === 0) return [];
 		return values
 			.filter(value => {
 				if (!isRecord(value)) return false;
@@ -1434,7 +1460,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #elementInfo(args: Readonly<Record<string, unknown>>): Promise<CodexElementInfo[]> {
 		const value = await this.#tab.codexEvaluate<unknown>(
 			ELEMENT_INFO_SOURCE,
-			[numberArg(args, "x"), numberArg(args, "y"), args.includeNonInteractable === true],
+			[numberArg(args, "x"), numberArg(args, "y")],
 			SELECTOR_TIMEOUT_MS,
 		);
 		if (Array.isArray(value)) return value as CodexElementInfo[];
@@ -1471,7 +1497,11 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	async #visibleDom(args: Readonly<Record<string, unknown>>): Promise<CodexVisibleDom> {
 		const deadline = Date.now() + selectorTimeoutArg(args);
-		await this.#cleanupPageState(remainingMs(deadline, "dom_cua.get_visible_dom"));
+		await this.#tab.codexEvaluateCleanup<boolean>(
+			CLEAR_DOM_REFS_SOURCE,
+			[],
+			remainingMs(deadline, "dom_cua.get_visible_dom"),
+		);
 		await this.#tab.ariaSnapshot(undefined, { boxes: true }, remainingMs(deadline, "dom_cua.get_visible_dom"));
 		const value = await this.#tab.codexEvaluate<unknown>(
 			VISIBLE_DOM_SOURCE,
@@ -1571,20 +1601,15 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.WAIT_FOR_EVENT);
 		}
 		const deadline = Date.now() + timeoutMs;
-		try {
-			const baseline = await this.prepare(remainingMs(deadline, "playwright.waitForEvent"));
-			while (true) {
-				const result = await this.#tab.codexEvaluate<FileEvent | null>(
-					READ_FILE_EVENT_AFTER_SOURCE,
-					[baseline],
-					remainingMs(deadline, "playwright.waitForEvent"),
-				);
-				if (result) return result;
-				await this.#tab.codexWait(Math.min(50, remainingMs(deadline, "playwright.waitForEvent")));
-			}
-		} catch (error) {
-			await this.#cleanupPageState().catch(() => undefined);
-			throw error;
+		const baseline = await this.prepare(remainingMs(deadline, "playwright.waitForEvent"));
+		while (true) {
+			const result = await this.#tab.codexEvaluate<FileEvent | null>(
+				READ_FILE_EVENT_AFTER_SOURCE,
+				[baseline],
+				remainingMs(deadline, "playwright.waitForEvent"),
+			);
+			if (result) return result;
+			await this.#tab.codexWait(Math.min(50, remainingMs(deadline, "playwright.waitForEvent")));
 		}
 	}
 
@@ -1693,22 +1718,23 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (nativeClick) {
 			let nativeSelector = selector;
 			let token: string | undefined;
-			if (!nativeSelector) {
-				token = crypto.randomUUID();
-				nativeSelector = await this.#locator<string>(
+			let fileActivationArmed = false;
+			try {
+				if (!nativeSelector) {
+					token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
+					nativeSelector = await this.#locator<string>(
+						descriptor,
+						"bindNativeSelector",
+						{ token },
+						remainingMs(deadline, operation),
+					);
+				}
+				fileActivationArmed = await this.#locator<boolean>(
 					descriptor,
-					"bindNativeSelector",
-					{ token },
+					"armNativeFileActivation",
+					{},
 					remainingMs(deadline, operation),
 				);
-			}
-			const fileActivationArmed = await this.#locator<boolean>(
-				descriptor,
-				"armNativeFileActivation",
-				{},
-				remainingMs(deadline, operation),
-			);
-			try {
 				if (operation === "locator.click") await this.#tab.click(nativeSelector, remainingMs(deadline, operation));
 				else await this.#tab.dblclick(nativeSelector, remainingMs(deadline, operation));
 				return undefined;
@@ -1721,15 +1747,23 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				}
 			}
 		}
-		if (operation === "locator.type" && selector) {
-			const value = stringArg(args, "value");
-			const before = await this.#locator<unknown>(descriptor, "editableValue", {}, remainingMs(deadline, operation));
-			await this.#nativeTypeExact(selector, value, deadline);
-			const after = await this.#locator<unknown>(descriptor, "editableValue", {}, remainingMs(deadline, operation));
-			if (typeof before === "string" && typeof after === "string" && after !== before + value) {
-				throw new Error("locator.type did not update the editable value");
+		if (operation === "locator.type") {
+			await this.#locator<string>(descriptor, "editableValue", {}, remainingMs(deadline, operation));
+			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
+			try {
+				const nativeSelector = await this.#locator<string>(
+					descriptor,
+					"bindNativeSelector",
+					{ token },
+					remainingMs(deadline, operation),
+				);
+				await this.#tab.type(nativeSelector, stringArg(args, "value"), remainingMs(deadline, operation));
+				return undefined;
+			} finally {
+				await this.#tab
+					.codexEvaluateCleanup<boolean>(DISPOSE_NATIVE_ACTION_TOKEN_SOURCE, [token], SELECTOR_TIMEOUT_MS)
+					.catch(() => undefined);
 			}
-			return undefined;
 		}
 		if (operation === "locator.press") {
 			if (selector) await this.#tab.focus(selector, remainingMs(deadline, operation));
@@ -1742,30 +1776,6 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			operation.slice("locator.".length),
 			args,
 			remainingMs(deadline, operation),
-		);
-	}
-
-	async #nativeTypeExact(selector: string, value: string, deadline: number): Promise<void> {
-		const leading = value.match(/^[ \t\r\n]+/)?.[0] ?? "";
-		const afterLeading = value.slice(leading.length);
-		const trailing = afterLeading.match(/[ \t\r\n]+$/)?.[0] ?? "";
-		const body = afterLeading.slice(0, afterLeading.length - trailing.length);
-		if (!leading && !trailing) {
-			await this.#tab.type(selector, value, remainingMs(deadline, "locator.type"));
-			return;
-		}
-		await this.#tab.focus(selector, remainingMs(deadline, "locator.type"));
-		await this.#insertTypedWhitespace(leading, deadline);
-		if (body) await this.#tab.type(selector, body, remainingMs(deadline, "locator.type"));
-		await this.#insertTypedWhitespace(trailing, deadline);
-	}
-
-	async #insertTypedWhitespace(value: string, deadline: number): Promise<void> {
-		if (!value) return;
-		await this.#tab.codexEvaluate<boolean>(
-			INSERT_ACTIVE_WHITESPACE_SOURCE,
-			[value],
-			remainingMs(deadline, "locator.type"),
 		);
 	}
 
@@ -1831,7 +1841,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	async #saveMedia(url: string, deadline: number, operation: string): Promise<void> {
 		if (!url) throw new ToolError(`${operation} target has no downloadable URL`);
-		const token = crypto.randomUUID();
+		const token = `${this.#tokenNamespace}-media-${crypto.randomUUID()}`;
 		let consumed = false;
 		try {
 			await this.#tab.codexEvaluate<boolean>(

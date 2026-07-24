@@ -1384,7 +1384,7 @@ describe("Puppeteer final parity blockers", () => {
 		await expect(snapshot).rejects.toThrow("disposed");
 		expect(lateHandleDisposals).toBe(1);
 		await expect(lateAdapter.invoke("dom_cua.click", { tabId: "1", nodeId: "1:1", timeoutMs: 20 })).rejects.toThrow(
-			"Unknown DOM CUA node_id",
+			"Browser adapter run has ended",
 		);
 	});
 	it("disposes a visible DOM collection that resolves after run abort without publishing nodes", async () => {
@@ -1610,5 +1610,311 @@ describe("Puppeteer final parity blockers", () => {
 			message: "Browser capability is unavailable: playwright.waitForEvent",
 		});
 		await adapter.dispose();
+	});
+	it("accepts null history responses only when back or forward changed the URL", async () => {
+		let currentUrl = "data:text/html,current";
+		let historyAction: "changed" | "unchanged" = "unchanged";
+		const page = {
+			url: () => currentUrl,
+			goBack: async () => {
+				if (historyAction === "changed") currentUrl = "data:text/html,back";
+				return null;
+			},
+			goForward: async () => {
+				if (historyAction === "changed") currentUrl = "data:text/html,forward";
+				return null;
+			},
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: page as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await expect(adapter.invoke("tab.back", { tabId: "1", timeoutMs: 20 })).rejects.toThrow(
+			"Browser history action did not produce a navigation",
+		);
+		historyAction = "changed";
+		await expect(adapter.invoke("tab.back", { tabId: "1", timeoutMs: 20 })).resolves.toBeUndefined();
+		historyAction = "unchanged";
+		await expect(adapter.invoke("tab.forward", { tabId: "1", timeoutMs: 20 })).rejects.toThrow(
+			"Browser history action did not produce a navigation",
+		);
+		historyAction = "changed";
+		await expect(adapter.invoke("tab.forward", { tabId: "1", timeoutMs: 20 })).resolves.toBeUndefined();
+		await adapter.dispose();
+	});
+
+	it("uses layout visibility and inherited normalized disabled semantics", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{
+				   const host=document.createElement("div");
+				   host.innerHTML='<button id="transparent" style="opacity:0" aria-hidden="true">Transparent</button><div aria-hidden=" TrUe "><button>Hidden child</button></div><div aria-disabled=" TrUe "><button id="aria-disabled-child">Child</button></div><fieldset disabled><input id="fieldset-disabled"></fieldset><button id="detached">Detached</button>';
+				   document.body.append(host); globalThis.__detached=host.querySelector("#detached"); globalThis.__detached.remove();
+				 });
+				 return {
+				   transparentVisible:await t.playwright.locator("#transparent").isVisible(),
+				   ariaDisabledEnabled:await t.playwright.locator("#aria-disabled-child").isEnabled(),
+				   fieldsetEnabled:await t.playwright.locator("#fieldset-disabled").isEnabled(),
+				   detachedVisible:await t.playwright.locator("#detached").isVisible(),
+				   hiddenRole:await t.playwright.getByRole("button",{name:"Hidden child",exact:true}).count()
+				 };`,
+			);
+			expect(result).toEqual({
+				transparentVisible: true,
+				ariaDisabledEnabled: false,
+				fieldsetEnabled: false,
+				detachedVisible: false,
+				hiddenRole: 0,
+			});
+		});
+	}, 20_000);
+
+	it("types through the native selection and verifies fill and type postconditions", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{
+				   const input=document.querySelector("#text"); input.value="abcdef"; input.focus(); input.setSelectionRange(2,4);
+				   globalThis.__nativeInputs=0; input.addEventListener("beforeinput",()=>globalThis.__nativeInputs++);
+				 });
+				 await t.playwright.locator("#text").type("X");
+				 const typed=await page.evaluate(()=>({value:document.querySelector("#text").value,nativeInputs:globalThis.__nativeInputs}));
+				 await t.playwright.locator("#text").fill("filled");
+				 const filled=await page.evaluate(()=>document.querySelector("#text").value);
+				 await page.evaluate(()=>document.querySelector("#text").addEventListener("beforeinput",event=>event.preventDefault(),{once:true}));
+				 let postcondition=""; try { await t.playwright.locator("#text").type("blocked"); } catch(error) { postcondition=String(error); }
+				 return {typed,filled,postcondition};`,
+			);
+			expect(result).toEqual({
+				typed: { value: "abXef", nativeInputs: 1 },
+				filled: "filled",
+				postcondition: expect.stringContaining("expected exact value"),
+			});
+		});
+	}, 20_000);
+
+	it("shares one shrinking locator deadline across resolution, reads, and actionability", async () => {
+		let now = 0;
+		spyOn(Date, "now").mockImplementation(() => now);
+		let clicks = 0;
+		const handle: Record<string, unknown> = {
+			asElement: () => handle,
+			dispose: async () => undefined,
+			evaluate: async () => {
+				now += 25;
+				return true;
+			},
+			click: async () => {
+				clicks++;
+			},
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				evaluateHandle: async () => {
+					now += 25;
+					return {
+						getProperties: async () => {
+							now += 25;
+							return new Map([["0", handle]]);
+						},
+						dispose: async () => undefined,
+					};
+				},
+				keyboard: { down: async () => undefined, up: async () => undefined },
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await expect(
+			adapter.invoke("locator.click", {
+				tabId: "1",
+				locator: { kind: "css", selector: "#target" },
+				timeoutMs: 100,
+			}),
+		).rejects.toThrow("timed out after 100ms");
+		expect(clicks).toBe(0);
+		await adapter.dispose();
+	});
+
+	it("emits a CSS.escape selector independently from ARIA-role interactability", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{ const button=document.createElement("button"); button.id="123 selector value"; button.textContent="Escaped"; Object.assign(button.style,{position:"fixed",left:"250px",top:"20px",width:"100px",height:"30px"}); document.body.append(button); });
+				 const info=(await t.playwright.elementInfo({x:260,y:25}))[0];
+				 return {role:info.role,primary:info.selector.primary,canonical:await page.evaluate(selector=>selector==="#"+CSS.escape("123 selector value")&&document.querySelector(selector)?.textContent==="Escaped",info.selector.primary)};`,
+			);
+			expect(result).toEqual({ role: "button", primary: expect.any(String), canonical: true });
+		});
+	}, 20_000);
+
+	it("releases every possibly pressed modifier when later modifier setup fails", async () => {
+		const released: string[] = [];
+		const activated: string[] = [];
+		const handle: Record<string, unknown> = {
+			asElement: () => handle,
+			dispose: async () => undefined,
+			evaluate: async () => true,
+			click: async () => undefined,
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				evaluateHandle: async () => ({
+					getProperties: async () => new Map([["0", handle]]),
+					dispose: async () => undefined,
+				}),
+				keyboard: {
+					down: async (key: string) => {
+						activated.push(key);
+						if (key === "Alt") throw new Error("modifier setup failed");
+					},
+					up: async (key: string) => {
+						activated.splice(activated.lastIndexOf(key), 1);
+						released.push(key);
+					},
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await expect(
+			adapter.invoke("locator.click", {
+				tabId: "1",
+				locator: { kind: "css", selector: "#target" },
+				modifiers: ["Shift", "Alt"],
+				timeoutMs: 100,
+			}),
+		).rejects.toThrow("modifier setup failed");
+		expect({ released, activated }).toEqual({ released: ["Alt", "Shift"], activated: [] });
+		await adapter.dispose();
+	});
+
+	it("matches every provided select option field conjunctively", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{ const select=document.querySelector("#choices"); select.innerHTML='<option value="one">First</option><option value="two">Second</option>'; });
+				 const locator=t.playwright.locator("#choices"); let mismatch="";
+				 try { await locator.selectOption({value:"one",label:"Second",index:0}); } catch(error) { mismatch=String(error); }
+				 const selected=await locator.selectOption({value:"two",label:"Second",index:1});
+				 return {mismatch,selected,current:await page.evaluate(()=>document.querySelector("#choices").value)};`,
+			);
+			expect(result).toEqual({
+				mismatch: expect.stringContaining("could not find"),
+				selected: ["two"],
+				current: "two",
+			});
+		});
+	}, 20_000);
+
+	it("removes temporary and destination media files after a rename completes past the deadline", async () => {
+		const rename = Promise.withResolvers<void>();
+		const removed: string[] = [];
+		spyOn(fs.promises, "open").mockResolvedValue({
+			writeFile: async () => undefined,
+			sync: async () => undefined,
+			close: async () => undefined,
+		} as never);
+		spyOn(fs.promises, "rename").mockImplementation(async () => await rename.promise);
+		spyOn(fs.promises, "rm").mockImplementation(async target => {
+			removed.push(String(target));
+		});
+		const handle: Record<string, unknown> = {
+			asElement: () => handle,
+			dispose: async () => undefined,
+			evaluate: async () => ({ base64Chunks: ["QQ=="], contentType: "text/plain" }),
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				evaluateHandle: async () => ({
+					getProperties: async () => new Map([["0", handle]]),
+					dispose: async () => undefined,
+				}),
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/codex-media-contract",
+			captureScreenshot: async () => "",
+		});
+		const downloading = adapter.invoke("locator.downloadMedia", {
+			tabId: "1",
+			locator: { kind: "css", selector: "#media" },
+			timeoutMs: 20,
+		});
+		await expect(downloading).rejects.toThrow("timed out");
+		rename.resolve();
+		await flushMicrotasks();
+		expect(removed.some(file => file.includes(".partial-"))).toBe(true);
+		expect(removed.some(file => !file.includes(".partial-") && file.includes("codex-media-"))).toBe(true);
+		await adapter.dispose();
+	});
+
+	it("keeps page, browser, facade state, and ownership outside the run adapter lifecycle", async () => {
+		const state = createPuppeteerCodexSessionState();
+		let pageCloses = 0;
+		let browserCloses = 0;
+		const page = {
+			url: () => "about:blank",
+			title: async () => "Run-owned",
+			close: async () => {
+				pageCloses++;
+			},
+		};
+		const browser = {
+			close: async () => {
+				browserCloses++;
+			},
+		};
+		const createAdapter = () =>
+			new PuppeteerCodexBrowserAdapter({
+				state,
+				page: page as never,
+				browser: browser as never,
+				signal: new AbortController().signal,
+				cwd: "/tmp/browser-contract",
+				captureScreenshot: async () => "",
+			});
+		const first = createAdapter();
+		await first.beginRun();
+		const firstFacade = createCodexBrowserFacade(first);
+		const firstTab = await firstFacade.tabs.selected();
+		if (!firstTab) throw new Error("Expected first run tab");
+		expect(firstTab.id).toBe("1");
+		await expect(firstTab.title()).resolves.toBe("Run-owned");
+		await first.dispose();
+		const second = createAdapter();
+		await second.beginRun();
+		const secondTab = await createCodexBrowserFacade(second).tabs.selected();
+		if (!secondTab) throw new Error("Expected second run tab");
+		expect(secondTab.id).toBe("1");
+		await expect(secondTab.title()).resolves.toBe("Run-owned");
+		await second.dispose();
+		expect({ pageCloses, browserCloses }).toEqual({ pageCloses: 0, browserCloses: 0 });
 	});
 });

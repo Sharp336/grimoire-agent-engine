@@ -58,6 +58,7 @@ async function withCmuxTool(test: (tool: BrowserTool, name: string, calls: RpcCa
 	process.env.CMUX_SOCKET_PATH = socketPath;
 	const calls: RpcCall[] = [];
 	const urlsBySurface = new Map<string, string>();
+	const navigationMarkers = new Set<string>();
 
 	spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
 	spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
@@ -91,6 +92,9 @@ async function withCmuxTool(test: (tool: BrowserTool, name: string, calls: RpcCa
 					urlsBySurface.set(String(params.surface_id), url);
 					return { url };
 				}
+				case "browser.reload":
+					navigationMarkers.delete(String(params.surface_id));
+					return {};
 				case "browser.snapshot": {
 					const url = urlsBySurface.get(String(params.surface_id)) ?? "https://fixture.test/start";
 					return {
@@ -115,13 +119,27 @@ async function withCmuxTool(test: (tool: BrowserTool, name: string, calls: RpcCa
 				case "browser.screenshot":
 					return { png_base64: "aQ==", width: 1, height: 1 };
 				case "browser.eval":
+					if (typeof params.script === "string" && params.script.includes("globalThis[key] = true")) {
+						navigationMarkers.add(String(params.surface_id));
+						return {
+							value: {
+								url: urlsBySurface.get(String(params.surface_id)) ?? "https://fixture.test/start",
+							},
+						};
+					}
+					if (typeof params.script === "string" && params.script.includes("Boolean(globalThis[")) {
+						return { value: navigationMarkers.has(String(params.surface_id)) };
+					}
 					if (params.script === "document.title") return { value: "Contract fixture" };
 					if (typeof params.script === "string" && params.script.includes("document.documentElement?.outerHTML")) {
 						return {
 							value: "<main><button id='target'>Target</button><input aria-label='Name'></main>",
 						};
 					}
-					if (typeof params.script === "string" && params.script.includes("includeNonInteractable")) {
+					if (
+						typeof params.script === "string" &&
+						params.script.includes("let element = document.elementFromPoint(x, y)")
+					) {
 						return {
 							value: {
 								tagName: "button",
@@ -364,7 +382,7 @@ async function assertLogicalTabLifecycle(tool: BrowserTool, name: string): Promi
 	);
 	expect(second.selectedId).toBe(first.freshId);
 	expect(second.listedIds).toEqual([first.freshId]);
-	expect(second.stale).toEqual(first.staleAfterNew);
+	expect(second.stale).toEqual({ name: "Error", message: "Browser adapter run has ended" });
 	expect(typeof second.title).toBe("string");
 
 	await tool.execute("codex-browser-outer-close", { action: "close", name, kill: true });
@@ -903,20 +921,26 @@ describe("Codex agent.browser public contract", () => {
 		});
 	});
 
-	it("normalizes an empty-string selectOption value to an explicit value selection", async () => {
+	it("normalizes every selectOption string field, including empty strings", async () => {
 		const adapter = new RecordingAdapter(operation => {
 			if (operation === "tab.selected") return { id: "1" };
-			if (operation === "locator.selectOption") return [""];
+			if (operation === "locator.selectOption") return ["", "", "", "value"];
 			return undefined;
 		});
 		const current = await createCodexBrowserFacade(adapter).tabs.selected();
 		if (!current) throw new Error("Expected selected contract tab");
 
 		const locator = current.playwright.locator("#target");
-		await expect(locator.selectOption("")).resolves.toEqual([""]);
-		expect(adapter.calls.find(entry => entry.operation === "locator.selectOption")?.args).toMatchObject({
-			selections: [{ value: "" }],
-		});
+		await expect(
+			locator.selectOption(["", { value: "" }, { label: "" }, { value: "value", label: "", index: 0 }]),
+		).resolves.toEqual(["", "", "", "value"]);
+		const call = adapter.calls.find(entry => entry.operation === "locator.selectOption");
+		expect(call?.args.selections).toEqual([
+			{ value: "" },
+			{ value: "" },
+			{ label: "" },
+			{ value: "value", label: "", index: 0 },
+		]);
 		await expect(locator.selectOption({})).rejects.toThrow("locator.selectOption requires a value, label, or index");
 		await expect(locator.selectOption([])).rejects.toThrow("locator.selectOption requires at least one selection");
 		expect(adapter.calls.filter(entry => entry.operation === "locator.selectOption")).toHaveLength(1);
@@ -942,11 +966,15 @@ describe("Codex agent.browser public contract", () => {
 		).rejects.toThrow("navigation timed out");
 	}, 500);
 
-	it("settles expectNavigation waiters when callbacks fail and never emits an orphan rejection", async () => {
+	it("cancels expectNavigation when its callback fails and consumes the canceled wait", async () => {
 		const navigation = Promise.withResolvers<void>();
 		const adapter = new RecordingAdapter(operation => {
 			if (operation === "tab.selected") return { id: "1" };
 			if (operation === "playwright.expectNavigation") return navigation.promise;
+			if (operation === "playwright.expectNavigation.cancel") {
+				navigation.reject(new Error("navigation canceled"));
+				return undefined;
+			}
 			return undefined;
 		});
 		const current = await createCodexBrowserFacade(adapter).tabs.selected();
@@ -958,8 +986,8 @@ describe("Codex agent.browser public contract", () => {
 		process.on("unhandledRejection", onUnhandled);
 		try {
 			await expect(
-				current.playwright.expectNavigation(() => {
-					queueMicrotask(() => navigation.reject(new Error("navigation waiter must be consumed")));
+				current.playwright.expectNavigation(async () => {
+					await Promise.resolve();
 					throw new Error("callback failed");
 				}),
 			).rejects.toThrow("callback failed");
@@ -1361,8 +1389,10 @@ describe("Codex agent.browser public contract", () => {
 			async codexEvaluate(_source: string, args: unknown[]) {
 				if (args[1] === "status") return { attached: true, visible: true, enabled: true };
 				if (args[1] === "editableValue") return editableValue;
-				if (args.length === 1) editableValue += String(args[0]);
-				nativeCalls.push({ operation: "evaluate", args });
+				if (args[1] === "bindNativeSelector") return "#name";
+				return true;
+			},
+			async codexEvaluateCleanup() {
 				return true;
 			},
 			async type(selector: string, text: string) {
@@ -1390,10 +1420,7 @@ describe("Codex agent.browser public contract", () => {
 			timeoutMs: 3_000,
 		});
 		expect(nativeCalls).toEqual([
-			{ operation: "focus", args: ["#name"] },
-			{ operation: "evaluate", args: [" "] },
-			{ operation: "type", args: ["#name", "ab"] },
-			{ operation: "evaluate", args: [" "] },
+			{ operation: "type", args: ["#name", " ab "] },
 			{ operation: "focus", args: ["#name"] },
 			{ operation: "press", args: ["Backspace"] },
 		]);
@@ -1637,7 +1664,9 @@ describe("Codex agent.browser public contract", () => {
 		if (!current) throw new Error("Expected selected contract tab");
 		await expect(current.playwright.locator("img").downloadMedia()).rejects.toBeDefined();
 		expect(writeCount).toBe(1);
-		expect(removeSpy).toHaveBeenCalledTimes(1);
+		const removedPaths = removeSpy.mock.calls.map(([file]) => String(file));
+		expect(removedPaths.some(file => file.includes(".partial-"))).toBe(true);
+		expect(removedPaths.some(file => !file.includes(".partial-") && file.includes("codex-media-"))).toBe(true);
 		adapter.dispose();
 	});
 

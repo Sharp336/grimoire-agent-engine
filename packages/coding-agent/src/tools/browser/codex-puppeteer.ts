@@ -661,6 +661,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async invoke<T>(operation: CodexBrowserOperation, args: Readonly<Record<string, unknown>>): Promise<T> {
+		if (this.#disposed) throw new Error("Browser adapter run has ended");
 		this.#assertTab(operation, args);
 		throwIfAborted(this.#signal);
 		const result = await this.#dispatch(operation, args);
@@ -698,11 +699,15 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				);
 				return undefined;
 			case "tab.back":
-				await this.#navigate(() => this.#page.goBack({ timeout: numberArg(args, "timeoutMs"), waitUntil: "load" }));
+				await this.#navigate(
+					() => this.#page.goBack({ timeout: numberArg(args, "timeoutMs"), waitUntil: "load" }),
+					true,
+				);
 				return undefined;
 			case "tab.forward":
-				await this.#navigate(() =>
-					this.#page.goForward({ timeout: numberArg(args, "timeoutMs"), waitUntil: "load" }),
+				await this.#navigate(
+					() => this.#page.goForward({ timeout: numberArg(args, "timeoutMs"), waitUntil: "load" }),
+					true,
 				);
 				return undefined;
 			case "tab.reload":
@@ -928,8 +933,12 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		);
 	}
 
-	async #navigate<T>(action: () => Promise<T>): Promise<void> {
-		await untilAborted(this.#signal, action);
+	async #navigate<T>(action: () => Promise<T>, requireHistoryNavigation = false): Promise<void> {
+		const previousUrl = this.#page.url();
+		const response = await untilAborted(this.#signal, action);
+		if (requireHistoryNavigation && response === null && this.#page.url() === previousUrl) {
+			throw new Error("Browser history action did not produce a navigation");
+		}
 	}
 
 	async #tabsContent(args: Readonly<Record<string, unknown>>): Promise<unknown[]> {
@@ -1131,190 +1140,137 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async #elementInfo(args: Readonly<Record<string, unknown>>): Promise<unknown> {
-		return await this.#page.evaluate(
+		const rawHandle = await this.#page.evaluateHandle(
 			(x, y, includeNonInteractable) => {
-				interface PageElement {
-					getAttribute(name: string): string | null;
-					getBoundingClientRect(): { x: number; y: number; width: number; height: number };
-					hasAttribute(name: string): boolean;
-					isContentEditable?: boolean;
-					labels?: ArrayLike<PageElement>;
-					outerHTML: string;
-					parentElement: PageElement | null;
-					tabIndex?: number;
-					tagName: string;
-					textContent: string | null;
-					value?: string;
+				const hit = document.elementFromPoint(x, y);
+				if (!hit || includeNonInteractable) return hit;
+				const interactiveRoles: Record<string, true> = {
+					button: true,
+					checkbox: true,
+					combobox: true,
+					link: true,
+					listbox: true,
+					menuitem: true,
+					menuitemcheckbox: true,
+					menuitemradio: true,
+					option: true,
+					radio: true,
+					searchbox: true,
+					slider: true,
+					spinbutton: true,
+					switch: true,
+					tab: true,
+					textbox: true,
+					treeitem: true,
+				};
+				for (let current: Element | null = hit; current; current = current.parentElement) {
+					const tagName = current.tagName.toLowerCase();
+					const inputType = (current.getAttribute("type") ?? "text").toLowerCase();
+					const explicitRole = (current.getAttribute("role") ?? "").trim().split(/\s+/)[0] ?? "";
+					const htmlCurrent = current as unknown as { isContentEditable?: boolean; tabIndex?: number };
+					const nativelyInteractable =
+						(tagName === "input" && inputType !== "hidden") ||
+						tagName === "button" ||
+						tagName === "select" ||
+						tagName === "textarea" ||
+						tagName === "option" ||
+						((tagName === "a" || tagName === "area") && current.hasAttribute("href")) ||
+						current.hasAttribute("tabindex") ||
+						(htmlCurrent.tabIndex ?? -1) >= 0 ||
+						htmlCurrent.isContentEditable === true;
+					if (nativelyInteractable || interactiveRoles[explicitRole] === true) return current;
 				}
-				const root = globalThis as unknown as {
-					document: {
-						elementFromPoint(x: number, y: number): PageElement | null;
-						getElementById(id: string): PageElement | null;
-					};
-					getComputedStyle(element: PageElement): { display: string; visibility: string };
-				};
-				const textOf = (element: PageElement): string => (element.textContent ?? "").replace(/\s+/g, " ").trim();
-				const documentRoot = root.document;
-				const implicitRole = (element: PageElement): string | null => {
-					const explicit = element.getAttribute("role")?.trim().split(/\s+/)[0];
-					if (explicit) return explicit;
-					const tag = element.tagName.toLowerCase();
-					if (tag === "button") return "button";
-					if ((tag === "a" || tag === "area") && element.hasAttribute("href")) return "link";
-					if (/^h[1-6]$/.test(tag)) return "heading";
-					if (tag === "textarea") return "textbox";
-					if (tag === "select") {
-						return element.hasAttribute("multiple") || Number(element.getAttribute("size") ?? "0") > 1
-							? "listbox"
-							: "combobox";
-					}
-					if (tag === "option") return "option";
-					if (tag === "img") return element.getAttribute("alt") === "" ? null : "img";
-					if (tag !== "input") return null;
-					const rawType = (element.getAttribute("type") ?? "text").toLowerCase();
-					const type = [
-						"button",
-						"checkbox",
-						"color",
-						"date",
-						"datetime-local",
-						"email",
-						"file",
-						"hidden",
-						"image",
-						"month",
-						"number",
-						"password",
-						"radio",
-						"range",
-						"reset",
-						"search",
-						"submit",
-						"tel",
-						"text",
-						"time",
-						"url",
-						"week",
-					].includes(rawType)
-						? rawType
-						: "text";
-					if (["button", "submit", "reset", "image"].includes(type)) return "button";
-					if (type === "checkbox") return "checkbox";
-					if (type === "radio") return "radio";
-					if (type === "range") return "slider";
-					if (type === "number") return "spinbutton";
-					if (["search", "text", "email", "tel", "url"].includes(type))
-						return element.hasAttribute("list") ? "combobox" : type === "search" ? "searchbox" : "textbox";
-					return null;
-				};
-				const accessibleName = (element: PageElement): string => {
-					const labelledBy = element.getAttribute("aria-labelledby");
-					if (labelledBy) {
-						const label = labelledBy
-							.split(/\s+/)
-							.map((id: string) => documentRoot.getElementById(id))
-							.filter((item: PageElement | null): item is PageElement => item !== null)
-							.map(textOf)
-							.join(" ")
-							.trim();
-						if (label) return label;
-					}
-					const aria = element.getAttribute("aria-label")?.trim();
-					if (aria) return aria;
-					const labelled = element;
-					if (labelled.labels?.length) {
-						const nativeLabel = Array.from(labelled.labels).map(textOf).join(" ").trim();
-						if (nativeLabel) return nativeLabel;
-					}
-					const tag = element.tagName.toLowerCase();
-					const type = (element.getAttribute("type") ?? "text").toLowerCase();
-					const valueName =
-						tag === "input" && ["button", "submit", "reset", "image"].includes(type) ? (element.value ?? "") : "";
-					const fallback = element.getAttribute("alt") ?? element.getAttribute("title") ?? valueName;
-					return fallback.trim() || textOf(element);
-				};
-				const interactable = (element: PageElement): boolean => {
-					const tag = element.tagName.toLowerCase();
-					const role = implicitRole(element);
-					const interactiveRoles = [
-						"button",
-						"checkbox",
-						"combobox",
-						"link",
-						"listbox",
-						"menuitem",
-						"menuitemcheckbox",
-						"menuitemradio",
-						"option",
-						"radio",
-						"searchbox",
-						"slider",
-						"spinbutton",
-						"switch",
-						"tab",
-						"textbox",
-						"treeitem",
-					];
-					const focusable = element;
-					return (
-						(tag === "input" && (element.getAttribute("type") ?? "text").toLowerCase() !== "hidden") ||
-						tag === "button" ||
-						tag === "select" ||
-						tag === "textarea" ||
-						((tag === "a" || tag === "area") && element.hasAttribute("href")) ||
-						(role !== null && interactiveRoles.includes(role)) ||
-						element.hasAttribute("tabindex") ||
-						(focusable.tabIndex ?? -1) >= 0 ||
-						focusable.isContentEditable === true
-					);
-				};
-				const accessibilityHidden = (element: PageElement): boolean => {
-					for (let current: PageElement | null = element; current; current = current.parentElement) {
-						const style = root.getComputedStyle(current);
-						if (
-							current.hasAttribute("hidden") ||
-							current.hasAttribute("inert") ||
-							current.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
-							style.display === "none" ||
-							style.visibility === "hidden"
-						)
-							return true;
-					}
-					return false;
-				};
-				let element = documentRoot.elementFromPoint(x, y);
-				if (!includeNonInteractable)
-					while (element && (!interactable(element) || accessibilityHidden(element)))
-						element = element.parentElement;
-				if (!element || accessibilityHidden(element)) return [];
-				const rect = element.getBoundingClientRect();
-				const visibleText = textOf(element) || null;
-				const ariaName = accessibleName(element) || null;
-				const testId = element.getAttribute("data-testid");
-				const id = element.getAttribute("id");
-				const escapeSelector = (value: string) =>
-					value.replace(/[^a-zA-Z0-9_-]/g, (character: string) => `\\${character}`);
-				const primary = testId ? `[data-testid="${escapeSelector(testId)}"]` : id ? `#${escapeSelector(id)}` : null;
-				const candidates = [primary, element.tagName.toLowerCase()].filter(
-					(value: string | null): value is string => value !== null,
-				);
-				return [
-					{
-						tagName: element.tagName.toLowerCase(),
-						role: implicitRole(element),
-						visibleText,
-						ariaName,
-						testId,
-						boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-						preview: element.outerHTML.slice(0, 500),
-						selector: { primary, candidates },
-					},
-				];
+				return hit;
 			},
 			numberArg(args, "x"),
 			numberArg(args, "y"),
 			args.includeNonInteractable === true,
 		);
+		const element = rawHandle.asElement() as ElementHandle | null;
+		if (!element) {
+			await rawHandle.dispose();
+			return [];
+		}
+		try {
+			const [metadata, aria] = await Promise.all([
+				element.evaluate(target => {
+					interface PageElement {
+						getAttribute(name: string): string | null;
+						getBoundingClientRect(): { x: number; y: number; width: number; height: number };
+						hasAttribute(name: string): boolean;
+						isContentEditable?: boolean;
+						outerHTML: string;
+						tabIndex?: number;
+						tagName: string;
+						textContent: string | null;
+					}
+					const pageElement = target as unknown as PageElement;
+					const tagName = pageElement.tagName.toLowerCase();
+					const inputType = (pageElement.getAttribute("type") ?? "text").toLowerCase();
+					const nativelyInteractable =
+						(tagName === "input" && inputType !== "hidden") ||
+						tagName === "button" ||
+						tagName === "select" ||
+						tagName === "textarea" ||
+						((tagName === "a" || tagName === "area") && pageElement.hasAttribute("href")) ||
+						pageElement.hasAttribute("tabindex") ||
+						(pageElement.tabIndex ?? -1) >= 0 ||
+						pageElement.isContentEditable === true;
+					const rect = pageElement.getBoundingClientRect();
+					const id = pageElement.getAttribute("id");
+					const testId = pageElement.getAttribute("data-testid");
+					const css = (globalThis as unknown as { CSS: { escape(value: string): string } }).CSS;
+					const primary = id ? `#${css.escape(id)}` : testId ? `[data-testid=${css.escape(testId)}]` : null;
+					return {
+						tagName,
+						nativelyInteractable,
+						visibleText: (pageElement.textContent ?? "").replace(/\s+/g, " ").trim() || null,
+						testId,
+						boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+						preview: pageElement.outerHTML.slice(0, 500),
+						selector: { primary, candidates: primary ? [primary, tagName] : [tagName] },
+					};
+				}),
+				getAriaElementState(element),
+			]);
+			if (aria.hidden) return [];
+			const interactiveRoles = [
+				"button",
+				"checkbox",
+				"combobox",
+				"link",
+				"listbox",
+				"menuitem",
+				"menuitemcheckbox",
+				"menuitemradio",
+				"option",
+				"radio",
+				"searchbox",
+				"slider",
+				"spinbutton",
+				"switch",
+				"tab",
+				"textbox",
+				"treeitem",
+			];
+			const interactable =
+				metadata.nativelyInteractable || (aria.role !== null && interactiveRoles.includes(aria.role));
+			if (!interactable && args.includeNonInteractable !== true) return [];
+			return [
+				{
+					tagName: metadata.tagName,
+					role: aria.role,
+					visibleText: metadata.visibleText,
+					ariaName: aria.name || null,
+					testId: metadata.testId,
+					boundingBox: metadata.boundingBox,
+					preview: metadata.preview,
+					selector: metadata.selector,
+				},
+			];
+		} finally {
+			await element.dispose();
+		}
 	}
 
 	async #elementScreenshot(args: Readonly<Record<string, unknown>>): Promise<string> {
@@ -1553,14 +1509,25 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const event = stringArg(args, "event");
 		const timeoutMs = numberArg(args, "timeoutMs");
 		if (event === "download") return await this.#waitForDownload(timeoutMs);
-		const waiting = this.#page.waitForFileChooser({ timeout: timeoutMs, signal: this.#signal });
+		const deadline = this.#operationDeadline(timeoutMs, "playwright.waitForEvent");
+		const waiting = this.#page.waitForFileChooser({
+			timeout: this.#operationRemaining(deadline),
+			signal: this.#signal,
+		});
+		let cancelScheduled = false;
+		const cancelLateChooser = () => {
+			if (cancelScheduled) return;
+			cancelScheduled = true;
+			void waiting.then(cancelFileChooser, () => undefined);
+		};
 		let chooser: FileChooser;
 		try {
-			chooser = await untilAborted(this.#signal, () => waiting);
+			chooser = await this.#runBeforeDeadline(deadline, () => waiting, cancelLateChooser);
 			throwIfAborted(this.#signal);
 			if (this.#disposed) throw new Error("Puppeteer adapter was disposed");
+			this.#operationRemaining(deadline);
 		} catch (error) {
-			void waiting.then(cancelFileChooser, () => undefined);
+			cancelLateChooser();
 			throw error;
 		}
 		const token = `filechooser-${Snowflake.next()}`;
@@ -1842,8 +1809,30 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				this.#operationRemaining(deadline);
 				const candidate = property.asElement();
 				if (candidate) {
-					handles.push(candidate as ElementHandle);
+					const element = candidate as ElementHandle;
+					handles.push(element);
 					properties.delete(property);
+					if (
+						descriptor.kind === "role" &&
+						(await element.evaluate(target => {
+							for (let current: Element | null = target; current; current = current.parentElement) {
+								const style = getComputedStyle(current);
+								if (
+									current.hasAttribute("hidden") ||
+									current.hasAttribute("inert") ||
+									current.getAttribute("aria-hidden")?.trim().toLowerCase() === "true" ||
+									style.display === "none" ||
+									style.visibility === "hidden" ||
+									style.visibility === "collapse"
+								)
+									return true;
+							}
+							return false;
+						}))
+					) {
+						handles.pop();
+						await element.dispose().catch(() => undefined);
+					}
 				}
 			}
 			await Promise.all([...properties].map(property => property.dispose().catch(() => undefined)));
@@ -1947,7 +1936,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 						if (
 							current.hasAttribute("hidden") ||
 							current.hasAttribute("inert") ||
-							current.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+							current.getAttribute("aria-hidden")?.trim().toLowerCase() === "true" ||
 							style.display === "none" ||
 							style.visibility === "hidden"
 						) {
@@ -2010,12 +1999,13 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #isVisible(handle: ElementHandle): Promise<boolean> {
 		if (typeof (handle as unknown as { evaluate?: unknown }).evaluate !== "function") return true;
 		return await handle.evaluate(element => {
+			if (!element.isConnected) return false;
 			const style = getComputedStyle(element);
 			const rect = element.getBoundingClientRect();
 			return (
 				style.display !== "none" &&
 				style.visibility !== "hidden" &&
-				Number(style.opacity) !== 0 &&
+				style.visibility !== "collapse" &&
 				rect.width > 0 &&
 				rect.height > 0
 			);
@@ -2025,8 +2015,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #isEnabled(handle: ElementHandle): Promise<boolean> {
 		if (typeof (handle as unknown as { evaluate?: unknown }).evaluate !== "function") return true;
 		return await handle.evaluate(element => {
-			const control = element as unknown as { disabled?: boolean };
-			return control.disabled !== true && element.getAttribute("aria-disabled") !== "true";
+			if (element.matches(":disabled")) return false;
+			for (let current: Element | null = element; current; current = current.parentElement) {
+				if (current.getAttribute("aria-disabled")?.trim().toLowerCase() === "true") return false;
+			}
+			return true;
 		});
 	}
 
@@ -2080,9 +2073,15 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				let failure: unknown;
 				try {
 					for (const modifier of normalized) {
-						await this.#page.keyboard.down(modifier as KeyInput);
 						pressed.push(modifier);
+						try {
+							await this.#page.keyboard.down(modifier as KeyInput);
+						} catch (error) {
+							if (!pressed.includes(modifier)) pressed.push(modifier);
+							throw error;
+						}
 						if (releaseRequested) {
+							if (!pressed.includes(modifier)) pressed.push(modifier);
 							await releasePressed();
 							throw new Error(`${label} was abandoned`);
 						}
@@ -2124,66 +2123,96 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		append: boolean,
 		deadline: OperationDeadline,
 	): Promise<void> {
-		const expected = await handle.evaluate(
-			(element, payload) => {
+		await handle.focus();
+		const before = await handle.evaluate((element, label) => {
+			interface EditableElement {
+				isContentEditable: boolean;
+				readOnly?: boolean;
+				selectionEnd?: number | null;
+				selectionStart?: number | null;
+				textContent: string | null;
+				type: string;
+				value: string;
+			}
+			const control = element as unknown as EditableElement;
+			const tag = element.tagName.toLowerCase();
+			const inputType = tag === "input" ? control.type.toLowerCase() : "";
+			const editableInput =
+				tag === "input" &&
+				[
+					"date",
+					"datetime-local",
+					"email",
+					"month",
+					"number",
+					"password",
+					"search",
+					"tel",
+					"text",
+					"time",
+					"url",
+					"week",
+				].includes(inputType);
+			const editableControl = editableInput || tag === "textarea";
+			const ariaReadonly = element.getAttribute("aria-readonly")?.trim().toLowerCase() === "true";
+			if (
+				(!editableControl && !control.isContentEditable) ||
+				(editableControl && control.readOnly) ||
+				ariaReadonly
+			) {
+				throw new Error(`${label} requires an editable element`);
+			}
+			const current = editableControl ? control.value : (control.textContent ?? "");
+			if (editableControl) {
+				return {
+					value: current,
+					start: control.selectionStart ?? current.length,
+					end: control.selectionEnd ?? current.length,
+				};
+			}
+			const selection = element.ownerDocument.defaultView?.getSelection();
+			if (!selection || selection.rangeCount === 0 || !element.contains(selection.anchorNode)) {
+				return { value: current, start: current.length, end: current.length };
+			}
+			const range = selection.getRangeAt(0);
+			const startRange = range.cloneRange();
+			startRange.selectNodeContents(element);
+			startRange.setEnd(range.startContainer, range.startOffset);
+			const endRange = range.cloneRange();
+			endRange.selectNodeContents(element);
+			endRange.setEnd(range.endContainer, range.endOffset);
+			return { value: current, start: startRange.toString().length, end: endRange.toString().length };
+		}, deadline.label);
+		let expected: string;
+		if (append) {
+			expected = before.value.slice(0, before.start) + value + before.value.slice(before.end);
+			await this.#page.keyboard.type(value);
+		} else {
+			expected = value;
+			await handle.evaluate((element, next) => {
 				interface EditableElement {
-					isContentEditable: boolean;
-					readOnly?: boolean;
 					textContent: string | null;
-					type: string;
 					value: string;
 				}
-				interface PageView {
-					Event?: new (type: string, options: { bubbles: boolean }) => unknown;
-					HTMLInputElement: { prototype: object };
-					HTMLTextAreaElement: { prototype: object };
-				}
-				const root = globalThis as unknown as {
-					Event: new (type: string, options: { bubbles: boolean }) => unknown;
-				};
-				if (Date.now() >= payload.expiresAt) throw new Error(`${payload.label} timed out before mutation`);
+				const target = element as unknown as EditableElement;
 				const tag = element.tagName.toLowerCase();
-				const control = element as unknown as EditableElement;
-				const editableElement = control;
-				const inputType = tag === "input" ? control.type.toLowerCase() : "";
-				const editableInput =
-					tag === "input" &&
-					!["button", "checkbox", "file", "hidden", "image", "radio", "reset", "submit"].includes(inputType);
-				const editableControl = editableInput || tag === "textarea";
-				const ariaReadonly = element.getAttribute("aria-readonly")?.trim().toLowerCase() === "true";
-				if (
-					(!editableControl && !editableElement.isContentEditable) ||
-					(editableControl && control.readOnly) ||
-					ariaReadonly
-				) {
-					throw new Error(`${payload.label} requires an editable element`);
-				}
-				const before = editableControl ? control.value : (editableElement.textContent ?? "");
-				const next = payload.append ? before + payload.value : payload.value;
-				const view = element.ownerDocument.defaultView as unknown as PageView | null;
-				if (editableControl) {
+				const view = element.ownerDocument.defaultView;
+				if (tag === "input" || tag === "textarea") {
 					const prototype =
 						tag === "textarea" ? view?.HTMLTextAreaElement.prototype : view?.HTMLInputElement.prototype;
 					const setter = prototype ? Object.getOwnPropertyDescriptor(prototype, "value")?.set : undefined;
 					if (setter) setter.call(element, next);
-					else control.value = next;
-				} else editableElement.textContent = next;
-				const EventConstructor = view?.Event ?? root.Event;
-				const eventTarget = element as unknown as { dispatchEvent(event: unknown): boolean };
+					else target.value = next;
+				} else target.textContent = next;
+				const EventConstructor = view?.Event ?? Event;
+				const eventTarget = element as unknown as { dispatchEvent(event: Event): boolean };
 				eventTarget.dispatchEvent(new EventConstructor("input", { bubbles: true }));
 				eventTarget.dispatchEvent(new EventConstructor("change", { bubbles: true }));
-				return next;
-			},
-			{ value, append, label: deadline.label, expiresAt: deadline.expiresAt },
-		);
+			}, value);
+		}
 		const observed = await handle.evaluate(element => {
-			interface ObservedElement {
-				textContent: string | null;
-				value: string;
-			}
-			const observedElement = element as unknown as ObservedElement;
-			const tag = element.tagName.toLowerCase();
-			return tag === "input" || tag === "textarea" ? observedElement.value : (observedElement.textContent ?? "");
+			const target = element as unknown as { isContentEditable: boolean; textContent: string | null; value: string };
+			return target.isContentEditable ? (target.textContent ?? "") : target.value;
 		});
 		if (observed !== expected) {
 			throw new Error(
@@ -2213,12 +2242,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					const selections = rawSelections as Array<{ value?: string; label?: string; index?: number }>;
 					const matches: number[] = [];
 					for (const selection of selections) {
-						const index = Array.from(select.options).findIndex((option, optionIndex) =>
-							selection.value !== undefined
-								? option.value === selection.value
-								: selection.label !== undefined
-									? option.label === selection.label
-									: selection.index === optionIndex,
+						const index = Array.from(select.options).findIndex(
+							(option, optionIndex) =>
+								(selection.value === undefined || option.value === selection.value) &&
+								(selection.label === undefined || option.label === selection.label) &&
+								(selection.index === undefined || selection.index === optionIndex),
 						);
 						if (index < 0) throw new Error("locator.selectOption could not find a requested option");
 						if (!matches.includes(index)) matches.push(index);
@@ -2411,15 +2439,14 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					if (
 						current.hasAttribute("hidden") ||
 						current.hasAttribute("inert") ||
-						current.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+						current.getAttribute("aria-hidden")?.trim().toLowerCase() === "true" ||
 						style.display === "none" ||
 						style.visibility === "hidden"
 					)
 						return false;
 				}
 				const rect = element.getBoundingClientRect();
-				if (rect.width <= 0 || rect.height <= 0 || Number(root.getComputedStyle(element).opacity) === 0)
-					return false;
+				if (rect.width <= 0 || rect.height <= 0) return false;
 				const tag = element.tagName.toLowerCase();
 				const focusable = element;
 				const role = roleOf(element);
@@ -2777,18 +2804,25 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			),
 		)) as DownloadedMedia | null;
 		if (!media) throw new Error(`${deadline.label} requires an element with a media source`);
+		this.#operationRemaining(deadline);
 		const decodedChunks = decodeBoundedMediaChunks(media.base64Chunks);
+		this.#operationRemaining(deadline);
 		const destination = path.join(
 			this.#cwd,
 			`codex-media-${Snowflake.next()}.${extensionForContentType(media.contentType)}`,
 		);
 		const temporary = `${destination}.partial-${Snowflake.next()}`;
 		let abandoned = false;
-		let committed = false;
 		const abandon = () => {
 			abandoned = true;
 		};
 		this.#signal.addEventListener("abort", abandon, { once: true });
+		const cleanupArtifacts = async (): Promise<void> => {
+			await Promise.all([
+				fs.promises.rm(temporary, { force: true }).catch(() => undefined),
+				fs.promises.rm(destination, { force: true }).catch(() => undefined),
+			]);
+		};
 		const persistence = (async () => {
 			const output = await fs.promises.open(temporary, "w");
 			try {
@@ -2803,7 +2837,10 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				await output.close();
 				if (abandoned) throw new Error(`${deadline.label} persistence canceled`);
 				await fs.promises.rename(temporary, destination);
-				committed = true;
+				if (abandoned) {
+					await cleanupArtifacts();
+					throw new Error(`${deadline.label} persistence canceled`);
+				}
 			} finally {
 				await output.close().catch(() => undefined);
 			}
@@ -2812,14 +2849,8 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			await this.#runBeforeDeadline(deadline, () => persistence, abandon);
 		} catch (error) {
 			abandon();
-			void persistence.catch(() => undefined);
-			const destinationExists =
-				committed ||
-				(await fs.promises.stat(destination).then(
-					() => true,
-					() => false,
-				));
-			await fs.promises.rm(destinationExists ? destination : temporary, { force: true });
+			await cleanupArtifacts();
+			void persistence.finally(cleanupArtifacts).catch(() => undefined);
 			throw error;
 		} finally {
 			this.#signal.removeEventListener("abort", abandon);
