@@ -1,6 +1,20 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added durable `/consult` read-only side questions and committed-boundary `/fork-live` creation while the parent response continues streaming.
+
+### Changed
+
+- Saved consultations now appear as parked read-only Agent Hub transcripts and remain hidden from messaging, collaboration, and `history://` peer surfaces.
+- Changed the default consultation shortcut to `Alt+Shift+Q` so legacy terminals do not confuse it with `Ctrl+C`; configured overrides remain supported.
+
+### Fixed
+
+- Fixed Agent Hub discovery falsely cancelling a still-running local `/consult` turn, and preserved parent session metadata across successive empty-boundary `/consult` and `/fork-live` children.
+
+
 
 ### Added
 

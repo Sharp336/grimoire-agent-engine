@@ -1419,6 +1419,49 @@ export class SessionManager {
 		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
 		await this.#rewriteAtomically();
 	}
+	/**
+	 * Create a durable metadata-only parent for a side child when this manager's
+	 * session file has not yet been materialized. No conversation entries,
+	 * drafts, or other live state are copied into the materialized parent.
+	 */
+	async materializeHeaderAndModelState(options?: {
+		header?: SessionHeader;
+		model?: string;
+		providerPromptCacheKey?: string;
+		sessionFile?: string;
+	}): Promise<SessionManager> {
+		const sourceHeader = options?.header ?? this.#header;
+		const cwd = sourceHeader.cwd;
+		const sessionDir = options?.sessionFile
+			? path.dirname(options.sessionFile)
+			: this.#persist
+				? this.#sessionDir
+				: SessionManager.getDefaultSessionDir(cwd, undefined, this.#storage);
+		const sessionFile =
+			options?.sessionFile ??
+			path.join(sessionDir, `${fileSafeTimestamp(sourceHeader.timestamp)}_${sourceHeader.id}.jsonl`);
+		const materialized = new SessionManager(cwd, sessionDir, true, this.#storage);
+		materialized.#resetToNewSession(undefined, sessionFile);
+		materialized.#sessionId = sourceHeader.id;
+		materialized.#header = {
+			...sourceHeader,
+			id: sourceHeader.id,
+			cwd,
+			providerPromptCacheKey: options?.providerPromptCacheKey ?? sourceHeader.providerPromptCacheKey,
+		};
+		materialized.#sessionName = materialized.#header.title;
+		materialized.#titleSource = materialized.#header.titleSource;
+		materialized.#titleUpdatedAt = materialized.#header.timestamp;
+		if (options?.model) materialized.appendModelChange(options.model);
+		// This must publish before yielding to the caller. The originating lazy
+		// manager can append its first assistant entry while the child is being
+		// created; an async header rewrite finishing afterward would otherwise
+		// replace that full parent journal with this metadata-only snapshot.
+		materialized.#forceFileCreation = true;
+		materialized.#rewriteSynchronously();
+		materialized.flushSync();
+		return materialized;
+	}
 
 	/**
 	 * Stage a synchronous group of entry appends and publish the resulting full
@@ -1699,6 +1742,16 @@ export class SessionManager {
 		return this.#sessionFile;
 	}
 
+	/** Whether this manager can durably materialize its assigned session path. */
+	isPersistent(): boolean {
+		return this.#persist;
+	}
+
+	/** Whether the manager currently has a durable session header on its assigned path. */
+	hasPersistedSessionFile(): boolean {
+		return this.#persist && this.#fileIsCurrent && !!this.#sessionFile && this.#storage.existsSync(this.#sessionFile);
+	}
+
 	getArtifactsDir(): string | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
 		return artifactsDirectoryFor(this.#sessionFile);
@@ -1933,6 +1986,14 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	peekSessionInit(): SessionInitEntry | undefined {
+		for (let index = this.#entries.length - 1; index >= 0; index--) {
+			const entry = this.#entries[index];
+			if (entry?.type === "session_init") return entry;
+		}
+		return undefined;
+	}
+
 	appendSessionInit(init: {
 		systemPrompt: string;
 		task: string;
@@ -2097,6 +2158,30 @@ export class SessionManager {
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
 		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
+	}
+
+	/** Build the resolved session context at an exact committed leaf. */
+	buildSessionContextAt(leafId: string | null, options?: BuildSessionContextOptions): SessionContext {
+		if (leafId !== null && !this.#index.has(leafId)) {
+			throw new Error(`Cannot fork committed snapshot: entry ${leafId} not found`);
+		}
+		return buildSessionContext(this.#entries, leafId, this.#index.entriesById(), options);
+	}
+
+	/** Fork a captured source into an explicitly pinned detached child file. */
+	async forkDetached(options: {
+		sourceSessionFile: string;
+		sessionFile: string;
+		throughLeafId: string | null;
+		suppressBreadcrumb?: boolean;
+	}): Promise<SessionManager> {
+		return SessionManager.forkFrom(
+			options.sourceSessionFile,
+			this.#cwd,
+			path.dirname(options.sessionFile),
+			this.#storage,
+			options,
+		);
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */
@@ -2292,40 +2377,61 @@ export class SessionManager {
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { suppressBreadcrumb?: boolean; sessionFile?: string },
+		options?: { suppressBreadcrumb?: boolean; sessionFile?: string; throughLeafId?: string | null },
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 
-		const sourceEntries = structuredClone(await loadEntriesFromFile(sourcePath, storage)) as FileEntry[];
-		migrateToCurrentVersion(sourceEntries);
-		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
+		try {
+			const sourceEntries = structuredClone(await loadEntriesFromFile(sourcePath, storage)) as FileEntry[];
+			migrateToCurrentVersion(sourceEntries);
+			await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 
-		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
-		manager.#resetToNewSession(
-			{
-				parentSession: sourceHeader?.id,
-				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
-			},
-			options?.sessionFile,
-		);
-		manager.#header.title = sourceHeader?.title;
-		manager.#header.titleSource = sourceHeader?.titleSource;
-		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
-		manager.#header.additionalDirectories =
-			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
-		manager.#sessionName = manager.#header.title;
-		manager.#titleSource = manager.#header.titleSource;
-		manager.#titleUpdatedAt = nowIso();
-		manager.#hasTitleSlot = true;
-		manager.#entries = history;
-		manager.#index.rebuild(history);
-		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
-		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		return manager;
+			const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
+			const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+			let selectedHistory = history;
+			if (options?.throughLeafId !== undefined) {
+				const sourceIndex = new SessionEntryIndex();
+				sourceIndex.rebuild(history);
+				const throughLeafId = options.throughLeafId;
+				if (throughLeafId !== null && !sourceIndex.has(throughLeafId)) {
+					throw new Error(`Cannot fork committed snapshot: entry ${throughLeafId} not found`);
+				}
+				selectedHistory = sourceIndex.pathTo(throughLeafId);
+			}
+			manager.#resetToNewSession(
+				{
+					parentSession: sourceHeader?.id,
+					providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
+				},
+				options?.sessionFile,
+			);
+			manager.#header.title = sourceHeader?.title;
+			manager.#header.titleSource = sourceHeader?.titleSource;
+			manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(
+				d => d !== path.resolve(cwd),
+			);
+			manager.#header.additionalDirectories =
+				manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
+			manager.#sessionName = manager.#header.title;
+			manager.#titleSource = manager.#header.titleSource;
+			manager.#titleUpdatedAt = nowIso();
+			manager.#hasTitleSlot = true;
+			manager.#entries = selectedHistory;
+			manager.#index.rebuild(selectedHistory);
+			manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+			manager.#forceFileCreation = true;
+			await manager.#rewriteAtomically();
+			return manager;
+		} catch (error) {
+			if (options?.sessionFile) {
+				await storage.deleteSessionWithArtifacts(options.sessionFile).catch(cleanupError => {
+					if (!isEnoent(cleanupError)) throw cleanupError;
+				});
+			}
+			throw error;
+		}
 	}
 
 	/**

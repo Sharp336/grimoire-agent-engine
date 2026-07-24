@@ -31,6 +31,7 @@ interface AppKeybindings {
 	"app.tools.expand": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
+	"app.consult": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
 	"app.clipboard.pasteImage": true;
@@ -133,6 +134,10 @@ export const KEYBINDINGS = {
 		// first so the default binding works there without remapping (#1903).
 		defaultKeys: ["ctrl+q", "ctrl+enter"],
 		description: "Send follow-up message",
+	},
+	"app.consult": {
+		defaultKeys: "alt+shift+q",
+		description: "Start a new consultation",
 	},
 	"app.retry": {
 		defaultKeys: "alt+r",

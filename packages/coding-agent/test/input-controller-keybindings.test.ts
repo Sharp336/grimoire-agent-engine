@@ -17,12 +17,13 @@ type FakeEditor = {
 	onSelectModelTemporary?: () => void;
 	onSelectModel?: () => void;
 	onHistorySearch?: () => void;
-	onPasteImage?: () => Promise<boolean>;
+	onConsult?: () => void;
 	onCopyPrompt?: () => void;
 	onExpandTools?: () => void;
 	onToggleThinking?: () => void;
 	onExternalEditor?: () => void;
 	onRetry?: () => void;
+	onDequeue?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
@@ -57,11 +58,14 @@ function registeredInputListeners(addInputListener: Mock<(listener: InputListene
 async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
+		"app.clear": ["ctrl+c"],
 		"app.display.reset": ["ctrl+l"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
 		"app.clipboard.pasteImage": ["ctrl+v"],
+		"app.consult": ["alt+shift+q"],
+		"app.message.dequeue": ["alt+shift+d"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -97,11 +101,38 @@ async function createContext() {
 		abort,
 		retry,
 	};
+	const flushSync = vi.fn();
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBtwBranchKey = vi.fn(async () => true);
+	const canBranchBtw: Mock<InteractiveModeContext["canBranchBtw"]> = vi.fn(() => false);
 	const handleBtwCopyKey = vi.fn(async () => true);
-	const canBranchBtw = vi.fn(() => false);
 	const canCopyBtw = vi.fn(() => false);
+	const canCopyConsult: Mock<InteractiveModeContext["canCopyConsult"]> = vi.fn(() => false);
+	const handleConsultCopyKey: Mock<InteractiveModeContext["handleConsultCopyKey"]> = vi.fn(async () => true);
+	const canAskMainAboutConsultationAnswer: Mock<InteractiveModeContext["canAskMainAboutConsultationAnswer"]> = vi.fn(
+		() => false,
+	);
+	const askMainAboutConsultationAnswer: Mock<InteractiveModeContext["askMainAboutConsultationAnswer"]> = vi.fn(
+		async () => true,
+	);
+	let consultComposerActive = false;
+	const getConsultTurnPresentation: Mock<InteractiveModeContext["getConsultTurnPresentation"]> = vi.fn(
+		() => undefined,
+	);
+	const hasActiveConsult: Mock<InteractiveModeContext["hasActiveConsult"]> = vi.fn(() => false);
+	const hasActiveOmfg: Mock<InteractiveModeContext["hasActiveOmfg"]> = vi.fn(() => false);
+	const returnConsultToParent: Mock<InteractiveModeContext["returnConsultToParent"]> = vi.fn(() => false);
+	const startNewConsultation: Mock<InteractiveModeContext["startNewConsultation"]> = vi.fn(async () => true);
+	const showPreviousConsultTurn: Mock<InteractiveModeContext["showPreviousConsultTurn"]> = vi.fn(async () => true);
+	const showNextConsultTurn: Mock<InteractiveModeContext["showNextConsultTurn"]> = vi.fn(async () => true);
+	const scrollConsultAnswer: Mock<InteractiveModeContext["scrollConsultAnswer"]> = vi.fn(() => true);
+	const scrollConsultAnswerPage: Mock<InteractiveModeContext["scrollConsultAnswerPage"]> = vi.fn(() => true);
+	const scrollConsultAnswerToStart: Mock<InteractiveModeContext["scrollConsultAnswerToStart"]> = vi.fn(() => true);
+	const scrollConsultAnswerToEnd: Mock<InteractiveModeContext["scrollConsultAnswerToEnd"]> = vi.fn(() => true);
+	const showConsultActionMenu: Mock<InteractiveModeContext["showConsultActionMenu"]> = vi.fn(async () => true);
+	const handleConsultSubmit: Mock<InteractiveModeContext["handleConsultSubmit"]> = vi.fn(async () => {});
+	const showWarning = vi.fn();
+	const clearEditor = vi.fn();
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -183,6 +214,9 @@ async function createContext() {
 			}
 		},
 		updatePendingMessagesDisplay,
+		sessionManager: { flushSync },
+		clearEditor,
+		lastSigintTime: 0,
 		isBashMode: false,
 		isPythonMode: false,
 		handleHotkeysCommand: vi.fn(),
@@ -198,10 +232,31 @@ async function createContext() {
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
 		hasActiveBtw: vi.fn(() => false),
+		hasActiveOmfg,
 		handleBtwBranchKey,
 		canBranchBtw,
 		canCopyBtw,
 		handleBtwCopyKey,
+		get isConsultComposerActive() {
+			return consultComposerActive;
+		},
+		hasActiveConsult,
+		returnConsultToParent,
+		startNewConsultation,
+		showPreviousConsultTurn,
+		showNextConsultTurn,
+		scrollConsultAnswer,
+		scrollConsultAnswerPage,
+		scrollConsultAnswerToStart,
+		scrollConsultAnswerToEnd,
+		getConsultTurnPresentation,
+		canCopyConsult,
+		handleConsultCopyKey,
+		showConsultActionMenu,
+		canAskMainAboutConsultationAnswer,
+		askMainAboutConsultationAnswer,
+		handleConsultSubmit,
+		showWarning,
 		showError,
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
@@ -211,8 +266,14 @@ async function createContext() {
 		ctx,
 		editor,
 		customHandlers,
+		getFocused() {
+			return focused;
+		},
 		setFocused(target: unknown) {
 			focused = target;
+		},
+		setConsultComposerActive(value: boolean) {
+			consultComposerActive = value;
 		},
 		spies: {
 			setActionKeys,
@@ -230,6 +291,25 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			hasActiveConsult,
+			returnConsultToParent,
+			startNewConsultation,
+			showPreviousConsultTurn,
+			showNextConsultTurn,
+			scrollConsultAnswer,
+			scrollConsultAnswerPage,
+			handleConsultSubmit,
+			scrollConsultAnswerToStart,
+			scrollConsultAnswerToEnd,
+			showWarning,
+			getConsultTurnPresentation,
+			canCopyConsult,
+			handleConsultCopyKey,
+			showConsultActionMenu,
+			canAskMainAboutConsultationAnswer,
+			askMainAboutConsultationAnswer,
+			flushSync,
+			clearEditor,
 		},
 	};
 }
@@ -593,6 +673,188 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showError).toHaveBeenCalledWith("queue full");
 		expect(editor.getText()).toBe("queued during stream");
 		expect(ctx.locallySubmittedUserSignatures.has("queued during stream\u00000")).toBe(false);
+	});
+
+	it("keeps clear and consultation as distinct configured editor actions", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.clear", ["ctrl+c"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.consult", ["alt+shift+q"]);
+		expect(editor.onClear).toBeDefined();
+		expect(editor.onConsult).toBeDefined();
+
+		editor.onClear?.();
+
+		expect(spies.startNewConsultation).not.toHaveBeenCalled();
+
+		editor.onConsult?.();
+
+		expect(spies.startNewConsultation).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns consultation editor ownership to the parent on Esc before interrupting its stream", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const session = ctx.session as unknown as { isStreaming: boolean };
+		session.isStreaming = true;
+		spies.hasActiveConsult.mockReturnValue(true);
+		spies.returnConsultToParent.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.returnConsultToParent).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("keeps consultation focus in the editor and reserves its explicit Alt turn navigation", async () => {
+		const { InputController, ctx, editor, getFocused, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[1;3A")).toEqual({ consume: true });
+		expect(dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[1;3B")).toEqual({ consume: true });
+		expect(spies.showPreviousConsultTurn).toHaveBeenCalledTimes(1);
+		expect(spies.showNextConsultTurn).toHaveBeenCalledTimes(1);
+
+		// These printable keys remain available for a consultation question rather
+		// than becoming panel navigation aliases.
+		expect(dispatchInput(registeredInputListeners(spies.addInputListener), "[")).toBeUndefined();
+		expect(dispatchInput(registeredInputListeners(spies.addInputListener), "]")).toBeUndefined();
+		expect(getFocused()).toBe(editor);
+	});
+
+	it("disables parent model, retry, dequeue, and external-editor actions while composing a consultation", async () => {
+		const { InputController, ctx, editor, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		const controller = new InputController(ctx);
+		const dequeue = vi.spyOn(controller, "handleDequeue");
+
+		controller.setupKeyHandlers();
+		editor.setText("consultation draft");
+		editor.onSelectModel?.();
+		editor.onSelectModelTemporary?.();
+		editor.onRetry?.();
+		// This represents a user-configured non-navigation dequeue chord. It
+		// bypasses the consultation panel's Alt+Up listener and must still not
+		// restore the parent queue or its images into this draft.
+		editor.onDequeue?.();
+		editor.onExternalEditor?.();
+		await Promise.resolve();
+
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.message.dequeue", ["alt+shift+d"]);
+		expect(spies.showModelSelector).not.toHaveBeenCalled();
+		expect(spies.retry).not.toHaveBeenCalled();
+		expect(dequeue).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("consultation draft");
+	});
+
+	it("routes wheel, Alt page navigation, and Alt Home/End to the bounded answer viewport; Alt+End clears detached new-output state through its context action", async () => {
+		const { InputController, ctx, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+		expect(dispatchInput(listeners, "\x1b[<64;40;8M")).toEqual({ consume: true });
+		expect(dispatchInput(listeners, "\x1b[<65;40;8M")).toEqual({ consume: true });
+		expect(spies.scrollConsultAnswer).toHaveBeenNthCalledWith(1, -3);
+		expect(spies.scrollConsultAnswer).toHaveBeenNthCalledWith(2, 3);
+
+		expect(dispatchInput(listeners, "\x1b[5;3~")).toEqual({ consume: true });
+		expect(dispatchInput(listeners, "\x1b[6;3~")).toEqual({ consume: true });
+		expect(spies.scrollConsultAnswerPage).toHaveBeenNthCalledWith(1, -1);
+		expect(spies.scrollConsultAnswerPage).toHaveBeenNthCalledWith(2, 1);
+
+		expect(dispatchInput(listeners, "\x1b[1;3H")).toEqual({ consume: true });
+		expect(spies.scrollConsultAnswerToStart).toHaveBeenCalledTimes(1);
+		expect(dispatchInput(listeners, "\x1b[1;3F")).toEqual({ consume: true });
+		expect(spies.scrollConsultAnswerToEnd).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses the eligible visible consultation answer in the parent only with Alt+Enter", async () => {
+		const { InputController, ctx, editor, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+		expect(dispatchInput(listeners, "\x1b[13;3u")).toBeUndefined();
+		expect(spies.askMainAboutConsultationAnswer).not.toHaveBeenCalled();
+
+		spies.canAskMainAboutConsultationAnswer.mockReturnValue(true);
+		editor.setText("follow-up draft");
+		expect(dispatchInput(listeners, "\x1b[13;3u")).toBeUndefined();
+		expect(spies.askMainAboutConsultationAnswer).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("follow-up draft");
+		editor.setText("");
+		expect(dispatchInput(listeners, "\x1b[13;3u")).toEqual({ consume: true });
+		expect(spies.askMainAboutConsultationAnswer).toHaveBeenCalledTimes(1);
+	});
+
+	it("opens the consultation action menu with ? or Alt+/", async () => {
+		const { InputController, ctx, editor, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+		expect(dispatchInput(listeners, "?")).toEqual({ consume: true });
+		expect(dispatchInput(listeners, "\x1b/")).toEqual({ consume: true });
+		expect(spies.showConsultActionMenu).toHaveBeenCalledTimes(2);
+
+		editor.setText("follow-up question");
+		expect(dispatchInput(listeners, "?")).toBeUndefined();
+		expect(spies.showConsultActionMenu).toHaveBeenCalledTimes(2);
+	});
+
+	it("routes Enter to the consultation thread and warns when an older turn is visible", async () => {
+		const { InputController, ctx, editor, getFocused, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		spies.getConsultTurnPresentation.mockReturnValue({
+			consultationId: "consult-1",
+			title: "Initial implementation review",
+			turnIndex: 1,
+			turnCount: 2,
+			isLatest: false,
+			status: "completed",
+		});
+		const controller = new InputController(ctx);
+
+		expect(getFocused()).toBe(editor);
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("follow the latest answer");
+
+		expect(spies.handleConsultSubmit).toHaveBeenCalledWith("follow the latest answer");
+		expect(getFocused()).toBe(editor);
+		expect(spies.showWarning).toHaveBeenCalledWith(
+			"Viewing old consultation turn 1; your question will be appended to latest turn 2.",
+		);
+		expect(spies.prompt).not.toHaveBeenCalled();
+	});
+
+	it("clears rejected images from the consultation composer", async () => {
+		const { InputController, ctx, editor, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		const image = { type: "image", data: "base64-data", mimeType: "image/png" } as const;
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["local://draft.png"];
+		editor.imageLinks = editor.pendingImageLinks;
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("retry without image");
+
+		expect(editor.getText()).toBe("retry without image");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+		expect(editor.imageLinks).toBeUndefined();
+		expect(spies.handleConsultSubmit).not.toHaveBeenCalled();
+		expect(ctx.showStatus).toHaveBeenCalledWith("Images are not supported in /consult.");
 	});
 
 	it("continue shortcuts submit a hidden synthetic developer directive", async () => {

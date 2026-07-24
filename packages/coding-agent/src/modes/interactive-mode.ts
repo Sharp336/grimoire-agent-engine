@@ -91,6 +91,7 @@ import {
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
+import askMainConsultationPrompt from "../prompts/system/consult-ask-main.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
@@ -103,9 +104,16 @@ import {
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { CompactMode } from "../session/compact-modes";
+import {
+	consultationThreadTitle,
+	consultationTurnStates,
+	fallbackConsultationTitle,
+	formatConsultationDisplayName,
+} from "../session/consultation";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
+import { loadEntriesFromFile } from "../session/session-loader";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
@@ -162,6 +170,7 @@ import { TranscriptContainer } from "./components/transcript-container";
 import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
+import { type ConsultationThreadHandle, ConsultController } from "./controllers/consult-controller";
 import { EventController } from "./controllers/event-controller";
 import { ExtensionUiController } from "./controllers/extension-ui-controller";
 import { InputController } from "./controllers/input-controller";
@@ -232,6 +241,19 @@ interface WorkingMessageAccentCacheKey {
 	sessionName: string | undefined;
 	accentSurfaceLuminance: number | undefined;
 	sessionAccentEnabled: boolean;
+}
+
+interface EditorDraftSnapshot {
+	text: string;
+	cursor: { line: number; col: number };
+	images: ImageContent[];
+	imageLinks: (string | undefined)[];
+	renderedImageLinks: readonly (string | undefined)[] | undefined;
+}
+
+interface ConsultComposerState {
+	parentDraft: EditorDraftSnapshot;
+	thread: ConsultationThreadHandle | undefined;
 }
 
 /**
@@ -365,6 +387,15 @@ class AnchoredLiveContainer extends Container implements NativeScrollbackLiveReg
 	getNativeScrollbackLiveRegionStart(): number | undefined {
 		return this.children.length > 0 ? 0 : undefined;
 	}
+
+	/**
+	 * An anchored slot is rebuilt in place. Keep its mutable suffix in the
+	 * viewport so replacing a BTW/consultation panel (or a HUD sibling) can
+	 * never append a prior frame to native scrollback.
+	 */
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		return this.children.length > 0;
+	}
 }
 
 /** How long the ctrl+p model-role cycle chip track lingers above the editor
@@ -434,14 +465,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	ui: TUI;
 	chatContainer: TranscriptContainer;
-	pendingMessagesContainer: Container;
-	statusContainer: Container;
-	todoContainer: Container;
-	subagentContainer: Container;
-	btwContainer: Container;
-	omfgContainer: Container;
-	errorBannerContainer: Container;
-	modelCycleContainer: Container;
+	pendingMessagesContainer: AnchoredLiveContainer;
+	statusContainer: AnchoredLiveContainer;
+	todoContainer: AnchoredLiveContainer;
+	subagentContainer: AnchoredLiveContainer;
+	btwContainer: AnchoredLiveContainer;
+	omfgContainer: AnchoredLiveContainer;
+	errorBannerContainer: AnchoredLiveContainer;
+	modelCycleContainer: AnchoredLiveContainer;
 	editor: CustomEditor;
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
@@ -540,6 +571,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	fileSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
+	#consultComposer: ConsultComposerState | undefined;
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
 
@@ -580,6 +612,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #toolUiContextSetter: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
 
 	readonly #btwController: BtwController;
+	readonly #consultController: ConsultController;
 	readonly #tanCommandController: TanCommandController;
 	readonly #omfgController: OmfgController;
 	readonly #commandController: CommandController;
@@ -613,6 +646,118 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	unfocusSession(): Promise<void> {
 		return this.#focusController.unfocus();
+	}
+	get isConsultComposerActive(): boolean {
+		return this.#consultComposer !== undefined;
+	}
+	getActiveConsultThread(): ConsultationThreadHandle | undefined {
+		return this.#consultComposer?.thread;
+	}
+	beginConsultComposer(thread?: ConsultationThreadHandle): void {
+		if (!this.#consultComposer) {
+			this.#consultComposer = {
+				parentDraft: {
+					text: this.editor.getText(),
+					cursor: this.editor.getCursor(),
+					images: [...this.editor.pendingImages],
+					imageLinks: [...this.editor.pendingImageLinks],
+					renderedImageLinks: this.editor.imageLinks ? [...this.editor.imageLinks] : undefined,
+				},
+				thread,
+			};
+		} else {
+			this.#consultComposer.thread = thread;
+		}
+		// Clear every parent/extension custom binding while the shared editor is
+		// owned by /consult, so printable consultation input cannot become a
+		// parent shortcut.
+		this.#inputController.setupKeyHandlers();
+		this.editor.setText("");
+		this.editor.imageLinks = undefined;
+		this.editor.pendingImages = [];
+		this.editor.pendingImageLinks = [];
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+	}
+	setActiveConsultThread(thread: ConsultationThreadHandle): void {
+		if (!this.#consultComposer) return;
+		this.#consultComposer.thread = thread;
+	}
+	getConsultTurnPresentation():
+		| {
+				consultationId: string;
+				title: string;
+				turnIndex: number;
+				turnCount: number;
+				isLatest: boolean;
+				status: string;
+		  }
+		| undefined {
+		return this.#consultController.getVisibleTurnPresentation();
+	}
+	#editorBorderLabel(): string {
+		if (!this.#consultComposer) return "PARENT";
+		const presentation = this.#consultController.getVisibleTurnPresentation();
+		if (!presentation) return "NEW CONSULT";
+		const subject = presentation.title.trim() || "Consultation";
+		const current = `CONSULT ${subject} · turn ${presentation.turnIndex}`;
+		return presentation.isLatest ? current : `${current} · VIEWING OLD TURN`;
+	}
+	#editorTopBorder(availableWidth: number): { content: string; width: number } {
+		const label = this.#editorBorderLabel();
+		const labelContent = theme.fg(this.#consultComposer ? "accent" : "muted", ` ${label} · `);
+		const labelWidth = visibleWidth(labelContent);
+		const status = this.statusLine.getTopBorder(Math.max(0, availableWidth - labelWidth));
+		return {
+			content: labelContent + status.content,
+			width: labelWidth + status.width,
+		};
+	}
+	restoreParentEditorFromConsult(): boolean {
+		const consultation = this.#consultComposer;
+		if (!consultation) return false;
+		this.#consultComposer = undefined;
+		this.#inputController.setupKeyHandlers();
+		const { parentDraft } = consultation;
+		this.editor.setText(parentDraft.text);
+		this.editor.pendingImages = [...parentDraft.images];
+		this.editor.pendingImageLinks = [...parentDraft.imageLinks];
+		this.editor.imageLinks = parentDraft.renderedImageLinks ? [...parentDraft.renderedImageLinks] : undefined;
+		this.#restoreEditorCursor(parentDraft.text, parentDraft.cursor);
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+		return true;
+	}
+	prepareQuotedConsultationAnswerInParent(answer: string, _thread?: ConsultationThreadHandle): boolean {
+		if (!answer || !this.restoreParentEditorFromConsult()) return false;
+		return this.#appendConsultationDraft(answer.replace(/^/gm, "> "));
+	}
+	prepareAskMainConsultationDraft(answer: string, _thread?: ConsultationThreadHandle): boolean {
+		if (!answer || !this.restoreParentEditorFromConsult()) return false;
+		const quotedAnswer = answer.replace(/^/gm, "> ");
+		return this.#appendConsultationDraft(prompt.render(askMainConsultationPrompt, { quotedAnswer }));
+	}
+	#appendConsultationDraft(draft: string): boolean {
+		const parentDraft = this.editor.getText();
+		this.editor.setText(parentDraft ? `${parentDraft}\n\n${draft}` : draft);
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+		return true;
+	}
+	openConsultationTranscript(thread: ConsultationThreadHandle): void {
+		this.showStatus(`Opening consult:${thread.consultationId} in Agent Hub.`);
+		this.#selectorController.showConsultationTranscript(thread, this.#observerRegistry);
+	}
+	#restoreEditorCursor(text: string, cursor: { line: number; col: number }): void {
+		const lines = text.split("\n");
+		const targetOffset =
+			lines
+				.slice(0, Math.max(0, Math.min(cursor.line, lines.length - 1)))
+				.reduce((offset, line) => offset + line.length + 1, 0) +
+			Math.max(0, Math.min(cursor.col, lines[Math.max(0, Math.min(cursor.line, lines.length - 1))]?.length ?? 0));
+		for (let remaining = text.length - targetOffset; remaining > 0; remaining--) {
+			this.editor.handleInput("\x1b[D");
+		}
 	}
 	clearTransientSessionUi(): void {
 		if (this.loadingAnimation) {
@@ -708,7 +853,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
 		setTerminalTextSizing(settings.get("tui.textSizing") && TERMINAL.textSizing);
-		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.statusContainer = new AnchoredLiveContainer();
 		this.todoContainer = new AnchoredLiveContainer();
@@ -717,6 +861,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.omfgContainer = new AnchoredLiveContainer();
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
+		this.chatContainer = new TranscriptContainer();
 		this.editor = new CustomEditor(getEditorTheme());
 		this.ui.enableScopedInputRender(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
@@ -731,8 +876,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 		this.#syncEditorMaxHeight();
 		this.#resizeHandler = () => {
+			// TUI owns the resize repaint and its settle/debounce behavior. This
+			// listener only updates the editor's geometry for that one paint.
 			this.#syncEditorMaxHeight();
-			this.ui.requestRender();
 		};
 		process.stdout.on("resize", this.#resizeHandler);
 		try {
@@ -761,7 +907,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// (#4145). The TUI throttles renders at ~30fps, so a long-running eval
 		// spraying events no longer runs `getTopBorder` synchronously in the
 		// hot path where the render never gets to paint the result.
-		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		this.editor.setTopBorderProvider(availableWidth => this.#editorTopBorder(availableWidth));
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 		this.proseOnlyThinking = settings.get("proseOnlyThinking");
@@ -788,6 +934,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
+		this.#consultController = new ConsultController(this);
 		this.#tanCommandController = new TanCommandController(this);
 		this.#omfgController = new OmfgController(this);
 		this.#extensionUiController = new ExtensionUiController(this);
@@ -3903,29 +4050,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
 
-		await this.#liveCommandController.stop();
-
-		this.#btwController.dispose();
-		this.#omfgController.dispose();
-		this.#focusController.dispose();
-
-		// Surface an explicit "Closing session…" line so the user sees a reason
-		// for the pause while `session.dispose()` flushes memory consolidate and
-		// other cleanups (issue #3641). The await on the next line yields the
-		// event loop, giving requestRender() a tick to paint the status before
-		// dispose blocks.
+		// Surface the shutdown immediately, before consultation cancellation or
+		// session disposal can yield or block on durable cleanup.
 		this.showStatus("Closing session…");
-
-		// Persist the draft and dispose the session through the shared teardown
-		// so a signal that arrives mid-shutdown cannot fire a second dispose.
-		// The teardown is a promise-memoized singleton; whichever path calls it
-		// first runs the work, the other awaits the same settled promise.
-		// The teardown is registered lazily in `init()` — a `/exit` reached
-		// before `init()` completed falls back to a direct dispose.
 		const stillClosingTimer = setTimeout(() => {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, STILL_CLOSING_DELAY_MS);
 		try {
+			await this.#liveCommandController.stop();
+			await this.#consultController.cancelBeforeSwitch();
+			this.#consultController.dispose();
+			this.restoreParentEditorFromConsult();
+			this.#btwController.dispose();
+			this.#omfgController.dispose();
+			this.#focusController.dispose();
+
+			// Persist the draft and dispose the session through the shared teardown
+			// so a signal that arrives mid-shutdown cannot fire a second dispose.
+			// The teardown is a promise-memoized singleton; whichever path calls it
+			// first runs the work, the other awaits the same settled promise.
+			// The teardown is registered lazily in `init()` — a `/exit` reached
+			// before `init()` completed falls back to a direct dispose.
 			if (this.#signalTeardown) {
 				await this.#signalTeardown();
 			} else {
@@ -3993,7 +4138,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
-		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		nextEditor.setTopBorderProvider(availableWidth => this.#editorTopBorder(availableWidth));
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
 			nextEditor.setHistoryStorage(this.historyStorage);
@@ -4377,7 +4522,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleContextCommand();
 	}
 
-	#prepareSessionSwitch(): void {
+	async #prepareSessionSwitch(): Promise<void> {
+		await this.#consultController.cancelBeforeSwitch();
+		this.#consultController.dispose();
+		this.restoreParentEditorFromConsult();
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
@@ -4385,24 +4533,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#hidePlanReview();
 	}
 
-	handleClearCommand(): Promise<void> {
-		this.#prepareSessionSwitch();
-		return this.#commandController.handleClearCommand();
+	async handleClearCommand(): Promise<void> {
+		await this.#prepareSessionSwitch();
+		await this.#commandController.handleClearCommand();
 	}
 
 	handleFreshCommand(): Promise<void> {
 		return this.#commandController.handleFreshCommand();
 	}
 
-	handleDropCommand(): Promise<void> {
-		this.#prepareSessionSwitch();
-		return this.#commandController.handleDropCommand();
+	async handleDropCommand(): Promise<void> {
+		await this.#prepareSessionSwitch();
+		await this.#commandController.handleDropCommand();
 	}
 
-	handleForkCommand(): Promise<void> {
-		this.#btwController.dispose();
-		this.#omfgController.dispose();
-		return this.#commandController.handleForkCommand();
+	async handleForkCommand(): Promise<void> {
+		if (!this.session.isStreaming) {
+			await this.#prepareSessionSwitch();
+		}
+		await this.#commandController.handleForkCommand();
+	}
+
+	handleForkLiveCommand(): Promise<void> {
+		return this.#commandController.handleForkLiveCommand();
 	}
 
 	handleMoveCommand(targetPath?: string): Promise<void> {
@@ -4515,7 +4668,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#selectorController.showDebugSelector();
 	}
 
-	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean }): void {
+	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean; openAgentId?: string }): void {
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 
@@ -4614,6 +4767,38 @@ export class InteractiveMode implements InteractiveModeContext {
 	showSessionSelector(): void {
 		this.#selectorController.showSessionSelector();
 	}
+	async showConsultPicker(
+		threads: readonly ConsultationThreadHandle[],
+	): Promise<ConsultationThreadHandle | undefined> {
+		const titledThreads = await Promise.all(
+			threads.map(async thread => {
+				const entries = await loadEntriesFromFile(thread.sessionFile).catch(() => []);
+				const turns = consultationTurnStates(entries, thread.consultationId);
+				return {
+					thread,
+					title:
+						consultationThreadTitle(entries, thread.consultationId) ??
+						fallbackConsultationTitle(turns[0]?.turn.question ?? ""),
+				};
+			}),
+		);
+		const duplicateIds = new Map<string, number>();
+		for (const { thread } of titledThreads) {
+			duplicateIds.set(thread.consultationId, (duplicateIds.get(thread.consultationId) ?? 0) + 1);
+		}
+		const labels = new Map<string, ConsultationThreadHandle>();
+		const duplicateLabels = new Map<string, number>();
+		for (const entry of titledThreads) {
+			const otherIds = titledThreads.filter(other => other !== entry).map(other => other.thread.consultationId);
+			const owner = duplicateIds.get(entry.thread.consultationId) === 1 ? "" : ` (${entry.thread.ownerId})`;
+			const base = `${formatConsultationDisplayName(entry.title, entry.thread.consultationId, otherIds)}${owner}`;
+			const duplicateLabelCount = duplicateLabels.get(base) ?? 0;
+			duplicateLabels.set(base, duplicateLabelCount + 1);
+			labels.set(duplicateLabelCount === 0 ? base : `${base} #${duplicateLabelCount + 1}`, entry.thread);
+		}
+		const selected = await this.showHookSelector("Resume consultation", [...labels.keys()]);
+		return selected ? labels.get(selected) : undefined;
+	}
 
 	async handleResumeSession(sessionPath: string): Promise<void> {
 		// Flush pending settings writes *before* disposing controllers or resetting
@@ -4625,8 +4810,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
 			return;
 		}
-		this.#btwController.dispose();
-		this.#omfgController.dispose();
+		await this.#prepareSessionSwitch();
 		this.resetObserverRegistry();
 		await this.#selectorController.handleResumeSession(sessionPath, { settingsFlushed: true });
 	}
@@ -4677,8 +4861,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#inputController.handleQueueCommand(message);
 	}
 
-	handleBtwCommand(question: string): Promise<void> {
-		return this.#btwController.start(question);
+	async handleBtwCommand(question: string): Promise<void> {
+		await this.#consultController.cancelBeforeSwitch();
+		this.#consultController.dispose();
+		this.restoreParentEditorFromConsult();
+		await this.#btwController.start(question);
+	}
+
+	async handleConsultCommand(question: string): Promise<void> {
+		this.#btwController.dispose();
+		await this.#consultController.startNewThread(question);
 	}
 
 	handleTanCommand(work: string): Promise<void> {
@@ -4691,6 +4883,101 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwEscape(): boolean {
 		return this.#btwController.handleEscape();
+	}
+
+	hasActiveConsult(): boolean {
+		return this.isConsultComposerActive || this.#consultController.hasActiveRequest();
+	}
+
+	handleConsultEscape(): boolean {
+		return this.returnConsultToParent();
+	}
+	async handleConsultNewComposer(): Promise<void> {
+		this.#btwController.dispose();
+		await this.#consultController.newComposer();
+	}
+
+	async handleConsultResume(id?: string): Promise<void> {
+		this.#btwController.dispose();
+		await this.#consultController.resume(id);
+	}
+
+	async handleConsultPick(): Promise<void> {
+		this.#btwController.dispose();
+		await this.#selectorController.showConsultsSelector();
+	}
+
+	handleConsultSubmit(question: string): Promise<void> {
+		return this.#consultController.submitCurrentThread(question);
+	}
+
+	canCopyConsult(): boolean {
+		return this.#consultController.canCopy();
+	}
+
+	handleConsultCopyKey(): Promise<boolean> {
+		return this.#consultController.handleCopy();
+	}
+	showPreviousConsultTurn(): Promise<boolean> {
+		return this.#consultController.showPreviousTurn();
+	}
+	showNextConsultTurn(): Promise<boolean> {
+		return this.#consultController.showNextTurn();
+	}
+	showLatestConsultTurn(): Promise<boolean> {
+		return this.#consultController.showLatestTurn();
+	}
+	scrollConsultAnswer(delta: number): boolean {
+		return this.#consultController.scrollVisibleAnswer(delta);
+	}
+	scrollConsultAnswerPage(direction: -1 | 1): boolean {
+		return this.#consultController.scrollVisibleAnswerPage(direction);
+	}
+	scrollConsultAnswerToStart(): boolean {
+		return this.#consultController.scrollVisibleAnswer(-Number.MAX_SAFE_INTEGER);
+	}
+	scrollConsultAnswerToEnd(): boolean {
+		return this.#consultController.scrollVisibleAnswer(Number.MAX_SAFE_INTEGER);
+	}
+	canCopyConsultTurn(): boolean {
+		return this.#consultController.canCopyVisibleTurn();
+	}
+	handleCopyConsultTurn(): Promise<boolean> {
+		return this.#consultController.handleCopyVisibleTurn();
+	}
+	canCancelConsultTurn(): boolean {
+		return this.#consultController.canCancelVisibleTurn();
+	}
+	cancelConsultTurn(): Promise<boolean> {
+		return this.#consultController.cancelVisibleTurn();
+	}
+	canOpenConsultTranscript(): boolean {
+		return this.#consultController.canOpenVisibleTranscript();
+	}
+	openConsultTranscript(): Promise<boolean> {
+		return this.#consultController.openVisibleTranscript();
+	}
+	showConsultActionMenu(): Promise<boolean> {
+		return this.#selectorController.showActiveConsultActions();
+	}
+	canQuoteConsultationAnswerInParent(): boolean {
+		return this.#consultController.canQuoteVisibleAnswerInParent();
+	}
+	quoteConsultationAnswerInParent(): Promise<boolean> {
+		return this.#consultController.quoteVisibleAnswerInParent();
+	}
+	canAskMainAboutConsultationAnswer(): boolean {
+		return this.#consultController.canAskMainAboutVisibleAnswer();
+	}
+	askMainAboutConsultationAnswer(): Promise<boolean> {
+		return this.#consultController.askMainAboutVisibleAnswer();
+	}
+	startNewConsultation(): Promise<boolean> {
+		this.#btwController.dispose();
+		return this.#consultController.startNewConsultation();
+	}
+	returnConsultToParent(): boolean {
+		return this.#consultController.returnToParent() || this.restoreParentEditorFromConsult();
 	}
 
 	canBranchBtw(): boolean {

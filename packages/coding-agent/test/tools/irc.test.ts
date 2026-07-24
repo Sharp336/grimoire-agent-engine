@@ -647,13 +647,20 @@ describe("IRC", () => {
 			expect(text).toContain("Parked agents are revived automatically");
 		});
 
-		it("op=list hides advisor-kind refs from the peer roster", async () => {
+		it("op=list hides read-only refs from the peer roster", async () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Worker", displayName: "task", kind: "sub", session: sub.session });
 			registry.register({
 				id: "0-Main/advisor",
 				displayName: "advisor",
 				kind: "advisor",
+				session: null,
+				status: "parked",
+			});
+			registry.register({
+				id: "0-Main/consult:private",
+				displayName: "Private architecture review",
+				kind: "consultation",
 				session: null,
 				status: "parked",
 			});
@@ -664,6 +671,7 @@ describe("IRC", () => {
 			const peerIds = details?.peers?.map(peer => peer.id) ?? [];
 			expect(peerIds).toContain("0-Worker");
 			expect(peerIds).not.toContain("0-Main/advisor");
+			expect(peerIds).not.toContain("0-Main/consult:private");
 		});
 
 		it("op=send returns receipts immediately without waiting for a reply", async () => {

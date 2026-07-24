@@ -50,6 +50,7 @@ import {
 	generateBranchSummary,
 	type ShakeConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import { failChatSpan, finishChatSpan, runInActiveSpan, startChatSpan } from "@oh-my-pi/pi-agent-core/telemetry";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -176,6 +177,7 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "../thinking";
+import { formatTitleConversationContext } from "../tiny/message-preproc";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
@@ -206,6 +208,7 @@ import type {
 	AgentSessionDisposeOptions,
 	AsyncJobSnapshot,
 	CommandMetadataChangedListener,
+	CommittedSessionFork,
 	ContextUsageBreakdown,
 	FollowUpOptions,
 	FreshSessionResult,
@@ -213,6 +216,8 @@ import type {
 	ModelCycleResult,
 	Prewalk,
 	PromptOptions,
+	ReadOnlySideRequestSnapshot,
+	ReadOnlySideTransforms,
 	ResolvedRoleModel,
 	RestoredQueuedMessage,
 	RoleModelCycle,
@@ -303,7 +308,11 @@ import {
 } from "./session-maintenance";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
-import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
+import {
+	SessionProviderBoundary,
+	type SessionProviderBoundaryControls,
+	type SessionProviderBoundaryHost,
+} from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -447,6 +456,7 @@ export class AgentSession {
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
+	#sessionIdentityBarrier: Promise<void> = Promise.resolve();
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -567,6 +577,7 @@ export class AgentSession {
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
 	#preferWebsockets: boolean | undefined;
+	#readOnlySideTransforms: ReadOnlySideTransforms;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
@@ -1035,6 +1046,11 @@ export class AgentSession {
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#preferWebsockets = config.preferWebsockets;
 		this.#onPayload = config.onPayload;
+		this.#readOnlySideTransforms = config.readOnlySideTransforms ?? {
+			convertMessages: messages => this.#convertToLlmForSideRequest(messages),
+			transformProviderContext: (context, model) =>
+				config.transformProviderContext ? config.transformProviderContext(context, model) : context,
+		};
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
 		// outer await on `#onResponse` (provider-response.ts) tolerates a sync void return,
@@ -1447,6 +1463,65 @@ export class AgentSession {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+
+	async createCommittedChildSession(
+		childId: string,
+		options?: { materializeParent?: boolean },
+	): Promise<CommittedSessionFork> {
+		if (!/^[A-Za-z0-9._-]+$/.test(childId)) {
+			throw new Error("Invalid committed child session id");
+		}
+		const manager = this.sessionManager;
+		const parentSessionFile = manager.getSessionFile();
+		if (!manager.isPersistent() || !parentSessionFile) {
+			throw new Error("Committed child sessions require a persisted parent session");
+		}
+		const hasPersistedParent = manager.hasPersistedSessionFile();
+		if (!hasPersistedParent && !options?.materializeParent) {
+			throw new Error("Committed child sessions require a persisted parent session");
+		}
+		const parentSessionId = manager.getSessionId();
+		const capturedLeafId = manager.getLeafId();
+		const committedContext = manager.buildSessionContextAt(capturedLeafId);
+		const hasCommittedContext = committedContext.messages.length > 0;
+		const parentLeafId = hasCommittedContext ? capturedLeafId : null;
+		const messages = structuredClone(hasCommittedContext ? committedContext.messages : []);
+		const sessionFile = path.join(
+			path.dirname(parentSessionFile),
+			path.basename(parentSessionFile, ".jsonl"),
+			`${childId}.jsonl`,
+		);
+
+		const prior = this.#sessionIdentityBarrier;
+		const { promise, resolve: release } = Promise.withResolvers<void>();
+		this.#sessionIdentityBarrier = promise;
+		await prior;
+		try {
+			// Materialize the owning manager, not a detached metadata-only sibling.
+			// That keeps this manager authoritative after the first empty-boundary
+			// child, so a second child cannot rewrite the assigned journal without
+			// its thinking, mode, or session-init entries.
+			await manager.ensureOnDisk();
+			await manager.flush();
+			const childSessionFile = sessionFile;
+			const childManager = await manager.forkDetached({
+				sourceSessionFile: parentSessionFile,
+				sessionFile: childSessionFile,
+				throughLeafId: parentLeafId,
+				suppressBreadcrumb: true,
+			});
+			return {
+				manager: childManager,
+				sessionFile: childSessionFile,
+				parentSessionId,
+				parentLeafId,
+				hasCommittedContext,
+				messages,
+			};
+		} finally {
+			release();
+		}
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -4119,8 +4194,12 @@ export class AgentSession {
 	}
 
 	/** Apply session-level stream hooks to a direct side request. */
-	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider = "anthropic"): SimpleStreamOptions {
-		return this.#providerBoundary.prepareSimpleStreamOptions(options, provider);
+	prepareSimpleStreamOptions(
+		options: SimpleStreamOptions,
+		provider = "anthropic",
+		controls?: SessionProviderBoundaryControls,
+	): SimpleStreamOptions {
+		return this.#providerBoundary.prepareSimpleStreamOptions(options, provider, controls);
 	}
 
 	/** Current steering mode */
@@ -5763,6 +5842,34 @@ export class AgentSession {
 		);
 	}
 
+	/**
+	 * Generate a consultation subject through the canonical session-title
+	 * service. The isolated request identity keeps the title request out of the
+	 * parent provider lineage, while the service retains normal role resolution,
+	 * prompting, normalization, and provider telemetry.
+	 */
+	async generateConsultationTitle(firstQuestion: string, firstAnswer: string): Promise<string | null> {
+		const conversation = formatTitleConversationContext([
+			{ role: "user", text: firstQuestion },
+			{ role: "assistant", text: firstAnswer },
+		]);
+		if (!conversation) return null;
+		// The title request is a separate provider conversation. Its unique identity
+		// must drive both credential routing and Anthropic session metadata: reusing
+		// the parent identity would merge remote cache/usage attribution even though
+		// no parent message or provider state participates in this direct request.
+		const titleSessionId = `consultation-title:${Snowflake.next()}`;
+		return generateSessionTitle(
+			conversation,
+			this.#modelRegistry,
+			this.settings,
+			titleSessionId,
+			this.model,
+			provider => buildSessionMetadata(titleSessionId, provider, this.#modelRegistry.authStorage),
+			this.#titleSystemPrompt,
+		);
+	}
+
 	async #refreshTitleAfterReplan(context: string, sessionId: string): Promise<void> {
 		const title = await this.generateTitle(context);
 		if (!title) return;
@@ -6704,6 +6811,145 @@ export class AgentSession {
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
 	 */
+	captureReadOnlySideRequestSnapshot(): ReadOnlySideRequestSnapshot | undefined {
+		const model = this.model;
+		if (!model) return undefined;
+		const providerSessionId = this.agent.sessionId;
+		if (!providerSessionId) return undefined;
+		return {
+			model,
+			providerSessionId,
+			promptCacheKey: this.agent.promptCacheKey ?? providerSessionId,
+			systemPrompt: [...this.agent.state.systemPrompt],
+			tools: [...this.agent.state.tools],
+			telemetry: this.agent.telemetry,
+		};
+	}
+
+	async runReadOnlySideTurn(args: {
+		request: ReadOnlySideRequestSnapshot;
+		messages: readonly AgentMessage[];
+		promptText: string;
+		developerReminder: string;
+		onTextDelta?: (delta: string) => void;
+		signal?: AbortSignal;
+	}): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
+		const request = args.request;
+		const snapshot = structuredClone(args.messages) as AgentMessage[];
+		snapshot.push({
+			role: "developer",
+			content: [{ type: "text", text: args.developerReminder }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		snapshot.push({
+			role: "user",
+			content: [{ type: "text", text: args.promptText }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		const llmMessages = await this.#readOnlySideTransforms.convertMessages(snapshot, request.model);
+		const context = await this.agent.buildSideRequestContext(llmMessages, request.systemPrompt, {
+			model: request.model,
+			tools: request.tools,
+			applyProviderTransform: false,
+		});
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const sideSessionId = `${request.providerSessionId}:side:${Snowflake.next()}`;
+		const options = this.prepareSimpleStreamOptions(
+			{
+				apiKey: this.#modelRegistry.resolver(request.model, request.providerSessionId),
+				sessionId: sideSessionId,
+				promptCacheKey: request.promptCacheKey,
+				preferWebsockets: this.#preferWebsockets,
+				providerSessionState,
+				reasoning: toReasoningEffort(this.thinkingLevel),
+				disableReasoning: shouldDisableReasoning(this.thinkingLevel),
+				hideThinkingSummary: this.agent.hideThinkingSummary,
+				serviceTier: this.#models.effectiveServiceTier(request.model),
+				signal: args.signal,
+			},
+			request.model.provider,
+			{ includeSessionHooks: false, includeSessionMetadata: false },
+		);
+
+		let providerReplyText = "";
+		let emittedReplyText = "";
+		let assistantMessage: AssistantMessage | undefined;
+		const transformedContext = await this.#readOnlySideTransforms.transformProviderContext(context, request.model);
+		const serviceTier = this.#models.effectiveServiceTier(request.model);
+		const telemetry = resolveTelemetry(request.telemetry, sideSessionId);
+		const chatSpan = startChatSpan(telemetry, request.model, {
+			stepNumber: 1,
+			request: {
+				systemPrompt: transformedContext.systemPrompt,
+				messages: transformedContext.messages,
+				tools: transformedContext.tools,
+				serviceTier,
+				reasoningEffort: options.reasoning,
+				toolChoice: options.toolChoice,
+			},
+		});
+		try {
+			await runInActiveSpan(chatSpan, async () => {
+				const stream = await this.#sideStreamFn(request.model, transformedContext, options);
+				for await (const event of stream) {
+					if (event.type === "text_delta") {
+						providerReplyText += event.delta;
+						if (args.onTextDelta) {
+							const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+							if (readyText.length > emittedReplyText.length) {
+								const delta = readyText.slice(emittedReplyText.length);
+								emittedReplyText = readyText;
+								args.onTextDelta(delta);
+							}
+						}
+						continue;
+					}
+					if (event.type === "done") {
+						const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
+						assistantMessage = this.#obfuscator?.hasSecrets()
+							? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
+							: { ...event.message, content: rawContent };
+						break;
+					}
+					if (event.type === "error") {
+						throw new Error(event.error.errorMessage || "Consultation failed");
+					}
+				}
+				if (!assistantMessage) throw new Error("Consultation ended without a final message");
+				await finishChatSpan(telemetry, chatSpan, assistantMessage, { stepNumber: 1, serviceTier });
+			});
+		} catch (error) {
+			failChatSpan(telemetry, chatSpan, { errorObject: error });
+			throw error;
+		} finally {
+			for (const [providerKey, state] of providerSessionState) {
+				try {
+					state.close();
+				} catch (error) {
+					logger.warn("Failed to close isolated provider session state", {
+						providerKey,
+						error: String(error),
+					});
+				}
+			}
+			providerSessionState.clear();
+		}
+		if (!assistantMessage) throw new Error("Consultation ended without a final message");
+		const replyText = this.#deobfuscateFromProvider(providerReplyText).trim();
+		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
+			args.onTextDelta(replyText.slice(emittedReplyText.length));
+		}
+		return {
+			replyText,
+			assistantMessage: {
+				...assistantMessage,
+				content: assistantMessage.content.filter(block => block.type !== "toolCall"),
+			},
+		};
+	}
+
 	async runEphemeralTurn(args: {
 		promptText: string;
 		onTextDelta?: (delta: string) => void;
@@ -6714,21 +6960,22 @@ export class AgentSession {
 		if (!model) {
 			throw new Error("No active model on session");
 		}
-		const cacheSessionId = this.sessionId;
+		const providerSessionId = this.agent.sessionId ?? this.sessionId;
+		const promptCacheKey = this.agent.promptCacheKey ?? providerSessionId;
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		const context = await this.agent.buildSideRequestContext(llmMessages);
 		const options = this.prepareSimpleStreamOptions(
 			{
-				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
+				apiKey: this.#modelRegistry.resolver(model, providerSessionId),
 				// Side-channel turns must not share OpenAI/Codex append-only
 				// conversation state with the main agent turn: IRC and /btw can run
 				// while the main turn is mid-tool-call. Keep the prompt-cache key
 				// stable, but give provider routing a unique request lineage. The
 				// shared provider state map is still required so Codex can allocate
 				// websocket state under that side-channel session id.
-				sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
-				promptCacheKey: cacheSessionId,
+				sessionId: `${providerSessionId}:side:${Snowflake.next()}`,
+				promptCacheKey,
 				preferWebsockets: this.#preferWebsockets,
 				providerSessionState: this.#providerSessionState,
 				reasoning: toReasoningEffort(this.thinkingLevel),

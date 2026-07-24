@@ -5,6 +5,7 @@ import {
 	canonicalKeyId,
 	Editor,
 	type EditorTheme,
+	extractPrintableText,
 	type KeyId,
 	parseKey,
 	parseKittySequence,
@@ -33,6 +34,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.tools.expand"
 	| "app.thinking.toggle"
 	| "app.editor.external"
+	| "app.consult"
 	| "app.history.search"
 	| "app.message.dequeue"
 	| "app.retry"
@@ -61,6 +63,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.consult": ["alt+shift+q"],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -498,6 +501,8 @@ export class CustomEditor extends Editor {
 	onDequeue?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
 	onRetry?: () => void;
+	/** Called when the configured consultation shortcut is pressed. */
+	onConsult?: () => void;
 	/** Called when Caps Lock is pressed. */
 	onCapsLock?: () => void;
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
@@ -761,6 +766,13 @@ export class CustomEditor extends Editor {
 
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
+		// Legacy terminals encode both Ctrl+C and Ctrl+Shift+C as raw ETX. Keep
+		// clear bound to that unambiguous byte; the default consultation chord is
+		// an Alt sequence with distinct terminal encoding.
+		if (data === "\x03" && this.#matchesAction("ctrl+c", "app.clear") && this.onClear) {
+			this.onClear();
+			return;
+		}
 
 		// Left-arrow on an empty editor: surface for the agent-hub double-tap
 		// gesture. Plain "left" only — modified arrows and any in-text cursor
@@ -825,6 +837,17 @@ export class CustomEditor extends Editor {
 			// Intercept configured history search shortcut
 			if (this.#matchesAction(canonical, "app.history.search") && this.onHistorySearch) {
 				this.onHistorySearch();
+				return;
+			}
+			// A consultation shortcut is an explicit command gesture. Leave
+			// printable keys alone so a remapped binding cannot hijack typing.
+			if (
+				data !== "\x03" &&
+				this.#matchesAction(canonical, "app.consult") &&
+				extractPrintableText(data) === undefined &&
+				this.onConsult
+			) {
+				this.onConsult();
 				return;
 			}
 

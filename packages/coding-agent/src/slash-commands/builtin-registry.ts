@@ -1286,6 +1286,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "hub",
+		description: "Open Agent Hub",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showAgentHub();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "agents",
 		description: "Open Agent Control Center dashboard",
 		handleTui: (_command, runtime) => {
@@ -1311,6 +1319,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleForkCommand();
+		},
+	},
+	{
+		name: "fork-live",
+		description: "Create a detached committed fork during a live response",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleForkLiveCommand();
 		},
 	},
 	{
@@ -1607,13 +1623,46 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "btw",
-		description: "Ask an ephemeral side question using the current session context",
+		description: "Ask a disposable one-shot side question using live session context",
 		inlineHint: "<question>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleBtwCommand(question);
+		},
+	},
+	{
+		name: "consult",
+		description:
+			"Start a durable read-only chat from committed context; use resume or pick to continue a saved thread",
+		inlineHint: "<question> | resume [id] | pick",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const argument = command.text.slice(`/${command.name}`.length).trim();
+			runtime.ctx.editor.setText("");
+			if (!argument) {
+				await runtime.ctx.handleConsultNewComposer();
+				return;
+			}
+			if (argument === "pick") {
+				await runtime.ctx.handleConsultPick();
+				return;
+			}
+			const resume = /^resume(?:\s+(.*))?$/.exec(argument);
+			if (resume) {
+				await runtime.ctx.handleConsultResume(resume[1]?.trim() || undefined);
+				return;
+			}
+			await runtime.ctx.handleConsultCommand(argument);
+		},
+	},
+	{
+		name: "consults",
+		description: "Open the compact durable consultation list",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleConsultPick();
 		},
 	},
 	{

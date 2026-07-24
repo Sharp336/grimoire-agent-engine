@@ -42,6 +42,12 @@ export interface SessionProviderBoundaryHost {
 	obfuscator: SecretObfuscator | undefined;
 }
 
+/** Controls session-bound additions to an otherwise isolated side request. */
+export interface SessionProviderBoundaryControls {
+	includeSessionHooks?: boolean;
+	includeSessionMetadata?: boolean;
+}
+
 /** Owns the transformations at the session/provider boundary. */
 export class SessionProviderBoundary {
 	readonly #host: SessionProviderBoundaryHost;
@@ -134,11 +140,17 @@ export class SessionProviderBoundary {
 	}
 
 	/** Applies session-level stream hooks and provider defaults to a side request. */
-	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider = "anthropic"): SimpleStreamOptions {
-		const sessionOnPayload = this.#host.onPayload;
-		const sessionOnResponse = this.#host.onResponse;
-		const sessionMetadata = this.#host.agent.metadataForProvider(provider);
-		const sessionOnSseEvent = this.#host.onSseEvent;
+	prepareSimpleStreamOptions(
+		options: SimpleStreamOptions,
+		provider = "anthropic",
+		controls?: SessionProviderBoundaryControls,
+	): SimpleStreamOptions {
+		const includeSessionHooks = controls?.includeSessionHooks !== false;
+		const sessionOnPayload = includeSessionHooks ? this.#host.onPayload : undefined;
+		const sessionOnResponse = includeSessionHooks ? this.#host.onResponse : undefined;
+		const sessionMetadata =
+			controls?.includeSessionMetadata === false ? undefined : this.#host.agent.metadataForProvider(provider);
+		const sessionOnSseEvent = includeSessionHooks ? this.#host.onSseEvent : undefined;
 		const openrouterRoutingPreset =
 			provider === "openrouter" ? this.#host.settings.get("providers.openrouterVariant") : "default";
 		const openrouterVariant =

@@ -229,9 +229,7 @@ function installSubagentRetryFallbackChain(args: {
 }
 
 function renderIrcPeerRoster(selfId: string): string {
-	const peers = AgentRegistry.global()
-		.list()
-		.filter(ref => ref.id !== selfId && ref.status !== "aborted" && ref.kind !== "advisor");
+	const peers = AgentRegistry.global().listMessageableTo(selfId);
 	if (peers.length === 0) return "- (no other agents)";
 	const lines = peers.map(
 		peer =>

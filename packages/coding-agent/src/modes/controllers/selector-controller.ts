@@ -40,8 +40,19 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
+import {
+	consultationAgentId,
+	consultationThreadTitle,
+	consultationTurnStates,
+	fallbackConsultationTitle,
+	formatConsultationDisplayName,
+	latestConsultationAnswer,
+} from "../../session/consultation";
 import type { SessionInfo } from "../../session/session-listing";
+import { loadEntriesFromFile } from "../../session/session-loader";
 import { SessionManager } from "../../session/session-manager";
 import { FileSessionStorage } from "../../session/session-storage";
 import { type LogoutAccount, toLogoutAccounts } from "../../slash-commands/helpers/logout";
@@ -92,8 +103,27 @@ import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 import { buildCopyTargets } from "../utils/copy-targets";
+import type { ConsultationThreadHandle } from "./consult-controller";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
+
+interface ConsultationSelectorEntry {
+	thread: ConsultationThreadHandle;
+	fullId: string;
+	title: string;
+	status: "running" | "completed" | "failed" | "cancelled";
+	lastActivity: number;
+	turnCount: number;
+	latestAnswer: string | undefined;
+}
+
+function formatConsultationAge(timestamp: number): string {
+	const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+	if (seconds < 60) return "now";
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+	if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
+	return `${Math.floor(seconds / 86_400)}d ago`;
+}
 
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
@@ -1812,9 +1842,172 @@ export class SelectorController {
 		});
 	}
 
+	/**
+	 * Keep the compact consultation panel focused on its answer. Secondary
+	 * operations live behind this small selector instead of competing for
+	 * printable editor keys.
+	 */
+	async showActiveConsultActions(): Promise<boolean> {
+		const actions: string[] = [];
+		if (this.ctx.canCopyConsultTurn()) actions.push("Copy answer");
+		if (this.ctx.canOpenConsultTranscript()) actions.push("Open full transcript");
+		actions.push("Start new consultation");
+		if (this.ctx.canCancelConsultTurn()) actions.push("Cancel running turn");
+		const action = await this.ctx.showHookSelector("Consult actions", actions);
+		switch (action) {
+			case "Copy answer":
+				return this.ctx.handleCopyConsultTurn();
+			case "Open full transcript":
+				return this.ctx.openConsultTranscript();
+			case "Start new consultation":
+				return this.ctx.startNewConsultation();
+			case "Cancel running turn":
+				return this.ctx.cancelConsultTurn();
+			default:
+				return false;
+		}
+	}
+
+	async showConsultsSelector(): Promise<void> {
+		const registry = AgentRegistry.global();
+		await registerPersistedSubagents(registry, this.ctx.sessionManager.getSessionFile());
+
+		const entries = (
+			await Promise.all(
+				registry
+					.list()
+					.filter(ref => ref.kind === "consultation" && ref.sessionFile)
+					.map(async ref => {
+						const marker = ref.id.lastIndexOf("/consult:");
+						const consultationId = marker < 0 ? "" : ref.id.slice(marker + "/consult:".length);
+						if (!consultationId || !ref.sessionFile) return undefined;
+						const sessionEntries = await loadEntriesFromFile(ref.sessionFile).catch(() => []);
+						const turns = consultationTurnStates(sessionEntries, consultationId);
+						const latest = turns[turns.length - 1];
+						if (!latest) return undefined;
+						const terminal = latest.terminal;
+						return {
+							thread: {
+								consultationId,
+								sessionFile: ref.sessionFile,
+								ownerId: ref.parentId ?? MAIN_AGENT_ID,
+							},
+							fullId: ref.id,
+							title:
+								consultationThreadTitle(sessionEntries, consultationId) ??
+								fallbackConsultationTitle(turns[0]?.turn.question ?? latest.turn.question),
+							status: terminal?.status ?? latest.turn.status,
+							lastActivity: terminal?.finishedAt ?? latest.turn.startedAt ?? ref.lastActivity,
+							turnCount: turns.length,
+							latestAnswer: latestConsultationAnswer(sessionEntries, consultationId),
+						} satisfies ConsultationSelectorEntry;
+					}),
+			)
+		)
+			.filter((entry): entry is ConsultationSelectorEntry => entry !== undefined)
+			.sort((a, b) => b.lastActivity - a.lastActivity || a.fullId.localeCompare(b.fullId));
+
+		if (!entries.length) {
+			this.ctx.showError("No durable consultations found; start one with /consult <question>.");
+			return;
+		}
+
+		const duplicateIds = new Map<string, number>();
+		for (const entry of entries) {
+			duplicateIds.set(entry.thread.consultationId, (duplicateIds.get(entry.thread.consultationId) ?? 0) + 1);
+		}
+		const choices = new Map<string, ConsultationSelectorEntry>();
+		for (const entry of entries) {
+			const owner = duplicateIds.get(entry.thread.consultationId) === 1 ? "" : ` (${entry.thread.ownerId})`;
+			const otherIds = entries.filter(other => other !== entry).map(other => other.thread.consultationId);
+			const base = `${formatConsultationDisplayName(entry.title, entry.thread.consultationId, otherIds)}${owner} · ${
+				entry.status
+			} · ${entry.turnCount} ${entry.turnCount === 1 ? "turn" : "turns"} · ${formatConsultationAge(entry.lastActivity)}`;
+			let label = base;
+			for (let duplicate = 2; choices.has(label); duplicate++) label = `${base} #${duplicate}`;
+			choices.set(label, entry);
+		}
+
+		const selected = await this.ctx.showHookSelector("Consultations", [...choices.keys()]);
+		const entry = selected ? choices.get(selected) : undefined;
+		if (entry) await this.#showConsultActions(entry);
+	}
+
+	async #showConsultActions(entry: ConsultationSelectorEntry): Promise<void> {
+		const action = await this.ctx.showHookSelector(
+			formatConsultationDisplayName(entry.title, entry.thread.consultationId),
+			["Open full transcript in Agent Hub", "Resume", "Copy selected answer", "Quote in parent", "Ask main"],
+		);
+		switch (action) {
+			case "Open full transcript in Agent Hub":
+				this.ctx.showAgentHub({
+					openAgentId: consultationAgentId(entry.thread.ownerId, entry.thread.consultationId),
+				});
+				return;
+			case "Resume":
+				await this.ctx.handleConsultResume(entry.fullId);
+				return;
+			case "Copy selected answer":
+				if (
+					this.ctx.getActiveConsultThread()?.sessionFile === entry.thread.sessionFile &&
+					this.ctx.getConsultTurnPresentation()?.isLatest === true &&
+					this.ctx.canCopyConsultTurn() &&
+					(await this.ctx.handleCopyConsultTurn())
+				) {
+					return;
+				}
+				if (!entry.latestAnswer) {
+					this.ctx.showError("This consultation has no answer to copy.");
+					return;
+				}
+				try {
+					await copyToClipboard(entry.latestAnswer);
+					this.ctx.showStatus("Copied consultation answer to clipboard");
+				} catch (error) {
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+				}
+				return;
+			case "Quote in parent":
+			case "Ask main": {
+				const handoffAction = action === "Quote in parent" ? "quote" : "ask-main";
+				if (
+					this.ctx.getActiveConsultThread()?.sessionFile === entry.thread.sessionFile &&
+					this.ctx.getConsultTurnPresentation()?.isLatest === true
+				) {
+					const prepared =
+						handoffAction === "quote"
+							? await this.ctx.quoteConsultationAnswerInParent()
+							: await this.ctx.askMainAboutConsultationAnswer();
+					if (!prepared) {
+						this.ctx.showError("The selected consultation answer is not ready to hand off.");
+					}
+					return;
+				}
+				if (!entry.latestAnswer) {
+					this.ctx.showError("This consultation has no answer to hand off.");
+					return;
+				}
+				if (!this.ctx.isConsultComposerActive) this.ctx.beginConsultComposer(entry.thread);
+				const prepared =
+					handoffAction === "quote"
+						? this.ctx.prepareQuotedConsultationAnswerInParent(entry.latestAnswer, entry.thread)
+						: this.ctx.prepareAskMainConsultationDraft(entry.latestAnswer, entry.thread);
+				if (!prepared) {
+					this.ctx.showError("Could not prepare the consultation handoff in the parent draft.");
+				}
+				return;
+			}
+		}
+	}
+	showConsultationTranscript(thread: ConsultationThreadHandle, observers: SessionObserverRegistry): void {
+		this.showAgentHub(observers, {
+			openAgentId: consultationAgentId(thread.ownerId, thread.consultationId),
+		});
+	}
+
 	showAgentHub(
 		observers: SessionObserverRegistry,
-		options?: { requireContent?: boolean; armCloseTap?: boolean },
+		options?: { requireContent?: boolean; armCloseTap?: boolean; openAgentId?: string },
 	): void {
 		const hubKeys = [
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
@@ -1875,9 +2068,10 @@ export class SelectorController {
 			// opened it were consumed by the editor's detector (issue #4780).
 			if (options?.armCloseTap) hub.armCloseTap();
 			this.ctx.ui.requestRender();
+			if (options?.openAgentId) hub.openChat(options.openAgentId);
 		};
 
-		if (options?.requireContent && hub.isEmpty) {
+		if ((options?.requireContent && hub.isEmpty) || options?.openAgentId) {
 			void hub.persistedSubagentsReady.then(showReadyHub);
 			return;
 		}

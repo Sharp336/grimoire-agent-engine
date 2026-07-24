@@ -16,6 +16,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const AGENT_ID = "Worker";
@@ -177,6 +178,138 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
+	it("shows the persisted consultation title and short id while opening its read-only transcript", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-hub-consultation-");
+		const consultationFile = path.join(tempDir.path(), "__consult.durable.jsonl");
+		const timestamp = "2026-07-20T00:00:00.000Z";
+		await Bun.write(
+			consultationFile,
+			`${[
+				JSON.stringify({ type: "session", version: 3, id: "consult", timestamp, cwd: tempDir.path() }),
+				JSON.stringify({
+					type: "custom",
+					id: "title",
+					parentId: null,
+					timestamp,
+					customType: "consultation-title",
+					data: { version: 1, consultationId: "durable", title: "Committed boundary audit", createdAt: 1 },
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "question",
+					parentId: null,
+					timestamp,
+					message: { role: "user", content: [{ type: "text", text: "What was committed?" }], timestamp },
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "answer",
+					parentId: "question",
+					timestamp,
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "The committed answer." }],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "gpt-5.5",
+						usage: {
+							input: 1,
+							output: 1,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 2,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.parse(timestamp),
+					},
+				}),
+			].join("\n")}\n`,
+		);
+		const agents = new AgentRegistry();
+		agents.register({
+			id: "Main/consult:durable",
+			displayName: "Committed boundary audit · consult:durable",
+			kind: "consultation",
+			parentId: "Main",
+			session: null,
+			sessionFile: consultationFile,
+			status: "parked",
+		});
+		const focusAgent = vi.fn(async () => {});
+		const requestRender = vi.fn();
+		let viewer:
+			| {
+					render(width: number): readonly string[];
+					handleInput(data: string): void;
+			  }
+			| undefined;
+		const ui = {
+			requestRender,
+			requestComponentRender: requestRender,
+			showOverlay: (component: { render(width: number): readonly string[]; handleInput(data: string): void }) => {
+				viewer = component;
+				return { hide: vi.fn() };
+			},
+			setFocus: vi.fn(),
+		} as never;
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: vi.fn(),
+			requestRender,
+			registry: agents,
+			irc: new IrcBus(agents),
+			ui,
+			focusAgent,
+		});
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("Committed boundary audit · consult:durable");
+
+		hub.handleInput("\r");
+
+		expect(focusAgent).not.toHaveBeenCalled();
+		expect(viewer).toBeDefined();
+		const transcript = Bun.stripANSI(viewer!.render(120).join("\n"));
+		expect(transcript).toContain("What was committed?");
+		expect(transcript).toContain("The committed answer.");
+		expect(transcript).toContain("Esc:close");
+		expect(transcript).not.toContain("Enter:send");
+
+		hub.handleInput("r");
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(
+			'"Main/consult:durable" is a read-only consultation transcript — nothing to revive.',
+		);
+		hub.handleInput("x");
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(
+			'"Main/consult:durable" is a read-only consultation transcript — cannot be killed.',
+		);
+		viewer!.handleInput("send this");
+		expect(focusAgent).not.toHaveBeenCalled();
+		expect(agents.get("Main/consult:durable")).toMatchObject({ status: "parked", sessionFile: consultationFile });
+		hub.dispose();
+	});
+
+	it("keeps /hub as the Agent Hub command and /agents as the control-center dashboard", async () => {
+		const showAgentHub = vi.fn();
+		const showAgentsDashboard = vi.fn();
+		const editor = { setText: vi.fn() };
+		const runtime = {
+			ctx: {
+				collabGuest: undefined,
+				showAgentHub,
+				showAgentsDashboard,
+				editor,
+			},
+		} as never;
+
+		expect(await executeBuiltinSlashCommand("/hub", runtime)).toBe(true);
+		expect(await executeBuiltinSlashCommand("/agents", runtime)).toBe(true);
+
+		expect(showAgentHub).toHaveBeenCalledTimes(1);
+		expect(showAgentsDashboard).toHaveBeenCalledTimes(1);
+		expect(editor.setText).toHaveBeenNthCalledWith(1, "");
+		expect(editor.setText).toHaveBeenNthCalledWith(2, "");
+	});
 	it("selector controller restores focus to the editor after Enter focuses an agent", async () => {
 		const agents = new AgentRegistry();
 		agents.register({

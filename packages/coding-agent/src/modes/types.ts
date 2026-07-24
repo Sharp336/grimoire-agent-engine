@@ -36,6 +36,7 @@ import type { HookSelectorComponent, HookSelectorOptions } from "./components/ho
 import type { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import type { TranscriptContainer } from "./components/transcript-container";
+import type { ConsultationThreadHandle } from "./controllers/consult-controller";
 import type { EventController } from "./controllers/event-controller";
 import type { LoopLimitRuntime } from "./loop-limit";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
@@ -212,6 +213,21 @@ export interface InteractiveModeContext {
 	lastStatusSpacer: Spacer | undefined;
 	lastStatusText: Text | undefined;
 	fileSlashCommands: Set<string>;
+	/** Whether the main editor is currently reserved for a durable consultation thread. */
+	readonly isConsultComposerActive: boolean;
+	/** Consultation thread receiving editor submissions, undefined before the first new-thread turn. */
+	getActiveConsultThread(): ConsultationThreadHandle | undefined;
+	/** Summary of the turn currently shown by the compact consultation panel. */
+	getConsultTurnPresentation():
+		| {
+				consultationId: string;
+				title: string;
+				turnIndex: number;
+				turnCount: number;
+				isLatest: boolean;
+				status: string;
+		  }
+		| undefined;
 	skillCommands: Map<string, Skill>;
 	oauthManualInput: OAuthManualInputManager;
 	todoPhases: TodoPhase[];
@@ -262,6 +278,21 @@ export interface InteractiveModeContext {
 	showWarning(message: string): void;
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
+	/** Capture the parent draft and reserve the shared editor for a consultation thread. */
+	beginConsultComposer(thread?: ConsultationThreadHandle): void;
+	/** Set the persisted thread that receives the next consultation editor submission. */
+	setActiveConsultThread(thread: ConsultationThreadHandle): void;
+	/** Restore the parent draft and release the shared editor from consultation ownership. */
+	restoreParentEditorFromConsult(): boolean;
+	/** Restore the parent draft and prepare an unsubmitted blockquote of the selected answer. */
+	prepareQuotedConsultationAnswerInParent(answer: string, thread?: ConsultationThreadHandle): boolean;
+	/**
+	 * Restore the parent draft and prepare an unsubmitted prompt asking the main agent
+	 * to use the selected answer while continuing the original task.
+	 */
+	prepareAskMainConsultationDraft(answer: string, thread?: ConsultationThreadHandle): boolean;
+	/** Open Agent Hub so the user can inspect the durable current consultation. */
+	openConsultationTranscript(thread: ConsultationThreadHandle): void;
 	updatePendingMessagesDisplay(): void;
 	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
@@ -345,6 +376,7 @@ export interface InteractiveModeContext {
 	handleFreshCommand(): Promise<void>;
 	handleDropCommand(): Promise<void>;
 	handleForkCommand(): Promise<void>;
+	handleForkLiveCommand(): Promise<void>;
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;
 	handlePythonCommand(code: string, excludeFromContext?: boolean): Promise<void>;
 	handleMCPCommand(text: string): Promise<void>;
@@ -387,7 +419,7 @@ export interface InteractiveModeContext {
 	showProviderSetup(): Promise<void>;
 	showHookConfirm(title: string, message: string): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
-	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean }): void;
+	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean; openAgentId?: string }): void;
 	resetObserverRegistry(): void;
 
 	// Input handling
@@ -399,9 +431,44 @@ export interface InteractiveModeContext {
 	/** Queue a message for delivery only after the active agent turn would stop. */
 	handleQueueCommand(message: string): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
+	handleConsultCommand(question: string): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
+	hasActiveConsult(): boolean;
+	handleConsultEscape(): boolean;
+	handleConsultNewComposer(): Promise<void>;
+	handleConsultResume(id?: string): Promise<void>;
+	handleConsultPick(): Promise<void>;
+	handleConsultSubmit(question: string): Promise<void>;
+	showConsultPicker(threads: readonly ConsultationThreadHandle[]): Promise<ConsultationThreadHandle | undefined>;
+	canCopyConsult(): boolean;
+	handleConsultCopyKey(): Promise<boolean>;
+	showPreviousConsultTurn(): Promise<boolean>;
+	showNextConsultTurn(): Promise<boolean>;
+	showLatestConsultTurn(): Promise<boolean>;
+	/** Scroll the visible consultation answer by physical terminal rows without moving editor focus. */
+	scrollConsultAnswer(delta: number): boolean;
+	/** Scroll the visible consultation answer by its current viewport height. */
+	scrollConsultAnswerPage(direction: -1 | 1): boolean;
+	/** Move the visible consultation answer to its first physical row. */
+	scrollConsultAnswerToStart(): boolean;
+	/** Move the visible consultation answer to its last physical row and resume following. */
+	scrollConsultAnswerToEnd(): boolean;
+	canCopyConsultTurn(): boolean;
+	handleCopyConsultTurn(): Promise<boolean>;
+	canCancelConsultTurn(): boolean;
+	cancelConsultTurn(): Promise<boolean>;
+	canOpenConsultTranscript(): boolean;
+	openConsultTranscript(): Promise<boolean>;
+	/** Open secondary consultation operations without reserving printable editor keys. */
+	showConsultActionMenu(): Promise<boolean>;
+	canQuoteConsultationAnswerInParent(): boolean;
+	quoteConsultationAnswerInParent(): Promise<boolean>;
+	canAskMainAboutConsultationAnswer(): boolean;
+	askMainAboutConsultationAnswer(): Promise<boolean>;
+	startNewConsultation(): Promise<boolean>;
+	returnConsultToParent(): boolean;
 	handleBtwBranchKey(): Promise<boolean>;
 	canBranchBtw(): boolean;
 	canCopyBtw(): boolean;

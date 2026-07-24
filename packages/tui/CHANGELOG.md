@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed native-scrollback live-region pinning when a lower pinned sibling reuses an earlier paint seam.
+
 
 ### Fixed
 

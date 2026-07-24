@@ -1,4 +1,4 @@
-import type { Agent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Agent, AgentLoopConfig, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
 	ImageContent,
@@ -93,6 +93,32 @@ export interface InitialRetryFallbackState {
 	pinned?: boolean;
 }
 
+/** Immutable live-request state captured for a read-only side request. */
+export interface ReadOnlySideRequestSnapshot {
+	model: Model;
+	providerSessionId: string;
+	promptCacheKey: string;
+	systemPrompt: string[];
+	tools: AgentTool[];
+	telemetry: AgentLoopConfig["telemetry"] | undefined;
+}
+
+/** Hook-free transformations retained by durable read-only side requests. */
+export interface ReadOnlySideTransforms {
+	convertMessages: (messages: AgentMessage[], model: Model) => Message[] | Promise<Message[]>;
+	transformProviderContext: (context: Context, model: Model) => Context | Promise<Context>;
+}
+
+/** Persisted child session forked at a committed parent boundary. */
+export interface CommittedSessionFork {
+	manager: SessionManager;
+	sessionFile: string;
+	parentSessionId: string;
+	parentLeafId: string | null;
+	hasCommittedContext: boolean;
+	messages: AgentMessage[];
+}
+
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
@@ -151,6 +177,8 @@ export interface AgentSessionConfig {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/** Pure, hook-free transforms for durable read-only consultations. */
+	readOnlySideTransforms?: ReadOnlySideTransforms;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */

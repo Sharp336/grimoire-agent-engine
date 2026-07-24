@@ -1,12 +1,13 @@
 import { afterEach, beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { BtwPanelComponent } from "@oh-my-pi/pi-coding-agent/modes/components/btw-panel";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { theme as activeTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { evalToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/eval-render";
 import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
-import { type Component, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, Container, type NativeScrollbackLiveRegion, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 // Long, path-like output that wraps at the box's inner width — the case that
@@ -87,6 +88,64 @@ class Footer implements Component {
 	invalidate(): void {}
 	render(_width: number): string[] {
 		return Array.from({ length: this.#rows }, (_, i) => `editor-${i}`);
+	}
+}
+
+class MutableParentStream implements Component {
+	#line: string;
+
+	constructor(line: string) {
+		this.#line = line;
+	}
+
+	setLine(line: string): void {
+		this.#line = line;
+	}
+
+	render(width: number): string[] {
+		return [this.#line.slice(0, width)];
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return false;
+	}
+
+	getTranscriptBlockSettledRows(): number {
+		return 0;
+	}
+}
+
+class PinnedLiveBlock implements Component, NativeScrollbackLiveRegion {
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	setLines(lines: string[]): void {
+		this.#lines = lines;
+	}
+
+	render(width: number): string[] {
+		return this.#lines.map(line => line.slice(0, width));
+	}
+
+	getNativeScrollbackLiveRegionStart(): number | undefined {
+		return this.#lines.length > 0 ? 0 : undefined;
+	}
+
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		return this.#lines.length > 0;
+	}
+}
+
+class PinnedLiveContainer extends Container implements NativeScrollbackLiveRegion {
+	getNativeScrollbackLiveRegionStart(): number | undefined {
+		return this.children.length > 0 ? 0 : undefined;
+	}
+
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		return this.children.length > 0;
 	}
 }
 
@@ -487,4 +546,211 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 			else Bun.env.TMUX = previousTmux;
 		}
 	});
+
+	test("keeps concurrent consultation, parent, subagent, and Hub frames isolated through a resize", async () => {
+		if (process.platform === "win32") return;
+		const previousResizeMode = Bun.env.PI_TUI_RESIZE_IN_PLACE;
+		const previousTmux = Bun.env.TMUX;
+		const previousScreen = Bun.env.STY;
+		const previousZellij = Bun.env.ZELLIJ;
+		const previousCmuxWorkspace = Bun.env.CMUX_WORKSPACE_ID;
+		const previousCmuxSurface = Bun.env.CMUX_SURFACE_ID;
+		const previousCmuxTransport = Bun.env.CMUX_REMOTE_TRANSPORT;
+		Bun.env.PI_TUI_RESIZE_IN_PLACE = "0";
+		delete Bun.env.TMUX;
+		delete Bun.env.STY;
+		delete Bun.env.ZELLIJ;
+		delete Bun.env.CMUX_WORKSPACE_ID;
+		delete Bun.env.CMUX_SURFACE_ID;
+		delete Bun.env.CMUX_REMOTE_TRANSPORT;
+
+		// The live suffix is the parent stream, four subagent rows, the
+		// consultation panel (about six rows), status, and Hub/editor. Keep it
+		// wholly visible at launch while the parent history still contributes a
+		// real scrollback row; later resizes deliberately shrink below this.
+		const term = new VirtualTerminal(100, 24);
+		Object.defineProperty(term, "isNativeViewportAtBottom", { configurable: true, value: () => undefined });
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const parentHistory = Array.from(
+			{ length: 12 },
+			(_, index) => `PARENT-HISTORY-${String(index).padStart(2, "0")}`,
+		);
+		const parentStream = new MutableParentStream("PARENT-LIVE-0");
+		const subagentHud = new PinnedLiveBlock([]);
+		const hubStatus = new PinnedLiveBlock([]);
+		const statusContainer = new PinnedLiveBlock([]);
+		const pendingMessagesSlot = new PinnedLiveContainer();
+		const todoSlot = new PinnedLiveContainer();
+		const subagentSlot = new PinnedLiveContainer();
+		const consultationSlot = new PinnedLiveContainer();
+		const omfgSlot = new PinnedLiveContainer();
+		const errorBannerSlot = new PinnedLiveContainer();
+		const modelCycleSlot = new PinnedLiveContainer();
+		const statusSlot = new PinnedLiveContainer();
+		const copyToast = new PinnedLiveBlock([]);
+		const consultationAnswer = Array.from(
+			{ length: 240 },
+			(_, index) => `CONSULT-ANSWER-${String(index).padStart(3, "0")}`,
+		).join("\n");
+		// Agent Hub replaces the editor slot after the anchored status slot; it
+		// is not itself a root live-region child.
+		const editorSlot = new Container();
+		editorSlot.addChild(hubStatus);
+		const transcript = new TranscriptContainer();
+		const consultation = new BtwPanelComponent({
+			tui,
+			commandLabel: "/consult",
+			question: "What is committed?",
+			consultation: {
+				threadId: "stream01",
+				title: "Concurrent render",
+				turnIndex: 1,
+				turnCount: 1,
+				status: "streaming-turn",
+				question: "What is committed?",
+				answer: consultationAnswer,
+				isLatest: true,
+			},
+		});
+		transcript.addChild(new StaticBlock(parentHistory));
+		transcript.addChild(parentStream);
+		consultationSlot.addChild(consultation);
+		// Preserve InteractiveMode's root order. Empty anchored slots are real
+		// root children, but declare no seam until their first child mounts.
+		tui.addChild(transcript);
+		tui.addChild(pendingMessagesSlot);
+		tui.addChild(todoSlot);
+		tui.addChild(subagentSlot);
+		tui.addChild(consultationSlot);
+		tui.addChild(omfgSlot);
+		tui.addChild(errorBannerSlot);
+		tui.addChild(modelCycleSlot);
+		tui.addChild(statusSlot);
+		tui.addChild(new StaticBlock([])); // statusLine
+		tui.addChild(new Container()); // hookWidgetContainerAbove
+		tui.addChild(editorSlot);
+		tui.addChild(new Container()); // hookWidgetContainerBelow
+
+		try {
+			tui.start();
+			await Promise.resolve();
+			scheduler.flush();
+			await term.flush();
+
+			for (let tick = 1; tick <= 4; tick++) {
+				consultation.appendConsultationText(`\nCONSULT-DELTA-${tick}-a`);
+				consultation.appendConsultationText(`\nCONSULT-DELTA-${tick}-b`);
+				consultation.appendConsultationText(`\nCONSULT-DELTA-${tick}-c`);
+				parentStream.setLine(`PARENT-LIVE-${tick}`);
+				if (tick === 1) {
+					subagentSlot.addChild(subagentHud);
+					statusSlot.addChild(statusContainer);
+					statusSlot.addChild(copyToast);
+				}
+				subagentHud.setLines(Array.from({ length: 4 }, (_, index) => `SUBAGENT-${index + 1} HUD tick=${tick}`));
+				statusContainer.setLines([`STATUS repaint tick=${tick}`]);
+				hubStatus.setLines([`HUB repaint tick=${tick}`]);
+				copyToast.setLines([`COPY TOAST tick=${tick}`]);
+				// Mirror the live UI: every mutated root subtree explicitly opts
+				// into the component-scoped render API. The consultation panel
+				// schedules its own request while the other synthetic components
+				// have no host callback and must declare theirs here.
+				tui.requestComponentRender(parentStream);
+				tui.requestComponentRender(subagentHud);
+				tui.requestComponentRender(statusContainer);
+				tui.requestComponentRender(copyToast);
+				tui.requestComponentRender(hubStatus);
+				await Promise.resolve();
+				scheduler.flush();
+				await term.flush();
+			}
+
+			const beforeResizeRows = plainScrollBuffer(term);
+			const nativeHistoryRows = beforeResizeRows.slice(0, term.getBufferPosition().baseY);
+			expect(nativeHistoryRows.some(row => row === parentHistory[0])).toBe(true);
+			expect(beforeResizeRows.filter(row => row.includes("Consult · Concurrent render"))).toHaveLength(1);
+			expect(beforeResizeRows.some(row => row.includes("consult:stream01"))).toBe(false);
+			expect(beforeResizeRows.filter(row => row.includes("CONSULT-DELTA-4-c"))).toHaveLength(1);
+			expect(
+				nativeHistoryRows.some(
+					row => row.includes("Consult · Concurrent render") || row.includes("CONSULT-DELTA-"),
+				),
+			).toBe(false);
+			expect(consultation.getCopyText()).toContain("CONSULT-ANSWER-000");
+			expect(consultation.getCopyText()).toContain("CONSULT-ANSWER-239");
+			expect(beforeResizeRows.some(row => row.includes("CONSULT-ANSWER-000"))).toBe(false);
+			expect(beforeResizeRows.filter(row => row.includes("CONSULT-ANSWER-")).length).toBeLessThan(240);
+
+			const fullPaintsBeforeResize = tui.fullRedraws;
+			let finalRows: string[] = [];
+			for (const terminalRows of [20, 24, 40]) {
+				term.resize(100, terminalRows);
+				scheduler.flush();
+				await term.flush();
+
+				finalRows = plainScrollBuffer(term);
+				for (const line of parentHistory) {
+					expect(finalRows.filter(row => row === line)).toHaveLength(1);
+				}
+				expect(finalRows.filter(row => row === "PARENT-LIVE-4")).toHaveLength(1);
+				for (let index = 1; index <= 4; index++) {
+					expect(finalRows.filter(row => row === `SUBAGENT-${index} HUD tick=4`)).toHaveLength(1);
+				}
+				expect(finalRows.filter(row => row === "HUB repaint tick=4")).toHaveLength(1);
+				expect(finalRows.filter(row => row === "STATUS repaint tick=4")).toHaveLength(1);
+				expect(finalRows.filter(row => row === "COPY TOAST tick=4")).toHaveLength(1);
+				expect(finalRows.filter(row => row.includes("Consult · Concurrent render"))).toHaveLength(1);
+				expect(finalRows.filter(row => row.includes("CONSULT-DELTA-4-c"))).toHaveLength(1);
+				expect(finalRows.some(row => row.includes("consult:stream01"))).toBe(false);
+				expect(finalRows.some(row => row.includes("Streaming"))).toBe(true);
+				expect(finalRows.some(row => row.includes("Streaming turn"))).toBe(false);
+				expect(finalRows.some(row => row.includes("What is committed?"))).toBe(true);
+				expect(finalRows.some(row => row.includes("Alt+PgUp/PgDn scroll"))).toBe(true);
+				expect(finalRows.some(row => row.includes("CONSULT-ANSWER-000"))).toBe(false);
+				expect(finalRows.filter(row => row.includes("CONSULT-ANSWER-")).length).toBeLessThan(240);
+				expect(finalRows.findIndex(row => row.includes("COPY TOAST tick=4"))).toBeGreaterThan(
+					finalRows.findIndex(row => row.includes("CONSULT-DELTA-4-c")),
+				);
+			}
+			expect(tui.fullRedraws).toBeGreaterThan(fullPaintsBeforeResize);
+
+			const orderedMarkers = [
+				"PARENT-LIVE-4",
+				"SUBAGENT-1 HUD tick=4",
+				"SUBAGENT-2 HUD tick=4",
+				"SUBAGENT-3 HUD tick=4",
+				"SUBAGENT-4 HUD tick=4",
+				"Consult · Concurrent render",
+				"CONSULT-DELTA-4-c",
+				"STATUS repaint tick=4",
+				"COPY TOAST tick=4",
+				"HUB repaint tick=4",
+			];
+			let previousIndex = -1;
+			for (const marker of orderedMarkers) {
+				const index = finalRows.findIndex(row => row.includes(marker));
+				expect(index).toBeGreaterThan(previousIndex);
+				previousIndex = index;
+			}
+		} finally {
+			consultation.close();
+			tui.stop();
+			await term.flush();
+			if (previousResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
+			else Bun.env.PI_TUI_RESIZE_IN_PLACE = previousResizeMode;
+			if (previousTmux === undefined) delete Bun.env.TMUX;
+			else Bun.env.TMUX = previousTmux;
+			if (previousScreen === undefined) delete Bun.env.STY;
+			else Bun.env.STY = previousScreen;
+			if (previousZellij === undefined) delete Bun.env.ZELLIJ;
+			else Bun.env.ZELLIJ = previousZellij;
+			if (previousCmuxWorkspace === undefined) delete Bun.env.CMUX_WORKSPACE_ID;
+			else Bun.env.CMUX_WORKSPACE_ID = previousCmuxWorkspace;
+			if (previousCmuxSurface === undefined) delete Bun.env.CMUX_SURFACE_ID;
+			else Bun.env.CMUX_SURFACE_ID = previousCmuxSurface;
+			if (previousCmuxTransport === undefined) delete Bun.env.CMUX_REMOTE_TRANSPORT;
+			else Bun.env.CMUX_REMOTE_TRANSPORT = previousCmuxTransport;
+		}
+	}, 30_000);
 });

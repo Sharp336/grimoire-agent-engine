@@ -10,6 +10,7 @@ import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-l
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "../helpers/agent-session-setup";
 
 interface JsonlMessageEntry {
 	type: "message";
@@ -86,5 +87,91 @@ describe("SessionManager.forkFrom", () => {
 			}
 			setAgentDir(previousAgentDir);
 		}
+	});
+
+	it("pins a committed path and rejects an absent boundary", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-boundary-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		await fs.mkdir(sessionDir, { recursive: true });
+		const sourceFile = path.join(sessionDir, "source.jsonl");
+		const timestamp = new Date().toISOString();
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "source-session",
+			timestamp,
+			cwd,
+		};
+		const first: JsonlMessageEntry = {
+			type: "message",
+			id: "first",
+			parentId: null,
+			timestamp,
+			message: { role: "user", content: "first", timestamp: Date.now() },
+		};
+		const later: JsonlMessageEntry = {
+			type: "message",
+			id: "later",
+			parentId: first.id,
+			timestamp,
+			message: { role: "user", content: "later", timestamp: Date.now() },
+		};
+		await Bun.write(sourceFile, `${JSON.stringify(header)}\n${JSON.stringify(first)}\n${JSON.stringify(later)}\n`);
+
+		const pinned = await SessionManager.forkFrom(sourceFile, cwd, sessionDir, undefined, {
+			throughLeafId: first.id,
+			suppressBreadcrumb: true,
+		});
+		expect(pinned.getEntries().map(entry => entry.id)).toEqual([first.id]);
+		expect(pinned.buildSessionContextAt(first.id).messages).toHaveLength(1);
+
+		const empty = await SessionManager.forkFrom(sourceFile, cwd, sessionDir, undefined, {
+			throughLeafId: null,
+			suppressBreadcrumb: true,
+		});
+		expect(empty.getEntries()).toEqual([]);
+		expect(() => pinned.buildSessionContextAt("missing")).toThrow(
+			"Cannot fork committed snapshot: entry missing not found",
+		);
+		await expect(
+			SessionManager.forkFrom(sourceFile, cwd, sessionDir, undefined, {
+				throughLeafId: "missing",
+				suppressBreadcrumb: true,
+			}),
+		).rejects.toThrow("Cannot fork committed snapshot: entry missing not found");
+	});
+	it("keeps an immediate parent append when materializing a lazy header", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-materialize-race-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const parent = SessionManager.create(cwd, sessionDir);
+		const parentFile = parent.getSessionFile();
+		if (!parentFile) throw new Error("expected lazy parent session file");
+
+		// Do not await first: this models a provider append arriving immediately
+		// after /consult has captured the metadata-only parent boundary.
+		const header = parent.getHeader();
+		const materializing = parent.materializeHeaderAndModelState({
+			header: header === null ? undefined : structuredClone(header),
+			model: "test-provider/test-model",
+			providerPromptCacheKey: "parent-cache",
+			sessionFile: parentFile,
+		});
+		parent.appendMessage(createAssistantMessage("must remain on parent"));
+		await materializing;
+		await parent.flush();
+
+		const parentEntries = await loadEntriesFromFile(parentFile);
+		expect(parentEntries).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					message: expect.objectContaining({
+						role: "assistant",
+						content: [{ type: "text", text: "must remain on parent" }],
+					}),
+				}),
+			]),
+		);
 	});
 });

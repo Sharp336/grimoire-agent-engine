@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
+import { assistantMessageWithReplyText } from "../../session/ephemeral-turn";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwPanelComponent } from "../components/btw-panel";
 import type { InteractiveModeContext } from "../types";
@@ -10,27 +11,6 @@ interface BtwRequest {
 	abortController: AbortController;
 	question: string;
 	leafId: string | null;
-}
-
-function assistantMessageWithReplyText(assistantMessage: AssistantMessage, replyText: string): AssistantMessage {
-	const content: AssistantMessage["content"] = [];
-	let replacedText = false;
-	for (const part of assistantMessage.content) {
-		if (part.type === "thinking") {
-			content.push({ type: "thinking", thinking: part.thinking });
-			continue;
-		}
-		if (part.type === "redactedThinking") continue;
-		if (part.type !== "text") {
-			content.push(part);
-			continue;
-		}
-		if (replacedText) continue;
-		content.push({ type: "text", text: replyText });
-		replacedText = true;
-	}
-	if (!replacedText) content.push({ type: "text", text: replyText });
-	return { ...assistantMessage, content, providerPayload: undefined };
 }
 
 export class BtwController {

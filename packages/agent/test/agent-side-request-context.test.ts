@@ -151,9 +151,11 @@ describe("Agent — buildSideRequestContext", () => {
 			});
 
 			await agent.prompt("Q?");
-			const sideContext = await agent.buildSideRequestContext([
-				{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() },
-			]);
+			const sideContext = await agent.buildSideRequestContext(
+				[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+				undefined,
+				{ tools: [tool] },
+			);
 
 			expect(mainContext?.tools?.map(entry => entry.name)).toEqual(["test_tool", "mcp__fixture_report"]);
 			expect(sideContext.tools?.map(entry => entry.name)).toEqual(["test_tool", "mcp__fixture_report"]);

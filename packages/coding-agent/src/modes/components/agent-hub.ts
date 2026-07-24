@@ -20,7 +20,13 @@ import type { KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import {
+	type AgentRef,
+	AgentRegistry,
+	type AgentStatus,
+	isReadOnlyAgentKind,
+	MAIN_AGENT_ID,
+} from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { parseThinkingLevel } from "../../thinking";
@@ -479,14 +485,15 @@ export class AgentHubOverlayComponent extends Container {
 	#renderEntry(ref: AgentRef, selected: boolean, width: number): string[] {
 		const max = Math.max(1, width - 2);
 		const cursor = selected ? theme.fg("accent", theme.nav.cursor) : " ";
-		const fields: string[] = [`${cursor} ${statusGlyph(ref.status)} ${theme.bold(replaceTabs(ref.id))}`];
-		if (ref.displayName && ref.displayName !== ref.id) {
+		const identity = ref.kind === "consultation" ? ref.displayName : ref.id;
+		const fields: string[] = [`${cursor} ${statusGlyph(ref.status)} ${theme.bold(replaceTabs(identity))}`];
+		if (ref.kind !== "consultation" && ref.displayName && ref.displayName !== ref.id) {
 			fields.push(theme.fg("dim", replaceTabs(ref.displayName)));
 		}
 		if (ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			fields.push(theme.fg("dim", `↳ ${replaceTabs(ref.parentId)}`));
 		}
-		if (ref.kind === "advisor") {
+		if (isReadOnlyAgentKind(ref.kind)) {
 			fields.push(theme.fg("warning", "read-only"));
 		}
 		const unread = this.#irc.unreadCount(ref.id);
@@ -572,7 +579,7 @@ export class AgentHubOverlayComponent extends Container {
 		const focusAgent = this.#focusAgent;
 		// Advisor refs are read-only transcripts with no live/ revivable session;
 		// open the in-hub chat view (file-backed) instead of trying to focus one.
-		if (ref.kind === "advisor" || this.#remote || !focusAgent) {
+		if (isReadOnlyAgentKind(ref.kind) || this.#remote || !focusAgent) {
 			this.openChat(ref.id);
 			return;
 		}
@@ -590,8 +597,11 @@ export class AgentHubOverlayComponent extends Container {
 	#reviveSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
 		if (!ref) return;
-		if (ref.kind === "advisor") {
-			this.#notice = `"${ref.id}" is a read-only advisor transcript — nothing to revive.`;
+		if (isReadOnlyAgentKind(ref.kind)) {
+			this.#notice =
+				ref.kind === "consultation"
+					? `"${ref.id}" is a read-only consultation transcript — nothing to revive.`
+					: `"${ref.id}" is a read-only advisor transcript — nothing to revive.`;
 			this.#requestRender();
 			return;
 		}
@@ -619,8 +629,11 @@ export class AgentHubOverlayComponent extends Container {
 	#killSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
 		if (!ref) return;
-		if (ref.kind === "advisor") {
-			this.#notice = `"${ref.id}" is a read-only advisor transcript — cannot be killed.`;
+		if (isReadOnlyAgentKind(ref.kind)) {
+			this.#notice =
+				ref.kind === "consultation"
+					? `"${ref.id}" is a read-only consultation transcript — cannot be killed.`
+					: `"${ref.id}" is a read-only advisor transcript — cannot be killed.`;
 			this.#requestRender();
 			return;
 		}
