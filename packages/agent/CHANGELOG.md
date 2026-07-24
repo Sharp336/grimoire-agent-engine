@@ -6,6 +6,15 @@
 
 - Added signal-aware, independently removable `Agent.addBeforeQueuedMessageDequeueHook()` registrations for session policies that must run before queued messages are consumed.
 - Added signal-aware, independently removable `Agent.addBeforeModelCallHook()` registrations for policies that must run before every provider request, including same-turn tool continuations.
+## [17.1.1] - 2026-07-24
+
+### Added
+
+- Added the provider-neutral native computer-call lifecycle, preserving observation outputs and input actions across pending and acknowledged tool results.
+
+### Changed
+
+- Queued steering no longer hard-aborts non-interruptible tools (e.g. `bash`): it aborts interruptible waits only and raises a cooperative steering signal (`ToolCallContext.steeringSignal`) that long-running tools may observe to finish early or background themselves. The mid-batch steering/IRC watch now runs for every tool batch instead of only batches containing an interruptible tool.
 
 ## [17.1.0] - 2026-07-24
 

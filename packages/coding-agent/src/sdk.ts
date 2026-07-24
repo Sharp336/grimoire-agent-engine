@@ -187,6 +187,7 @@ import {
 	isMountableUnderXdev,
 	type LspStartupServerInfo,
 	ReadTool,
+	releaseComputerSessionsForOwner,
 	type Tool,
 	type ToolSession,
 	WebSearchTool,
@@ -3132,6 +3133,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						);
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
+			createComputerTool: restrictToolNames
+				? undefined
+				: async () => (await BUILTIN_TOOLS.computer(toolSession)) ?? null,
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)
@@ -3476,6 +3480,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}
 					await asyncJobManager.dispose({ timeoutMs: 3_000 });
 				}
+				await releaseComputerSessionsForOwner(evalKernelOwnerId);
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeRubyKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeJuliaKernelSessionsByOwner(evalKernelOwnerId);

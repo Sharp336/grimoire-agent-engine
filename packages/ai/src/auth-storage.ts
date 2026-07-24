@@ -830,6 +830,8 @@ export interface OAuthAccountSummary {
 	/** Organization/workspace the credential is scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
+	/** True when this account is the session-sticky OAuth credential requested by `listOAuthAccounts`. */
+	active: boolean;
 }
 export interface InvalidateCredentialMatchingOptions {
 	signal?: AbortSignal;
@@ -5213,11 +5215,20 @@ export class AuthStorage {
 	 * order, WITHOUT refreshing any token. The array position (0-based) is the
 	 * selector accepted by {@link AuthStorage.getOAuthAccessAt}; a "pick the Nth
 	 * account" UI should render `position + 1`.
+	 *
+	 * When `sessionId` is supplied, the session-sticky OAuth credential is marked
+	 * `active`. No account is active before that session has resolved or pinned a
+	 * credential.
 	 */
-	listOAuthAccounts(provider: string): OAuthAccountSummary[] {
+	listOAuthAccounts(provider: string, sessionId?: string): OAuthAccountSummary[] {
 		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
 			return [];
 		}
+		const sessionCredential = this.#getSessionCredential(provider, sessionId);
+		const activeCredentialId =
+			sessionCredential?.type === "oauth"
+				? this.#getStoredCredentials(provider)[sessionCredential.index]?.id
+				: undefined;
 		return this.#getStoredOAuthSelections(provider).map((selection, position) => ({
 			position,
 			credentialId: selection.credentialId,
@@ -5227,7 +5238,27 @@ export class AuthStorage {
 			enterpriseUrl: selection.credential.enterpriseUrl,
 			orgId: selection.credential.orgId,
 			orgName: selection.credential.orgName,
+			active: selection.credentialId === activeCredentialId,
 		}));
+	}
+
+	/**
+	 * Pin one stored OAuth account as this session's preferred credential.
+	 *
+	 * The durable credential id keeps the pin stable across credential refreshes,
+	 * storage reordering, and process restarts. Normal auth retry and usage-limit
+	 * handling may still route around an unavailable account.
+	 */
+	pinSessionOAuthAccount(provider: string, sessionId: string, credentialId: number): boolean {
+		if (!sessionId || this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+			return false;
+		}
+		const stored = this.#getStoredCredentials(provider);
+		const index = stored.findIndex(entry => entry.id === credentialId);
+		const target = stored[index];
+		if (target?.credential.type !== "oauth") return false;
+		this.#recordSessionCredential(provider, sessionId, "oauth", index);
+		return true;
 	}
 
 	/**
