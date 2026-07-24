@@ -371,16 +371,17 @@ function writeJson(file: string, value: unknown): void {
 	fs.renameSync(tmp, file);
 }
 
-function readJson<T>(file: string): T | null {
+function readJson<T>(file: string): T | undefined {
 	let text: string;
 	try {
 		text = fs.readFileSync(file, "utf8");
 	} catch (err) {
-		if (isEnoent(err)) return null; // genuinely absent — callers may seed defaults
+		if (isEnoent(err)) return undefined; // file ABSENT (ENOENT) — callers may seed defaults
 		throw err; // permission/IO error: surface it, never masquerade as "missing"
 	}
-	// A parse error propagates on purpose: a corrupt file must not read as absent
-	// and then get silently overwritten with defaults/empty.
+	// Returns the parsed value as-is — including a literal `null`, primitive, or
+	// array. Callers must route a present-but-non-object value through their
+	// validation/malformed path, NOT treat it like an absent file.
 	return JSON.parse(text) as T;
 }
 
@@ -1238,8 +1239,10 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			state ??= structuredClone(EMPTY_STATE);
 			return state;
 		}
-		if (raw === null) {
-			// genuinely absent (ENOENT) → fresh queue, seeded on the first save
+		if (raw === undefined) {
+			// file ABSENT (ENOENT) → fresh queue, seeded on the first save. A present
+			// file that parsed to `null`/primitive/array falls through to migrateState,
+			// which rejects it as malformed (preserve + refuse), not seed.
 			stateReadError = false;
 			state = structuredClone(EMPTY_STATE);
 			return state;
@@ -1271,11 +1274,9 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		if (state !== null) writeJson(stateFile(), state);
 	}
 	function loadConfig(): void {
-		let onDisk: (Partial<SchedulerConfig> & { windowHours?: unknown; maxWindowsPer24h?: unknown }) | null;
+		let raw: unknown;
 		try {
-			onDisk = readJson<Partial<SchedulerConfig> & { windowHours?: unknown; maxWindowsPer24h?: unknown }>(
-				configFile(),
-			);
+			raw = readJson<unknown>(configFile());
 		} catch (err) {
 			// Corrupt/unreadable config.json: use defaults in memory but DO NOT
 			// overwrite the user's file — surface it so they can fix it.
@@ -1288,11 +1289,24 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			);
 			return;
 		}
-		if (onDisk === null) {
+		if (raw === undefined) {
 			cfg = structuredClone(DEFAULT_CONFIG);
-			writeJson(configFile(), cfg); // seed an editable config file
+			writeJson(configFile(), cfg); // absent → seed an editable config file
 			return;
 		}
+		if (raw === null || typeof raw !== "object") {
+			// present but not a JSON object (literal null / primitive / array):
+			// malformed — use defaults for the session, leave the file untouched.
+			cfg = structuredClone(DEFAULT_CONFIG);
+			pi.logger?.warn?.("scheduler: config.json is not a JSON object — using defaults without overwriting");
+			notify(
+				null,
+				"scheduler: config.json is malformed (not a JSON object) — using defaults this session; the file was left untouched (fix or delete it).",
+				"error",
+			);
+			return;
+		}
+		const onDisk = raw as Partial<SchedulerConfig> & { windowHours?: unknown; maxWindowsPer24h?: unknown };
 		const badField = configShapeError(onDisk);
 		if (badField) {
 			// A present config field has the wrong type — using it would crash a
@@ -1524,6 +1538,18 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			scheduleDispatch(cfg.dispatchDelayMs);
 			return;
 		}
+		// A content-policy ("cyber") violation poisoned the conversation: purge it
+		// BEFORE anything else — even with an empty queue or a rate-limit hold — so a
+		// manual turn or a terminal cap-fail doesn't strand the user in the flagged
+		// context. Reset is async; re-arm the loop to dispatch into the clean context.
+		if (pendingContextReset) {
+			resetInFlight = true;
+			void resetContext("content-policy violation").finally(() => {
+				resetInFlight = false;
+				scheduleDispatch(cfg.dispatchDelayMs);
+			});
+			return;
+		}
 		const task = nextPendingTask(st);
 		if (!task) {
 			if (!emptyQueueNotified) {
@@ -1558,18 +1584,6 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 				armResumeTimer(resumeAt);
 				return;
 			}
-		}
-
-		// A content-policy ("cyber") violation poisoned the conversation: purge
-		// it BEFORE sending, or this dispatch just trips the same classifier.
-		// Reset is async; re-arm the loop and dispatch into the clean context.
-		if (pendingContextReset) {
-			resetInFlight = true;
-			void resetContext("content-policy violation").finally(() => {
-				resetInFlight = false;
-				scheduleDispatch(cfg.dispatchDelayMs);
-			});
-			return;
 		}
 
 		const resuming = task.status === "interrupted";

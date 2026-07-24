@@ -1967,6 +1967,87 @@ export async function runSmoke(): Promise<void> {
 	const afterShutdownRz = rz.sentPrompts.length;
 	await sleep(1400); // past the resume time — the timer must not dispatch
 	assert.equal(rz.sentPrompts.length, afterShutdownRz, "a resume timer does not dispatch after shutdown");
+	fs.rmSync(configFile, { force: true });
+	fs.writeFileSync(stateFile, "null");
+	const nl = makeMockPi();
+	const ctxNl = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(nl.api);
+	await nl.emit("session_start", {}, ctxNl);
+	await nl.command("add hi", ctxNl);
+	assert.equal(
+		fs.readFileSync(stateFile, "utf8"),
+		"null",
+		"state.json containing literal null is preserved (not seeded over)",
+	);
+	assert.ok(
+		ctxNl.notifications.some(n => /malformed|corrupt|unreadable/i.test(n)),
+		"literal-null state is treated as malformed, not absent",
+	);
+	await nl.command("stop", ctxNl);
+
+	// 46. a content-policy hit that fails the LAST task (maxContextResets cap)
+	// still purges the poisoned context, even though the queue is now empty — the
+	// reset runs before the empty-queue return, so a manual prompt afterward isn't
+	// stuck in the flagged transcript.
+	{
+		fs.rmSync(configFile, { force: true });
+		const st = {
+			version: 2,
+			run: "stopped",
+			tasks: [
+				{
+					id: "t106",
+					prompt: "Poisoned",
+					status: "queued",
+					addedAt: new Date().toISOString(),
+					attempts: 0,
+					policyResets: 5,
+				},
+			],
+			currentTaskId: null,
+			rateLimitedUntil: null,
+			windows: [],
+			nextTaskSeq: 107,
+		};
+		fs.writeFileSync(stateFile, JSON.stringify(st));
+	}
+	const pz = makeMockPi();
+	const ctxPz = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(pz.api);
+	await pz.emit("session_start", {}, ctxPz);
+	{
+		const c = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+		c.dispatchDelayMs = 20;
+		c.watchdogIntervalMs = 60_000;
+		c.stallTimeoutMs = 600_000;
+		c.maxContextResets = 5;
+		fs.writeFileSync(configFile, JSON.stringify(c));
+	}
+	await pz.command("start", ctxPz); // capture command ctx (newSession)
+	await sleep(600);
+	assert.equal(pz.sentPrompts.length, 1, "t106 dispatched");
+	await pz.emit("agent_start", {}, ctxPz);
+	await pz.emit(
+		"agent_end",
+		{
+			messages: [
+				{
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage: "blocked: usage policy violation (cyber)",
+				},
+			],
+		},
+		ctxPz,
+	);
+	await sleep(200); // queue is now empty (t106 failed at cap) — the purge must still run
+	{
+		const st = readState();
+		assert.equal(task(st, "t106").status, "failed", "the capped content-policy task is failed");
+		assert.ok(ctxPz.newSessionCalls >= 1, "the poisoned context is purged even though the queue drained to empty");
+	}
+	await pz.command("stop", ctxPz);
 
 	console.log("smoke: all assertions passed");
 	console.log(`smoke: data dir was ${tmpAgentDir}`);
