@@ -786,6 +786,7 @@ export class EventController {
 						{
 							snapshots: getFileSnapshotStore(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),
+							formatCallSource: settings.get("tools.formatCallSource"),
 							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
 						},
@@ -985,6 +986,7 @@ export class EventController {
 				{
 					snapshots: getFileSnapshotStore(this.ctx.viewSession),
 					showImages: settings.get("terminal.showImages"),
+					formatCallSource: settings.get("tools.formatCallSource"),
 					editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 					editAllowFuzzy: settings.get("edit.fuzzyMatch"),
 					liveRegion: this.ctx.chatContainer,

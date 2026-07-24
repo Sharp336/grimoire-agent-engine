@@ -11,6 +11,11 @@
 - Added the `/computer` slash command (`on`/`off`/`status`/toggle) to enable or disable the computer tool for the current session without persisting settings.
 - Exposed `computer` to models without native OpenAI computer-use support as a regular function tool with a typed GA action schema; the same native desktop backend and approval policy apply on both paths.
 - Hardened computer action ingress: action-specific fields, modifier/key arrays, coordinates, drag points, and scroll deltas fail closed before native input; numeric fields must be signed 32-bit integers and coordinates must be non-negative.
+- Added opt-in display-only source formatting for completed eval, shell, and code-file write tool calls using compatible formatters already installed on `PATH`, with top-bar install hints when a formatter is missing and unchanged raw-source fallback when formatting fails.
+
+### Fixed
+
+- Fixed coding-agent startup failing while compiling tool execution rendering.
 
 ### Changed
 

@@ -1422,9 +1422,19 @@ function renderContentPreview(
 	});
 }
 
-/** Render context for the write tool: resolves an `xd://`-mounted tool so its live renderer drives device dispatch previews. */
+function renderSourceFormatterHint(
+	options: RenderResultOptions & { renderContext?: WriteRenderContext },
+	uiTheme: Theme,
+): string {
+	const sourceFormatterHint = options.renderContext?.sourceFormatterHint;
+	return typeof sourceFormatterHint === "string" && sourceFormatterHint.length > 0
+		? `${uiTheme.fg("dim", " · ")}${uiTheme.fg("dim", sourceFormatterHint)}`
+		: "";
+}
+
 export interface WriteRenderContext {
 	resolveXdevMounted?: (name: string) => AgentTool | undefined;
+	sourceFormatterHint?: string;
 }
 
 export const writeToolRenderer = {
@@ -1453,6 +1463,7 @@ export const writeToolRenderer = {
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
 		const pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
+		const formatterHint = renderSourceFormatterHint(options, uiTheme);
 		// No status icon on the head row: it's the head of the framed block, and
 		// native-scrollback commits are prefix-only — an animated glyph would pin
 		// the commit boundary at the top, and the pending hourglass just adds
@@ -1460,7 +1471,7 @@ export const writeToolRenderer = {
 		const header = renderStatusLine(
 			{
 				title: "Write",
-				description: `${langIcon} ${pathDisplay}`,
+				description: `${langIcon} ${pathDisplay}${formatterHint}`,
 			},
 			uiTheme,
 		);
@@ -1515,11 +1526,12 @@ export const writeToolRenderer = {
 		const linkTarget = result.details?.resolvedPath;
 		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
 		const pathDisplay = filePath && linkTarget ? fileHyperlink(linkTarget, styledPath) : styledPath;
+		const formatterHint = renderSourceFormatterHint(options, uiTheme);
 
 		if (result.isError) {
 			const errorText = result.content?.find(c => c.type === "text")?.text ?? "";
 			const header = renderStatusLine(
-				{ icon: "error", title: "Write", description: `${langIcon} ${pathDisplay}` },
+				{ icon: "error", title: "Write", description: `${langIcon} ${pathDisplay}${formatterHint}` },
 				uiTheme,
 			);
 			return framedBlock(uiTheme, width => ({
@@ -1545,7 +1557,7 @@ export const writeToolRenderer = {
 				iconOverride: isPartial ? undefined : uiTheme.styledSymbol("tool.write", "accent"),
 				spinnerFrame: options.spinnerFrame,
 				title: "Write",
-				description: `${langIcon} ${pathDisplay}${lineSuffix}${execSuffix}`,
+				description: `${langIcon} ${pathDisplay}${formatterHint}${lineSuffix}${execSuffix}`,
 			},
 			uiTheme,
 		);
