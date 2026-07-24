@@ -143,6 +143,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Grep & Browser",
 		"Computer",
 		"GitHub",
+		"Display",
 		"Output Limits",
 		"Execution",
 		"Discovery & MCP",
@@ -773,6 +774,17 @@ export const SETTINGS_SCHEMA = {
 				{ value: "2048", label: "2048" },
 				{ value: "4096", label: "4096", description: "Loose" },
 			],
+		},
+	},
+	"tools.formatCallSource": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Display",
+			label: "Format Tool Call Source",
+			description:
+				"Format completed eval/shell/code-file tool call source with compatible installed formatters. Does not modify the source executed or written by the tool.",
 		},
 	},
 	"tools.artifactTailLines": {

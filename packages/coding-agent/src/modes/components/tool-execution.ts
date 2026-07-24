@@ -238,6 +238,11 @@ export interface ToolExecutionOptions {
 	editFuzzyThreshold?: number;
 	editAllowFuzzy?: boolean;
 	sourceFormatter?: SourceFormatter;
+	/**
+	 * Format compatible tool call source previews for completed eval/shell/write/code-file results
+	 * without mutating the underlying executed/written source.
+	 */
+	formatCallSource?: boolean;
 	/** Live-region probe used to settle detached task progress once the block
 	 * leaves the repaintable transcript region. */
 	liveRegion?: TranscriptLiveRegionProbe;
@@ -291,9 +296,9 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#imageSpacers: Spacer[] = [];
 	readonly #instanceId = ++toolExecutionInstanceSeq;
 	#toolName: string;
+	#args: unknown;
 	#toolLabel: string;
-	#args: any;
-	#sourceFormatter: SourceFormatter;
+	#sourceFormatter?: SourceFormatter;
 	#sourceFormatArgsVersion = 0;
 	#sourceFormatRequestVersion = 0;
 	#activeSourceFormatPass = 0;
@@ -408,7 +413,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#ui = ui;
 		this.#cwd = cwd;
 		this.#args = args;
-		this.#sourceFormatter = options.sourceFormatter ?? formatToolCallSourceArgs;
+		this.#sourceFormatter =
+			options.sourceFormatter ?? (options.formatCallSource === true ? formatToolCallSourceArgs : undefined);
 		this.#sourceFormatArgsVersion = 1;
 		this.#editMode = resolveEditModeForTool(toolName, tool);
 
@@ -485,6 +491,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	#scheduleSourceFormattingPass(): void {
+		if (!this.#sourceFormatter) return;
 		if (this.#sealed) return;
 		// Don't request repeatedly for the same arg payload.
 		if (this.#sourceFormatRequestVersion >= this.#sourceFormatArgsVersion) return;
@@ -496,10 +503,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		const controller = new AbortController();
 		this.#sourceFormattingAbort = controller;
 		const args = this.#args;
+		const formatter = this.#sourceFormatter;
 
 		void (async () => {
 			try {
-				const formatted = await this.#sourceFormatter(this.#toolName, args, controller.signal);
+				const formatted = await formatter?.(this.#toolName, args, controller.signal);
 				if (controller.signal.aborted || this.#sealed || generation !== this.#sourceFormatArgsVersion) return;
 				this.#setSourceFormatterOutcome(isSourceFormatterOutcome(formatted) ? formatted : { status: "unchanged" });
 				this.#displayInputVersion++;
@@ -1221,8 +1229,18 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				}
 
 				// Show pending indicator for remaining files
-				const totalFiles = this.#args?.edits
-					? new Set((this.#args.edits as any[]).map((e: any) => e?.path).filter(Boolean)).size
+				const edits =
+					typeof this.#args === "object" && this.#args !== null && "edits" in this.#args
+						? this.#args.edits
+						: undefined;
+				const totalFiles = Array.isArray(edits)
+					? new Set(
+							edits
+								.map(edit =>
+									typeof edit === "object" && edit !== null && "path" in edit ? edit.path : undefined,
+								)
+								.filter(Boolean),
+						).size
 					: 0;
 				const remaining = Math.max(0, totalFiles - perFileResults.length);
 				if (remaining > 0 && this.#isPartial) {
@@ -1397,7 +1415,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			}
 			context.expanded = this.#expanded;
 			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
-			context.timeout = normalizeTimeoutSeconds(this.#args?.timeout, 3600);
+			const timeout =
+				typeof this.#args === "object" && this.#args !== null && "timeout" in this.#args
+					? this.#args.timeout
+					: undefined;
+			context.timeout = normalizeTimeoutSeconds(timeout, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
 			const output = this.#getTextOutput().trimEnd();
 			context.output = output;

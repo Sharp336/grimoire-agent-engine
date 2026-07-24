@@ -42,8 +42,17 @@ function sourceFormatterOutcomeUnchanged(): SourceFormatterOutcome {
 	return { status: "unchanged" };
 }
 
-function sourceFormatterOptions(formatter: SourceFormatter): ToolExecutionOptions {
-	return { sourceFormatter: formatter };
+type ToolExecutionOptionsWithFormatCallSource = ToolExecutionOptions & { formatCallSource?: boolean };
+
+function sourceFormatterOptions(
+	formatter: SourceFormatter,
+	formatCallSource?: boolean,
+): ToolExecutionOptionsWithFormatCallSource {
+	return { sourceFormatter: formatter, formatCallSource };
+}
+
+function disabledSourceFormatterOptions(): ToolExecutionOptionsWithFormatCallSource {
+	return { formatCallSource: false };
 }
 
 describe("ToolExecutionComponent source formatting", () => {
@@ -86,6 +95,61 @@ describe("ToolExecutionComponent source formatting", () => {
 		expect(before).toContain("raw()");
 		expect(getRenderedText()).toContain("raw()");
 		expect(sourceFormatter).not.toHaveBeenCalled();
+	});
+
+	it("renders raw args and finalizes immediately when source formatting is disabled", async () => {
+		const { tool, getRenderedText } = makeTextRenderer();
+		const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+
+		const args = { language: "js", code: "raw()" };
+		const component = new ToolExecutionComponent("eval", args, disabledSourceFormatterOptions(), tool, ui);
+		components.push(component);
+
+		component.setArgsComplete();
+		component.updateResult({ content: [{ type: "text", text: "finalized" }] }, false);
+
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+		expect(rendered).toContain("raw()");
+		expect(rendered).not.toContain("Install prettier for pretty formatting");
+		expect(getRenderedText()).toContain("raw()");
+	});
+
+	it("formats source args when an explicit formatter is injected even when formatCallSource is false", async () => {
+		const { tool, getRenderedText } = makeTextRenderer();
+		const sourceFormatter = vi.fn(
+			async (_toolName: string, callArgs: unknown, _signal: AbortSignal): Promise<SourceFormatterOutcome> => {
+				if (typeof callArgs !== "object" || callArgs === null) {
+					return sourceFormatterOutcomeUnchanged();
+				}
+				const argsRecord = callArgs as Record<string, unknown>;
+				const { code } = argsRecord;
+				return sourceFormatterOutcomeFormatted({
+					...argsRecord,
+					code: `formatted(${typeof code === "string" ? code : ""})`,
+				});
+			},
+		);
+		const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+
+		const args = { language: "js", code: "raw()" };
+		const component = new ToolExecutionComponent(
+			"eval",
+			args,
+			sourceFormatterOptions(sourceFormatter, false),
+			tool,
+			ui,
+		);
+		components.push(component);
+
+		component.setArgsComplete();
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+
+		const after = Bun.stripANSI(component.render(100).join("\n"));
+		expect(sourceFormatter).toHaveBeenCalledTimes(1);
+		expect(after).toContain("formatted(raw())");
+		expect(getRenderedText()).toContain("formatted(raw())");
 	});
 
 	it("formats source args once after args are complete", async () => {
