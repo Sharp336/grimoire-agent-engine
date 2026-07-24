@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderResponseError } from "@oh-my-pi/pi-ai/error";
 import { mapH2TransportError } from "@oh-my-pi/pi-ai/providers/cursor";
-import { __evictH2PoolEntry, __getH2PoolStats, __resetH2Pool, acquireH2Session } from "../src/providers/cursor/h2-pool";
+import { __evictH2PoolEntry, __getH2PoolStatsForOrigin, acquireH2Session } from "../src/providers/cursor/h2-pool";
 
 const BASE_URL = "https://api2.cursor.sh";
 
@@ -39,13 +39,28 @@ describe("mapH2TransportError", () => {
 
 describe("H2 pool delayed initialization cleanup", () => {
 	it("aborts created manager when slot is evicted during asynchronous initialization", async () => {
-		__resetH2Pool();
 		const testUrl = "https://127.0.0.1:59998";
 		const acqPromise = acquireH2Session(testUrl, "cursor").catch(() => null);
 		__evictH2PoolEntry(testUrl, "cursor");
 		await acqPromise;
-		const stats = __getH2PoolStats();
+		const stats = __getH2PoolStatsForOrigin(testUrl, "cursor");
 		expect(stats.retiringCount).toBe(0);
-		__resetH2Pool();
+	});
+});
+
+describe("H2 pool setup error propagation", () => {
+	it("reports the underlying setup error rather than the generic aggregate when every slot fails", async () => {
+		const envKey = "PI_PROXY_CURSOR_REVIEW_ERROR";
+		const previousProxy = Bun.env[envKey];
+		Bun.env[envKey] = "http://127.0.0.1:59997";
+		try {
+			await expect(acquireH2Session("https://cursor-review-error.example", "cursor-review-error")).rejects.toThrow(
+				/ECONNREFUSED|connect/i,
+			);
+		} finally {
+			if (previousProxy === undefined) delete Bun.env[envKey];
+			else Bun.env[envKey] = previousProxy;
+			__evictH2PoolEntry("https://cursor-review-error.example", "cursor-review-error");
+		}
 	});
 });

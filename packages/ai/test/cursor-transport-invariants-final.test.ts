@@ -4,6 +4,7 @@ import * as http2 from "node:http2";
 import type * as net from "node:net";
 import * as path from "node:path";
 import { create, toBinary } from "@bufbuild/protobuf";
+import { Code, ConnectError } from "@connectrpc/connect";
 import {
 	AgentServerMessageSchema,
 	InteractionUpdateSchema,
@@ -140,6 +141,54 @@ describe("Invariant 2: GetServerConfig and H1 bridge honor proxy policy and prec
 		expect(byName.get("NO_PROXY bypass match")?.actual).toBe("true");
 		expect(byName.get("NO_PROXY bypass no-match")?.actual).toBe("false");
 		expect(byName.get("GetServerConfig HTTP/1 mode")?.actual).toBe("http1");
+	});
+});
+
+describe("Invariant 2: H1 fatal errors preserve Connect status", () => {
+	it("propagates an unavailable SSE error through bridge.messages", async () => {
+		const mockServer = http.createServer((req, res) => {
+			if (req.url?.includes("BidiAppend")) {
+				res.writeHead(200, { "Content-Type": "application/proto", Connection: "close" });
+				res.end(toBinary(BidiAppendResponseSchema, create(BidiAppendResponseSchema, {})));
+				return;
+			}
+			if (req.url?.includes("RunSSE")) {
+				res.writeHead(200, { "Content-Type": "application/connect+proto", Connection: "close" });
+				res.end(connectErrorEndStreamFrame("unavailable", "transient transport failure"));
+				return;
+			}
+			res.writeHead(404, { Connection: "close" });
+			res.end();
+		});
+		const listening = Promise.withResolvers<void>();
+		mockServer.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const baseUrl = `http://127.0.0.1:${(mockServer.address() as net.AddressInfo).port}`;
+		let bridge: CursorHttp1Bridge | undefined;
+
+		try {
+			bridge = await createCursorHttp1Bridge({
+				baseUrl,
+				apiKey: "test-key",
+				provider: "cursor",
+				originalRequestId: "orig-1",
+				requestId: "req-1",
+				requestBytes: new Uint8Array(),
+			});
+			let thrown: unknown;
+			try {
+				for await (const _message of bridge.messages) {
+					// Drain until the fatal transport error closes the bridge.
+				}
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown).toBeInstanceOf(ConnectError);
+			if (thrown instanceof ConnectError) expect(thrown.code).toBe(Code.Unavailable);
+		} finally {
+			await bridge?.close("dispose");
+			await closeServerAsync(mockServer);
+		}
 	});
 });
 

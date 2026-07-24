@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import { create, toBinary } from "@bufbuild/protobuf";
@@ -12,6 +11,7 @@ import {
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+import { BidiAppendResponseSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/bidi_pb";
 import { Http2Config } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/server_config_pb";
 import { __evictH2PoolEntry, __getH2PoolStats, acquireH2Session } from "../src/providers/cursor/h2-pool";
 import { __evictServerConfigEntry, selectMode } from "../src/providers/cursor/server-config";
@@ -53,6 +53,10 @@ function turnEndedFrame(): Buffer {
 function connectEndErrorFrame(code: string, message: string): Buffer {
 	const payload = Buffer.from(JSON.stringify({ error: { code, message } }), "utf8");
 	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
+}
+
+function connectEndOkFrame(): Buffer {
+	return frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG);
 }
 
 let h2Server: http2.Http2Server | undefined;
@@ -123,22 +127,23 @@ function makeModel(baseUrl: string): Model<"cursor-agent"> {
 const context: Context = {
 	messages: [{ role: "user", content: "transport integration", timestamp: 1 }],
 };
-
 async function collect(
 	model: Model<"cursor-agent">,
-	options?: { signal?: AbortSignal; cursorUseHttp1ForAgent?: boolean },
-): Promise<{ stopReason: string }> {
+	options?: { signal?: AbortSignal; cursorUseHttp1ForAgent?: boolean; useHttp1ForAgent?: boolean },
+): Promise<{ stopReason: string; text: string }> {
 	const stream = streamCursor(model, context, {
 		apiKey: "test-token",
 		signal: options?.signal,
 		cursorUseHttp1ForAgent: options?.cursorUseHttp1ForAgent,
+		useHttp1ForAgent: options?.useHttp1ForAgent,
 		providerRetryWait: async () => {},
 	});
-	for await (const _event of stream) {
-		// drain
+	const textDeltas: string[] = [];
+	for await (const event of stream) {
+		if (event.type === "text_delta") textDeltas.push(event.delta);
 	}
 	const result = await stream.result();
-	return { stopReason: result.stopReason };
+	return { stopReason: result.stopReason, text: textDeltas.join("") };
 }
 
 async function stopServers(): Promise<void> {
@@ -199,7 +204,7 @@ describe("Cursor transport production integration", () => {
 		expect(stats.retiringCount).toBe(0);
 	});
 
-	it("prefers HTTP/1 when cursorUseHttp1ForAgent is true", async () => {
+	it("prefers mapped HTTP/1 after config discovery fails", async () => {
 		const baseUrl = await startH1Server();
 		let sawRunSSE = false;
 		let sawBidiAppend = false;
@@ -235,7 +240,7 @@ describe("Cursor transport production integration", () => {
 
 		const stream = streamCursor(makeModel(baseUrl), context, {
 			apiKey: "test-token",
-			cursorUseHttp1ForAgent: true,
+			useHttp1ForAgent: true,
 			providerRetryWait: async () => {},
 		});
 		for await (const _event of stream) {
@@ -250,6 +255,40 @@ describe("Cursor transport production integration", () => {
 		// H2 pool should NOT have been used for the agent traffic.
 		const stats = __getH2PoolStats();
 		expect(stats.poolCount).toBe(0);
+	});
+
+	it("retries a transient HTTP/1 SSE error before surfacing it", async () => {
+		const baseUrl = await startH1Server();
+		let runSseCount = 0;
+		handleH1Request = (req, res) => {
+			const url = req.url ?? "";
+			if (url.includes("GetServerConfig")) {
+				res.writeHead(404, { "content-type": "application/json" });
+				res.end();
+				return;
+			}
+			if (url.includes("BidiAppend")) {
+				res.writeHead(200, { "content-type": "application/proto", Connection: "close" });
+				res.end(toBinary(BidiAppendResponseSchema, create(BidiAppendResponseSchema, {})));
+				return;
+			}
+			if (url.includes("RunSSE")) {
+				runSseCount++;
+				res.writeHead(200, { "content-type": "application/connect+proto", Connection: "close" });
+				if (runSseCount === 1) {
+					res.end(connectEndErrorFrame("unavailable", "transient HTTP/1 failure"));
+				} else {
+					res.end(Buffer.concat([textDeltaFrame("retry-ok"), turnEndedFrame(), connectEndOkFrame()]));
+				}
+				return;
+			}
+			res.writeHead(404);
+			res.end();
+		};
+		const result = await collect(makeModel(baseUrl), { useHttp1ForAgent: true });
+		expect(runSseCount).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.text).toBe("retry-ok");
 	});
 
 	it("server-force override wins over local preference", () => {
@@ -351,15 +390,22 @@ describe("Cursor transport production integration", () => {
 		expect(stats.retiringCount).toBe(0);
 	});
 
-	it("does not call http2.connect directly in cursor.ts source", async () => {
-		const source = await fs.readFile(new URL("../src/providers/cursor.ts", import.meta.url), "utf8");
-		const lines = source.split("\n");
-		const connectCalls = lines.filter(
-			line =>
-				line.includes("http2.connect(") &&
-				!line.trim().startsWith("import ") &&
-				!line.includes("http2.ClientHttp2Stream"),
-		);
-		expect(connectCalls.length).toBe(0);
+	it("routes agent traffic through the H2 pool, not a direct http2.connect bypass", async () => {
+		const baseUrl = await startH2Server();
+		h2SuccessHandler();
+
+		const { stopReason } = await collect(makeModel(baseUrl));
+		expect(stopReason).toBe("stop");
+
+		// The fixture received the Run RPC over a real H2 session — a bypass
+		// that never connected would leave requestPaths empty.
+		expect(requestPaths.some(p => p.includes("/agent.v1.AgentService/Run"))).toBe(true);
+
+		// The pool owns a healthy entry for this origin — a direct
+		// http2.connect bypass would create no pool entry (poolCount === 0).
+		const stats = __getH2PoolStats();
+		expect(stats.poolCount).toBeGreaterThanOrEqual(1);
+		// All leases released; no managers stuck retiring.
+		expect(stats.retiringCount).toBe(0);
 	});
 });

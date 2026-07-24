@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import type http2 from "node:http2";
 import { create, fromBinary, fromJson, type JsonValue, toBinary, toJson } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
+import { Code, ConnectError } from "@connectrpc/connect";
 import type { McpToolDefinition } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import {
 	AgentClientMessageSchema,
@@ -420,7 +421,16 @@ const CURSOR_TRANSIENT_GRPC_CODES: Record<number, true> = {
 	14: true,
 	15: true,
 };
-const CURSOR_TRANSIENT_CONNECT_CODES: Record<string, true> = {
+const CURSOR_TRANSIENT_CONNECT_CODES: Record<number, true> = {
+	[Code.Canceled]: true,
+	[Code.Unknown]: true,
+	[Code.DeadlineExceeded]: true,
+	[Code.Aborted]: true,
+	[Code.Internal]: true,
+	[Code.Unavailable]: true,
+	[Code.DataLoss]: true,
+};
+const CURSOR_TRANSIENT_CONNECT_NAMES: Record<string, true> = {
 	cancelled: true,
 	unknown: true,
 	deadline_exceeded: true,
@@ -443,11 +453,12 @@ function isTransientCursorError(error: unknown): boolean {
 	if (error instanceof AIError.CursorCredentialError) return false;
 	if (error instanceof AIError.ValidationError) return false;
 	if (AIError.isUsageLimit(error)) return false;
+	if (error instanceof ConnectError) return CURSOR_TRANSIENT_CONNECT_CODES[error.code] === true;
 	const message = error instanceof Error ? error.message : String(error);
 	const grpc = message.match(/gRPC error (\d+):/i);
 	if (grpc) return CURSOR_TRANSIENT_GRPC_CODES[Number(grpc[1])] === true;
 	const connect = message.match(/Connect error ([a-z_]+):/i);
-	if (connect) return CURSOR_TRANSIENT_CONNECT_CODES[connect[1].toLowerCase()] === true;
+	if (connect) return CURSOR_TRANSIENT_CONNECT_NAMES[connect[1].toLowerCase()] === true;
 	return CURSOR_TRANSIENT_NETWORK_PATTERN.test(message);
 }
 
@@ -1022,8 +1033,9 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				if (error instanceof AIError.CursorCredentialError) throw error;
 				const message = error instanceof Error ? error.message : String(error);
 				if (/401|403|unauthenticated|permission_denied/i.test(message)) throw error;
+				const preferHttp1 = options?.useHttp1ForAgent ?? options?.cursorUseHttp1ForAgent ?? false;
 				return {
-					mode: (options?.cursorUseHttp1ForAgent ? "http1" : "http2") as CursorTransportMode,
+					mode: (preferHttp1 ? "http1" : "http2") as CursorTransportMode,
 					agentUrlConfig: undefined,
 				};
 			});

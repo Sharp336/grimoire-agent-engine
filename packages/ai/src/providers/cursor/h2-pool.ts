@@ -125,18 +125,35 @@ export async function acquireH2Session(baseUrl: string, provider: string, signal
 	}
 
 	// Try each of the POOL_SIZE slots, advancing the round-robin index.
+	// The first real (non-Abort) setup error is remembered so that, if every
+	// slot ultimately fails, the caller sees the most informative original
+	// error instead of a generic aggregate. this path converts each slot's
+	// real error into null only temporarily, while we keep trying.
+	let lastSetupError: unknown = null;
 	for (let attempts = 0; attempts < POOL_SIZE; attempts++) {
 		const slotIndex = (entry.roundRobin + attempts) % POOL_SIZE;
 		const slot = entry.slots[slotIndex];
-		const result = await tryAcquireFromSlot(entry, slotIndex, slot, baseUrl, origin, proxyUrl, signal, key);
-		if (result !== null) {
-			// Advance the round-robin past this slot for next time.
-			entry.roundRobin = (slotIndex + 1) % POOL_SIZE;
-			return result;
+		try {
+			const result = await tryAcquireFromSlot(entry, slotIndex, slot, baseUrl, origin, proxyUrl, signal, key);
+			if (result !== null) {
+				// Advance the round-robin past this slot for next time.
+				entry.roundRobin = (slotIndex + 1) % POOL_SIZE;
+				return result;
+			}
+			// Slot was unhealthy/vacant/failed — try the next slot.
+		} catch (error) {
+			if (error instanceof AbortError) {
+				throw error;
+			}
+			// Remember the most informative setup failure for the final throw.
+			lastSetupError = error;
+			// Slot has been reset; try the next slot.
 		}
-		// Slot was unhealthy/vacant/failed — try the next slot.
 	}
 
+	if (lastSetupError !== null) {
+		throw lastSetupError;
+	}
 	throw new Error("Failed to acquire H2 session from all pool slots");
 }
 
@@ -197,8 +214,9 @@ async function tryAcquireFromSlot(
 			if (error instanceof AbortError) {
 				throw error;
 			}
-			// Init failed; slot is now vacant. Try next.
-			return null;
+			// Init failed; slot is now vacant. Re-throw so the caller can
+			// preserve the original setup error while still trying other slots.
+			throw error;
 		}
 	}
 
@@ -217,8 +235,9 @@ async function tryAcquireFromSlot(
 			if (error instanceof AbortError) {
 				throw error;
 			}
-			// Init failed; slot is now vacant. Try next.
-			return null;
+			// Init failed; slot is now vacant. Re-throw so the caller can
+			// preserve the original setup error while still trying other slots.
+			throw error;
 		}
 	}
 

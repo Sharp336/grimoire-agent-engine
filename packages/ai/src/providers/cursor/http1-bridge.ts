@@ -46,8 +46,8 @@ const HEARTBEAT_INTERVAL_MS = 5000;
 
 type BridgeState =
 	| { kind: "open"; phase: "sse" | "poll"; nextSeqno: bigint }
-	| { kind: "closing"; reason: "success" | "fatal" | "abort" | "dispose" }
-	| { kind: "closed" };
+	| { kind: "closing"; reason: "success" | "fatal" | "abort" | "dispose"; error?: Error }
+	| { kind: "closed"; error?: Error };
 
 interface PendingAppend {
 	seqno: bigint;
@@ -59,7 +59,7 @@ interface PendingAppend {
 export interface CursorHttp1Bridge {
 	readonly messages: AsyncIterable<AgentServerMessage>;
 	send(data: Uint8Array): Promise<void>;
-	close(reason: "success" | "fatal" | "abort" | "dispose"): Promise<void>;
+	close(reason: "success" | "fatal" | "abort" | "dispose", error?: Error): Promise<void>;
 }
 
 export async function createCursorHttp1Bridge(opts: {
@@ -139,9 +139,9 @@ export async function createCursorHttp1Bridge(opts: {
 		notifyWaiter();
 	}
 
-	async function closeBridge(reason: "success" | "fatal" | "abort" | "dispose"): Promise<void> {
+	async function closeBridge(reason: "success" | "fatal" | "abort" | "dispose", error?: Error): Promise<void> {
 		if (state.kind === "closed" || state.kind === "closing") return;
-		state = { kind: "closing", reason };
+		state = { kind: "closing", reason, error: reason === "fatal" ? error : undefined };
 		activeH1Bridges.delete(bridge);
 		agent?.destroy();
 
@@ -166,7 +166,7 @@ export async function createCursorHttp1Bridge(opts: {
 		notifyWaiter();
 
 		await Promise.allSettled(inFlightPromises);
-		state = { kind: "closed" };
+		state = { kind: "closed", error: state.error };
 	}
 
 	async function sendAppend(data: Uint8Array): Promise<void> {
@@ -218,7 +218,7 @@ export async function createCursorHttp1Bridge(opts: {
 						p.reject(new Error("Append failure sealed the queue"));
 					}
 					appendQueue.length = 0;
-					void closeBridge("fatal");
+					void closeBridge("fatal", err);
 				});
 
 			inFlight.add(inFlightPromise);
@@ -259,6 +259,11 @@ export async function createCursorHttp1Bridge(opts: {
 							}
 						}
 						if (state.kind === "closed" || state.kind === "closing") {
+							// A fatal close propagates the underlying transport/SSE
+							// error to the outer consumer so the retry supervisor
+							// can classify and replay it; a clean close ends the
+							// iterator normally.
+							if (state.error) throw state.error;
 							return { value: undefined, done: true };
 						}
 						// Wait for a message or close notification.
@@ -323,8 +328,10 @@ export async function createCursorHttp1Bridge(opts: {
 				);
 				return;
 			}
-			// Fatal inbound failure: seal both directions.
-			void closeBridge("fatal");
+			// Fatal inbound failure: seal both directions and propagate the
+			// error so the outer retry supervisor can classify it.
+			const fatal = error instanceof Error ? error : new Error(String(error));
+			void closeBridge("fatal", fatal);
 		}
 	})();
 	const bridge: CursorHttp1Bridge = {
