@@ -3,6 +3,21 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 describe("SelectorController prompt-affecting settings", () => {
+	it("refreshes the active prompt when the xdev inline-device allowlist changes", async () => {
+		const refreshBaseSystemPrompt = vi.fn(async () => {});
+		const ctx = {
+			session: { refreshBaseSystemPrompt },
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new SelectorController(ctx);
+
+		controller.handleSettingChange("tools.xdevInlineDevices", ["mcp__context_mode_*"]);
+		await Promise.resolve();
+
+		expect(refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+		expect(ctx.showError).not.toHaveBeenCalled();
+	});
+
 	it("refreshes the active prompt when xdev docs mode changes", async () => {
 		const refreshBaseSystemPrompt = vi.fn(async () => {});
 		const ctx = {

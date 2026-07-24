@@ -438,6 +438,7 @@ export class SelectorController {
 				});
 				break;
 			case "tools.xdevDocs":
+			case "tools.xdevInlineDevices":
 				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
