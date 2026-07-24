@@ -552,9 +552,10 @@ export const evalToolRenderer = {
 		result: { content: Array<{ type: string; text?: string }>; details?: EvalToolDetails },
 		options: RenderResultOptions & { renderContext?: EvalRenderContext },
 		uiTheme: Theme,
-		_args?: EvalRenderArgs,
+		args?: EvalRenderArgs,
 	): Component {
 		const details = result.details;
+		const displayCells = getRenderCells(args);
 
 		const rawOutput =
 			options.renderContext?.output ?? (result.content?.find(c => c.type === "text")?.text ?? "").trimEnd();
@@ -604,6 +605,7 @@ export const evalToolRenderer = {
 					const lines: string[] = [];
 					for (let i = 0; i < cellResults.length; i++) {
 						const cell = cellResults[i];
+						const displayCell = displayCells[i];
 						const allEvents = cell.statusEvents ?? [];
 						const agentEvents = allEvents.filter(e => e.op === "agent");
 						const otherEvents = agentEvents.length > 0 ? allEvents.filter(e => e.op !== "agent") : allEvents;
@@ -623,7 +625,7 @@ export const evalToolRenderer = {
 						}
 						const cellLines = renderCodeCell(
 							{
-								code: cell.code,
+								code: displayCell?.code ?? cell.code,
 								language: languageForHighlighter(cell.language ?? details?.language),
 								showLanguage: true,
 								index: i,

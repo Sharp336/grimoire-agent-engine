@@ -24,6 +24,7 @@ import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
 import { isWaitingPollDetails } from "../../tools/hub";
 import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../../tools/render-utils";
 import { type FirstResultViewportRepaint, toolRenderers } from "../../tools/renderers";
+import { formatToolCallSourceArgs, type SourceFormatter } from "../../tools/source-formatter";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
@@ -211,12 +212,12 @@ export interface ToolExecutionUi {
 	resetDisplay(): void;
 	imageBudget?: TUI["imageBudget"];
 }
-
 export interface ToolExecutionOptions {
 	snapshots?: SnapshotStore;
 	showImages?: boolean; // default: true (only used if terminal supports images)
 	editFuzzyThreshold?: number;
 	editAllowFuzzy?: boolean;
+	sourceFormatter?: SourceFormatter;
 	/** Live-region probe used to settle detached task progress once the block
 	 * leaves the repaintable transcript region. */
 	liveRegion?: TranscriptLiveRegionProbe;
@@ -272,6 +273,13 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#toolName: string;
 	#toolLabel: string;
 	#args: any;
+	#sourceFormatter: SourceFormatter;
+	#sourceFormatArgsVersion = 0;
+	#sourceFormatRequestVersion = 0;
+	#activeSourceFormatPass = 0;
+	#sourceFormatPass = 0;
+	#sourceFormattingAbort?: AbortController;
+	#formattedSourceArgs?: Record<string, unknown>;
 	#expanded = false;
 	#showImages: boolean;
 	#editFuzzyThreshold: number | undefined;
@@ -379,6 +387,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#ui = ui;
 		this.#cwd = cwd;
 		this.#args = args;
+		this.#sourceFormatter = options.sourceFormatter ?? formatToolCallSourceArgs;
+		this.#sourceFormatArgsVersion = 1;
 		this.#editMode = resolveEditModeForTool(toolName, tool);
 
 		// Always create both - contentBox for custom tools/bash/tools with renderers, contentText for other built-ins.
@@ -421,16 +431,69 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	updateArgs(args: any, _toolCallId?: string): void {
+		if (this.#sealed) return;
 		// Reference-equality short-circuit before any further work. Callers
 		// always allocate a new arg object on each streamed delta (see
 		// event-controller.ts and ui-helpers.ts), so a same-reference assignment
 		// signals "nothing meaningful changed" and the renderer can skip.
 		if (args === this.#args) return;
 		this.#args = args;
+		this.#sourceFormatArgsVersion += 1;
+		this.#formattedSourceArgs = undefined;
 		this.#displayInputVersion++;
+		this.#abortSourceFormatting();
 		this.#updateSpinnerAnimation();
 		this.#schedulePreviewDiff();
 		this.#updateDisplay();
+	}
+
+	#abortSourceFormatting(): void {
+		const activePass = this.#activeSourceFormatPass;
+		this.#sourceFormattingAbort?.abort();
+		this.#sourceFormattingAbort = undefined;
+		this.#releaseSourceFormatFinalizationHold(activePass);
+	}
+
+	#releaseSourceFormatFinalizationHold(pass: number): void {
+		if (this.#activeSourceFormatPass !== pass || pass === 0) return;
+		this.#activeSourceFormatPass = 0;
+		if (this.#result !== undefined && !this.#isPartial) {
+			this.#ui.requestRender();
+		}
+	}
+
+	#scheduleSourceFormattingPass(): void {
+		if (this.#sealed) return;
+		// Don't request repeatedly for the same arg payload.
+		if (this.#sourceFormatRequestVersion >= this.#sourceFormatArgsVersion) return;
+
+		const generation = this.#sourceFormatArgsVersion;
+		this.#sourceFormatRequestVersion = generation;
+		const formatPass = ++this.#sourceFormatPass;
+		this.#activeSourceFormatPass = formatPass;
+		const controller = new AbortController();
+		this.#sourceFormattingAbort = controller;
+		const args = this.#args;
+
+		void (async () => {
+			try {
+				const formatted = await this.#sourceFormatter(this.#toolName, args, controller.signal);
+				if (controller.signal.aborted || this.#sealed || generation !== this.#sourceFormatArgsVersion) return;
+				this.#formattedSourceArgs = formatted;
+				this.#displayInputVersion++;
+				this.#updateDisplay();
+				this.#ui.requestComponentRender(this);
+			} catch (err) {
+				if (controller.signal.aborted) return;
+				this.#formattedSourceArgs = undefined;
+				logger.warn("Source formatter failed", { tool: this.#toolName, error: String(err) });
+			} finally {
+				if (this.#sourceFormattingAbort === controller) {
+					this.#sourceFormattingAbort = undefined;
+				}
+				this.#releaseSourceFormatFinalizationHold(formatPass);
+			}
+		})();
 	}
 
 	/**
@@ -438,9 +501,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * This triggers an immediate final diff computation for edit-like tools.
 	 */
 	setArgsComplete(_toolCallId?: string): void {
+		if (this.#sealed) return;
 		this.#argsComplete = true;
 		this.#updateSpinnerAnimation();
 		this.#schedulePreviewDiff();
+		this.#scheduleSourceFormattingPass();
 	}
 
 	/**
@@ -557,6 +622,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		isPartial = false,
 		_toolCallId?: string,
 	): void {
+		if (this.#sealed) return;
 		// A detached task spawn keeps streaming progress snapshots after the
 		// block froze (left the transcript live region). Drop them: the rows are
 		// static gray history now, and repainting would rewrite rows the engine
@@ -579,6 +645,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// When tool is complete, ensure args are marked complete so spinner stops
 		if (!isPartial) {
 			this.#argsComplete = true;
+			this.#scheduleSourceFormattingPass();
 		}
 		this.#updateSpinnerAnimation();
 		this.#updateTodoStrikeAnimation();
@@ -806,6 +873,10 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	isTranscriptBlockFinalized(): boolean {
 		if (this.#sealed) return true;
 		if (this.#result === undefined) return false;
+		// Keep async source-format updates alive until their pass settles so a late
+		// formatter completion can still repaint the tool-call args without
+		// stranding the live block in native scrollback.
+		if (this.#activeSourceFormatPass) return false;
 		// A displaceable snapshot stays live: its rows are kept out of native
 		// scrollback so a follow-up tool call can remove the block.
 		if (this.#displaceableByToolName) return false;
@@ -862,6 +933,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#stopTodoStrikeAnimation();
 		this.#editDiffAbort?.abort();
 		this.#editDiffAbort = undefined;
+		this.#abortSourceFormatting();
 		// Drop any queued rerun so the drain loop exits instead of recomputing a
 		// preview for a torn-down block after its in-flight compute is aborted.
 		this.#editDiffDirty = false;
@@ -1243,7 +1315,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	#getCallArgsForRender(): any {
-		const renderArgs = getArgsWithStreamedTextInput(this.#args);
+		const renderArgs = this.#formattedSourceArgs ?? getArgsWithStreamedTextInput(this.#args);
 		if (!isEditLikeToolName(this.#toolName)) {
 			return renderArgs;
 		}
@@ -1257,7 +1329,9 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		if (!first?.diff) {
 			return renderArgs;
 		}
-		return { ...(renderArgs as Record<string, unknown>), previewDiff: first.diff };
+		const previewArgSource =
+			typeof renderArgs === "object" && renderArgs !== null ? renderArgs : ({} as Record<string, unknown>);
+		return { ...previewArgSource, previewDiff: first.diff };
 	}
 
 	/**
