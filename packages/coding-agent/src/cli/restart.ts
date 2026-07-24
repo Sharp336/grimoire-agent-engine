@@ -1,6 +1,6 @@
 import * as path from "node:path";
 
-import { isCompiledBinary, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { isCompiledBinary, stripWindowsExtendedLengthPathPrefix, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { ConfiguredThinkingLevel } from "../thinking";
 
 /** Environment variable used for one-hop restart handoff of runtime CLI API keys. */
@@ -89,6 +89,7 @@ export interface RestartCommandEnvironment {
 	isCompiledBinary: () => boolean;
 	workerHostEntry: () => string | null;
 	execPath: string;
+	platform?: NodeJS.Platform;
 	packageRoot: string;
 }
 
@@ -238,6 +239,7 @@ function defaultRestartCommandEnvironment(): RestartCommandEnvironment {
 		isCompiledBinary,
 		workerHostEntry,
 		execPath: process.execPath,
+		platform: process.platform,
 		packageRoot: path.resolve(import.meta.dir, "..", ".."),
 	};
 }
@@ -306,14 +308,14 @@ function buildChildEnv(overrides: Record<string, string> | undefined): Record<st
 export function resolveRestartBaseCommand(
 	env: RestartCommandEnvironment = defaultRestartCommandEnvironment(),
 ): RestartCommandBase {
-	if (env.isCompiledBinary()) return { cmd: [env.execPath] };
-
+	const executable = stripWindowsExtendedLengthPathPrefix(env.execPath, env.platform);
+	if (env.isCompiledBinary()) return { cmd: [executable] };
 	const hostEntry = env.workerHostEntry();
 	if (hostEntry) {
-		return { cmd: [env.execPath, hostEntry] };
+		return { cmd: [executable, hostEntry] };
 	}
 
-	return { cmd: [env.execPath, path.join(env.packageRoot, "src/cli.ts")] };
+	return { cmd: [executable, path.join(env.packageRoot, "src/cli.ts")] };
 }
 
 /** Build a restart-safe argv that resumes the current persisted session only. */

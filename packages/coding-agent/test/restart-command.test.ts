@@ -14,6 +14,7 @@ import {
 	type RestartExtensionFlagValue,
 	type RestartSpawn,
 	type RestartSpawnInput,
+	resolveRestartBaseCommand,
 	restoreRestartExtensionFlagValues,
 	selectRestartExtensionPackageRoots,
 	spawnRestartProcess,
@@ -64,6 +65,42 @@ describe("restart command construction", () => {
 			],
 			cwd: "/repo/project",
 		});
+	});
+
+	test("keeps normal POSIX executable paths unchanged", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			platform: "linux",
+			packageRoot,
+		};
+
+		expect(resolveRestartBaseCommand(env)).toEqual({ cmd: ["/opt/omp/omp"] });
+	});
+
+	test("strips extended-length drive executable paths before spawning", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "\\\\?\\C:\\Program Files\\Bun\\bun.exe",
+			platform: "win32",
+			packageRoot,
+		};
+
+		expect(resolveRestartBaseCommand(env)).toEqual({ cmd: ["C:\\Program Files\\Bun\\bun.exe"] });
+	});
+
+	test("strips extended-length UNC executable paths before spawning", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "\\\\?\\UNC\\server\\share\\bun.exe",
+			platform: "win32",
+			packageRoot,
+		};
+
+		expect(resolveRestartBaseCommand(env)).toEqual({ cmd: ["\\\\server\\share\\bun.exe"] });
 	});
 
 	test("builds a host-entry restart command without changing session cwd", () => {
