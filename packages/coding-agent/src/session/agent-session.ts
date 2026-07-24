@@ -35,6 +35,7 @@ import {
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
+	countTokens,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -44,6 +45,7 @@ import {
 import {
 	AGGRESSIVE_SHAKE_CONFIG,
 	applyShakeRegions,
+	DEFAULT_SHAKE_CONFIG,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
