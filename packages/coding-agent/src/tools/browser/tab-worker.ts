@@ -28,6 +28,14 @@ import {
 	parseAriaRefSelector,
 	resolveAriaRefHandle,
 } from "./aria/aria-snapshot";
+import { attachCodexBrowserToAgent } from "./codex-facade";
+import {
+	attachPuppeteerCodexLogCapture,
+	createPuppeteerCodexSessionState,
+	detachPuppeteerCodexLogCapture,
+	PuppeteerCodexBrowserAdapter,
+	type PuppeteerCodexSessionState,
+} from "./codex-puppeteer";
 import {
 	applyStealthPatches,
 	applyViewport,
@@ -730,6 +738,7 @@ export class WorkerCore {
 	#elementCounter = 0;
 	#active: ActiveRun | null = null;
 	#runtime: JsRuntime | null = null;
+	readonly #codexState: PuppeteerCodexSessionState = createPuppeteerCodexSessionState();
 	#unsub: () => void;
 	#mode?: WorkerInitPayload["mode"];
 	#dialogPolicy?: DialogPolicy;
@@ -788,6 +797,7 @@ export class WorkerCore {
 			});
 			if (payload.mode === "headless") {
 				this.#page = await this.#browser.newPage();
+				await attachPuppeteerCodexLogCapture(this.#page, this.#codexState);
 				this.#observeDialogs();
 				await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
 				await applyViewport(this.#page, payload.viewport);
@@ -808,6 +818,7 @@ export class WorkerCore {
 				const page = await target.page();
 				if (!page) throw new ToolError(`Target ${payload.targetId} is no longer available on the attached browser`);
 				this.#page = page;
+				await attachPuppeteerCodexLogCapture(this.#page, this.#codexState);
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
@@ -941,6 +952,10 @@ export class WorkerCore {
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
 		let runPage: RunPageScope | undefined;
+		let codexAdapter: PuppeteerCodexBrowserAdapter | undefined;
+		let attachedAgent: object | undefined;
+		let priorBrowserDescriptor: PropertyDescriptor | undefined;
+		let browserAttached = false;
 		try {
 			throwIfAborted(signal);
 			runPage = createRunPageScope(this.#requirePage());
@@ -948,6 +963,21 @@ export class WorkerCore {
 			const tabApi = this.#createTabApi(msg.name, msg.timeoutMs, signal, msg.session, output, screenshots, active);
 			const runtime = this.#ensureRuntime(msg.session);
 			runtime.setCwd(msg.session.cwd);
+			codexAdapter = new PuppeteerCodexBrowserAdapter({
+				state: this.#codexState,
+				page: runPage.page,
+				browser,
+				signal,
+				cwd: msg.session.cwd,
+				captureScreenshot: async opts => {
+					const screenshot = await this.#captureScreenshot(msg.session, output, screenshots, signal, {
+						fullPage: opts.fullPage,
+						silent: true,
+					});
+					return Buffer.from(await Bun.file(screenshot.dest).arrayBuffer()).toString("base64");
+				},
+			});
+			await codexAdapter.beginRun();
 			runtime.setRunScope({
 				page: bindBrowserRunFacade(runPage.page, signal),
 				browser: bindBrowserRunFacade(browser, signal),
@@ -970,6 +1000,12 @@ export class WorkerCore {
 					);
 				},
 			});
+			const existingAgent = Reflect.get(globalThis, "agent");
+			if (typeof existingAgent !== "function") throw new ToolError("Browser runtime prelude agent is unavailable");
+			attachedAgent = existingAgent;
+			priorBrowserDescriptor = Object.getOwnPropertyDescriptor(existingAgent, "browser");
+			attachCodexBrowserToAgent(existingAgent, codexAdapter);
+			browserAttached = true;
 			const { promise: cancelRejection, reject: rejectCancel } = Promise.withResolvers<never>();
 			const onCancel = (): void => {
 				const abortError =
@@ -1015,13 +1051,21 @@ export class WorkerCore {
 		} catch (error) {
 			failure = { error };
 		} finally {
-			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
 			try {
-				await runPage?.cleanup();
-			} catch (error) {
-				failure = { error };
+				if (browserAttached && attachedAgent) {
+					if (priorBrowserDescriptor) Object.defineProperty(attachedAgent, "browser", priorBrowserDescriptor);
+					else Reflect.deleteProperty(attachedAgent, "browser");
+				}
+			} finally {
+				runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
+				await codexAdapter?.dispose();
+				try {
+					await runPage?.cleanup();
+				} catch (error) {
+					failure = { error };
+				}
+				if (this.#active?.id === msg.id) this.#active = null;
 			}
-			if (this.#active?.id === msg.id) this.#active = null;
 		}
 		if (failure) {
 			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
@@ -1817,6 +1861,7 @@ export class WorkerCore {
 
 	async #close(): Promise<void> {
 		this.#unsub();
+		await detachPuppeteerCodexLogCapture(this.#codexState);
 		this.#clearElementCache();
 		const page = this.#page;
 		if (this.#dialogHandler && page && !page.isClosed()) page.off("dialog", this.#dialogHandler);
