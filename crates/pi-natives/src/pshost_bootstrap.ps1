@@ -120,10 +120,38 @@ $stdout = [Omp.Stdio]::DetachStdout()
 # never carries protocol frames, so it can't desync the reader — but Rust
 # only retains that pipe as a startup-failure diagnostic tail (never routed
 # to a running exec's result), so an unredirected direct write there would
-# silently vanish instead of surfacing as command output. Point both at
-# buffers instead; Complete-Exec drains them as ordinary/error output.
-$script:consoleOut = [System.IO.StringWriter]::new()
-$script:consoleErr = [System.IO.StringWriter]::new()
+# silently vanish instead of surfacing as command output. Point both at a
+# thread-safe queue-backed writer instead; Publish-Streams periodically
+# drains it (same as the PowerShell data streams) so a long-running,
+# high-volume direct Console writer can't grow the sidecar's memory
+# unbounded before Complete-Exec ever runs. A plain StringBuilder-backed
+# StringWriter (the previous implementation) is NOT safe to read/clear
+# concurrently with the pipeline's BeginInvoke() thread still appending to
+# it -- Write() calls land on a background thread while the poll loop
+# reading/draining runs on the main thread, genuinely concurrent.
+# ConcurrentQueue is lock-free for exactly this producer/consumer pattern,
+# so Drain() is always safe to call from the main thread.
+Add-Type -TypeDefinition @'
+using System.Collections.Concurrent;
+using System.Text;
+namespace Omp {
+    public class QueueWriter : System.IO.TextWriter {
+        readonly ConcurrentQueue<string> q = new ConcurrentQueue<string>();
+        public override Encoding Encoding { get { return Encoding.UTF8; } }
+        public override void Write(char value) { q.Enqueue(value.ToString()); }
+        public override void Write(string value) { if (!string.IsNullOrEmpty(value)) q.Enqueue(value); }
+        public bool HasContent { get { return !q.IsEmpty; } }
+        public string Drain() {
+            var sb = new StringBuilder();
+            string s;
+            while (q.TryDequeue(out s)) { sb.Append(s); }
+            return sb.ToString();
+        }
+    }
+}
+'@
+$script:consoleOut = [Omp.QueueWriter]::new()
+$script:consoleErr = [Omp.QueueWriter]::new()
 [Console]::SetOut($script:consoleOut)
 [Console]::SetError($script:consoleErr)
 # DetachStdin only repoints the OS stdin slot/handle; a managed Console.In
@@ -275,8 +303,8 @@ function Start-Exec([pscustomobject] $Request) {
     # the Rust-side stderr_tail clear-at-start-of-exec fix (round 25) — a
     # background writer racing this exact clear remains a possible few-ms
     # window, but idle-period leakage is no longer unbounded.
-    [void]$script:consoleOut.GetStringBuilder().Clear()
-    [void]$script:consoleErr.GetStringBuilder().Clear()
+    [void]$script:consoleOut.Drain()
+    [void]$script:consoleErr.Drain()
 
     # cwd + env are injected as data (a session-state variable / the process env),
     # never string-interpolated, so user values cannot inject code. cwd is applied
@@ -363,6 +391,12 @@ if ((`$global:__ompNativeRan -or `$global:LASTEXITCODE -ne `$global:__ompPrevExi
         # this instead of Streams.Error.Count, which would go back to 0
         # once records are removed.
         HadErrorRecords = $false
+        # Sticky flag: direct [Console]::Error writes are now periodically
+        # drained (see Publish-Streams) like the other streams, so
+        # Complete-Exec can no longer tell from the buffer's state alone
+        # whether this exec ever wrote anything to it (a poll may have
+        # already drained and cleared it before completion runs).
+        HadConsoleErr = $false
     }
 }
 
@@ -442,6 +476,20 @@ function Publish-Streams([hashtable] $Cur) {
         $Cur.ErrorIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'error' -Text (Format-AnsiText $text '31;1')
     }
+    # Direct [Console]::Out/Error writes, periodically drained the same way
+    # as the PS data streams above -- QueueWriter.Drain() is lock-free-safe
+    # to call from this (main) thread while the pipeline thread concurrently
+    # writes, unlike the previous StringBuilder-backed implementation.
+    # HadConsoleErr is sticky (mirrors HadErrorRecords) since Complete-Exec
+    # can no longer infer "did this exec ever write to Console.Error" from
+    # the buffer's state once polling has already drained it.
+    if ($script:consoleOut.HasContent) {
+        Write-Chunk -Id $Cur.Id -Stream 'output' -Text $script:consoleOut.Drain()
+    }
+    if ($script:consoleErr.HasContent) {
+        $Cur.HadConsoleErr = $true
+        Write-Chunk -Id $Cur.Id -Stream 'error' -Text (Format-AnsiText $script:consoleErr.Drain() '31;1')
+    }
 }
 
 function Complete-Exec {
@@ -468,8 +516,10 @@ function Complete-Exec {
         }
     }
 
-    $consoleErrText = if ($script:consoleErr.GetStringBuilder().Length -gt 0) { $script:consoleErr.ToString() } else { $null }
-    $hadErrors = [bool]$cur.PS.HadErrors -or $cur.HadErrorRecords -or ($null -ne $consoleErrText)
+    # hadErrors is finalized AFTER Publish-Streams (below) runs its final
+    # drain -- HadConsoleErr is set there, not computed from the
+    # QueueWriter's state here, since polling may have already drained and
+    # cleared any Console.Error content before completion runs.
 
     # Retain result objects (inspectable via Enter-PSHostProcess) and update
     # the History ring from whatever the pipeline actually produced. Done
@@ -502,25 +552,14 @@ function Complete-Exec {
         $renderedOutput = (Invoke-OnRunspace 'param($w) $global:__omp.Last | Out-String -Width $w' @($cur.Width)) -join ''
     }
     Write-Chunk -Id $cur.Id -Stream 'output' -Text $renderedOutput
-    # Drain direct [Console]::Out writes (redirected at startup) as output.
-    # Completion-only on purpose: the pipeline thread appends to this
-    # StringBuilder while running, and StringBuilder is not safe to read
-    # concurrently with a writer.
-    if ($script:consoleOut.GetStringBuilder().Length -gt 0) {
-        Write-Chunk -Id $cur.Id -Stream 'output' -Text $script:consoleOut.ToString()
-        [void]$script:consoleOut.GetStringBuilder().Clear()
-    }
-    # Drain direct [Console]::Error writes (redirected at startup) as error
-    # output, mirroring Console.Out — completion-only for the same
-    # StringBuilder-thread-safety reason.
-    if ($null -ne $consoleErrText) {
-        Write-Chunk -Id $cur.Id -Stream 'error' -Text (Format-AnsiText $consoleErrText '31;1')
-        [void]$script:consoleErr.GetStringBuilder().Clear()
-    }
     if ($null -ne $terminatingErrorText) {
         Write-Chunk -Id $cur.Id -Stream 'error' -Text (Format-AnsiText $terminatingErrorText '31;1')
     }
+    # Final drain: catches any Console.Out/Error and PS-stream content
+    # written since the last poll (or the whole thing, for a fast command
+    # that never got polled while running) and sets HadConsoleErr.
     Publish-Streams $cur
+    $hadErrors = [bool]$cur.PS.HadErrors -or $cur.HadErrorRecords -or $cur.HadConsoleErr -or ($null -ne $terminatingErrorText)
 
     # Per-invocation exit code: the wrapped script records __ompExit only when
     # this pipeline ran a native command (lookup flag or exit-code change), so a

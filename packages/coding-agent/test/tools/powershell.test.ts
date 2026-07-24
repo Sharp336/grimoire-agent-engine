@@ -219,6 +219,46 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(result)).toContain("boom-from-console-error");
 	});
 
+	test("a high-volume [Console]::Out write delivers every line intact after live release", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-console-out-highvolume-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Direct Console.Out/Error writes are now periodically drained (a
+		// thread-safe queue-backed writer, not a completion-only
+		// StringBuilder) the same way the PS data streams already were —
+		// proves the periodic drain doesn't drop, duplicate, or reorder
+		// content under a fast write burst.
+		const result = await tool.execute("cout-hv", {
+			command: '1..3000 | ForEach-Object { [Console]::Out.WriteLine("line-$_") }',
+		});
+		expect(result.isError ?? false).toBe(false);
+		const text = textOf(result);
+		const matches = [...text.matchAll(/line-(\d+)/g)].map(m => Number(m[1]));
+		expect(matches.length).toBe(3000);
+		expect(new Set(matches).size).toBe(3000);
+		expect(Math.min(...matches)).toBe(1);
+		expect(Math.max(...matches)).toBe(3000);
+	});
+
+	test("a [Console]::Error write drained mid-run still trips hadErrors at completion", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-console-error-sticky-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// The sticky HadConsoleErr flag (set the moment a periodic poll
+		// drains a non-empty consoleErr) must survive to Complete-Exec even
+		// though the queue itself is empty again by the time completion
+		// runs its own final drain — proves hadErrors isn't silently lost
+		// once live draining takes the content away before the command
+		// finishes.
+		const result = await tool.execute("cerr-sticky", {
+			command: "[Console]::Error.WriteLine('early-error'); Start-Sleep -Milliseconds 300; 'done'",
+		});
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("early-error");
+	});
+
 	test("a direct [Console]::In read returns immediately instead of touching the protocol pipe", async () => {
 		const tool = await loadPowerShellTool(fakeSession("ps-console-in-test"));
 		expect(tool).not.toBeNull();

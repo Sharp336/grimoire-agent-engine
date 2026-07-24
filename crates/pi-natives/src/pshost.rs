@@ -209,13 +209,66 @@ mod win_job {
 		fn AssignProcessToJobObject(hJob: RawHandle, hProcess: RawHandle) -> i32;
 		fn TerminateJobObject(hJob: RawHandle, uExitCode: u32) -> i32;
 		fn CloseHandle(hObject: RawHandle) -> i32;
+		fn SetInformationJobObject(
+			hJob: RawHandle,
+			JobObjectInformationClass: i32,
+			lpJobObjectInformation: *const core::ffi::c_void,
+			cbJobObjectInformationLength: u32,
+		) -> i32;
 	}
 
-	/// Owned job object handle. `Drop` only closes the handle (no
-	/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is set), so letting a `JobHandle`
-	/// go out of scope on the normal exit path never kills a still-running
-	/// tree — `terminate()` is the only thing that does that, called
-	/// explicitly from `dispose()`'s clean-exit branch.
+	const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+	const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+
+	// Layouts mirror the Win32 `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` struct
+	// exactly (field-for-field, matching Windows' own alignment) -- declared
+	// locally rather than pulling `windows-sys`'s job-objects feature in for
+	// one struct.
+	#[repr(C)]
+	struct JobObjectBasicLimitInformation {
+		per_process_user_time_limit: i64,
+		per_job_user_time_limit:     i64,
+		limit_flags:                 u32,
+		minimum_working_set_size:    usize,
+		maximum_working_set_size:    usize,
+		active_process_limit:        u32,
+		affinity:                    usize,
+		priority_class:              u32,
+		scheduling_class:            u32,
+	}
+	#[repr(C)]
+	#[allow(
+		clippy::struct_field_names,
+		reason = "field names mirror the Win32 IO_COUNTERS struct's own naming exactly"
+	)]
+	struct IoCounters {
+		read_operation_count:  u64,
+		write_operation_count: u64,
+		other_operation_count: u64,
+		read_transfer_count:   u64,
+		write_transfer_count:  u64,
+		other_transfer_count:  u64,
+	}
+	#[repr(C)]
+	struct JobObjectExtendedLimitInformation {
+		basic_limit_information:  JobObjectBasicLimitInformation,
+		io_info:                  IoCounters,
+		process_memory_limit:     usize,
+		job_memory_limit:         usize,
+		peak_process_memory_used: usize,
+		peak_job_memory_used:     usize,
+	}
+
+	/// Owned job object handle. `Drop` only closes the handle -- but
+	/// `create_for` sets `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so the OS
+	/// itself kills every process still in the job the moment the LAST
+	/// handle to it closes, which happens automatically when omp's own
+	/// process terminates (gracefully or not) without ever calling
+	/// `terminate()` explicitly -- e.g. a crash, an unhandled panic that
+	/// aborts the process, or the user killing omp directly. Without this
+	/// flag, an orphaned sidecar (and its descendants) would only be
+	/// reaped by `dispose()`'s explicit `terminate()` call, which never
+	/// runs if omp itself dies first.
 	pub struct JobHandle(RawHandle);
 
 	// SAFETY: a Win32 HANDLE has no thread affinity; every job-object call
@@ -225,11 +278,15 @@ mod win_job {
 	unsafe impl Sync for JobHandle {}
 
 	impl JobHandle {
-		/// Create an unnamed job object and assign `process_handle` (the pwsh
-		/// sidecar's own process handle) to it. Returns `None` on failure
-		/// (e.g. a sandboxed environment that denies job-object creation) —
-		/// callers fall back to the existing direct-children sweep in that
-		/// case, so this is a best-effort improvement, not a hard dependency.
+		/// Create an unnamed job object, assign `process_handle` (the pwsh
+		/// sidecar's own process handle) to it, and enable kill-on-close.
+		/// Returns `None` on failure to create/assign (e.g. a sandboxed
+		/// environment that denies job-object creation) — callers fall back
+		/// to the existing direct-children sweep in that case, so this is a
+		/// best-effort improvement, not a hard dependency. A
+		/// `SetInformationJobObject` failure is non-fatal: the job object
+		/// is still returned and usable for explicit `terminate()` calls,
+		/// just without the crash-safety net.
 		pub fn create_for(process_handle: RawHandle) -> Option<Self> {
 			// SAFETY: `CreateJobObjectW` takes only by-value/null arguments and
 			// does not dereference caller memory; a null name creates an
@@ -248,6 +305,42 @@ mod win_job {
 				unsafe { CloseHandle(job) };
 				return None;
 			}
+			let info = JobObjectExtendedLimitInformation {
+				basic_limit_information:  JobObjectBasicLimitInformation {
+					per_process_user_time_limit: 0,
+					per_job_user_time_limit:     0,
+					limit_flags:                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+					minimum_working_set_size:    0,
+					maximum_working_set_size:    0,
+					active_process_limit:        0,
+					affinity:                    0,
+					priority_class:              0,
+					scheduling_class:            0,
+				},
+				io_info:                  IoCounters {
+					read_operation_count:  0,
+					write_operation_count: 0,
+					other_operation_count: 0,
+					read_transfer_count:   0,
+					write_transfer_count:  0,
+					other_transfer_count:  0,
+				},
+				process_memory_limit:     0,
+				job_memory_limit:         0,
+				peak_process_memory_used: 0,
+				peak_job_memory_used:     0,
+			};
+			// SAFETY: `job` is a valid, just-assigned job handle; `info` is a
+			// correctly-laid-out, fully-initialized struct matching the Win32
+			// ABI, alive for the duration of this call.
+			unsafe {
+				SetInformationJobObject(
+					job,
+					JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+					std::ptr::addr_of!(info).cast(),
+					std::mem::size_of::<JobObjectExtendedLimitInformation>() as u32,
+				)
+			};
 			Some(Self(job))
 		}
 
@@ -1485,6 +1578,63 @@ mod tests {
 			rest = remainder;
 		}
 		assert_eq!(pieces.concat(), text, "reassembled pieces equal the original text exactly");
+	}
+
+	/// Without `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, closing the job handle
+	/// (e.g. because omp's own process crashed or was force-killed, without
+	/// ever calling `dispose()`/`terminate()` explicitly) leaves every
+	/// process still in the job running -- only an EXPLICIT
+	/// `TerminateJobObject` call reaps them, and that call only happens
+	/// from `dispose()`. Kill-on-close makes closing the LAST handle to the
+	/// job -- which happens automatically when the owning process exits,
+	/// gracefully or not -- sufficient on its own. Tests this directly
+	/// against `win_job::JobHandle` (no pwsh/PsHost involved): spawns a
+	/// real child, assigns it to a fresh job, then simply `drop`s the
+	/// handle WITHOUT calling `terminate()` -- simulating omp disappearing
+	/// without a graceful shutdown.
+	#[test]
+	fn win_job_kill_on_close_reaps_a_child_when_the_handle_is_simply_dropped() {
+		if !cfg!(windows) {
+			eprintln!("skipping pshost test: Windows-only (win_job is a no-op elsewhere)");
+			return;
+		}
+
+		use std::os::windows::io::AsRawHandle;
+
+		let mut child = std::process::Command::new("ping.exe")
+			.args(["-n", "30", "127.0.0.1"])
+			.stdout(std::process::Stdio::null())
+			.spawn()
+			.expect("spawn ping.exe");
+		let pid = child.id() as i32;
+
+		let is_running = |pid: i32| {
+			super::core_process::Process::from_pid(pid)
+				.is_some_and(|p| matches!(p.status(), super::core_process::ProcessStatus::Running))
+		};
+		assert!(is_running(pid), "child alive right after spawn (pid {pid})");
+
+		let job = super::win_job::JobHandle::create_for(child.as_raw_handle())
+			.expect("job object created and the child assigned to it");
+
+		// No terminate() call -- just drop the handle, exactly like an
+		// abrupt process exit would (the OS closes every handle a
+		// terminated process held, including this one).
+		drop(job);
+
+		let mut reaped = false;
+		for _ in 0..30 {
+			if !is_running(pid) {
+				reaped = true;
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(100));
+		}
+		assert!(
+			reaped,
+			"kill-on-close must reap the child once the job handle is simply dropped (pid {pid})"
+		);
+		let _ = child.wait();
 	}
 
 	/// `pump_stderr`'s 8KiB cap computes a raw byte offset (`tail.len() -
