@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the eval tool's status-event tree truncating from the bottom: the newest `log()` progress lines were hidden behind an `… N more` marker while the oldest stayed visible; the tree now shows a tail window behind an `… N earlier` marker, and the expanded view widens to the viewport instead of a fixed 10 events
+- Fixed the `//!world=main` directive being silently ignored for string expressions passed to raw Puppeteer evaluation APIs
+- Fixed tab reuse issues where hung navigation or unhandled modals would cause initialization to stall and trigger a force-kill
+
+## [17.1.0] - 2026-07-24
+
+### Breaking Changes
+
+- Replaced the `providers.webSearch` and `providers.image` single-preference configuration options with `providers.webSearchOrder` and `providers.imageOrder` priority lists. Existing configurations migrate automatically on startup.
+
+### Added
+
+- Added dynamic multi-root workspace context support, allowing users to manage multiple workspace directories mid-session via `/add-dir`, `/remove-dir`, and `/dirs` slash commands, or seed them at launch using the `--add-dir` CLI flag.
+- Added `/live`, a Codex-authenticated real-time voice interface that streams microphone audio over WebRTC and routes coding tasks through the active agent session.
+- Added opt-in usage-aware model fallback for rationed coding plans, including a `/usage` command to view live quantitative usage data and automatic fallback chain traversal.
+- Added `error.notify` configuration to allow failed model turns to trigger distinct terminal or desktop notifications.
+- Added auto-following light and dark themes to HTML session exports, with a `/export --themes` option to bundle selected TUI themes.
+- Added owner-routed asynchronous job delivery, ensuring background bash and task results are injected directly into the owning subagent or agent session rather than the top-level session.
+- Added background-on-steer capability for auto-backgrounded bash commands, allowing incoming user or peer messages to immediately background running commands.
+- Added `friendlyName` support for hidden secrets, allowing model-visible placeholders to carry sanitized semantic labels, hashes, and case hints.
+- Added support for Jujutsu (`jj`) repositories in the statusline `git` segment, displaying the nearest bookmark or change ID and retrieving working-copy change counts.
+- Added `block` and `unblock` operations for tasks, introducing a `blocked` status for tasks waiting on external input to exclude them from incomplete-todo reminders.
+- Added a toggle-list editor in `/settings` for managing array-of-enum settings like search and image provider orders.
+- Added `models.yml` Bedrock Converse prompt-cache capability overrides for bundled and opaque inference profiles.
+- Added `getServiceTiers()` and `setServiceTier()` extension APIs to read and modify the live per-family service tier for session requests.
+- Added opt-in `omp bench --cache` for independent cold/warm prompt-cache benchmarking with stable-prefix controls.
+- Added `tools.xdevDocs` prompt-doc modes and the `tools.xdevInlineDevices` glob allowlist to control which mounted device documentation is inlined into the system prompt.
+- Added the opt-in `read.renderMarkdown` setting for formatted Markdown read previews.
+
+### Changed
+
+- Updated subagent behavior to inherit `async.enabled` and `bash.autoBackground.enabled` from parent sessions, and refined subagent run completion to wait for background jobs to settle.
+- Added ordered `bash.patterns` command approval rules to allow, prompt, or deny bash commands by pattern.
+- Updated Markdown file handling so all Markdown flavors (`.markdown`, `.mdx`, `.mdc`, etc.) respect the `read.summarize.prose` setting.
+- Upgraded xAI web search to use `grok-4.5` at low reasoning effort instead of `grok-4.3`.
+- Improved search provider resilience by cascading and falling back through other configured search providers when the preferred provider fails.
+- Extended the bash tool's `direnv` and `devenv` auto-loading to all backends (including the ACP client terminal and interactive PTY) while honoring `direnv`'s local allow list.
+
+### Fixed
+
+- Fixed a path traversal vulnerability in blob reference resolution by rejecting non-canonical hashes in `parseBlobRef`.
+- Fixed multiple edge cases in the secret obfuscation and redaction engine, including handling of context-sensitive regexes, placeholder key requirements in unwritable directories, friendly-name forgery vulnerabilities, and regex match boundaries straddling existing placeholders.
+- Fixed a first-use race condition in `ArtifactManager` where concurrent callers could allocate duplicate artifact IDs.
+- Fixed Vibe-mode session stability, resolving issues with workers disappearing across restarts, hanging during teardown, clobbering target tools during session switches, and resolving against incorrect models.
+- Fixed concurrent MCP configuration mutations losing updates by serializing read-modify-write operations under a per-file lock with atomic writes.
+- Fixed legacy extensions failing to load on npm/source-link installs due to transitive CommonJS dependency graph clobbering.
+- Fixed `omp auth-gateway` commands bypassing the process-scoped OAuth account pool configured via environment variables.
+- Fixed terminal transcript rendering issues where displaceable snapshots (like waiting polls and todo lists) spammed native scrollback.
+- Fixed the terminal title to reflect the active agent run state (working, waiting, or blocked) when `tui.titleState` is enabled.
+- Fixed the `browser` tool's `open` action ignoring timeouts during browser acquisition and leaking orphaned browser instances.
+- Fixed the `write` tool silently creating empty files when a read-tool selector was mis-dispatched as a write.
+- Fixed snapcompact archiving reproducing assistant reasoning (`¶think:` sections) into replayed frames for Anthropic-dialect models.
+- Fixed Linux socket-mode DAP launches hanging indefinitely on connection failures.
+- Fixed Plan Review annotations being discarded on dismissal and limited to headings.
+- Fixed Assistant-mode TTS playback aborting prematurely when an agent continued after a tool call.
+- Fixed absolute usage amounts rendering inconsistently across CLI, TUI, and ACP output surfaces.
+- Fixed MCP sessions dropping tools from servers that finished connecting after the initial startup window.
+
 ## [17.0.9] - 2026-07-23
 
 ### Added
@@ -698,9 +758,6 @@
 
 ### Fixed
 
-- Fixed the eval tool's status-event tree truncating from the bottom: the newest `log()` progress lines were hidden behind an `… N more` marker while the oldest stayed visible; the tree now shows a tail window behind an `… N earlier` marker, and the expanded view widens to the viewport instead of a fixed 10 events
-- Fixed the `//!world=main` directive being silently ignored for string expressions passed to raw Puppeteer evaluation APIs
-- Fixed tab reuse issues where hung navigation or unhandled modals would cause initialization to stall and trigger a force-kill
 - Improved search reliability for Perplexity provider by forcing retrieval for all queries
 - Fixed JS eval cells losing top-level `function` and `var` declarations across cells when the defining cell contained top-level `await` — the async wrapper scoped them to the cell's IIFE instead of publishing them to the worker global
 

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [17.1.0] - 2026-07-24
+
+### Added
+
+- Added Text.setStyleFn() to apply foreground stylers at render time, allowing components to dynamically re-resolve colors after invalidation instead of baking in the palette active at construction.
+
+### Fixed
+
+- Fixed an issue where exiting or tearing down the TUI left the terminal in cursor-key/keypad application mode (DECCKM), which broke arrow keys in the parent shell. Both stop() and emergencyTerminalRestore() now correctly emit standard rmkx resets.
+
 ## [17.0.9] - 2026-07-23
 
 ### Added
