@@ -518,6 +518,7 @@ export class SessionTools {
 		}
 
 		this.#notifyXdevMountDelta(previousMounted, rebuiltSystemPrompt !== undefined);
+		if (rebuiltSystemPrompt) this.#markMountedDocsInBasePrompt();
 		this.#host.agent.setTools(tools);
 		if (rebuiltSystemPrompt && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
@@ -526,6 +527,13 @@ export class SessionTools {
 			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
 			this.#lastAppliedToolSignature = rebuiltSignature;
 			this.#promptModelKey = this.#currentPromptModelKey();
+		}
+	}
+
+	#markMountedDocsInBasePrompt(): void {
+		this.#xdevDocsInBasePrompt = new Set(this.#mountedXdevToolNames);
+		if (this.#pendingXdevMountDelta) {
+			this.#pendingXdevMountDelta.docsInBasePrompt = new Set(this.#xdevDocsInBasePrompt);
 		}
 	}
 
@@ -719,10 +727,7 @@ export class SessionTools {
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
-		this.#xdevDocsInBasePrompt = new Set(this.#mountedXdevToolNames);
-		if (this.#pendingXdevMountDelta) {
-			this.#pendingXdevMountDelta.docsInBasePrompt = new Set(this.#xdevDocsInBasePrompt);
-		}
+		this.#markMountedDocsInBasePrompt();
 		this.#host.clearMemoryPromotionSnapshot();
 		if (
 			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||

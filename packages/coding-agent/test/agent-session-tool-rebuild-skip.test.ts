@@ -707,6 +707,30 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices[0]).not.toContain("## mcp__nucleus_search");
 	});
 
+	it("omits inline docs after a no-delta MCP prompt rebuild", async () => {
+		const registry = new XdevRegistry([]);
+		const instructions = new Map<string, string>([["nucleus", "v1 instructions"]]);
+		const { session, contexts } = newSession(async () => registry.docsAll("inline"), {
+			xdevRegistry: registry,
+			getMcpServerInstructions: () => instructions,
+			responses: [{ content: ["ok"] }],
+		});
+		session.settings.set("tools.xdevDocs", "inline");
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+
+		await session.refreshMCPTools([]);
+		await session.refreshMCPTools([search]);
+		// Same mount set, but changed MCP instructions rebuild the base prompt.
+		instructions.set("nucleus", "v2 instructions");
+		await session.refreshMCPTools([search]);
+		await session.prompt("hello");
+
+		const notices = mountNoticesIn(contexts[0]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+		expect(notices[0]).not.toContain("## mcp__nucleus_search");
+	});
+
 	it("drops a mount delta that cancels out before the next prompt", async () => {
 		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
 			xdevRegistry: new XdevRegistry([]),
