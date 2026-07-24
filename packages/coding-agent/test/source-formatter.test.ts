@@ -193,9 +193,20 @@ describe("createSourceFormatter", () => {
 			binary: "ruff",
 			args: ["format", "--isolated", "--stdin-filename", "/tmp/source.py", "-"],
 		},
-		{ name: "rust", path: "/tmp/source.rs", binary: "rustfmt", args: ["--emit", "stdout"] },
+		{
+			name: "rust",
+			path: "/tmp/source.rs",
+			binary: "rustfmt",
+			args: ["--emit", "stdout", "--edition", "2021"],
+		},
 		{ name: "go", path: "/tmp/source.go", binary: "gofmt", args: [] },
-		{ name: "shell", path: "/tmp/source.sh", binary: "shfmt", args: [] },
+		{ name: "shell", path: "/tmp/source.sh", binary: "shfmt", args: ["--filename", "/tmp/source.sh"] },
+		{
+			name: "zsh",
+			path: "/tmp/source.zsh",
+			binary: "shfmt",
+			args: ["--filename", "/tmp/source.zsh", "--language-dialect", "zsh"],
+		},
 	];
 
 	for (const writeCase of writeCases) {
@@ -228,6 +239,19 @@ describe("createSourceFormatter", () => {
 		const result = await formatter("write", args, new AbortController().signal);
 
 		expectUnchanged(result);
+		expect(spawn).not.toHaveBeenCalled();
+		expect(which).not.toHaveBeenCalled();
+	});
+
+	it("does not route unsupported shell dialects through shfmt", async () => {
+		const which = vi.fn().mockReturnValue("/tmp/shfmt");
+		const spawn = vi.fn<SpawnCommand>();
+		const formatter = createSourceFormatter({ runtime: { which, spawn } });
+
+		for (const path of ["script.csh", "script.tcsh", "script.fish"]) {
+			const result = await formatter("write", { path, content: "echo raw" }, new AbortController().signal);
+			expectUnchanged(result);
+		}
 		expect(spawn).not.toHaveBeenCalled();
 		expect(which).not.toHaveBeenCalled();
 	});

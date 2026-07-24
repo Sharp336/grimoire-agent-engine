@@ -74,12 +74,27 @@ interface FormatterCommand {
 	readonly source: string;
 }
 
-const PRETTIER_EXTS = new Set([".js", ".jsx", ".ts", ".tsx", ".json"]);
-const PY_EXTS = new Set([".py"]);
-const RUST_EXTS = new Set([".rs"]);
-const GO_EXTS = new Set([".go"]);
-const SHELL_EXTS = new Set([".sh", ".bash", ".zsh", ".ksh", ".csh", ".tcsh", ".fish"]);
-const RAW_EXTS = new Set([".md", ".markdown", ".yml", ".yaml", ".css", ".html", ".htm"]);
+const PRETTIER_EXTS: Record<string, true> = { ".js": true, ".jsx": true, ".ts": true, ".tsx": true, ".json": true };
+const PY_EXTS: Record<string, true> = { ".py": true };
+const RUST_EXTS: Record<string, true> = { ".rs": true };
+const GO_EXTS: Record<string, true> = { ".go": true };
+const SHFMT_DIALECT_BY_EXT: Record<string, false | "bash" | "zsh" | "mksh" | "bats"> = {
+	".sh": false,
+	".bash": "bash",
+	".zsh": "zsh",
+	".ksh": "mksh",
+	".mksh": "mksh",
+	".bats": "bats",
+};
+const RAW_EXTS: Record<string, true> = {
+	".md": true,
+	".markdown": true,
+	".yml": true,
+	".yaml": true,
+	".css": true,
+	".html": true,
+	".htm": true,
+};
 
 const DEFAULT_OPTIONS: NormalizedSourceFormatterOptions = {
 	maxInputBytes: 256 * 1024,
@@ -256,9 +271,9 @@ function inferWriteFormatter(argsRecord: Record<string, unknown>): FormatterComm
 	if (!writePath) return undefined;
 
 	const extension = path.extname(writePath).toLowerCase();
-	if (RAW_EXTS.has(extension)) return undefined;
+	if (Object.hasOwn(RAW_EXTS, extension)) return undefined;
 
-	if (PRETTIER_EXTS.has(extension)) {
+	if (Object.hasOwn(PRETTIER_EXTS, extension)) {
 		return {
 			field: "content",
 			binary: "prettier",
@@ -267,7 +282,7 @@ function inferWriteFormatter(argsRecord: Record<string, unknown>): FormatterComm
 		};
 	}
 
-	if (PY_EXTS.has(extension)) {
+	if (Object.hasOwn(PY_EXTS, extension)) {
 		return {
 			field: "content",
 			binary: "ruff",
@@ -276,16 +291,16 @@ function inferWriteFormatter(argsRecord: Record<string, unknown>): FormatterComm
 		};
 	}
 
-	if (RUST_EXTS.has(extension)) {
+	if (Object.hasOwn(RUST_EXTS, extension)) {
 		return {
 			field: "content",
 			binary: "rustfmt",
-			args: ["--emit", "stdout"],
+			args: ["--emit", "stdout", "--edition", "2021"],
 			source,
 		};
 	}
 
-	if (GO_EXTS.has(extension)) {
+	if (Object.hasOwn(GO_EXTS, extension)) {
 		return {
 			field: "content",
 			binary: "gofmt",
@@ -294,11 +309,12 @@ function inferWriteFormatter(argsRecord: Record<string, unknown>): FormatterComm
 		};
 	}
 
-	if (SHELL_EXTS.has(extension)) {
+	const shellDialect = SHFMT_DIALECT_BY_EXT[extension];
+	if (shellDialect !== undefined) {
 		return {
 			field: "content",
 			binary: "shfmt",
-			args: [],
+			args: shellDialect ? ["--filename", writePath, "--language-dialect", shellDialect] : ["--filename", writePath],
 			source,
 		};
 	}
