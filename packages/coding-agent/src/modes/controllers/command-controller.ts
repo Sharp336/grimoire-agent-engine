@@ -1014,6 +1014,7 @@ export class CommandController {
 		const outputSchema = structuredClone(inherited?.outputSchema);
 		const outputSchemaMode = structuredClone(inherited?.outputSchemaMode);
 		const restrictToolNames = structuredClone(inherited?.restrictToolNames);
+		const spawns = inherited?.spawns ?? (tools.includes("task") ? "*" : "");
 		const id = `Fork-${Snowflake.next()}`;
 		let child: CommittedSessionFork | undefined;
 		try {
@@ -1022,7 +1023,7 @@ export class CommandController {
 				systemPrompt: systemPrompt.join("\n\n"),
 				task: prompt.render(liveForkTaskPrompt, {}),
 				tools,
-				spawns: "",
+				spawns,
 				readSummarize,
 				outputSchema,
 				outputSchemaMode,

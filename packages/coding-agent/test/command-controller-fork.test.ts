@@ -4,7 +4,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 
-function streamingContext(options: { persisted?: boolean } = {}) {
+function streamingContext(options: { persisted?: boolean; spawns?: string; tools?: string[] } = {}) {
 	const appendSessionInit = vi.fn();
 	const flush = vi.fn(async () => {});
 	const close = vi.fn(async () => {});
@@ -32,13 +32,14 @@ function streamingContext(options: { persisted?: boolean } = {}) {
 		isStreaming: true,
 		getAgentId: () => "Main",
 		agent: { state: { systemPrompt: ["system"], streamMessage } },
-		getActiveToolNames: () => ["read"],
+		getActiveToolNames: () => options.tools ?? ["read"],
 		settings: { get: () => false },
 		sessionManager: {
 			peekSessionInit: () => ({
 				outputSchema: { type: "string" },
 				outputSchemaMode: "strict",
 				restrictToolNames: true,
+				spawns: options.spawns,
 			}),
 		},
 		createCommittedChildSession,
@@ -95,6 +96,30 @@ describe("CommandController streaming /fork", () => {
 		expect(harness.switchSession).not.toHaveBeenCalled();
 		expect(harness.session.isStreaming).toBe(true);
 		expect(harness.session.agent.state.streamMessage).toBe(harness.streamMessage);
+	});
+
+	it("preserves the active spawn policy in the parked live fork", async () => {
+		const harness = streamingContext({ spawns: "reviewer", tools: ["read", "task"] });
+		await new CommandController(harness.ctx).handleForkLiveCommand();
+
+		expect(harness.appendSessionInit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				tools: ["read", "task"],
+				spawns: "reviewer",
+			}),
+		);
+	});
+
+	it("retains unrestricted spawning when a main session has the task tool", async () => {
+		const harness = streamingContext({ tools: ["read", "task"] });
+		await new CommandController(harness.ctx).handleForkLiveCommand();
+
+		expect(harness.appendSessionInit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				tools: ["read", "task"],
+				spawns: "*",
+			}),
+		);
 	});
 
 	it("materializes a lazy parent before parking the committed-boundary child", async () => {
