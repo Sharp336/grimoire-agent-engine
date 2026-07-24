@@ -757,6 +757,25 @@ export class OutputSink {
 	#pendingFileWrites?: string[];
 	#fileReady = false;
 
+	// Retained lazy file-creation/drain promise; `close()` joins it before end so
+	// an admitted chunk that triggered creation cannot outlive descriptor release.
+	#fileCreation?: Promise<void>;
+	// Materialized artifact id, set only after the writer is created and its
+	// initial drain succeeds, and retained after the writer is detached/ended so
+	// `dump()` still reports it.
+	#materializedArtifactId?: string;
+
+	// Monotonic lifecycle: accepting -> closing -> closed. `#activeAdmissions`
+	// counts mutations admitted before the accepting->closing transition, so a
+	// reentrant `onChunk` close still lets the triggering chunk finish accounting
+	// and persistence before finalization begins.
+	#phase: "accepting" | "closing" | "closed" = "accepting";
+	#activeAdmissions = 0;
+	#closeCompletion?: Promise<void>;
+	#finishResolve?: () => void;
+	#finishReject?: (error: unknown) => void;
+	#finalizeStarted = false;
+
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
 	readonly #spillThreshold: number;
@@ -838,27 +857,59 @@ export class OutputSink {
 	}
 
 	/**
-	 * Push a chunk of output. The buffer management and onChunk callback run
-	 * synchronously. File sink writes are deferred and serialized internally.
+	 * Push a chunk of output. Buffer management and the onChunk callback run
+	 * synchronously. Admission is the linearization point: a chunk admitted while
+	 * accepting always finishes its accounting and artifact persistence even if
+	 * `onChunk` reentrantly calls `close()`; a nested push after that transition
+	 * is ignored.
 	 */
 	push(chunk: string): void {
-		chunk = sanitizeWithOptionalSixelPassthrough(chunk, text => sanitizeText(this.#normalizeCarriageReturns(text)));
-
-		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
-		// A timer flushes quiet tails at the throttle boundary; dump() catches a
-		// final pending chunk when the process exits before that timer fires.
-		// Live preview gets the raw (pre-cap) chunk so the TUI never lags behind
-		// what reached the sink — the column cap is for the persisted LLM view.
-		if (this.#onChunk) {
-			const now = Date.now();
-			if (now - this.#lastChunkTime >= this.#chunkThrottleMs) {
-				this.#emitPendingChunkWith(chunk, now);
-			} else {
-				this.#pendingChunk += chunk;
-				this.#schedulePendingChunkFlush();
+		if (this.#phase !== "accepting") return;
+		this.#activeAdmissions++;
+		let callbackError: { value: unknown } | undefined;
+		try {
+			const sanitized = sanitizeWithOptionalSixelPassthrough(chunk, text =>
+				sanitizeText(this.#normalizeCarriageReturns(text)),
+			);
+			// Callback-first: preserve the observable onChunk ordering. Capture a
+			// callback failure so the admitted chunk still completes its byte/line
+			// accounting, column cap, and artifact admission before we rethrow.
+			if (this.#onChunk) {
+				try {
+					this.#emitPreview(sanitized);
+				} catch (error) {
+					callbackError = { value: error };
+				}
 			}
+			this.#account(sanitized);
+		} finally {
+			this.#activeAdmissions--;
+			this.#maybeFinishAfterAdmission();
 		}
+		if (callbackError) throw callbackError.value;
+	}
 
+	/**
+	 * Emit the throttled live-preview for a sanitized chunk. Coalesces chunks
+	 * arriving inside the throttle window; a timer flushes quiet tails at the
+	 * boundary and finalization flushes any final pending chunk.
+	 */
+	#emitPreview(chunk: string): void {
+		const now = Date.now();
+		if (now - this.#lastChunkTime >= this.#chunkThrottleMs) {
+			this.#emitPendingChunkWith(chunk, now);
+		} else {
+			this.#pendingChunk += chunk;
+			this.#schedulePendingChunkFlush();
+		}
+	}
+
+	/**
+	 * Byte/line accounting, per-line column cap, artifact mirroring, and
+	 * head/tail retention for a sanitized chunk. Shared by `push()` (public,
+	 * admission-gated) and `#ingest()` (internal finalization).
+	 */
+	#account(chunk: string): void {
 		const rawBytes = Buffer.byteLength(chunk, "utf-8");
 		this.#totalBytes += rawBytes;
 
@@ -907,6 +958,26 @@ export class OutputSink {
 		}
 
 		this.#pushTail(tailChunk, tailBytes);
+	}
+
+	/**
+	 * Internal ingestion used only during finalization (turning a held terminal
+	 * carriage return into one newline). Runs the same accounting and persistence
+	 * as an admitted push without reopening public admission; a preview failure
+	 * here cannot abort descriptor release.
+	 */
+	#ingest(chunk: string): void {
+		const sanitized = sanitizeWithOptionalSixelPassthrough(chunk, text =>
+			sanitizeText(this.#normalizeCarriageReturns(text)),
+		);
+		if (this.#onChunk) {
+			try {
+				this.#emitPreview(sanitized);
+			} catch {
+				/* finalization preview failure is non-fatal */
+			}
+		}
+		this.#account(sanitized);
 	}
 
 	/**
@@ -1013,12 +1084,11 @@ export class OutputSink {
 			this.#emitToSink(chunk);
 			return;
 		}
-		// File sink not yet created — queue this chunk and kick off creation.
-		// The queue is bounded only by how many chunks arrive before the open
-		// resolves (typically <2). The cap is enforced on drain.
+		// File sink not yet created — queue this chunk and kick off creation. The
+		// creation/drain promise is retained so `close()` can join it before ending.
 		if (!this.#pendingFileWrites) {
 			this.#pendingFileWrites = [chunk];
-			void this.#createFileSink();
+			this.#fileCreation = this.#createFileSink();
 		} else {
 			this.#pendingFileWrites.push(chunk);
 		}
@@ -1117,14 +1187,30 @@ export class OutputSink {
 				}
 				this.#pendingFileWrites = undefined;
 			}
+
+			// Identity is materialized only once the writer exists and its initial
+			// drain has succeeded, so a creation failure never leaves a phantom id.
+			this.#materializedArtifactId = this.#artifactId;
 		} catch {
-			try {
-				await this.#file?.sink?.end();
-			} catch {
-				/* ignore */
-			}
-			this.#file = undefined;
 			this.#pendingFileWrites = undefined;
+			this.#materializedArtifactId = undefined;
+			// Best-effort: a single cleanup end attempt for any acquired writer.
+			await this.#endOwnedFile();
+		}
+	}
+
+	/**
+	 * The sole primitive that ends the owned file sink. Detaches the writer
+	 * before awaiting `end()` and clears writer/readiness fields in `finally`, so
+	 * exactly one end attempt is made for every acquired writer.
+	 */
+	async #endOwnedFile(): Promise<void> {
+		const file = this.#file;
+		if (!file) return;
+		try {
+			await file.sink.end();
+		} finally {
+			this.#file = undefined;
 			this.#fileReady = false;
 		}
 	}
@@ -1156,6 +1242,7 @@ export class OutputSink {
 	 * branch in `dump()` against stale totals.
 	 */
 	replace(text: string): void {
+		if (this.#phase !== "accepting") return;
 		this.#clearPendingChunkTimer();
 		this.#buffer = text;
 		this.#bufferBytes = Buffer.byteLength(text, "utf-8");
@@ -1203,8 +1290,28 @@ export class OutputSink {
 		const delay = Math.max(0, this.#chunkThrottleMs - elapsed);
 		this.#pendingChunkTimer = setTimeout(() => {
 			this.#pendingChunkTimer = undefined;
-			this.#flushPendingChunk();
+			if (this.#phase !== "accepting") return;
+			// Admit the timer-driven preview so a reentrant close it triggers still
+			// defers finalization until this flush completes.
+			this.#activeAdmissions++;
+			try {
+				this.#flushPendingChunk();
+			} finally {
+				this.#activeAdmissions--;
+				this.#maybeFinishAfterAdmission();
+			}
 		}, delay);
+	}
+
+	/**
+	 * Start deferred finalization once the last in-flight admission exits after a
+	 * close transition. Read in its own control-flow context so `#phase` is the
+	 * live value rather than a caller-narrowed literal.
+	 */
+	#maybeFinishAfterAdmission(): void {
+		if (this.#phase === "closing" && this.#activeAdmissions === 0) {
+			void this.#finishClose();
+		}
 	}
 
 	/**
@@ -1243,22 +1350,118 @@ export class OutputSink {
 		}
 	}
 
+	/**
+	 * Idempotent close. The first call transitions accepting -> closing
+	 * synchronously (so later public mutations are ignored) and finalizes once
+	 * every in-flight admission drains; concurrent close/dump/dispose calls share
+	 * the one completion and the single descriptor end attempt.
+	 */
+	close(): Promise<void> {
+		if (!this.#closeCompletion) {
+			this.#phase = "closing";
+			const { promise, resolve, reject } = Promise.withResolvers<void>();
+			this.#closeCompletion = promise;
+			this.#finishResolve = resolve;
+			this.#finishReject = reject;
+			if (this.#activeAdmissions === 0) {
+				void this.#finishClose();
+			}
+		}
+		return this.#closeCompletion;
+	}
+
+	/**
+	 * Run each finalization stage exactly once in order — trailing-CR
+	 * normalization, pending-preview drain, lazy creation join, capped-tail
+	 * flush, and writer end — collecting the first stage error without letting it
+	 * skip descriptor release, then transition to closed and settle the shared
+	 * completion. Never retried.
+	 */
+	async #finishClose(): Promise<void> {
+		if (this.#finalizeStarted) return;
+		this.#finalizeStarted = true;
+
+		let stageError: unknown;
+		const capture = (stage: () => void): void => {
+			try {
+				stage();
+			} catch (error) {
+				if (stageError === undefined) stageError = error;
+			}
+		};
+
+		// Turn a held terminal carriage return into one newline via the internal
+		// path (public admission stays closed).
+		capture(() => {
+			if (this.#pendingCarriageReturn) {
+				this.#pendingCarriageReturn = false;
+				this.#ingest(NL);
+			}
+		});
+		// Flush any chunk still held back by the throttle, then cancel its timer.
+		capture(() => this.#flushPendingChunk());
+		this.#clearPendingChunkTimer();
+
+		// Join the retained lazy file-creation/drain before ending.
+		if (this.#fileCreation) {
+			try {
+				await this.#fileCreation;
+			} catch (error) {
+				if (stageError === undefined) stageError = error;
+			}
+		}
+
+		// Flush the capped artifact tail/notice once, then end unconditionally.
+		capture(() => {
+			if (this.#file) this.#flushArtifactTailIfCapped();
+		});
+		try {
+			await this.#endOwnedFile();
+		} catch (error) {
+			if (stageError === undefined) stageError = error;
+		}
+
+		this.#pendingFileWrites = undefined;
+		this.#phase = "closed";
+		if (stageError !== undefined) {
+			this.#finishReject?.(stageError);
+		} else {
+			this.#finishResolve?.();
+		}
+	}
+
+	/**
+	 * Close the sink, then compose the summary from frozen fields. Repeated dumps
+	 * observe the retained completion and recompute the same summary; a per-call
+	 * `notice` prefix is applied without mutating counters, buffers, artifact
+	 * bytes, or ownership.
+	 */
 	async dump(notice?: string): Promise<OutputSummary> {
-		if (this.#pendingCarriageReturn) {
-			this.#pendingCarriageReturn = false;
-			this.push(NL);
+		await this.close();
+		return this.#buildSummary(notice);
+	}
+
+	/**
+	 * Non-throwing async disposal for lexical `await using` owners. Explicit
+	 * `dump()` still surfaces close failure; disposal consumes a cleanup
+	 * rejection so it cannot mask an already-active work error.
+	 */
+	async [Symbol.asyncDispose](): Promise<void> {
+		try {
+			await this.close();
+		} catch {
+			/* preserve the primary error; close failure is surfaced by dump() */
 		}
+	}
+
+	/**
+	 * Compose the {@link OutputSummary} from frozen post-close state. Truncation
+	 * is derived locally rather than mutating `#truncated`, so repeated dumps are
+	 * state-stable.
+	 */
+	#buildSummary(notice?: string): OutputSummary {
 		const noticeLine = notice ? `[${notice}]\n` : "";
-
-		// Flush any chunk still held back by the throttle so the live preview
-		// ends with the complete stream.
-		this.#flushPendingChunk();
 		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
-
-		if (this.#file) {
-			this.#flushArtifactTailIfCapped();
-			await this.#file.sink.end();
-		}
 
 		// Compose the visible output. With head retention, splice head + marker
 		// + tail when content was elided. Otherwise return the rolling buffer.
@@ -1277,6 +1480,7 @@ export class OutputSink {
 		let outputLines: number;
 		let elidedBytes: number | undefined;
 		let elidedLines: number | undefined;
+		let truncated = this.#truncated;
 
 		if (headBytes > 0 && effectiveTotalBytes > headBytes + tailBytes) {
 			// Middle was elided. Emit head + marker + tail.
@@ -1294,7 +1498,7 @@ export class OutputSink {
 				Buffer.byteLength(headSep, "utf-8") +
 				Buffer.byteLength(tailSep, "utf-8");
 			outputLines = headLines + 1 + tailLines;
-			this.#truncated = true;
+			truncated = true;
 		} else if (headBytes > 0) {
 			// Head + tail combine into the full buffered output (no overlap or elision).
 			body = `${this.#head}${tailBuf}`;
@@ -1308,7 +1512,7 @@ export class OutputSink {
 
 		return {
 			output: `${noticeLine}${body}`,
-			truncated: this.#truncated,
+			truncated,
 			totalLines,
 			totalBytes: this.#totalBytes,
 			outputLines,
@@ -1318,7 +1522,7 @@ export class OutputSink {
 			columnDroppedBytes: this.#columnDroppedBytes > 0 ? this.#columnDroppedBytes : undefined,
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
-			artifactId: this.#file?.artifactId,
+			artifactId: this.#materializedArtifactId,
 		};
 	}
 }

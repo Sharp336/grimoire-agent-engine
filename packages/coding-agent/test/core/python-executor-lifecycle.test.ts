@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+import {
+	disposeAllKernelSessions,
+	executePython,
+	executePythonWithKernel,
+	type PythonKernelExecutor,
+} from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { KernelExecuteResult } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import * as pythonKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
@@ -161,5 +166,43 @@ describe("executePython lifecycle", () => {
 		]);
 		expect(r1.exitCode).toBe(0);
 		expect(r2.exitCode).toBe(0);
+	});
+
+	it("owner precedence: a backend error survives while a rejected end is attempted once", async () => {
+		const backendError = new Error("backend-W");
+		const state = { endCount: 0 };
+		const fakeSink = {
+			write: (chunk: string): number => chunk.length,
+			end: async (): Promise<void> => {
+				state.endCount++;
+				throw new Error("end-E");
+			},
+		};
+		const artifactPath = "omp-kernel-owner://artifact";
+		const realFile = Bun.file.bind(Bun);
+		vi.spyOn(Bun, "file").mockImplementation(((p: unknown, ...rest: unknown[]) => {
+			if (p === artifactPath) {
+				return { writer: () => fakeSink } as unknown as ReturnType<typeof realFile>;
+			}
+			return realFile(p as never, ...(rest as []));
+		}) as typeof Bun.file);
+
+		const kernel: PythonKernelExecutor = {
+			execute: async (_code, options) => {
+				// Spill past the in-memory threshold so the artifact writer is acquired,
+				// then fail the backend work with a sentinel.
+				options?.onChunk?.("Z".repeat(100_000));
+				throw backendError;
+			},
+		};
+
+		await expect(
+			executePythonWithKernel(kernel, "boom()", {
+				artifactPath,
+				artifactId: "k",
+				cwd: getProjectDir(),
+			}),
+		).rejects.toThrow("backend-W");
+		expect(state.endCount).toBe(1);
 	});
 });

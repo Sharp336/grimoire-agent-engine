@@ -4,6 +4,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { executeJs, type JsResult } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
+import { OutputSink } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -529,5 +530,13 @@ describe("executeJs", () => {
 		expect(result.cancelled).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toContain("Command timed out");
+	});
+
+	it("owner precedence: a dump failure surfaces and is not caught, appended, or retried", async () => {
+		const dumpSpy = vi.spyOn(OutputSink.prototype, "dump").mockRejectedValue(new Error("dump-E"));
+		await expect(executeJs("const dumpFail = 1; dumpFail;", { sessionId, session, sessionFile })).rejects.toThrow(
+			"dump-E",
+		);
+		expect(dumpSpy).toHaveBeenCalledTimes(1);
 	});
 });

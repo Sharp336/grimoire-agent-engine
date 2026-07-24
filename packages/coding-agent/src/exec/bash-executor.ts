@@ -373,7 +373,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			: preflight.command;
 
 	// Create output sink for truncation and artifact handling
-	const sink = new OutputSink({
+	await using sink = new OutputSink({
 		onChunk: options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,

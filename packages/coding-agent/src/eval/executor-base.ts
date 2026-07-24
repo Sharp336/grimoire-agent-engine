@@ -364,7 +364,7 @@ export async function executeWithKernelBase<
 	} = params;
 
 	const settings = await Settings.init();
-	const sink = new OutputSink({
+	await using sink = new OutputSink({
 		onChunk: options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,

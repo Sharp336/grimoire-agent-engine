@@ -74,7 +74,7 @@ function formatJsTimeoutAnnotation(timeoutMs: number | undefined): string {
 
 export async function executeJs(code: string, options: JsExecutorOptions): Promise<JsResult> {
 	const displayOutputs: JsDisplayOutput[] = [];
-	const outputSink = new OutputSink({
+	await using outputSink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
 		spillThreshold: DEFAULT_MAX_BYTES,
@@ -96,6 +96,12 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	// and never derive a competing fixed timer from it.
 	const acquireBudgetMs = legacyTimeoutMs ?? options.idleTimeoutMs;
 
+	// Classify the VM outcome first and append any translated timeout/error text
+	// while the sink is still accepting. The single dump() runs outside this catch
+	// so a dump/end failure surfaces instead of being reclassified, appended to,
+	// or retried.
+	let exitCode: number | undefined;
+	let cancelled: boolean;
 	try {
 		await executeInVmContext({
 			sessionKey: options.sessionId,
@@ -121,53 +127,35 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				},
 			},
 		});
-		const summary = await outputSink.dump();
-		return {
-			output: summary.output,
-			exitCode: 0,
-			cancelled: false,
-			truncated: summary.truncated,
-			artifactId: summary.artifactId,
-			totalLines: summary.totalLines,
-			totalBytes: summary.totalBytes,
-			outputLines: summary.outputLines,
-			outputBytes: summary.outputBytes,
-			displayOutputs,
-		};
+		exitCode = 0;
+		cancelled = false;
 	} catch (error) {
 		if (signal?.aborted || isAbortError(error)) {
 			const timedOut = Boolean(timeoutSignal?.aborted) || isTimeoutReason(options.signal?.reason);
 			if (timedOut) {
 				outputSink.push(formatJsTimeoutAnnotation(legacyTimeoutMs ?? options.idleTimeoutMs));
 			}
-			const summary = await outputSink.dump();
-			return {
-				output: summary.output,
-				exitCode: undefined,
-				cancelled: true,
-				truncated: summary.truncated,
-				artifactId: summary.artifactId,
-				totalLines: summary.totalLines,
-				totalBytes: summary.totalBytes,
-				outputLines: summary.outputLines,
-				outputBytes: summary.outputBytes,
-				displayOutputs,
-			};
+			exitCode = undefined;
+			cancelled = true;
+		} else {
+			const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+			outputSink.push(message);
+			exitCode = 1;
+			cancelled = false;
 		}
-		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-		outputSink.push(message);
-		const summary = await outputSink.dump();
-		return {
-			output: summary.output,
-			exitCode: 1,
-			cancelled: false,
-			truncated: summary.truncated,
-			artifactId: summary.artifactId,
-			totalLines: summary.totalLines,
-			totalBytes: summary.totalBytes,
-			outputLines: summary.outputLines,
-			outputBytes: summary.outputBytes,
-			displayOutputs,
-		};
 	}
+
+	const summary = await outputSink.dump();
+	return {
+		output: summary.output,
+		exitCode,
+		cancelled,
+		truncated: summary.truncated,
+		artifactId: summary.artifactId,
+		totalLines: summary.totalLines,
+		totalBytes: summary.totalBytes,
+		outputLines: summary.outputLines,
+		outputBytes: summary.outputBytes,
+		displayOutputs,
+	};
 }

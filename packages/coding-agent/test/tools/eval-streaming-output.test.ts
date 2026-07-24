@@ -108,4 +108,40 @@ describe("EvalTool live stdout streaming", () => {
 		expect(result.details?.meta?.truncation).toBeUndefined();
 		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 8 chars");
 	});
+
+	it("owner precedence: a backend throw survives while the artifact end rejects once", async () => {
+		const state = { endCount: 0 };
+		const fakeSink = {
+			write: (chunk: string): number => chunk.length,
+			end: async (): Promise<void> => {
+				state.endCount++;
+				throw new Error("end-E");
+			},
+		};
+		const artifactPath = "omp-eval-owner://artifact";
+		const realFile = Bun.file.bind(Bun);
+		vi.spyOn(Bun, "file").mockImplementation(((p: unknown, ...rest: unknown[]) => {
+			if (p === artifactPath) {
+				return { writer: () => fakeSink } as unknown as ReturnType<typeof realFile>;
+			}
+			return realFile(p as never, ...(rest as []));
+		}) as typeof Bun.file);
+		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async (
+			_code: string,
+			options: { onChunk?: (chunk: string) => void },
+		) => {
+			// Spill past the in-memory threshold to acquire the artifact writer, then
+			// fail the backend work.
+			options.onChunk?.("Z".repeat(100_000));
+			throw new Error("backend-W");
+		}) as never);
+
+		const session = makeSession();
+		session.allocateOutputArtifact = async () => ({ path: artifactPath, id: "eval-art" });
+
+		await expect(
+			new EvalTool(session).execute("call-owner", { language: "js", code: "x" }, undefined, undefined),
+		).rejects.toThrow("backend-W");
+		expect(state.endCount).toBe(1);
+	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed failed bash and eval executions leaking artifact descriptors until later reads failed with EMFILE ([#6463](https://github.com/can1357/oh-my-pi/issues/6463)).
+
 ## [17.1.0] - 2026-07-24
 
 ### Breaking Changes

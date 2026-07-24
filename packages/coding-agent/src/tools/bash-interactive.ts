@@ -27,6 +27,11 @@ export interface BashInteractiveResult extends OutputSummary {
 	timedOut: boolean;
 }
 
+// Observed completion for the overlay: the detached PTY finalizer settles this
+// through ui.custom so a flush/dump failure surfaces to the caller instead of
+// stranding the overlay's `done` callback.
+type BashInteractiveCompletion = { ok: true; result: BashInteractiveResult } | { ok: false; error: unknown };
+
 function normalizeCaptureChunk(chunk: string): string {
 	const normalized = chunk.replace(/\r\n?/gu, "\n");
 	return sanitizeWithOptionalSixelPassthrough(normalized, sanitizeText);
@@ -334,13 +339,13 @@ export async function runInteractiveBashPty(
 	// Load the xterm Terminal ctor here (async boundary) — the ui.custom factory below is sync.
 	const XtermTerminal = await loadXtermTerminal();
 	const { shell: resolvedShell } = settings.getShellConfig();
-	const sink = new OutputSink({
+	await using sink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
 	});
-	const result = await ui.custom<BashInteractiveResult>(
+	const outcome = await ui.custom<BashInteractiveCompletion>(
 		(tui, uiTheme, _keybindings, done) => {
 			const session = new PtySession();
 			const component = new BashInteractiveOverlayComponent(
@@ -357,14 +362,21 @@ export async function runInteractiveBashPty(
 				component.setComplete({ exitCode: run.exitCode, cancelled: run.cancelled, timedOut: run.timedOut });
 				tui.requestRender();
 				void (async () => {
-					await component.flushOutput();
-					const summary = await sink.dump();
-					done({
-						exitCode: run.exitCode,
-						cancelled: run.cancelled,
-						timedOut: run.timedOut,
-						...summary,
-					});
+					try {
+						await component.flushOutput();
+						const summary = await sink.dump();
+						done({
+							ok: true,
+							result: {
+								exitCode: run.exitCode,
+								cancelled: run.cancelled,
+								timedOut: run.timedOut,
+								...summary,
+							},
+						});
+					} catch (error) {
+						done({ ok: false, error });
+					}
 				})();
 			};
 			const cols = Math.max(20, tui.terminal.columns - 2);
@@ -427,5 +439,8 @@ export async function runInteractiveBashPty(
 		},
 		{ overlay: true },
 	);
-	return result;
+	if (!outcome.ok) {
+		throw outcome.error;
+	}
+	return outcome.result;
 }

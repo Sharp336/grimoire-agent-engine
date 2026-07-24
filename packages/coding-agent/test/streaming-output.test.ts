@@ -776,3 +776,175 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(elided + dropped).toBeLessThan(dumped.totalBytes);
 	});
 });
+
+describe("OutputSink lifecycle ownership", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function makeFakeSink() {
+		const state = {
+			writes: [] as string[],
+			endCount: 0,
+			failEndWith: undefined as unknown,
+			failWritesWith: undefined as unknown,
+		};
+		const sink = {
+			write(chunk: string): number {
+				if (state.failWritesWith !== undefined) throw state.failWritesWith;
+				state.writes.push(chunk);
+				return chunk.length;
+			},
+			async end(): Promise<void> {
+				state.endCount++;
+				if (state.failEndWith !== undefined) throw state.failEndWith;
+			},
+		};
+		return { state, sink };
+	}
+
+	function spyBunFile(targetPath: string, fakeSink: unknown): void {
+		const realFile = Bun.file.bind(Bun);
+		vi.spyOn(Bun, "file").mockImplementation(((p: unknown, ...rest: unknown[]) => {
+			if (p === targetPath) {
+				return { writer: () => fakeSink } as unknown as ReturnType<typeof realFile>;
+			}
+			return realFile(p as never, ...(rest as []));
+		}) as typeof Bun.file);
+	}
+
+	test("reentrant onChunk close admits the triggering chunk once and ignores nested pushes", async () => {
+		const { state, sink: fakeSink } = makeFakeSink();
+		const artifactPath = "omp-lifecycle://reentrant";
+		spyBunFile(artifactPath, fakeSink);
+		let closed = false;
+		let nestedIgnored = false;
+		const preview: string[] = [];
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "reentrant",
+			spillThreshold: 4,
+			onChunk: chunk => {
+				preview.push(chunk);
+				if (!closed) {
+					closed = true;
+					void sink.close();
+					sink.push("NESTED");
+					nestedIgnored = true;
+				}
+			},
+		});
+		sink.push("TRIGGERDATA");
+		const summary = await sink.dump();
+
+		expect(nestedIgnored).toBe(true);
+		expect(preview).toEqual(["TRIGGERDATA"]);
+		expect(summary.totalBytes).toBe(byteLength("TRIGGERDATA"));
+		expect(state.writes.join("")).toBe("TRIGGERDATA");
+		expect(state.writes.join("")).not.toContain("NESTED");
+		expect(state.endCount).toBe(1);
+		expect(summary.artifactId).toBe("reentrant");
+	});
+
+	test("reentrant onChunk close that throws keeps the chunk admitted and rethrows the sentinel", async () => {
+		const { state, sink: fakeSink } = makeFakeSink();
+		const artifactPath = "omp-lifecycle://reentrant-throw";
+		spyBunFile(artifactPath, fakeSink);
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "rt",
+			spillThreshold: 4,
+			onChunk: () => {
+				void sink.close();
+				throw new Error("cb-sentinel");
+			},
+		});
+		expect(() => sink.push("TRIGGERDATA")).toThrow("cb-sentinel");
+		const summary = await sink.dump();
+
+		expect(summary.totalBytes).toBe(byteLength("TRIGGERDATA"));
+		expect(state.writes.join("")).toBe("TRIGGERDATA");
+		expect(state.endCount).toBe(1);
+	});
+
+	test("concurrent close/dump/dispose share one completion and end once", async () => {
+		const { state, sink: fakeSink } = makeFakeSink();
+		const artifactPath = "omp-lifecycle://coalesce";
+		spyBunFile(artifactPath, fakeSink);
+		const sink = new OutputSink({ artifactPath, artifactId: "c", spillThreshold: 4 });
+		sink.push("abcdef");
+		const p1 = sink.close();
+		const p2 = sink.dump();
+		const p3 = sink[Symbol.asyncDispose]();
+		const [, summary] = await Promise.all([p1, p2, p3]);
+
+		expect(state.endCount).toBe(1);
+		expect(summary.artifactId).toBe("c");
+	});
+
+	test("end rejection clears ownership, surfaces to explicit dump, and is not retried", async () => {
+		const { state, sink: fakeSink } = makeFakeSink();
+		state.failEndWith = new Error("end-fail");
+		const artifactPath = "omp-lifecycle://end-fail";
+		spyBunFile(artifactPath, fakeSink);
+		const sink = new OutputSink({ artifactPath, artifactId: "e", spillThreshold: 4 });
+		sink.push("abcdef");
+
+		await expect(sink.dump()).rejects.toThrow("end-fail");
+		await expect(sink.dump()).rejects.toThrow("end-fail");
+		expect(state.endCount).toBe(1);
+		await expect(Promise.resolve(sink[Symbol.asyncDispose]())).resolves.toBeUndefined();
+	});
+
+	test("push/replace after close cannot change frozen output and repeated dump is stable", async () => {
+		const sink = new OutputSink();
+		sink.push("kept");
+		await sink.close();
+		sink.push("ignored");
+		sink.replace("wiped");
+		const d1 = await sink.dump();
+		const d2 = await sink.dump();
+
+		expect(d1.output).toBe("kept");
+		expect(d2).toEqual(d1);
+	});
+
+	test("a throttled timer scheduled before close flushes once and does not fire after close", async () => {
+		vi.useFakeTimers();
+		const preview: string[] = [];
+		const sink = new OutputSink({ onChunk: chunk => preview.push(chunk), chunkThrottleMs: 50 });
+		sink.push("first");
+		sink.push("second");
+		expect(preview).toEqual(["first"]);
+
+		await sink.close();
+		vi.advanceTimersByTime(200);
+
+		expect(preview).toEqual(["first", "second"]);
+	});
+
+	test("close normalizes a held terminal carriage return into one newline", async () => {
+		const sink = new OutputSink();
+		sink.push("progress\r");
+		const summary = await sink.dump();
+		expect(summary.output).toBe("progress\n");
+	});
+
+	test("a capped-tail flush failure still ends the descriptor exactly once", async () => {
+		const { state, sink: fakeSink } = makeFakeSink();
+		const artifactPath = "omp-lifecycle://tail-fail";
+		spyBunFile(artifactPath, fakeSink);
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "t",
+			spillThreshold: 16,
+			artifactMaxBytes: 32,
+			artifactHeadBytes: 16,
+		});
+		sink.push("0123456789ABCDEF".repeat(4));
+		state.failWritesWith = new Error("tail-flush-fail");
+
+		await expect(sink.dump()).rejects.toThrow("tail-flush-fail");
+		expect(state.endCount).toBe(1);
+	});
+});

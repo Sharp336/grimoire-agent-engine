@@ -99,6 +99,37 @@ describe("executeBash", () => {
 		}
 	});
 
+	it("owner precedence: a rejected artifact end surfaces to the caller and is attempted once", async () => {
+		const state = { endCount: 0 };
+		const fakeSink = {
+			write: (chunk: string): number => chunk.length,
+			end: async (): Promise<void> => {
+				state.endCount++;
+				throw new Error("end-E");
+			},
+		};
+		const artifactPath = "omp-bash-owner://artifact";
+		const realFile = Bun.file.bind(Bun);
+		vi.spyOn(Bun, "file").mockImplementation(((p: unknown, ...rest: unknown[]) => {
+			if (p === artifactPath) {
+				return { writer: () => fakeSink } as unknown as ReturnType<typeof realFile>;
+			}
+			return realFile(p as never, ...(rest as []));
+		}) as typeof Bun.file);
+
+		// ~100 KB of output spills past the in-memory threshold, acquiring the
+		// artifact writer whose end() then rejects.
+		await expect(
+			executeBash('head -c 100000 /dev/zero | tr "\\0" Z', {
+				cwd: tempDir,
+				timeout: 5000,
+				artifactPath,
+				artifactId: "b",
+			}),
+		).rejects.toThrow("end-E");
+		expect(state.endCount).toBe(1);
+	});
+
 	it("omits minimizer options when the feature is disabled", () => {
 		const group: ShellMinimizerSettings = {
 			enabled: false,
