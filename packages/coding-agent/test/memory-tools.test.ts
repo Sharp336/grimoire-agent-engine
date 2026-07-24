@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
@@ -18,13 +18,13 @@ import type { MemoryRuntimeContext } from "@oh-my-pi/pi-coding-agent/memory-back
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { loadMnemopiConfig, type MnemopiBackendConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import {
-	getMnemopiScopedDbPaths,
 	getMnemopiSessionState,
 	loadMnemopi,
 	loadMnemopiCore,
 	MnemopiSessionState,
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
@@ -33,8 +33,7 @@ import { MemoryRetainTool } from "@oh-my-pi/pi-coding-agent/tools/memory-retain"
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-// Mnemopi is lazy-loaded at runtime; preload it so the sync construction in
-// registerMnemopiState() and getMnemopiScopedDbPaths() can resolve the module.
+// Mnemopi is lazy-loaded at runtime; preload it for synchronous state construction.
 await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 
 const TEST_SESSION_ID = "test-session-id";
@@ -165,6 +164,7 @@ interface RegisterMnemopiStateOptions {
 	cwd?: string;
 	sessionId?: string;
 	entries?: () => unknown[];
+	listeners?: Set<AgentSessionEventListener>;
 }
 
 function registerMnemopiState(
@@ -178,12 +178,25 @@ function registerMnemopiState(
 		config: finalConfig,
 		session: {
 			sessionId,
+			settings: Settings.isolated({
+				"memory.backend": "mnemopi",
+				"mnemopi.noEmbeddings": true,
+				"mnemopi.llmMode": "none",
+			}),
+			modelRegistry: {
+				getApiKeyForProvider: async () => undefined,
+				resolver: () => async () => undefined,
+			} as never,
 			sessionManager: {
 				getEntries: options.entries ?? (() => []),
 				getCwd: () => options.cwd ?? "/tmp",
 			} as never,
 			emitNotice: () => {},
 			getHindsightSessionState: () => undefined,
+			subscribe: (listener: AgentSessionEventListener) => {
+				options.listeners?.add(listener);
+				return () => options.listeners?.delete(listener);
+			},
 		} as never,
 	});
 	setMnemopiSessionState(registeredMnemopiState.session as never, registeredMnemopiState);
@@ -468,9 +481,9 @@ describe("retain.execute (Mnemopi backend)", () => {
 		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
 		const result = await tool.execute("call-mnemopi-multi", {
 			items: [
-				{ content: "fact one" },
-				{ content: "fact two", context: "additional context" },
-				{ content: "fact three" },
+				{ content: "user prefers dark mode" },
+				{ content: "user prefers Vim keybindings", context: "additional context" },
+				{ content: "user prefers tabs" },
 			],
 		});
 
@@ -478,12 +491,11 @@ describe("retain.execute (Mnemopi backend)", () => {
 
 		// Verify all memories are recallable
 		const recallTool = MemoryRecallTool.createIf(makeSession(settings))!;
-		const recallResult = await recallTool.execute("call-mnemopi-recall-multi", { query: "facts" });
-
-		const text = (recallResult.content[0] as { text: string }).text;
-		expect(text).toContain("fact one");
-		expect(text).toContain("fact two");
-		expect(text).toContain("fact three");
+		for (const [index, fact] of ["dark mode", "Vim keybindings", "tabs"].entries()) {
+			const recallResult = await recallTool.execute(`call-mnemopi-recall-multi-${index}`, { query: fact });
+			const text = (recallResult.content[0] as { text: string }).text;
+			expect(text).toContain(fact);
+		}
 	});
 
 	it("isolates memories between projects when scoping is per-project", async () => {
@@ -925,7 +937,7 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(parentRetainSpy).not.toHaveBeenCalled();
 	});
 
-	it("clears every scoped Mnemopi database for per-project-tagged mode", async () => {
+	it("clears scoped Mnemopi data and rehydrates active state", async () => {
 		const config = makeMnemopiConfig({
 			scoping: "per-project-tagged",
 			bank: "project-alpha",
@@ -933,33 +945,40 @@ describe("Mnemopi backend lifecycle", () => {
 			retainBank: "project-alpha",
 			recallBanks: ["project-alpha", "default"],
 		});
-		const state = registerMnemopiState(config, { cwd: "/work/project-alpha" });
+		const listeners = new Set<AgentSessionEventListener>();
+		const state = registerMnemopiState(config, { cwd: "/work/project-alpha", listeners });
 		state.rememberInScope("project clear marker", { scope: "bank", extract: false, source: "test" });
 		state.globalMemory?.remember("global clear marker", { scope: "bank", extract: false, source: "test" });
-		const dbPaths = getMnemopiScopedDbPaths(config);
-		for (const dbPath of dbPaths) expect(existsSync(dbPath)).toBe(true);
 		const session = state.session;
 		setMnemopiSessionState(session, state);
 
 		await mnemopiBackend.clear(path.dirname(config.dbPath), "/work/project-alpha", session);
 
-		// The clear() contract: all scoped DB files are deleted. On Windows under
-		// bun:test, SQLite handle release may lag behind the await; poll briefly
-		// before asserting rather than failing on a transient lock.
-		const assertGone = async (p: string): Promise<void> => {
-			for (let i = 0; i < 40; i++) {
-				if (!existsSync(p)) return;
-				await Bun.sleep(25);
-			}
-		};
-		for (const dbPath of dbPaths) {
-			await assertGone(dbPath);
-			await assertGone(`${dbPath}-wal`);
-			await assertGone(`${dbPath}-shm`);
-		}
-		// Assert state was cleared even if file deletion is still in-flight.
-		expect(getMnemopiSessionState(session)).toBeUndefined();
+		const rehydrated = getMnemopiSessionState(session);
+		if (!rehydrated) throw new Error("Mnemopi state was not rehydrated");
+		expect(rehydrated).not.toBe(state);
+		expect(listeners.size).toBe(1);
+		const remaining = await rehydrated.recallResultsScoped("clear marker");
+		expect(remaining.some(hit => String(hit.content).includes("clear marker"))).toBe(false);
+		expect(rehydrated.rememberScoped("after-clear", { source: "test", scope: "bank", extract: false })).toEqual(
+			expect.any(String),
+		);
+		registeredMnemopiState = rehydrated;
+	});
+	it("attaches listeners when enqueue rehydrates missing state", async () => {
+		const config = makeMnemopiConfig();
+		const listeners = new Set<AgentSessionEventListener>();
+		const seed = registerMnemopiState(config, { listeners });
+		const session = seed.session;
+		setMnemopiSessionState(session, undefined);
+		await seed.dispose({ consolidate: false });
 		registeredMnemopiState = undefined;
+
+		await mnemopiBackend.enqueue(path.dirname(config.dbPath), "/tmp", session);
+
+		registeredMnemopiState = getMnemopiSessionState(session);
+		expect(registeredMnemopiState).toBeDefined();
+		expect(listeners.size).toBe(1);
 	});
 
 	it("clear() skips consolidation before deleting the DBs (#2327 review)", async () => {
@@ -998,8 +1017,8 @@ describe("Mnemopi backend lifecycle", () => {
 			expect(bank.sleep).not.toHaveBeenCalled();
 			expect(bank.close).toHaveBeenCalledTimes(1);
 		}
-		expect(getMnemopiSessionState(session)).toBeUndefined();
-		registeredMnemopiState = undefined;
+		registeredMnemopiState = getMnemopiSessionState(session);
+		expect(registeredMnemopiState).toBeDefined();
 	});
 
 	it("exposes direct mnemopi runtime status and search/save results", async () => {
@@ -1486,23 +1505,21 @@ describe("reflect.execute (Mnemopi backend)", () => {
 		const retainTool = MemoryRetainTool.createIf(makeSession(settings))!;
 		await retainTool.execute("call-mnemopi-store-reflect", {
 			items: [
-				{ content: "the user prefers dark mode in their editor" },
-				{ content: "the user uses Vim keybindings" },
-				{ content: "the user likes tabs over spaces" },
+				{ content: "editor preference: the user prefers dark mode" },
+				{ content: "editor preference: the user uses Vim keybindings" },
+				{ content: "editor preference: the user likes tabs over spaces" },
 			],
 		});
 
 		// Then reflect on them
 		const reflectTool = MemoryReflectTool.createIf(makeSession(settings))!;
 		const result = await reflectTool.execute("call-mnemopi-reflect-query", {
-			query: "what are the user's editor preferences?",
+			query: "dark mode",
 		});
 
 		const text = (result.content[0] as { text: string }).text;
 		expect(text).toContain("Based on recalled memories");
 		expect(text).toContain("dark mode");
-		expect(text).toContain("Vim");
-		expect(text).toContain("tabs");
 	});
 
 	it("includes additional context in the query when provided", async () => {

@@ -2,6 +2,86 @@
 
 ## [Unreleased]
 
+## [17.1.1] - 2026-07-24
+
+### Added
+
+- Added the `/session pin` subcommand and account picker to pin provider OAuth accounts for the current session
+- Added the disabled-by-default `computer` essential tool with configurable enablement, backend, display, and maximum width/height settings. Native desktop execution runs through a `DesktopSession` worker; observation uses read approval, input uses exec approval, and provider checks always prompt and fail closed.
+- Added the `/computer` slash command (`on`/`off`/`status`/toggle) to enable or disable the computer tool for the current session without persisting settings.
+- Exposed `computer` to models without native OpenAI computer-use support as a regular function tool with a typed GA action schema; the same native desktop backend and approval policy apply on both paths.
+- Hardened computer action ingress: action-specific fields, modifier/key arrays, coordinates, drag points, and scroll deltas fail closed before native input; numeric fields must be signed 32-bit integers and coordinates must be non-negative.
+
+### Changed
+
+- Replaced Chromium-backed `/live` media and external speech recorder/player subprocesses with the cross-platform native microphone, speaker, Opus, and WebRTC stack from `@oh-my-pi/pi-natives`.
+
+### Fixed
+
+- Fixed live-call attestation depending on the ChatGPT desktop app being installed: `generateLiveAttestation` now mints DeviceCheck tokens in-process through the `@oh-my-pi/pi-natives` `deviceCheckGenerateToken` binding instead of probing `/Applications` for the app's `devicecheck.node` addon, so the `x-oai-attestation` header works on hosts without the desktop app and drops the `createRequire` addon probing; the attestation provider is now wired up to `@oh-my-pi/pi-ai` for ChatGPT-OAuth Codex requests.
+- Fixed `xd://` device execution failures rendering as `write` errors instead of using the mounted tool's own error renderer.
+- Fixed custom tools without bespoke renderers losing the default state-tinted card when mounted under `xd://`; dispatched calls now keep their label, arguments, status, output preview, and expansion affordance instead of dumping a bare result line into the transcript.
+- Fixed the clipboard image-paste keybind mangling copied URL text into a bogus path error on macOS (e.g. `Image not found at /https/::i.can.ac:CE4Ek3.png` for a copied `https://i.can.ac/CE4Ek3.png`). AppleScript's `the clipboard as «class furl»` coerces plain *text* into a file URL by treating the string as an HFS path (`:`↔`/` swap), so `readMacFileUrlsFromClipboard` returned a garbage path that dead-ended in `handleImagePathPaste` instead of falling through to the text paste. The script now bails early via `clipboard info for «class furl»` unless the pasteboard actually carries a `public.file-url` representation, so URL/text clipboards paste as text.
+- Fixed spilled tool-output artifact descriptors leaking on error/abort paths. `OutputSink.dump()` was the only path that closed the spill `Bun.FileSink`, but the bash and Python executors re-throw on failure and their `finally` blocks never closed the sink, so a large-output command that errored leaked the artifact descriptor until an unrelated read (e.g. a `SKILL.md` load) hit `EMFILE`. `OutputSink` now exposes an idempotent `dispose()` that closes the sink exactly once, wired into every executor's `finally` ([#6463](https://github.com/can1357/oh-my-pi/issues/6463)).
+- Fixed the first submitted prompt stalling while the local tiny-title worker started: the interactive submit handler now paints the pending user row before starting title generation, and startup prewarms an idle, unref'd worker so the first submit reuses a live subprocess instead of paying spawn latency ahead of the first frame ([#6462](https://github.com/can1357/oh-my-pi/issues/6462)).
+- Fixed legacy Pi extensions failing validation when importing the upstream `keyText` keybinding helper ([#6470](https://github.com/can1357/oh-my-pi/issues/6470)).
+
+## [17.1.0] - 2026-07-24
+
+### Breaking Changes
+
+- Replaced the `providers.webSearch` and `providers.image` single-preference configuration options with `providers.webSearchOrder` and `providers.imageOrder` priority lists. Existing configurations migrate automatically on startup.
+
+### Added
+
+- Added dynamic multi-root workspace context support, allowing users to manage multiple workspace directories mid-session via `/add-dir`, `/remove-dir`, and `/dirs` slash commands, or seed them at launch using the `--add-dir` CLI flag.
+- Added `/live`, a Codex-authenticated real-time voice interface that streams microphone audio over WebRTC and routes coding tasks through the active agent session.
+- Added opt-in usage-aware model fallback for rationed coding plans, including a `/usage` command to view live quantitative usage data and automatic fallback chain traversal.
+- Added `error.notify` configuration to allow failed model turns to trigger distinct terminal or desktop notifications.
+- Added auto-following light and dark themes to HTML session exports, with a `/export --themes` option to bundle selected TUI themes.
+- Added owner-routed asynchronous job delivery, ensuring background bash and task results are injected directly into the owning subagent or agent session rather than the top-level session.
+- Added background-on-steer capability for auto-backgrounded bash commands, allowing incoming user or peer messages to immediately background running commands.
+- Added `friendlyName` support for hidden secrets, allowing model-visible placeholders to carry sanitized semantic labels, hashes, and case hints.
+- Added support for Jujutsu (`jj`) repositories in the statusline `git` segment, displaying the nearest bookmark or change ID and retrieving working-copy change counts.
+- Added `block` and `unblock` operations for tasks, introducing a `blocked` status for tasks waiting on external input to exclude them from incomplete-todo reminders.
+- Added a toggle-list editor in `/settings` for managing array-of-enum settings like search and image provider orders.
+- Added `models.yml` Bedrock Converse prompt-cache capability overrides for bundled and opaque inference profiles.
+- Added `getServiceTiers()` and `setServiceTier()` extension APIs to read and modify the live per-family service tier for session requests.
+- Added opt-in `omp bench --cache` for independent cold/warm prompt-cache benchmarking with stable-prefix controls.
+- Added `tools.xdevDocs` prompt-doc modes and the `tools.xdevInlineDevices` glob allowlist to control which mounted device documentation is inlined into the system prompt.
+- Added the opt-in `read.renderMarkdown` setting for formatted Markdown read previews.
+
+### Changed
+
+- Updated subagent behavior to inherit `async.enabled` and `bash.autoBackground.enabled` from parent sessions, and refined subagent run completion to wait for background jobs to settle.
+- Added ordered `bash.patterns` command approval rules to allow, prompt, or deny bash commands by pattern.
+- Updated Markdown file handling so all Markdown flavors (`.markdown`, `.mdx`, `.mdc`, etc.) respect the `read.summarize.prose` setting.
+- Upgraded xAI web search to use `grok-4.5` at low reasoning effort instead of `grok-4.3`.
+- Improved search provider resilience by cascading and falling back through other configured search providers when the preferred provider fails.
+- Extended the bash tool's `direnv` and `devenv` auto-loading to all backends (including the ACP client terminal and interactive PTY) while honoring `direnv`'s local allow list.
+
+### Fixed
+
+- Fixed a path traversal vulnerability in blob reference resolution by rejecting non-canonical hashes in `parseBlobRef`.
+- Fixed multiple edge cases in the secret obfuscation and redaction engine, including handling of context-sensitive regexes, placeholder key requirements in unwritable directories, friendly-name forgery vulnerabilities, and regex match boundaries straddling existing placeholders.
+- Fixed a first-use race condition in `ArtifactManager` where concurrent callers could allocate duplicate artifact IDs.
+- Fixed Vibe-mode session stability, resolving issues with workers disappearing across restarts, hanging during teardown, clobbering target tools during session switches, and resolving against incorrect models.
+- Fixed concurrent MCP configuration mutations losing updates by serializing read-modify-write operations under a per-file lock with atomic writes.
+- Fixed legacy extensions failing to load on npm/source-link installs due to transitive CommonJS dependency graph clobbering.
+- Fixed `omp auth-gateway` commands bypassing the process-scoped OAuth account pool configured via environment variables.
+- Fixed terminal transcript rendering issues where displaceable snapshots (like waiting polls and todo lists) spammed native scrollback.
+- Fixed the terminal title to reflect the active agent run state (working, waiting, or blocked) when `tui.titleState` is enabled.
+- Fixed the `browser` tool's `open` action ignoring timeouts during browser acquisition and leaking orphaned browser instances.
+- Fixed the `write` tool silently creating empty files when a read-tool selector was mis-dispatched as a write.
+- Fixed snapcompact archiving reproducing assistant reasoning (`¶think:` sections) into replayed frames for Anthropic-dialect models.
+- Fixed Linux socket-mode DAP launches hanging indefinitely on connection failures.
+- Fixed Plan Review annotations being discarded on dismissal and limited to headings.
+- Fixed Assistant-mode TTS playback aborting prematurely when an agent continued after a tool call.
+- Fixed absolute usage amounts rendering inconsistently across CLI, TUI, and ACP output surfaces.
+- Fixed MCP sessions dropping tools from servers that finished connecting after the initial startup window.
+
+## [17.0.9] - 2026-07-23
+
 ### Added
 
 - Added per-call `model` selection to the `task` tool, including per-item batch selectors, fallback chains, and explicit reasoning suffixes.
@@ -12,9 +92,11 @@
 ### Changed
 
 - Adjusted retry fallback handling to recognize discovery-only and runtime extension providers, preventing spurious unknown-provider warnings.
+- Restored Auto QA's ask-the-user default: `dev.autoqa` defaults to `true` again, so the first `xd://report_issue` write pops the consent dialog instead of the feature being silently off. Denying consent (or `dev.autoqa: false` / `PI_AUTO_QA=0`) fully disables prompt injection; an explicitly configured `dev.autoqa: true` overrides a past denial. Also restored the #1224 guarantee lost in the xd:// device consolidation: the grievance row is inserted only after consent resolves to granted (or `PI_AUTO_QA_PUSH=1`), so nothing touches the local database while consent is unset or denied.
 
 ### Fixed
 
+- Fixed Auto QA grievance recording silently dropping every report since the xd:// device consolidation: `openAutoQaDb` treated the database file path (`~/.omp/autoqa.db`) as a directory and tried to open `autoqa.db/autoqa.db` inside it, which fails on legacy installs (the flat file blocks the directory) and fresh ones alike (SQLite does not create parent directories). Also restored the `busy_timeout` pragma dropped in the same refactor (#2421). Renamed `getAutoQaDbDir` to `getAutoQaDbPath` to match what it returns.
 - Fixed the setup wizard hiding the selected row on short terminals (e.g. 24x80): the provider sign-in, theme, and web-search lists now fit their windows to the visible height, and decorative chrome (sign-in hint, theme mock preview) yields to the list when space is tight.
 - Fixed restored sessions replaying terminal aborted or errored assistant turns, which could repeatedly fail continuation from an assistant role; `/retry` now consults the persisted transcript so the failed turn remains retryable without re-entering provider context.
 - Fixed `get_available_models` and `set_model` RPCs racing background model discovery on cold start by awaiting the in-flight refresh before reading the registry. RPC/ACP clients that query the catalog or select a model immediately after session ready previously saw only statically-bundled models until discovery completed seconds later.

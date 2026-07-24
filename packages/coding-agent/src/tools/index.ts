@@ -27,6 +27,7 @@ import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
+import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
@@ -41,6 +42,7 @@ import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
+import { ComputerTool } from "./computer";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -75,6 +77,8 @@ export * from "./ast-grep";
 export * from "./bash";
 export * from "./browser";
 export * from "./checkpoint";
+export * from "./computer";
+export * from "./computer/supervisor";
 export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
@@ -145,6 +149,8 @@ export interface DeferredDiagnosticsEntry {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
+	additionalDirectories?: string[];
 	/** Whether UI is available */
 	hasUI: boolean;
 	/**
@@ -218,6 +224,8 @@ export interface ToolSession {
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
+	/** Parent session journal used by tools that persist runtime lifecycle state. */
+	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Reject new eval work once session disposal has started. */
@@ -401,6 +409,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	lsp: LspTool.createIf,
 	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
+	computer: s => new ComputerTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	task: s => TaskTool.create(s),
@@ -528,9 +537,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
 		}
-		// Automatic learning follows the effective AgentSession classification.
-		// `/tan` clones run at depth zero but are subagents; direct ToolSession
-		// callers without that classification fall back to task depth.
+		if (session.settings.get("memory.backend") === "mnemopi" && !requestedTools.includes("memory_edit")) {
+			requestedTools.push("memory_edit");
+		}
 		if (session.settings.get("autolearn.enabled") && isPrimaryAutolearnSession) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
@@ -559,6 +568,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "ask") return session.settings.get("ask.enabled");
 		if (name === "browser") return session.settings.get("browser.enabled");
+		if (name === "computer") return session.settings.get("computer.enabled");
 		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
 		if (name === "hub") {
 			return (
@@ -568,9 +578,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "retain" || name === "recall") {
 			return ["hindsight", "mnemopi", "supermemory"].includes(memoryBackend);
 		}
-		if (name === "reflect") {
-			return ["hindsight", "mnemopi"].includes(memoryBackend);
-		}
+		if (name === "reflect") return ["hindsight", "mnemopi"].includes(memoryBackend);
+		if (name === "memory_edit") return memoryBackend === "mnemopi";
 		if (name === "manage_skill") return session.settings.get("autolearn.enabled") && isPrimaryAutolearnSession;
 		if (name === "learn") {
 			return (
