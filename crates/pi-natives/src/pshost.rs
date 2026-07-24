@@ -357,6 +357,26 @@ impl HostCore {
 		self.pending.lock().remove(&id);
 	}
 
+	/// Take and terminate the sidecar's Windows job object, reaping every
+	/// descendant it or any transitive child ever spawned regardless of
+	/// intermediate parents already having exited (see `win_job`). A no-op
+	/// on non-Windows and once the job has already been taken/terminated.
+	/// Every force-kill path (`dispose()`'s two branches, `exec()`'s
+	/// stop-ack-timeout kill) must call this alongside its process-tree
+	/// kill — `terminate_tree(group=true)` alone only covers POSIX, since
+	/// round-4's own-process-group spawn is what makes `group=true`
+	/// reach the whole tree there.
+	#[cfg(windows)]
+	fn kill_windows_job(&self) {
+		let job = self.job.lock().take();
+		if let Some(job) = job {
+			job.terminate();
+		}
+	}
+
+	#[cfg(not(windows))]
+	fn kill_windows_job(&self) {}
+
 	/// Run one command on the shared runspace, streaming rendered chunks to
 	/// `chunk_tx`. Binding-free core of [`PsHost::run`]: no `Env`, no
 	/// threadsafe function — directly unit-testable. Cancellation stops only the
@@ -494,14 +514,8 @@ impl HostCore {
 						// termination never runs either. A background grandchild
 						// this wedged command spawned (e.g. `cmd /c start /b ...`)
 						// would otherwise survive the force-kill on Windows, the
-						// same gap `dispose()`'s clean-exit branch closes.
-						#[cfg(windows)]
-						{
-							let job = self.job.lock().take();
-							if let Some(job) = job {
-								job.terminate();
-							}
-						}
+						// same gap `dispose()`'s force-kill branches close.
+						self.kill_windows_job();
 						Some(PsRunResult {
 							exit_code:  None,
 							had_errors: true,
@@ -875,6 +889,14 @@ impl PsHost {
 				let _ = process
 					.terminate_tree(true, 0, 5_000, core_cancel::CancelToken::default())
 					.await;
+				// The root never exited within the grace window and had to be
+				// hard-killed. On POSIX, `terminate_tree(group=true)` already
+				// reached the whole process-group-spawned tree (round-4). On
+				// Windows there is no process-group equivalent, so this branch
+				// needs the same job-object termination as the clean-exit
+				// branch below — a session shutdown racing an uncooperative
+				// command must not leave a Windows grandchild behind.
+				self.core.kill_windows_job();
 			} else {
 				// The root exited within the grace window, but terminate_tree
 				// bails out immediately whenever the root isn't Running — it
@@ -905,13 +927,7 @@ impl PsHost {
 				// reaches every process the sidecar or any of its descendants
 				// ever spawned, independent of how many intermediates in the
 				// chain have since died — see `win_job` for why.
-				#[cfg(windows)]
-				{
-					let job = self.core.job.lock().take();
-					if let Some(job) = job {
-						job.terminate();
-					}
-				}
+				self.core.kill_windows_job();
 				for child in children_before_exit {
 					let _ = child
 						.terminate_tree(false, 0, 5_000, core_cancel::CancelToken::default())
