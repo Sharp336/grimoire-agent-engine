@@ -42,10 +42,13 @@ import {
 	type ToolChoiceDirective,
 } from "@oh-my-pi/pi-agent-core";
 import {
+	AGGRESSIVE_SHAKE_CONFIG,
+	applyShakeRegions,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
+	collectShakeRegions,
 	estimateTokens,
 	generateBranchSummary,
 	type ShakeConfig,

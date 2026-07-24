@@ -2856,7 +2856,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
-				return noneResult;
+				return COMPACTION_CHECK_NONE;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
