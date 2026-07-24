@@ -161,6 +161,71 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		}
 	}, 10_000);
 
+	test("envMode replace starts without PATH and excludes ambient variables while omitted mode merges them", async () => {
+		using tempDir = TempDir.createSync("@rpc-env-");
+		const parentOnlyKey = `OMP_RPC_PARENT_${crypto.randomUUID().replaceAll("-", "_")}`;
+		const parentOnlyValue = crypto.randomUUID();
+		const hadParentOnlyKey = Object.hasOwn(Bun.env, parentOnlyKey);
+		const previousParentOnlyValue = Bun.env[parentOnlyKey];
+		const probeAgent = tempDir.join("env-probe-agent.ts");
+		const replaceResultFile = tempDir.join("replace.json");
+		const mergeResultFile = tempDir.join("merge.json");
+
+		await Bun.write(
+			probeAgent,
+			`
+const resultPath = Bun.env.OMP_RPC_ENV_RESULT;
+if (!resultPath) throw new Error("OMP_RPC_ENV_RESULT is required");
+await Bun.write(resultPath, JSON.stringify({
+	parentPresent: Object.hasOwn(Bun.env, ${JSON.stringify(parentOnlyKey)}),
+	parentValue: Bun.env[${JSON.stringify(parentOnlyKey)}],
+	childValue: Bun.env.OMP_RPC_CHILD_ONLY,
+	pathPresent: Object.hasOwn(Bun.env, "PATH"),
+}));
+process.stdout.write(JSON.stringify({ type: "ready" }) + "\\n");
+for await (const _line of console) {}
+`,
+		);
+
+		Bun.env[parentOnlyKey] = parentOnlyValue;
+		try {
+			using replaceClient = new RpcClient({
+				cliPath: probeAgent,
+				env: {
+					OMP_RPC_CHILD_ONLY: "1",
+					OMP_RPC_ENV_RESULT: replaceResultFile,
+				},
+				envMode: "replace",
+			});
+			await replaceClient.start();
+			await replaceClient.stop();
+
+			using mergeClient = new RpcClient({
+				cliPath: probeAgent,
+				env: {
+					OMP_RPC_CHILD_ONLY: "2",
+					OMP_RPC_ENV_RESULT: mergeResultFile,
+				},
+			});
+			await mergeClient.start();
+			await mergeClient.stop();
+
+			const replaced = (await Bun.file(replaceResultFile).json()) as Record<string, unknown>;
+			const merged = (await Bun.file(mergeResultFile).json()) as Record<string, unknown>;
+			expect(replaced).toEqual({
+				parentPresent: false,
+				childValue: "1",
+				pathPresent: false,
+			});
+			expect(merged.parentPresent).toBe(true);
+			expect(merged.parentValue).toBe(parentOnlyValue);
+			expect(merged.childValue).toBe("2");
+		} finally {
+			if (hadParentOnlyKey) Bun.env[parentOnlyKey] = previousParentOnlyValue!;
+			else delete Bun.env[parentOnlyKey];
+		}
+	}, 10_000);
+
 	test("rejects pending requests and reaps a worker that closes stdout without exiting", async () => {
 		let stdoutController: ReadableStreamDefaultController<Uint8Array> | undefined;
 		let resolveExit: ((exitCode: number) => void) | undefined;

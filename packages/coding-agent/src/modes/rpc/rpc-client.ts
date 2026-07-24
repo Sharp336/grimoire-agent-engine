@@ -52,8 +52,14 @@ export interface RpcClientOptions {
 	cliPath?: string;
 	/** Working directory for the agent */
 	cwd?: string;
-	/** Environment variables */
+	/** Environment variables overlaid on the ambient environment by default */
 	env?: Record<string, string>;
+	/**
+	 * How to construct the child environment. `"merge"` preserves the default behavior by overlaying
+	 * {@link env} on `Bun.env`. `"replace"` passes only {@link env}, preventing ambient variables
+	 * (including credentials) from reaching the child; callers must supply every required variable.
+	 */
+	envMode?: "merge" | "replace";
 	/** Provider to use */
 	provider?: string;
 	/** Model ID to use */
@@ -298,9 +304,9 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		const child = ptree.spawn(["bun", cliPath, ...args], {
+		const child = ptree.spawn([process.execPath, cliPath, ...args], {
 			cwd: this.options.cwd,
-			env: { ...Bun.env, ...this.options.env },
+			env: this.options.envMode === "replace" ? (this.options.env ?? {}) : { ...Bun.env, ...this.options.env },
 			stdin: "pipe",
 		});
 		this.#process = child;
