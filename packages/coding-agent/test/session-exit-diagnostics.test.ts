@@ -7,6 +7,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionTeardown } from "@oh-my-pi/pi-coding-agent/modes/session-teardown";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { SessionShutdownEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -46,6 +48,18 @@ const pendingAssistant: AssistantMessage = {
 	timestamp: Date.now(),
 };
 
+function captureShutdownEvents(): { events: SessionShutdownEvent[]; runner: ExtensionRunner } {
+	const events: SessionShutdownEvent[] = [];
+	const runner = {
+		hasHandlers: (eventType: string) => eventType === "session_shutdown",
+		emit: async (event: SessionShutdownEvent) => {
+			events.push(event);
+		},
+		clearManagedTimers: () => {},
+	} as unknown as ExtensionRunner;
+	return { events, runner };
+}
+
 describe("session exit diagnostics", () => {
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage | undefined;
@@ -77,11 +91,13 @@ describe("session exit diagnostics", () => {
 			},
 			convertToLlm,
 		});
+		const shutdown = captureShutdownEvents();
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
+			extensionRunner: shutdown.runner,
 		});
 
 		agent.emitExternalEvent({ type: "message_end", message: pendingAssistant });
@@ -116,6 +132,7 @@ describe("session exit diagnostics", () => {
 
 		await session.dispose();
 		session = undefined;
+		expect(shutdown.events).toEqual([{ type: "session_shutdown", reason: "dispose" }]);
 		const exitEntry = sessionManager
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
@@ -150,11 +167,13 @@ describe("session exit diagnostics", () => {
 			},
 			convertToLlm,
 		});
+		const shutdown = captureShutdownEvents();
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
+			extensionRunner: shutdown.runner,
 		});
 		const activeSession = session;
 
@@ -186,6 +205,7 @@ describe("session exit diagnostics", () => {
 
 		await teardown(postmortem.Reason.SIGTERM);
 		session = undefined;
+		expect(shutdown.events).toEqual([{ type: "session_shutdown", reason: "signal" }]);
 
 		const exitEntry = sessionManager
 			.getEntries()

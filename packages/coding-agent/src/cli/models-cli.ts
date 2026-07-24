@@ -340,7 +340,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 
 		renderProviderModels(modelRegistry, action, pattern, json);
 	} finally {
-		await emitSessionShutdownEvent(extensionRunner);
+		await emitSessionShutdownEvent(extensionRunner, "dispose");
 	}
 }
 
