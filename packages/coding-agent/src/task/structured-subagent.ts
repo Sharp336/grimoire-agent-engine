@@ -206,7 +206,18 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	}
 }
 
-function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
+/**
+ * Depth and spawn-policy containment gate shared by every child dispatch
+ * path — native agents via {@link resolveEffectiveSubagentPolicy} and the
+ * external `recipe` executor via its own explicit call in `task/index.ts`.
+ * `agentName` is compared against the parent's `spawns` allowlist exactly
+ * like a native agent type; `"recipe"` must appear in an explicit allowlist
+ * to be spawned from a caller restricted to specific agents.
+ */
+export function assertDepthAndSpawnAllowed(
+	request: Pick<StructuredSubagentRequest, "session" | "blockedAgent">,
+	agentName: string,
+): void {
 	const taskDepth = request.session.taskDepth ?? 0;
 	const maxDepth = request.session.settings.get("task.maxRecursionDepth") ?? 2;
 	if (!canSpawnAtDepth(maxDepth, taskDepth)) {

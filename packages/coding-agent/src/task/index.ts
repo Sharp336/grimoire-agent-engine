@@ -16,7 +16,7 @@
 import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $env, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { Theme } from "../modes/theme/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
@@ -51,7 +51,20 @@ import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
-import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import {
+	assertDepthAndSpawnAllowed,
+	resolveEffectiveSubagentPolicy,
+	runStructuredSubagent,
+	StructuredSubagentError,
+} from "./structured-subagent";
+
+/**
+ * Bound for external recipe abort cleanup: how long `#runExternalTask` waits
+ * for a late `executor.start()` handle or a hung `execution.abort()` before
+ * giving up and settling the call anyway. Mirrors the 5s cleanup bound used
+ * elsewhere for adopted-session teardown (see `task/executor.ts`).
+ */
+const EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS = 5000;
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -813,7 +826,16 @@ Recipe items run through one external fresh-process executor. External runs do n
 		const preflights = await Promise.all(
 			normalizedSpawnParams.map(async spawn => {
 				if (Object.hasOwn(spawn, "recipe")) {
-					return { external: true as const, policy: undefined, error: undefined };
+					try {
+						assertDepthAndSpawnAllowed({ session: this.session, blockedAgent: this.#blockedAgent }, "recipe");
+						return { external: true as const, policy: undefined, error: undefined };
+					} catch (error) {
+						return {
+							external: true as const,
+							policy: undefined,
+							error: error instanceof StructuredSubagentError ? error.message : String(error),
+						};
+					}
 				}
 				try {
 					return {
@@ -847,7 +869,7 @@ Recipe items run through one external fresh-process executor. External runs do n
 		}
 
 		const validIndices = preflights.flatMap((preflight, index) =>
-			preflight.external || preflight.policy ? [index] : [],
+			preflight.error === undefined && (preflight.external || preflight.policy) ? [index] : [],
 		);
 		const validSpawns = validIndices.map(index => ({ item: spawnItems[index]!, index }));
 		const itemBlocking = preflights.map(preflight => preflight.policy?.effectiveAgent.blocking === true);
@@ -1577,6 +1599,12 @@ Recipe items run through one external fresh-process executor. External runs do n
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
+		try {
+			assertDepthAndSpawnAllowed({ session: this.session, blockedAgent: this.#blockedAgent }, "recipe");
+		} catch (error) {
+			const message = error instanceof StructuredSubagentError ? error.message : String(error);
+			return createTaskModeError(message);
+		}
 		const executor = this.session.externalTaskExecutor;
 		if (!executor || typeof params.recipe !== "string") {
 			return createTaskModeError(
@@ -1590,7 +1618,22 @@ Recipe items run through one external fresh-process executor. External runs do n
 			this.session.agentOutputManager = outputManager;
 		}
 		const id = preAllocatedId ?? (await outputManager.allocate(params.name?.trim() || generateTaskName()));
-		const runSignal = signal ?? new AbortController().signal;
+
+		// Apply the same wall-clock cap native subagents get (`task.maxRuntimeMs`;
+		// 0 disables). The timer aborts a dedicated controller folded into the
+		// caller's signal via `AbortSignal.any`, so a stuck external executor
+		// cannot outlive the bound even when no `signal` was supplied.
+		const maxRuntimeMs = Math.max(0, Math.trunc(Number(this.session.settings.get("task.maxRuntimeMs") ?? 0) || 0));
+		const runtimeController = new AbortController();
+		let runtimeTimeoutId: NodeJS.Timeout | undefined;
+		if (maxRuntimeMs > 0) {
+			runtimeTimeoutId = setTimeout(() => {
+				runtimeController.abort(
+					new Error(`External Task runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs})`),
+				);
+			}, maxRuntimeMs);
+		}
+		const runSignal = signal ? AbortSignal.any([signal, runtimeController.signal]) : runtimeController.signal;
 		const progress: AgentProgress = {
 			index: spawnIndex,
 			id,
@@ -1651,17 +1694,69 @@ Recipe items run through one external fresh-process executor. External runs do n
 		};
 
 		let execution: ExternalTaskExecution | undefined;
+		// Populated the instant `start()` is invoked, before it can settle —
+		// `requestAbort` awaits this (bounded) when abort fires while `start()`
+		// is still in flight, so a late-arriving handle still gets cleaned up.
+		let startPromise: Promise<ExternalTaskExecution> | undefined;
+		// Resolves once `startPromise` above is assigned. Closes the gap between
+		// registering the abort listener and actually invoking `start()` (e.g.
+		// while `emitProgress`'s "Starting..." update is still in flight) so an
+		// abort landing in that gap still waits for, then cleans up, the handle.
+		const startInvoked = Promise.withResolvers<void>();
 		let abortCleanup: Promise<{ error?: unknown }> | undefined;
+		const abortSettled = Promise.withResolvers<{ error?: unknown }>();
+		const requestAbort = () => {
+			if (abortCleanup) return;
+			abortCleanup = (async (): Promise<{ error?: unknown }> => {
+				if (!execution) {
+					try {
+						await untilAborted(AbortSignal.timeout(EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS), startInvoked.promise);
+					} catch {
+						// `start()` was never even invoked within the bound — nothing to abort.
+						return {};
+					}
+					try {
+						execution = await untilAborted(AbortSignal.timeout(EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS), startPromise!);
+					} catch {
+						// `start()` never produced a usable handle within the bound, or
+						// it rejected — nothing to abort.
+						return {};
+					}
+				}
+				if (!execution) return {};
+				try {
+					await untilAborted(
+						AbortSignal.timeout(EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS),
+						Promise.resolve(execution.abort()),
+					);
+					return {};
+				} catch (error) {
+					return { error };
+				}
+			})();
+			void abortCleanup.then(abortSettled.resolve);
+		};
+		// Registered before `start()` is ever called: a signal that fires while
+		// the executor is still starting (or before it's even invoked) must not
+		// wait for `start()` to settle before cleanup begins.
+		runSignal.addEventListener("abort", requestAbort, { once: true });
+		if (runSignal.aborted) requestAbort();
 		try {
 			await emitProgress(`Starting external recipe task ${id}...`);
-			execution = await executor.start({
-				recipe: params.recipe.trim(),
-				assignment,
-				context,
-				cwd: this.session.cwd,
-				signal: runSignal,
-				onProgress: update => emitProgress(update.message),
-			});
+			startPromise = Promise.resolve(
+				executor.start({
+					recipe: params.recipe.trim(),
+					assignment,
+					context,
+					cwd: this.session.cwd,
+					signal: runSignal,
+					onProgress: update => emitProgress(update.message),
+				}),
+			);
+			startInvoked.resolve();
+			// Races `start()` itself against the signal: a hung `start()` cannot
+			// block cancellation just because no execution handle exists yet.
+			execution = await untilAborted(runSignal, startPromise);
 			if (
 				!execution ||
 				typeof execution.abort !== "function" ||
@@ -1671,19 +1766,6 @@ Recipe items run through one external fresh-process executor. External runs do n
 				throw new Error("External Task executor returned an invalid execution handle.");
 			}
 
-			const abortSettled = Promise.withResolvers<{ error?: unknown }>();
-			const requestAbort = () => {
-				if (abortCleanup) return;
-				abortCleanup = Promise.resolve()
-					.then(() => execution!.abort())
-					.then(
-						() => ({}),
-						error => ({ error }),
-					);
-				void abortCleanup.then(abortSettled.resolve);
-			};
-			runSignal.addEventListener("abort", requestAbort, { once: true });
-			if (runSignal.aborted) requestAbort();
 			try {
 				const resultOutcome = Promise.resolve(execution.result).then(
 					result => ({ type: "result" as const, result }),
@@ -1745,6 +1827,8 @@ Recipe items run through one external fresh-process executor. External runs do n
 					{ aborted, abortReason: reason },
 				),
 			);
+		} finally {
+			clearTimeout(runtimeTimeoutId);
 		}
 	}
 

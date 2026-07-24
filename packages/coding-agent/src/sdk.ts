@@ -2438,7 +2438,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				});
 		const sdkCustomTools = restrictToolNames
 			? []
-			: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
+			: (options.customTools ?? [])
+					.filter(tool => !isLegacyBuiltinToolDefinition(tool))
+					.filter(tool => {
+						if (tool.name !== "task") return true;
+						logger.warn(
+							'Ignoring customTools entry "task"; the native Task tool cannot be replaced via customTools. Use an extension\'s registerTaskExecutor() to augment it instead.',
+						);
+						return false;
+					});
 		const allCustomTools = [
 			...registeredTools,
 			...sdkCustomTools.map(tool => {

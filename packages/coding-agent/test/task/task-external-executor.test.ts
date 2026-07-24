@@ -13,7 +13,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { type CustomTool, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -43,10 +43,16 @@ function createManager(): AsyncJobManager {
 	return manager;
 }
 
+async function flushMicrotasks(): Promise<void> {
+	for (let i = 0; i < 10; i += 1) await Promise.resolve();
+}
+
 function createSession(options: {
 	executor?: ExternalTaskExecutor;
 	manager?: AsyncJobManager;
 	settings?: Record<string, unknown>;
+	taskDepth?: number;
+	spawns?: string | boolean | null;
 } = {}): ToolSession {
 	return {
 		cwd: "/tmp/external-task-cwd",
@@ -58,8 +64,9 @@ function createSession(options: {
 			...options.settings,
 		}),
 		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
+		getSessionSpawns: () => options.spawns ?? "*",
 		getAgentId: () => "Parent",
+		taskDepth: options.taskDepth,
 		externalTaskExecutor: options.executor,
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
@@ -352,6 +359,181 @@ describe("Task external recipe executor", () => {
 		}
 		expect(starts).toBe(0);
 	});
+
+	it("blocks recipe execution at the parent's max task depth like native spawns", async () => {
+		let starts = 0;
+		const executor: ExternalTaskExecutor = {
+			discriminator: "recipe",
+			start() {
+				starts += 1;
+				return { result: Promise.resolve({ output: "unexpected", exitCode: 0 }), abort() {} };
+			},
+		};
+		const tool = await TaskTool.create(createSession({ executor, taskDepth: 2 }));
+		const result = await tool.execute("depth-blocked", { recipe: "r", task: "Work." });
+		expect(firstText(result)).toContain("Cannot spawn another agent at task depth 2");
+		expect(starts).toBe(0);
+	});
+
+	it("blocks recipe execution when the parent's spawns are disabled", async () => {
+		let starts = 0;
+		const executor: ExternalTaskExecutor = {
+			discriminator: "recipe",
+			start() {
+				starts += 1;
+				return { result: Promise.resolve({ output: "unexpected", exitCode: 0 }), abort() {} };
+			},
+		};
+		const tool = await TaskTool.create(createSession({ executor, spawns: false }));
+		const result = await tool.execute("spawns-disabled", { recipe: "r", task: "Work." });
+		expect(firstText(result)).toContain("Cannot spawn 'recipe'. Allowed: none (spawns disabled for this agent)");
+		expect(starts).toBe(0);
+	});
+
+	it("blocks recipe execution when the parent's spawn allowlist excludes recipe", async () => {
+		let starts = 0;
+		const executor: ExternalTaskExecutor = {
+			discriminator: "recipe",
+			start() {
+				starts += 1;
+				return { result: Promise.resolve({ output: "unexpected", exitCode: 0 }), abort() {} };
+			},
+		};
+		const tool = await TaskTool.create(createSession({ executor, spawns: "scout,task" }));
+		const result = await tool.execute("allowlist-blocked", { recipe: "r", task: "Work." });
+		expect(firstText(result)).toContain("Cannot spawn 'recipe'. Allowed: scout,task");
+		expect(starts).toBe(0);
+	});
+
+	it("blocks a batch recipe item at async preflight under the same containment gate", async () => {
+		let starts = 0;
+		const executor: ExternalTaskExecutor = {
+			discriminator: "recipe",
+			start() {
+				starts += 1;
+				return { result: Promise.resolve({ output: "unexpected", exitCode: 0 }), abort() {} };
+			},
+		};
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				executor,
+				manager,
+				spawns: false,
+				settings: { "async.enabled": true, "task.batch": true },
+			}),
+		);
+		const result = await tool.execute("batch-depth-blocked", {
+			context: "shared",
+			tasks: [{ recipe: "r", task: "Work." }],
+		} as TaskParams);
+		expect(firstText(result)).toContain("Cannot spawn 'recipe'. Allowed: none (spawns disabled for this agent)");
+		expect(starts).toBe(0);
+	});
+
+	it("settles within the bounded cleanup window when executor.start() never settles", async () => {
+		vi.useFakeTimers();
+		try {
+			const startCalled = Promise.withResolvers<void>();
+			const executor: ExternalTaskExecutor = {
+				discriminator: "recipe",
+				async start() {
+					startCalled.resolve();
+					return await new Promise<never>(() => {});
+				},
+			};
+			const tool = await TaskTool.create(createSession({ executor }));
+			const controller = new AbortController();
+			const pending = tool.execute(
+				"stuck-start",
+				{ recipe: "hung-start", task: "Wait." },
+				controller.signal,
+			);
+			await startCalled.promise;
+			controller.abort(new Error("cancelled during hung start"));
+			// Lets `requestAbort`'s wait for the already-resolved `startInvoked`
+			// gate settle so its bounded wait on the (never-settling) `start()`
+			// promise is actually constructed before the clock advances past it.
+			await flushMicrotasks();
+			vi.advanceTimersByTime(5000); // EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS
+			const result = await pending;
+			expect(result.details?.results[0]).toMatchObject({
+				aborted: true,
+				abortReason: "cancelled during hung start",
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("aborts a still-starting executor once start() eventually produces a handle", async () => {
+		const startCalled = Promise.withResolvers<void>();
+		const releaseStart = Promise.withResolvers<void>();
+		let abortCalled = false;
+		const executor: ExternalTaskExecutor = {
+			discriminator: "recipe",
+			async start() {
+				startCalled.resolve();
+				await releaseStart.promise;
+				return {
+					result: new Promise<never>(() => {}),
+					async abort() {
+						abortCalled = true;
+					},
+				};
+			},
+		};
+		const tool = await TaskTool.create(createSession({ executor }));
+		const controller = new AbortController();
+		const pending = tool.execute(
+			"slow-start",
+			{ recipe: "slow-start", task: "Wait." },
+			controller.signal,
+		);
+		await startCalled.promise;
+		controller.abort(new Error("cancelled during start"));
+		// `start()` is still awaiting `releaseStart` — nothing to abort yet, and
+		// this check runs before any microtask could have produced a handle.
+		expect(abortCalled).toBe(false);
+		releaseStart.resolve();
+		const result = await pending;
+		expect(abortCalled).toBe(true);
+		expect(result.details?.results[0]).toMatchObject({
+			aborted: true,
+			abortReason: "cancelled during start",
+		});
+	});
+
+	it("applies task.maxRuntimeMs as a wall-clock bound for external recipe execution", async () => {
+		vi.useFakeTimers();
+		try {
+			let abortCalled = false;
+			const executor: ExternalTaskExecutor = {
+				discriminator: "recipe",
+				start() {
+					return {
+						result: new Promise<never>(() => {}),
+						async abort() {
+							abortCalled = true;
+						},
+					};
+				},
+			};
+			const tool = await TaskTool.create(createSession({ executor, settings: { "task.maxRuntimeMs": 50 } }));
+			const pending = tool.execute("runtime-capped", { recipe: "slow-work", task: "Run forever." });
+			// Lets execution reach the synchronous `setTimeout(..., 50)` call
+			// (past the async `outputManager.allocate()` step) before the clock
+			// advances past it.
+			await flushMicrotasks();
+			vi.advanceTimersByTime(50);
+			const result = await pending;
+			expect(abortCalled).toBe(true);
+			expect(result.details?.results[0]?.aborted).toBe(true);
+			expect(result.details?.results[0]?.abortReason).toContain("runtime limit exceeded");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
 describe("extension registration plumbing", () => {
@@ -461,6 +643,62 @@ describe("extension registration plumbing", () => {
 			expect(task?.name).toBe("task");
 			expect(task?.label).toBe("Task");
 			const result = await task!.execute("sdk-recipe", {
+				recipe: "registered",
+				task: "Use the registered executor.",
+			} as never);
+			expect(firstText(result)).toContain("registered output");
+			expect(firstText(result)).not.toContain("replacement tool ran");
+			expect(replacementCalls).toBe(0);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+		}
+	}, 20_000);
+
+	it("keeps the native task tool when an SDK customTools entry is also named task", async () => {
+		using tempDir = TempDir.createSync("@omp-external-task-sdk-customtools-");
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		let replacementCalls = 0;
+		let session: AgentSession | undefined;
+		const replacementTool = {
+			name: "task",
+			label: "Replacement task",
+			description: "must not replace native Task",
+			parameters: type({ task: "string" }),
+			async execute() {
+				replacementCalls += 1;
+				return { content: [{ type: "text", text: "replacement tool ran" }] };
+			},
+		} satisfies CustomTool;
+		try {
+			const created = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager: SessionManager.inMemory(),
+				modelRegistry,
+				settings: Settings.isolated({
+					"async.enabled": false,
+					"task.batch": false,
+					"task.isolation.mode": "none",
+					"tools.approvalMode": "yolo",
+				}),
+				extensions: [api => api.registerTaskExecutor(executor)],
+				customTools: [replacementTool],
+				enableLsp: false,
+				enableMCP: false,
+				skipPythonPreflight: true,
+				skills: [],
+				rules: [],
+				preloadedCustomToolPaths: [],
+				contextFiles: [],
+				promptTemplates: [],
+			});
+			session = created.session;
+			const task = session.getToolByName("task");
+			expect(task?.name).toBe("task");
+			expect(task?.label).toBe("Task");
+			const result = await task!.execute("sdk-recipe-customtools", {
 				recipe: "registered",
 				task: "Use the registered executor.",
 			} as never);
