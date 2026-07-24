@@ -176,7 +176,6 @@ const restartHandler = async (
 };
 
 const restartHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime): SlashCommandResult => {
-	runtime.ctx.editor.setText("");
 	void runtime.ctx.restart();
 	return commandConsumed();
 };

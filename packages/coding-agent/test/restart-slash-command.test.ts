@@ -3,7 +3,7 @@ import type { BuiltinSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 
 describe("/restart slash command", () => {
-	test("clears the editor and restarts the TUI", async () => {
+	test("keeps the draft for restart teardown to persist", async () => {
 		const setText = vi.fn();
 		const restart = vi.fn(async () => undefined);
 		const runtime = { ctx: { editor: { setText }, restart } } as unknown as BuiltinSlashCommandRuntime;
@@ -11,7 +11,7 @@ describe("/restart slash command", () => {
 		const result = await executeBuiltinSlashCommand("/restart", runtime);
 
 		expect(result).toBe(true);
-		expect(setText).toHaveBeenCalledWith("");
+		expect(setText).not.toHaveBeenCalled();
 		expect(restart).toHaveBeenCalledTimes(1);
 	});
 });

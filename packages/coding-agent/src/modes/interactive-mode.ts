@@ -3979,11 +3979,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-		await this.#liveCommandController.stop();
-
 	async #teardownForProcessExit(options: {
 		printResumeHint: boolean;
 	}): Promise<{ sessionId: string; sessionFile: string | undefined }> {
+		await this.#liveCommandController.stop();
 		// Snapshot the editor before any teardown empties it. Persisting the draft
 		// here covers Ctrl+D shutdown with non-empty text; for /exit the editor is
 		// already cleared so saveDraft("") just removes any stale sidecar.
