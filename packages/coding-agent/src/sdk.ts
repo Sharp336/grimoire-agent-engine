@@ -1798,31 +1798,63 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 
 				const deferredMCPManager = mcpManager;
-				startDeferredMCPDiscovery = liveSession => {
-					void (async () => {
-						try {
-							const mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
-								deferredMCPManager.discoverAndConnect(mcpDiscoverOptions),
-							);
-							// The session can be torn down while servers are still connecting.
-							// Don't resurrect tools on a disposed session, and don't leak the
-							// transports/subprocesses the connect just spawned.
-							if (liveSession.isDisposed) {
-								await deferredMCPManager.disconnectAll();
-								return;
+				// Opt-in (`mcp.awaitStartupMs` > 0): give servers a bounded window to
+				// connect BEFORE the session and its system prompt are assembled, so
+				// their tools mount into the initial xd:// inventory instead of
+				// arriving via a hidden mount notice that then rides every request
+				// until compaction. Slow/uncached stragglers still register later
+				// through the manager's #onToolsChanged -> refreshMCPTools path.
+				const awaitStartupMs = Math.min(Math.max(0, settings.get("mcp.awaitStartupMs") ?? 0), 30_000);
+				if (awaitStartupMs > 0) {
+					let mcpResult: MCPLoadResult | undefined;
+					let discoveryError: unknown;
+					try {
+						mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
+							deferredMCPManager.discoverAndConnect({ ...mcpDiscoverOptions, startupTimeoutMs: awaitStartupMs }),
+						);
+					} catch (error) {
+						discoveryError = error;
+					}
+					if (mcpResult) {
+						applyMCPEnvironment(mcpResult);
+						logMCPLoadErrors(mcpResult.errors);
+						customTools.push(...mcpResult.tools);
+					} else {
+						// Discovery hard-failed (config load); mirror the deferred
+						// path's behavior: log and continue with no MCP tools rather
+						// than failing session startup.
+						logger.error("MCP tool load failed", {
+							path: ".mcp.json",
+							error: discoveryError instanceof Error ? discoveryError.message : String(discoveryError),
+						});
+					}
+				} else {
+					startDeferredMCPDiscovery = liveSession => {
+						void (async () => {
+							try {
+								const mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
+									deferredMCPManager.discoverAndConnect(mcpDiscoverOptions),
+								);
+								// The session can be torn down while servers are still connecting.
+								// Don't resurrect tools on a disposed session, and don't leak the
+								// transports/subprocesses the connect just spawned.
+								if (liveSession.isDisposed) {
+									await deferredMCPManager.disconnectAll();
+									return;
+								}
+								applyMCPEnvironment(mcpResult);
+								logMCPLoadErrors(mcpResult.errors);
+								// Connected MCP tools are enabled and mounted under xd:// devices.
+								await liveSession.refreshMCPTools(mcpResult.tools);
+							} catch (error) {
+								logger.error("MCP tool load failed", {
+									path: ".mcp.json",
+									error: error instanceof Error ? error.message : String(error),
+								});
 							}
-							applyMCPEnvironment(mcpResult);
-							logMCPLoadErrors(mcpResult.errors);
-							// Connected MCP tools are enabled and mounted under xd:// devices.
-							await liveSession.refreshMCPTools(mcpResult.tools);
-						} catch (error) {
-							logger.error("MCP tool load failed", {
-								path: ".mcp.json",
-								error: error instanceof Error ? error.message : String(error),
-							});
-						}
-					})();
-				};
+						})();
+					};
+				}
 			} else {
 				const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
 					...mcpDiscoverOptions,
@@ -3419,6 +3451,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}
 				})();
 			});
+			// Awaited-startup path (mcp.awaitStartupMs > 0): discovery already
+			// returned and its tools were registered at build time, but a server
+			// that was still pending at the startup gate may have completed in
+			// the window before this callback was installed — its tools updated
+			// the manager with no listener attached. Replay the manager's current
+			// view once so no server's tools are stranded for the session.
+			if (deferMCPDiscoveryForUI && !startDeferredMCPDiscovery && mcpManager.getTools().length > 0) {
+				await session.refreshMCPTools(mcpManager.getTools());
+			}
 			// Wire prompt refresh → rebuild MCP prompt slash commands
 			mcpManager.setOnPromptsChanged(serverName => {
 				const promptCommands = buildMCPPromptCommands(mcpManager);

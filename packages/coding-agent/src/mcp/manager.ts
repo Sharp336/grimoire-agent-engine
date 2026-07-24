@@ -159,6 +159,14 @@ export interface MCPDiscoverOptions {
 	filterBrowser?: boolean;
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
+	/**
+	 * Override for the startup gate (default STARTUP_TIMEOUT_MS = 250): how long
+	 * `connectServers` waits for in-flight connects before returning whatever is
+	 * ready (live + cached-deferred tools) and leaving stragglers to register in
+	 * the background. Interactive sessions opt into a longer gate via
+	 * `mcp.awaitStartupMs` so tools mount before the first prompt build.
+	 */
+	startupTimeoutMs?: number;
 }
 
 /** Handles an MCP `WWW-Authenticate` challenge and returns refreshed config. */
@@ -340,7 +348,7 @@ export class MCPManager {
 			throw error;
 		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
-		const result = await this.connectServers(configs, sources, options?.onStatus);
+		const result = await this.connectServers(configs, sources, options?.onStatus, options?.startupTimeoutMs);
 		result.exaApiKeys = exaApiKeys;
 		return result;
 	}
@@ -353,6 +361,7 @@ export class MCPManager {
 		configs: Record<string, MCPServerConfig>,
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
+		startupTimeoutMs: number = STARTUP_TIMEOUT_MS,
 	): Promise<MCPLoadResult> {
 		type ConnectionTask = {
 			name: string;
@@ -515,7 +524,7 @@ export class MCPManager {
 		if (connectionTasks.length > 0) {
 			await Promise.race([
 				Promise.allSettled(connectionTasks.map(task => task.tracked.promise)),
-				delay(STARTUP_TIMEOUT_MS),
+				delay(startupTimeoutMs),
 			]);
 
 			const cachedTools = new Map<string, MCPToolDefinition[]>();

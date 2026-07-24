@@ -4236,6 +4236,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"mcp.awaitStartupMs": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Await Startup",
+			description:
+				"Wait up to this many milliseconds for MCP servers to connect before first paint, so their tools mount directly into the system prompt instead of arriving via an xd:// mount notice; 0 connects in the background",
+			options: [
+				{ value: "0", label: "Disabled (background connect)" },
+				{ value: "250", label: "250 ms" },
+				{ value: "1000", label: "1 second" },
+				{ value: "2500", label: "2.5 seconds" },
+				{ value: "5000", label: "5 seconds" },
+				{ value: "10000", label: "10 seconds" },
+			],
+		},
+	},
+
 	// ────────────────────────────────────────────────────────────────────────
 	// Tasks
 	// ────────────────────────────────────────────────────────────────────────
