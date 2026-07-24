@@ -1221,6 +1221,21 @@ async fn supervise(core: Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>
 	}
 	core.pending.lock().clear();
 
+	// A ready host that died mid-command may still have stderr bytes sitting
+	// unread in the OS pipe buffer -- exec()'s stderr-forward path (woken by
+	// the pending.clear() above resolving its done_rx to an error) wants to
+	// see them via sync_stderr() when building the crash diagnostic. Perform
+	// the SAME rendezvous here, from the supervise side, before nulling
+	// stderr_sync_tx below: pump_stderr's sync arm does a bounded,
+	// non-blocking poll_stderr_once drain (never blocks even if a grandchild
+	// is still holding the pipe's write end open), so this can't introduce a
+	// hang. Without it, nulling stderr_sync_tx immediately below turns any
+	// concurrent exec()-side sync_stderr() call into an instant no-op,
+	// silently dropping whatever the pump hadn't caught up to reading yet --
+	// the crash diagnostic could end up saying only "host terminated"
+	// instead of preserving what the dying process actually wrote.
+	core.sync_stderr().await;
+
 	*core.stderr_sync_tx.lock() = None;
 	writer.abort();
 	stderr_pump.abort();
@@ -1907,6 +1922,69 @@ mod tests {
 			)
 			.await;
 		assert!(res.is_err(), "host death mid-exec surfaces as an error");
+	}
+
+	/// A ready host that dies mid-command right after an inherited child
+	/// wrote to its stderr pipe must still forward those bytes as the crash
+	/// diagnostic. `supervise()`'s teardown previously nulled
+	/// `stderr_sync_tx` and aborted the stderr pump task BEFORE giving
+	/// `exec()`'s stderr-forward path (woken by the same teardown's
+	/// `pending.lock().clear()`, which resolves its `done_rx` to an error) a
+	/// chance to rendezvous with it, silently dropping whatever the pump
+	/// hadn't caught up to reading yet. Note: with `WaitForExit()` giving
+	/// the pump task ample scheduling opportunity before the crash, this
+	/// specific race did not reproduce here even without the fix (5/5 runs
+	/// passed pre-fix on this box's multi-thread tokio scheduler) -- this
+	/// guards the observable contract (stderr right before a crash is
+	/// preserved) going forward rather than proving the narrower scheduling
+	/// race itself, same class of gap as round-21/32's "mechanism doesn't
+	/// independently reproduce under test" cases.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn host_death_mid_exec_still_forwards_stderr_written_just_before_the_crash() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// Write to the inherited stderr pipe, wait for the child to actually
+		// finish (so the bytes are physically in the OS pipe), then crash
+		// the host immediately.
+		let child_args = if cfg!(windows) {
+			"'cmd.exe'; '/c echo crash-diagnostic-marker 1>&2'"
+		} else {
+			"'/bin/sh'; '-c'; 'echo crash-diagnostic-marker >&2'"
+		};
+		let cmd = format!(
+			"$args = @({child_args}); $psi = New-Object System.Diagnostics.ProcessStartInfo; \
+			 $psi.FileName = $args[0]; if ($args.Count -gt 2) {{ $psi.ArgumentList.Add($args[1]); \
+			 $psi.ArgumentList.Add($args[2]) }} else {{ $psi.Arguments = $args[1] }}; \
+			 $psi.UseShellExecute = $false; $psi.RedirectStandardError = $false; $p = \
+			 [System.Diagnostics.Process]::Start($psi); $p.WaitForExit(); [Environment]::Exit(3)"
+		);
+
+		let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(super::CHUNK_QUEUE_CHUNKS);
+		let collector = tokio::spawn(async move {
+			let mut output = String::new();
+			while let Some(chunk) = chunk_rx.recv().await {
+				output.push_str(&chunk);
+			}
+			output
+		});
+		let result = host
+			.core
+			.exec(cmd, None, None, 200, task::CancelToken::default(), chunk_tx)
+			.await;
+		assert!(result.is_err(), "host death mid-exec surfaces as an error");
+
+		let forwarded = collector.await.expect("chunk collector joins");
+		assert!(
+			forwarded.contains("crash-diagnostic-marker"),
+			"stderr written just before the crash must still be forwarded as the crash diagnostic: \
+			 {forwarded:?}"
+		);
 	}
 
 	/// A user command spawning a background child with default
