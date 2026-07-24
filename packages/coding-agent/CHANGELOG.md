@@ -22,6 +22,8 @@
 
 ### Changed
 
+- Split the `AgentSession` implementation into focused session-domain controllers while preserving its public API and runtime behavior.
+
 - Subagents now inherit `async.enabled` and `bash.autoBackground.enabled` from the parent instead of having both force-disabled. Subagent runs complete only after their own background jobs settle and the agent submits a `yield` that postdates every delivered result: a terminal yield with jobs still pending parks the run (recoverable turn stop) instead of completing it, async results are folded in as follow-up turns (with a one-time notice offering `hub` wait/cancel), a result delivered after a yield supersedes that yield and re-runs the yield reminder ladder, and a run that never refreshes a superseded yield fails with the stale payload preserved as salvage. Teardown cancels and awaits surviving jobs before isolation worktree capture and cleanup.
 - Added ordered `bash.patterns` command approval rules so selected bash commands can be allowed, prompted, or denied by command pattern.
 - Cache full-session retention transcript incrementally instead of re-formatting the entire message history on every retain cycle ([#4246](https://github.com/can1357/oh-my-pi/issues/4246))
@@ -31,6 +33,9 @@
 
 ### Fixed
 
+- Fixed `models.yml` compatibility validation accepting invalid OpenAI-specific values through the Bedrock schema branch.
+
+- Pinned displaceable transcript snapshots (`hub` waiting polls and live `todo` lists) to the viewport like the `vibe_wait` wall: when the transcript outgrows the terminal, their still-mutating rows are no longer committed to native scrollback on every spinner tick, which previously spammed hundreds of duplicated "waiting on N jobs" rows and force-sealed the poll so follow-up polls stacked instead of replacing it.
 - Fixed a first-use race in `ArtifactManager` where two concurrent `allocatePath`/`save` callers on a fresh instance both re-seeded `#nextId` across the directory-scan yield and allocated the same artifact id, silently overwriting the first artifact (same tool type) or making `artifact://` resolution ambiguous (different tool types). The initial scan is now memoized as a single in-flight promise so all concurrent callers share one initialization and receive distinct ids ([#4091](https://github.com/can1357/oh-my-pi/issues/4091)).
 - Fixed blob reference resolution passing unvalidated `blob:sha256:` suffixes into `path.join`, allowing a crafted ref (e.g. `blob:sha256:../../../etc/passwd`) in a persisted/shared session to escape the blob directory and read arbitrary files into resolved image history; `parseBlobRef` now rejects any suffix that is not a canonical 64-char lowercase hex hash, gating every resolution path ([#4088](https://github.com/can1357/oh-my-pi/issues/4088)).
 - Fixed discarded `Settings` instances keeping debounced save timers and chained background saves armed; discarding an instance now cancels its pending writes so they cannot race a successor's file locks.

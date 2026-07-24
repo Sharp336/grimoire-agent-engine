@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import chalk from "chalk";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -32,6 +32,21 @@ export interface TodoItem {
 export interface TodoPhase {
 	name: string;
 	tasks: TodoItem[];
+}
+
+/** Whether an unknown value is a persisted todo phase. */
+export function isTodoPhase(value: unknown): value is TodoPhase {
+	if (!isRecord(value) || typeof value.name !== "string" || !Array.isArray(value.tasks)) return false;
+	return value.tasks.every(
+		task =>
+			isRecord(task) &&
+			typeof task.content === "string" &&
+			(task.status === "pending" ||
+				task.status === "in_progress" ||
+				task.status === "completed" ||
+				task.status === "abandoned" ||
+				task.status === "blocked"),
+	);
 }
 
 export interface TodoCompletionTransition {
