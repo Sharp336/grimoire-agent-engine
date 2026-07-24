@@ -3,17 +3,22 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "../src/config/settings";
 import type { ContextAgentRunner } from "../src/context-manager/agent-runner";
 import { ContextManagerController } from "../src/context-manager/controller";
 import { decideHistorianTrigger } from "../src/context-manager/historian";
 import type { ContextMemoryAdapter } from "../src/context-manager/memory";
 import { injectAutoSearchHint } from "../src/context-manager/search";
+import { createAgentSession } from "../src/sdk";
+import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
 import * as git from "../src/utils/git";
 
 const temporaryDirectories: string[] = [];
 const model = { provider: "test", id: "test", contextWindow: 128_000 } as Model;
+const CONTEXT_MANAGER_MOCK_API_SOURCE = "context-manager-controller-test";
 
 async function temporaryDirectory(): Promise<string> {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "context-controller-"));
@@ -22,6 +27,7 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 afterEach(async () => {
+	unregisterCustomApis(CONTEXT_MANAGER_MOCK_API_SOURCE);
 	vi.useRealTimers();
 	await Promise.all(
 		temporaryDirectories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })),
@@ -612,6 +618,74 @@ describe("managed-context controller", () => {
 			expect(search.hits.some(hit => hit.canonicalId === latest.sha)).toBe(true);
 		} finally {
 			await controller.dispose();
+		}
+	});
+
+	it("applies active reductions to the main provider request without rewriting canonical history", async () => {
+		const cwd = await temporaryDirectory();
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		authStorage.setRuntimeApiKey("mock", "test-key");
+		const sessionManager = SessionManager.inMemory(cwd);
+		appendTurns(sessionManager, 3);
+		const canonicalBefore = JSON.stringify(canonicalMessages(sessionManager));
+		const mock = createMockModel({ handler: () => ({ content: ["managed response"] }) });
+		registerMockApi(CONTEXT_MANAGER_MOCK_API_SOURCE);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: cwd,
+			authStorage,
+			model: mock,
+			settings: Settings.isolated({
+				"advisor.enabled": false,
+				"autolearn.enabled": false,
+				"compaction.strategy": "managed",
+				"contextManager.enabled": true,
+				"contextManager.autoSearch.enabled": false,
+				"contextManager.historian.enabled": false,
+				"contextManager.protectedTags": 2,
+				"contextManager.temporalAwareness": false,
+				"memory.backend": "off",
+			}),
+			sessionManager,
+			contextStorePath: ":memory:",
+			contextFiles: [],
+			disableExtensionDiscovery: true,
+			enableIrc: false,
+			enableLsp: false,
+			enableMCP: false,
+			restrictToolNames: true,
+			rules: [],
+			skipPythonPreflight: true,
+			skills: [],
+			toolNames: [],
+		});
+		try {
+			const manager = session.contextManager;
+			if (!manager?.active) throw new Error("Expected managed context to be active");
+			await manager.prepareCanonicalMessages(session.messages);
+			expect(await manager.reduceTags([1])).toMatchObject({
+				status: "queued",
+				requestedTags: [1],
+				expandedTags: [1, 2],
+			});
+			expect(await manager.flush(mock)).toMatchObject({ status: "ok", activeDrops: 1 });
+
+			await session.prompt("latest managed-context request");
+			await session.waitForIdle();
+
+			const mainCall = mock.calls.find(call =>
+				JSON.stringify(call.context.messages).includes("latest managed-context request"),
+			);
+			if (!mainCall) throw new Error("Expected the main provider request");
+			const providerMessages = JSON.stringify(mainCall.context.messages);
+			expect(providerMessages).not.toContain("request 0 with durable details");
+			expect(providerMessages).not.toContain("completed 0 with verified outcome");
+			expect(providerMessages).toContain("request 1 with durable details");
+			expect(JSON.stringify(canonicalMessages(sessionManager))).toContain("request 0 with durable details");
+			expect(canonicalBefore).toContain("request 0 with durable details");
+		} finally {
+			await session.dispose();
+			authStorage.close();
 		}
 	});
 

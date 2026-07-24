@@ -110,6 +110,7 @@ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } fr
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import { computeNonMessageTokens } from "./modes/utils/context-usage";
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
@@ -2892,10 +2893,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return obfuscateMessages(obfuscator, converted);
 		};
 
-		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
+		const sessionTransformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
 			return wrapSteeringForModel(withContext);
 		};
+		const activeContextManager = contextManager?.active ? contextManager : undefined;
+		const transformContext = activeContextManager
+			? async (messages: AgentMessage[], signal?: AbortSignal) => {
+					const canonicalMessages = await activeContextManager.prepareCanonicalMessages(messages, signal);
+					const transformedMessages = await sessionTransformContext(canonicalMessages, signal);
+					return activeContextManager.transformContext(
+						transformedMessages,
+						signal,
+						agent?.state.model ?? model,
+						hasSession ? computeNonMessageTokens(session) : 0,
+					);
+				}
+			: sessionTransformContext;
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames, then
 		// clamp images to the active provider budget before the request is sent.
@@ -3150,7 +3164,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					? () => createVibeTools(toolSession)
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
-			transformContext,
+			transformContext: sessionTransformContext,
 			transformProviderContext,
 			onPayload,
 			onResponse,
