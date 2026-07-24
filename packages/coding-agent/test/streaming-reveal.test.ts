@@ -112,6 +112,24 @@ describe("streaming reveal", () => {
 		expect(textAt(target, 0)).toBe(`${familyEmoji}B`);
 	});
 
+	it("reveals compatibility Jamo per cluster and canonical conjoining Jamo atomically", () => {
+		// Compatibility Jamo (U+3131..U+318E) are three separate grapheme clusters;
+		// the canonical conjoining form of the same syllable (U+1100..U+11FF) is a
+		// single grapheme, so it reveals all-or-nothing.
+		const compatJamo = "\u314e\u314f\u3134"; // ㅎㅏㄴ
+		const conjoiningJamo = "\u1112\u1161\u11ab"; // 한 (decomposed)
+
+		const compatTarget = makeMessage([{ type: "text", text: compatJamo }]);
+		expect(visibleUnits(compatTarget, false)).toBe(3);
+		expect(textAt(buildDisplayMessage(compatTarget, 1, false), 0)).toBe("\u314e");
+		expect(textAt(buildDisplayMessage(compatTarget, 2, false), 0)).toBe("\u314e\u314f");
+		expect(textAt(buildDisplayMessage(compatTarget, 3, false), 0)).toBe(compatJamo);
+
+		const conjoiningTarget = makeMessage([{ type: "text", text: conjoiningJamo }]);
+		expect(visibleUnits(conjoiningTarget, false)).toBe(1);
+		expect(textAt(buildDisplayMessage(conjoiningTarget, 1, false), 0)).toBe(conjoiningJamo);
+	});
+
 	it("excludes hidden thinking from the reveal budget and passes it through", () => {
 		const thinkingBlock = { type: "thinking" as const, thinking: "thought" };
 		const target = makeMessage([thinkingBlock, { type: "text", text: "answer" }]);
@@ -419,6 +437,20 @@ describe("BlockUnitCounter.slice", () => {
 			revealed = rand() < 0.05 ? Math.floor(rand() * 3) : Math.min(total, revealed + 1 + Math.floor(rand() * 6));
 			if (revealed < 0) revealed = 0;
 			expect(counter.slice(0, text, revealed)).toBe(refSlice(text, revealed));
+		}
+	});
+
+	it("slices Hangul jamo fixtures at cluster boundaries (compat per jamo, conjoining atomic)", () => {
+		const compatJamo = "\u314e\u314f\u3134"; // ㅎㅏㄴ — three clusters
+		const conjoiningJamo = "\u1112\u1161\u11ab"; // 한 — one canonical cluster
+		expect(refCount(compatJamo)).toBe(3);
+		expect(refCount(conjoiningJamo)).toBe(1);
+		const counter = new BlockUnitCounter();
+		for (let units = 0; units <= refCount(compatJamo); units++) {
+			expect(counter.slice(0, compatJamo, units)).toBe(refSlice(compatJamo, units));
+		}
+		for (let units = 0; units <= refCount(conjoiningJamo); units++) {
+			expect(counter.slice(1, conjoiningJamo, units)).toBe(refSlice(conjoiningJamo, units));
 		}
 	});
 });

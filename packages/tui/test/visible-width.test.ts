@@ -139,6 +139,28 @@ describe("visibleWidth — runtime Hangul Compatibility Jamo profile", () => {
 			expect(visibleWidth(input)).toBe(nativeVisibleWidth(input, TAB));
 		}
 	});
+
+	it("applies the WarpTerminal narrow profile to Compatibility Jamo, not canonical Jamo", () => {
+		// Warp (width 1) vs Ghostty (width 2): the same Compatibility Jamo run
+		// measures 3 vs 6 cells, in parity with the native engine that
+		// truncate/slice/wrap use.
+		const compatJamo = "\u314e\u314f\u3134"; // ㅎㅏㄴ
+		const canonicalConjoiningJamo = "\u1112\u1161\u11ab"; // 한 (decomposed)
+
+		setHangulCompatibilityJamoWidth(1);
+		expect(visibleWidth(compatJamo)).toBe(3);
+		expect(visibleWidth(compatJamo)).toBe(nativeVisibleWidth(compatJamo, TAB));
+		const conjoiningNarrow = visibleWidth(canonicalConjoiningJamo);
+		const conjoiningNarrowNative = nativeVisibleWidth(canonicalConjoiningJamo, TAB);
+
+		setHangulCompatibilityJamoWidth(2);
+		expect(visibleWidth(compatJamo)).toBe(6);
+		expect(visibleWidth(compatJamo)).toBe(nativeVisibleWidth(compatJamo, TAB));
+		// Control: canonical conjoining Jamo is outside the Compatibility block, so
+		// its width is identical under both profiles (both JS and native engines).
+		expect(visibleWidth(canonicalConjoiningJamo)).toBe(conjoiningNarrow);
+		expect(nativeVisibleWidth(canonicalConjoiningJamo, TAB)).toBe(conjoiningNarrowNative);
+	});
 });
 
 describe("native text helpers — runtime Hangul Compatibility Jamo profile", () => {

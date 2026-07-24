@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -6,6 +6,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
+import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui/utils";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -71,6 +72,10 @@ describe("InteractiveMode.showStatus", () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
 		await initTheme();
+	});
+
+	afterEach(() => {
+		resetHangulCompatibilityJamoWidthForTests();
 	});
 
 	test("coalesces immediately-sequential status messages", () => {
@@ -156,5 +161,30 @@ describe("InteractiveMode.showStatus", () => {
 		// handler owns this lifecycle and uses it to guard against clearing the
 		// user's in-progress editor draft during an optimistic send (#783).
 		expect(ctx.optimisticUserMessageSignature).toBe("hello\u00001");
+	});
+
+	test("wraps Compatibility Jamo status lines by the active width profile", () => {
+		const compatRun = "\u314e\u314f\u3134".repeat(12); // ㅎㅏㄴ × 12
+		const conjoiningRun = "\u1112\u1161\u11ab".repeat(12); // 한 × 12 (decomposed)
+
+		const statusRows = (statusText: string, width: number): number => {
+			const { ctx, helpers } = createInitialRenderHarness();
+			helpers.showStatus(statusText);
+			return renderLastLine(ctx.chatContainer, width).split("\n").length;
+		};
+
+		setHangulCompatibilityJamoWidth(1);
+		const compatNarrowRows = statusRows(compatRun, 20);
+		setHangulCompatibilityJamoWidth(2);
+		const compatWideRows = statusRows(compatRun, 20);
+		// Narrow Compatibility Jamo wrap into fewer rows than wide.
+		expect(compatNarrowRows).toBeLessThan(compatWideRows);
+
+		setHangulCompatibilityJamoWidth(1);
+		const conjoiningNarrowRows = statusRows(conjoiningRun, 20);
+		setHangulCompatibilityJamoWidth(2);
+		const conjoiningWideRows = statusRows(conjoiningRun, 20);
+		// Control: canonical conjoining Jamo wrap identically under both profiles.
+		expect(conjoiningNarrowRows).toBe(conjoiningWideRows);
 	});
 });

@@ -26,10 +26,9 @@ const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
 // Hangul Compatibility Jamo (U+3131..=U+318E) render width is terminal-dependent:
-// Ghostty follows UAX#11 (2 cells); Terminal.app and iTerm2 render narrow (1),
-// matching the macOS platform default. Override only for terminals known to
-// disagree — the rest keep the platform default (macOS narrow, otherwise UAX#11),
-// so this is a no-op everywhere except Ghostty. A runtime DSR/CPR probe that
+// Ghostty follows UAX#11 (2 cells); Terminal.app, iTerm2, and Warp render narrow
+// (1). Override only for terminals known to disagree — the rest keep the platform
+// default (macOS narrow, otherwise UAX#11). A runtime DSR/CPR probe that
 // auto-detects the width on unknown terminals is tracked separately.
 export function resolveHangulCompatibilityJamoWidthFromTerminalIdentity(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -40,6 +39,13 @@ export function resolveHangulCompatibilityJamoWidthFromTerminalIdentity(
 		env.TERM?.toLowerCase().includes("ghostty")
 	) {
 		return 2;
+	}
+	// Warp reports TERM_PROGRAM=WarpTerminal and renders Hangul Compatibility
+	// Jamo narrow (1 cell) on every platform, disagreeing with UAX#11's 2 cells
+	// that the Linux platform default follows. Correct so wrap/truncation math and
+	// the hardware cursor column stay aligned during Korean IME composition.
+	if (env.TERM_PROGRAM?.toLowerCase() === "warpterminal") {
+		return 1;
 	}
 	return "platform";
 }

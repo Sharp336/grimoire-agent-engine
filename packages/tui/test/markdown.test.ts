@@ -3,7 +3,11 @@ import { stripVTControlCharacters } from "node:util";
 import { clearRenderCache, Markdown, renderInlineMarkdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
-import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import {
+	resetHangulCompatibilityJamoWidthForTests,
+	setHangulCompatibilityJamoWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "chalk";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
@@ -2317,5 +2321,58 @@ describe("Math rendering", () => {
 		expect(lines.join("\n")).not.toContain("begin{cases}");
 		// The cases body follows immediately: folding the lhs in avoids a blank-line paragraph split.
 		expect(lines[fxIdx + 1]).toContain("x > 0");
+	});
+});
+
+describe("Hangul jamo width profile", () => {
+	afterEach(() => {
+		resetHangulCompatibilityJamoWidthForTests();
+		clearRenderCache();
+	});
+
+	// The Markdown component wraps to the viewport with the shared width engine,
+	// so the resolved Compatibility Jamo profile (narrow on Warp, wide on Ghostty)
+	// changes where Compatibility Jamo wrap — while canonical conjoining Jamo
+	// (U+1100..U+11FF), the control, wraps identically under both profiles. The
+	// module render cache is keyed by (text, width), so it is cleared between the
+	// two profiles (the profile is fixed once at startup in normal use).
+	it("wraps Compatibility Jamo by the active width profile, canonical Jamo unchanged", () => {
+		const compatRun = "\u314e\u314f\u3134".repeat(12); // ㅎㅏㄴ × 12
+		const conjoiningRun = "\u1112\u1161\u11ab".repeat(12); // 한 × 12 (decomposed)
+
+		setHangulCompatibilityJamoWidth(1);
+		clearRenderCache();
+		const compatNarrow = new Markdown(compatRun, 0, 0, defaultMarkdownTheme).render(20);
+		setHangulCompatibilityJamoWidth(2);
+		clearRenderCache();
+		const compatWide = new Markdown(compatRun, 0, 0, defaultMarkdownTheme).render(20);
+		// Narrow Compatibility Jamo pack into fewer wrapped rows than wide.
+		expect(compatNarrow.length).toBeLessThan(compatWide.length);
+
+		setHangulCompatibilityJamoWidth(1);
+		clearRenderCache();
+		const conjoiningNarrow = new Markdown(conjoiningRun, 0, 0, defaultMarkdownTheme).render(20);
+		setHangulCompatibilityJamoWidth(2);
+		clearRenderCache();
+		const conjoiningWide = new Markdown(conjoiningRun, 0, 0, defaultMarkdownTheme).render(20);
+		// Control: canonical conjoining Jamo wraps the same under either profile.
+		expect(conjoiningNarrow).toEqual(conjoiningWide);
+	});
+
+	it("renders both Hangul jamo forms without corruption", () => {
+		setHangulCompatibilityJamoWidth(1);
+		clearRenderCache();
+		const compat = "\u314e\u314f\u3134"; // ㅎㅏㄴ
+		const conjoining = "\u1112\u1161\u11ab"; // 한 (decomposed)
+		const compatOut = new Markdown(compat, 0, 0, defaultMarkdownTheme)
+			.render(80)
+			.map(line => stripVTControlCharacters(line))
+			.join("");
+		const conjoiningOut = new Markdown(conjoining, 0, 0, defaultMarkdownTheme)
+			.render(80)
+			.map(line => stripVTControlCharacters(line))
+			.join("");
+		expect(compatOut).toContain(compat);
+		expect(conjoiningOut).toContain(conjoining);
 	});
 });

@@ -5,6 +5,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { taskToolRenderer } from "@oh-my-pi/pi-coding-agent/task/renderer";
 import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
+import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui/utils";
 
 function runningProgress(overrides: Partial<AgentProgress> = {}): AgentProgress {
 	return {
@@ -66,6 +67,7 @@ describe("task progress rendering", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
+		resetHangulCompatibilityJamoWidthForTests();
 	});
 	it("renders running task rows static with the agent dot", async () => {
 		const theme = (await getThemeByName("dark"))!;
@@ -441,6 +443,46 @@ describe("task progress rendering", () => {
 		// The run summary footer still counts the full batch.
 		expect(collapsed).toContain("5 succeeded");
 		expect(collapsed).toContain("1 failed");
+	});
+
+	it("truncates Compatibility Jamo task previews by width profile; canonical Jamo is the control", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		if (!theme) return;
+		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const renderTask = (task: string): string =>
+			Bun.stripANSI(
+				taskToolRenderer
+					.renderResult(
+						{
+							content: [{ type: "text", text: "" }],
+							details: detailsFor(runningProgress({ id: "JamoPreview", task })),
+						},
+						options,
+						theme,
+					)
+					.render(120)
+					.join("\n"),
+			);
+		const kept = (text: string, marker: string): number => [...text].filter(ch => ch === marker).length;
+
+		const compatRun = "\u314e\u314f\u3134".repeat(40); // ㅎㅏㄴ × 40
+		setHangulCompatibilityJamoWidth(1);
+		const compatNarrowKept = kept(renderTask(compatRun), "\u314e");
+		setHangulCompatibilityJamoWidth(2);
+		const compatWideKept = kept(renderTask(compatRun), "\u314e");
+		// The preview truncates to a fixed cell budget, so narrow Compatibility
+		// Jamo keep more glyphs than wide ones.
+		expect(compatNarrowKept).toBeGreaterThan(compatWideKept);
+
+		const conjoiningRun = "\u1112\u1161\u11ab".repeat(40); // 한 × 40 (decomposed)
+		setHangulCompatibilityJamoWidth(1);
+		const conjoiningNarrowKept = kept(renderTask(conjoiningRun), "\u1112");
+		setHangulCompatibilityJamoWidth(2);
+		const conjoiningWideKept = kept(renderTask(conjoiningRun), "\u1112");
+		// Control: canonical conjoining Jamo are outside the corrected block, so the
+		// same count survives under both profiles.
+		expect(conjoiningNarrowKept).toBe(conjoiningWideKept);
 	});
 });
 

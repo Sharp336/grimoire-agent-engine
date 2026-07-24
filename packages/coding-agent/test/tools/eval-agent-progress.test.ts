@@ -3,6 +3,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { EvalStatusEvent, EvalToolDetails } from "@oh-my-pi/pi-coding-agent/eval/types";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { evalToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui/utils";
 
 /**
  * Defends the contract that `agent()` calls inside an eval cell surface as a
@@ -23,6 +24,7 @@ describe("eval renderer: agent() progress below the cell box", () => {
 
 	afterAll(() => {
 		resetSettingsForTest();
+		resetHangulCompatibilityJamoWidthForTests();
 	});
 
 	function render(statusEvents: EvalStatusEvent[], status: "running" | "complete" = "running"): string[] {
@@ -144,5 +146,42 @@ describe("eval renderer: agent() progress below the cell box", () => {
 		expect(inside).toContain("file.ts");
 		expect(inside).not.toContain("0-Scout");
 		expect(below).toContain("0-Scout");
+	});
+
+	it("truncates Compatibility Jamo agent intents by width profile; canonical Jamo is the control", () => {
+		const renderIntent = (intent: string): string =>
+			render([
+				{
+					op: "agent",
+					id: "0-Scout",
+					agent: "task",
+					status: "running",
+					currentTool: "read",
+					currentToolArgs: "config.ts",
+					lastIntent: intent,
+					taskPreview: "investigate the bug",
+					toolCount: 4,
+					contextTokens: 5000,
+					contextWindow: 200000,
+					cost: 0.03,
+					durationMs: 800,
+					model: "p/model",
+				},
+			]).join("\n");
+		const kept = (text: string, marker: string): number => [...text].filter(ch => ch === marker).length;
+
+		const compatRun = "\u314e\u314f\u3134".repeat(40); // ㅎㅏㄴ × 40
+		setHangulCompatibilityJamoWidth(1);
+		const compatNarrowKept = kept(renderIntent(compatRun), "\u314e");
+		setHangulCompatibilityJamoWidth(2);
+		const compatWideKept = kept(renderIntent(compatRun), "\u314e");
+		expect(compatNarrowKept).toBeGreaterThan(compatWideKept);
+
+		const conjoiningRun = "\u1112\u1161\u11ab".repeat(40); // 한 × 40 (decomposed)
+		setHangulCompatibilityJamoWidth(1);
+		const conjoiningNarrowKept = kept(renderIntent(conjoiningRun), "\u1112");
+		setHangulCompatibilityJamoWidth(2);
+		const conjoiningWideKept = kept(renderIntent(conjoiningRun), "\u1112");
+		expect(conjoiningNarrowKept).toBe(conjoiningWideKept);
 	});
 });

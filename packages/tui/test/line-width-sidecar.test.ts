@@ -83,4 +83,30 @@ describe("line-width sidecar", () => {
 		setHangulCompatibilityJamoWidth(1);
 		expect(getWidthConfigEpoch()).toBe(afterFirst);
 	});
+
+	it("re-measures Compatibility Jamo across the Warp/Ghostty switch; canonical Jamo is the control", () => {
+		const compatJamo = "\u314e\u314f\u3134"; // ㅎㅏㄴ
+		const canonicalConjoiningJamo = "\u1112\u1161\u11ab"; // 한 (decomposed)
+		const compatLine = [compatJamo];
+		const conjoiningLine = [canonicalConjoiningJamo];
+
+		// Warp width (1): each Compatibility Jamo is one cell.
+		setHangulCompatibilityJamoWidth(1);
+		publishLineWidths(compatLine, [visibleWidth(compatJamo)]);
+		publishLineWidths(conjoiningLine, [visibleWidth(canonicalConjoiningJamo)]);
+		expect(getPublishedLineWidths(compatLine)).toEqual([3]);
+		const conjoiningWidth = visibleWidth(canonicalConjoiningJamo);
+		expect(getPublishedLineWidths(conjoiningLine)).toEqual([conjoiningWidth]);
+
+		// Switching to Ghostty width (2) bumps the epoch, so every sidecar entry
+		// drops — the invalidation is global, not per-string.
+		setHangulCompatibilityJamoWidth(2);
+		expect(getPublishedLineWidths(compatLine)).toBeUndefined();
+		expect(getPublishedLineWidths(conjoiningLine)).toBeUndefined();
+
+		// Compatibility Jamo now measures wide; canonical conjoining Jamo is the
+		// control and re-measures to the same width as before.
+		expect(visibleWidth(compatJamo)).toBe(6);
+		expect(visibleWidth(canonicalConjoiningJamo)).toBe(conjoiningWidth);
+	});
 });

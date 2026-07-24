@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed separated Hangul Jamo corrupting streamed layouts in WarpTerminal ([#6461](https://github.com/can1357/oh-my-pi/issues/6461)).
+
 ## [17.1.0] - 2026-07-24
 
 ### Added
