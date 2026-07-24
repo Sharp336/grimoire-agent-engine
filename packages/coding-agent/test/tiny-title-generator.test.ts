@@ -6,6 +6,7 @@ import { isSubcommand } from "@oh-my-pi/pi-coding-agent/cli-commands";
 import { getDefault, getEnumValues, getUi } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { TinyTitleDownloadProgressComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tiny-title-download-progress";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { RefCountedWorkerHandle } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
@@ -21,7 +22,12 @@ import {
 	TINY_TITLE_MODEL_OPTIONS,
 	TINY_TITLE_MODEL_VALUES,
 } from "@oh-my-pi/pi-coding-agent/tiny/models";
-import { createTinyTitleSubprocess, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import {
+	createTinyTitleSubprocess,
+	TinyTitleClient,
+	tinyTitleClient,
+} from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import type { TinyTitleWorkerInbound, TinyTitleWorkerOutbound } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import type { Subprocess } from "bun";
 
@@ -258,5 +264,67 @@ describe("tiny title download progress UI", () => {
 describe("tiny-models CLI", () => {
 	it("registers tiny-models as a top-level subcommand", () => {
 		expect(isSubcommand("tiny-models")).toBe(true);
+	});
+});
+
+describe("tiny title prewarm", () => {
+	it("spawns one unrefed idle worker and reuses it on first generate", async () => {
+		let spawnCount = 0;
+		const sent: TinyTitleWorkerInbound[] = [];
+		let refCount = 0;
+		const messageHandlers = new Set<(message: TinyTitleWorkerOutbound) => void>();
+
+		const client = new TinyTitleClient(() => {
+			spawnCount += 1;
+			const handle: RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> = {
+				send(message) {
+					sent.push(message);
+					if (message.type !== "generate") return;
+					queueMicrotask(() => {
+						for (const handler of messageHandlers) {
+							handler({ type: "title", id: message.id, title: "Warm Title" });
+						}
+					});
+				},
+				onMessage(handler) {
+					messageHandlers.add(handler);
+					return () => {
+						messageHandlers.delete(handler);
+					};
+				},
+				onError() {
+					return () => {};
+				},
+				async terminate() {},
+				ref() {
+					refCount += 1;
+				},
+				unref() {
+					refCount -= 1;
+				},
+			};
+			return handle;
+		});
+
+		client.prewarm();
+		expect(spawnCount).toBe(1);
+		expect(sent).toEqual([]);
+		expect(refCount).toBe(0);
+
+		client.prewarm();
+		expect(spawnCount).toBe(1);
+
+		const title = await client.generate("lfm2-350m", "Investigate routing");
+		expect(title).toBe("Warm Title");
+		expect(spawnCount).toBe(1);
+		expect(sent).toHaveLength(1);
+		const first = sent[0];
+		if (first?.type !== "generate") {
+			throw new Error("expected one generate request");
+		}
+		expect(first.modelKey).toBe("lfm2-350m");
+		expect(refCount).toBe(0);
+
+		await client.terminate();
 	});
 });

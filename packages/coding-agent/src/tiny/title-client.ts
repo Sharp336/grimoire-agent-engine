@@ -196,6 +196,15 @@ export class TinyTitleClient {
 		return () => this.#progressListeners.delete(listener);
 	}
 
+	/**
+	 * Eagerly spawn the idle worker subprocess so the first {@link generate}
+	 * call reuses it. Idempotent: a warm worker is left untouched. Sends no
+	 * request and does not download, load weights, or run inference.
+	 */
+	prewarm(): void {
+		this.#ensureWorker();
+	}
+
 	async generate(modelKey: string, message: string, signal?: AbortSignal): Promise<string | null>;
 	async generate(modelKey: string, message: string, options?: TinyTitleGenerateOptions): Promise<string | null>;
 	async generate(

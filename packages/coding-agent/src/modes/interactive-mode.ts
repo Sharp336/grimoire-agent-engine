@@ -113,6 +113,8 @@ import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import { isTinyTitleLocalModelKey } from "../tiny/models";
+import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
@@ -464,6 +466,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
+	#titlePrewarmImmediate: ReturnType<typeof setImmediate> | undefined;
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
 	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
@@ -995,6 +998,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Start the UI. Cold `omp` launch opts into clearing on the first paint so
 		// the initial welcome frame does not append over the previous run's scrollback.
 		this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
+		// After start()'s forced paint is queued: FIFO setImmediate paints first,
+		// then this idle title-worker prewarm runs without delaying first frame.
+		this.#scheduleTitleWorkerPrewarm();
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
@@ -1853,6 +1859,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.#todoAutoClearTimer) return;
 		clearTimeout(this.#todoAutoClearTimer);
 		this.#todoAutoClearTimer = undefined;
+	}
+
+	#cancelTitleWorkerPrewarm(): void {
+		if (!this.#titlePrewarmImmediate) return;
+		clearImmediate(this.#titlePrewarmImmediate);
+		this.#titlePrewarmImmediate = undefined;
+	}
+
+	/**
+	 * Schedule an idle tiny-title worker spawn after the initial forced paint.
+	 * Only local models need the worker; online/disabled/invalid keys skip it.
+	 * The callback re-checks shutdown so a queued immediate cannot respawn after
+	 * teardown (and {@link #cancelTitleWorkerPrewarm} clears it from stop()).
+	 */
+	#scheduleTitleWorkerPrewarm(): void {
+		this.#cancelTitleWorkerPrewarm();
+		const tinyModel = settings.get("providers.tinyModel");
+		if (!isTinyTitleLocalModelKey(tinyModel)) return;
+		this.#titlePrewarmImmediate = setImmediate(() => {
+			this.#titlePrewarmImmediate = undefined;
+			if (this.#isShuttingDown) return;
+			tinyTitleClient.prewarm();
+		});
 	}
 
 	#isClosedTodo(task: TodoItem): boolean {
@@ -3847,6 +3876,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cleanupMicAnimation();
 		this.#liveCommandController.dispose();
 		this.#cancelTodoAutoClearTimer();
+		this.#cancelTitleWorkerPrewarm();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {

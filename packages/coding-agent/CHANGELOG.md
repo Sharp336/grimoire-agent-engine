@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the first submitted prompt stalling while the local title worker starts ([#6462](https://github.com/can1357/oh-my-pi/issues/6462)).
+
 ## [17.1.0] - 2026-07-24
 
 ### Breaking Changes
