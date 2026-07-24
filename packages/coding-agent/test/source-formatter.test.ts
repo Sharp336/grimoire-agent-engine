@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
-import { createSourceFormatter } from "@oh-my-pi/pi-coding-agent/tools/source-formatter";
+import { createSourceFormatter, type SourceFormatterOutcome } from "@oh-my-pi/pi-coding-agent/tools/source-formatter";
 
 function streamFromText(text: string): ReadableStream<Uint8Array> {
 	const body = new Response(text).body;
@@ -84,8 +84,6 @@ const EXPECTED_FORMATTER_SPAWN_OPTIONS: SpawnOptions = {
 function neverSettlingPromise<T>(): Promise<T> {
 	return Promise.withResolvers<T>().promise;
 }
-
-type SourceFormatterOutcome = Awaited<ReturnType<ReturnType<typeof createSourceFormatter>>>;
 
 function expectFormatted(outcome: SourceFormatterOutcome): Record<string, unknown> & object {
 	expect(outcome.status).toBe("formatted");
