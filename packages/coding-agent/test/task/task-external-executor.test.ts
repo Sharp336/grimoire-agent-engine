@@ -534,6 +534,64 @@ describe("Task external recipe executor", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it("aborts a late-arriving handle after cleanup's bounded wait times out during a slow pre-start delay", async () => {
+		vi.useFakeTimers();
+		try {
+			const startCalled = Promise.withResolvers<void>();
+			const releaseProgress = Promise.withResolvers<void>();
+			let abortCalled = false;
+			const executor: ExternalTaskExecutor = {
+				discriminator: "recipe",
+				async start() {
+					startCalled.resolve();
+					// Simulates an executor that ignores the already-aborted signal
+					// it was handed and still produces a live handle.
+					return {
+						result: new Promise<never>(() => {}),
+						async abort() {
+							abortCalled = true;
+						},
+					};
+				},
+			};
+			const tool = await TaskTool.create(createSession({ executor }));
+			// A slow pre-start progress callback delays the "Starting..." emit,
+			// which in turn delays the `executor.start()` call well past the
+			// abort-cleanup bound.
+			const onUpdate = async () => {
+				await releaseProgress.promise;
+			};
+			const controller = new AbortController();
+			const pending = tool.execute(
+				"slow-pre-start",
+				{ recipe: "slow-pre-start", task: "Wait." },
+				controller.signal,
+				onUpdate,
+			);
+			await flushMicrotasks();
+			controller.abort(new Error("cancelled during slow pre-start"));
+			await flushMicrotasks();
+			// Elapse the whole abort-cleanup bound before `start()` is even
+			// invoked — cleanup gives up on its own bounded wait here.
+			vi.advanceTimersByTime(5000);
+			await flushMicrotasks();
+			expect(abortCalled).toBe(false);
+			// Now the delayed progress callback finally resolves; `start()` runs
+			// and produces a handle despite the already-aborted signal.
+			releaseProgress.resolve();
+			await startCalled.promise;
+			await flushMicrotasks();
+			expect(abortCalled).toBe(true);
+			const result = await pending;
+			expect(result.details?.results[0]).toMatchObject({
+				aborted: true,
+				abortReason: "cancelled during slow pre-start",
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
 describe("extension registration plumbing", () => {

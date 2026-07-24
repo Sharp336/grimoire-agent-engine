@@ -1705,34 +1705,45 @@ Recipe items run through one external fresh-process executor. External runs do n
 		const startInvoked = Promise.withResolvers<void>();
 		let abortCleanup: Promise<{ error?: unknown }> | undefined;
 		const abortSettled = Promise.withResolvers<{ error?: unknown }>();
+		// Guards against calling `.abort()` twice — the bounded wait below and
+		// the unbounded late continuation it can spawn both funnel through this.
+		let handleAbortAttempted = false;
+		const abortHandleOnce = async (exec: ExternalTaskExecution): Promise<{ error?: unknown }> => {
+			if (handleAbortAttempted) return {};
+			handleAbortAttempted = true;
+			execution = exec;
+			try {
+				await untilAborted(AbortSignal.timeout(EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS), Promise.resolve(exec.abort()));
+				return {};
+			} catch (error) {
+				return { error };
+			}
+		};
 		const requestAbort = () => {
 			if (abortCleanup) return;
 			abortCleanup = (async (): Promise<{ error?: unknown }> => {
-				if (!execution) {
-					try {
-						await untilAborted(AbortSignal.timeout(EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS), startInvoked.promise);
-					} catch {
-						// `start()` was never even invoked within the bound — nothing to abort.
-						return {};
-					}
-					try {
-						execution = await untilAborted(AbortSignal.timeout(EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS), startPromise!);
-					} catch {
-						// `start()` never produced a usable handle within the bound, or
-						// it rejected — nothing to abort.
-						return {};
-					}
-				}
-				if (!execution) return {};
+				if (execution) return abortHandleOnce(execution);
+				let lateHandle: ExternalTaskExecution;
 				try {
-					await untilAborted(
+					lateHandle = await untilAborted(
 						AbortSignal.timeout(EXTERNAL_TASK_ABORT_CLEANUP_TIMEOUT_MS),
-						Promise.resolve(execution.abort()),
+						startInvoked.promise.then(() => startPromise!),
+					);
+				} catch {
+					// `start()` was not invoked, or did not produce a handle, within
+					// the bound — it may still run later (e.g. a slow pre-start
+					// progress callback delayed it, or the executor itself is slow).
+					// Attach an unbounded continuation so a late handle still gets
+					// aborted exactly once instead of orphaning an executor that
+					// ignores the already-aborted signal it was given. This settles
+					// this call's own (already-bounded) wait now regardless.
+					void startInvoked.promise.then(
+						() => startPromise!.then(abortHandleOnce, () => {}),
+						() => {},
 					);
 					return {};
-				} catch (error) {
-					return { error };
 				}
+				return abortHandleOnce(lateHandle);
 			})();
 			void abortCleanup.then(abortSettled.resolve);
 		};
