@@ -74,21 +74,21 @@ function extractCommandClassDesc(content: string, commandName: string): Record<s
 	return result;
 }
 
-function extractArgsAndFlagsFlat(content: string): Record<string, string> {
+function extractArgsAndFlagsScoped(content: string, commandName: string): Record<string, string> {
 	const result: Record<string, string> = {};
 
 	// Extract arg descriptions: name: Args.string({ description: "..." })
 	// Support multiline by matching the full Args call
 	const argRe = /(\w+):\s*Args\.\w+\(\{[^}]*?description:\s*"([^"]+)"/gs;
 	for (const match of extractMatches(argRe, content)) {
-		const key = `args.${match[1]}.description`;
+		const key = `${commandName}.args.${match[1]}.description`;
 		if (!result[key]) result[key] = match[2];
 	}
 
 	// Extract flag descriptions: name: Flags.string({ description: "..." })
 	const flagRe = /(\w+):\s*Flags\.\w+\(\{[^}]*?description:\s*"([^"]+)"/gs;
 	for (const match of extractMatches(flagRe, content)) {
-		const key = `flags.${match[1]}.description`;
+		const key = `${commandName}.flags.${match[1]}.description`;
 		if (!result[key]) result[key] = match[2];
 	}
 
@@ -107,8 +107,8 @@ function extractCommandsTranslations(): TranslationData {
 		// Command class description
 		Object.assign(translations, extractCommandClassDesc(content, commandName));
 
-		// Flat args/flags descriptions (shared across all commands)
-		Object.assign(translations, extractArgsAndFlagsFlat(content));
+		// Scoped args/flags descriptions (per command)
+		Object.assign(translations, extractArgsAndFlagsScoped(content, commandName));
 	}
 
 	return translations;

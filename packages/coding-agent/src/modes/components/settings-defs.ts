@@ -63,6 +63,7 @@ type OptionList = ReadonlyArray<SubmenuOption>;
 export interface SubmenuSettingDef extends BaseSettingDef {
 	type: "submenu";
 	options: OptionList;
+	secret?: boolean;
 	onPreview?: (value: string) => void;
 	onPreviewCancel?: (originalValue: string) => void;
 }
@@ -190,10 +191,10 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 	if (schemaType === "string") {
 		if (options === "runtime") {
 			// Empty list now; the selector layer (theme handling, etc.) injects choices.
-			return { ...base, type: "submenu", options: [] };
+			return { ...base, type: "submenu", options: [], secret: ui.secret === true };
 		}
 		if (options) {
-			return { ...base, type: "submenu", options };
+			return { ...base, type: "submenu", options, secret: ui.secret === true };
 		}
 		// One classification drives both surfaces: a setting marked `credential`
 		// masks here too, so the panel cannot display one that only the CLI knows

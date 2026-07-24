@@ -67,6 +67,7 @@ import { getPreset } from "./status-line/presets";
 class TextInputSubmenu extends Container {
 	#input: Input;
 	#error: Text;
+	#isSecret: boolean;
 
 	constructor(
 		label: string,
@@ -74,9 +75,11 @@ class TextInputSubmenu extends Container {
 		currentValue: string,
 		private readonly onSubmit: (value: string) => void,
 		private readonly onCancel: () => void,
+		isSecret: boolean = false,
 	) {
 		super();
 
+		this.#isSecret = isSecret;
 		this.addChild(new Text(theme.bold(theme.fg("accent", label)), 0, 0));
 		if (description) {
 			this.addChild(new Spacer(1));
@@ -101,6 +104,25 @@ class TextInputSubmenu extends Container {
 		this.addChild(new Spacer(1));
 		this.addChild(this.#error);
 		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel · Clear field to unset"), 0, 0));
+	}
+
+	override render(width: number): readonly string[] {
+		if (!this.#isSecret) {
+			return super.render(width);
+		}
+		// Mask the input's rendered output for secret settings
+		const lines = super.render(width);
+		return lines.map(line => {
+			// Replace the input value with mask characters
+			// The input renders as a single line with the value
+			if (line.includes(this.#input.getValue())) {
+				const value = this.#input.getValue();
+				if (value) {
+					return line.replace(value, "•".repeat(Math.min(value.length, 8)));
+				}
+			}
+			return line;
+		});
 	}
 
 	handleInput(data: string): void {
@@ -987,7 +1009,11 @@ export class SettingsSelectorComponent implements Component {
 					id: def.path,
 					label: def.label,
 					description: def.description,
-					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue, def as SubmenuSettingDef),
+					currentValue: def.secret
+						? currentValue
+							? "••••••••"
+							: ""
+						: this.#getSubmenuCurrentValue(def.path, currentValue, def as SubmenuSettingDef),
 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
 					changed,
 				};
@@ -1174,7 +1200,7 @@ export class SettingsSelectorComponent implements Component {
 		return new TextInputSubmenu(
 			def.label,
 			def.description,
-			// For secret settings, pass empty string to input (user sees masked display but edits raw value)
+			// Pass actual value to input so it's preserved on submit; render masks it
 			this.#formatTextInputEditValue(def.path, settings.get(def.path)),
 			value => {
 				// Empty string clears the setting; undefined-typed string settings
@@ -1184,6 +1210,7 @@ export class SettingsSelectorComponent implements Component {
 				wrappedDone(this.#formatTextInputValue(def, settings.get(def.path)));
 			},
 			() => wrappedDone(),
+			def.secret,
 		);
 	}
 

@@ -373,6 +373,17 @@ export function renderCommandHelp(
 ): void {
 	const lines: string[] = [];
 
+	if (Cmd.description) {
+		const t = translator
+			? (text: string, key: string) => {
+					const result = translator(text, key);
+					return result === key ? text : result;
+				}
+			: (text: string, _key: string) => text;
+		lines.push(t(Cmd.description, `commands.${id}.description`));
+		lines.push("");
+		lines.push(t("USAGE", "cli.usage"));
+	}
 	lines.push(`  ${commandUsageLine(bin, id, Cmd, translator)}\n`);
 	renderCommandBody(lines, Cmd, id, translator);
 	process.stdout.write(lines.join("\n"));

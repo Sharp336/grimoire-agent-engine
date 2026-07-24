@@ -55,6 +55,11 @@ export function getRoutes(t: TranslationFn): DashboardRoute[] {
 			icon: Cpu,
 		},
 		{
+			id: "providers",
+			label: t("nav.section.providers"),
+			icon: Plug,
+		},
+		{
 			id: "tools",
 			label: t("nav.section.tools"),
 			icon: Wrench,
