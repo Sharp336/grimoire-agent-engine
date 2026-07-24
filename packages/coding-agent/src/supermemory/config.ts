@@ -69,7 +69,7 @@ export function loadSupermemoryConfig(settings: Settings, env: NodeJS.ProcessEnv
 		retainEveryNTurns: Math.floor(
 			finiteNumber(settings.get("supermemory.retainEveryNTurns"), DEFAULT_RETAIN_EVERY_N_TURNS, 1, 100),
 		),
-		recallLimit: Math.floor(finiteNumber(settings.get("supermemory.recallLimit"), DEFAULT_RECALL_LIMIT, 2, 50)),
+		recallLimit: Math.floor(finiteNumber(settings.get("supermemory.recallLimit"), DEFAULT_RECALL_LIMIT, 1, 50)),
 		threshold: finiteNumber(settings.get("supermemory.threshold"), DEFAULT_THRESHOLD, 0, 1),
 		searchMode: pickSearchMode(settings.get("supermemory.searchMode")),
 		apiKey: nonEmptyString(env.SUPERMEMORY_API_KEY) ?? null,

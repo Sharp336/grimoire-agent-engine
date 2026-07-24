@@ -517,12 +517,13 @@ async function searchWithState(
 				items: [],
 				message: "Supermemory is unavailable or unconfigured.",
 			};
+		const resultLimit = Math.min(options?.limit ?? scope.config.recallLimit, scope.config.recallLimit);
 		const response = await scope.client.search({
 			q: query,
 			containerTag: scope.containerTag,
 			searchMode: scope.config.searchMode,
 			signal: options?.signal,
-			limit: Math.max(2, Math.min(options?.limit ?? scope.config.recallLimit, scope.config.recallLimit)),
+			limit: Math.max(2, resultLimit),
 			threshold: scope.config.threshold,
 		});
 		if (options?.signal?.aborted)
@@ -536,13 +537,14 @@ async function searchWithState(
 				message: "Search was superseded by a session lifecycle change.",
 			};
 		}
-		state.lastSearchCount = response.results.length;
+		const results = response.results.slice(0, resultLimit);
+		state.lastSearchCount = results.length;
 		state.lastSearchAt = Date.now();
 		return {
 			backend: "supermemory",
 			query,
-			count: response.results.length,
-			items: response.results.map(item => ({
+			count: results.length,
+			items: results.map(item => ({
 				id: item.id,
 				content: item.content,
 				timestamp: item.updatedAt,

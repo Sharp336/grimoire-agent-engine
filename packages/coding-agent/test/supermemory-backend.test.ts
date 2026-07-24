@@ -1562,7 +1562,13 @@ describe("supermemoryBackend", () => {
 
 	it("clamps explicit search limits to the Supermemory API minimum", async () => {
 		const session = makeSession();
-		const search = vi.spyOn(SupermemoryClient.prototype, "search").mockResolvedValue({ results: [], total: 0 });
+		const search = vi.spyOn(SupermemoryClient.prototype, "search").mockResolvedValue({
+			results: [
+				{ id: "first", content: "first memory" },
+				{ id: "second", content: "second memory" },
+			],
+			total: 2,
+		});
 		await supermemoryBackend.start({
 			session: session as never,
 			settings: configuredSettings({ "supermemory.recallLimit": 1 }),
@@ -1571,11 +1577,14 @@ describe("supermemoryBackend", () => {
 			taskDepth: 0,
 		});
 
-		await supermemoryBackend.search({ agentDir: "/tmp", cwd: "/tmp", session: session as never }, "query", {
-			limit: 1,
-		});
+		const result = await supermemoryBackend.search(
+			{ agentDir: "/tmp", cwd: "/tmp", session: session as never },
+			"query",
+			{ limit: 1 },
+		);
 
 		expect(search).toHaveBeenCalledWith(expect.objectContaining({ limit: 2 }));
+		expect(result).toMatchObject({ count: 1, items: [{ id: "first" }] });
 		await supermemoryBackend.disposeSession?.(session as never);
 	});
 
