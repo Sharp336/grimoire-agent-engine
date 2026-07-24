@@ -264,6 +264,7 @@ export interface InteractiveRestartCommandInput {
 	launchFlags?: restartProcess.RestartLaunchFlags;
 	liveProviderSessionId: string;
 	liveAdvisorEnabled: boolean;
+	liveComputerEnabled: boolean;
 	liveHideThinkingBlock: boolean;
 	liveModel?: Model;
 	liveModelChangeRole?: string;
@@ -288,6 +289,7 @@ export function buildInteractiveRestartCommandOptions(
 		model: isEphemeralFallback ? undefined : (liveModelSelector ?? options.launchFlags?.model),
 		providerSessionId: options.liveProviderSessionId,
 		advisor: options.liveAdvisorEnabled,
+		computer: options.liveComputerEnabled,
 		hideThinking: options.liveHideThinkingBlock,
 	};
 }
@@ -4112,6 +4114,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					approvalMode: this.settings.get("tools.approvalMode") as restartProcess.RestartApprovalMode,
 					launchFlags: this.#restartLaunchFlags,
 					liveAdvisorEnabled: this.session.isAdvisorEnabled(),
+					liveComputerEnabled: this.settings.get("computer.enabled"),
 					liveHideThinkingBlock: this.hideThinkingBlock,
 					liveModel: this.session.model,
 					liveModelChangeRole: this.sessionManager.getLastModelChangeRole(),

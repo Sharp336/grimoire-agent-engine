@@ -30,6 +30,7 @@ import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import {
 	consumeRestartAdvisorEnabled,
+	consumeRestartComputerEnabled,
 	consumeRestartExtensionFlagValues,
 	consumeRestartExtensionPackageRoots,
 	consumeRestartLiteralPrompts,
@@ -1434,6 +1435,7 @@ export async function runRootCommand(
 	const restartExtensionFlagValues = consumeRestartExtensionFlagValues();
 	const restartExtensionPackageRoots = consumeRestartExtensionPackageRoots();
 	const restartAdvisorEnabled = consumeRestartAdvisorEnabled();
+	const restartComputerEnabled = consumeRestartComputerEnabled();
 	const restartLiteralPrompts = consumeRestartLiteralPrompts();
 	if (restartLiteralPrompts) restartLiteralPromptInputs.set(parsedArgs, restartLiteralPrompts);
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
@@ -1565,6 +1567,9 @@ export async function runRootCommand(
 	}
 	if (restartAdvisorEnabled !== undefined) {
 		settingsInstance.override("advisor.enabled", restartAdvisorEnabled);
+	}
+	if (restartComputerEnabled !== undefined) {
+		settingsInstance.override("computer.enabled", restartComputerEnabled);
 	}
 
 	await logger.time(

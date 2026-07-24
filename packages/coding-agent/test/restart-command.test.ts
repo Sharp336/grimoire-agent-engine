@@ -3,11 +3,13 @@ import * as path from "node:path";
 import {
 	buildRestartCommand,
 	consumeRestartAdvisorEnabled,
+	consumeRestartComputerEnabled,
 	consumeRestartExtensionFlagValues,
 	consumeRestartExtensionPackageRoots,
 	RESTART_ADVISOR_ENABLED_ENV,
 	RESTART_API_KEY_ENV,
 	RESTART_API_KEY_PROVIDER_ENV,
+	RESTART_COMPUTER_ENABLED_ENV,
 	RESTART_EXTENSION_FLAG_VALUES_ENV,
 	RESTART_EXTENSION_PACKAGE_ROOTS_ENV,
 	type RestartCommandEnvironment,
@@ -345,6 +347,25 @@ describe("restart command construction", () => {
 		});
 	});
 
+	test("hands off live computer-use state via child env", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const enabledCommand = buildRestartCommand({ ...baseOptions(), computer: true }, env);
+		const disabledCommand = buildRestartCommand({ ...baseOptions(), computer: false }, env);
+
+		expect(enabledCommand.env).toEqual({
+			[RESTART_COMPUTER_ENABLED_ENV]: "1",
+		});
+		expect(disabledCommand.env).toEqual({
+			[RESTART_COMPUTER_ENABLED_ENV]: "0",
+		});
+	});
+
 	test("carries autoApprove flag in command", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => true,
@@ -401,6 +422,19 @@ describe("restart command construction", () => {
 		expect(enabledEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
 		expect(disabledEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
 		expect(invalidEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
+	});
+
+	test("consumes restart computer-use env toggles", () => {
+		const enabledEnv = { [RESTART_COMPUTER_ENABLED_ENV]: "1" };
+		const disabledEnv = { [RESTART_COMPUTER_ENABLED_ENV]: "0" };
+		const invalidEnv = { [RESTART_COMPUTER_ENABLED_ENV]: "yes" };
+
+		expect(consumeRestartComputerEnabled(enabledEnv)).toBe(true);
+		expect(consumeRestartComputerEnabled(disabledEnv)).toBe(false);
+		expect(consumeRestartComputerEnabled(invalidEnv)).toBeUndefined();
+		expect(enabledEnv[RESTART_COMPUTER_ENABLED_ENV]).toBeUndefined();
+		expect(disabledEnv[RESTART_COMPUTER_ENABLED_ENV]).toBeUndefined();
+		expect(invalidEnv[RESTART_COMPUTER_ENABLED_ENV]).toBeUndefined();
 	});
 
 	test("restores only registered extension flag values", () => {

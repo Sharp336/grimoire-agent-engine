@@ -85,6 +85,7 @@ describe("restart command options", () => {
 			launchFlags: { providerSessionId: "launch-provider-session" },
 			liveProviderSessionId: "fresh-provider-session",
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 		});
 
@@ -99,6 +100,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { provider: "anthropic", model: "claude-launch" },
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 			liveModel: restartModel({ provider: "openai", id: "gpt-5-live" }),
 			liveProviderSessionId: "provider-session",
@@ -116,6 +118,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { provider: "openrouter", model: "z-ai/glm-4.7" },
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 			liveModel: restartModel({
 				provider: "openrouter",
@@ -137,6 +140,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { provider: "anthropic", model: "claude-launch" },
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 			liveModel: restartModel({ provider: "openrouter", id: "fallback-live" }),
 			liveModelChangeRole: "fallback",
@@ -155,6 +159,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { provider: "openai", model: "gpt-A" },
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 			liveModel: restartModel({ provider: "anthropic", id: "claude-C" }),
 			liveModelChangeRole: "fallback",
@@ -173,6 +178,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { autoApprove: true },
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 			liveModel: restartModel({ provider: "openai", id: "gpt-5-live" }),
 			liveProviderSessionId: "provider-session",
@@ -189,6 +195,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { advisor: false },
 			liveAdvisorEnabled: true,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 			liveProviderSessionId: "provider-session",
 		});
@@ -199,12 +206,41 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { advisor: true },
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 			liveProviderSessionId: "provider-session",
 		});
 
 		expect(enabledOptions.advisor).toBe(true);
 		expect(disabledOptions.advisor).toBe(false);
+	});
+
+	test("uses the live computer-use state after a session-scoped toggle", () => {
+		const enabledOptions = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { computer: false },
+			liveAdvisorEnabled: false,
+			liveComputerEnabled: true,
+			liveHideThinkingBlock: false,
+			liveProviderSessionId: "provider-session",
+		});
+		const disabledOptions = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { computer: true },
+			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
+			liveHideThinkingBlock: false,
+			liveProviderSessionId: "provider-session",
+		});
+
+		expect(enabledOptions.computer).toBe(true);
+		expect(disabledOptions.computer).toBe(false);
 	});
 
 	test("uses the live thinking visibility state after stale launch flags", () => {
@@ -215,6 +251,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { hideThinking: false },
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: true,
 			liveProviderSessionId: "provider-session",
 		});
@@ -225,6 +262,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { hideThinking: true },
 			liveAdvisorEnabled: false,
+			liveComputerEnabled: false,
 			liveHideThinkingBlock: false,
 			liveProviderSessionId: "provider-session",
 		});
