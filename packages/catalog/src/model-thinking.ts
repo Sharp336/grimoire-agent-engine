@@ -165,7 +165,10 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	thinking: ThinkingConfig,
 ): ThinkingConfig {
 	const parsed = parseKnownModel(spec.id);
-	const normalizedEfforts = getModelDefinedEfforts(spec, compat) ?? thinking.efforts;
+	const normalizedEfforts =
+		spec.provider === "cline-api" || spec.provider === "clinepass"
+			? thinking.efforts
+			: (getModelDefinedEfforts(spec, compat) ?? thinking.efforts);
 	const effortsChanged = !sameEffortList(normalizedEfforts, thinking.efforts);
 	const effortMap =
 		thinking.effortMap === undefined || effortsChanged

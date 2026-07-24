@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ClinePass (`clinepass`) as a native, bundled model provider — Cline's flat-rate subscription gateway at `https://api.cline.bot/api/v1` (`CLINEPASS_API_KEY`, `CLINE_API_KEY`). ClinePass has no `/v1/models` endpoint, so the descriptor omits `catalogDiscovery` and `generate-models.ts` seeds the eleven curated models (`glm-5.2`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `minimax-m3`, `qwen3.7-max`, `qwen3.7-plus`) from `CLINEPASS_STATIC_MODELS` as the source of truth, like Fire Pass. Added a `clinepass` `wireModelIdMode` that keeps friendly bare catalog ids (`glm-5.2`) while translating to the `cline-pass/glm-5.2` wire form at request time. Curated effort ladders are preserved end-to-end: a `rebakeModelThinking` exemption prevents the generator from overwriting them with id-based family effort tables (GLM `max`, DeepSeek `high/max`), and `fillThinkingWireDefaults` guards the runtime `buildModel` path.
+- Added a bundled `cline-api` catalog for Cline's pay-as-you-go usage-credit route. Its curated agentic models retain normal `provider/model` ids on the wire, remain distinct from ClinePass's `cline-pass/*` namespace, and expose the gateway's verified reasoning and output-token behavior.
+
 ## [17.1.1] - 2026-07-24
 
 ### Added

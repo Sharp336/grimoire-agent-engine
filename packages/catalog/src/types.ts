@@ -585,7 +585,7 @@ export interface ResolvedOpenAISharedCompat {
 	enableGeminiThinkingLoopGuard?: boolean;
 	openRouterRouting?: OpenAICompat["openRouterRouting"];
 	/** Provider-specific wire model-id transform applied to the base id. */
-	wireModelIdMode: "raw" | "firepass" | "fireworks" | "openrouter";
+	wireModelIdMode: "raw" | "firepass" | "fireworks" | "openrouter" | "clinepass";
 	/** See {@link OpenAICompat.toolSchemaFlavor}. Read by both wire paths when converting tools. */
 	toolSchemaFlavor?: OpenAICompat["toolSchemaFlavor"];
 }

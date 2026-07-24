@@ -1,3 +1,4 @@
+import { toClinepassWireModelId } from "@oh-my-pi/pi-catalog/clinepass-model-id";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
@@ -549,6 +550,8 @@ export function applyWireModelIdTransform(
 	switch (mode) {
 		case "firepass":
 			return toFirepassWireModelId(baseId);
+		case "clinepass":
+			return toClinepassWireModelId(baseId);
 		case "fireworks":
 			return toFireworksWireModelId(baseId);
 		case "openrouter":
@@ -1125,6 +1128,10 @@ export function resolveOpenAICompletionsOutputClamp(
 	}
 	if (model.provider === "moonshot" && isKimiK3ModelId(model.id)) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	// Both Cline billing routes accept their advertised output budget.
+	if (model.provider === "clinepass" || model.provider === "cline-api") {
+		return model.maxTokens ?? undefined;
 	}
 	return undefined;
 }

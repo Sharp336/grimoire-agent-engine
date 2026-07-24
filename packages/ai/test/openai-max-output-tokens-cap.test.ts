@@ -174,6 +174,21 @@ function kimiOpenRouterModel(maxTokens: number): Model<"openai-completions"> {
 	});
 }
 
+function clineCompletionsModel(provider: "cline-api" | "clinepass"): Model<"openai-completions"> {
+	return buildModel({
+		id: provider === "clinepass" ? "deepseek-v4-pro" : "deepseek/deepseek-v4-pro",
+		name: "DeepSeek V4 Pro via Cline",
+		api: "openai-completions",
+		provider,
+		baseUrl: "https://api.cline.bot/api/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	});
+}
+
 describe("OpenAI-family output-token cap", () => {
 	it("clamps openai-responses max_output_tokens to the 64k ceiling", async () => {
 		const base = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-responses">;
@@ -232,5 +247,12 @@ describe("OpenAI-family output-token cap", () => {
 	it("still sends max_tokens for Kimi via OpenRouter (TPM rate-limit requirement)", async () => {
 		const body = await captureCompletionsBody(kimiOpenRouterModel(131_072));
 		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
+	});
+
+	it("allows both Cline routes to request their advertised output budget", async () => {
+		for (const provider of ["cline-api", "clinepass"] as const) {
+			const body = await captureCompletionsBody(clineCompletionsModel(provider), 384_000);
+			expect(body.max_completion_tokens).toBe(384_000);
+		}
 	});
 });
