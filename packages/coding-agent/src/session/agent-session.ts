@@ -4056,9 +4056,6 @@ export class AgentSession {
 	}
 
 	/** Reduce stored context with the selected shake strategy. */
-	shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
-		return this.#maintenance.shake(mode, opts);
-	}
 
 	/** Compact the active session history. */
 	compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
@@ -6262,8 +6259,8 @@ export class AgentSession {
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
-		this.#resetAllAdvisorRuntimes();
-		this.#syncTodoPhasesFromBranch();
+		this.#advisors.resetAllRuntimes();
+		this.#todo.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return result;
 	}
@@ -6305,8 +6302,8 @@ export class AgentSession {
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
-		this.#resetAllAdvisorRuntimes();
-		this.#syncTodoPhasesFromBranch();
+		this.#advisors.resetAllRuntimes();
+		this.#todo.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return result;
 	}
@@ -6323,7 +6320,7 @@ export class AgentSession {
 	 * No-op when the branch carries no images; returns `{ removed: 0 }` and
 	 * skips the disk rewrite.
 	 */
-	 *
+	/**
 	 * - `images` delegates to {@link dropImages}.
 	 * - `elide` replaces whole tool-call results and large fenced/XML blocks
 	 *   with short placeholders that embed an `artifact://` recovery link.
@@ -6377,7 +6374,7 @@ export class AgentSession {
 		if (!opts.skipAgentUpdate) {
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
-			this.#resetAllAdvisorRuntimes();
+			this.#advisors.resetAllRuntimes();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 		}
 
@@ -7601,8 +7598,8 @@ export class AgentSession {
 		// and advisor cursors / todo phases were derived from the replaced
 		// history.
 		this.#planReferenceSent = false;
-		this.#resetAllAdvisorRuntimes();
-		this.#syncTodoPhasesFromBranch();
+		this.#advisors.resetAllRuntimes();
+		this.#todo.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		// Extensions must see the entry that is now active, not (only) the one
 		// this rebuild just superseded — mirror the regular append path's hook.
@@ -8244,8 +8241,8 @@ export class AgentSession {
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
 			this.#planReferenceSent = false;
-			this.#resetAllAdvisorRuntimes();
-			this.#syncTodoPhasesFromBranch();
+			this.#advisors.resetAllRuntimes();
+			this.#todo.syncFromBranch();
 			if (codexCompaction) {
 				this.#resetCodexProviderAfterCompaction(codexCompaction);
 			} else {
