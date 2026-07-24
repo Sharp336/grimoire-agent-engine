@@ -776,15 +776,15 @@ export class Agent {
 	}
 
 	async #dequeueSteeringMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
-		if (this.#steeringQueue.length === 0) return [];
+		if (signal?.aborted || this.#steeringQueue.length === 0) return [];
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return this.#dequeueSteeringMessages();
+		return signal?.aborted ? [] : this.#dequeueSteeringMessages();
 	}
 
 	async #dequeueFollowUpMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
-		if (this.#followUpQueue.length === 0) return [];
+		if (signal?.aborted || this.#followUpQueue.length === 0) return [];
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return this.#dequeueFollowUpMessages();
+		return signal?.aborted ? [] : this.#dequeueFollowUpMessages();
 	}
 
 	setProviderResponseInterceptor(fn: SimpleStreamOptions["onResponse"] | undefined): void {

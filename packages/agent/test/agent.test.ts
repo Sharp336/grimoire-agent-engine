@@ -43,6 +43,17 @@ describe("Agent", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("continue() leaves queued messages owned when its signal is already aborted", async () => {
+		const agent = new Agent();
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		agent.followUp({ role: "user", content: "stay queued", timestamp: Date.now() });
+		const controller = new AbortController();
+		controller.abort();
+
+		await expect(agent.continue(controller.signal)).rejects.toThrow("Cannot continue from message role: assistant");
+		expect(agent.peekFollowUpQueue()).toHaveLength(1);
+	});
+
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const mock = createMockModel({ responses: [{ content: ["Processed"] }] });
 		const agent = new Agent({ streamFn: mock.stream });

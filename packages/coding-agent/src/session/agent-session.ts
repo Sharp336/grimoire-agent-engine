@@ -4733,7 +4733,6 @@ export class AgentSession {
 			this.#resetPromptMaintenanceState();
 			this.#recovery.setAcceptTerminalEmptyStop(options?.acceptTerminalEmptyStop === true);
 
-			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			// Validate model
 			if (!this.model) {
 				throw new Error(
