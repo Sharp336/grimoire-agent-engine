@@ -2,12 +2,13 @@ import { describe, expect, test } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { buildRestartCommand, consumeRestartLiteralPrompts } from "@oh-my-pi/pi-coding-agent/cli/restart";
 import {
 	applyLiveThinkingToRestartLaunchArgs,
 	buildRestartLaunchFlags,
-	resolveRestartPromptLaunchValue,
+	resolveStartupPromptInputs,
 } from "@oh-my-pi/pi-coding-agent/main";
-import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { resolvePromptInput, resolvePromptInputWithSource } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("restart launch flags", () => {
@@ -151,24 +152,69 @@ describe("restart launch flags", () => {
 		]);
 	});
 
-	test("absolutizes file-backed prompt flags from the session-start cwd only", async () => {
-		using tempDir = TempDir.createSync("@omp-restart-prompts-");
-		const launchPromptPath = path.join(tempDir.path(), "launch", "prompts", "system.md");
-		const sessionCwd = path.join(tempDir.path(), "session");
-		const sessionPromptPath = path.join(sessionCwd, "prompts", "system.md");
-		await Bun.write(launchPromptPath, "launch prompt");
-		await Bun.write(sessionPromptPath, "session prompt");
+	test("preserves initial prompt source classification across restart", async () => {
+		const tempDir = TempDir.createSync("restart-prompt-flags");
+		const sessionCwd = path.resolve(tempDir.path());
+		const fileBackedPrompt = path.join(sessionCwd, "prompts", "system.md");
+		const literalSystemPrompt = path.join(sessionCwd, "literal-system-prompt");
+		const literalAppendPrompt = path.join(sessionCwd, "literal-append-prompt");
+		const prefixCollision = "omp-restart-literal-prompt:bm90LWludGVybmFs";
+		try {
+			await Bun.write(fileBackedPrompt, "file-backed prompt");
+			const fileBackedSource = await resolvePromptInputWithSource(fileBackedPrompt, "system prompt");
+			const literalSystemSource = await resolvePromptInputWithSource(literalSystemPrompt, "system prompt");
+			const literalAppendSource = await resolvePromptInputWithSource(literalAppendPrompt, "append system prompt");
 
-		expect(await resolveRestartPromptLaunchValue("prompts/system.md", sessionCwd)).toBe(sessionPromptPath);
-		expect(await resolveRestartPromptLaunchValue("prompts/system.md", sessionCwd)).not.toBe(launchPromptPath);
-		expect(await resolveRestartPromptLaunchValue(undefined, sessionCwd, launchPromptPath)).toBe(launchPromptPath);
-		const literalRestartValue = await resolveRestartPromptLaunchValue("literal prompt", sessionCwd);
-		expect(literalRestartValue).not.toBe("literal prompt");
-		await Bun.write(path.join(sessionCwd, "literal prompt"), "session literal file");
-		expect(await resolvePromptInput(literalRestartValue, "system prompt")).toBe("literal prompt");
-		const secondRestartValue = await resolveRestartPromptLaunchValue(literalRestartValue, sessionCwd);
-		expect(secondRestartValue).toBe(literalRestartValue);
-		expect(await resolvePromptInput(secondRestartValue, "system prompt")).toBe("literal prompt");
-		expect(await resolveRestartPromptLaunchValue("literal\nprompt", sessionCwd)).toBe("literal\nprompt");
+			expect(fileBackedSource?.source).toBe("file");
+			expect(literalSystemSource?.source).toBe("literal");
+			expect(literalAppendSource?.source).toBe("literal");
+			expect(await resolvePromptInput(prefixCollision, "system prompt")).toBe(prefixCollision);
+
+			await Bun.write(literalSystemPrompt, "new system file");
+			await Bun.write(literalAppendPrompt, "new append file");
+			const flags = buildRestartLaunchFlags(
+				{ systemPrompt: literalSystemPrompt, appendSystemPrompt: literalAppendPrompt },
+				sessionCwd,
+				undefined,
+				undefined,
+				undefined,
+				sessionCwd,
+				undefined,
+				undefined,
+				undefined,
+				{ systemPrompt: literalSystemSource, appendSystemPrompt: literalAppendSource },
+			);
+			const fileFlags = buildRestartLaunchFlags(
+				{ systemPrompt: fileBackedPrompt },
+				sessionCwd,
+				undefined,
+				undefined,
+				undefined,
+				sessionCwd,
+				undefined,
+				undefined,
+				undefined,
+				{ systemPrompt: fileBackedSource },
+			);
+			const command = buildRestartCommand({
+				sessionId: "session-1",
+				cwd: sessionCwd,
+				sessionDir: tempDir.join("sessions"),
+				approvalMode: "write",
+				...flags,
+			});
+			const restartLiterals = consumeRestartLiteralPrompts(command.env);
+			const childInputs = await resolveStartupPromptInputs({
+				restartLiteralPrompts: restartLiterals,
+			});
+
+			expect(fileFlags.systemPrompt).toBe(fileBackedPrompt);
+			expect(command.cmd).not.toContain("--system-prompt");
+			expect(command.cmd).not.toContain("--append-system-prompt");
+			expect(childInputs.systemPrompt?.value).toBe(literalSystemPrompt);
+			expect(childInputs.appendSystemPrompt?.value).toBe(literalAppendPrompt);
+		} finally {
+			await tempDir.remove();
+		}
 	});
 });

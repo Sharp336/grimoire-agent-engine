@@ -3,6 +3,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	buildInteractiveRestartCommandOptions,
 	hasRestartBlockingWork,
+	spawnRestartAfterStartupMarketplaceUpdate,
 } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession, AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -16,6 +17,7 @@ type RestartBlockingSessionState = Pick<
 	| "isEvalRunning"
 	| "queuedMessageCount"
 	| "getAsyncJobSnapshot"
+	| "hasPendingAsyncWork"
 >;
 
 function restartModel(overrides: Pick<Model, "provider" | "id"> & Partial<Model>): Model {
@@ -42,6 +44,7 @@ function sessionState(overrides: Partial<RestartBlockingSessionState> = {}): Res
 		isEvalRunning: false,
 		queuedMessageCount: 0,
 		getAsyncJobSnapshot: () => null,
+		hasPendingAsyncWork: () => false,
 		...overrides,
 	};
 }
@@ -290,5 +293,27 @@ describe("restart active-work guard", () => {
 		registry.setStatus("Worker", "idle");
 
 		expect(hasRestartBlockingWork(sessionState(), registry)).toBe(false);
+	});
+});
+
+describe("restart startup lifecycle", () => {
+	test("waits for the parent marketplace auto-update before spawning the child", async () => {
+		const update = Promise.withResolvers<void>();
+		let spawned = false;
+		const restarted = spawnRestartAfterStartupMarketplaceUpdate(
+			update.promise,
+			{ cmd: ["omp"], cwd: "/repo/project" },
+			async () => {
+				spawned = true;
+				return 0;
+			},
+		);
+
+		await Promise.resolve();
+		expect(spawned).toBe(false);
+
+		update.resolve();
+		expect(await restarted).toBe(0);
+		expect(spawned).toBe(true);
 	});
 });

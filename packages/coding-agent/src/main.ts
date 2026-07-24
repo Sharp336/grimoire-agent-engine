@@ -32,10 +32,12 @@ import {
 	consumeRestartAdvisorEnabled,
 	consumeRestartExtensionFlagValues,
 	consumeRestartExtensionPackageRoots,
+	consumeRestartLiteralPrompts,
 	RESTART_API_KEY_ENV,
 	RESTART_API_KEY_PROVIDER_ENV,
 	type RestartExtensionFlagValue,
 	type RestartLaunchFlags,
+	type RestartLiteralPrompts,
 	type RestartToolRestriction,
 	restoreRestartExtensionFlagValues,
 	selectRestartExtensionPackageRoots,
@@ -95,9 +97,9 @@ import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverTitleSystemPromptFile,
-	encodeLiteralPromptInput,
-	isEncodedLiteralPromptInput,
+	type PromptInputResolution,
 	resolvePromptInput,
+	resolvePromptInputWithSource,
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
@@ -442,21 +444,38 @@ function resolveRestartConfigEnvFiles(value: string | undefined, cwd: string): s
 	return configFiles && configFiles.length > 0 ? resolveRestartLaunchPaths(configFiles, cwd) : undefined;
 }
 
-/** Resolve a restart prompt flag to its original file path only when the launch input was file-backed. */
-export async function resolveRestartPromptLaunchValue(
-	value: string | undefined,
+/** Initial prompt-source classifications retained for a restart. */
+export interface RestartPromptSources {
+	systemPrompt?: PromptInputResolution;
+	appendSystemPrompt?: PromptInputResolution;
+}
+
+function buildRestartPromptLaunchFlags(
+	sources: RestartPromptSources | undefined,
 	launchCwd: string,
-	fallbackValue?: string,
-): Promise<string | undefined> {
-	const source = value ?? fallbackValue;
-	if (!source || source.includes("\n") || isEncodedLiteralPromptInput(source)) return source;
-	const resolved = resolveRestartLaunchPath(source, launchCwd);
-	try {
-		await Bun.file(resolved).text();
-		return resolved;
-	} catch {
-		return encodeLiteralPromptInput(source);
+	parsed: Pick<Args, "systemPrompt" | "appendSystemPrompt">,
+): Pick<
+	RestartLaunchFlags,
+	"systemPrompt" | "appendSystemPrompt" | "restartLiteralSystemPrompt" | "restartLiteralAppendSystemPrompt"
+> {
+	if (!sources) {
+		return {
+			systemPrompt: parsed.systemPrompt,
+			appendSystemPrompt: parsed.appendSystemPrompt,
+		};
 	}
+	const systemPrompt = sources.systemPrompt;
+	const appendSystemPrompt = sources.appendSystemPrompt;
+	return {
+		systemPrompt:
+			systemPrompt?.source === "file" ? resolveRestartLaunchPath(systemPrompt.input, launchCwd) : undefined,
+		appendSystemPrompt:
+			appendSystemPrompt?.source === "file"
+				? resolveRestartLaunchPath(appendSystemPrompt.input, launchCwd)
+				: undefined,
+		restartLiteralSystemPrompt: systemPrompt?.source === "literal" ? systemPrompt.input : undefined,
+		restartLiteralAppendSystemPrompt: appendSystemPrompt?.source === "literal" ? appendSystemPrompt.input : undefined,
+	};
 }
 
 /** Return parsed restart launch args with the current session thinking selector overriding stale launch input. */
@@ -512,6 +531,7 @@ export function buildRestartLaunchFlags(
 	restartApiKey?: string,
 	restartExtensionPackageRoots?: readonly string[],
 	restartConfigFilesEnv?: string,
+	restartPromptSources?: RestartPromptSources,
 ): RestartLaunchFlags {
 	const extensionPackageRootInputs = selectRestartExtensionPackageRoots(
 		restartExtensionPackageRoots,
@@ -524,12 +544,12 @@ export function buildRestartLaunchFlags(
 			: extensionPackageRootInputs.length > 0
 				? resolveRestartLaunchPaths(extensionPackageRootInputs, launchCwd)
 				: undefined;
+	const restartPromptLaunchFlags = buildRestartPromptLaunchFlags(restartPromptSources, sessionStartCwd, parsed);
 	return {
 		apiKey: parsed.apiKey ?? restartApiKey,
 		apiKeyProvider,
 		advisor: Boolean(parsed.advisor),
 		autoApprove: Boolean(parsed.autoApprove),
-		appendSystemPrompt: parsed.appendSystemPrompt,
 		disableExtensions: Boolean(parsed.noExtensions),
 		disableLsp: Boolean(parsed.noLsp),
 		noPty: Boolean(parsed.noPty),
@@ -560,11 +580,11 @@ export function buildRestartLaunchFlags(
 		slowModel: parsed.slow,
 		smolModel: parsed.smol,
 		hideThinking: Boolean(parsed.hideThinking),
-		systemPrompt: parsed.systemPrompt,
+		...restartPromptLaunchFlags,
 	};
 }
 
-type RuntimeApiKeySessionOptions = { model?: { provider: string }; modelPattern?: string };
+type RuntimeApiKeySessionOptions = { model?: { provider: string }; modelPattern?: string | string[] };
 type RestorableModelSource = Pick<SessionManager, "getRestorableModelStrings">;
 
 /** Return whether a runtime API key lacks both a launch model and a restorable provider. */
@@ -680,6 +700,7 @@ async function runInteractiveMode(
 	joinLink?: string,
 	restartToolRestriction?: RestartToolRestriction,
 	restartLaunchFlags?: RestartLaunchFlags,
+	startupMarketplaceUpdate?: Promise<void>,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -691,6 +712,7 @@ async function runInteractiveMode(
 		eventBus,
 		restartToolRestriction,
 		restartLaunchFlags,
+		startupMarketplaceUpdate,
 	);
 
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
@@ -1084,12 +1106,36 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
-interface RestartPromptSources {
-	discoveredSystemPromptSource?: string;
-	discoveredAppendPromptSource?: string;
+/** Resolve initial custom prompts while preserving whether each was literal or file-backed. */
+export async function resolveStartupPromptInputs({
+	systemPromptSource,
+	appendSystemPromptSource,
+	restartLiteralPrompts,
+}: {
+	systemPromptSource?: string;
+	appendSystemPromptSource?: string;
+	restartLiteralPrompts?: RestartLiteralPrompts;
+}): Promise<RestartPromptSources> {
+	const [systemPrompt, appendSystemPrompt] = await Promise.all([
+		restartLiteralPrompts?.systemPrompt === undefined
+			? resolvePromptInputWithSource(systemPromptSource, "system prompt")
+			: Promise.resolve({
+					source: "literal" as const,
+					input: restartLiteralPrompts.systemPrompt,
+					value: restartLiteralPrompts.systemPrompt,
+				}),
+		restartLiteralPrompts?.appendSystemPrompt === undefined
+			? resolvePromptInputWithSource(appendSystemPromptSource, "append system prompt")
+			: Promise.resolve({
+					source: "literal" as const,
+					input: restartLiteralPrompts.appendSystemPrompt,
+					value: restartLiteralPrompts.appendSystemPrompt,
+				}),
+	]);
+	return { systemPrompt, appendSystemPrompt };
 }
-
 const restartPromptSources = new WeakMap<CreateAgentSessionOptions, RestartPromptSources>();
+const restartLiteralPromptInputs = new WeakMap<Args, RestartLiteralPrompts>();
 
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
 export async function buildSessionOptions(
@@ -1112,18 +1158,30 @@ export async function buildSessionOptions(
 		options.deadline = Date.now() + parsed.maxTime * 1000;
 	}
 
-	// Auto-discover SYSTEM.md if no CLI system prompt provided
-	const discoveredSystemPromptSource = parsed.systemPrompt === undefined ? discoverSystemPromptFile() : undefined;
+	const restartLiteralPrompts = restartLiteralPromptInputs.get(parsed);
+	const restartSystemPrompt = restartLiteralPrompts?.systemPrompt;
+	const restartAppendSystemPrompt = restartLiteralPrompts?.appendSystemPrompt;
+	// Auto-discover prompt files only when no CLI or restart-literal prompt was provided.
+	const discoveredSystemPromptSource =
+		parsed.systemPrompt === undefined && restartSystemPrompt === undefined ? discoverSystemPromptFile() : undefined;
 	const systemPromptSource = parsed.systemPrompt ?? discoveredSystemPromptSource;
 	const discoveredAppendPromptSource =
-		parsed.appendSystemPrompt === undefined ? discoverAppendSystemPromptFile() : undefined;
+		parsed.appendSystemPrompt === undefined && restartAppendSystemPrompt === undefined
+			? discoverAppendSystemPromptFile()
+			: undefined;
 	const appendPromptSource = parsed.appendSystemPrompt ?? discoveredAppendPromptSource;
 	const titleSystemPromptSource = discoverTitleSystemPromptFile();
-	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt] = await Promise.all([
-		resolvePromptInput(systemPromptSource, "system prompt"),
-		resolvePromptInput(appendPromptSource, "append system prompt"),
+	const [resolvedPromptInputs, titleSystemPrompt] = await Promise.all([
+		resolveStartupPromptInputs({
+			systemPromptSource,
+			appendSystemPromptSource: appendPromptSource,
+			restartLiteralPrompts,
+		}),
 		resolvePromptInput(titleSystemPromptSource, "title system prompt"),
 	]);
+	const { systemPrompt: systemPromptInput, appendSystemPrompt: appendPromptInput } = resolvedPromptInputs;
+	const resolvedSystemPrompt = systemPromptInput?.value;
+	const resolvedAppendPrompt = appendPromptInput?.value;
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
@@ -1344,7 +1402,7 @@ export async function buildSessionOptions(
 		options.additionalExtensionPaths = [];
 	}
 
-	restartPromptSources.set(options, { discoveredSystemPromptSource, discoveredAppendPromptSource });
+	restartPromptSources.set(options, { systemPrompt: systemPromptInput, appendSystemPrompt: appendPromptInput });
 	return options;
 }
 
@@ -1376,6 +1434,8 @@ export async function runRootCommand(
 	const restartExtensionFlagValues = consumeRestartExtensionFlagValues();
 	const restartExtensionPackageRoots = consumeRestartExtensionPackageRoots();
 	const restartAdvisorEnabled = consumeRestartAdvisorEnabled();
+	const restartLiteralPrompts = consumeRestartLiteralPrompts();
+	if (restartLiteralPrompts) restartLiteralPromptInputs.set(parsedArgs, restartLiteralPrompts);
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
 	const notifs: (InteractiveModeNotify | null)[] = [];
@@ -1648,7 +1708,7 @@ export async function runRootCommand(
 		await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
 	}
 
-	scheduleMarketplaceAutoUpdate({
+	const marketplaceAutoUpdate = scheduleMarketplaceAutoUpdate({
 		autoUpdate: settingsInstance.get("marketplace.autoUpdate"),
 		resolveActiveProjectRegistryPath,
 		clearPluginRootsCache: clearPluginRootsAndCaches,
@@ -1663,7 +1723,7 @@ export async function runRootCommand(
 		modelRegistry,
 		settingsInstance,
 	);
-	const { discoveredSystemPromptSource, discoveredAppendPromptSource } = restartPromptSources.get(sessionOptions) ?? {};
+	const restartPromptSourceSnapshot = restartPromptSources.get(sessionOptions);
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
@@ -1900,19 +1960,7 @@ export async function runRootCommand(
 				parsedArgs.join,
 				buildRestartToolRestriction(initialArgs),
 				buildRestartLaunchFlags(
-					{
-						...applyLiveThinkingToRestartLaunchArgs(initialArgs, session.configuredThinkingLevel()),
-						systemPrompt: await resolveRestartPromptLaunchValue(
-							initialArgs.systemPrompt,
-							cwd,
-							discoveredSystemPromptSource,
-						),
-						appendSystemPrompt: await resolveRestartPromptLaunchValue(
-							initialArgs.appendSystemPrompt,
-							cwd,
-							discoveredAppendPromptSource,
-						),
-					},
+					applyLiveThinkingToRestartLaunchArgs(initialArgs, session.configuredThinkingLevel()),
 					launchConfigCwd,
 					currentExtensionFlagValues,
 					sessionOptions.deadline,
@@ -1921,7 +1969,9 @@ export async function runRootCommand(
 					restartApiKeyHandoff?.apiKey,
 					restartExtensionPackageRoots,
 					restartConfigFilesEnv,
+					restartPromptSourceSnapshot,
 				),
+				marketplaceAutoUpdate,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

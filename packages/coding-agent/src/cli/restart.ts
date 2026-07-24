@@ -14,6 +14,8 @@ export const RESTART_ADVISOR_ENABLED_ENV = "OMP_RESTART_ADVISOR_ENABLED";
 export const RESTART_EXTENSION_FLAG_VALUES_ENV = "OMP_RESTART_EXTENSION_FLAG_VALUES";
 /** Environment variable used to preserve CLI extension package roots across picker resumes and restarts. */
 export const RESTART_EXTENSION_PACKAGE_ROOTS_ENV = "OMP_RESTART_EXTENSION_PACKAGE_ROOTS";
+/** Environment variable used for one-hop restart handoff of literal system prompt values. */
+export const RESTART_LITERAL_PROMPTS_ENV = "OMP_RESTART_LITERAL_PROMPTS";
 
 /** Tool approval modes that can be restored across a process restart. */
 export type RestartApprovalMode = "always-ask" | "write" | "yolo";
@@ -60,6 +62,10 @@ export interface RestartLaunchFlags {
 	skillPatterns?: string[];
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
+	/** Literal system prompt classified at initial launch; restored through a restart-only env handoff. */
+	restartLiteralSystemPrompt?: string;
+	/** Literal append system prompt classified at initial launch; restored through a restart-only env handoff. */
+	restartLiteralAppendSystemPrompt?: string;
 	/** Absolute wall-clock deadline in epoch milliseconds for replaying remaining --max-time. */
 	maxTimeDeadline?: number;
 	autoApprove?: boolean;
@@ -123,6 +129,33 @@ export interface SpawnRestartProcessOptions {
 export interface RestartExtensionFlagSink {
 	getFlags(): { has(name: string): boolean };
 	setFlagValue(name: string, value: boolean | string): void;
+}
+
+/** Literal prompt values carried only by a restart child environment. */
+export interface RestartLiteralPrompts {
+	systemPrompt?: string;
+	appendSystemPrompt?: string;
+}
+
+/** Consume literal prompt values from the one-hop restart environment payload. */
+export function consumeRestartLiteralPrompts(
+	env: Record<string, string | undefined> = process.env,
+): RestartLiteralPrompts | undefined {
+	const encoded = env[RESTART_LITERAL_PROMPTS_ENV];
+	if (encoded === undefined) return undefined;
+	delete env[RESTART_LITERAL_PROMPTS_ENV];
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(encoded);
+	} catch {
+		return undefined;
+	}
+	if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) return undefined;
+	const values: RestartLiteralPrompts = {};
+	const source = decoded as Record<string, unknown>;
+	if (typeof source.systemPrompt === "string") values.systemPrompt = source.systemPrompt;
+	if (typeof source.appendSystemPrompt === "string") values.appendSystemPrompt = source.appendSystemPrompt;
+	return values.systemPrompt !== undefined || values.appendSystemPrompt !== undefined ? values : undefined;
 }
 
 /** Consume the restart-only advisor toggle override from the one-hop restart environment. */
@@ -240,6 +273,17 @@ function buildRestartEnv(options: RestartLaunchFlags): Record<string, string> | 
 	}
 	if (options.extensionPackageRoots !== undefined) {
 		childEnv[RESTART_EXTENSION_PACKAGE_ROOTS_ENV] = JSON.stringify(options.extensionPackageRoots);
+		hasChildEnv = true;
+	}
+	if (options.restartLiteralSystemPrompt !== undefined || options.restartLiteralAppendSystemPrompt !== undefined) {
+		childEnv[RESTART_LITERAL_PROMPTS_ENV] = JSON.stringify({
+			...(options.restartLiteralSystemPrompt !== undefined
+				? { systemPrompt: options.restartLiteralSystemPrompt }
+				: {}),
+			...(options.restartLiteralAppendSystemPrompt !== undefined
+				? { appendSystemPrompt: options.restartLiteralAppendSystemPrompt }
+				: {}),
+		} satisfies RestartLiteralPrompts);
 		hasChildEnv = true;
 	}
 	if (options.advisor !== undefined) {

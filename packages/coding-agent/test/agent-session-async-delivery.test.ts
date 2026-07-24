@@ -15,6 +15,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { hasRestartBlockingWork } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -94,7 +95,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(sawResult).toBe(true);
 	});
 
-	it("still reports pending async work while a delivered result awaits injection", async () => {
+	it("still blocks restart while a delivered result awaits idle injection", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		const agent = new Agent({
@@ -131,6 +132,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		// count as pending async work, or the run driver terminates and the
 		// delivered result is silently dropped from the final report.
 		expect(session.hasPendingAsyncWork()).toBe(true);
+		expect(hasRestartBlockingWork(session)).toBe(true);
 
 		// Settling drains the queued follow-up into a real turn and only then
 		// reaches quiescence.

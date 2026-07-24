@@ -232,6 +232,7 @@ export function hasRestartBlockingWork(
 		| "isEvalRunning"
 		| "queuedMessageCount"
 		| "getAsyncJobSnapshot"
+		| "hasPendingAsyncWork"
 	>,
 	subagentRegistry?: AgentRegistry,
 ): boolean {
@@ -246,6 +247,7 @@ export function hasRestartBlockingWork(
 		session.isBashRunning ||
 		session.isEvalRunning ||
 		session.queuedMessageCount > 0 ||
+		session.hasPendingAsyncWork() ||
 		(asyncJobSnapshot?.running.length ?? 0) > 0 ||
 		hasPendingAsyncDelivery ||
 		hasRunningSubagents
@@ -288,6 +290,16 @@ export function buildInteractiveRestartCommandOptions(
 		advisor: options.liveAdvisorEnabled,
 		hideThinking: options.liveHideThinkingBlock,
 	};
+}
+
+/** Keep a restart child from concurrently updating marketplace state with its parent. */
+export async function spawnRestartAfterStartupMarketplaceUpdate(
+	startupMarketplaceUpdate: Promise<void> | undefined,
+	command: restartProcess.RestartCommand,
+	spawnRestart: (command: restartProcess.RestartCommand) => Promise<number> = restartProcess.spawnRestartProcess,
+): Promise<number> {
+	await startupMarketplaceUpdate;
+	return await spawnRestart(command);
 }
 
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
@@ -721,6 +733,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBus?: EventBus;
 	readonly #restartToolRestriction: restartProcess.RestartToolRestriction | undefined;
 	readonly #restartLaunchFlags: restartProcess.RestartLaunchFlags;
+	readonly #startupMarketplaceUpdate: Promise<void> | undefined;
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
@@ -743,6 +756,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		eventBus?: EventBus,
 		restartToolRestriction?: restartProcess.RestartToolRestriction,
 		restartLaunchFlags: restartProcess.RestartLaunchFlags = {},
+		startupMarketplaceUpdate?: Promise<void>,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
@@ -760,6 +774,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBus = eventBus;
 		this.#restartToolRestriction = restartToolRestriction;
 		this.#restartLaunchFlags = restartLaunchFlags;
+		this.#startupMarketplaceUpdate = startupMarketplaceUpdate;
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(LSP_STARTUP_EVENT_CHANNEL, data => {
@@ -4130,7 +4145,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			await this.#teardownForProcessExit({ printResumeHint: false });
 			await postmortem.cleanup();
-			const exitCode = await restartProcess.spawnRestartProcess(command);
+			const exitCode = await spawnRestartAfterStartupMarketplaceUpdate(this.#startupMarketplaceUpdate, command);
 			await postmortem.quit(exitCode);
 		} catch (error) {
 			process.stderr.write(`Restart failed: ${errorMessage(error)}\n`);

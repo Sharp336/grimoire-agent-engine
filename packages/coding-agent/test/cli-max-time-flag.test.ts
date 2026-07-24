@@ -75,7 +75,7 @@ describe("parseArgs — --max-time flag", () => {
 		expect(stderr).toContain("Run `omp --help` for available flags.");
 		expect(stderr).not.toContain("parseMaxTimeSeconds");
 		expect(stderr).not.toContain("CliUsageError");
-
+	});
 	it("captures the absolute restart deadline for maxTime", () => {
 		const parsed = parseArgs(["--max-time", "30", "--print", "hello"]);
 		const deadline = 1_700_000_030_000;
