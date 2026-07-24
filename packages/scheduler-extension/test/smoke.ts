@@ -1777,6 +1777,34 @@ export async function runSmoke(): Promise<void> {
 	await pt.command("stop", ctxPt);
 	fs.rmSync(path.join(tmpCwd, ".omp"), { recursive: true, force: true });
 
+	// 39. approval settings merged by OTHER providers are covered too — e.g. a
+	// project `.codex/config.toml` (TOML) with a non-yolo approvalMode triggers the
+	// warning, since the core merges every provider's project settings verbatim.
+	{
+		fs.rmSync(configFile, { force: true });
+		fs.mkdirSync(path.join(tmpCwd, ".codex"), { recursive: true });
+		fs.writeFileSync(path.join(tmpCwd, ".codex", "config.toml"), '[tools]\napprovalMode = "write"\n');
+		const st = readState();
+		st.run = "stopped";
+		st.currentTaskId = null;
+		st.tasks = [];
+		st.windows = [];
+		st.nextTaskSeq = 107;
+		fs.writeFileSync(stateFile, JSON.stringify(st));
+	}
+	const cx = makeMockPi();
+	const ctxCx = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(cx.api);
+	await cx.emit("session_start", {}, ctxCx);
+	await cx.command("start", ctxCx);
+	assert.equal(
+		ctxCx.confirmCalls,
+		1,
+		"a non-yolo approvalMode in a provider's project file (.codex/config.toml) warns",
+	);
+	await cx.command("stop", ctxCx);
+	fs.rmSync(path.join(tmpCwd, ".codex"), { recursive: true, force: true });
+
 	console.log("smoke: all assertions passed");
 	console.log(`smoke: data dir was ${tmpAgentDir}`);
 }

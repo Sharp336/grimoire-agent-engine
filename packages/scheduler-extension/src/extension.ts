@@ -635,7 +635,7 @@ function fmtClock(epochMs: number): string {
 /**
  * Best-effort scan of persisted settings for an approval policy that could block
  * an unattended run. settings.md § Precedence: project `<cwd>/.omp/config.{yml,
- * yaml}` + legacy `settings.json` + `.claude/settings*.json`, then global
+ * yaml}` + legacy `settings.json`, plus the project files other settings providers merge verbatim (`.claude/settings*.json`, `.cursor`/`.gemini` `settings.json`, `opencode.json`, `.codex/config.toml`), then global
  * `~/.omp/agent/…`. Runtime flags (`--yolo`) are in-memory and invisible here, so
  * callers treat a hit as a warning, not a hard fact. The extension can't see the
  * host's merged effective settings or provider precedence, so rather than guess
@@ -650,6 +650,10 @@ function detectApprovalConcern(cwd: string): string | null {
 		path.join(cwd, ".omp", "settings.json"),
 		path.join(cwd, ".claude", "settings.json"),
 		path.join(cwd, ".claude", "settings.local.json"),
+		path.join(cwd, ".cursor", "settings.json"),
+		path.join(cwd, ".gemini", "settings.json"),
+		path.join(cwd, "opencode.json"),
+		path.join(cwd, ".codex", "config.toml"),
 		path.join(agentDir(), "config.yml"),
 		path.join(agentDir(), "config.yaml"),
 		path.join(agentDir(), "settings.json"),
@@ -665,8 +669,8 @@ function detectApprovalConcern(cwd: string): string | null {
  * A `tools` approval setting in one file that could block a tool call, or null.
  * Covers BOTH `tools.approvalMode` (non-yolo) AND per-tool `tools.approval`
  * policies — settings-schema.ts marks any non-`allow` entry as honored in EVERY
- * approval mode, so it can prompt/deny even under yolo. Bun.YAML.parse reads YAML
- * block+flow and JSON (settings.json), matching the core loader, not a regex.
+ * approval mode, so it can prompt/deny even under yolo. Parses JSON+YAML via
+ * Bun.YAML and TOML (`.codex/config.toml`) via Bun.TOML, matching the core loaders.
  */
 function readApprovalConcern(file: string): string | null {
 	let text: string;
@@ -676,7 +680,7 @@ function readApprovalConcern(file: string): string | null {
 		return null;
 	}
 	try {
-		const parsed: unknown = Bun.YAML.parse(text);
+		const parsed: unknown = file.endsWith(".toml") ? Bun.TOML.parse(text) : Bun.YAML.parse(text);
 		if (!parsed || typeof parsed !== "object" || !("tools" in parsed)) return null;
 		const tools = parsed.tools;
 		if (!tools || typeof tools !== "object") return null;
