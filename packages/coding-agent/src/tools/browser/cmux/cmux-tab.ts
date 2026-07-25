@@ -633,7 +633,7 @@ export class CmuxTab {
 			if (timeoutController.signal.aborted || Date.now() >= deadline) {
 				throw new ToolError(`${operation} timed out`);
 			}
-			fs.renameSync(temporary, destination);
+			await fs.promises.rename(temporary, destination);
 			published = true;
 		} catch (error) {
 			throwIfAborted(signal);

@@ -138,7 +138,7 @@ async function withCmuxTool(test: (tool: BrowserTool, name: string, calls: RpcCa
 					}
 					if (
 						typeof params.script === "string" &&
-						params.script.includes("let element = document.elementFromPoint(x, y)")
+						params.script.includes("const deepestElementFromPoint")
 					) {
 						return {
 							value: {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
 import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxCodexBrowserAdapter } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/codex-adapter";
 import {
@@ -817,6 +818,23 @@ describe("cmux Codex browser review regressions", () => {
 		expect(counts).toEqual([1, 1, 1]);
 	});
 
+	it("resolves aria-labelledby references within an open shadow root", async () => {
+		const { document, window } = parseHTML("<html><body><div id=host></div></body></html>");
+		const host = document.getElementById("host");
+		if (!host) throw new Error("Expected shadow host");
+		const shadowRoot = host.attachShadow({ mode: "open" });
+		shadowRoot.innerHTML = '<span id="shadow-label">Shadow Label</span><input aria-labelledby="shadow-label">';
+		const current = await selectedTab(
+			facadeFor({
+				async codexEvaluate(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window });
+				},
+			}),
+		);
+
+		expect(await current.playwright.getByLabel("Shadow Label", { exact: true }).count()).toBe(1);
+	});
+
 	it("uses aria-labelledby, then aria-label, before native labels for role queries", async () => {
 		const probe = labelProbe();
 		const current = await selectedTab(
@@ -858,6 +876,81 @@ describe("cmux Codex browser review regressions", () => {
 		expect(await current.playwright.elementInfo({ x: 11, y: 21 })).toEqual([
 			expect.objectContaining({ tagName: "input", role: "checkbox", ariaName: "Preferred ARIA" }),
 		]);
+	});
+
+	it("descends through open shadow roots for cmux elementInfo", async () => {
+		const view = {};
+		let host: Record<string, unknown>;
+		let shadowRoot: Record<string, unknown>;
+		const document = {
+			defaultView: view,
+			elementFromPoint: () => host,
+			getElementById: () => null,
+		};
+		const button = {
+			tagName: "BUTTON",
+			children: [],
+			ownerDocument: document,
+			parentElement: null,
+			innerText: "Shadow Action",
+			textContent: "Shadow Action",
+			outerHTML: "<button>Shadow Action</button>",
+			getRootNode: () => shadowRoot,
+			getAttribute: () => null,
+			hasAttribute: () => false,
+			getBoundingClientRect: () => ({ x: 10, y: 20, width: 90, height: 30 }),
+		};
+		shadowRoot = { host: undefined, elementFromPoint: () => button };
+		host = {
+			tagName: "DIV",
+			children: [],
+			ownerDocument: document,
+			parentElement: null,
+			shadowRoot,
+			getAttribute: () => null,
+			hasAttribute: () => false,
+		};
+		Reflect.set(shadowRoot, "host", host);
+		const current = await selectedTab(
+			facadeFor({
+				async codexEvaluate(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window: view });
+				},
+			}),
+		);
+
+		expect(await current.playwright.elementInfo({ x: 20, y: 25 })).toEqual([
+			expect.objectContaining({ tagName: "button", role: "button", visibleText: "Shadow Action" }),
+		]);
+	});
+
+	it("awaits asynchronous cmux media publication without calling renameSync", async () => {
+		const rename = Promise.withResolvers<void>();
+		const asyncRename = spyOn(fs.promises, "rename").mockImplementation(async () => await rename.promise);
+		const syncRename = spyOn(fs, "renameSync").mockImplementation(() => {
+			throw new Error("synchronous rename used");
+		});
+		spyOn(fs.promises, "writeFile").mockResolvedValue(undefined);
+		spyOn(fs.promises, "rm").mockResolvedValue(undefined);
+		const tab = new CmuxTab({ client: {} as never, surfaceId: "surface-contract" });
+		let settled = false;
+		const outcome = tab
+			.codexPersistFile("/tmp/cmux-media-contract.bin", new Uint8Array([1, 2, 3]), 1_000, "media download")
+			.then(
+				() => undefined,
+				error => error,
+			)
+			.finally(() => {
+				settled = true;
+			});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(asyncRename).toHaveBeenCalledTimes(1);
+		expect(syncRename).not.toHaveBeenCalled();
+		expect(settled).toBe(false);
+		rename.resolve();
+		expect(await outcome).toBeUndefined();
 	});
 
 	it("returns one canonical visible DOM DTO with cmux ref node ids", async () => {

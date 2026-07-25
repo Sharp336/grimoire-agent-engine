@@ -991,7 +991,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					content = await this.#runBeforeTabsContentDeadline(deadline, url, () => page.content());
 				}
 				this.#tabsContentRemaining(deadline, url);
-				output.push({ url: page.url(), title, content });
+				output.push({ url, title, content });
 			} catch {
 				throwIfAborted(this.#signal);
 				output.push({ url, title: null, content: null });

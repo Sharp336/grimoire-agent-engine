@@ -155,7 +155,8 @@ function labelCandidates(element: Element): string[] {
 	if (ariaLabel) values.push(ariaLabel);
 	const labelledBy = element.getAttribute("aria-labelledby");
 	if (labelledBy) {
-		const name = normalizeText(labelledBy.split(/\s+/).map(id => element.ownerDocument.getElementById(id)?.textContent ?? "").join(" "));
+		const root = element.getRootNode() as Document | ShadowRoot;
+		const name = normalizeText(labelledBy.split(/\s+/).map(id => root.getElementById(id)?.textContent ?? "").join(" "));
 		if (name) values.push(name);
 	}
 	return values;

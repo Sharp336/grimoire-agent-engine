@@ -99,8 +99,9 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	};
 	const labelledByText = element => {
 		const labelledBy = element.getAttribute("aria-labelledby");
+		const root = element.getRootNode?.() ?? element.ownerDocument;
 		return labelledBy
-			? normalizeText(labelledBy.split(/\\s+/).map(id => element.ownerDocument?.getElementById(id)?.textContent || "").join(" "))
+			? normalizeText(labelledBy.split(/\\s+/).map(id => root?.getElementById?.(id)?.textContent || "").join(" "))
 			: "";
 	};
 	const associatedLabelText = element => element.labels?.length ? normalizeText(Array.from(element.labels).map(label => textOf(label)).join(" ")) : "";
@@ -127,7 +128,15 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		}
 		return [root];
 	});
-	const descendants = roots => rootsFor(roots).flatMap(root => Array.from(root.querySelectorAll("*")));
+	const descendants = roots => rootsFor(roots).flatMap(root => {
+		const values = [];
+		const visit = scope => {
+			for (const element of Array.from(scope.querySelectorAll("*"))) values.push(element);
+			for (const element of Array.from(scope.querySelectorAll("*"))) if (element.shadowRoot) visit(element.shadowRoot);
+		};
+		visit(root);
+		return values;
+	});
 	const unique = values => [...new Set(values)];
 	const query = (value, roots = [document]) => {
 		switch (value.kind) {
@@ -303,9 +312,10 @@ const ELEMENT_INFO_SOURCE = `(x, y) => {
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const canonicalState = element => typeof globalThis.__ompCodexAriaState === "function" ? globalThis.__ompCodexAriaState(element) : null;
 	const viewOf = element => element?.ownerDocument?.defaultView || window;
+	const composedParent = element => element?.assignedSlot ?? element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
 	const accessibilityHidden = element => {
 		if (canonicalState(element)?.hidden === true) return true;
-		for (let current = element; current; current = current.parentElement) {
+		for (let current = element; current; current = composedParent(current)) {
 			if (current.hidden || current.inert === true || current.hasAttribute?.("inert") || trueState(current.getAttribute?.("aria-hidden"))) return true;
 			const style = viewOf(current).getComputedStyle?.(current);
 			if (style && (style.display === "none" || style.visibility === "hidden")) return true;
@@ -364,9 +374,18 @@ const ELEMENT_INFO_SOURCE = `(x, y) => {
 		String(element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim() ||
 		associatedLabelText(element) ||
 		String(element.getAttribute("alt") || element.getAttribute("title") || valueName(element) || textOf(element) || descendantAlternative(element)).replace(/\\s+/g, " ").trim();
-	let element = document.elementFromPoint(x, y);
+	const deepestElementFromPoint = (root, pointX, pointY) => {
+		let hit = root?.elementFromPoint?.(pointX, pointY) ?? null;
+		while (hit?.shadowRoot?.elementFromPoint) {
+			const nested = hit.shadowRoot.elementFromPoint(pointX, pointY);
+			if (!nested || nested === hit) break;
+			hit = nested;
+		}
+		return hit;
+	};
+	let element = deepestElementFromPoint(document, x, y);
 	if (element && accessibilityHidden(element)) return [];
-	while (element && !interactable(element)) element = element.parentElement;
+	while (element && !interactable(element)) element = composedParent(element);
 	if (!element) return [];
 	const text = textOf(element);
 	const ariaName = accessibleName(element);

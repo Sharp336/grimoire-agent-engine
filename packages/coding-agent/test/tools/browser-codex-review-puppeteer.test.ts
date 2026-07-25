@@ -356,6 +356,29 @@ describe("Puppeteer Codex download adapter", () => {
 		}
 	});
 
+	it("preserves each requested tabs.content URL after navigation redirects", async () => {
+		const requestedUrl = "https://fixture.test/requested";
+		const temporaryPage = {
+			url: () => "https://fixture.test/redirected",
+			goto: async () => undefined,
+			title: async () => "Redirected fixture",
+			content: async () => "<html>redirected</html>",
+			close: async () => undefined,
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: { url: () => "https://fixture.test/selected" } as never,
+			browser: { newPage: async () => temporaryPage } as never,
+			signal: new AbortController().signal,
+			cwd: ".",
+			captureScreenshot: async () => "",
+		});
+
+		await expect(
+			adapter.invoke("tabs.content", { urls: [requestedUrl], contentType: "html", timeoutMs: 1_000 }),
+		).resolves.toEqual([{ url: requestedUrl, title: "Redirected fixture", content: "<html>redirected</html>" }]);
+		await adapter.dispose();
+	});
 	it("uses one shrinking tabs.content deadline for acquisition and every content phase, then a fresh cleanup bound", async () => {
 		vi.useFakeTimers();
 		let now = 0;

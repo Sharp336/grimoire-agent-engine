@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { buildAriaSnapshotScript, parseAriaRefSelector } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { buildAriaRuntimeInstallerSource } from "@oh-my-pi/pi-coding-agent/tools/browser/aria/aria-snapshot";
+import { parseHTML } from "linkedom";
 
 describe("parseAriaRefSelector", () => {
 	it("accepts the explicit aria-ref prefixes and returns the bare id", () => {
@@ -108,6 +109,32 @@ describe("generated ARIA locator runtime", () => {
 					child: { kind: "css", selector: "#deep-target" },
 				}),
 			).toEqual([deepTarget]);
+		} finally {
+			delete globals.__ompCodexAriaQuery;
+			delete globals.__ompCodexAriaState;
+		}
+	});
+
+	it("resolves aria-labelledby references within an open shadow root", () => {
+		const { document, window } = parseHTML("<html><body><div id=host></div></body></html>");
+		const host = document.getElementById("host");
+		if (!host) throw new Error("Expected shadow host");
+		const shadowRoot = host.attachShadow({ mode: "open" });
+		shadowRoot.innerHTML = '<span id="shadow-label">Shadow Label</span><input aria-labelledby="shadow-label">';
+		const control = shadowRoot.querySelector("input");
+		if (!control) throw new Error("Expected shadow control");
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
+		const globals = globalThis as unknown as Record<string, unknown>;
+		try {
+			new Function("document", "Element", "window", `return (${buildAriaRuntimeInstallerSource()})();`)(
+				document,
+				window.Element,
+				window,
+			);
+			const query = globals.__ompCodexAriaQuery as (descriptor: unknown) => unknown[];
+			expect(query({ kind: "label", text: { kind: "string", value: "Shadow Label", exact: true } })).toEqual([
+				control,
+			]);
 		} finally {
 			delete globals.__ompCodexAriaQuery;
 			delete globals.__ompCodexAriaState;
