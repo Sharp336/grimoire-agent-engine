@@ -109,8 +109,10 @@ function trackPromise<T>(promise: Promise<T>): TrackedPromise<T> {
 	return tracked;
 }
 
-function delay(ms: number): Promise<void> {
-	return Bun.sleep(ms);
+function cancelableDelay(ms: number): { promise: Promise<void>; cancel: () => void } {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const timer = setTimeout(resolve, ms);
+	return { promise, cancel: () => clearTimeout(timer) };
 }
 
 /**
@@ -522,10 +524,15 @@ export class MCPManager {
 		}
 
 		if (connectionTasks.length > 0) {
-			await Promise.race([
-				Promise.allSettled(connectionTasks.map(task => task.tracked.promise)),
-				delay(startupTimeoutMs),
-			]);
+			const startupDelay = cancelableDelay(startupTimeoutMs);
+			try {
+				await Promise.race([
+					Promise.allSettled(connectionTasks.map(task => task.tracked.promise)),
+					startupDelay.promise,
+				]);
+			} finally {
+				startupDelay.cancel();
+			}
 
 			const cachedTools = new Map<string, MCPToolDefinition[]>();
 			const pendingTasks = connectionTasks.filter(task => task.tracked.status === "pending");

@@ -1593,6 +1593,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agentRegistry.unregister(resolvedAgentId, ref);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
+	let ownedMCPManager: MCPManager | undefined;
+	const previousMCPManager = MCPManager.instance();
 
 	try {
 		const getActiveModelString = (): string | undefined => {
@@ -1790,6 +1792,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
 				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				ownedMCPManager = mcpManager;
 				mcpManager.setAuthStorage(authStorage);
 				toolSession.mcpManager = mcpManager;
 
@@ -1862,6 +1865,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					authStorage,
 				});
 				mcpManager = mcpResult.manager;
+				ownedMCPManager = mcpManager;
 				toolSession.mcpManager = mcpManager;
 
 				if (settings.get("mcp.notifications")) {
@@ -3510,6 +3514,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
 				if (hasRegistered) unregisterUnlessParked();
+				if (ownedMCPManager) {
+					await ownedMCPManager.disconnectAll();
+					if (MCPManager.instance() === ownedMCPManager) MCPManager.setInstance(previousMCPManager);
+				}
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {
 						AsyncJobManager.setInstance(undefined);
