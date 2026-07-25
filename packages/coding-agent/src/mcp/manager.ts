@@ -139,6 +139,33 @@ export function resolveSubscriptionPostAction(
 	if (currentEpoch !== subscriptionEpoch) return "ignore";
 	return "apply";
 }
+
+/** Cap on buffered resource-updated events before a listener is installed. */
+export const PENDING_RESOURCE_UPDATE_CAP = 128;
+
+/**
+ * Queue a resource-updated event that arrived before {@link MCPManager.setOnResourcesChanged}
+ * had a listener. Dedupes by server+uri; drops new keys once the cap is hit.
+ */
+export function queuePendingResourceUpdate(
+	pending: Map<string, { serverName: string; uri: string }>,
+	serverName: string,
+	uri: string,
+	cap: number = PENDING_RESOURCE_UPDATE_CAP,
+): void {
+	const key = `${serverName}\0${uri}`;
+	if (!pending.has(key) && pending.size >= cap) return;
+	pending.set(key, { serverName, uri });
+}
+
+/** Drain buffered resource-updated events in insertion order. */
+export function takePendingResourceUpdates(
+	pending: Map<string, { serverName: string; uri: string }>,
+): Array<{ serverName: string; uri: string }> {
+	const items = [...pending.values()];
+	pending.clear();
+	return items;
+}
 /** Result of loading MCP tools */
 export interface MCPLoadResult {
 	/** Loaded tools as CustomTool instances */
@@ -213,6 +240,12 @@ export class MCPManager {
 	#notificationsEpoch = 0;
 	#subscribedResources = new Map<string, Set<string>>();
 	#pendingResourceRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void> }>();
+	/**
+	 * Resource-updated notifications that arrived before a session listener was
+	 * installed (e.g. during `mcp.awaitStartupMs` discovery). Flushed by
+	 * {@link setOnResourcesChanged}.
+	 */
+	#pendingResourceUpdates = new Map<string, { serverName: string; uri: string }>();
 	#pendingReconnections = new Map<string, Promise<MCPServerConnection | null>>();
 	/** Preserved configs for reconnection after connection loss. */
 	#serverConfigs = new Map<string, MCPServerConfig>();
@@ -245,9 +278,14 @@ export class MCPManager {
 
 	/**
 	 * Set a callback to fire when any server's resources change.
+	 * Replays any resource-updated events that arrived before the listener was
+	 * installed (awaited-startup discovery window).
 	 */
 	setOnResourcesChanged(handler: (serverName: string, uri: string) => void): void {
 		this.#onResourcesChanged = handler;
+		for (const { serverName, uri } of takePendingResourceUpdates(this.#pendingResourceUpdates)) {
+			handler(serverName, uri);
+		}
 	}
 
 	/**
@@ -653,7 +691,13 @@ export class MCPManager {
 				const uri = (params as { uri?: string })?.uri;
 				const subscribed = this.#subscribedResources.get(serverName);
 				if (uri && subscribed?.has(uri)) {
-					this.#onResourcesChanged?.(serverName, uri);
+					if (this.#onResourcesChanged) {
+						this.#onResourcesChanged(serverName, uri);
+					} else {
+						// Discovery can complete (and emit updates) before the
+						// session wires its listener under mcp.awaitStartupMs.
+						queuePendingResourceUpdate(this.#pendingResourceUpdates, serverName, uri);
+					}
 				}
 				break;
 			}
@@ -791,6 +835,9 @@ export class MCPManager {
 		this.#serverConfigs.delete(name);
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
+		for (const key of this.#pendingResourceUpdates.keys()) {
+			if (key.startsWith(`${name}\0`)) this.#pendingResourceUpdates.delete(key);
+		}
 
 		const connection = this.#connections.get(name);
 
@@ -836,6 +883,7 @@ export class MCPManager {
 		this.#pendingReconnections.clear();
 		this.#pendingConnectionAborts.clear();
 		this.#pendingResourceRefresh.clear();
+		this.#pendingResourceUpdates.clear();
 		this.#sources.clear();
 		this.#serverConfigs.clear();
 		this.#connections.clear();
