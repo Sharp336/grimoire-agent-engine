@@ -3589,6 +3589,12 @@ export class AgentSession {
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();
+		// Same reason, and one more: an armed wake closes over this session's manager, so a
+		// schedule surviving teardown would both pin the disposed session and later fire
+		// getEntries/appendCustomEntry against a SessionManager already closed below.
+		this.#sessionSchedule?.dispose();
+		this.#sessionSchedule = undefined;
+		this.#sessionScheduleTimers.clearAll();
 		this.abortRetry();
 		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
