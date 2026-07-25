@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a MiniMax Token Plan usage provider, replacing the no-op `minimax-code` stub: `/usage` now queries `GET /v1/token_plan/remains` with the `sk-cp-…` API key from `/login minimax-code` and maps each `model_remains[]` product row to its own 5-hour + weekly `UsageLimit` pair (per-product, not aggregated), inverting counts to remaining, treating `*_status === 3` as the Coding Plan's unlimited state, and filtering non-`general` product rows (e.g. video).
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed
