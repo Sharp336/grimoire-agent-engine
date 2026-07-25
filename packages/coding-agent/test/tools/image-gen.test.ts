@@ -235,7 +235,11 @@ describe("imageGenTool", () => {
 		expect(result.details?.imageCount).toBe(1);
 	});
 
-	it("uses the Codex Images API for official-JWT text generation", async () => {
+	it.each([
+		"https://chatgpt.com/backend-api",
+		"https://chatgpt.com/backend-api/codex",
+		"https://chatgpt.com/backend-api/codex/responses",
+	])("uses the Codex Images API for official-JWT text generation with base URL %s", async baseUrl => {
 		setImageProviderOrder(["openai-codex"]);
 		let requestUrl: string | undefined;
 		let requestMethod: string | undefined;
@@ -263,7 +267,7 @@ describe("imageGenTool", () => {
 			provider: "openai-codex",
 			id: "gpt-5.5",
 			name: "GPT-5.5",
-			baseUrl: "https://chatgpt.com/backend-api",
+			baseUrl,
 		} as Model;
 		const activeModel = {
 			api: "anthropic-messages",

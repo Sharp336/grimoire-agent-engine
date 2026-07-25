@@ -2,6 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	CODEX_BASE_URL,
 	CODEX_CLIENT_VERSION,
@@ -792,7 +793,7 @@ function getOpenAIHostedImageProvider(model: Model): ImageProvider {
 
 function isOfficialCodexSubscriptionImageRequest(model: Model, apiKey: string): boolean {
 	if (model.api !== "openai-codex-responses" && model.provider !== "openai-codex") return false;
-	return getOpenAIBaseUrl(model) === CODEX_BASE_URL && getCodexAccountId(apiKey) !== undefined;
+	return getCodexBackendRoot(model) === CODEX_BASE_URL && getCodexAccountId(apiKey) !== undefined;
 }
 
 function resolveOpenAIImageSize(aspectRatio: string | undefined, imageSize: string | undefined): string | undefined {
@@ -931,15 +932,17 @@ function getOpenAIBaseUrl(model: Model): string {
 	return (model.baseUrl || fallback).replace(/\/+$/, "");
 }
 
+function getCodexBackendRoot(model: Model): string {
+	const responsesUrl = resolveCodexResponsesUrl(getOpenAIBaseUrl(model));
+	return responsesUrl.slice(0, -URL_PATHS.CODEX_RESPONSES.length);
+}
+
 function getOpenAIResponsesUrl(model: Model): string {
 	const baseUrl = getOpenAIBaseUrl(model);
 	if (model.api !== "openai-codex-responses" && model.provider !== "openai-codex") {
 		return `${baseUrl}/responses`;
 	}
-	const baseWithSlash = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-	return new URL(URL_PATHS.RESPONSES.slice(1), baseWithSlash)
-		.toString()
-		.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES);
+	return resolveCodexResponsesUrl(baseUrl);
 }
 
 function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string | undefined): Headers {
@@ -1066,7 +1069,7 @@ async function generateCodexImage(
 ): Promise<OpenAIHostedImageResult> {
 	const requestBody = buildCodexImageRequest(assemblePrompt(params), params, inputImages);
 	const path = inputImages.length > 0 ? CODEX_IMAGE_EDITS_PATH : CODEX_IMAGE_GENERATIONS_PATH;
-	const response = await fetchImpl(`${getOpenAIBaseUrl(model)}${path}`, {
+	const response = await fetchImpl(`${getCodexBackendRoot(model)}${path}`, {
 		method: "POST",
 		headers: buildCodexImageHeaders(model, apiKey),
 		body: JSON.stringify(requestBody),
