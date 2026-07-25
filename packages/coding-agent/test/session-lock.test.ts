@@ -403,6 +403,31 @@ describe("session lock", () => {
 		lock.release();
 	});
 
+	it("clears its claim when releasing after heartbeat cleanup fails", () => {
+		const { session } = fixture();
+		const lock = acquireSessionLock(session);
+		const claimPath = `${lockPathForSession(session)}.steal`;
+		const unlinkSync = fs.unlinkSync;
+		let failed = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (!failed && String(target) === claimPath) {
+				failed = true;
+				const error = new Error("claim cleanup failed") as NodeJS.ErrnoException;
+				error.code = "EACCES";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		expect(() => lock.heartbeat()).toThrow(SessionLockError);
+		expect(fs.existsSync(lockPathForSession(session))).toBe(true);
+		expect(fs.existsSync(claimPath)).toBe(true);
+		unlinkSpy.mockRestore();
+
+		lock.release();
+		expect(fs.existsSync(lockPathForSession(session))).toBe(false);
+		expect(fs.existsSync(claimPath)).toBe(false);
+	});
+
 	it("recovers only dead local orphan claims, never foreign claims", () => {
 		const { session } = fixture();
 		const claimPath = `${lockPathForSession(session)}.steal`;

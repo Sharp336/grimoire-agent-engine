@@ -753,6 +753,7 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		if (released) return;
 		const claimPath = claimPathFor(lockPath);
 		let claimed = false;
+		let failure: SessionLockError | undefined;
 		try {
 			recoverClaim(claimPath, normalized, rt);
 			claimed = writeClaim(claimPath, claim());
@@ -779,11 +780,16 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 			writeAtomic(lockPath, next);
 			record.heartbeatAt = next.heartbeatAt;
 		} catch (error) {
-			if (error instanceof SessionLockError) throw error;
-			throw ioError(normalized, lockPath, error);
-		} finally {
-			if (claimed) removeClaim(claimPath, normalized, rt.ownerId);
+			failure = error instanceof SessionLockError ? error : ioError(normalized, lockPath, error);
 		}
+		if (claimed) {
+			try {
+				removeClaim(claimPath, normalized, rt.ownerId);
+			} catch (error) {
+				failure ??= ioError(normalized, lockPath, error);
+			}
+		}
+		if (failure) throw failure;
 	};
 	const reportHeartbeatError = (error: unknown): void => {
 		const typed = error instanceof SessionLockError ? error : ioError(normalized, lockPath, error);
@@ -822,6 +828,7 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 					if (errorCode(error) !== "ENOENT") throw ioError(normalized, lockPath, error);
 				}
 			}
+			removeClaim(claimPathFor(lockPath), normalized, rt.ownerId);
 			released = true;
 			clearInterval(timer);
 		},

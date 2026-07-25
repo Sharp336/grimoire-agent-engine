@@ -172,6 +172,39 @@ describe("SessionManager persistent lock integration", () => {
 		await manager.close();
 	});
 
+	it("rolls back a move when source ownership cannot be released", async () => {
+		const { cwd, sessions } = fixture();
+		const targetCwd = path.join(path.dirname(cwd), "target-cwd");
+		const targetSessions = path.join(path.dirname(sessions), "target-sessions");
+		fs.mkdirSync(targetCwd);
+		const manager = SessionManager.create(cwd, sessions);
+		await manager.ensureOnDisk();
+		const oldFile = manager.getSessionFile();
+		if (!oldFile) throw new Error("missing session file");
+		const newFile = path.join(targetSessions, path.basename(oldFile));
+		const oldLockPath = lockPathForSession(oldFile);
+		const unlinkSync = fs.unlinkSync;
+		let failed = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (!failed && String(target) === oldLockPath) {
+				failed = true;
+				const error = new Error("source lock cleanup failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		await expect(manager.moveTo(targetCwd, targetSessions)).rejects.toBeInstanceOf(SessionLockError);
+		unlinkSpy.mockRestore();
+
+		expect(manager.getSessionFile()).toBe(oldFile);
+		expect(fs.existsSync(oldFile)).toBe(true);
+		expect(fs.existsSync(newFile)).toBe(false);
+		expect(fs.existsSync(lockPathForSession(newFile))).toBe(false);
+		expect(inspectSessionLock(oldFile).status).toBe("live");
+		await manager.close();
+	});
+
 	it("releases target ownership when move rollback fails", async () => {
 		const { cwd, sessions } = fixture();
 		const targetCwd = path.join(path.dirname(cwd), "target-cwd");
@@ -256,12 +289,27 @@ describe("SessionManager persistent lock integration", () => {
 		fs.writeFileSync(target, "session");
 		fs.linkSync(target, path.join(sessions, "alias.jsonl"));
 
-		// No writer can hold a lock on a multiply-linked file, so refusing the
-		// deletion would strand it instead of protecting a live owner.
+		// With no sidecar owner to protect, deletion may unlink one hard-link path.
 		const manager = SessionManager.create(cwd, sessions);
 		await manager.dropSession(target);
 		expect(fs.existsSync(target)).toBe(false);
 		await manager.close();
+	});
+
+	it("refuses hard-link deletion when the target acquired ownership first", async () => {
+		const { cwd, sessions } = fixture();
+		const owner = SessionManager.create(cwd, sessions);
+		await owner.ensureOnDisk();
+		const target = owner.getSessionFile();
+		if (!target) throw new Error("missing target session file");
+		fs.linkSync(target, path.join(sessions, "alias.jsonl"));
+
+		const deleter = SessionManager.create(cwd, sessions);
+		await expect(deleter.dropSession(target)).rejects.toBeInstanceOf(SessionLockError);
+		expect(fs.existsSync(target)).toBe(true);
+		expect(inspectSessionLock(target).status).toBe("live");
+		await deleter.close();
+		await owner.close();
 	});
 
 	it("holds ownership until session deletion finishes", async () => {

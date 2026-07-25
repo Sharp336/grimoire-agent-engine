@@ -60,7 +60,13 @@ import {
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
 import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
-import { acquireSessionLock, lockPathForSession, SessionLockError, type SessionLockHandle } from "./session-lock";
+import {
+	acquireSessionLock,
+	inspectSessionLock,
+	lockPathForSession,
+	SessionLockError,
+	type SessionLockHandle,
+} from "./session-lock";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -1452,10 +1458,27 @@ export class SessionManager {
 		try {
 			return acquireSessionLock(sessionFile, { onHeartbeatError: this.#sessionLockErrorHandler });
 		} catch (error) {
-			// A session file that cannot carry a lock cannot have a live lock
-			// owner either, so refusing to delete it would strand the file.
-			if (error instanceof SessionLockError && error.code === "unsupported") return undefined;
-			throw error;
+			if (!(error instanceof SessionLockError) || error.code !== "unsupported") throw error;
+			const inspection = inspectSessionLock(sessionFile);
+			if (inspection.status === "live" || inspection.status === "suspect") {
+				throw new SessionLockError(
+					"locked",
+					`Session is already writable by ${inspection.record?.ownerId ?? "another process"}`,
+					sessionFile,
+					inspection.lockPath,
+					inspection,
+				);
+			}
+			if (inspection.status === "malformed") {
+				throw new SessionLockError(
+					"malformed",
+					`Session lock is malformed; refusing to overwrite ${inspection.lockPath}`,
+					sessionFile,
+					inspection.lockPath,
+					inspection,
+				);
+			}
+			return undefined;
 		}
 	}
 
@@ -1594,7 +1617,6 @@ export class SessionManager {
 
 				let sessionMoved = false;
 				let artifactsMoved = false;
-
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
 						await fs.promises.rename(oldSessionFile, newSessionFile);
