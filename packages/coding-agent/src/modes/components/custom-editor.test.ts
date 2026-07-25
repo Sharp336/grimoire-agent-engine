@@ -302,6 +302,46 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(events).toEqual(["start", "end"]);
 	});
 
+	it("uses the configured key and preserves the default space behavior when remapped", () => {
+		const { editor, events } = makeEditor();
+		editor.setActionKeys("app.stt.pushToTalk", ["x"]);
+
+		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(editor.getText()).toBe(" ".repeat(SPACE_HOLD_MECHANICAL_RUN + 2));
+		expect(events).toEqual([]);
+
+		for (let i = 0; i < SPACE_HOLD_MECHANICAL_RUN + 2; i++) {
+			vi.advanceTimersByTime(REPEAT_GAP_MS);
+			editor.handleInput("x");
+		}
+		expect(editor.getText()).toBe(" ".repeat(SPACE_HOLD_MECHANICAL_RUN + 2));
+		expect(events).toEqual(["start"]);
+
+		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
+		expect(events).toEqual(["start", "end"]);
+	});
+
+	it("does not combine separate configured keys into one hold", () => {
+		const { editor, events } = makeEditor();
+		editor.setActionKeys("app.stt.pushToTalk", ["x", "y"]);
+
+		for (const key of ["x", "y", "x", "y", "x", "y"]) {
+			vi.advanceTimersByTime(REPEAT_GAP_MS);
+			editor.handleInput(key);
+		}
+
+		expect(editor.getText()).toBe("xyxyxy");
+		expect(events).toEqual([]);
+	});
+
+	it("leaves the default key unchanged when push-to-talk is explicitly unbound", () => {
+		const { editor, events } = makeEditor();
+		editor.setActionKeys("app.stt.pushToTalk", []);
+		feedSpaces(editor, 8, REPEAT_GAP_MS);
+		expect(editor.getText()).toBe(" ".repeat(8));
+		expect(events).toEqual([]);
+	});
+
 	it("does not trigger when the space bar is smashed at an irregular cadence", () => {
 		const { editor, events } = makeEditor();
 		// Fast but jittery, the way a human mashes — not the metronomic delta of OS auto-repeat.

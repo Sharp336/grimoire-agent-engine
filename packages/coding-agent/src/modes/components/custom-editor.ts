@@ -39,6 +39,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.stt.pushToTalk"
 >;
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
@@ -61,6 +62,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.stt.pushToTalk": ["space"],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -503,14 +505,13 @@ export class CustomEditor extends Editor {
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
 	onLeftAtStart?: () => void;
 
-	/** Fired when a sustained space-bar hold is recognized — the push-to-talk STT start. The
-	 *  optimistically-typed spaces have already been deleted by the time this runs. */
+	/** Fired when a sustained push-to-talk key hold is recognized. Any optimistically inserted
+	 *  characters have already been deleted by the time this runs. */
 	onSpaceHoldStart?: () => void;
-	/** Fired when the held space bar is released (detected as an idle gap with no further repeated
-	 *  spaces) — the push-to-talk STT stop. */
+	/** Fired when the push-to-talk key is released (detected as an idle gap with no further repeats). */
 	onSpaceHoldEnd?: () => void;
-	/** Gate for the space-hold gesture. Returns false to keep the space bar inserting spaces
-	 *  normally; wired to `stt.enabled` so disabling STT restores plain space behavior. */
+	/** Gate for the push-to-talk gesture. Returns false to keep the configured key's normal behavior;
+	 *  wired to `stt.enabled` so disabling STT restores normal input. */
 	sttHoldEnabled?: () => boolean;
 
 	/** Custom key handlers from extensions and non-built-in app actions. */
@@ -529,17 +530,21 @@ export class CustomEditor extends Editor {
 	/** Input chunks deferred behind an in-flight paste, drained in FIFO order once the paste
 	 *  count returns to zero. */
 	#pendingInput: string[] = [];
-	/** Spaces actually inserted in the current run; tracked back out when a hold is recognized. */
+	/** Characters inserted by the candidate key run; tracked back out when a hold is recognized. */
 	#spaceRunInserted = 0;
-	/** Consecutive "mechanical" deltas (fast + steady); a sustained run of these confirms a held bar. */
+	/** Canonical key for the current candidate run, preventing separate configured keys from combining. */
+	#spaceRunKey: string | undefined;
+	/** Consecutive "mechanical" deltas (fast + steady); a sustained run confirms a held key. */
 	#mechanicalRun = 0;
-	/** Inter-space gap (ms) of the previous space pair, compared against the next to judge steadiness. */
+	/** Gap (ms) of the previous candidate-key pair, compared with the next to judge steadiness. */
 	#prevSpaceGap: number | undefined;
-	/** Monotonic timestamp (ms) of the last space, to measure the gap to the next one. */
+	/** Monotonic timestamp (ms) of the last candidate keypress. */
 	#lastSpaceAt = Number.NEGATIVE_INFINITY;
-	/** True while a recognized space-hold push-to-talk recording is in progress. */
+	/** Canonical key whose recognized hold currently owns push-to-talk recording. */
+	#spaceHoldKey: string | undefined;
+	/** True while a recognized push-to-talk key hold is in progress. */
 	#spaceHoldActive = false;
-	/** Idle timer that fires `onSpaceHoldEnd` once repeated spaces stop arriving. */
+	/** Idle timer that fires `onSpaceHoldEnd` once repeated keypresses stop arriving. */
 	#spaceHoldTimer: NodeJS.Timeout | undefined;
 	#actionKeys = new Map<ConfigurableEditorAction, KeyId[]>(
 		Object.entries(DEFAULT_ACTION_KEYS).map(([action, keys]) => [action as ConfigurableEditorAction, [...keys]]),
@@ -602,61 +607,69 @@ export class CustomEditor extends Editor {
 		return this.onSpaceHoldStart !== undefined && (this.sttHoldEnabled?.() ?? false) && !this.isShowingAutocomplete();
 	}
 
-	/** Drive the space-hold push-to-talk state machine. Returns true when the gesture consumed the
-	 *  input so it must not reach normal editing. A held space bar emits OS auto-repeat: a *steady*
-	 *  stream of spaces at a fixed fast interval. We watch the inter-space deltas and only recognize a
+	/** Drive the configurable push-to-talk key-hold state machine. Returns true when the gesture
+	 *  consumed the input so it must not reach normal editing. A held key emits OS auto-repeat: a
+	 *  steady stream at a fixed fast interval. We watch the inter-key deltas and only recognize a
 	 *  hold once {@link SPACE_HOLD_MECHANICAL_RUN} consecutive deltas are "mechanical" — both
-	 *  auto-repeat-fast and near-identical (see {@link gapsAreMechanical}). Smashing the bar is fast
-	 *  but jittery and deliberate taps are too slow, so neither escalates and both keep typing real
-	 *  spaces; the few spaces typed before a real hold is recognized are tracked back out. */
+	 *  auto-repeat-fast and near-identical (see {@link gapsAreMechanical}). Deliberate taps and
+	 *  irregular key mashing keep their normal behavior; characters inserted before a real hold is
+	 *  recognized are tracked back out. */
 	#handleSpaceHold(data: string, canonical: string | undefined): boolean {
-		const isSpace = canonical === "space";
+		const isPushToTalkKey = canonical !== undefined && this.#matchesAction(canonical, "app.stt.pushToTalk");
 		if (this.#spaceHoldActive) {
-			if (isSpace) {
+			if (canonical === this.#spaceHoldKey) {
 				// Auto-repeat while held: swallow it and keep the release timer alive.
 				this.#armSpaceHoldReleaseTimer();
 				return true;
 			}
-			// Any non-space means the bar was released — stop recording, then let the key through.
+			// Any other key means the held key was released — stop recording, then let it through.
 			this.#endSpaceHold();
 			return false;
 		}
-		if (!isSpace) {
+		if (!isPushToTalkKey) {
 			this.#resetSpaceRun();
 			return false;
 		}
 		if (!this.#spaceHoldGestureEnabled()) return false;
+		if (this.#spaceRunKey !== canonical) {
+			this.#resetSpaceRun();
+			this.#spaceRunKey = canonical;
+		}
 		const now = performance.now();
 		const gap = now - this.#lastSpaceAt;
 		const prevGap = this.#prevSpaceGap;
 		this.#lastSpaceAt = now;
 		this.#prevSpaceGap = gap;
 		if (prevGap === undefined || !gapsAreMechanical(gap, prevGap)) {
-			// First space, a deliberate tap, or jittery smashing: not a steady machine cadence yet, so
-			// type a real space and reset the mechanical run.
+			// First keypress, a deliberate tap, or jittery mashing: preserve its normal behavior and
+			// reset the mechanical run.
 			this.#mechanicalRun = 0;
+			const beforeLength = this.getText().length;
 			super.handleInput(data);
-			this.#spaceRunInserted++;
+			this.#spaceRunInserted += Math.max(0, this.getText().length - beforeLength);
 			return true;
 		}
 		// Steady fast repeat: swallow it. Once the cadence has held for SPACE_HOLD_MECHANICAL_RUN
-		// deltas it's a held bar — track back the few pre-burst spaces already typed and start.
+		// deltas, track back any inserted characters and start recording.
 		if (++this.#mechanicalRun >= SPACE_HOLD_MECHANICAL_RUN) {
+			const holdKey = canonical;
 			this.deleteBeforeCursor(this.#spaceRunInserted);
 			this.#resetSpaceRun();
-			this.#beginSpaceHold();
+			this.#beginSpaceHold(holdKey);
 		}
 		return true;
 	}
 
 	#resetSpaceRun(): void {
 		this.#spaceRunInserted = 0;
+		this.#spaceRunKey = undefined;
 		this.#mechanicalRun = 0;
 		this.#prevSpaceGap = undefined;
 		this.#lastSpaceAt = Number.NEGATIVE_INFINITY;
 	}
 
-	#beginSpaceHold(): void {
+	#beginSpaceHold(key: string): void {
+		this.#spaceHoldKey = key;
 		this.#spaceHoldActive = true;
 		this.#armSpaceHoldReleaseTimer();
 		this.onSpaceHoldStart?.();
@@ -674,6 +687,7 @@ export class CustomEditor extends Editor {
 	#endSpaceHold(): void {
 		if (!this.#spaceHoldActive) return;
 		this.#spaceHoldActive = false;
+		this.#spaceHoldKey = undefined;
 		this.#resetSpaceRun();
 		if (this.#spaceHoldTimer) {
 			clearTimeout(this.#spaceHoldTimer);
@@ -770,7 +784,7 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
-		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
+		// Configured key-hold push-to-talk: a sustained key starts/stops STT instead of typing.
 		if (this.#handleSpaceHold(data, canonical)) return;
 
 		if (canonical !== undefined) {
