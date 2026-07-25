@@ -35,6 +35,9 @@ export interface Args {
 	prewalkInto?: string;
 	planYolo?: boolean;
 	planYoloInto?: string;
+	mission?: boolean;
+	missionWorkerModel?: string;
+	missionValidatorModel?: string;
 	maxTime?: number;
 	apiKey?: string;
 	systemPrompt?: string;
@@ -245,6 +248,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPrewalk = true;
 		} else if (arg === "--plan-yolo") {
 			result.planYolo = true;
+		} else if (arg === "--mission") {
+			result.mission = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 		} else if (arg === "--print-thoughts") {
@@ -292,7 +297,34 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 	}
 
+	assertMissionLaunchFlags(result);
 	return result;
+}
+
+/**
+ * Mission launch flags are for persisted text interactive/print mode only.
+ * Protocol modes and ephemeral sessions cannot host them.
+ */
+function assertMissionLaunchFlags(result: Args): void {
+	const used: string[] = [];
+	if (result.mission) used.push("--mission");
+	if (result.missionWorkerModel !== undefined) used.push("--mission-worker-model");
+	if (result.missionValidatorModel !== undefined) used.push("--mission-validator-model");
+	if (used.length === 0) return;
+
+	const flagList =
+		used.length === 1
+			? used[0]!
+			: used.length === 2
+				? `${used[0]} and ${used[1]}`
+				: `${used.slice(0, -1).join(", ")}, and ${used[used.length - 1]}`;
+
+	if (result.mode === "rpc" || result.mode === "rpc-ui" || result.mode === "acp") {
+		throw new CliUsageError(`${flagList} cannot be used with --mode ${result.mode}`);
+	}
+	if (result.noSession) {
+		throw new CliUsageError(`${flagList} cannot be used with --no-session`);
+	}
 }
 
 /**

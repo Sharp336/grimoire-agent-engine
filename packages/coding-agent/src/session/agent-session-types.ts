@@ -25,6 +25,7 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ToolSession } from "../tools";
 import type { XdevRegistry } from "../tools/xdev";
 import type { SessionManager } from "./session-manager";
 
@@ -140,6 +141,15 @@ export interface AgentSessionConfig {
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings. */
 	toolRegistry?: Map<string, AgentTool>;
+	/** The session's ToolSession. MissionRuntime spawns mission children through it. */
+	toolSession?: ToolSession;
+	/**
+	 * Register an id-scoped cold reviver for one mission worker; returns its unregister handle.
+	 *
+	 * Supplied by the launch host, not built here: the reviver factory needs auth storage and
+	 * LSP settings that live at the call site, not on AgentSession.
+	 */
+	registerPersistedSubagentReviver?: (agentId: string) => (() => void) | undefined;
 	/** Creates tools registered only while vibe mode is active. */
 	createVibeTools?: () => AgentTool[];
 	/** Names whose current registry entry is the built-in implementation. */

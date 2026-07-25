@@ -179,6 +179,23 @@ export default class Index extends Command {
 			options: ["always-ask", "write", "yolo"],
 			description: "Override tools.approvalMode for this session (always-ask|write|yolo)",
 		}),
+		// `--mission` / `--mission-worker-model` / `--mission-validator-model`: declared here so
+		// oclif's auto-generated `--help` lists them. Runtime parsing happens in `cli/args.ts
+		// parseArgs` — `runRootCommand` consumes the manual-parser output, not these oclif flag
+		// values. `assertMissionLaunchFlags` (cli/args.ts) already rejects combining any of these
+		// with `--mode rpc|rpc-ui|acp` or `--no-session`. If you rename or remove any form, update
+		// both `cli/args.ts` (Args interface + assertMissionLaunchFlags) and `cli/flag-tables.ts`
+		// (VALUELESS_FLAGS / STRING_SETTERS) in lockstep.
+		mission: Flags.boolean({
+			description:
+				"Start a mission: consume the initial prompt/piped input as the goal and run a single planning turn (persisted text/print mode only)",
+		}),
+		"mission-worker-model": Flags.string({
+			description: "Model override for implementation workers (or PI default task model)",
+		}),
+		"mission-validator-model": Flags.string({
+			description: "Model override for scrutiny/user-testing validators (or PI default model)",
+		}),
 	};
 
 	static examples = [

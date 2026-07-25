@@ -1,10 +1,18 @@
+import * as fs from "node:fs";
 import { type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
-import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDbPath,
+	getAgentDir,
+	getProjectDir,
+	getTranscriptDbPath,
+	logger,
+	normalizePathForComparison,
+} from "@oh-my-pi/pi-utils";
 import {
 	type AdvisorConfigScope,
 	discoverAdvisorConfigs,
@@ -45,6 +53,7 @@ import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../s
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { FileSessionStorage } from "../../session/session-storage";
+import { TranscriptIndex } from "../../session/transcript-index";
 import { type LogoutAccount, toLogoutAccounts } from "../../slash-commands/helpers/logout";
 import {
 	describeRedeemOutcome,
@@ -87,6 +96,7 @@ import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
+import { SessionMapComponent } from "../components/session-map";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
@@ -1348,7 +1358,31 @@ export class SelectorController {
 		// invites the user to Tab into all-projects rather than silently surfacing
 		// every project's history when the cwd has nothing to resume. See #3099.
 		const historyStorage = this.ctx.historyStorage;
-		const historyMatcher = historyStorage ? (query: string) => historyStorage.matchingSessionIds(query) : undefined;
+		let historyMatcher = historyStorage ? (query: string) => historyStorage.matchingSessionIds(query) : undefined;
+		// Transcript matches are opt-in: the DB exists only after `/session search`
+		// has run. Check once at selector build; never build the index here.
+		const transcriptDbPath = getTranscriptDbPath();
+		if (fs.existsSync(transcriptDbPath)) {
+			const historyOnly = historyMatcher;
+			historyMatcher = (query: string) => {
+				const historyIds = historyOnly?.(query) ?? [];
+				let transcriptIds: string[] = [];
+				try {
+					transcriptIds = TranscriptIndex.open(transcriptDbPath).matchingSessionIds(query);
+				} catch (error) {
+					logger.warn("Transcript index unavailable for session ranking", { error: String(error) });
+					return historyIds;
+				}
+				const seen = new Set<string>();
+				const combined: string[] = [];
+				for (const id of [...transcriptIds, ...historyIds]) {
+					if (seen.has(id)) continue;
+					seen.add(id);
+					combined.push(id);
+				}
+				return combined;
+			};
+		}
 		// Keep the fullscreen picker on the alternate buffer while a selected
 		// session is loaded and its transcript is rebuilt. Closing it first exposes
 		// the stale normal buffer for the entire async switch on terminals without
@@ -1415,6 +1449,58 @@ export class SelectorController {
 			fullscreen: true,
 		});
 		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+	}
+
+	async showSessionMap(): Promise<void> {
+		const sessions = await SessionManager.list(
+			this.ctx.sessionManager.getCwd(),
+			this.ctx.sessionManager.getSessionDir(),
+		);
+		let overlayHandle: OverlayHandle | undefined;
+		const done = () => {
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const map = new SessionMapComponent(
+			sessions,
+			async (session: SessionInfo) => {
+				map.lockInput();
+				let keepOpen = false;
+				try {
+					const success = await this.handleResumeSession(session.path);
+					if (!success) {
+						keepOpen = true;
+						map.unlockInput();
+						this.ctx.ui.requestRender();
+					}
+				} finally {
+					if (!keepOpen) done();
+				}
+			},
+			() => {
+				done();
+			},
+			() => {
+				done();
+				void this.ctx.shutdown();
+			},
+			{
+				loadAllSessions: () => SessionManager.listAll(),
+				getTerminalRows: () => this.ctx.ui.terminal.rows,
+				fillHeight: true,
+			},
+		);
+		map.setOnRequestRender(() => this.ctx.ui.requestRender());
+		overlayHandle = this.ctx.ui.showOverlay(map, {
+			anchor: "top-left",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.ctx.ui.setFocus(map);
 		this.ctx.ui.requestRender();
 	}
 

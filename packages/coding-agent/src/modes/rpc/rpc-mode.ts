@@ -25,6 +25,8 @@ import {
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { MISSION_BUSY, type MissionRuntime, MissionRuntimeError } from "../../missions/runtime";
+import type { MissionState } from "../../missions/types";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -109,6 +111,19 @@ export type RpcSessionChangeResult =
 	| { type: "branch"; data: { text: string; cancelled: boolean } };
 
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
+
+/** Machine-readable reason for a mission transition the runtime refuses. */
+export const INVALID_MISSION_TRANSITION = "INVALID_MISSION_TRANSITION";
+
+import { type MissionRestartRuntime, restartMission } from "../../missions/runtime";
+
+export { type MissionRestartRuntime, restartMission };
+
+/** Command discriminators routed to the top-level session's {@link MissionRuntime}. */
+export type RpcMissionCommandType = Extract<
+	RpcCommand,
+	{ type: `mission_${string}` } | { type: "get_mission" }
+>["type"];
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
@@ -666,6 +681,84 @@ export async function runRpcMode(
 		return { id, type: "response", command, success: false, error: message, ...(code ? { code } : {}) };
 	};
 
+	/**
+	 * Refuse a command that cannot interrupt in-flight mission work. Answers
+	 * immediately — never waits for the child turn, Git mutation, or state flush
+	 * to settle, so a host can always ask again after `mission_pause`.
+	 */
+	const missionBusy = (id: string | undefined, command: string): RpcResponse | undefined => {
+		if (!session.missionRuntime.isBusy()) return undefined;
+		return error(
+			id,
+			command,
+			"Mission work is in flight; pause the mission and retry once it settles.",
+			MISSION_BUSY,
+		);
+	};
+
+	/**
+	 * Run one mission transition and answer with the resulting snapshot. The runtime
+	 * publishes every transition through `SessionManager.appendEntriesAtomically`, so
+	 * awaiting the call IS awaiting the durable `mission-state` entry — the response is
+	 * never optimistic. A transition the runtime refuses carries
+	 * `INVALID_MISSION_TRANSITION`; anything else (persistence, Git) reports uncoded.
+	 */
+	const missionCommand = async (
+		id: string | undefined,
+		command: RpcMissionCommandType,
+		run: (runtime: MissionRuntime) => Promise<MissionState | null>,
+	): Promise<RpcResponse> => {
+		try {
+			const mission = await run(session.missionRuntime);
+			return success(id, command, { mission });
+		} catch (err: unknown) {
+			const message = err instanceof Error ? err.message : String(err);
+			const code = err instanceof MissionRuntimeError ? INVALID_MISSION_TRANSITION : undefined;
+			return error(id, command, message, code);
+		}
+	};
+
+	/**
+	 * Translate the AgentSession transition guard's sentinel into the wire contract.
+	 * The pre-checks below answer the common case immediately; this covers the race
+	 * where mission work starts between the check and the transition, so a host never
+	 * sees an uncoded error for a refusal that has a machine-readable reason.
+	 */
+	const missionTransitionError = (id: string | undefined, command: string, err: unknown): RpcResponse | undefined => {
+		if (!(err instanceof Error)) return undefined;
+		if (err.message === MISSION_BUSY) {
+			return error(id, command, "Mission work is in flight; retry once it settles.", MISSION_BUSY);
+		}
+		if (err.message === INVALID_MISSION_TRANSITION) {
+			return error(
+				id,
+				command,
+				"This transition is not allowed while a mission is active.",
+				INVALID_MISSION_TRANSITION,
+			);
+		}
+		return undefined;
+	};
+
+	/**
+	 * A nonterminal mission owns its transcript and its workers: `branch` would rewrite
+	 * history beneath live children, and new/switch may only proceed once mission work
+	 * has settled (AgentSession then pauses the mission through `prepareToSuspend`).
+	 */
+	const missionSessionChangeGuard = (
+		id: string | undefined,
+		type: RpcSessionChangeCommand["type"],
+	): RpcResponse | undefined => {
+		if (type !== "branch") return missionBusy(id, type);
+		if (!session.missionRuntime.hasActiveMission()) return undefined;
+		return error(
+			id,
+			"branch",
+			"Cannot branch the transcript while a mission is active; cancel or complete it first.",
+			INVALID_MISSION_TRANSITION,
+		);
+	};
+
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
 
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
@@ -1049,9 +1142,19 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
-				return success(id, result.type, result.data);
+				// Mission safety precedes the transition: the target session state is
+				// restored and the subagent registry cleared only on a successful retry.
+				const guarded = missionSessionChangeGuard(id, command.type);
+				if (guarded) return guarded;
+				try {
+					const result = await handleRpcSessionChange(session, command, subagentRegistry);
+					if (!result.data.cancelled) await emitAvailableCommandsUpdate();
+					return success(id, result.type, result.data);
+				} catch (err: unknown) {
+					const refused = missionTransitionError(id, command.type, err);
+					if (refused) return refused;
+					throw err;
+				}
 			}
 
 			// =================================================================
@@ -1309,9 +1412,59 @@ export async function runRpcMode(
 				if (session.isStreaming) {
 					return error(id, "handoff", "Cannot hand off while a response is in progress");
 				}
-				const result = await session.handoff(command.customInstructions);
-				return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
+				// Handoff tears the session down; in-flight mission work must settle first.
+				const busy = missionBusy(id, "handoff");
+				if (busy) return busy;
+				try {
+					const result = await session.handoff(command.customInstructions);
+					return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
+				} catch (err: unknown) {
+					const refused = missionTransitionError(id, "handoff", err);
+					if (refused) return refused;
+					throw err;
+				}
 			}
+
+			// =================================================================
+			// Mission
+			// =================================================================
+
+			case "mission_start":
+				return missionCommand(id, "mission_start", runtime =>
+					runtime.start(command.goal, {
+						workerModel: command.workerModel,
+						validatorModel: command.validatorModel,
+					}),
+				);
+
+			// Readable while mission work is in flight.
+			case "get_mission":
+				return missionCommand(id, "get_mission", runtime => Promise.resolve(runtime.snapshot()));
+
+			case "mission_accept":
+				return missionCommand(id, "mission_accept", runtime => runtime.accept());
+
+			// Callable while busy: pause latches immediately and no successor dispatches.
+			case "mission_pause":
+				return missionCommand(id, "mission_pause", runtime => runtime.pause("user_requested"));
+
+			case "mission_resume":
+				return (
+					missionBusy(id, "mission_resume") ??
+					missionCommand(id, "mission_resume", runtime =>
+						runtime.resume({ messageToWorker: command.messageToWorker }),
+					)
+				);
+
+			case "mission_restart":
+				return (
+					missionBusy(id, "mission_restart") ??
+					missionCommand(id, "mission_restart", runtime => restartMission(runtime, command.messageToWorker))
+				);
+
+			// Callable while busy: cancel aborts the child and waits for settlement.
+			case "mission_cancel":
+				return missionCommand(id, "mission_cancel", runtime => runtime.cancel());
 
 			// =================================================================
 			// Messages

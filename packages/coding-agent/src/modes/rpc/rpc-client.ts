@@ -11,6 +11,7 @@ import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
+import type { MissionState } from "../../missions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
@@ -31,6 +32,7 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcMissionResult,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentEventFrame,
@@ -40,6 +42,13 @@ import type {
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
+
+/**
+ * Mission transitions do real work behind the response — repository initialization,
+ * child abort and settlement, Git reconciliation — so they get a deadline well past
+ * the default command timeout. Reads (`get_mission`) keep the default.
+ */
+const MISSION_COMMAND_TIMEOUT_MS = 300_000;
 
 /** Distributive Omit that works with union types */
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
@@ -129,6 +138,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"notice",
 	"thinking_level_changed",
 	"goal_updated",
+	"mission_updated",
+	"mission_progress",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {
@@ -799,6 +810,62 @@ export class RpcClient {
 	async getLastAssistantText(): Promise<string | null> {
 		const response = await this.#send({ type: "get_last_assistant_text" });
 		return this.#getData<{ text: string | null }>(response).text;
+	}
+
+	/**
+	 * Start a mission for `goal`, optionally overriding the child models. Resolves once
+	 * the planning state is durable; the planning turn itself streams as session events.
+	 */
+	async startMission(
+		goal: string,
+		options?: { workerModel?: string | string[]; validatorModel?: string | string[] },
+	): Promise<MissionState | null> {
+		const response = await this.#send(
+			{
+				type: "mission_start",
+				goal,
+				workerModel: options?.workerModel,
+				validatorModel: options?.validatorModel,
+			},
+			MISSION_COMMAND_TIMEOUT_MS,
+		);
+		return this.#getData<RpcMissionResult>(response).mission;
+	}
+
+	/** Read the current mission snapshot. Answered even while mission work is in flight. */
+	async getMission(): Promise<MissionState | null> {
+		const response = await this.#send({ type: "get_mission" });
+		return this.#getData<RpcMissionResult>(response).mission;
+	}
+
+	/** Accept the planned mission. Resolves after repository initialization is durable. */
+	async acceptMission(): Promise<MissionState | null> {
+		const response = await this.#send({ type: "mission_accept" }, MISSION_COMMAND_TIMEOUT_MS);
+		return this.#getData<RpcMissionResult>(response).mission;
+	}
+
+	/** Pause the mission. Records the latch immediately; an in-flight child may still settle. */
+	async pauseMission(): Promise<MissionState | null> {
+		const response = await this.#send({ type: "mission_pause" });
+		return this.#getData<RpcMissionResult>(response).mission;
+	}
+
+	/** Resume a paused mission with its persisted next-run intent. Fails MISSION_BUSY while busy. */
+	async resumeMission(messageToWorker?: string): Promise<MissionState | null> {
+		const response = await this.#send({ type: "mission_resume", messageToWorker }, MISSION_COMMAND_TIMEOUT_MS);
+		return this.#getData<RpcMissionResult>(response).mission;
+	}
+
+	/** Restart the current feature with a fresh worker in its preserved workspace. */
+	async restartMission(messageToWorker?: string): Promise<MissionState | null> {
+		const response = await this.#send({ type: "mission_restart", messageToWorker }, MISSION_COMMAND_TIMEOUT_MS);
+		return this.#getData<RpcMissionResult>(response).mission;
+	}
+
+	/** Cancel the mission. Aborts the current child and waits for child/Git settlement. */
+	async cancelMission(): Promise<MissionState | null> {
+		const response = await this.#send({ type: "mission_cancel" }, MISSION_COMMAND_TIMEOUT_MS);
+		return this.#getData<RpcMissionResult>(response).mission;
 	}
 
 	/**

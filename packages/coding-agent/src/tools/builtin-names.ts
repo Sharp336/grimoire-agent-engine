@@ -27,12 +27,13 @@ export const BUILTIN_TOOL_NAMES = [
 	"reflect",
 	"learn",
 	"manage_skill",
+	"schedule",
 ] as const;
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];
 
 /** Hidden built-ins: constructible and `--tools`-addressable, but never part of the default active set. */
-export const HIDDEN_TOOL_NAMES = ["yield", "goal"] as const;
+export const HIDDEN_TOOL_NAMES = ["yield", "goal", "mission"] as const;
 
 export type HiddenToolName = (typeof HIDDEN_TOOL_NAMES)[number];
 

@@ -1,0 +1,350 @@
+/**
+ * Contracts for session self-scheduling: fold, arming, controller fire/cancel/restore,
+ * overdue turn-boundary delivery, due-time resolution, and schedule-tool input validation.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { ManagedTimers } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/managed-timers";
+import type { CustomEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import {
+	armSessionSchedules,
+	foldPendingSessionSchedules,
+	resolveScheduleDueAtMs,
+	SESSION_SCHEDULE_CUSTOM_TYPE,
+	SESSION_SCHEDULE_MESSAGE_TYPE,
+	SessionScheduleController,
+	type SessionScheduleFireHost,
+} from "@oh-my-pi/pi-coding-agent/session/session-schedule";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { ScheduleTool } from "@oh-my-pi/pi-coding-agent/tools/schedule";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+
+type HiddenMessage = {
+	customType: string;
+	content: string;
+	deliverAs?: "steer" | "followUp" | "nextTurn";
+	triggerTurn?: boolean;
+};
+
+async function flushMicrotasks(rounds = 8): Promise<void> {
+	for (let i = 0; i < rounds; i++) await Promise.resolve();
+}
+
+function scheduleCustomEntry(data: unknown, id = "entry"): CustomEntry {
+	return {
+		type: "custom",
+		customType: SESSION_SCHEDULE_CUSTOM_TYPE,
+		data,
+		id,
+		parentId: null,
+		timestamp: "1970-01-01T00:00:00.000Z",
+	};
+}
+
+function scheduleEntriesOf(entries: readonly SessionEntry[]): CustomEntry[] {
+	return entries.filter(
+		(entry): entry is CustomEntry => entry.type === "custom" && entry.customType === SESSION_SCHEDULE_CUSTOM_TYPE,
+	);
+}
+
+function createHarness(initialNowMs = 1_000_000) {
+	let nowMs = initialNowMs;
+	const entries: SessionEntry[] = [];
+	const hiddenMessages: HiddenMessage[] = [];
+	let entrySeq = 0;
+
+	const timers = new ManagedTimers((_event, _error) => {});
+	const host: SessionScheduleFireHost = {
+		getEntries: () => entries,
+		appendCustomEntry: (customType, data) => {
+			const id = `entry-${++entrySeq}`;
+			entries.push({
+				type: "custom",
+				customType,
+				data,
+				id,
+				parentId: null,
+				timestamp: new Date(nowMs).toISOString(),
+			});
+			return id;
+		},
+		sendHiddenMessage: async message => {
+			hiddenMessages.push({ ...message });
+		},
+	};
+
+	const controller = new SessionScheduleController(timers, host, () => nowMs);
+
+	return {
+		controller,
+		entries,
+		hiddenMessages,
+		timers,
+		host,
+		now: () => nowMs,
+		setNow: (next: number) => {
+			nowMs = next;
+		},
+		dispose: () => {
+			controller.dispose();
+			timers.clearAll();
+		},
+	};
+}
+
+describe("session-schedule", () => {
+	let harness: ReturnType<typeof createHarness> | undefined;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		harness = undefined;
+	});
+
+	afterEach(() => {
+		harness?.dispose();
+		harness = undefined;
+		vi.clearAllTimers();
+		vi.useRealTimers();
+	});
+
+	it("creating a schedule appends exactly one session-schedule entry and arms one timer", () => {
+		harness = createHarness(1_000_000);
+		const created = harness.controller.create({ delayMs: 2_000, prompt: "wake me" });
+
+		const scheduleEntries = scheduleEntriesOf(harness.entries);
+		expect(scheduleEntries).toHaveLength(1);
+		expect(scheduleEntries[0]?.data).toEqual({
+			id: created.id,
+			dueAtMs: 1_002_000,
+			prompt: "wake me",
+			createdAt: 1_000_000,
+		});
+		expect(vi.getTimerCount()).toBe(1);
+		expect(harness.controller.listPending()).toHaveLength(1);
+		expect(harness.hiddenMessages).toHaveLength(0);
+	});
+
+	it("advancing past dueAtMs enqueues exactly one hidden message with the stored prompt", async () => {
+		harness = createHarness(1_000_000);
+		const prompt = "check the build";
+		harness.controller.create({ delayMs: 1_500, prompt });
+
+		expect(vi.getTimerCount()).toBe(1);
+		vi.advanceTimersByTime(1_499);
+		await flushMicrotasks();
+		expect(harness.hiddenMessages).toHaveLength(0);
+
+		vi.advanceTimersByTime(1);
+		await flushMicrotasks();
+
+		expect(harness.hiddenMessages).toHaveLength(1);
+		expect(harness.hiddenMessages[0]).toEqual({
+			customType: SESSION_SCHEDULE_MESSAGE_TYPE,
+			content: prompt,
+			deliverAs: "nextTurn",
+			triggerTurn: true,
+		});
+		// Fire path is host.sendHiddenMessage only — no schedule tool round-trip.
+		expect(scheduleEntriesOf(harness.entries).some(entry => (entry.data as { fired?: boolean })?.fired === true)).toBe(
+			true,
+		);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("cancelling before the deadline appends a cancel tombstone and fires nothing", async () => {
+		harness = createHarness(1_000_000);
+		const created = harness.controller.create({ delayMs: 5_000, prompt: "should not fire" });
+
+		expect(vi.getTimerCount()).toBe(1);
+		expect(harness.controller.cancel(created.id)).toBe(true);
+
+		const scheduleEntries = scheduleEntriesOf(harness.entries);
+		expect(scheduleEntries).toHaveLength(2);
+		expect(scheduleEntries[1]?.data).toEqual({ id: created.id, cancelled: true });
+		expect(harness.controller.listPending()).toHaveLength(0);
+		expect(vi.getTimerCount()).toBe(0);
+
+		vi.advanceTimersByTime(10_000);
+		await flushMicrotasks();
+		expect(harness.hiddenMessages).toHaveLength(0);
+	});
+
+	it("re-fold after fire does not re-arm that id; a still-pending schedule does re-arm", async () => {
+		harness = createHarness(1_000_000);
+		const first = harness.controller.create({ delayMs: 1_000, prompt: "first wake" });
+
+		vi.advanceTimersByTime(1_000);
+		await flushMicrotasks();
+		expect(harness.hiddenMessages).toHaveLength(1);
+		expect(harness.hiddenMessages[0]?.content).toBe("first wake");
+		expect(vi.getTimerCount()).toBe(0);
+
+		// Fired tombstone keeps the id out of the pending fold.
+		expect(foldPendingSessionSchedules(harness.entries).some(entry => entry.id === first.id)).toBe(false);
+		harness.controller.rearmFromEntries();
+		expect(vi.getTimerCount()).toBe(0);
+
+		const second = harness.controller.create({ delayMs: 4_000, prompt: "second wake" });
+		expect(vi.getTimerCount()).toBe(1);
+		expect(foldPendingSessionSchedules(harness.entries).map(entry => entry.id)).toEqual([second.id]);
+
+		harness.controller.rearmFromEntries();
+		expect(vi.getTimerCount()).toBe(1);
+
+		vi.advanceTimersByTime(4_000);
+		await flushMicrotasks();
+		expect(harness.hiddenMessages).toHaveLength(2);
+		expect(harness.hiddenMessages.map(message => message.content)).toEqual(["first wake", "second wake"]);
+	});
+
+	it("overdue creates stay pending after fold and fire once at the next turn boundary", async () => {
+		harness = createHarness(10_000);
+		harness.entries.push(
+			scheduleCustomEntry(
+				{
+					id: "overdue-1",
+					dueAtMs: 1_000,
+					prompt: "catch up",
+					createdAt: 0,
+				},
+				"seed-overdue",
+			),
+		);
+
+		const pending = foldPendingSessionSchedules(harness.entries);
+		expect(pending).toHaveLength(1);
+		expect(pending[0]?.id).toBe("overdue-1");
+
+		const armed = armSessionSchedules(harness.entries, harness.timers, harness.host, { now: () => harness!.now() });
+		expect(armed.pending).toHaveLength(1);
+		expect(vi.getTimerCount()).toBe(1);
+
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+
+		expect(harness.hiddenMessages).toHaveLength(1);
+		expect(harness.hiddenMessages[0]).toEqual({
+			customType: SESSION_SCHEDULE_MESSAGE_TYPE,
+			content: "catch up",
+			deliverAs: "nextTurn",
+			triggerTurn: false,
+		});
+		expect(vi.getTimerCount()).toBe(0);
+
+		// Fired tombstone: another arm + zero-delay tick must not repeat delivery.
+		const rearmed = armSessionSchedules(harness.entries, harness.timers, harness.host, { now: () => harness!.now() });
+		expect(rearmed.pending).toHaveLength(0);
+		expect(vi.getTimerCount()).toBe(0);
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+		expect(harness.hiddenMessages).toHaveLength(1);
+
+		armed.disarm();
+		rearmed.disarm();
+	});
+
+	it("resolveScheduleDueAtMs rejects both delayMs+atIso and neither", () => {
+		const neither = resolveScheduleDueAtMs({ prompt: "wake" }, 1_000);
+		expect(neither).toEqual({ error: "Exactly one of delayMs or atIso must be supplied." });
+
+		const both = resolveScheduleDueAtMs(
+			{
+				prompt: "wake",
+				delayMs: 500,
+				atIso: "2020-01-01T00:00:00.000Z",
+			},
+			1_000,
+		);
+		expect(both).toEqual({ error: "Exactly one of delayMs or atIso must be supplied." });
+
+		const fromDelay = resolveScheduleDueAtMs({ prompt: "wake", delayMs: 250 }, 1_000);
+		expect(fromDelay).toEqual({ dueAtMs: 1_250 });
+
+		const fromAt = resolveScheduleDueAtMs({ prompt: "wake", atIso: "2020-01-01T00:00:00.000Z" }, 1_000);
+		expect(fromAt).toEqual({ dueAtMs: Date.parse("2020-01-01T00:00:00.000Z") });
+	});
+
+	it("schedule tool input validation rejects both and neither create combinations", async () => {
+		const tool = new ScheduleTool({ cwd: "/tmp/schedule-test" } as ToolSession);
+
+		await expect(tool.execute("call-neither", { prompt: "wake" })).rejects.toBeInstanceOf(ToolError);
+		await expect(tool.execute("call-neither", { prompt: "wake" })).rejects.toThrow(
+			"Exactly one of delayMs or atIso must be supplied.",
+		);
+
+		await expect(
+			tool.execute("call-both", {
+				prompt: "wake",
+				delayMs: 100,
+				atIso: "2020-01-01T00:00:00.000Z",
+			}),
+		).rejects.toBeInstanceOf(ToolError);
+		await expect(
+			tool.execute("call-both-again", {
+				prompt: "wake",
+				delayMs: 100,
+				atIso: "2020-01-01T00:00:00.000Z",
+			}),
+		).rejects.toThrow("Exactly one of delayMs or atIso must be supplied.");
+	});
+
+	it("a tool-created schedule reaches the live controller and actually fires", async () => {
+		// Regression: the tool used to read its controller through a synthetic cast that was
+		// never populated on ToolSession, so every create silently took the controller-less
+		// fallback — the entry persisted but no timer was ever armed and the wake never fired.
+		harness = createHarness();
+		const local = harness;
+		const tool = new ScheduleTool({
+			cwd: "/tmp/schedule-test",
+			getSessionSchedule: () => local.controller,
+		} as ToolSession);
+
+		await tool.execute("call-1", { prompt: "wake up", delayMs: 5_000 });
+
+		local.setNow(local.now() + 5_000);
+		vi.advanceTimersByTime(5_000);
+		await flushMicrotasks();
+
+		expect(local.hiddenMessages).toHaveLength(1);
+		expect(local.hiddenMessages[0]?.content).toContain("wake up");
+	});
+
+	it("fold ignores unknown or garbage custom-entry payloads without throwing", () => {
+		const entries: SessionEntry[] = [
+			scheduleCustomEntry(undefined, "u1"),
+			scheduleCustomEntry(null, "u2"),
+			scheduleCustomEntry("not-an-object", "u3"),
+			scheduleCustomEntry({ id: "" }, "u4"),
+			scheduleCustomEntry({ id: "partial" }, "u5"),
+			scheduleCustomEntry({ id: "bad-due", dueAtMs: Number.NaN, prompt: "x", createdAt: 1 }, "u6"),
+			scheduleCustomEntry({ id: "empty-prompt", dueAtMs: 1, prompt: "", createdAt: 1 }, "u7"),
+			scheduleCustomEntry({ id: "cancel-noise", cancelled: "yes" }, "u8"),
+			{
+				type: "custom",
+				customType: "other-extension",
+				data: { id: "other", dueAtMs: 1, prompt: "ignore", createdAt: 1 },
+				id: "other",
+				parentId: null,
+				timestamp: "1970-01-01T00:00:00.000Z",
+			},
+			scheduleCustomEntry(
+				{
+					id: "good",
+					dueAtMs: 42,
+					prompt: "keep me",
+					createdAt: 7,
+				},
+				"good-entry",
+			),
+		];
+
+		expect(() => foldPendingSessionSchedules(entries)).not.toThrow();
+		expect(foldPendingSessionSchedules(entries)).toEqual([
+			{
+				id: "good",
+				dueAtMs: 42,
+				prompt: "keep me",
+				createdAt: 7,
+			},
+		]);
+	});
+});

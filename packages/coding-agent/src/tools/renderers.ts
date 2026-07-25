@@ -25,8 +25,10 @@ import { grepToolRenderer } from "./grep";
 import { hubToolRenderer } from "./hub";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
+import { missionToolRenderer } from "./mission-tool";
 import { readToolRenderer } from "./read";
 import { resolveRenderer } from "./resolve";
+import { scheduleToolRenderer } from "./schedule";
 import { todoToolRenderer } from "./todo";
 import { createVibeToolRenderer } from "./vibe";
 import { writeToolRenderer } from "./write";
@@ -106,6 +108,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	resolve: resolveRenderer as ToolRenderer,
 	reject: resolveRenderer as ToolRenderer,
 	retain: retainToolRenderer as ToolRenderer,
+	schedule: scheduleToolRenderer as ToolRenderer,
 	recall: recallToolRenderer as ToolRenderer,
 	reflect: reflectToolRenderer as ToolRenderer,
 	// Lazy getter: `taskToolRenderer` lives in a module that closes an import
@@ -118,6 +121,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	todo: todoToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,
+	mission: missionToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,
 	vibe_spawn: createVibeToolRenderer("spawn") as ToolRenderer,
 	vibe_send: createVibeToolRenderer("send") as ToolRenderer,

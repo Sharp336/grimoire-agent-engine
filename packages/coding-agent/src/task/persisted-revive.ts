@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import type { ServiceTier, ServiceTierFamily } from "@oh-my-pi/pi-ai";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -9,7 +10,7 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
-import { createMCPProxyTools, createSubagentSettings } from "./executor";
+import { createDelegatedParentApprovalUIContext, createMCPProxyTools, createSubagentSettings } from "./executor";
 
 /**
  * Ambient context the reviver needs at revive time. The top-level session is
@@ -60,6 +61,16 @@ export function createPersistedSubagentReviverFactory(
 			return undefined;
 		}
 		const init = peek.init;
+		const isFixedMissionChild = init.cwdBinding === "fixed";
+		const missionOwner = init.missionOwner;
+		if (isFixedMissionChild) {
+			// Fixed mission children must revive only under their owning top-level
+			// session and only at the recorded worktree cwd — never the parent
+			// checkout or a foreign ACP session.
+			if (!missionOwner || missionOwner.ownerSessionId !== ctx.session.sessionId) {
+				return undefined;
+			}
+		}
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
 		// assuming a fixed level.
@@ -84,14 +95,27 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = init.restrictToolNames === true;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
-			const { session } = await createAgentSession({
-				cwd: ctx.session.sessionManager.getCwd(),
+			const reviveCwd = isFixedMissionChild ? peek.cwd : ctx.session.sessionManager.getCwd();
+			// Mission children inherit the parent's approval mode (never implicit
+			// yolo). Ordinary task/eval children keep createSubagentSettings' yolo.
+			const parentApprovalOverrides = isFixedMissionChild
+				? {
+						"tools.approvalMode": ctx.settings.get("tools.approvalMode"),
+						"tools.approval": ctx.settings.get("tools.approval"),
+					}
+				: undefined;
+			const parentUiContext =
+				isFixedMissionChild && ctx.session.extensionRunner?.hasUI()
+					? ctx.session.extensionRunner.getUIContext()
+					: undefined;
+			const { session, setToolUIContext } = await createAgentSession({
+				cwd: reviveCwd,
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
-				settings: createSubagentSettings(
-					ctx.settings,
-					init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
-				),
+				settings: createSubagentSettings(ctx.settings, {
+					...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+					...parentApprovalOverrides,
+				}),
 				sessionManager: reopened,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,
@@ -108,8 +132,11 @@ export function createPersistedSubagentReviverFactory(
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
 				spawns: init.spawns ?? "",
-				hasUI: false,
+				hasUI: parentUiContext !== undefined,
 				enableLsp: restrictToolNames ? false : ctx.enableLsp,
+				// Fixed mission children run outside the parent checkout — pass the
+				// owner's loaded skills so skill://<name> still resolves.
+				...(isFixedMissionChild ? { skills: [...ctx.session.skills] } : {}),
 				...(restrictToolNames
 					? {
 							enableIrc: false,
@@ -123,6 +150,57 @@ export function createPersistedSubagentReviverFactory(
 							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 						}),
 			});
+			if (isFixedMissionChild) {
+				const delegatedUi = parentUiContext ? createDelegatedParentApprovalUIContext(parentUiContext) : undefined;
+				if (delegatedUi) {
+					setToolUIContext(delegatedUi, true);
+				}
+				const bridge = ctx.session.clientBridge;
+				if (bridge) session.setClientBridge(bridge);
+				const runner = session.extensionRunner;
+				if (runner && delegatedUi && !runner.hasUI()) {
+					runner.initialize(
+						{
+							sendMessage: () => {},
+							sendUserMessage: () => {},
+							appendEntry: (customType, data) => {
+								session.sessionManager.appendCustomEntry(customType, data);
+							},
+							setLabel: (targetId, label) => {
+								session.sessionManager.appendLabelChange(targetId, label);
+							},
+							getActiveTools: () => session.getEnabledToolNames(),
+							getAllTools: () => session.getAllToolNames(),
+							setActiveTools: async toolNames => {
+								await session.setActiveToolsByName(toolNames);
+							},
+							getCommands: () => [],
+							setModel: async () => false,
+							getThinkingLevel: () => session.thinkingLevel,
+							setThinkingLevel: level => session.setThinkingLevel(level),
+							getServiceTiers: () => session.serviceTierByFamily,
+							setServiceTier: (family: ServiceTierFamily, tier: ServiceTier | undefined) =>
+								session.setServiceTierFamily(family, tier),
+							getSessionName: () => session.sessionManager.getSessionName(),
+							setSessionName: async name => {
+								await session.sessionManager.setSessionName(name, "user");
+							},
+						},
+						{
+							getModel: () => session.model,
+							isIdle: () => !session.isStreaming,
+							abort: () => session.abort(),
+							hasPendingMessages: () => session.queuedMessageCount > 0,
+							shutdown: () => {},
+							getContextUsage: () => session.getContextUsage(),
+							getSystemPrompt: () => session.systemPrompt,
+							compact: async () => {},
+						},
+						undefined,
+						delegatedUi,
+					);
+				}
+			}
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.

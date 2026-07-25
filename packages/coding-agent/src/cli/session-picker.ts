@@ -1,10 +1,12 @@
+import * as fs from "node:fs";
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getTranscriptDbPath, logger } from "@oh-my-pi/pi-utils";
 import { SessionSelectorComponent } from "../modes/components/session-selector";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionInfo } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
+import { TranscriptIndex } from "../session/transcript-index";
 
 /**
  * Show the TUI session selector and return the selected session, or null if
@@ -24,13 +26,37 @@ export async function selectSession(
 
 	// Rank sessions with prompt-history matches too, recovering prompts the 4KB
 	// session-list prefix never sees. Best-effort: a missing/locked history.db
-	// must not break the picker.
+	// must not break the picker. When transcripts.db exists (after `/session search`),
+	// fold those hits in ahead of history matches — same combined matcher as the
+	// in-editor /resume selector so the two pickers cannot disagree.
 	let historyMatcher: ((query: string) => string[]) | undefined;
 	try {
 		const history = HistoryStorage.open();
 		historyMatcher = (query: string) => history.matchingSessionIds(query);
 	} catch (error) {
 		logger.warn("History storage unavailable for session ranking", { error: String(error) });
+	}
+	const transcriptDbPath = getTranscriptDbPath();
+	if (fs.existsSync(transcriptDbPath)) {
+		const historyOnly = historyMatcher;
+		historyMatcher = (query: string) => {
+			const historyIds = historyOnly?.(query) ?? [];
+			let transcriptIds: string[] = [];
+			try {
+				transcriptIds = TranscriptIndex.open(transcriptDbPath).matchingSessionIds(query);
+			} catch (error) {
+				logger.warn("Transcript index unavailable for session ranking", { error: String(error) });
+				return historyIds;
+			}
+			const seen = new Set<string>();
+			const combined: string[] = [];
+			for (const id of [...transcriptIds, ...historyIds]) {
+				if (seen.has(id)) continue;
+				seen.add(id);
+				combined.push(id);
+			}
+			return combined;
+		};
 	}
 
 	const showSelector = () => {

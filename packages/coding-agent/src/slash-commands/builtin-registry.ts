@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
-import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getProjectDir, getTranscriptDbPath, prompt, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
@@ -27,16 +27,23 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import { resolveMemoryBackend } from "../memory-backend";
+import { type MissionRuntime, restartMission } from "../missions/runtime";
+import type { MissionState } from "../missions/types";
 import { runPauseScreen } from "../modes/components/pause-screen";
+import { renderSessionMapText } from "../modes/components/session-map";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
+import qaMd from "../prompts/qa.md" with { type: "text" };
+import sessionSearchCommandMd from "../prompts/session-search-command.md" with { type: "text" };
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
+import { SessionManager } from "../session/session-manager";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { TranscriptIndex } from "../session/transcript-index";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
@@ -108,6 +115,67 @@ async function applyComputerUseToggle(session: AgentSession, enable: boolean): P
 	}
 	session.settings.override("computer.enabled", enable);
 	return `Computer use ${enable ? "enabled" : "disabled"} for this session.`;
+}
+
+const SESSION_USAGE = "Usage: /session [info|delete|pin [account]|search <question>|tag <name>|untag <name>|tags|map]";
+
+/**
+ * Reindex this project's transcripts, then render the prompt that dispatches the bundled
+ * `session-search` agent.
+ *
+ * The first invocation is what creates the database — that is deliberately the opt-in
+ * moment, so a user who never searches pays nothing and the `/resume` selector keeps
+ * falling back to prompt-history matches alone.
+ */
+async function renderSessionSearchPrompt(question: string, cwd: string): Promise<string> {
+	const sessionDir = SessionManager.getDefaultSessionDir(cwd);
+	await TranscriptIndex.open().reindex({ sessionDirs: [sessionDir] });
+	return prompt.render(sessionSearchCommandMd, { question, dbPath: getTranscriptDbPath(), sessionDir });
+}
+
+/** One-screen mission summary shared by every `/mission` verb and both hosts. */
+function formatMissionStatus(state: MissionState): string {
+	const lines = [
+		`Mission: ${state.status}${state.pauseReason ? ` (${state.pauseReason})` : ""}`,
+		`Goal: ${state.goal}`,
+	];
+	const active = state.features.find(feature => feature.status === "in_progress");
+	if (active) lines.push(`Current: ${active.id} — ${active.description}`);
+	const done = state.features.filter(feature => feature.status === "completed").length;
+	lines.push(`Features: ${done}/${state.features.length} completed`);
+	return lines.join("\n");
+}
+
+/**
+ * `/mission` verb semantics, owned in one place so the ACP and TUI hosts cannot drift.
+ * Returns the text to surface; each host decides how to display it.
+ */
+async function runMissionVerb(mission: MissionRuntime, args: string): Promise<string> {
+	const { verb, rest } = parseSubcommand(args);
+	const messageToWorker = rest || undefined;
+	switch (verb) {
+		case "status": {
+			const snapshot = mission.snapshot();
+			return snapshot ? formatMissionStatus(snapshot) : "No active mission.";
+		}
+		case "accept":
+			return formatMissionStatus(await mission.accept());
+		case "pause":
+			return formatMissionStatus(await mission.pause("user_requested"));
+		case "resume":
+			return formatMissionStatus(await mission.resume({ messageToWorker }));
+		case "restart": {
+			// The shared helper, not a bare resume: restart also has to resolve a pending
+			// handoff as `retry_fresh`, which the RPC host already relies on.
+			const state = await restartMission(mission, messageToWorker);
+			return state ? formatMissionStatus(state) : "No active mission.";
+		}
+		case "cancel":
+			return formatMissionStatus(await mission.cancel());
+		default:
+			// Anything else is the goal itself: `/mission <goal>` starts one.
+			return formatMissionStatus(await mission.start(args.trim()));
+	}
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -1115,7 +1183,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "session",
 		description: "Session management commands",
 		acpDescription: "Show or configure the current session",
-		acpInputHint: "[info|delete|pin [account]]",
+		acpInputHint: "[info|delete|pin [account]|search <question>|tag <name>|untag <name>|tags|map]",
 		subcommands: [
 			{ name: "info", description: "Show session info and stats" },
 			{ name: "delete", description: "Delete current session and return to selector" },
@@ -1124,6 +1192,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				description: "Pin the current provider to a stored OAuth account",
 				usage: "[account]",
 			},
+			{ name: "tag", description: "Add a tag to this session", usage: "<name>" },
+			{ name: "untag", description: "Remove a tag from this session", usage: "<name>" },
+			{ name: "tags", description: "List this session's tags" },
+			{ name: "map", description: "Show the session lineage map" },
+			{ name: "search", description: "Search past session transcripts", usage: "<question>" },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -1161,7 +1234,28 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				await handleSessionPinCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /session [info|delete|pin [account]]", runtime);
+			if (verb === "tag" || verb === "untag") {
+				const name = rest.trim();
+				if (!name) return usage(`Usage: /session ${verb} <name>`, runtime);
+				runtime.sessionManager.appendSessionTag(name, verb === "tag");
+				await runtime.output(`${verb === "tag" ? "Tagged" : "Untagged"} session: ${name}`);
+				return commandConsumed();
+			}
+			if (verb === "tags" && !rest) {
+				const tags = runtime.sessionManager.sessionTags();
+				await runtime.output(tags.length > 0 ? `Tags: ${tags.join(", ")}` : "No tags on this session.");
+				return commandConsumed();
+			}
+			if (verb === "map" && !rest) {
+				const sessions = await SessionManager.list(runtime.cwd, runtime.sessionManager.getSessionDir());
+				await runtime.output(renderSessionMapText(sessions));
+				return commandConsumed();
+			}
+			if (verb === "search") {
+				if (!rest.trim()) return usage("Usage: /session search <question>", runtime);
+				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.cwd) };
+			}
+			return usage(SESSION_USAGE, runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -1169,6 +1263,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				await runtime.ctx.handleSessionDeleteCommand();
 				return;
+			}
+			if (verb === "search") {
+				runtime.ctx.editor.setText("");
+				if (!rest.trim()) {
+					runtime.ctx.showStatus("Usage: /session search <question>");
+					return;
+				}
+				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.ctx.sessionManager.getCwd()) };
 			}
 			if (verb === "pin") {
 				if (rest) {
@@ -1180,10 +1282,32 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
+			if (verb === "tag" || verb === "untag") {
+				const name = rest.trim();
+				if (name) {
+					runtime.ctx.sessionManager.appendSessionTag(name, verb === "tag");
+					runtime.ctx.showStatus(`${verb === "tag" ? "Tagged" : "Untagged"} session: ${name}`);
+				} else {
+					runtime.ctx.showStatus(`Usage: /session ${verb} <name>`);
+				}
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (verb === "tags" && !rest) {
+				const tags = runtime.ctx.sessionManager.sessionTags();
+				runtime.ctx.showStatus(tags.length > 0 ? `Tags: ${tags.join(", ")}` : "No tags on this session.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (verb === "map" && !rest) {
+				runtime.ctx.editor.setText("");
+				await runtime.ctx.showSessionMap();
+				return;
+			}
 			if (!verb || (verb === "info" && !rest)) {
 				await runtime.ctx.handleSessionCommand();
 			} else {
-				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
+				runtime.ctx.showStatus(SESSION_USAGE);
 			}
 			runtime.ctx.editor.setText("");
 		},
@@ -2544,6 +2668,53 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
+		},
+	},
+	{
+		name: "mission",
+		description: "Run a long multi-feature goal as an orchestrated mission",
+		acpDescription: "Manage the session's mission",
+		inlineHint: "[goal | status | accept | pause | resume | restart | cancel]",
+		acpInputHint: "[goal|status|accept|pause|resume|restart|cancel]",
+		subcommands: [
+			{ name: "status", description: "Show the current mission snapshot" },
+			{ name: "accept", description: "Accept the proposed plan and begin execution" },
+			{ name: "pause", description: "Pause the mission after in-flight work settles" },
+			{ name: "resume", description: "Resume by the recorded pause reason", usage: "[message]" },
+			{ name: "restart", description: "Release the current worker and retry fresh", usage: "[message]" },
+			{ name: "cancel", description: "Cancel the mission, preserving nonempty workspaces" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			try {
+				await runtime.output(await runMissionVerb(runtime.session.missionRuntime, command.args));
+			} catch (err) {
+				return usage(`Mission: ${errorMessage(err)}`, runtime);
+			}
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			try {
+				runtime.ctx.showStatus(await runMissionVerb(runtime.ctx.session.missionRuntime, command.args));
+			} catch (err) {
+				runtime.ctx.showError(`Mission: ${errorMessage(err)}`);
+			}
+		},
+	},
+	{
+		name: "qa",
+		description: "Verify recent work and report findings with evidence (no edits)",
+		acpDescription: "Run an evidence-first QA pass",
+		inlineHint: "[what to verify]",
+		allowArgs: true,
+		handle: (command, runtime) => {
+			void runtime;
+			return { prompt: prompt.render(qaMd, { request: command.args.trim() }) };
+		},
+		handleTui: (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			return { prompt: prompt.render(qaMd, { request: command.args.trim() }) };
 		},
 	},
 	{

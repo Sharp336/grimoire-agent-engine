@@ -97,7 +97,7 @@ import type { AdvisorConfig, AdvisorRuntimeStatus } from "../advisor";
 import { type AsyncJob, AsyncJobManager } from "../async";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import { type ResolvedModelRoleValue, resolveModelOverride } from "../config/model-resolver";
+import { type ResolvedModelRoleValue, resolveModelFromString, resolveModelOverride } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -139,6 +139,8 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
+import { MISSION_BUSY, MissionRuntime } from "../missions/runtime";
+import type { MissionState } from "../missions/types";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
@@ -162,6 +164,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -305,6 +308,7 @@ import {
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
+import { initSessionSchedules, type SessionScheduleController } from "./session-schedule";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -480,6 +484,16 @@ export class AgentSession {
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
+	#missionRuntime: MissionRuntime;
+	/**
+	 * Dedicated timer pool for session schedules. Deliberately NOT the extension
+	 * runner's `ManagedTimers`: its `clearAll()` runs on extension teardown, which
+	 * would silently disarm every pending wake.
+	 */
+	readonly #sessionScheduleTimers = new ManagedTimers((event, error) =>
+		logger.warn("Session schedule timer callback threw", { event, error }),
+	);
+	#sessionSchedule: SessionScheduleController | undefined;
 	readonly #advisors: SessionAdvisors;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
@@ -1263,10 +1277,72 @@ export class AgentSession {
 				);
 			},
 		});
+		this.#missionRuntime = new MissionRuntime({
+			ownerSessionId: () => this.sessionManager.getSessionId(),
+			cwd: () => this.sessionManager.getCwd(),
+			sessionManager: this.sessionManager,
+			emitUpdated: state => this.#emitSessionEvent({ type: "mission_updated", mission: state }),
+			emitProgress: event => this.#emitSessionEvent({ type: "mission_progress", event }),
+			sendHiddenMessage: async message => {
+				await this.sendCustomMessage(
+					{
+						customType: message.customType,
+						content: message.content,
+						display: false,
+						attribution: "agent",
+					},
+					{ deliverAs: message.deliverAs },
+				);
+			},
+			getEnabledToolNames: () => this.getEnabledToolNames(),
+			setActiveToolsByName: names => this.setActiveToolsByName(names),
+			// UI and bridge stay private: the delegate is produced as a closure, never stored
+			// on ToolSession, and a foreign owner gets `undefined` so the child fails closed.
+			parentApprovalDelegate: owner =>
+				owner.ownerSessionId === this.sessionManager.getSessionId()
+					? {
+							kind: "parent",
+							uiContext: this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
+							clientBridge: this.#clientBridge,
+						}
+					: undefined,
+			resolveChildModels: async (worker, validator) => {
+				const available = this.#modelRegistry.getAvailable();
+				for (const pattern of [worker, validator]) {
+					if (pattern === undefined) continue;
+					for (const candidate of Array.isArray(pattern) ? pattern : [pattern]) {
+						if (!resolveModelFromString(candidate, available)) {
+							throw new Error(`Unknown model: ${candidate}`);
+						}
+					}
+				}
+			},
+			assertSkillsExist: names => {
+				const known = new Set(this.skills.map(skill => skill.name));
+				const missing = names.filter(name => !known.has(name));
+				if (missing.length > 0) throw new Error(`Unknown skill(s): ${missing.join(", ")}`);
+			},
+			getToolSession: () => {
+				const toolSession = config.toolSession;
+				if (!toolSession) throw new Error("Mission children require a ToolSession on AgentSessionConfig.");
+				return toolSession;
+			},
+			isPlanModeActive: () => this.#planModeState?.enabled === true,
+			isGoalModeActive: () => this.#goalModeState?.enabled === true,
+			isVibeModeActive: () => this.#vibeModeState?.enabled === true,
+			registerPersistedReviver: agentId => config.registerPersistedSubagentReviver?.(agentId),
+			agentLifecycle: () => AgentLifecycleManager.global(),
+		});
+		this.#rearmSessionSchedules();
+		// The constructor cannot await. `restore()` only reads persisted entries and
+		// reconciles owned resources, so a logged failure here leaves the mission paused
+		// rather than half-started; the async transitions below await it properly.
+		void this.#missionRuntime.restore().catch(error => {
+			logger.error("Mission restore failed", { error: String(error) });
+		});
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
 		});
-
 		const advisorsHost: SessionAdvisorsHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -4225,8 +4301,60 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Gate a session transition against an owned, non-terminal mission.
+	 *
+	 * `suspend` transitions (new/switch/handoff) are legal once in-flight work settles, so
+	 * they only reject while busy. `destructive` transitions rewrite or relocate the
+	 * transcript the mission's own state lives in, so they are refused outright until the
+	 * mission reaches a terminal state.
+	 */
+	#assertMissionTransitionAllowed(kind: "suspend" | "destructive"): void {
+		if (!this.#missionRuntime.hasActiveMission()) return;
+		if (this.#missionRuntime.isBusy()) throw new Error(MISSION_BUSY);
+		if (kind === "destructive") throw new Error("INVALID_MISSION_TRANSITION");
+	}
+
 	get goalRuntime(): GoalRuntime {
 		return this.#goalRuntime;
+	}
+
+	get missionRuntime(): MissionRuntime {
+		return this.#missionRuntime;
+	}
+
+	getMissionState(): MissionState | null {
+		return this.#missionRuntime.snapshot();
+	}
+
+	/**
+	 * (Re)arm persisted one-shot wakes for the active branch. Called at construction and
+	 * after any branch swap, since `newSession`/`switchSession` replace the entry set the
+	 * pending fold derives from.
+	 */
+	#rearmSessionSchedules(): void {
+		this.#sessionSchedule?.dispose();
+		this.#sessionSchedule = initSessionSchedules(this.sessionManager.getBranch(), this.#sessionScheduleTimers, {
+			getEntries: () => this.sessionManager.getBranch(),
+			appendCustomEntry: (customType, data) => this.sessionManager.appendCustomEntry(customType, data),
+			flush: () => this.sessionManager.flush(),
+			sendHiddenMessage: async message => {
+				await this.sendCustomMessage(
+					{
+						customType: message.customType,
+						content: message.content,
+						display: false,
+						attribution: "agent",
+					},
+					{ deliverAs: message.deliverAs, triggerTurn: message.triggerTurn },
+				);
+			},
+		});
+	}
+
+	/** Live schedule controller. Read structurally by the `schedule` tool. */
+	getSessionSchedule(): SessionScheduleController | undefined {
+		return this.#sessionSchedule;
 	}
 
 	markPlanReferenceSent(): void {
@@ -5895,6 +6023,7 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
+		this.#assertMissionTransitionAllowed("suspend");
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -5966,6 +6095,11 @@ export class AgentSession {
 		// not the previous session's — refresh before the next turn goes out.
 		await this.refreshBaseSystemPrompt();
 
+		// The branch just changed, so the previous branch's wakes are no longer ours to
+		// fire and this branch's have never been armed.
+		this.#rearmSessionSchedules();
+		await this.#missionRuntime.restore();
+
 		// Emit session_switch event with reason "new" to hooks
 		if (this.#extensionRunner) {
 			await this.#extensionRunner.emit({
@@ -5994,6 +6128,7 @@ export class AgentSession {
 	 */
 	async fork(): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
+		this.#assertMissionTransitionAllowed("destructive");
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "fork" (can be cancelled)
@@ -6069,6 +6204,7 @@ export class AgentSession {
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
 		this.#assertVibeSessionTransitionAllowed("move the session");
+		this.#assertMissionTransitionAllowed("destructive");
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
 
@@ -6883,6 +7019,7 @@ export class AgentSession {
 	 * @returns true if switch completed, false if cancelled by hook
 	 */
 	async switchSession(sessionPath: string): Promise<boolean> {
+		this.#assertMissionTransitionAllowed("suspend");
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -6980,6 +7117,10 @@ export class AgentSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisors.resetSessionState();
 			this.#todo.syncFromBranch();
+			// Same reason as newSession: the entry set the pending fold derives from was
+			// just replaced, so re-arm against the branch we actually switched to.
+			this.#rearmSessionSchedules();
+			await this.#missionRuntime.restore();
 			if (switchingToDifferentSession) {
 				this.#closeAllProviderSessions("session switch");
 			} else if (didReloadConversationChange) {

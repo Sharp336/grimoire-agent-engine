@@ -331,6 +331,13 @@ export interface CreateAgentSessionOptions {
 	cwd?: string;
 	/** Additional workspace directories beyond cwd (multi-root), absolute or cwd-relative. */
 	additionalDirectories?: string[];
+	/**
+	 * Register an id-scoped cold reviver for one mission worker; returns its unregister handle.
+	 *
+	 * Supplied by the launch host because the reviver factory needs auth storage and LSP
+	 * settings that exist only at that call site.
+	 */
+	registerPersistedSubagentReviver?: (agentId: string) => (() => void) | undefined;
 	/** Global config directory. Default: ~/.omp/agent */
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
@@ -1674,6 +1681,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
+			getMissionRuntime: () => session?.missionRuntime,
+			getMissionState: () => session?.getMissionState() ?? null,
+			getSessionSchedule: () => session?.getSessionSchedule(),
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
 			getTurnBudget: () => sessionManager.getTurnBudget(),
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),
@@ -2538,6 +2548,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				builtInRegistryToolNames.add(goalTool.name);
 			}
 		}
+		// No settings flag by design: the tool is live only while a mission exists and is
+		// non-terminal, which `createTools` already gates on.
+		if (!restrictToolNames && !toolRegistry.has("mission") && (toolSession.taskDepth ?? 0) === 0) {
+			const missionTool = await logger.time("createTools:mission:session", HIDDEN_TOOLS.mission, toolSession);
+			if (missionTool) {
+				toolRegistry.set(missionTool.name, wrapToolWithMetaNotice(missionTool));
+				builtInRegistryToolNames.add(missionTool.name);
+			}
+		}
 		for (const tool of wrappedExtensionTools) {
 			toolRegistry.set(tool.name, tool);
 			builtInRegistryToolNames.delete(tool.name);
@@ -3120,8 +3139,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
 			toolRegistry,
+			toolSession,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
+			registerPersistedSubagentReviver: options.registerPersistedSubagentReviver,
 			createMemoryTools: restrictToolNames
 				? undefined
 				: async () => {

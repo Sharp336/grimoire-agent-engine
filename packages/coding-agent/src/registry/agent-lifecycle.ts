@@ -96,6 +96,7 @@ export class AgentLifecycleManager {
 			current.#revivals.clear();
 			current.#parks.clear();
 			current.#persistedReviverFactory = undefined;
+			current.#persistedReviversById.clear();
 		}
 		AgentLifecycleManager.#global = undefined;
 	}
@@ -114,6 +115,12 @@ export class AgentLifecycleManager {
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** TTL applied when a cold-revived ref is adopted on demand. */
 	#persistedReviveTtlMs = 0;
+	/**
+	 * Per-agent persisted revivers for concurrent ACP top-level sessions.
+	 * Preferred over {@link #persistedReviverFactory} so one session cannot
+	 * clobber another's cold-worker routing.
+	 */
+	#persistedReviversById = new Map<string, { factory: PersistedSubagentReviverFactory; idleTtlMs: number }>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -129,6 +136,20 @@ export class AgentLifecycleManager {
 	setPersistedSubagentReviverFactory(factory: PersistedSubagentReviverFactory, idleTtlMs: number): void {
 		this.#persistedReviverFactory = factory;
 		this.#persistedReviveTtlMs = idleTtlMs;
+	}
+
+	/**
+	 * Register an id-scoped cold-reviver factory. Concurrent ACP top-level
+	 * sessions each register their own workers so {@link ensureLive} routes to
+	 * the owning session instead of the newest process-global factory.
+	 * Returns an unregister function; safe to call more than once.
+	 */
+	registerPersistedReviver(agentId: string, factory: PersistedSubagentReviverFactory, idleTtlMs: number): () => void {
+		this.#persistedReviversById.set(agentId, { factory, idleTtlMs });
+		return () => {
+			const current = this.#persistedReviversById.get(agentId);
+			if (current?.factory === factory) this.#persistedReviversById.delete(agentId);
+		};
 	}
 
 	/**
@@ -317,12 +338,23 @@ export class AgentLifecycleManager {
 		let adoption = this.#adopted.get(id);
 		let revive = adoption?.ref === ref ? adoption.revive : undefined;
 		let coldAdopted = false;
-		if (!revive && ref.status === "parked" && ref.sessionFile && this.#persistedReviverFactory) {
-			revive = await this.#persistedReviverFactory(ref);
-			if (revive) {
-				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
-				this.#adopted.set(id, adoption);
-				coldAdopted = true;
+		if (!revive && ref.status === "parked" && ref.sessionFile) {
+			const scoped = this.#persistedReviversById.get(id);
+			if (scoped) {
+				revive = await scoped.factory(ref);
+				if (revive) {
+					adoption = { ref, idleTtlMs: scoped.idleTtlMs, revive };
+					this.#adopted.set(id, adoption);
+					coldAdopted = true;
+				}
+			}
+			if (!revive && this.#persistedReviverFactory) {
+				revive = await this.#persistedReviverFactory(ref);
+				if (revive) {
+					adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
+					this.#adopted.set(id, adoption);
+					coldAdopted = true;
+				}
 			}
 		}
 		if (this.#registry.get(id) !== ref) {
@@ -391,6 +423,7 @@ export class AgentLifecycleManager {
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
+		this.#persistedReviversById.clear();
 	}
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {

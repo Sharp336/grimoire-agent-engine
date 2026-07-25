@@ -142,6 +142,16 @@ export interface LabelEntry extends SessionEntryBase {
 	label: string | undefined;
 }
 
+/**
+ * Namespace for session-level tags stored as {@link LabelEntry} rows.
+ *
+ * A tag is a label whose `targetId` is this prefix plus the tag name, so a session
+ * carries a SET of tags: `SessionEntryIndex` keeps one label per `targetId`, and a
+ * single shared sentinel target would collapse every tag into the newest one.
+ * Clearing a tag appends the same `targetId` with an empty label.
+ */
+export const SESSION_TAG_PREFIX = "__session_tag__:";
+
 /** Append-only audit entry recording a session title change. */
 export interface TitleChangeEntry extends SessionEntryBase {
 	type: typeof TITLE_CHANGE_ENTRY_TYPE;
@@ -164,6 +174,19 @@ export interface TtsrInjectionEntry extends SessionEntryBase {
 	injectedRules: string[];
 }
 
+/**
+ * JSON-safe mission-child ownership markers for session_init.
+ * Lives beside SessionInitEntry (not the mission domain) so session persistence
+ * never imports MissionRuntime.
+ */
+export interface MissionChildOwnerEntry {
+	missionId: string;
+	ownerSessionId: string;
+	role: "implementation" | "scrutiny" | "user-testing";
+	milestoneId: string;
+	featureId: string;
+}
+
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
@@ -183,6 +206,10 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** Fixed mission worktree binding; absent preserves ordinary-task revive-at-parent-cwd semantics. */
+	cwdBinding?: "fixed";
+	/** Mission ownership required to cold-revive a fixed-cwd child in the owning top-level session. */
+	missionOwner?: MissionChildOwnerEntry;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

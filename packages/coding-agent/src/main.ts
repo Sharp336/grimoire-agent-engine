@@ -56,6 +56,7 @@ import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
+import { MISSION_WORKER_IDLE_TTL_MS } from "./missions/runtime";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
@@ -63,7 +64,7 @@ import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
-import { AgentLifecycleManager } from "./registry/agent-lifecycle";
+import { AgentLifecycleManager, type PersistedSubagentReviverFactory } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -1493,10 +1494,21 @@ export async function runRootCommand(
 			stdoutIsTTY: process.stdout.isTTY,
 		});
 
+		// Built after createSession because the factory needs the session it revives into;
+		// mission workers only register during runtime operation, well after this is set.
+		let persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await createSession({
 			...sessionOptions,
 			eventBus,
 			preloadedExtensions: extensionsResult,
+			registerPersistedSubagentReviver: agentId =>
+				persistedReviverFactory
+					? AgentLifecycleManager.global().registerPersistedReviver(
+							agentId,
+							persistedReviverFactory,
+							MISSION_WORKER_IDLE_TTL_MS,
+						)
+					: undefined,
 		});
 
 		// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
@@ -1506,14 +1518,15 @@ export async function runRootCommand(
 		// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
 		// bootstrap: ACP keeps several concurrent top-level sessions and a single
 		// process-global factory must not be clobbered by the most recent one.
+		persistedReviverFactory = createPersistedSubagentReviverFactory({
+			session,
+			authStorage,
+			modelRegistry,
+			settings: settingsInstance,
+			enableLsp: sessionOptions.enableLsp ?? true,
+		});
 		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
-			createPersistedSubagentReviverFactory({
-				session,
-				authStorage,
-				modelRegistry,
-				settings: settingsInstance,
-				enableLsp: sessionOptions.enableLsp ?? true,
-			}),
+			persistedReviverFactory,
 			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 		);
 		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
