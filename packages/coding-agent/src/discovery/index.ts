@@ -37,6 +37,8 @@ import "./omp-plugins";
 import "./ssh";
 import "./vscode";
 import "./windsurf";
+// Toolbox provider registers on import (implementation lives under extensibility).
+import "../extensibility/custom-tools/toolbox";
 
 // Re-export the main API from capability registry
 export {
