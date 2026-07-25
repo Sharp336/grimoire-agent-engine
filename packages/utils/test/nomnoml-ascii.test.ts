@@ -86,6 +86,39 @@ describe("renderNomnomlAsciiSafe", () => {
 		});
 	}
 
+	it("draws associations declared inside a nested container", () => {
+		// Walking only root.assocs renders both nested nodes and silently drops the edge.
+		const rendered = stripDiagram(renderNomnomlAsciiSafe("[Container|\n  [A] -> [B]\n]", 80));
+		const rows = rendered.split("\n");
+
+		expect(rendered).toContain("Container");
+		// Container plus both nested classifiers, each with its own border box.
+		expect(rendered.match(/┌/g)).toHaveLength(3);
+
+		const arrowRow = rows.findIndex(row => row.includes("v"));
+		const arrowColumn = rows[arrowRow]?.indexOf("v") ?? -1;
+		const sourceRow = rows.findIndex(row => row.includes("A"));
+		const targetRow = rows.findIndex(row => row.includes("B"));
+
+		expect(arrowColumn).toBeGreaterThan(0);
+		// The edge runs down from below A and lands on B's box, not in dead space.
+		expect(arrowRow).toBeGreaterThan(sourceRow);
+		expect(arrowRow).toBeLessThan(targetRow);
+		const connectorRows = rows.filter(row => row[arrowColumn] === "│").length;
+		expect(connectorRows).toBeGreaterThan(1);
+	});
+
+	it("accumulates compartment offsets for doubly nested associations", () => {
+		const rendered = stripDiagram(renderNomnomlAsciiSafe("[Outer|\n [Inner|\n  [A] -> [B]\n ]\n]", 80));
+		const rows = rendered.split("\n");
+
+		// Outer, Inner, and both leaf classifiers.
+		expect(rendered.match(/┌/g)).toHaveLength(4);
+		expect(rows.some(row => row.includes("v"))).toBe(true);
+		// A mistranslated edge escapes the outer box; its border column must survive.
+		expect(rows.every(row => "┌│└".includes(row[0] ?? ""))).toBe(true);
+	});
+
 	it("places direct association markers on connector-facing edge points", () => {
 		// nomnoml path for [A]->[B] is [source center, top edge, mid, bottom edge, target center].
 		// Marker must land on path[length-2] (x=2,y=7,v), not node-center (2,9) or mid-route (2,5).
