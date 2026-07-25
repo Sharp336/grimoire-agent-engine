@@ -2213,6 +2213,37 @@ describe("cmux Codex browser review regressions", () => {
 		await adapter.dispose();
 	});
 
+	it("types into the deepest active editor inside shadow roots", async () => {
+		const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
+		const host = document.getElementById("host");
+		if (!host) throw new Error("Expected shadow host");
+		const shadowRoot = host.attachShadow({ mode: "open" });
+		const input = document.createElement("input");
+		shadowRoot.append(input);
+		Object.defineProperty(document, "activeElement", { configurable: true, value: host });
+		Object.defineProperty(shadowRoot, "activeElement", { configurable: true, value: input });
+		const nativeCalls: Array<{ selector: string; text: string }> = [];
+		const evaluate = (source: string, args: unknown[]) => runPageEvaluator(source, args, { document, window });
+		const { adapter, browser } = adapterAndFacadeFor({
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async type(selector: string, text: string) {
+				nativeCalls.push({ selector, text });
+				expect(input.matches(selector)).toBe(true);
+				input.value += text;
+			},
+		});
+
+		try {
+			await (await selectedTab(browser)).cua.type({ text: "shadow text" });
+			expect(input.value).toBe("shadow text");
+			expect(nativeCalls).toHaveLength(1);
+			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
+		} finally {
+			await adapter.dispose();
+		}
+	});
+
 	it("rejects fill and type on non-editable targets without mutating them", async () => {
 		const events: string[] = [];
 		const view = {

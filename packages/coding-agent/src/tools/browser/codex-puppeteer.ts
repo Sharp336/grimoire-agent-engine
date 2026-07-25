@@ -611,6 +611,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	#domSnapshotGeneration = 0;
 	#downloadSession: CDPSession | undefined;
 	#downloadSessionPromise: Promise<CDPSession> | undefined;
+	#downloadReadiness: Promise<void> | undefined;
 	#downloadWillBeginHandler: ((event: DownloadWillBeginEvent) => void) | undefined;
 	#downloadProgressHandler: ((event: DownloadProgressEvent) => void) | undefined;
 	#downloadPolicyOwnership: DownloadPolicyOwnership | undefined;
@@ -674,6 +675,8 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (this.#disposed) throw new Error("Browser adapter run has ended");
 		this.#assertTab(operation, args);
 		throwIfAborted(this.#signal);
+		const downloadReadiness = this.#downloadReadiness;
+		if (downloadReadiness && operation !== "playwright.waitForEvent") await downloadReadiness;
 		const result = await this.#dispatch(operation, args);
 		throwIfAborted(this.#signal);
 		return result as T;
@@ -1608,7 +1611,14 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		this.#signal.addEventListener("abort", aborted, { once: true });
 		this.#downloadWaiters.add(waiter);
 		if (this.#signal.aborted) aborted();
-		void this.#ensureDownloadSession().catch(error => waiter.reject(error));
+		const readiness = this.#ensureDownloadSession().then(() => undefined);
+		this.#downloadReadiness = readiness;
+		void readiness
+			.finally(() => {
+				if (this.#downloadReadiness === readiness) this.#downloadReadiness = undefined;
+			})
+			.catch(() => undefined);
+		void readiness.catch(error => waiter.reject(error));
 		const download = await pendingDownload.promise;
 		const token = `download-${Snowflake.next()}`;
 		this.#downloads.set(token, download);

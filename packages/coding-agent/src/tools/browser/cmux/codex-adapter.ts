@@ -296,8 +296,12 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 }`;
 
 const DISPOSE_NATIVE_ACTION_TOKEN_SOURCE = `(token) => {
-	for (const element of document.querySelectorAll("[data-omp-codex-action-token]")) {
-		if (element.getAttribute("data-omp-codex-action-token") === token) element.removeAttribute("data-omp-codex-action-token");
+	const roots = [document];
+	for (const root of roots) {
+		for (const element of root.querySelectorAll("*")) {
+			if (element.getAttribute?.("data-omp-codex-action-token") === token) element.removeAttribute("data-omp-codex-action-token");
+			if (element.shadowRoot) roots.push(element.shadowRoot);
+		}
 	}
 	return true;
 }`;
@@ -510,7 +514,8 @@ const VISIBLE_DOM_SOURCE = `() => {
 }`;
 
 const PREPARE_ACTIVE_NATIVE_TYPE_SOURCE = `(token, label) => {
-	const target = document.activeElement;
+	let target = document.activeElement;
+	while (target?.shadowRoot?.activeElement) target = target.shadowRoot.activeElement;
 	if (!target || typeof target !== "object") throw new Error(label + " requires an editable active element");
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const composedParent = element => element?.parentElement ?? element?.getRootNode?.()?.host ?? null;

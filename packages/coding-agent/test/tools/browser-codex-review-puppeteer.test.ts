@@ -211,25 +211,32 @@ describe("Puppeteer Codex logical tabs", () => {
 });
 
 describe("Puppeteer Codex download adapter", () => {
-	it("lazily establishes download readiness before exposing the first waiter", async () => {
+	it("blocks the first download trigger until capture listeners are ready", async () => {
 		spyOn(fs, "mkdir").mockResolvedValue(undefined);
-		const enableStarted = Promise.withResolvers<void>();
-		const releaseEnable = Promise.withResolvers<void>();
-		const session = new DownloadSessionDouble(async (method, params) => {
-			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allow") {
-				enableStarted.resolve();
-				await releaseEnable.promise;
-			}
-		});
-		let createSessionCount = 0;
+		const createStarted = Promise.withResolvers<void>();
+		const releaseSession = Promise.withResolvers<DownloadSessionDouble>();
+		const session = new DownloadSessionDouble();
+		let clickCount = 0;
 		const adapter = new PuppeteerCodexBrowserAdapter({
 			currentTabId: "1",
-			page: { url: () => "https://fixture.test/download", title: async () => "Download fixture" } as never,
+			page: {
+				url: () => "https://fixture.test/download",
+				title: async () => "Download fixture",
+				mouse: {
+					click: async () => {
+						clickCount++;
+						session.emit("Browser.downloadWillBegin", {
+							guid: "immediate-download",
+							suggestedFilename: "immediate.txt",
+						});
+					},
+				},
+			} as never,
 			browser: {
 				target: () => ({
 					createCDPSession: async () => {
-						createSessionCount++;
-						return session;
+						createStarted.resolve();
+						return await releaseSession.promise;
 					},
 				}),
 			} as never,
@@ -239,26 +246,23 @@ describe("Puppeteer Codex download adapter", () => {
 		});
 
 		try {
-			await adapter.beginRun();
-			expect(createSessionCount).toBe(0);
 			const tab = await createCodexBrowserFacade(adapter).tabs.selected();
 			if (!tab) throw new Error("Expected selected Puppeteer tab");
+			const result = Promise.all([
+				tab.playwright.waitForEvent("download", { timeoutMs: 100 }),
+				tab.cua.click({ x: 10, y: 20 }),
+			]);
+			await createStarted.promise;
+			await flushMicrotasks();
+			expect(clickCount).toBe(0);
 
-			const waiting = tab.playwright.waitForEvent("download", { timeoutMs: 100 });
-			await enableStarted.promise;
-			expect(createSessionCount).toBe(1);
-			releaseEnable.resolve();
-			await session.downloadListenerRegistered.promise;
-			session.emit("Browser.downloadWillBegin", {
-				guid: "immediate-download",
-				suggestedFilename: "immediate.txt",
-			});
-			const download = await waiting;
+			releaseSession.resolve(session);
+			const [download] = await result;
 			if (!("path" in download)) throw new Error("Expected an immediate download event");
 			session.emit("Browser.downloadProgress", { guid: "immediate-download", state: "completed" });
 			expect(path.basename((await download.path({ timeoutMs: 100 })) ?? "")).toBe("immediate.txt");
 		} finally {
-			releaseEnable.resolve();
+			releaseSession.resolve(session);
 			await adapter.dispose();
 		}
 	});
