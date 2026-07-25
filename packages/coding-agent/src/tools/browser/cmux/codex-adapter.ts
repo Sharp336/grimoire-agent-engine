@@ -586,7 +586,7 @@ const CLEAR_DOM_REFS_SOURCE = `() => { delete globalThis.__ompCodexDomRefs; retu
 
 const READ_FILE_EVENT_AFTER_SOURCE = `(baseline) => {
 	const event = globalThis.__ompCodexBrowserState?.fileEvents.find(event => event.sequence > baseline);
-	return event ? { token: event.token, multiple: event.multiple } : null;
+	return event ? { sequence: event.sequence, token: event.token, multiple: event.multiple } : null;
 }`;
 
 const DISPOSE_FILE_TOKEN_SOURCE = `(token) => {
@@ -731,6 +731,7 @@ interface LocatorStatus {
 }
 
 interface FileEvent {
+	sequence: number;
 	token: string;
 	multiple: boolean;
 }
@@ -864,6 +865,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	readonly #navigationCancels = new Map<string, () => void>();
 	readonly #tokenNamespace = crypto.randomUUID();
 	#runState: "new" | "active" | "ended" = "new";
+	#fileChooserReadiness: Promise<number> | undefined;
 
 	constructor(tab: CmuxTab, state?: CmuxCodexBrowserSessionState) {
 		this.#tab = tab;
@@ -1601,14 +1603,21 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.WAIT_FOR_EVENT);
 		}
 		const deadline = Date.now() + timeoutMs;
-		const baseline = await this.prepare(remainingMs(deadline, "playwright.waitForEvent"));
+		const readiness = this.prepare(remainingMs(deadline, "playwright.waitForEvent"));
+		this.#fileChooserReadiness = readiness;
+		let baseline: number;
+		try {
+			baseline = await readiness;
+		} finally {
+			if (this.#fileChooserReadiness === readiness) this.#fileChooserReadiness = undefined;
+		}
 		while (true) {
 			const result = await this.#tab.codexEvaluate<FileEvent | null>(
 				READ_FILE_EVENT_AFTER_SOURCE,
 				[baseline],
 				remainingMs(deadline, "playwright.waitForEvent"),
 			);
-			if (result) return result;
+			if (result) return { token: result.token, multiple: result.multiple };
 			await this.#tab.codexWait(Math.min(50, remainingMs(deadline, "playwright.waitForEvent")));
 		}
 	}
@@ -1712,6 +1721,10 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				(Array.isArray(args.modifiers) && args.modifiers.length > 0))
 		) {
 			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.LOCATOR_CLICK_OPTIONS);
+		}
+		if (nativeClick) {
+			const readiness = this.#fileChooserReadiness;
+			if (readiness) await readiness;
 		}
 		await this.#waitForLocator(descriptor, args.force === true ? "attached" : "actionable", deadline, operation);
 		const selector = this.#cssSelector(descriptor);

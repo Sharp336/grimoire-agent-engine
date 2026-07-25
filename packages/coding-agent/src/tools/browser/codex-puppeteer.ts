@@ -1626,12 +1626,12 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.WAIT_FOR_EVENT);
 		}
 		const session = await createSession.call(target);
+		const coordinator = getDownloadPolicyCoordinator(this.#browser, this.#cwd);
 		let ownership: DownloadPolicyOwnership | undefined;
 		let began: ((event: DownloadWillBeginEvent) => void) | undefined;
 		let progressed: ((event: DownloadProgressEvent) => void) | undefined;
 		try {
-			ownership = await acquireDownloadPolicy(this.#browser, this.#cwd, session);
-			const directory = ownership.coordinator.directory;
+			const directory = coordinator.directory;
 			began = (event: DownloadWillBeginEvent) => {
 				const frameIds = this.#activeDownloadFrameIds();
 				if (frameIds && (typeof event.frameId !== "string" || !frameIds.has(event.frameId))) return;
@@ -1662,6 +1662,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			};
 			session.on("Browser.downloadWillBegin", began);
 			session.on("Browser.downloadProgress", progressed);
+			ownership = await acquireDownloadPolicy(this.#browser, this.#cwd, session);
 			if (this.#disposed) throw new Error("Puppeteer adapter was disposed");
 			this.#downloadWillBeginHandler = began;
 			this.#downloadProgressHandler = progressed;
@@ -1798,10 +1799,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	async #resolveEvaluated(descriptor: CodexLocatorDescriptor, deadline: OperationDeadline): Promise<ElementHandle[]> {
 		this.#operationRemaining(deadline);
-		const collection = await queryAriaLocatorHandle(this.#page, descriptor);
+		let collection: JSHandle<unknown> | undefined;
 		const handles: ElementHandle[] = [];
 		const properties = new Set<JSHandle<unknown>>();
 		try {
+			collection = await queryAriaLocatorHandle(this.#page, descriptor);
 			this.#operationRemaining(deadline);
 			const values = await collection.getProperties();
 			for (const property of values.values()) properties.add(property);
@@ -1848,7 +1850,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			}
 			throw error;
 		} finally {
-			await collection.dispose().catch(() => undefined);
+			await collection?.dispose().catch(() => undefined);
 		}
 	}
 

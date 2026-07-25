@@ -109,7 +109,11 @@ function describeWorkerResult(message: WorkerOutbound): string {
 	return message.ok ? "successful result" : `${message.error.name}: ${message.error.message}`;
 }
 
-function makePuppeteerBrowser(targetIds: readonly string[]): Browser {
+interface PuppeteerPageProbe {
+	requestInterception: boolean[];
+}
+
+function makePuppeteerBrowser(targetIds: readonly string[], probe?: PuppeteerPageProbe): Browser {
 	const targets = targetIds.map(targetId => {
 		const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
 		const frame = {};
@@ -130,7 +134,9 @@ function makePuppeteerBrowser(targetIds: readonly string[]): Browser {
 			viewport: () => ({ width: 800, height: 600 }),
 			mainFrame: () => frame,
 			isClosed: () => false,
-			setRequestInterception: async () => {},
+			setRequestInterception: async (enabled: boolean) => {
+				probe?.requestInterception.push(enabled);
+			},
 			on(type: string, handler: (...args: unknown[]) => void) {
 				let handlers = listeners.get(type);
 				if (!handlers) {
@@ -548,5 +554,56 @@ describe("Codex agent.browser Puppeteer inline-worker lifecycle", () => {
 				priorDescriptorRestoredAfterCompletion: true,
 			},
 		]);
+	}, 20_000);
+
+	it("runs page cleanup and resets active state when adapter disposal fails without replacing the primary error", async () => {
+		const probe: PuppeteerPageProbe = { requestInterception: [] };
+		const browser = makePuppeteerBrowser(["cleanup-invariant"], probe);
+		const connectSpy = spyOn(puppeteer, "connect").mockResolvedValue(browser);
+		const disposeSpy = spyOn(PuppeteerCodexBrowserAdapter.prototype, "dispose").mockRejectedValue(
+			new Error("adapter disposal failed"),
+		);
+		const harness = createPuppeteerWorkerHarness();
+
+		try {
+			await initializePuppeteerWorker(harness, "cleanup-invariant");
+			const failed = harness.waitFor(message => message.type === "result" && message.id === "primary-failure");
+			harness.send({
+				type: "run",
+				id: "primary-failure",
+				name: "primary-failure",
+				code: 'page.on("request", () => undefined); throw new Error("primary run failed");',
+				timeoutMs: 5_000,
+				session: { cwd: process.cwd() },
+			});
+			const failure = await waitForLifecycleStep(failed, "disposal failure result");
+			expect(failure).toMatchObject({
+				type: "result",
+				id: "primary-failure",
+				ok: false,
+				error: { message: "primary run failed" },
+			});
+			expect(probe.requestInterception.at(-1)).toBe(false);
+
+			disposeSpy.mockRestore();
+			const recovered = harness.waitFor(message => message.type === "result" && message.id === "recovered-run");
+			harness.send({
+				type: "run",
+				id: "recovered-run",
+				name: "recovered-run",
+				code: "return true;",
+				timeoutMs: 5_000,
+				session: { cwd: process.cwd() },
+			});
+			await expect(waitForLifecycleStep(recovered, "run after disposal failure")).resolves.toMatchObject({
+				type: "result",
+				id: "recovered-run",
+				ok: true,
+			});
+		} finally {
+			disposeSpy.mockRestore();
+			connectSpy.mockRestore();
+			await harness.close().catch(() => undefined);
+		}
 	}, 20_000);
 });

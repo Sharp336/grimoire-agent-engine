@@ -1058,13 +1058,18 @@ export class WorkerCore {
 				}
 			} finally {
 				runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
-				await codexAdapter?.dispose();
+				try {
+					await codexAdapter?.dispose();
+				} catch (error) {
+					failure ??= { error };
+				}
 				try {
 					await runPage?.cleanup();
 				} catch (error) {
-					failure = { error };
+					failure ??= { error };
+				} finally {
+					if (this.#active?.id === msg.id) this.#active = null;
 				}
-				if (this.#active?.id === msg.id) this.#active = null;
 			}
 		}
 		if (failure) {

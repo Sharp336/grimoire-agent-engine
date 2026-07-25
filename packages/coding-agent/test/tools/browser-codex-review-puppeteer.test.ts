@@ -59,6 +59,8 @@ async function withPuppeteerTool(test: (tool: BrowserTool, name: string) => Prom
 	<button id="go">Go</button><button class="gone">Display Hidden</button><button aria-hidden="true">ARIA Hidden</button>
 	<div id="plain">Plain target</div><div id="editable" contenteditable="true">edit</div>
 	<ul><li>One Item</li></ul><button id="icon-button"><img alt="Save"></button><div>Mixed   Case Text</div><div inert><button>Inert Hidden</button></div>
+	<div aria-hidden="true"><span>ARIA hidden text</span><input aria-label="ARIA hidden label" placeholder="ARIA hidden placeholder"></div>
+	<div inert><span>Inert hidden text</span><input aria-label="Inert hidden label" placeholder="Inert hidden placeholder"></div>
 	<input id="aria-readonly-input" aria-readonly=" TrUe " value="locked"><div id="aria-readonly-editable" contenteditable="true" aria-readonly="TRUE">locked content</div>
 	<iframe id="only-frame" srcdoc="<button id='frame-button'>Frame target</button>"></iframe>
 	<div id="button-row"><button id="stable">Stable target</button><button id="other">Other target</button></div>
@@ -223,6 +225,38 @@ describe("Puppeteer Codex download adapter", () => {
 			await adapter.dispose();
 		}
 	});
+	it("arms download listeners before enabling browser download behavior", async () => {
+		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
+		let session!: DownloadSessionDouble;
+		session = new DownloadSessionDouble(async (method, params) => {
+			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allow") {
+				session.emit("Browser.downloadWillBegin", {
+					guid: "setup-download",
+					suggestedFilename: "setup.txt",
+				});
+			}
+		});
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: { url: () => "https://fixture.test/download", title: async () => "Download fixture" } as never,
+			browser: { target: () => ({ createCDPSession: async () => session }) } as never,
+			signal: new AbortController().signal,
+			cwd: ".",
+			captureScreenshot: async () => "",
+		});
+
+		try {
+			const tab = await createCodexBrowserFacade(adapter).tabs.selected();
+			if (!tab) throw new Error("Expected selected Puppeteer tab");
+			const download = await tab.playwright.waitForEvent("download", { timeoutMs: 100 });
+			if (!("path" in download)) throw new Error("Expected setup-time download event");
+			session.emit("Browser.downloadProgress", { guid: "setup-download", state: "completed" });
+			expect(path.basename((await download.path({ timeoutMs: 100 })) ?? "")).toBe("setup.txt");
+		} finally {
+			await adapter.dispose();
+		}
+	});
+
 	it("shares one completed download across concurrent waitForEvent waiters", async () => {
 		vi.useFakeTimers();
 		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
@@ -748,7 +782,13 @@ describe("Puppeteer final parity blockers", () => {
 				   normalizedText:await p.getByText("mixed case").count(),
 				   displayHidden:await p.getByRole("button",{name:"Display Hidden",exact:true}).count(),
 				   ariaHidden:await p.getByRole("button",{name:"ARIA Hidden",exact:true}).count(),
-				   inertHidden:await p.getByRole("button",{name:"Inert Hidden",exact:true}).count()
+				   inertHidden:await p.getByRole("button",{name:"Inert Hidden",exact:true}).count(),
+				   hiddenText:await p.getByText("ARIA hidden text",{exact:true}).count(),
+				   hiddenLabel:await p.getByLabel("ARIA hidden label",{exact:true}).count(),
+				   hiddenPlaceholder:await p.getByPlaceholder("ARIA hidden placeholder",{exact:true}).count(),
+				   inertText:await p.getByText("Inert hidden text",{exact:true}).count(),
+				   inertLabel:await p.getByLabel("Inert hidden label",{exact:true}).count(),
+				   inertPlaceholder:await p.getByPlaceholder("Inert hidden placeholder",{exact:true}).count()
 				 };`,
 			);
 			expect(result).toEqual({
@@ -765,6 +805,12 @@ describe("Puppeteer final parity blockers", () => {
 				displayHidden: 0,
 				ariaHidden: 0,
 				inertHidden: 0,
+				hiddenText: 0,
+				hiddenLabel: 0,
+				hiddenPlaceholder: 0,
+				inertText: 0,
+				inertLabel: 0,
+				inertPlaceholder: 0,
 			});
 		});
 	}, 20_000);
@@ -1916,5 +1962,37 @@ describe("Puppeteer final parity blockers", () => {
 		await expect(secondTab.title()).resolves.toBe("Run-owned");
 		await second.dispose();
 		expect({ pageCloses, browserCloses }).toEqual({ pageCloses: 0, browserCloses: 0 });
+	});
+
+	it("maps cross-origin failures from locator query creation to capability errors", async () => {
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				evaluateHandle: async () => {
+					throw new Error("CODEX_CROSS_ORIGIN_FRAME");
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await expect(
+			adapter.invoke("locator.count", {
+				tabId: "1",
+				locator: {
+					kind: "within",
+					parent: { kind: "frame", selector: "iframe" },
+					child: { kind: "role", role: "button" },
+				},
+				timeoutMs: 100,
+			}),
+		).rejects.toMatchObject({
+			name: "BrowserCapabilityError",
+			message: "Browser capability is unavailable: playwright.frameLocator cross-origin",
+		});
+		await adapter.dispose();
 	});
 });

@@ -1295,6 +1295,66 @@ describe("cmux Codex browser review regressions", () => {
 		}
 	});
 
+	it("captures the observer sequence before consuming waiter readiness in a following click", async () => {
+		const probe = observerProbe(true);
+		let installs = 0;
+		const lateInstall = Promise.withResolvers<void>();
+		let clicked = false;
+		let postClickWaits = 0;
+		const evaluate = (source: string, args: unknown[]) => {
+			if (source.includes("INSTALL_PAGE_OBSERVERS_SOURCE")) throw new Error("Unexpected source marker");
+			if (source.includes("fileEventSequence") && args.length === 1) {
+				installs++;
+				if (installs > 1) {
+					return lateInstall.promise.then(() =>
+						runPageEvaluator(source, args, {
+							document: probe.document,
+							window: {},
+							Element: probe.ElementProbe,
+						}),
+					);
+				}
+			}
+			const command = args[1];
+			if (command === "status") return { attached: true, visible: true, enabled: true };
+			return runPageEvaluator(source, args, {
+				document: probe.document,
+				window: {},
+				Element: probe.ElementProbe,
+			});
+		};
+		const { adapter, browser } = adapterAndFacadeFor({
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async click() {
+				clicked = true;
+				probe.fire(probe.file);
+			},
+			async codexWait() {
+				await Promise.resolve();
+				if (clicked && ++postClickWaits > 1) throw new Error("file chooser event was missed");
+			},
+		});
+
+		try {
+			await adapter.beginRun();
+			const current = await selectedTab(browser);
+			const chooserPromise = current.playwright.waitForEvent("filechooser", { timeoutMs: 250 });
+			const clickPromise = current.playwright.locator("#upload").click();
+			await Promise.resolve();
+			expect(clicked).toBe(false);
+			lateInstall.resolve();
+			await clickPromise;
+			const chooser = await chooserPromise;
+			if (!("isMultiple" in chooser)) throw new Error("Expected file chooser event");
+			expect(chooser.isMultiple()).toBe(true);
+			expect(installs).toBe(2);
+		} finally {
+			lateInstall.resolve();
+			await adapter.dispose();
+		}
+	});
+
 	it("does not synthesize a chooser after a trusted native file-input click is default-prevented", async () => {
 		const probe = observerProbe();
 		const waiterPolling = Promise.withResolvers<void>();
