@@ -30,8 +30,10 @@ import {
 	MISSION_BUSY,
 	type MissionRuntime,
 	MissionRuntimeError,
+	restartMission,
 } from "../../missions/runtime";
 
+/** Machine-readable reason for a mission transition the runtime refuses. */
 export { INVALID_MISSION_TRANSITION };
 
 import type { MissionState } from "../../missions/types";
@@ -119,12 +121,6 @@ export type RpcSessionChangeResult =
 	| { type: "branch"; data: { text: string; cancelled: boolean } };
 
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
-
-/** Machine-readable reason for a mission transition the runtime refuses. */
-
-import { type MissionRestartRuntime, restartMission } from "../../missions/runtime";
-
-export { type MissionRestartRuntime, restartMission };
 
 /** Command discriminators routed to the top-level session's {@link MissionRuntime}. */
 export type RpcMissionCommandType = Extract<

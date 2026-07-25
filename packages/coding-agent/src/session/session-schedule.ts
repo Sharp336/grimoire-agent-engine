@@ -310,8 +310,7 @@ export class SessionScheduleController {
 
 /**
  * Named init the orchestrator calls from AgentSession construction and after
- * newSession/switchSession. Do not edit agent-session.ts in this slice — wire
- * this from the consolidating pass.
+ * newSession/switchSession.
  */
 export function initSessionSchedules(
 	entries: readonly SessionEntry[],

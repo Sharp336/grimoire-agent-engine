@@ -51,6 +51,7 @@ import {
 	expectedIntegrationNewHead,
 	isMissionTerminal,
 	loadMissionState,
+	MISSION_ID_PATTERN,
 	nextMissionFeature,
 	validateMissionPlan,
 } from "./state";
@@ -62,6 +63,7 @@ import {
 	type MissionFeature,
 	type MissionFeatureWorkspaceDescriptor,
 	type MissionHandoff,
+	type MissionHandoffDecision,
 	type MissionMilestone,
 	type MissionNextRunMode,
 	type MissionPauseReason,
@@ -629,10 +631,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 		}
 	}
 
-	async resolveHandoff(input: {
-		decision: "accept" | "retry_same" | "retry_fresh" | "cancel_feature" | "pause";
-		messageToWorker?: string;
-	}): Promise<MissionState> {
+	async resolveHandoff(input: { decision: MissionHandoffDecision; messageToWorker?: string }): Promise<MissionState> {
 		const state = this.#requireOwnedState();
 		const handoff = state.pendingHandoff;
 		if (!handoff) throw new MissionRuntimeError("There is no pending handoff to resolve.");
@@ -692,8 +691,8 @@ export class MissionRuntime implements MissionRuntimeContract {
 		const existingIds = new Set(state.features.map(item => item.id));
 		const remediations: MissionFeature[] = [];
 		for (const spec of input.addFeatures) {
-			if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(spec.id)) {
-				throw new MissionRuntimeError(`Remediation feature id "${spec.id}" must match [a-z0-9][a-z0-9._-]{0,63}.`);
+			if (!MISSION_ID_PATTERN.test(spec.id)) {
+				throw new MissionRuntimeError(`Remediation feature id "${spec.id}" must match ${MISSION_ID_PATTERN}.`);
 			}
 			if (existingIds.has(spec.id)) {
 				throw new MissionRuntimeError(`Remediation feature id "${spec.id}" already exists.`);

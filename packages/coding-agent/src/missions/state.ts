@@ -4,6 +4,7 @@ import type {
 	MissionFeature,
 	MissionFeatureStatus,
 	MissionHandoff,
+	MissionHandoffDecision,
 	MissionIntegrationPending,
 	MissionPauseReason,
 	MissionPlan,
@@ -32,7 +33,7 @@ export class MissionStateError extends Error {
 	override readonly name = "MissionStateError";
 }
 
-const MISSION_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+export const MISSION_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 const MISSION_STATUSES = [
 	"planning",
@@ -70,15 +71,19 @@ const PAUSE_REASONS = [
 	"validator_workspace_dirty",
 ] as const satisfies readonly MissionPauseReason[];
 
-const HANDOFF_RESOLVE_DECISIONS = ["accept", "retry_same", "retry_fresh", "cancel_feature", "pause"] as const;
+const HANDOFF_RESOLVE_DECISIONS = [
+	"accept",
+	"retry_same",
+	"retry_fresh",
+	"cancel_feature",
+	"pause",
+] as const satisfies readonly MissionHandoffDecision[];
 
 function isMissionPauseReason(value: unknown): value is MissionPauseReason {
 	return typeof value === "string" && (PAUSE_REASONS as readonly string[]).includes(value);
 }
 
-function isHandoffResolveDecision(
-	value: unknown,
-): value is "accept" | "retry_same" | "retry_fresh" | "cancel_feature" | "pause" {
+function isHandoffResolveDecision(value: unknown): value is MissionHandoffDecision {
 	return typeof value === "string" && (HANDOFF_RESOLVE_DECISIONS as readonly string[]).includes(value);
 }
 
