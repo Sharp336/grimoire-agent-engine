@@ -382,6 +382,7 @@ interface SharedSessionLock {
 	handle: SessionLockHandle;
 	references: number;
 	errorHandlers: Set<(error: Error) => void>;
+	state: { invalid: boolean };
 }
 
 interface AtomicEntryBatch {
@@ -632,23 +633,37 @@ export class SessionManager {
 	}
 
 	#acquireSessionLock(sessionFile: string = this.#sessionFile ?? ""): void {
-		if (
-			!this.#persist ||
-			!(this.#storage instanceof FileSessionStorage) ||
-			!sessionFile ||
-			this.#sessionLock?.handle.lockPath === lockPathForSession(sessionFile)
-		) {
+		if (!this.#persist || !(this.#storage instanceof FileSessionStorage) || !sessionFile) return;
+		const current = this.#sessionLock;
+		if (current?.handle.lockPath === lockPathForSession(sessionFile)) {
+			if (!current.state.invalid && !current.handle.released) return;
+			current.handle.release();
+			current.state.invalid = false;
+			try {
+				current.handle = acquireSessionLock(sessionFile, {
+					onHeartbeatError: error => {
+						current.state.invalid = true;
+						for (const handler of current.errorHandlers) handler(error);
+					},
+				});
+			} catch (error) {
+				current.state.invalid = true;
+				throw error;
+			}
 			return;
 		}
 		const errorHandlers = new Set<(error: Error) => void>([this.#sessionLockErrorHandler]);
+		const state = { invalid: false };
 		const next: SharedSessionLock = {
 			handle: acquireSessionLock(sessionFile, {
 				onHeartbeatError: error => {
+					state.invalid = true;
 					for (const handler of errorHandlers) handler(error);
 				},
 			}),
 			references: 1,
 			errorHandlers,
+			state,
 		};
 		try {
 			this.#releaseSessionLock();
@@ -1605,11 +1620,15 @@ export class SessionManager {
 
 				let targetLock: SessionLockHandle | undefined;
 				let targetErrorHandlers: Set<(error: Error) => void> | undefined;
+				let targetLockState: SharedSessionLock["state"] | undefined;
 				if (sessionPathChanged && this.#storage instanceof FileSessionStorage) {
 					const errorHandlers = new Set([this.#sessionLockErrorHandler]);
+					const state = { invalid: false };
 					targetErrorHandlers = errorHandlers;
+					targetLockState = state;
 					targetLock = acquireSessionLock(newSessionFile, {
 						onHeartbeatError: error => {
+							state.invalid = true;
 							for (const handler of errorHandlers) handler(error);
 						},
 					});
@@ -1667,12 +1686,13 @@ export class SessionManager {
 					];
 				}
 
-				if (targetLock && targetErrorHandlers) {
+				if (targetLock && targetErrorHandlers && targetLockState) {
 					this.#releaseSessionLock();
 					this.#sessionLock = {
 						handle: targetLock,
 						references: 1,
 						errorHandlers: targetErrorHandlers,
+						state: targetLockState,
 					};
 				}
 				this.#sessionFile = newSessionFile;
@@ -1822,6 +1842,7 @@ export class SessionManager {
 		return this.#withAtomicPersistenceLock(async () => {
 			if (!this.#persist || !this.#sessionFile) return;
 			if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
+			this.#acquireSessionLock();
 			const operationError =
 				this.#diskFailure ?? new Error("Authoritative session persistence recovery was requested.");
 			await this.#authoritativelyRewriteCurrentStateLocked(operationError);

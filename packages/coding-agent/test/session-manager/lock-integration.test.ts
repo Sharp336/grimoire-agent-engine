@@ -3,7 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { exportFromFile } from "../../src/export/html";
-import { inspectSessionLock, lockPathForSession, SessionLockError } from "../../src/session/session-lock";
+import {
+	inspectSessionLock,
+	lockPathForSession,
+	SESSION_LOCK_HEARTBEAT_MS,
+	SessionLockError,
+} from "../../src/session/session-lock";
 import { SessionManager } from "../../src/session/session-manager";
 import { FileSessionStorage } from "../../src/session/session-storage";
 
@@ -334,5 +339,38 @@ describe("SessionManager persistent lock integration", () => {
 		finishDeletion();
 		await dropping;
 		expect(fs.existsSync(lockPathForSession(sessionFile))).toBe(false);
+	});
+
+	it("requires reacquisition after a heartbeat loses ownership", async () => {
+		vi.useFakeTimers();
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		let lockPath: string | undefined;
+		try {
+			await manager.ensureOnDisk();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("missing session file");
+			lockPath = lockPathForSession(sessionFile);
+			const record = inspectSessionLock(sessionFile).record;
+			if (!record) throw new Error("missing session lock record");
+			fs.writeFileSync(lockPath, JSON.stringify({ ...record, ownerId: Bun.randomUUIDv7() }));
+			const sessionBeforeRecovery = fs.readFileSync(sessionFile, "utf8");
+
+			vi.advanceTimersByTime(SESSION_LOCK_HEARTBEAT_MS);
+			await Promise.resolve();
+
+			await expect(manager.recoverPersistenceFromCurrentState()).rejects.toBeInstanceOf(SessionLockError);
+			expect(fs.readFileSync(sessionFile, "utf8")).toBe(sessionBeforeRecovery);
+
+			fs.unlinkSync(lockPath);
+			await manager.recoverPersistenceFromCurrentState();
+			expect(inspectSessionLock(sessionFile).status).toBe("live");
+		} finally {
+			await manager.close().catch(error => {
+				if (!(error instanceof SessionLockError)) throw error;
+			});
+			if (lockPath && fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+			vi.useRealTimers();
+		}
 	});
 });
