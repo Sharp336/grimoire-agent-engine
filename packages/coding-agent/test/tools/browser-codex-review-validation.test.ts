@@ -204,6 +204,20 @@ describe("Codex browser public facade closed vocabularies", () => {
 		]);
 	});
 
+	it("rejects unknown selectOption object keys rather than silently normalizing them", async () => {
+		const adapter = new RecordingAdapter();
+		const { tab } = await selectedTab(adapter);
+		const locator = tab.playwright.locator("#role");
+
+		const outcome = await captureError(() => locator.selectOption({ value: "admin", lable: "User" } as never));
+
+		expect(outcome).toEqual({
+			name: "Error",
+			message: "locator.selectOption does not accept lable",
+		});
+		expect(adapter.calls.some(call => call.operation === "locator.selectOption")).toBe(false);
+	});
+
 	it("rejects unknown locator.filter option keys", async () => {
 		const adapter = new RecordingAdapter();
 		const { tab } = await selectedTab(adapter);

@@ -119,6 +119,12 @@ async function withCmuxTool(test: (tool: BrowserTool, name: string, calls: RpcCa
 				case "browser.screenshot":
 					return { png_base64: "aQ==", width: 1, height: 1 };
 				case "browser.eval":
+					if (
+						typeof params.script === "string" &&
+						params.script.includes(',\\"bindNativeSelector\\",{\\"token\\":')
+					) {
+						return { value: 'pierce/[data-omp-codex-action-token="contract"]' };
+					}
 					if (typeof params.script === "string" && params.script.includes("globalThis[key] = true")) {
 						navigationMarkers.add(String(params.surface_id));
 						return {
@@ -835,6 +841,10 @@ describe("Codex agent.browser public contract", () => {
 					now = 2_500;
 					return { attached: true, visible: true, enabled: true };
 				}
+				if (args[1] === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="deadline"]';
+				return true;
+			},
+			async codexEvaluateCleanup() {
 				return true;
 			},
 			async click(_selector: string, timeoutMs: number) {

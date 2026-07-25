@@ -462,6 +462,7 @@ const CLICK_OPTION_KEYS: Readonly<Record<string, true>> = {
 	force: true,
 	timeoutMs: true,
 };
+const SELECT_OPTION_KEYS: Readonly<Record<string, true>> = { value: true, label: true, index: true };
 
 function assertAllowedKeys(
 	value: Readonly<Record<string, unknown>>,
@@ -796,6 +797,7 @@ export class CodexLocator {
 		const normalized = input.map(item => {
 			if (typeof item === "string") return { value: item };
 			const value = requireObject(item, "locator.selectOption");
+			assertAllowedKeys(value, "locator.selectOption", SELECT_OPTION_KEYS);
 			if (value.value === undefined && value.label === undefined && value.index === undefined) {
 				throw new Error("locator.selectOption requires a value, label, or index");
 			}

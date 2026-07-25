@@ -128,19 +128,20 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		}
 		return [root];
 	});
-	const descendants = roots => rootsFor(roots).flatMap(root => {
+	const queryAll = (roots, selector) => rootsFor(roots).flatMap(root => {
 		const values = [];
 		const visit = scope => {
-			for (const element of Array.from(scope.querySelectorAll("*"))) values.push(element);
+			values.push(...Array.from(scope.querySelectorAll(selector)));
 			for (const element of Array.from(scope.querySelectorAll("*"))) if (element.shadowRoot) visit(element.shadowRoot);
 		};
 		visit(root);
 		return values;
 	});
+	const descendants = roots => queryAll(roots, "*");
 	const unique = values => [...new Set(values)];
 	const query = (value, roots = [document]) => {
 		switch (value.kind) {
-			case "css": return unique(rootsFor(roots).flatMap(root => Array.from(root.querySelectorAll(value.selector))));
+			case "css": return unique(queryAll(roots, value.selector));
 			case "role": return descendants(roots).filter(element => !accessibilityHidden(element) && implicitRole(element) === value.role && patternMatches(value.name, accessibleName(element)));
 			case "text": return descendants(roots).filter(element => !accessibilityHidden(element) && patternMatches(value.text, textOf(element)) && !Array.from(element.children).some(child => patternMatches(value.text, textOf(child))));
 			case "label": return descendants(roots).filter(element => !accessibilityHidden(element) && labelCandidates(element).some(label => patternMatches(value.text, label)));
@@ -1817,21 +1818,36 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			if (readiness) await readiness;
 		}
 		await this.#waitForLocator(descriptor, args.force === true ? "attached" : "actionable", deadline, operation);
+		if (this.#containsFrame(descriptor) && nativeClick) {
+			return await this.#locator<boolean>(
+				descriptor,
+				operation === "locator.click" ? "click" : "dblclick",
+				{ button: args.button, modifiers: args.modifiers },
+				remainingMs(deadline, operation),
+			);
+		}
+		if (this.#containsFrame(descriptor) && operation === "locator.type") {
+			await this.#locator<string>(descriptor, "editableValue", {}, remainingMs(deadline, operation));
+			return await this.#locator<boolean>(
+				descriptor,
+				"type",
+				{ value: stringArg(args, "value") },
+				remainingMs(deadline, operation),
+			);
+		}
 		const selector = this.#cssSelector(descriptor);
 		if (nativeClick) {
-			let nativeSelector = selector;
-			let token: string | undefined;
+			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
+			let tokenBound = false;
 			let fileActivationArmed = false;
 			try {
-				if (!nativeSelector) {
-					token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
-					nativeSelector = await this.#locator<string>(
-						descriptor,
-						"bindNativeSelector",
-						{ token },
-						remainingMs(deadline, operation),
-					);
-				}
+				const nativeSelector = await this.#locator<string>(
+					descriptor,
+					"bindNativeSelector",
+					{ token },
+					remainingMs(deadline, operation),
+				);
+				tokenBound = true;
 				fileActivationArmed = await this.#locator<boolean>(
 					descriptor,
 					"armNativeFileActivation",
@@ -1843,7 +1859,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				return undefined;
 			} finally {
 				if (fileActivationArmed) await this.#disarmNativeFileActivation();
-				if (token) {
+				if (tokenBound) {
 					await this.#tab
 						.codexEvaluateCleanup<boolean>(DISPOSE_NATIVE_ACTION_TOKEN_SOURCE, [token], SELECTOR_TIMEOUT_MS)
 						.catch(() => undefined);

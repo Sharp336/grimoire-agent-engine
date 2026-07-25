@@ -1354,10 +1354,11 @@ describe("cmux Codex browser review regressions", () => {
 			caughtError(() => current.playwright.locator("#primary").click({ force: true })),
 		]);
 
-		expect(nativeClicks).toEqual(["#primary"]);
+		expect(nativeClicks).toHaveLength(1);
+		expect(nativeClicks[0]).toMatch(/^\[data-omp-codex-action-token=/);
 		expect(nativeDoubleClicks).toHaveLength(1);
 		expect(nativeDoubleClicks[0]).toMatch(/^\[data-omp-codex-action-token=/);
-		expect(disposedTokens).toHaveLength(1);
+		expect(disposedTokens).toHaveLength(2);
 		expect(commands).not.toContain("click");
 		expect(commands).not.toContain("dblclick");
 		for (const error of unsupported) {
@@ -1368,7 +1369,7 @@ describe("cmux Codex browser review regressions", () => {
 		}
 	});
 
-	it("keeps semantic locators inside open shadow roots actionable through native click and type", async () => {
+	it("keeps CSS and semantic locators inside open shadow roots actionable through native input", async () => {
 		const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
 		const host = document.getElementById("host");
 		if (!host) throw new Error("Expected shadow host");
@@ -1420,12 +1421,14 @@ describe("cmux Codex browser review regressions", () => {
 
 		try {
 			const current = await selectedTab(browser);
+			await current.playwright.locator("button").click();
+			await current.playwright.locator("input").type("css-");
 			await current.playwright.getByText("Shadow action", { exact: true }).click();
 			await current.playwright.getByRole("textbox", { name: "Shadow editor", exact: true }).type("typed");
 
-			expect(nativeSelectors).toHaveLength(2);
+			expect(nativeSelectors).toHaveLength(4);
 			expect(nativeSelectors.every(selector => selector.startsWith("pierce/"))).toBe(true);
-			expect(input.value).toBe("typed");
+			expect(input.value).toBe("css-typed");
 			expect(button.hasAttribute("data-omp-codex-action-token")).toBe(false);
 			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
 		} finally {
@@ -1445,6 +1448,13 @@ describe("cmux Codex browser review regressions", () => {
 					if (command === "status") return { attached: true, visible: true, enabled: true };
 					if (command === "click" || command === "dblclick") coveredTargetActivations++;
 					if (command === "armNativeFileActivation") return false;
+					if (command === "bindNativeSelector") {
+						const token = String((args[2] as { token: string }).token);
+						return `[data-omp-codex-action-token="${token}"]`;
+					}
+					return true;
+				},
+				async codexEvaluateCleanup() {
 					return true;
 				},
 				async click(_selector: string, timeoutMs?: number) {
@@ -3531,6 +3541,52 @@ describe("cmux Codex browser review regressions", () => {
 		await adapter.invoke("tab.reload", { tabId: "1", timeoutMs: 100 });
 		expect(sequence).toEqual(["arm", "reload", "prepare"]);
 		expect(navigationSignal?.aborted).toBe(true);
+	});
+	it("keeps same-origin frame locator actions inside their resolved frame context", async () => {
+		const commands: string[] = [];
+		let clicked = false;
+		let typed = "";
+		const nativeActions: string[] = [];
+		const { adapter, browser } = adapterAndFacadeFor({
+			async codexEvaluate(_source: string, args: unknown[]) {
+				const command = String(args[1]);
+				commands.push(command);
+				if (command === "status") return { attached: true, visible: true, enabled: true };
+				if (command === "click") {
+					clicked = true;
+					return true;
+				}
+				if (command === "editableValue") return "";
+				if (command === "type") {
+					typed = String((args[2] as { value: string }).value);
+					return true;
+				}
+				if (command === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="frame"]';
+				return false;
+			},
+			async codexEvaluateCleanup() {
+				return true;
+			},
+			async click() {
+				nativeActions.push("click");
+			},
+			async type() {
+				nativeActions.push("type");
+			},
+		});
+
+		try {
+			const frame = (await selectedTab(browser)).playwright.frameLocator("#frame");
+			await frame.locator("#button").click();
+			await frame.locator("#editor").type("inside frame");
+
+			expect({ clicked, typed }).toEqual({ clicked: true, typed: "inside frame" });
+			expect(nativeActions).toEqual([]);
+			expect(commands).toContain("click");
+			expect(commands).toContain("type");
+		} finally {
+			await adapter.dispose();
+		}
 	});
 	it("uses the generated ARIA runtime through two same-origin frame realms", async () => {
 		class TopRealmElement {}
