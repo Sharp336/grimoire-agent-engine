@@ -1280,8 +1280,11 @@ export class AgentSession {
 			isDisposed: () => this.#isDisposed,
 			memoryBackendSession: () => this,
 			getMemoryBackend: () => this.#memoryBackend,
-			setMemoryBackend: backend => this.#installMemoryBackend(backend),
+			setMemoryBackend: backend => this.setMemoryBackend(backend),
 			disposeMemoryBackend: () => this.#disposeMemoryBackend(),
+			clearMemoryBackend: () => {
+				this.#memoryBackend = undefined;
+			},
 			getHindsightSessionState: () => this.getHindsightSessionState(),
 			setHindsightSessionState: state => this.setHindsightSessionState(state),
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),

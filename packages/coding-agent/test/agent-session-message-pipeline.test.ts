@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "bun:test";
 import {
 	Agent,
 	AgentBusyError,
@@ -110,12 +110,12 @@ describe("AgentSession message pipeline", () => {
 		}
 	});
 
-	it("accepts every discriminated pre-core queue input without a sequence", () => {
-		const queueInputs = [
-			{ kind: "prompt", text: "prompt", options: {} },
-			{ kind: "preparedPrompt", text: "prepared", options: {} },
-			{ kind: "userMessage", content: "user", deliverAs: "prompt" },
-			{
+	it("has an exhaustive fixture for every discriminated pre-core queue input", () => {
+		const queueInputs = {
+			prompt: { kind: "prompt", text: "prompt", options: {} },
+			preparedPrompt: { kind: "preparedPrompt", text: "prepared", options: {} },
+			userMessage: { kind: "userMessage", content: "user", deliverAs: "prompt" },
+			customPrompt: {
 				kind: "customPrompt",
 				message: {
 					role: "custom",
@@ -128,7 +128,7 @@ describe("AgentSession message pipeline", () => {
 				keywordNotices: [],
 				options: { streamingBehavior: "steer", queueOnly: true, queueChipText: "chip" },
 			},
-			{
+			customDelivery: {
 				kind: "customDelivery",
 				message: {
 					role: "custom",
@@ -140,9 +140,11 @@ describe("AgentSession message pipeline", () => {
 				},
 				options: { deliverAs: "nextTurn", triggerTurn: false, queueChipText: "chip" },
 			},
-		] satisfies PreCoreQueuedMessageInput[];
+		} satisfies {
+			[Kind in PreCoreQueuedMessageInput["kind"]]: Extract<PreCoreQueuedMessageInput, { kind: Kind }>;
+		};
 
-		expect(queueInputs).toHaveLength(5);
+		expectTypeOf<keyof typeof queueInputs>().toEqualTypeOf<PreCoreQueuedMessageInput["kind"]>();
 	});
 
 	it("applies transformContext before convertToLlm", async () => {

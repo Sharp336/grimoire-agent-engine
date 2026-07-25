@@ -19,6 +19,7 @@ export interface SessionMemoryHost {
 	getMemoryBackend(): MemoryBackend | undefined;
 	setMemoryBackend(backend: MemoryBackend): void;
 	disposeMemoryBackend(): Promise<void>;
+	clearMemoryBackend(): void;
 	getHindsightSessionState(): HindsightSessionState | undefined;
 	setHindsightSessionState(state: HindsightSessionState | undefined): void;
 	getMnemopiSessionState(): MnemopiSessionState | undefined;
@@ -156,6 +157,7 @@ export class SessionMemory {
 	async #disposeMemoryBackendState(consolidateMnemopi = true): Promise<void> {
 		this.cancelLocalMemoryStartup();
 		await this.#host.disposeMemoryBackend();
+		this.#host.clearMemoryBackend();
 		const hindsight = this.#host.getHindsightSessionState();
 		if (hindsight) {
 			try {
