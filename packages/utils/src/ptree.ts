@@ -316,7 +316,13 @@ export class ChildProcess<In extends InMask = InMask> {
 				() => false,
 			),
 		]).then(timedOut => {
-			if (timedOut) this.kill(new TimeoutError(ms, this.#stderrTail));
+			if (timedOut) {
+				// Mirror attachSignal: killing rejects #exited, and the watchdog is a
+				// second observer of that lifecycle. Without its own no-op catch the
+				// rejection surfaces unhandled when the caller settles first.
+				this.#exited.catch(() => {});
+				this.kill(new TimeoutError(ms, this.#stderrTail));
+			}
 		});
 	}
 
