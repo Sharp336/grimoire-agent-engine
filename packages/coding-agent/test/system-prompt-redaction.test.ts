@@ -107,11 +107,13 @@ describe("redactSkillDescriptions", () => {
 		});
 
 		it("trims description to fit within per-skill token budget by dropping trailing sentences", () => {
+			// One skill: Phase 2 never runs (skills.length(1) > budgetTokens is false),
+			// so this isolates Phase 1 per-skill sentence-boundary trimming.
 			// contextWindow = 30, maxContextShare = 0.05 -> totalTokenBudget = 1 token.
-			// 2 skills -> per-skill budget = max(1, floor(1/2)) = 1 token.
-			// countTokens("One.") = 1 ≤ 1, so the first sentence fits.
+			// 1 skill -> per-skill budget = max(1, floor(1/1)) = 1 token.
+			// countTokens("One.") = 1 <= 1, so the first sentence fits.
 			// countTokens("One. Two.") = 3 > 1, so only "One." is kept.
-			const result = redactSkillDescriptions(MOCK_SKILLS, {
+			const result = redactSkillDescriptions([MOCK_SKILLS[0]], {
 				mode: "trim",
 				maxContextShare: 0.05,
 				contextWindow: 30,
@@ -207,6 +209,36 @@ describe("redactSkillDescriptions", () => {
 			// descriptions to empty (best effort) — names always survive.
 			expect(result.every(s => s.description === "")).toBe(true);
 		});
+
+		it("clears one-token descriptions when framing alone already exceeds the trim budget", () => {
+			// 200 skills with one-token descriptions (`A.`) against a 10-token total
+			// budget. Phase 1 keeps every description because each fits the per-skill
+			// floor (≥1). Framing alone (200 name lines + wrapper) exceeds the budget,
+			// so Phase 2 must drive the description budget to zero and drop them all
+			// rather than returning Phase 1 output verbatim.
+			const manySkills: Skill[] = Array.from({ length: 200 }, (_, i) => ({
+				name: `s${i}`,
+				description: "A.",
+				filePath: `/path/to/s${i}`,
+				baseDir: "/path/to",
+				source: "test",
+			}));
+			// budgetTokens = max(1, floor(10 * 1)) = 10; 200 > 10 so Phase 2 runs.
+			const result = redactSkillDescriptions(manySkills, {
+				mode: "trim",
+				maxContextShare: 1,
+				contextWindow: 10,
+			});
+			expect(result.length).toBe(200);
+			for (let i = 0; i < 200; i++) {
+				expect(result[i].name).toBe(`s${i}`);
+			}
+			expect(result.every(s => s.description === "")).toBe(true);
+			// Clearing descriptions must shrink the rendered block vs Phase 1 survivors.
+			const phase1Rendered = `<skills>\n${manySkills.map(s => `- ${s.name}: ${s.description}`).join("\n")}\n</skills>`;
+			const resultRendered = `<skills>\n${result.map(s => `- ${s.name}: ${s.description}`).join("\n")}\n</skills>`;
+			expect(countTokens(resultRendered)).toBeLessThan(countTokens(phase1Rendered));
+		});
 	});
 
 	describe("cap mode", () => {
@@ -228,6 +260,34 @@ describe("redactSkillDescriptions", () => {
 				contextWindow: 160,
 			});
 			expect(result[0].description).toBe("One. Two.");
+		});
+
+		it("returns CJK descriptions that already fit byte-identical without split/rejoin", () => {
+			// Cap mode used to split every description before checking budget. For a
+			// CJK description that already fits, splitSentences inserts a space after
+			// `。` and rejoin yields `第一。 第二。` — mutating the provider prompt with
+			// no redaction needed. When the rendered block is within budget, originals
+			// must be returned untouched (same object reference / byte-identical text).
+			const description = "第一。第二。";
+			const cjkSkill: Skill = {
+				name: "cjk-fit",
+				description,
+				filePath: "/path/to/cjk-fit",
+				baseDir: "/path/to",
+				source: "test",
+			};
+			const skills = [cjkSkill];
+			const renderedTokens = countTokens(`<skills>\n- cjk-fit: ${description}\n</skills>`);
+			const result = redactSkillDescriptions(skills, {
+				mode: "cap",
+				maxContextShare: 1,
+				contextWindow: renderedTokens, // exact fit
+			});
+			expect(result).toBe(skills);
+			expect(result[0]).toBe(cjkSkill);
+			expect(result[0].description).toBe(description);
+			expect(result[0].description).toBe("第一。第二。");
+			expect(result[0].description).not.toBe("第一。 第二。");
 		});
 
 		it("preserves leading CJK sentences when capping rendered skills", () => {

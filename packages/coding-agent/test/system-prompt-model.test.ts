@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { onHindsightScopeChanged, onSkillsRedactionChanged, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { onHindsightScopeChanged, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	computeNonMessageBreakdown,
@@ -192,7 +192,7 @@ describe("AgentSession model-change prompt refresh", () => {
 		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
 	});
 
-	it("rebuilds on model change when includeModelInPrompt is disabled but context window changes", async () => {
+	it("rebuilds on model change when includeModelInPrompt is disabled but context window changes with redaction enabled", async () => {
 		const [modelA, modelB] = pickTwoModelsWithDifferentContextWindow();
 		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
 		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
@@ -200,7 +200,11 @@ describe("AgentSession model-change prompt refresh", () => {
 		let rebuildCount = 0;
 		session = newSession(
 			modelA,
-			Settings.isolated({ "compaction.enabled": false, includeModelInPrompt: false }),
+			Settings.isolated({
+				"compaction.enabled": false,
+				includeModelInPrompt: false,
+				"skills.redaction.mode": "trim",
+			}),
 			async () => {
 				rebuildCount++;
 				return { systemPrompt: ["rebuilt"] };
@@ -214,6 +218,30 @@ describe("AgentSession model-change prompt refresh", () => {
 		// Re-selecting the same model (same context window) → no additional rebuild.
 		await session.setModel(modelB);
 		expect(rebuildCount).toBe(1);
+	});
+
+	it("does not rebuild on context-window-only change when skill redaction is off", async () => {
+		const [modelA, modelB] = pickTwoModelsWithDifferentContextWindow();
+		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
+		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
+
+		let rebuildCount = 0;
+		session = newSession(
+			modelA,
+			Settings.isolated({
+				"compaction.enabled": false,
+				includeModelInPrompt: false,
+				"skills.redaction.mode": "off",
+			}),
+			async () => {
+				rebuildCount++;
+				return { systemPrompt: ["rebuilt"] };
+			},
+		);
+
+		await session.setModel(modelB);
+		expect(rebuildCount).toBe(0);
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
 	});
 });
 
@@ -482,6 +510,10 @@ describe("AgentSession switchSession restores prompt with model context window",
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			includeModelInPrompt: false,
+			// The rebuild is gated on redaction being enabled: contextWindow is
+			// consumed only by redactSkillDescriptions, so the restore must rebuild
+			// (and refresh #promptModelContextWindow) only when redaction is on.
+			"skills.redaction.mode": "trim",
 		});
 
 		// Write session B's session file with a model_change entry for model B.
@@ -729,20 +761,20 @@ describe("AgentSession context usage rebases after redaction-driven prompt refre
 
 describe("Settings fireAllHooks skips unchanged redaction values during clone/replay", () => {
 	it("does not broadcast redaction changes during cloneForCwd when values are unchanged", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
 		let signalFireCount = 0;
-		const unsubscribe = onSkillsRedactionChanged(() => {
+		const unsubscribe = settings.onSkillsRedactionChanged(() => {
 			signalFireCount++;
 		});
 
 		try {
-			const settings = Settings.isolated({ "compaction.enabled": false });
 			// Fire the hook by setting a value — this populates #lastHookedValues.
 			settings.set("skills.redaction.mode", "trim");
 			const firesAfterSet = signalFireCount;
 			expect(firesAfterSet).toBeGreaterThan(0);
 
-			// Clone for a different cwd — redaction values haven't changed,
-			// so the signal must NOT fire.
+			// Clone for a different cwd — redaction values haven't changed, and
+			// even if they had, the clone fires only its own instance signal.
 			await settings.cloneForCwd("/tmp/different-cwd-for-clone-test");
 			expect(signalFireCount).toBe(firesAfterSet);
 		} finally {
@@ -751,13 +783,13 @@ describe("Settings fireAllHooks skips unchanged redaction values during clone/re
 	});
 
 	it("does not broadcast redaction changes during reloadForCwd when values are unchanged", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
 		let signalFireCount = 0;
-		const unsubscribe = onSkillsRedactionChanged(() => {
+		const unsubscribe = settings.onSkillsRedactionChanged(() => {
 			signalFireCount++;
 		});
 
 		try {
-			const settings = Settings.isolated({ "compaction.enabled": false });
 			// Set a value to populate #lastHookedValues via the hook.
 			settings.set("skills.redaction.mode", "cap");
 			const firesAfterSet = signalFireCount;
@@ -773,6 +805,28 @@ describe("Settings fireAllHooks skips unchanged redaction values during clone/re
 			} finally {
 				removeSyncWithRetries(tempDir);
 			}
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("cloneForCwd with different redaction values does not notify the original instance subscribers", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		let signalFireCount = 0;
+		const unsubscribe = settings.onSkillsRedactionChanged(() => {
+			signalFireCount++;
+		});
+
+		try {
+			settings.set("skills.redaction.mode", "trim");
+			const firesAfterSet = signalFireCount;
+			expect(firesAfterSet).toBeGreaterThan(0);
+
+			const cloned = await settings.cloneForCwd("/tmp/different-cwd-for-clone-isolation-test");
+			// Mutate the clone after construction. Even though redaction changed on
+			// the clone, the original instance's subscribers must stay quiet.
+			cloned.set("skills.redaction.mode", "cap");
+			expect(signalFireCount).toBe(firesAfterSet);
 		} finally {
 			unsubscribe();
 		}

@@ -104,35 +104,35 @@ function applyTrimMode(
 
 	// Phase 2: only when the per-skill floor (≥1 token) caused the aggregate
 	// to exceed the budget — i.e. when there are more skills than budget
-	// tokens. For small skill counts the per-skill budget already accounts for
-	// the total, and framing overhead alone may exceed a tiny budget without
-	// the per-skill floor being at fault. Iteratively trim description text
-	// down to a residual per-entry budget that accounts for fixed rendering
-	// overhead. Mirrors cap mode Phase 2 so both modes enforce the same
-	// aggregate ceiling. Skill names are never touched, so the entry list and
-	// names always survive even when the budget is unsplittable.
+	// tokens (skills.length > budgetTokens). For small skill counts the per-skill
+	// budget already accounts for the total, so trim mode trusts Phase 1 there
+	// (cap mode is the more aggressive mode and enters Phase 2 on rendered > budget
+	// alone). When the per-skill floor itself caused the overflow, iteratively trim
+	// description text down to a residual per-entry budget that accounts for fixed
+	// rendering overhead, enforcing the same aggregate ceiling as cap mode Phase 2.
+	// Skill names are never touched, so the entry list and names always survive
+	// even when the budget is unsplittable.
 	if (skills.length > budgetTokens && estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
 		const framingTokens = estimateRenderedSkillsTokens(
 			redacted.map(entry => ({ skill: entry.skill, sentences: [] })),
 			renderFormat,
 		);
-		// Only trim descriptions further when there is budget left after
-		// framing. When framing alone exceeds the budget (tiny budget, few
-		// skills), description trimming cannot help — keep Phase 1 results.
-		if (framingTokens < budgetTokens) {
-			const descriptionTokenBudget = Math.max(0, budgetTokens - framingTokens);
-			let residualTokenBudget = Math.max(0, Math.floor(descriptionTokenBudget / skills.length));
+		// When framing alone already meets/exceeds the budget, drive the
+		// description budget to zero so Phase 1's one-token survivors are
+		// dropped. Leaving Phase 1 verbatim would keep every short description
+		// even though clearing them materially shrinks the over-budget block.
+		const descriptionTokenBudget = framingTokens >= budgetTokens ? 0 : Math.max(0, budgetTokens - framingTokens);
+		let residualTokenBudget = Math.max(0, Math.floor(descriptionTokenBudget / skills.length));
 
-			while (estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
-				for (const entry of redacted) {
-					const text = entry.sentences.join(" ");
-					const trimmed = trimDescriptionToTokenBudget(text, residualTokenBudget);
-					entry.sentences = trimmed ? [trimmed] : [];
-				}
-				if (estimateRenderedSkillsTokens(redacted, renderFormat) <= budgetTokens) break;
-				if (residualTokenBudget === 0) break;
-				residualTokenBudget = Math.floor(residualTokenBudget / 2);
+		while (estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
+			for (const entry of redacted) {
+				const text = entry.sentences.join(" ");
+				const trimmed = trimDescriptionToTokenBudget(text, residualTokenBudget);
+				entry.sentences = trimmed ? [trimmed] : [];
 			}
+			if (estimateRenderedSkillsTokens(redacted, renderFormat) <= budgetTokens) break;
+			if (residualTokenBudget === 0) break;
+			residualTokenBudget = Math.floor(residualTokenBudget / 2);
 		}
 	}
 
@@ -151,6 +151,13 @@ function applyCapMode(
 	if (skills.length === 0) return [];
 
 	const budgetTokens = Math.max(1, Math.floor(contextWindow * maxContextShare));
+	// Bail out before split/rejoin when the rendered block already fits.
+	// splitSentences normalizes CJK terminators (`。` → `。 `), so rejoining
+	// with spaces would mutate descriptions like `第一。第二。` even when no
+	// redaction is needed.
+	if (countTokens(renderSkillsBlock(skills, renderFormat)) <= budgetTokens) {
+		return skills;
+	}
 	const redacted = skills.map(skill => ({ skill, sentences: splitSentences(skill.description) }));
 
 	// Phase 1: pop sentences from the longest multi-sentence descriptions until

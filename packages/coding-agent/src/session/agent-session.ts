@@ -177,12 +177,7 @@ import { MODEL_ROLE_IDS, MODEL_ROLES } from "../config/model-roles";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
-import {
-	getDefault,
-	onAppendOnlyModeChanged,
-	onSkillsRedactionChanged,
-	validateProviderMaxInFlightRequests,
-} from "../config/settings";
+import { getDefault, onAppendOnlyModeChanged, validateProviderMaxInFlightRequests } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
@@ -2317,7 +2312,7 @@ export class AgentSession {
 		// Refreshes are serialized via a promise chain and guarded by an epoch so
 		// a stale async rebuild cannot overwrite the result of a newer one — only
 		// the latest settings win.
-		this.#unsubscribeSkillsRedaction = onSkillsRedactionChanged(() => {
+		this.#unsubscribeSkillsRedaction = this.settings.onSkillsRedactionChanged(() => {
 			const epoch = ++this.#redactionRefreshEpoch;
 			// Do NOT eagerly increment #promptBuildVersion here. Doing so
 			// invalidates an in-flight tool rebuild (in #applyActiveToolsByName)
@@ -6043,7 +6038,11 @@ export class AgentSession {
 		// Skill-description redaction budgets against the model's context window,
 		// so a context-window change must trigger a rebuild even when the model
 		// name is not rendered into the prompt (`includeModelInPrompt=false`).
-		const contextWindowChanged = this.model?.contextWindow !== this.#promptModelContextWindow;
+		// When redaction is off, contextWindow is not consumed by prompt rendering
+		// (see redactSkillDescriptions), so skip the rebuild to avoid re-running
+		// SDK systemPrompt callbacks after setModel() has already switched.
+		const redactionEnabled = this.settings.get("skills.redaction.mode") !== "off";
+		const contextWindowChanged = redactionEnabled && this.model?.contextWindow !== this.#promptModelContextWindow;
 		if (editModeChanged || modelChanged || contextWindowChanged) {
 			await this.refreshBaseSystemPrompt();
 		}

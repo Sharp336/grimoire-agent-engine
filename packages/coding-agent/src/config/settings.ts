@@ -215,6 +215,45 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 	return resolved;
 }
 
+/**
+ * Minimal change-notification primitive backing the exported `on*Changed`
+ * subscriptions. Holds a listener set, hands out unsubscribe closures, and
+ * isolates errors so a single throwing listener can't abort the rest or bubble
+ * out of `Settings.set()`.
+ *
+ * @typeParam A - argument tuple forwarded to each listener on `fire`.
+ */
+class SettingSignal<A extends unknown[] = []> {
+	#listeners = new Set<(...args: A) => void>();
+
+	constructor(private readonly label: string) {}
+
+	/** Subscribe `cb`; returns an unsubscribe function. */
+	on(cb: (...args: A) => void): () => void {
+		this.#listeners.add(cb);
+		return () => {
+			this.#listeners.delete(cb);
+		};
+	}
+
+	/**
+	 * Invoke every listener with `args`. Iterates a snapshot so a listener may
+	 * (un)subscribe mid-fire without re-entrancy — the Hindsight backend
+	 * re-registers the fresh state's listener on every rebuild — and wraps each
+	 * call so a throwing listener is logged and skipped instead of aborting the
+	 * rest.
+	 */
+	fire(...args: A): void {
+		for (const cb of [...this.#listeners]) {
+			try {
+				cb(...args);
+			} catch (err) {
+				logger.warn(`Settings: ${this.label} hook failed`, { error: String(err) });
+			}
+		}
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
@@ -250,6 +289,14 @@ export class Settings {
 	 *  because their effective state depends on the working directory — e.g.
 	 *  Hindsight bank scoping derives the bank from the project path. */
 	#lastHookedValues = new Map<SettingPath, unknown>();
+
+	/**
+	 * Per-instance signal for `skills.redaction.mode` / `maxContextShare` changes.
+	 * Instance-scoped so `cloneForCwd()` only notifies subscribers of the clone
+	 * (typically none yet), not every already-running session that subscribed on
+	 * a different Settings instance.
+	 */
+	#skillsRedactionSignal = new SettingSignal("skills.redaction");
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
@@ -396,6 +443,11 @@ export class Settings {
 		if (hook) {
 			hook(next, prev);
 		}
+		// Instance-scoped redaction signal: fire on every set() (including no-ops)
+		// to match prior SETTING_HOOKS behavior. Clone/reload notify via #fireAllHooks.
+		if (path === "skills.redaction.mode" || path === "skills.redaction.maxContextShare") {
+			this.#skillsRedactionSignal.fire();
+		}
 		this.#lastHookedValues.set(path, next);
 		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
@@ -433,6 +485,16 @@ export class Settings {
 		if (path === "statusLine.sessionAccent") {
 			statusLineSessionAccentSignal.fire();
 		}
+	}
+
+	/**
+	 * Subscribe to skill-description redaction setting changes on this settings
+	 * instance. The caller should rebuild the system prompt (which re-derives the
+	 * redaction budget from the current `skills.redaction.*` settings and model
+	 * context window) in the callback. Returns an unsubscribe function.
+	 */
+	onSkillsRedactionChanged(cb: () => void): () => void {
+		return this.#skillsRedactionSignal.on(cb);
 	}
 
 	/**
@@ -1369,6 +1431,12 @@ export class Settings {
 			// clone/reload because the cwd itself is part of their effective
 			// state (e.g. Hindsight per-project bank scoping).
 			if (last !== undefined && Object.is(value, last) && !(key in CWD_DEPENDENT_HOOKS)) continue;
+			// Redaction hooks are instance-scoped placeholders in SETTING_HOOKS;
+			// fire this instance's signal so a clone only notifies its own subscribers.
+			if (key === "skills.redaction.mode" || key === "skills.redaction.maxContextShare") {
+				this.#skillsRedactionSignal.fire();
+				continue;
+			}
 			hook(value, last ?? value);
 		}
 	}
@@ -1403,45 +1471,6 @@ export class Settings {
 // ═══════════════════════════════════════════════════════════════════════════
 
 type SettingHook<P extends SettingPath> = (value: SettingValue<P>, prev: SettingValue<P>) => void;
-
-/**
- * Minimal change-notification primitive backing the exported `on*Changed`
- * subscriptions. Holds a listener set, hands out unsubscribe closures, and
- * isolates errors so a single throwing listener can't abort the rest or bubble
- * out of `Settings.set()`.
- *
- * @typeParam A - argument tuple forwarded to each listener on `fire`.
- */
-class SettingSignal<A extends unknown[] = []> {
-	#listeners = new Set<(...args: A) => void>();
-
-	constructor(private readonly label: string) {}
-
-	/** Subscribe `cb`; returns an unsubscribe function. */
-	on(cb: (...args: A) => void): () => void {
-		this.#listeners.add(cb);
-		return () => {
-			this.#listeners.delete(cb);
-		};
-	}
-
-	/**
-	 * Invoke every listener with `args`. Iterates a snapshot so a listener may
-	 * (un)subscribe mid-fire without re-entrancy — the Hindsight backend
-	 * re-registers the fresh state's listener on every rebuild — and wraps each
-	 * call so a throwing listener is logged and skipped instead of aborting the
-	 * rest.
-	 */
-	fire(...args: A): void {
-		for (const cb of [...this.#listeners]) {
-			try {
-				cb(...args);
-			} catch (err) {
-				logger.warn(`Settings: ${this.label} hook failed`, { error: String(err) });
-			}
-		}
-	}
-}
 
 const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"theme.dark": value => {
@@ -1479,8 +1508,10 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
-	"skills.redaction.mode": () => skillsRedactionSignal.fire(),
-	"skills.redaction.maxContextShare": () => skillsRedactionSignal.fire(),
+	// Placeholders so #fireAllHooks iterates these paths; the instance signal is
+	// fired from Settings.#fireAllHooks / Settings.set (not a module-global).
+	"skills.redaction.mode": () => {},
+	"skills.redaction.maxContextShare": () => {},
 	"worktree.base": value => {
 		const dir = typeof value === "string" && value.trim() ? value : undefined;
 		// Always call so an unset/empty value clears a previously-applied override.
@@ -1539,17 +1570,6 @@ const hindsightScopeSignal = new SettingSignal("hindsight scope");
  * caller is expected to re-read the relevant settings via `Settings.get`.
  */
 export const onHindsightScopeChanged = (cb: () => void) => hindsightScopeSignal.on(cb);
-
-/** Fires when `skills.redaction.mode` or `skills.redaction.maxContextShare` changes. */
-const skillsRedactionSignal = new SettingSignal("skills.redaction");
-
-/**
- * Subscribe to skill-description redaction setting changes. The caller should
- * rebuild the system prompt (which re-derives the redaction budget from the
- * current `skills.redaction.*` settings and model context window) in the
- * callback. Returns an unsubscribe function.
- */
-export const onSkillsRedactionChanged = (cb: () => void) => skillsRedactionSignal.on(cb);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Global Singleton
