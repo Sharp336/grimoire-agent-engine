@@ -346,6 +346,9 @@ function clearLegacyPiResolutionCaches(): void {
 	nativeAddonRequireScanCache.clear();
 	nativeAddonLoaderModulePaths.clear();
 	realpathCache.clear();
+	// `prebuiltExtensionHookPaths` is intentionally not cleared: Bun cannot unregister a
+	// plugin, so the registered hooks outlive any cache reset. Clearing it would re-register
+	// a duplicate hook per entry on the next load.
 	prebuiltExtensionSources.clear();
 }
 
@@ -2014,6 +2017,12 @@ async function installExtensionGraphHook(
 					const queryIndex = args.path.indexOf("?mtime=");
 					const sourcePath = queryIndex >= 0 ? args.path.slice(0, queryIndex) : args.path;
 					const mtimeTag = queryIndex >= 0 ? args.path.slice(queryIndex + "?mtime=".length) : null;
+					const prebuilt = prebuiltExtensionSources.get(sourcePath);
+					if (prebuilt !== undefined) {
+						// A prebuilt sidecar hook supersedes any stale graph hook for this
+						// entry (e.g. after a same-process rebuild that added a sidecar).
+						return { contents: prebuilt, loader: getLoader(sourcePath) };
+					}
 					const cached = asyncModules.get(sourcePath);
 					let raw: string;
 					if (cached !== undefined) {
@@ -2123,7 +2132,7 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 			}
 		}
 	}
-	if (pendingModules.size === 0 && pendingCommonJsPaths.size === 0) {
+	if (pendingModules.size === 0 && commonJsPaths.size === 0) {
 		return undefined;
 	}
 
@@ -2222,14 +2231,14 @@ async function preparePrebuiltExtensionEntry(entryRealPath: string): Promise<str
 	let source: string;
 	let sidecar: PrebuiltImportSidecar | null;
 	try {
-		source = await Bun.file(entryRealPath).text();
 		sidecar = parsePrebuiltImportSidecar(
 			JSON.parse(await Bun.file(`${entryRealPath}${PREBUILT_IMPORT_SIDECAR_SUFFIX}`).text()),
 		);
+		if (!sidecar) return null;
+		source = await Bun.file(entryRealPath).text();
 	} catch {
 		return null;
 	}
-	if (!sidecar) return null;
 	const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
 	if (sha256 !== sidecar.sha256) return null;
 
@@ -2279,7 +2288,7 @@ async function preparePrebuiltExtensionEntry(entryRealPath: string): Promise<str
 	return rewritten;
 }
 
-function installPrebuiltExtensionHook(entryRealPath: string, source: string): { clear(): void } {
+function installPrebuiltExtensionHook(entryRealPath: string, source: string): void {
 	prebuiltExtensionSources.set(entryRealPath, source);
 	if (!prebuiltExtensionHookPaths.has(entryRealPath)) {
 		prebuiltExtensionHookPaths.add(entryRealPath);
@@ -2288,18 +2297,31 @@ function installPrebuiltExtensionHook(entryRealPath: string, source: string): { 
 		Bun.plugin({
 			name: `omp:legacy-pi-prebuilt:${hookId}`,
 			setup(build) {
-				build.onLoad({ filter, namespace: "file" }, args => {
+				build.onLoad({ filter, namespace: "file" }, async args => {
 					const queryIndex = args.path.indexOf("?mtime=");
 					const sourcePath = queryIndex >= 0 ? args.path.slice(0, queryIndex) : args.path;
+					const mtimeTag = queryIndex >= 0 ? args.path.slice(queryIndex + "?mtime=".length) : null;
+					// Retain the source: concurrent loads of the same entry carry distinct ?mtime
+					// tags but share this map, so deleting on first serve would hand a later
+					// concurrent load nothing. The sidecar hash binds source to entry, so the
+					// retained snapshot stays correct until a load replaces or evicts it.
 					const contents = prebuiltExtensionSources.get(sourcePath);
-					if (contents === undefined) return undefined;
-					prebuiltExtensionSources.delete(sourcePath);
-					return { contents, loader: getLoader(sourcePath) };
+					if (contents !== undefined) {
+						return { contents, loader: getLoader(sourcePath) };
+					}
+					// Bun rejects an undefined onLoad return instead of falling through to the
+					// next plugin, and this hook is permanent, so it has to stay total: once a
+					// load evicts the source because the sidecar went missing or stale, rewrite
+					// the entry here exactly as the graph loader would.
+					const raw = await Bun.file(sourcePath).text();
+					return {
+						contents: await rewriteLegacyExtensionSource(raw, sourcePath, mtimeTag),
+						loader: getLoader(sourcePath),
+					};
 				});
 			},
 		});
 	}
-	return { clear: () => prebuiltExtensionSources.delete(entryRealPath) };
 }
 
 /**
@@ -2320,10 +2342,15 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
 	await ensureLegacyPiOverridesReady();
 	const prebuiltSource = await preparePrebuiltExtensionEntry(entryRealPath);
-	const pendingSources =
-		prebuiltSource === null
-			? await ensureExtensionGraphHook(entryRealPath)
-			: installPrebuiltExtensionHook(entryRealPath, prebuiltSource);
+	let pendingSources: { clear(): void } | undefined;
+	if (prebuiltSource === null) {
+		// A sidecar that went missing or stale must stop the retained fast-path source
+		// from serving this entry, so the graph hook below takes over cleanly.
+		prebuiltExtensionSources.delete(entryRealPath);
+		pendingSources = await ensureExtensionGraphHook(entryRealPath);
+	} else {
+		installPrebuiltExtensionHook(entryRealPath, prebuiltSource);
+	}
 	try {
 		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
 		// On POSIX, use the raw filesystem path so Bun keys the `?mtime`
@@ -2335,9 +2362,10 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 				: entryRealPath;
 		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
 	} finally {
-		// Drop whatever the initial import didn't consume: graph modules only
-		// reached by lazy dynamic imports must be read from disk at their actual
-		// import time, not served from this load-time snapshot.
+		// Drop graph snapshots the initial import didn't consume: graph modules only
+		// reached by lazy dynamic imports must be read from disk at their actual import
+		// time, not served from this load-time snapshot. The prebuilt source is retained
+		// (see installPrebuiltExtensionHook) so concurrent and later loads stay served.
 		pendingSources?.clear();
 	}
 }

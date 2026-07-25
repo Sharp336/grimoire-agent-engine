@@ -149,6 +149,28 @@ export { ToolAbortError };
 		const loaded = (await loadLegacyPiModule(entryPath)) as { ToolAbortError: typeof ToolAbortError };
 		expect(loaded.ToolAbortError).toBe(ToolAbortError);
 	});
+
+	it("uses the prebuilt fast path exactly once for a valid sidecar", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "fastpath.js");
+		const source = `export const marker = "fast";\n`;
+		fs.writeFileSync(entryPath, source, "utf8");
+		const imports = new Bun.Transpiler({ loader: "js" }).scanImports(source).map(found => {
+			const token = JSON.stringify(found.path);
+			const start = source.indexOf(token);
+			return { kind: found.kind, specifier: found.path, start, end: start + token.length };
+		});
+		const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+		fs.writeFileSync(`${entryPath}.omp-imports.json`, JSON.stringify({ version: 1, sha256, imports }), "utf8");
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { marker: string };
+		expect(loaded.marker).toBe("fast");
+		// Both reads pin the fast path: the sidecar count fails if the sidecar is never
+		// consulted (fast path removed), and the entry count fails if a valid sidecar is
+		// rejected, because the graph fallback reads the entry again in collectExtensionModules.
+		expect(reads.get(fs.realpathSync(`${entryPath}.omp-imports.json`)) ?? 0).toBe(1);
+		expect(reads.get(fs.realpathSync(entryPath)) ?? 0).toBe(1);
+	});
 	it("falls back to graph loading when a prebuilt sidecar is stale", async () => {
 		const cwd = tempDir.absolute();
 		const dependencyPath = path.join(cwd, "dependency.ts");
@@ -163,6 +185,36 @@ export { ToolAbortError };
 
 		const loaded = (await loadLegacyPiModule(entryPath)) as { value: string };
 		expect(loaded.value).toBe("fallback");
+	});
+	it("still loads a fast-path entry on a later load once its sidecar goes stale", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "rebuilt.js");
+		const writeSidecar = (source: string, sha256?: string) => {
+			fs.writeFileSync(
+				`${entryPath}.omp-imports.json`,
+				JSON.stringify({
+					version: 1,
+					sha256: sha256 ?? new Bun.CryptoHasher("sha256").update(source).digest("hex"),
+					imports: [],
+				}),
+				"utf8",
+			);
+		};
+
+		const first = `export const marker = "v1";\n`;
+		fs.writeFileSync(entryPath, first, "utf8");
+		writeSidecar(first);
+		const initial = (await loadLegacyPiModule(entryPath)) as { marker: string };
+		expect(initial.marker).toBe("v1");
+
+		// The first load registers a permanent prebuilt hook. Rebuilding the entry without
+		// refreshing its sidecar evicts the retained source, so that hook must still serve
+		// the rebuilt entry instead of failing the load.
+		const second = `export const marker = "v2";\n`;
+		fs.writeFileSync(entryPath, second, "utf8");
+		writeSidecar(second, "stale");
+		const reloaded = (await loadLegacyPiModule(entryPath)) as { marker: string };
+		expect(reloaded.marker).toBe("v2");
 	});
 	it("rejects a hash-valid sidecar range that does not point at the import", async () => {
 		const cwd = tempDir.absolute();
