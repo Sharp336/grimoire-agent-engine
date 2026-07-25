@@ -49,7 +49,7 @@ describe("Cursor contract surfaces (advisor, cancellation, disposal)", () => {
 		}
 	});
 
-	it("propagates providers.cursor.useHttp1ForAgent setting to main and advisor Agent instances", async () => {
+	it("reads providers.cursor.useHttp1ForAgent per request for main and advisor turns", async () => {
 		tempDir = await TempDir.create("advisor-cursor-contract-test-");
 		sessionManager = SessionManager.inMemory();
 		authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
@@ -70,7 +70,6 @@ describe("Cursor contract surfaces (advisor, cancellation, disposal)", () => {
 
 		const mainAgent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			cursorUseHttp1ForAgent: isolatedSettings.get("providers.cursor.useHttp1ForAgent"),
 			streamFn: settingsAwareStreamFn,
 		});
 
@@ -83,10 +82,18 @@ describe("Cursor contract surfaces (advisor, cancellation, disposal)", () => {
 			advisorStreamFn: settingsAwareStreamFn,
 		});
 
-		// Verify main agent carries cursorUseHttp1ForAgent
+		// No Agent-level snapshot: the setting is read per request by the
+		// settings-aware stream wrapper.
 		await mainAgent.prompt("main test").catch(() => {});
 		expect(capturedStreamOptions.length).toBeGreaterThan(0);
 		expect(capturedStreamOptions[0]?.cursorUseHttp1ForAgent).toBe(true);
+
+		// Flipping the setting mid-session must take effect on the next turn.
+		capturedStreamOptions.length = 0;
+		isolatedSettings.override("providers.cursor.useHttp1ForAgent", false);
+		await mainAgent.prompt("main test 2").catch(() => {});
+		expect(capturedStreamOptions[0]?.cursorUseHttp1ForAgent).toBe(false);
+		isolatedSettings.override("providers.cursor.useHttp1ForAgent", true);
 
 		capturedStreamOptions.length = 0;
 

@@ -202,7 +202,6 @@ export interface SessionAdvisorsHost {
 	obfuscator: SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
 	preferWebsockets: boolean | undefined;
-	cursorUseHttp1ForAgent: boolean | undefined;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
@@ -659,8 +658,6 @@ export class SessionAdvisors {
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
 				preferWebsockets: this.#host.preferWebsockets,
-				cursorUseHttp1ForAgent:
-					this.#host.cursorUseHttp1ForAgent ?? this.#host.settings.get("providers.cursor.useHttp1ForAgent"),
 				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
 				streamFn: this.#advisorStreamFn,
 				onPayload: this.#host.onPayload,

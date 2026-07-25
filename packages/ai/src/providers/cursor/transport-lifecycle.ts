@@ -28,7 +28,9 @@ export function setCursorTransportDisposer(disposer: () => Promise<void>): void 
 	}
 	transportDisposer = disposer;
 	if (!registered) {
-		postmortem.register("cursor-h2-pool", () => void disposeCursorTransport());
+		postmortem.register("cursor-h2-pool", async () => {
+			await disposeCursorTransport();
+		});
 		registered = true;
 	}
 }

@@ -136,8 +136,6 @@ export interface AgentOptions {
 
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
-	/** Option to prefer Cursor HTTP/1 transport bridge when true. */
-	cursorUseHttp1ForAgent?: boolean;
 
 	/**
 	 * Custom stream function (for proxy backends, etc.). Default uses streamSimple.
@@ -376,7 +374,6 @@ export class Agent {
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
 	#preferWebsockets?: boolean;
-	#cursorUseHttp1ForAgent?: boolean;
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	#intentTracing: boolean;
 	#pruneToolDescriptions: boolean;
@@ -457,7 +454,6 @@ export class Agent {
 		this.#cwdResolver = opts.cwdResolver;
 		this.#kimiApiFormat = opts.kimiApiFormat;
 		this.#preferWebsockets = opts.preferWebsockets;
-		this.#cursorUseHttp1ForAgent = opts.cursorUseHttp1ForAgent;
 		this.#transformToolCallArguments = opts.transformToolCallArguments;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
@@ -1174,7 +1170,6 @@ export class Agent {
 			maxRetryDelayMs: this.#maxRetryDelayMs,
 			kimiApiFormat: this.#kimiApiFormat,
 			preferWebsockets: this.#preferWebsockets,
-			cursorUseHttp1ForAgent: this.#cursorUseHttp1ForAgent,
 			convertToLlm: this.#convertToLlm,
 			transformProviderContext: this.#transformProviderContext,
 			transformContext: this.#transformContext,

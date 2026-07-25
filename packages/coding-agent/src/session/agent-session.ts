@@ -566,7 +566,6 @@ export class AgentSession {
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
 	#preferWebsockets: boolean | undefined;
-	#cursorUseHttp1ForAgent: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
@@ -1034,7 +1033,6 @@ export class AgentSession {
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#preferWebsockets = config.preferWebsockets;
-		this.#cursorUseHttp1ForAgent = config.cursorUseHttp1ForAgent;
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -1275,7 +1273,6 @@ export class AgentSession {
 			obfuscator: this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: this.#preferWebsockets,
-			cursorUseHttp1ForAgent: this.#cursorUseHttp1ForAgent,
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,

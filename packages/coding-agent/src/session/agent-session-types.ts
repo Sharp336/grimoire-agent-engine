@@ -155,8 +155,6 @@ export interface AgentSessionConfig {
 	advisorStreamFn?: StreamFn;
 	/** Prefer websocket transport for OpenAI Codex requests when supported. */
 	preferWebsockets?: boolean;
-	/** Prefer Cursor's HTTP/1 streaming bridge unless the server forces a transport mode. */
-	cursorUseHttp1ForAgent?: boolean;
 	/** Provider payload hook used by the active session request path. */
 	onPayload?: SimpleStreamOptions["onPayload"];
 	/** Provider response hook used by the active session request path. */

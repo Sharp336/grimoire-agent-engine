@@ -23,7 +23,13 @@ const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 type HealthySlot = { kind: "healthy"; generation: number; manager: Http2SessionManager; leases: number };
 type SlotState =
 	| { readonly kind: "vacant" }
-	| { readonly kind: "initializing"; readonly generation: number; readonly promise: Promise<LeasedManager> }
+	| {
+			readonly kind: "initializing";
+			readonly generation: number;
+			readonly promise: Promise<LeasedManager>;
+			/** Cancels the in-progress proxy tunnel so disposal never waits it out. */
+			readonly abort: AbortController;
+	  }
 	| HealthySlot;
 
 interface LeasedManager {
@@ -170,7 +176,8 @@ async function tryAcquireFromSlot(
 	if (slot.kind === "vacant") {
 		// Cold acquisition: initialize the slot.
 		const generation = Date.now() + slotIndex;
-		const promise = createSessionManager(baseUrl, origin, proxyUrl).then(
+		const abort = new AbortController();
+		const promise = createSessionManager(baseUrl, origin, proxyUrl, abort.signal).then(
 			(manager): LeasedManager => {
 				if (disposed) {
 					manager.abort();
@@ -198,7 +205,7 @@ async function tryAcquireFromSlot(
 			},
 		);
 
-		entry.slots[slotIndex] = { kind: "initializing", generation, promise };
+		entry.slots[slotIndex] = { kind: "initializing", generation, promise, abort };
 
 		try {
 			await raceWithSignal(promise, signal);
@@ -315,10 +322,12 @@ async function createSessionManager(
 	baseUrl: string,
 	origin: string,
 	proxyUrl: string | undefined,
+	signal?: AbortSignal,
 ): Promise<Http2SessionManager> {
 	if (proxyUrl) {
 		const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
 			timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
+			signal,
 		});
 		const manager = new Http2SessionManager(
 			origin,
@@ -354,6 +363,9 @@ export async function disposeCursorH2Pool(): Promise<void> {
 			if (slot.kind === "healthy") {
 				closePromises.push(closeManager(slot.manager));
 			} else if (slot.kind === "initializing") {
+				// Cancel the pending tunnel first: waiting out the 30s proxy
+				// timeout would blow past postmortem's disposal deadline.
+				slot.abort.abort(new Error("Cursor H2 pool disposed"));
 				closePromises.push(slot.promise.then(lm => closeManager(lm.manager)).catch(() => {}));
 			}
 		}

@@ -152,12 +152,16 @@ async function stopServers(): Promise<void> {
 	if (h2Server) {
 		const closing = h2Server;
 		h2Server = undefined;
-		await new Promise<void>((resolve, reject) => closing.close(e => (e ? reject(e) : resolve())));
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		closing.close(e => (e ? reject(e) : resolve()));
+		await promise;
 	}
 	if (h1Server) {
 		const closing = h1Server;
 		h1Server = undefined;
-		await new Promise<void>((resolve, reject) => closing.close(e => (e ? reject(e) : resolve())));
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		closing.close(e => (e ? reject(e) : resolve()));
+		await promise;
 	}
 }
 

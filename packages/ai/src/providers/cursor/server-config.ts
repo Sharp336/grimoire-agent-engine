@@ -38,6 +38,9 @@ interface CacheEntry {
 
 const configCache = new Map<string, CacheEntry>();
 
+/** Upper bound on a single server-config discovery round trip. */
+const DISCOVERY_TIMEOUT_MS = 10_000;
+
 function configKey(baseUrl: string, apiKey: string): string {
 	const url = new URL(baseUrl);
 	const origin = `${url.protocol}//${url.host}`;
@@ -171,8 +174,11 @@ async function fetchServerConfig(
 		});
 
 		const client = createClient(CursorServerConfigService, transport);
+		// Bound discovery: a server that accepts the connection and never
+		// answers would otherwise pin every concurrent caller on the shared
+		// cached fetch promise. On timeout the caller's neutral fallback wins.
 		const response: GetServerConfigResponse = await client.getServerConfig(create(GetServerConfigRequestSchema, {}), {
-			signal: controllerSignal,
+			signal: AbortSignal.any([controllerSignal, AbortSignal.timeout(DISCOVERY_TIMEOUT_MS)]),
 		});
 		return {
 			http2Config: response.http2Config,
@@ -190,11 +196,11 @@ function raceFetchWithSignal(
 	signal: AbortSignal | undefined,
 ): Promise<ServerConfigResult> {
 	if (!signal) return promise;
-	if (signal.aborted) return Promise.reject(new Error("Aborted before config fetch"));
+	if (signal.aborted) return Promise.reject(new AIError.AbortError("Aborted before config fetch"));
 	const { promise: result, resolve, reject } = Promise.withResolvers<ServerConfigResult>();
 	const onAbort = (): void => {
 		signal.removeEventListener("abort", onAbort);
-		reject(new Error("Aborted during config fetch"));
+		reject(new AIError.AbortError("Aborted during config fetch"));
 	};
 	signal.addEventListener("abort", onAbort, { once: true });
 	promise.then(

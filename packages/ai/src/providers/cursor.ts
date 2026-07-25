@@ -608,9 +608,11 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						h2Request.close();
 					}
 
-					const callerTask = activeHandlerPromise;
-					const tasksToAwait = Array.from(trackedTasks).filter(t => t !== callerTask);
-					await Promise.allSettled(tasksToAwait);
+					// Await every tracked handler, including the one that invoked
+					// settle: `resolveTask` runs in that handler's `finally`, so
+					// awaiting it from settle's detached async task cannot
+					// deadlock — settle never runs inline on the handler's stack.
+					await Promise.allSettled(Array.from(trackedTasks));
 
 					if (lease) {
 						lease.release();
@@ -766,8 +768,9 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						},
 					};
 
-					heartbeatTimer = setInterval(sendHeartbeat, 5000);
-					heartbeatTimer.unref?.();
+					// No supervisor heartbeat here: the H1 bridge runs its own
+					// clientHeartbeat timer over BidiAppend. A second timer on
+					// this path would double every append.
 
 					// Consume server messages from the bridge's async iterable.
 					(async () => {
@@ -1030,8 +1033,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				originalRequestId,
 				signal: options?.signal,
 			}).catch((error: unknown) => {
-				// Auth failures from config discovery must propagate (and may trigger
-				// credential rotation). Ordinary discovery failures yield neutral policy.
+				// Caller abort and auth failures from config discovery must
+				// propagate (auth may trigger credential rotation). Ordinary
+				// discovery failures yield neutral policy.
+				if (error instanceof AIError.AbortError) throw error;
 				if (error instanceof AIError.CursorCredentialError) throw error;
 				const message = error instanceof Error ? error.message : String(error);
 				if (/401|403|unauthenticated|permission_denied/i.test(message)) throw error;

@@ -193,7 +193,7 @@ describe("Invariant 2: H1 fatal errors preserve Connect status", () => {
 });
 
 describe("Invariant 3: Poll Sequence Validation", () => {
-	it("allows one byte-identical duplicate and rejects second consecutive duplicate", async () => {
+	it("delivers a byte-identical retransmit exactly once and rejects a second consecutive duplicate", async () => {
 		const msg1Bytes = toBinary(AgentServerMessageSchema, textDeltaMessage("hello"));
 		const msg2Bytes = toBinary(AgentServerMessageSchema, textDeltaMessage("world"));
 
@@ -264,8 +264,9 @@ describe("Invariant 3: Poll Sequence Validation", () => {
 				}
 			}
 
-			// Single duplicate 0n was accepted, 1n was accepted
-			expect(received).toEqual(["hello", "hello", "world"]);
+			// The seqno 0n retransmit advances the poll but is not re-delivered:
+			// re-enqueuing it would render text twice and run an exec frame twice.
+			expect(received).toEqual(["hello", "world"]);
 		} finally {
 			await bridge?.close("success").catch(() => {});
 			await closeServerAsync(mockServer);
@@ -406,8 +407,9 @@ describe("Invariant 3: Poll Sequence Validation", () => {
 				}
 			}
 
-			// First 0n and 1st dup 0n enqueued (2 total), 2nd dup 0n rejected
-			expect(received).toEqual(["hello", "hello"]);
+			// First 0n enqueued once; the 1st retransmit is discarded and the
+			// 2nd consecutive duplicate is a fatal sequence violation.
+			expect(received).toEqual(["hello"]);
 		} finally {
 			await bridge?.close("success").catch(() => {});
 			await closeServerAsync(mockServer);

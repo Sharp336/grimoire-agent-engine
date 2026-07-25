@@ -209,7 +209,7 @@ export async function createCursorHttp1Bridge(opts: {
 			});
 
 			const inFlightPromise = bidiClient
-				.bidiAppend(appendRequest)
+				.bidiAppend(appendRequest, { signal: receiveSignal })
 				.then(() => {
 					inFlight.delete(inFlightPromise);
 					pending.resolve();
@@ -229,7 +229,7 @@ export async function createCursorHttp1Bridge(opts: {
 						p.reject(new Error("Append failure sealed the queue"));
 					}
 					appendQueue.length = 0;
-					void closeBridge("fatal", err);
+					void closeBridge("fatal", connectAuthToCursorCredentialError(error) ?? err);
 				});
 
 			inFlight.add(inFlightPromise);
@@ -409,7 +409,16 @@ async function startPollFallback(
 					await closeBridge("fatal");
 					return;
 				}
+				// First retransmit of an already-delivered frame: tolerate it,
+				// but discard the payload. Re-enqueuing would render text twice
+				// and run an exec frame twice.
 				duplicateCount = 1;
+				if (pollResponse.eof) {
+					await closeBridge("success");
+					return;
+				}
+				pollRequest.startRequest = false;
+				continue;
 			} else if (pollResponse.seqno === expectedSeq + 1n) {
 				expectedSeq = pollResponse.seqno;
 				lastSeqData = pollResponse.data;
