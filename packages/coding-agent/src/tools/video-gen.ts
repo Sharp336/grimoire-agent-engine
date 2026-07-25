@@ -1,6 +1,6 @@
 import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { ModelRegistry } from "../config/model-registry";
 import type { AgentToolUpdateCallback, CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
@@ -173,26 +173,6 @@ function videoProviderOrder(
 	return providers;
 }
 
-/**
- * Sleep between polls without outliving the job fence. `untilAborted` rejects
- * the tool call the moment the caller aborts, but a bare sleep would still hold
- * a timer past that point — race it against the signal so the loop unwinds.
- */
-function sleepUntilAborted(ms: number, signal: AbortSignal): Promise<void> {
-	if (signal.aborted) return Promise.resolve();
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const timer = setTimeout(() => {
-		signal.removeEventListener("abort", onAbort);
-		resolve();
-	}, ms);
-	function onAbort(): void {
-		clearTimeout(timer);
-		resolve();
-	}
-	signal.addEventListener("abort", onAbort, { once: true });
-	return promise;
-}
-
 function reportProgress(
 	onUpdate: AgentToolUpdateCallback<VideoGenToolDetails, VideoGenParams> | undefined,
 	provider: VideoProvider,
@@ -259,8 +239,22 @@ export class VideoJobPoller {
 			return null;
 		}
 		if (response.ok) {
+			// A truncated or otherwise unreadable body is as transient as the fetch
+			// failing outright, and the job is still running — spend the budget
+			// rather than abandoning a paid generation over one bad response.
+			let parsed: T;
+			try {
+				parsed = (await response.json()) as T;
+			} catch (error) {
+				if (++this.#failures > MAX_POLL_FAILURES) throw error;
+				logger.warn("Video job poll body unreadable, retrying", {
+					label: this.label,
+					failures: this.#failures,
+				});
+				return null;
+			}
 			this.#failures = 0;
-			return (await response.json()) as T;
+			return parsed;
 		}
 
 		const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
@@ -400,8 +394,7 @@ async function generateXaiVideo(
 		for (;;) {
 			const status = await poller.poll<XAIVideoStatus>(`${baseUrl}/videos/${requestId}`);
 			if (!status) {
-				await sleepUntilAborted(POLL_INTERVAL_MS, signal);
-				signal.throwIfAborted();
+				await untilAborted(signal, Bun.sleep(POLL_INTERVAL_MS));
 				continue;
 			}
 			if (status.status === "done") {
@@ -427,8 +420,7 @@ async function generateXaiVideo(
 				throw new Error(`xAI video generation ${status.status}${detail}`);
 			}
 			reportProgress(onUpdate, "xai", model, "generating", status.progress);
-			await sleepUntilAborted(POLL_INTERVAL_MS, signal);
-			signal.throwIfAborted();
+			await untilAborted(signal, Bun.sleep(POLL_INTERVAL_MS));
 		}
 	} catch (error) {
 		throw new VideoJobCommittedError("xai", requestId, error);
@@ -499,8 +491,7 @@ async function generateOpenRouterVideo(
 		for (;;) {
 			const status = await poller.poll<OpenRouterVideoStatus>(pollingUrl);
 			if (!status) {
-				await sleepUntilAborted(POLL_INTERVAL_MS, signal);
-				signal.throwIfAborted();
+				await untilAborted(signal, Bun.sleep(POLL_INTERVAL_MS));
 				continue;
 			}
 			const state = status.status ?? "pending";
@@ -524,8 +515,7 @@ async function generateOpenRouterVideo(
 				throw new Error(`OpenRouter video generation ${state}${message ? `: ${message}` : ""}`);
 			}
 			reportProgress(onUpdate, "openrouter", model, "generating", status.progress);
-			await sleepUntilAborted(POLL_INTERVAL_MS, signal);
-			signal.throwIfAborted();
+			await untilAborted(signal, Bun.sleep(POLL_INTERVAL_MS));
 		}
 	} catch (error) {
 		throw new VideoJobCommittedError("openrouter", requestId, error);

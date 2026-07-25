@@ -507,3 +507,21 @@ describe("VideoJobPoller", () => {
 		);
 	});
 });
+
+describe("VideoJobPoller body handling", () => {
+	it("spends the retry budget on an unreadable body rather than abandoning the job", async () => {
+		let attempt = 0;
+		const fetchMock = (async () => {
+			attempt += 1;
+			return attempt === 1
+				? new Response("<truncated", { status: 200, headers: { "content-type": "application/json" } })
+				: json({ status: "pending" });
+		}) as unknown as typeof fetch;
+		const subject = new VideoJobPoller("test", "static-key", () => ({}), fetchMock, new AbortController().signal);
+
+		// A body that will not decode is as transient as the fetch failing; the
+		// generation is still running and paid for.
+		expect(await subject.poll("https://example.test/job")).toBeNull();
+		expect(await subject.poll<{ status: string }>("https://example.test/job")).toEqual({ status: "pending" });
+	});
+});
