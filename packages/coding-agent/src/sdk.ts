@@ -145,6 +145,7 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
+import { advisorToolIdentity } from "./session/session-advisors";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
@@ -2490,6 +2491,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
 			localProtocolOptions,
+			// Live closures, not captured values: the runner is constructed before
+			// `session` is assigned (see `let session!` above, set once startup
+			// completes), and extensions create contexts long after that. Reading
+			// through the closure is what makes `ctx.providerSessionId` /
+			// `ctx.usageProviderScopeId` non-undefined for session-scoped usage
+			// providers instead of silently resolving in the global scope.
+			{
+				getProviderSessionId: () => (hasSession ? session.sessionId : undefined),
+				getUsageProviderScopeId: () => (hasSession ? session.usageProviderScopeId : undefined),
+			},
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -3070,6 +3081,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			hasEditTool: true,
 			requireYieldTool: false,
 			getSessionId: () => {
+				// Roster advisors share this one toolset, so prefer the identity the
+				// running advisor bound (see `advisorToolIdentity`). The flat
+				// `<session>-advisor` id stays the fallback for tool state touched
+				// outside an advisor turn.
+				const bound = advisorToolIdentity.getStore();
+				if (bound) return bound.sessionLabel;
 				const id = sessionManager.getSessionId?.();
 				return id ? `${id}-advisor` : null;
 			},

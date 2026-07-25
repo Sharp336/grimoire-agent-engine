@@ -3186,7 +3186,13 @@ export class AuthStorage {
 			// value through transient failures. Session-cookie providers can opt out
 			// so an expired login does not display stale quota indefinitely.
 			const stale = this.#usageCache.getStale<UsageReport | null>(cacheKey);
-			const retainLastGood = this.#usageProviderResolver?.(request.provider)?.retainLastGoodOnFailure !== false;
+			// Prefer the request's own provider over the global resolver: a provider
+			// registered only in this session owns its stale-cache policy, and asking
+			// the unscoped resolver turns an explicit `retainLastGoodOnFailure: false`
+			// (cookie/login usage that must vanish when the login dies) back into the
+			// default `true`, serving stale quota after invalidation.
+			const policyProvider = request.usageProvider ?? this.#usageProviderResolver?.(request.provider);
+			const retainLastGood = policyProvider?.retainLastGoodOnFailure !== false;
 			const lastGood = retainLastGood ? (stale?.value ?? null) : null;
 			const backoffJitter = USAGE_FAILURE_BACKOFF_MS * (Math.random() * 0.5 - 0.25);
 			const coolDown = Date.now() + USAGE_FAILURE_BACKOFF_MS + backoffJitter;
@@ -3482,14 +3488,24 @@ export class AuthStorage {
 				for (const entry of entries) {
 					if (entry.credential.type !== "oauth") continue;
 					const request = this.#buildUsageRequestForOauth(provider, entry.credential, baseUrl);
-					if (providerImpl.supports && !providerImpl.supports(request)) continue;
+					// Same usage context as every other path below: without it a session
+					// extension overriding xai-oauth passes its own `supports` check and
+					// is then fetched through the unscoped resolver, so its report and
+					// cache partition are ignored for xAI OAuth accounts.
+					request.usageProvider = providerImpl;
+					request.usageProviderCacheKeyVersion = usageContext.cacheKeyVersion;
+					request.usageProviderExtensionOwned = usageContext.extensionOwned;
+					if (!this.#usageProviderSupports(providerImpl, request)) continue;
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
 				}
 				const oauthToken = $env.XAI_OAUTH_TOKEN?.trim();
 				if (!hasUsableStoredOAuthCredential && oauthToken) {
 					const request = this.#buildUsageRequest(provider, { type: "oauth", accessToken: oauthToken }, baseUrl);
-					if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
+					request.usageProvider = providerImpl;
+					request.usageProviderCacheKeyVersion = usageContext.cacheKeyVersion;
+					request.usageProviderExtensionOwned = usageContext.extensionOwned;
+					if (this.#usageProviderSupports(providerImpl, request)) requests.push(request);
 				}
 				continue;
 			}

@@ -1,4 +1,4 @@
-import type { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	Agent,
 	type AgentMessage,
@@ -97,17 +97,29 @@ import type { SessionManager } from "./session-manager";
 import type { YieldQueue } from "./yield-queue";
 
 export interface ToolSessionIdentity {
-	providerSessionId: string;
+	/**
+	 * Advisor provider session id, absent until the primary session has an id.
+	 * Tool state keys on `sessionLabel`, so binding stays useful either way.
+	 */
+	providerSessionId: string | undefined;
 	sessionLabel: string;
 }
 
-export function bindToolsToAsyncSessionIdentity(
-	tools: AgentTool[],
+/**
+ * Per-advisor tool identity. The advisor toolset is built once (in `sdk.ts`) and
+ * shared by every roster advisor, so the identity their tool state is keyed on
+ * has to be dynamic rather than a baked `<session>-advisor` id: each advisor runs
+ * its tools inside this store and the advisor `ToolSession` reads it.
+ */
+export const advisorToolIdentity = new AsyncLocalStorage<ToolSessionIdentity>();
+
+export function bindToolsToAsyncSessionIdentity<T extends AgentTool<any>>(
+	tools: T[],
 	identity: AsyncLocalStorage<ToolSessionIdentity>,
 	session: ToolSessionIdentity,
-): AgentTool[] {
+): T[] {
 	return tools.map(tool => {
-		const bound = Object.defineProperties({}, Object.getOwnPropertyDescriptors(tool)) as AgentTool;
+		const bound = Object.defineProperties({}, Object.getOwnPropertyDescriptors(tool)) as T;
 		Object.defineProperty(bound, "description", {
 			enumerable: true,
 			get: () => tool.description,
@@ -600,7 +612,24 @@ export class SessionAdvisors {
 
 			const names = config.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(config.tools);
 			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
-			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
+			const primaryProviderSessionId = this.#host.sessionId();
+			const advisorSessionLabel = slug
+				? `${primaryProviderSessionId}-advisor-${slug}`
+				: `${primaryProviderSessionId}-advisor`;
+			const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
+				this.#advisorProviderSessionIds,
+				primaryProviderSessionId,
+				slug,
+			);
+			// Bind each advisor's tools to its own identity. Tool state (snapshot,
+			// seen-lines, conflict and summary caches) is keyed on session identity, so
+			// while every roster advisor resolved to the single `<session>-advisor` id
+			// their tool state collided whenever more than one ran with tools.
+			const advisorLoopTools: AgentTool<any>[] = bindToolsToAsyncSessionIdentity(
+				[adviseTool, ...tools],
+				advisorToolIdentity,
+				{ providerSessionId: advisorProviderSessionId, sessionLabel: advisorSessionLabel },
+			);
 			const advisorToolMap = new Map<string, AgentTool<any>>();
 			const availableAdvisorToolNames = new Set<string>();
 			for (const tool of advisorLoopTools) {
@@ -614,15 +643,6 @@ export class SessionAdvisors {
 			let quarantinedAdvisorOutput: string | undefined;
 			let currentAdvisorInput = "";
 
-			const primaryProviderSessionId = this.#host.sessionId();
-			const advisorSessionLabel = slug
-				? `${primaryProviderSessionId}-advisor-${slug}`
-				: `${primaryProviderSessionId}-advisor`;
-			const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
-				this.#advisorProviderSessionIds,
-				primaryProviderSessionId,
-				slug,
-			);
 			const appendOnlyContext = new AppendOnlyContextManager();
 
 			// Thread the primary's telemetry into the advisor loop so the advisor
@@ -680,7 +700,15 @@ export class SessionAdvisors {
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
 				preferWebsockets: this.#host.preferWebsockets,
-				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
+				// The advisor's own provider-session id is a prompt-cache identity, not
+				// a usage scope. Advisor turns must resolve credentials under the
+				// owning session's scope or an extension usage provider's reports and
+				// quota blocks are ignored until some main-session path observes them.
+				getApiKey: requestModel =>
+					this.#host.modelRegistry.resolver(requestModel, {
+						sessionId: advisorProviderSessionId,
+						usageScopeId: this.#host.usageScopeId(),
+					}),
 				streamFn: this.#advisorStreamFn,
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
@@ -1003,7 +1031,9 @@ export class SessionAdvisors {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return;
-		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, advisor.providerSessionId);
+		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, advisor.providerSessionId, {
+			usageScopeId: this.#host.usageScopeId(),
+		});
 		if (!apiKey) return;
 
 		const thinkingToApply =
@@ -1096,7 +1126,9 @@ export class SessionAdvisors {
 			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 			if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
-			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId);
+			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, {
+				usageScopeId: this.#host.usageScopeId(),
+			});
 			if (!apiKey) continue;
 
 			const originalThinkingLevel = advisor.thinkingLevel;
@@ -1269,14 +1301,19 @@ export class SessionAdvisors {
 		});
 
 		for (const candidate of candidates) {
-			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId);
+			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId, {
+				usageScopeId: this.#host.usageScopeId(),
+			});
 			if (!apiKey) continue;
 
 			try {
 				compactResult = await compact(
 					preparation,
 					candidate,
-					this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId),
+					this.#host.modelRegistry.resolver(candidate, {
+						sessionId: advisorProviderSessionId,
+						usageScopeId: this.#host.usageScopeId(),
+					}),
 					undefined,
 					undefined,
 					{

@@ -1170,7 +1170,12 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						}
 
 						const hostedModel = apiKey.model;
-						const hostedKey: ApiKey = ctx.modelRegistry.resolver(hostedModel, sessionId);
+						// Retry resolvers must carry the scope too: initial discovery above
+						// used it, but an auth/usage-limit retry rotates and marks
+						// credentials through this resolver, so without the scope the
+						// scoped provider's cache version and quota blocks are ignored
+						// from the second attempt on.
+						const hostedKey: ApiKey = ctx.modelRegistry.resolver(hostedModel, { sessionId, usageScopeId });
 
 						const parsed = await withAuth(
 							hostedKey,
@@ -1231,6 +1236,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						const prompt = assemblePrompt(params);
 						const antigravityKey: ApiKey = ctx.modelRegistry.resolver("google-antigravity", {
 							sessionId,
+							usageScopeId,
 							modelId: DEFAULT_ANTIGRAVITY_MODEL,
 						});
 
@@ -1401,6 +1407,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 						const xaiKey: ApiKey = ctx.modelRegistry.resolver(xaiCreds.provider, {
 							sessionId,
+							usageScopeId,
 							baseUrl: xaiCreds.baseURL,
 						});
 
