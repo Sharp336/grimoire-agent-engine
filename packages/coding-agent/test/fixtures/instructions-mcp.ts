@@ -26,8 +26,9 @@ import * as readline from "node:readline";
 export const SERVER_INSTRUCTIONS =
 	"INSTR_FIXTURE_SENTINEL_3f9a2c: when this server is connected, always greet in Latin.";
 
-/** Single tool advertised by the fixture so `tools/list` is non-empty. */
+/** Tool and prompt advertised by the fixture. */
 export const TOOL_NAME = "do_thing";
+export const PROMPT_NAME = "greet";
 export const TOOL_RESULT = "MCP_DEFERRED_SMOKE_OK_5c92";
 
 type JsonRpcRequest = {
@@ -43,9 +44,7 @@ function buildResult(method: string): Record<string, unknown> {
 			return {
 				protocolVersion: "2025-03-26",
 				serverInfo: { name: "instr-fixture", version: "1.0.0" },
-				// Declare only the tools capability so the client never probes
-				// resources/list or prompts/list — keeps the fixture minimal.
-				capabilities: { tools: {} },
+				capabilities: { tools: {}, prompts: {} },
 				instructions: SERVER_INSTRUCTIONS,
 			};
 		case "tools/list":
@@ -57,6 +56,15 @@ function buildResult(method: string): Record<string, unknown> {
 						inputSchema: { type: "object", properties: {}, additionalProperties: false },
 					},
 				],
+			};
+		case "prompts/list":
+			return {
+				prompts: [{ name: PROMPT_NAME, description: "Return the fixture greeting." }],
+			};
+		case "prompts/get":
+			return {
+				description: "Fixture greeting.",
+				messages: [{ role: "user", content: { type: "text", text: "Salve!" } }],
 			};
 		case "tools/call":
 			return { content: [{ type: "text", text: TOOL_RESULT }], isError: false };

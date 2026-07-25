@@ -3451,21 +3451,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}
 				})();
 			});
-			// Awaited-startup path (mcp.awaitStartupMs > 0): discovery already
-			// returned and its tools were registered at build time, but a server
-			// that was still pending at the startup gate may have completed in
-			// the window before this callback was installed — its tools updated
-			// the manager with no listener attached. Replay the manager's current
-			// view once so no server's tools are stranded for the session.
-			if (deferMCPDiscoveryForUI && !startDeferredMCPDiscovery && mcpManager.getTools().length > 0) {
-				await session.refreshMCPTools(mcpManager.getTools());
-			}
 			// Wire prompt refresh → rebuild MCP prompt slash commands
 			mcpManager.setOnPromptsChanged(serverName => {
 				const promptCommands = buildMCPPromptCommands(mcpManager);
 				session.setMCPPromptCommands(promptCommands);
 				logger.debug("MCP prompt commands refreshed", { path: `mcp:${serverName}` });
 			});
+			// Awaited-startup path (mcp.awaitStartupMs > 0): discovery already
+			// returned before the tools callback was installed. Replay even an
+			// empty tool list so instruction-only servers are observed.
+			if (deferMCPDiscoveryForUI && !startDeferredMCPDiscovery) {
+				await session.refreshMCPTools(mcpManager.getTools());
+			}
 			const notificationDebounceTimers = new Map<string, Timer>();
 			const clearDebounceTimers = () => {
 				for (const timer of notificationDebounceTimers.values()) clearTimeout(timer);

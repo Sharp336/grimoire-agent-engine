@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import { SERVER_INSTRUCTIONS, TOOL_NAME } from "./fixtures/instructions-mcp";
+import { PROMPT_NAME, SERVER_INSTRUCTIONS, TOOL_NAME } from "./fixtures/instructions-mcp";
 
 // Contract: with `mcp.awaitStartupMs` > 0, an interactive (`hasUI`) session
 // waits (bounded) for MCP discovery BEFORE assembling its tool registry and
@@ -110,6 +110,7 @@ describe("createAgentSession with mcp.awaitStartupMs (interactive UI)", () => {
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			expect(prompt).toContain("MCP Server Instructions");
 			expect(session.getEnabledToolNames()).toContain(MCP_TOOL_NAME);
+			expect(session.mcpPromptCommands.map(command => command.command.name)).toContain(`instr:${PROMPT_NAME}`);
 			// Mounted under xd:// (xdev default) and catalogued in the prompt.
 			expect(prompt).toContain(`xd://${MCP_TOOL_NAME}`);
 			// Note: full ambient isolation is not achievable here — the native
