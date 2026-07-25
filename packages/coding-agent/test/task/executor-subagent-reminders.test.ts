@@ -7,6 +7,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	finalizeSubprocessOutput,
 	runSubprocess,
@@ -14,7 +15,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 function createAssistantStopMessage(text: string): AssistantMessage {
 	return {
@@ -661,6 +662,35 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.aborted).toBe(true);
 		expect(result.abortReason).toBe("Cancelled before start");
 		expect(result.stderr).toBe("Cancelled before start");
+	});
+
+	it("closes a persisted session manager that opens after startup is aborted", async () => {
+		using tempDir = TempDir.createSync("@pi-aborted-session-open-");
+		const abortController = new AbortController();
+		const opening = Promise.withResolvers<SessionManager>();
+		const close = vi.fn(async () => {});
+		const opened = { close } as unknown as SessionManager;
+		const openCalled = Promise.withResolvers<void>();
+		vi.spyOn(SessionManager, "open").mockImplementation(() => {
+			openCalled.resolve();
+			return opening.promise;
+		});
+
+		const resultPromise = runSubprocess({
+			...baseOptions,
+			id: "subagent-aborted-session-open",
+			artifactsDir: tempDir.path(),
+			signal: abortController.signal,
+		});
+		await openCalled.promise;
+		abortController.abort("cancel startup");
+		const result = await resultPromise;
+		opening.resolve(opened);
+		await opening.promise;
+		await Promise.resolve();
+
+		expect(result.aborted).toBe(true);
+		expect(close).toHaveBeenCalledTimes(1);
 	});
 
 	it("surfaces the assistant abort message instead of 'Cancelled by caller' on an internal turn abort", async () => {
