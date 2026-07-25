@@ -67,7 +67,6 @@ import { getPreset } from "./status-line/presets";
 class TextInputSubmenu extends Container {
 	#input: Input;
 	#error: Text;
-	#isSecret: boolean;
 
 	constructor(
 		label: string,
@@ -79,7 +78,6 @@ class TextInputSubmenu extends Container {
 	) {
 		super();
 
-		this.#isSecret = isSecret;
 		this.addChild(new Text(theme.bold(theme.fg("accent", label)), 0, 0));
 		if (description) {
 			this.addChild(new Spacer(1));
@@ -88,6 +86,7 @@ class TextInputSubmenu extends Container {
 		this.addChild(new Spacer(1));
 
 		this.#input = new Input();
+		this.#input.mask = isSecret;
 		if (currentValue) {
 			this.#input.setValue(currentValue);
 		}
@@ -104,25 +103,6 @@ class TextInputSubmenu extends Container {
 		this.addChild(new Spacer(1));
 		this.addChild(this.#error);
 		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel · Clear field to unset"), 0, 0));
-	}
-
-	override render(width: number): readonly string[] {
-		if (!this.#isSecret) {
-			return super.render(width);
-		}
-		// Mask the input's rendered output for secret settings
-		const lines = super.render(width);
-		return lines.map(line => {
-			// Replace the input value with mask characters
-			// The input renders as a single line with the value
-			if (line.includes(this.#input.getValue())) {
-				const value = this.#input.getValue();
-				if (value) {
-					return line.replace(value, "•".repeat(Math.min(value.length, 8)));
-				}
-			}
-			return line;
-		});
 	}
 
 	handleInput(data: string): void {

@@ -50,7 +50,7 @@ export function initCache(): void {
 }
 
 async function fetchRate(): Promise<number> {
-	const resp = await fetch(API_URL);
+	const resp = await fetch(API_URL, { signal: AbortSignal.timeout(5_000) });
 	if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 	const data = (await resp.json()) as { rates?: Record<string, number> };
 	const cny = data.rates?.CNY;
