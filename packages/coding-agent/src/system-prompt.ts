@@ -111,11 +111,76 @@ function parseWmicTable(output: string, header: string): string | null {
 	return filtered[0] ?? null;
 }
 
-const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
+/** Shared prep budget for system-prompt scans and guided-goal context loading. */
+export const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
 /** Kept below prep timeout so timed-out probes can still write the null cache before fallback. */
 const GPU_PROBE_TIMEOUT_MS = SYSTEM_PROMPT_PREP_TIMEOUT_MS - 500;
 /** Drop stdout from a probe descendant that inherited the pipe after the probe exited. */
 const GPU_PROBE_STDOUT_DRAIN_MS = 250;
+
+export type LoadedContextFile = {
+	path: string;
+	content: string;
+	depth?: number;
+	level: "user" | "project";
+};
+
+/**
+ * Race `work` against a deadline. On timeout or rejection, return `fallback`.
+ * Timed-out work continues in the background so caches can still warm.
+ *
+ * When `deadline` is omitted, a fresh timer of `timeoutMs` (default
+ * {@link SYSTEM_PROMPT_PREP_TIMEOUT_MS}) is created for this call.
+ */
+export async function withDeadline<T>(
+	name: string,
+	work: Promise<T>,
+	fallback: T,
+	options?: {
+		deadline?: Promise<"__timeout__">;
+		timeoutMs?: number;
+		onTimeout?: (name: string) => void;
+		onError?: (name: string, error: unknown) => void;
+	},
+): Promise<T> {
+	let ownTimer: ReturnType<typeof setTimeout> | undefined;
+	let deadline = options?.deadline;
+	if (!deadline) {
+		const resolvers = Promise.withResolvers<"__timeout__">();
+		deadline = resolvers.promise;
+		ownTimer = setTimeout(
+			() => resolvers.resolve("__timeout__"),
+			options?.timeoutMs ?? SYSTEM_PROMPT_PREP_TIMEOUT_MS,
+		);
+		// Unref so a fast caller does not hold a one-shot CLI alive waiting for this timer.
+		ownTimer.unref();
+	}
+	try {
+		const tagged = work
+			.then(value => ({ kind: "ok" as const, value }))
+			.catch(error => ({ kind: "err" as const, error }));
+		const result = await Promise.race([tagged, deadline]);
+		if (result === "__timeout__") {
+			options?.onTimeout?.(name);
+			// Let the work continue in the background so its caches still warm; just log on completion.
+			void tagged.then(r => {
+				if (r.kind === "err") {
+					logger.warn("Background system prompt preparation step failed", { name, error: String(r.error) });
+				} else {
+					logger.debug("Background system prompt preparation step completed after timeout", { name });
+				}
+			});
+			return fallback;
+		}
+		if (result.kind === "err") {
+			options?.onError?.(name, result.error);
+			return fallback;
+		}
+		return result.value;
+	} finally {
+		if (ownTimer) clearTimeout(ownTimer);
+	}
+}
 
 async function runGpuProbe(cmd: string[]): Promise<string | null> {
 	try {
@@ -331,9 +396,9 @@ export interface LoadContextFilesOptions {
 	cwd?: string;
 }
 
-function dedupeExactContextFiles(
-	contextFiles: Array<{ path: string; content: string; depth?: number }>,
-): Array<{ path: string; content: string; depth?: number }> {
+function dedupeExactContextFiles<
+	T extends { path: string; content: string; depth?: number; level?: "user" | "project" },
+>(contextFiles: T[]): T[] {
 	const lastIndexByContent = new Map<string, number>();
 	for (const [index, file] of contextFiles.entries()) {
 		// Keep the closest matching context entry when content is byte-for-byte identical.
@@ -345,12 +410,10 @@ function dedupeExactContextFiles(
 
 /**
  * Load all project context files using the capability API.
- * Returns {path, content, depth} entries for all discovered context files.
+ * Returns {path, content, depth, level} entries for all discovered context files.
  * Files are sorted by depth (descending) so files closer to cwd appear last/more prominent.
  */
-export async function loadProjectContextFiles(
-	options: LoadContextFilesOptions = {},
-): Promise<Array<{ path: string; content: string; depth?: number }>> {
+export async function loadProjectContextFiles(options: LoadContextFilesOptions = {}): Promise<LoadedContextFile[]> {
 	const resolvedCwd = options.cwd ?? getProjectDir();
 
 	const result = await loadCapability(contextFileCapability.id, { cwd: resolvedCwd });
@@ -366,6 +429,7 @@ export async function loadProjectContextFiles(
 				path: contextFile.path,
 				content: await expandAtImports(contextFile.content, contextFile.path),
 				depth: contextFile.depth,
+				level: contextFile.level,
 			};
 		}),
 	);
@@ -466,7 +530,7 @@ export interface BuildSystemPromptOptions {
 	/** Working directory. Default: getProjectDir() */
 	cwd?: string;
 	/** Pre-loaded context files (skips discovery if provided). */
-	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
+	contextFiles?: Array<{ path: string; content: string; depth?: number; level?: "user" | "project" }>;
 	/** Skills provided directly to system prompt construction. */
 	skills?: Skill[];
 	/** Pre-loaded rulebook rules (descriptions, excluding TTSR and always-apply). */
@@ -573,29 +637,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const timedOut: string[] = [];
 	const failed: Array<{ name: string; error: unknown }> = [];
 
-	async function withDeadline<T>(name: string, work: Promise<T>, fallback: T): Promise<T> {
-		const tagged = work
-			.then(value => ({ kind: "ok" as const, value }))
-			.catch(error => ({ kind: "err" as const, error }));
-		const result = await Promise.race([tagged, deadline]);
-		if (result === "__timeout__") {
-			timedOut.push(name);
-			// Let the work continue in the background so its caches still warm; just log on completion.
-			void tagged.then(r => {
-				if (r.kind === "err") {
-					logger.warn("Background system prompt preparation step failed", { name, error: String(r.error) });
-				} else {
-					logger.debug("Background system prompt preparation step completed after timeout", { name });
-				}
-			});
-			return fallback;
-		}
-		if (result.kind === "err") {
-			failed.push({ name, error: result.error });
-			return fallback;
-		}
-		return result.value;
-	}
+	const withSharedDeadline = <T>(name: string, work: Promise<T>, fallback: T): Promise<T> =>
+		withDeadline(name, work, fallback, {
+			deadline,
+			onTimeout: step => timedOut.push(step),
+			onError: (step, error) => failed.push({ name: step, error }),
+		});
 
 	// Caller-supplied `customPrompt` / `resolvedCustomPrompt` owns block 0; the
 	// secondary capability-path `SYSTEM.md` walk-up MUST NOT silently augment it,
@@ -647,29 +694,33 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		cpuModel,
 		gpu,
 	] = await Promise.all([
-		withDeadline(
+		withSharedDeadline(
 			"customPrompt",
 			providedResolvedCustomPrompt !== undefined
 				? Promise.resolve(providedResolvedCustomPrompt)
 				: resolvePromptInput(customPrompt, "system prompt"),
 			prepDefaults.resolvedCustomPrompt,
 		),
-		withDeadline(
+		withSharedDeadline(
 			"appendSystemPrompt",
 			providedResolvedAppendPrompt !== undefined
 				? Promise.resolve(providedResolvedAppendPrompt)
 				: resolvePromptInput(appendSystemPrompt, "append system prompt"),
 			prepDefaults.resolvedAppendPrompt,
 		),
-		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization),
-		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
+		withSharedDeadline(
+			"loadSystemPromptFiles",
+			systemPromptCustomizationPromise,
+			prepDefaults.systemPromptCustomization,
+		),
+		withSharedDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
 			dedupeExactContextFiles,
 		),
-		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
-		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
-		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
-		withDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
-		withDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
+		withSharedDeadline("loadSkills", skillsPromise, prepDefaults.skills),
+		withSharedDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
+		withSharedDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
+		withSharedDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
+		withSharedDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
 	]);
 	clearTimeout(deadlineTimer);
 	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);

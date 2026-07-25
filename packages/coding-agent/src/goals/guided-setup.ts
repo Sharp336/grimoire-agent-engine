@@ -6,7 +6,7 @@ import guidedGoalContextPrompt from "../prompts/goals/guided-goal-context.md" wi
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import guidedGoalSystemPrompt from "../prompts/goals/guided-goal-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
-import { loadProjectContextFiles } from "../system-prompt";
+import { loadProjectContextFiles, withDeadline } from "../system-prompt";
 import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "../thinking";
 
 const RESPOND_TOOL_NAME = "respond";
@@ -50,7 +50,9 @@ export interface GuidedGoalTurnOptions {
  */
 export async function buildGuidedGoalContextPrompt(cwd: string): Promise<string | undefined> {
 	try {
-		const contextFiles = await loadProjectContextFiles({ cwd });
+		const loaded = await withDeadline("loadProjectContextFiles", loadProjectContextFiles({ cwd }), []);
+		// User-level files must not keep empty projects from the context-free path.
+		const contextFiles = loaded.filter(file => file.level === "project");
 		if (contextFiles.length === 0) return undefined;
 		return prompt.render(guidedGoalContextPrompt, { contextFiles }).trim() || undefined;
 	} catch (err) {
