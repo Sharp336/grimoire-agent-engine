@@ -644,7 +644,12 @@ export class SessionManager {
 			references: 1,
 			errorHandlers,
 		};
-		this.#releaseSessionLock();
+		try {
+			this.#releaseSessionLock();
+		} catch (error) {
+			next.handle.release();
+			throw error;
+		}
 		this.#sessionLock = next;
 	}
 

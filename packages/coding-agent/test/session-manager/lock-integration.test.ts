@@ -80,6 +80,39 @@ describe("SessionManager persistent lock integration", () => {
 		expect(fs.existsSync(lockPath)).toBe(false);
 	});
 
+	it("releases a replacement lock when the previous lock cannot be removed", async () => {
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		await manager.ensureOnDisk();
+		const previousFile = manager.getSessionFile();
+		if (!previousFile) throw new Error("missing previous session file");
+
+		const targetManager = SessionManager.create(cwd, sessions);
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		if (!targetFile) throw new Error("missing target session file");
+		await targetManager.close();
+
+		const previousLockPath = lockPathForSession(previousFile);
+		const unlinkSync = fs.unlinkSync;
+		let failed = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (!failed && String(target) === previousLockPath) {
+				failed = true;
+				const error = new Error("unlink failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		await expect(manager.setSessionFile(targetFile)).rejects.toBeInstanceOf(SessionLockError);
+		unlinkSpy.mockRestore();
+
+		expect(fs.existsSync(lockPathForSession(targetFile))).toBe(false);
+		await manager.close();
+	});
+
 	it("keeps canonical ownership through symlink rewrites and deletion", async () => {
 		const { cwd, sessions } = fixture();
 		const created = SessionManager.create(cwd, sessions);
