@@ -2698,15 +2698,44 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async #coordinateDrag(args: Readonly<Record<string, unknown>>): Promise<void> {
-		await this.#pressKeys(args.keys);
+		const keys = Array.isArray(args.keys) ? (args.keys as string[]) : [];
+		const pressed: string[] = [];
 		const points = args.path as Array<{ x: number; y: number }>;
-		await this.#page.mouse.move(points[0].x, points[0].y);
-		await this.#page.mouse.down();
+		let mouseDownAttempted = false;
+		let failure: unknown;
+		let cleanupFailure: unknown;
 		try {
-			for (const point of points.slice(1)) await this.#page.mouse.move(point.x, point.y);
+			for (const key of keys) {
+				pressed.push(key);
+				await this.#page.keyboard.down(key as KeyInput);
+			}
+			await this.#page.mouse.move(points[0].x, points[0].y);
+			mouseDownAttempted = true;
+			await this.#page.mouse.down();
+			for (let index = 1; index < points.length; index++) {
+				const point = points[index]!;
+				await this.#page.mouse.move(point.x, point.y);
+			}
+		} catch (error) {
+			failure = error;
 		} finally {
-			await this.#page.mouse.up();
+			if (mouseDownAttempted) {
+				try {
+					await this.#page.mouse.up();
+				} catch (error) {
+					cleanupFailure ??= error;
+				}
+			}
+			for (let index = pressed.length - 1; index >= 0; index--) {
+				try {
+					await this.#page.keyboard.up(pressed[index]! as KeyInput);
+				} catch (error) {
+					cleanupFailure ??= error;
+				}
+			}
 		}
+		if (failure !== undefined) throw failure;
+		if (cleanupFailure !== undefined) throw cleanupFailure;
 	}
 
 	async #downloadLocatorMedia(args: Readonly<Record<string, unknown>>): Promise<void> {
@@ -2757,10 +2786,15 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const media = (await this.#runBeforeDeadline(deadline, () =>
 			handle.evaluate(
 				async (element, timeoutMs, label) => {
+					const nestedMedia = element.querySelector("img,video,audio,source");
+					const elementCurrentSrc = "currentSrc" in element ? element.currentSrc : undefined;
+					const nestedCurrentSrc = nestedMedia && "currentSrc" in nestedMedia ? nestedMedia.currentSrc : undefined;
 					const source =
+						(typeof elementCurrentSrc === "string" && elementCurrentSrc ? elementCurrentSrc : null) ??
 						element.getAttribute("src") ??
 						element.getAttribute("href") ??
-						element.querySelector("img,video,audio,source")?.getAttribute("src") ??
+						(typeof nestedCurrentSrc === "string" && nestedCurrentSrc ? nestedCurrentSrc : null) ??
+						nestedMedia?.getAttribute("src") ??
 						element.querySelector("a")?.getAttribute("href");
 					if (!source) return null;
 					const controller = new AbortController();

@@ -128,13 +128,13 @@ function queryAll(root: QueryRoot, selector: string): Element[] {
 	return values;
 }
 
-function isFrame(element: Element): element is HTMLIFrameElement {
-	return element.tagName.toLowerCase() === "iframe";
+function isFrame(root: QueryRoot): root is HTMLIFrameElement {
+	return "tagName" in root && String(root.tagName).toLowerCase() === "iframe";
 }
 
 function rootsFor(roots: QueryRoot[]): QueryRoot[] {
 	return roots.flatMap(root => {
-		if (!(root instanceof Element) || !isFrame(root)) return [root];
+		if (!isFrame(root)) return [root];
 		try {
 			if (!root.contentDocument) throw new Error("CODEX_CROSS_ORIGIN_FRAME");
 			return [root.contentDocument];

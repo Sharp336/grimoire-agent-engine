@@ -2021,4 +2021,148 @@ describe("Puppeteer final parity blockers", () => {
 		});
 		await adapter.dispose();
 	});
+	it("resolves locators through two nested same-origin frame realms", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{
+					const outer=document.createElement("iframe"); outer.id="outer-frame"; document.body.append(outer);
+					const outerDocument=outer.contentDocument; outerDocument.open(); outerDocument.write("<iframe id='inner-frame'></iframe>"); outerDocument.close();
+					const inner=outerDocument.querySelector("#inner-frame"); const innerDocument=inner.contentDocument;
+					innerDocument.open(); innerDocument.write("<button id='deep-target'>Deep target</button>"); innerDocument.close();
+				 });
+				 return await t.playwright.frameLocator("#outer-frame").frameLocator("#inner-frame").locator("#deep-target").count();`,
+			);
+			expect(result).toBe(1);
+		});
+	}, 20_000);
+
+	it("keeps CUA drag modifiers down through mouse cleanup and releases them after failure", async () => {
+		const events: string[] = [];
+		const active = new Set<string>();
+		const activeKeys = () => [...active].join("+") || "none";
+		let moves = 0;
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				keyboard: {
+					press: async (key: string) => events.push(`key.press:${key}`),
+					down: async (key: string) => {
+						active.add(key);
+						events.push(`key.down:${key}`);
+					},
+					up: async (key: string) => {
+						events.push(`key.up:${key}`);
+						active.delete(key);
+					},
+				},
+				mouse: {
+					move: async (x: number, y: number) => {
+						events.push(`mouse.move:${x},${y}:${activeKeys()}`);
+						if (++moves === 2) throw new Error("drag move failed");
+					},
+					down: async () => events.push(`mouse.down:${activeKeys()}`),
+					up: async () => events.push(`mouse.up:${activeKeys()}`),
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await expect(
+			adapter.invoke("cua.drag", {
+				tabId: "1",
+				keys: ["Shift", "Alt"],
+				path: [
+					{ x: 1, y: 2 },
+					{ x: 3, y: 4 },
+				],
+			}),
+		).rejects.toThrow("drag move failed");
+		expect(events).toEqual([
+			"key.down:Shift",
+			"key.down:Alt",
+			"mouse.move:1,2:Shift+Alt",
+			"mouse.down:Shift+Alt",
+			"mouse.move:3,4:Shift+Alt",
+			"mouse.up:Shift+Alt",
+			"key.up:Alt",
+			"key.up:Shift",
+		]);
+		expect([...active]).toEqual([]);
+		await adapter.dispose();
+	});
+
+	it("prefers responsive currentSrc for media downloads with or without an src attribute", async () => {
+		const requested: string[] = [];
+		const fetchMock: typeof globalThis.fetch = Object.assign(
+			async (input: string | URL | Request) => {
+				requested.push(String(input));
+				return new Response(new Uint8Array([65]), { headers: { "content-type": "text/plain" } });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+		spyOn(fs.promises, "open").mockResolvedValue({
+			writeFile: async () => undefined,
+			sync: async () => undefined,
+			close: async () => undefined,
+		} as never);
+		spyOn(fs.promises, "rename").mockResolvedValue(undefined);
+		for (const fallbackSrc of ["https://fixture.test/fallback.png", null]) {
+			const element = {
+				currentSrc: "https://fixture.test/responsive.webp",
+				getAttribute: (name: string) => (name === "src" ? fallbackSrc : null),
+				querySelector: () => null,
+			};
+			const handle: Record<string, unknown> = {
+				asElement: () => handle,
+				dispose: async () => undefined,
+				evaluate: async (
+					callback: (target: typeof element, timeoutMs: number, label: string) => Promise<unknown>,
+					timeoutMs: number,
+					label: string,
+				) => {
+					const globals = globalThis as unknown as Record<string, unknown>;
+					const documentDescriptor = Object.getOwnPropertyDescriptor(globals, "document");
+					Object.defineProperty(globals, "document", {
+						value: { baseURI: "https://fixture.test/" },
+						configurable: true,
+					});
+					try {
+						return await callback(element, timeoutMs, label);
+					} finally {
+						if (documentDescriptor) Object.defineProperty(globals, "document", documentDescriptor);
+						else delete globals.document;
+					}
+				},
+			};
+			const adapter = new PuppeteerCodexBrowserAdapter({
+				currentTabId: "1",
+				page: {
+					url: () => "about:blank",
+					evaluateHandle: async () => ({
+						getProperties: async () => new Map([["0", handle]]),
+						dispose: async () => undefined,
+					}),
+				} as never,
+				browser: {} as never,
+				signal: new AbortController().signal,
+				cwd: "/tmp/browser-contract",
+				captureScreenshot: async () => "",
+			});
+			await adapter.invoke("locator.downloadMedia", {
+				tabId: "1",
+				locator: { kind: "css", selector: "#responsive" },
+				timeoutMs: 1_000,
+			});
+			await adapter.dispose();
+		}
+		expect(requested).toEqual(["https://fixture.test/responsive.webp", "https://fixture.test/responsive.webp"]);
+	});
 });

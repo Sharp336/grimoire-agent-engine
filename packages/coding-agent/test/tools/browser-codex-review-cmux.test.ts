@@ -3083,4 +3083,55 @@ describe("cmux Codex browser review regressions", () => {
 		expect(sequence).toEqual(["arm", "reload", "prepare"]);
 		expect(navigationSignal?.aborted).toBe(true);
 	});
+	it("uses the generated ARIA runtime through two same-origin frame realms", async () => {
+		class TopRealmElement {}
+		const deepTarget = { tagName: "BUTTON", querySelectorAll: () => [] };
+		const deepestDocument = {
+			querySelectorAll: (selector: string) => (selector === "#deep-target" || selector === "*" ? [deepTarget] : []),
+		};
+		const innerFrame = {
+			tagName: "IFRAME",
+			contentDocument: deepestDocument,
+			querySelectorAll: () => [],
+		};
+		const outerDocument = {
+			querySelectorAll: (selector: string) => (selector === "#inner-frame" || selector === "*" ? [innerFrame] : []),
+		};
+		const outerFrame = Object.assign(new TopRealmElement(), {
+			tagName: "IFRAME",
+			contentDocument: outerDocument,
+			querySelectorAll: () => [],
+		});
+		const topDocument = {
+			addEventListener: () => undefined,
+			removeEventListener: () => undefined,
+			querySelectorAll: (selector: string) => (selector === "#outer-frame" || selector === "*" ? [outerFrame] : []),
+		};
+		const evaluate = (source: string, args: unknown[]) =>
+			runPageEvaluator(source, args, {
+				document: topDocument,
+				window: {},
+				Element: TopRealmElement,
+			});
+		const adapter = new CmuxCodexBrowserAdapter({
+			surfaceId: "surface-contract",
+			codexUrl: async () => "about:blank",
+			title: async () => "Nested frames",
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: evaluate,
+		} as never);
+		await adapter.beginRun();
+		try {
+			const current = await selectedTab(createCodexBrowserFacade(adapter));
+			expect(
+				await current.playwright
+					.frameLocator("#outer-frame")
+					.frameLocator("#inner-frame")
+					.locator("#deep-target")
+					.count(),
+			).toBe(1);
+		} finally {
+			await adapter.endRun();
+		}
+	});
 });

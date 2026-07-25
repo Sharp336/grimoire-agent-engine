@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildAriaSnapshotScript, parseAriaRefSelector } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { buildAriaRuntimeInstallerSource } from "@oh-my-pi/pi-coding-agent/tools/browser/aria/aria-snapshot";
 
 describe("parseAriaRefSelector", () => {
 	it("accepts the explicit aria-ref prefixes and returns the bare id", () => {
@@ -63,5 +64,53 @@ describe("buildAriaSnapshotScript", () => {
 		const script = buildAriaSnapshotScript(undefined, { depth: 3, boxes: true });
 		expect(script).toContain('"depth":3');
 		expect(script).toContain('"boxes":true');
+	});
+});
+
+describe("generated ARIA locator runtime", () => {
+	it("descends through two same-origin frame realms", () => {
+		class TopRealmElement {}
+		const deepTarget = { tagName: "BUTTON", querySelectorAll: () => [] };
+		const deepestDocument = {
+			querySelectorAll: (selector: string) => (selector === "#deep-target" || selector === "*" ? [deepTarget] : []),
+		};
+		const innerFrame = {
+			tagName: "IFRAME",
+			contentDocument: deepestDocument,
+			querySelectorAll: () => [],
+		};
+		const outerDocument = {
+			querySelectorAll: (selector: string) => (selector === "#inner-frame" || selector === "*" ? [innerFrame] : []),
+		};
+		const outerFrame = Object.assign(new TopRealmElement(), {
+			tagName: "IFRAME",
+			contentDocument: outerDocument,
+			querySelectorAll: () => [],
+		});
+		const topDocument = {
+			querySelectorAll: (selector: string) => (selector === "#outer-frame" || selector === "*" ? [outerFrame] : []),
+		};
+		const globals = globalThis as unknown as Record<string, unknown>;
+		try {
+			new Function("document", "Element", `return (${buildAriaRuntimeInstallerSource()})();`)(
+				topDocument,
+				TopRealmElement,
+			);
+			const query = globals.__ompCodexAriaQuery as (descriptor: unknown) => unknown[];
+			expect(
+				query({
+					kind: "within",
+					parent: {
+						kind: "within",
+						parent: { kind: "frame", selector: "#outer-frame" },
+						child: { kind: "frame", selector: "#inner-frame" },
+					},
+					child: { kind: "css", selector: "#deep-target" },
+				}),
+			).toEqual([deepTarget]);
+		} finally {
+			delete globals.__ompCodexAriaQuery;
+			delete globals.__ompCodexAriaState;
+		}
 	});
 });
