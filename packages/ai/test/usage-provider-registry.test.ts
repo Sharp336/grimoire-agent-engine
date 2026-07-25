@@ -742,6 +742,52 @@ describe("AuthStorage usage provider registry", () => {
 		}
 	});
 
+	it("honors a session-scoped provider's stale-cache opt-out on failure", async () => {
+		const now = spyOn(Date, "now");
+		const start = 1_900_000_000_000;
+		now.mockReturnValue(start);
+		const providerId = "scoped-optout-usage";
+		const storage = new AuthStorage(
+			createStore([
+				{ id: 1, provider: providerId, credential: { type: "api_key", key: "test-key" }, disabledCause: null },
+			]),
+		);
+		let fail = false;
+		const provider: UsageProvider = {
+			id: providerId,
+			// Cookie/login-style usage: when the login dies the quota must disappear
+			// rather than keep displaying the last good value.
+			retainLastGoodOnFailure: false,
+			fetchUsage: async () => (fail ? null : { provider: providerId, fetchedAt: start, limits: [] }),
+		};
+		let unregister: (() => void) | undefined;
+
+		try {
+			await storage.reload();
+			// Registered ONLY in the session scope, so the global resolver knows
+			// nothing about this provider — which is why the retention policy has to
+			// be read off the request rather than re-resolved unscoped.
+			unregister = storage.registerSessionUsageProviders("optout-session", {
+				resolve: candidate => (candidate === providerId ? provider : undefined),
+				cacheKeyVersion: () => "optout:1",
+				providerIds: () => [providerId],
+			});
+			const options = { usageScopeId: "optout-session" };
+			expect((await storage.fetchUsageReports(options))?.[0]?.fetchedAt).toBe(start);
+
+			// Same window the default-retention case uses to prove a refetch happens
+			// and last-good is still inside its retention bound; the opt-out is what
+			// must drop the report instead of serving the stale value.
+			fail = true;
+			now.mockReturnValue(start + 24 * 3_600_000 - 1_000);
+			expect(await storage.fetchUsageReports(options)).toEqual([]);
+		} finally {
+			unregister?.();
+			storage.close();
+			now.mockRestore();
+		}
+	});
+
 	it("coalesces concurrent reports across session scopes with the same durable cache key", async () => {
 		const providerId = "concurrent-scoped-usage";
 		const credential = {
