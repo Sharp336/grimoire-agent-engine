@@ -457,6 +457,17 @@ interface DispatchReservation {
  */
 type SelectionOutcome = { kind: "dispatch"; reservation: DispatchReservation } | { kind: "idle" } | { kind: "halted" };
 
+/** One committed child dispatch: the feature/workspace it owns plus the active-run token's turn. */
+interface MissionDispatch {
+	feature: MissionFeature;
+	milestone: MissionMilestone;
+	descriptor: MissionWorkspaceDescriptor;
+	mode: MissionNextRunMode;
+	workerSessionId: string;
+	messageToWorker?: string;
+	turn: number;
+}
+
 export class MissionRuntime implements MissionRuntimeContract {
 	readonly #host: MissionRuntimeHost;
 	readonly #workspaces = new MissionWorkspaceManager();
@@ -1377,15 +1388,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 		reservation: DispatchReservation,
 		ready: MissionWorkspaceDescriptor,
 		dispatch: { mode: MissionNextRunMode; workerSessionId: string; messageToWorker?: string },
-	): Promise<{
-		feature: MissionFeature;
-		milestone: MissionMilestone;
-		descriptor: MissionWorkspaceDescriptor;
-		mode: MissionNextRunMode;
-		workerSessionId: string;
-		messageToWorker?: string;
-		turn: number;
-	} | null> {
+	): Promise<MissionDispatch | null> {
 		const state = this.#requireState();
 		const current = featureById(state, reservation.feature.id);
 		if (!current) return null;
@@ -1440,18 +1443,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 
 	// ── child turn ──────────────────────────────────────────────────────────
 
-	async #runChildTurn(
-		dispatch: {
-			feature: MissionFeature;
-			milestone: MissionMilestone;
-			descriptor: MissionWorkspaceDescriptor;
-			mode: MissionNextRunMode;
-			workerSessionId: string;
-			messageToWorker?: string;
-			turn: number;
-		},
-		signal?: AbortSignal,
-	): Promise<MissionHandoff | null> {
+	async #runChildTurn(dispatch: MissionDispatch, signal?: AbortSignal): Promise<MissionHandoff | null> {
 		const state = this.#requireState();
 		const feature = dispatch.feature;
 		const role = roleOf(feature);
@@ -1484,15 +1476,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 			if (at - this.#lastHeartbeatAt < MISSION_HEARTBEAT_INTERVAL_MS) return;
 			this.#lastHeartbeatAt = at;
 			void this.#withTransitionTail(async () => {
-				const live = this.#state?.activeRun;
-				if (
-					!live ||
-					live.featureId !== feature.id ||
-					live.workerSessionId !== dispatch.workerSessionId ||
-					live.turn !== dispatch.turn
-				) {
-					return;
-				}
+				if (!this.#activeRunFor(feature.id, dispatch.workerSessionId, dispatch.turn)) return;
 				await this.#appendProgressOnly({
 					type: "heartbeat",
 					featureId: feature.id,
@@ -1525,14 +1509,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 
 	async #invokeChild(
 		state: MissionState,
-		dispatch: {
-			feature: MissionFeature;
-			milestone: MissionMilestone;
-			descriptor: MissionWorkspaceDescriptor;
-			mode: MissionNextRunMode;
-			workerSessionId: string;
-			messageToWorker?: string;
-		},
+		dispatch: Omit<MissionDispatch, "turn">,
 		role: MissionChildOwnerEntry["role"],
 		owner: MissionChildOwnerEntry,
 		signal: AbortSignal,
@@ -1592,21 +1569,27 @@ export class MissionRuntime implements MissionRuntimeContract {
 		return invocation.result;
 	}
 
+	/**
+	 * The live state when its active-run token still names exactly this feature/worker/turn,
+	 * otherwise undefined. A settling child must never overwrite a newer paused/cancelled state,
+	 * so every mutation on a child's completion path passes through this one check.
+	 */
+	#activeRunFor(featureId: string, workerSessionId: string, turn: number): MissionState | undefined {
+		const state = this.#state;
+		const active = state?.activeRun;
+		if (!state || !active) return undefined;
+		if (active.featureId !== featureId || active.workerSessionId !== workerSessionId || active.turn !== turn) {
+			return undefined;
+		}
+		return state;
+	}
+
 	/** Inactivity: the turn is consumed, the worker id is dropped, and no handoff is recorded. */
 	async #settleInactivity(dispatch: { workerSessionId: string; turn: number }, featureId: string): Promise<void> {
 		await this.#releaseWorkerId(dispatch.workerSessionId);
 		await this.#withTransitionTail(async () => {
-			const state = this.#state;
-			const active = state?.activeRun;
-			if (
-				!state ||
-				!active ||
-				active.featureId !== featureId ||
-				active.workerSessionId !== dispatch.workerSessionId ||
-				active.turn !== dispatch.turn
-			) {
-				return;
-			}
+			const state = this.#activeRunFor(featureId, dispatch.workerSessionId, dispatch.turn);
+			if (!state) return;
 			const feature = featureById(state, featureId);
 			if (!feature) return;
 			const reset: MissionFeature = {
@@ -1638,18 +1621,9 @@ export class MissionRuntime implements MissionRuntimeContract {
 	): Promise<MissionHandoff | null> {
 		const parsed = this.#parseHandoff(dispatch.feature, result, failure);
 		return this.#withTransitionTail(async () => {
-			const state = this.#state;
-			const active = state?.activeRun;
-			if (
-				!state ||
-				!active ||
-				active.featureId !== dispatch.feature.id ||
-				active.workerSessionId !== dispatch.workerSessionId ||
-				active.turn !== dispatch.turn
-			) {
-				// Pause or cancel already won this race; the settling result never overwrites it.
-				return null;
-			}
+			// Pause or cancel already won this race; the settling result never overwrites it.
+			const state = this.#activeRunFor(dispatch.feature.id, dispatch.workerSessionId, dispatch.turn);
+			if (!state) return null;
 			const nextStatus = state.status === "paused" || this.#pauseRequested ? "paused" : "orchestrator_turn";
 			await this.#commit(
 				{

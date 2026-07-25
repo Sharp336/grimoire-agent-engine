@@ -86,38 +86,22 @@ function extractChunks(
 		if (!isLlmMessage(message)) continue;
 
 		const createdAt = entryCreatedAtMs(entry.timestamp, fileMtimeMs);
+		const push = (kind: PreparedChunk["kind"], role: string, content: string): void => {
+			if (content.length === 0) return;
+			chunks.push({ filePath, sessionId, entryId: entry.id, kind, role, content, createdAt });
+		};
 
 		switch (message.role) {
 			case "user":
 			case "developer": {
 				if (typeof message.content === "string") {
-					if (message.content.length > 0) {
-						chunks.push({
-							filePath,
-							sessionId,
-							entryId: entry.id,
-							kind: "message_text",
-							role: message.role,
-							content: message.content,
-							createdAt,
-						});
-					}
+					push("message_text", message.role, message.content);
 					break;
 				}
 				for (const block of message.content) {
 					switch (block.type) {
 						case "text":
-							if (block.text.length > 0) {
-								chunks.push({
-									filePath,
-									sessionId,
-									entryId: entry.id,
-									kind: "message_text",
-									role: message.role,
-									content: block.text,
-									createdAt,
-								});
-							}
+							push("message_text", message.role, block.text);
 							break;
 						case "image":
 							break;
@@ -131,29 +115,11 @@ function extractChunks(
 				for (const block of message.content) {
 					switch (block.type) {
 						case "text":
-							if (block.text.length > 0) {
-								chunks.push({
-									filePath,
-									sessionId,
-									entryId: entry.id,
-									kind: "message_text",
-									role: message.role,
-									content: block.text,
-									createdAt,
-								});
-							}
+							push("message_text", message.role, block.text);
 							break;
 						case "toolCall": {
 							const raw = `${block.name} ${JSON.stringify(block.arguments)}`;
-							chunks.push({
-								filePath,
-								sessionId,
-								entryId: entry.id,
-								kind: "tool_use",
-								role: "",
-								content: capContent(raw, TOOL_USE_CONTENT_CAP),
-								createdAt,
-							});
+							push("tool_use", "", capContent(raw, TOOL_USE_CONTENT_CAP));
 							break;
 						}
 						case "thinking":
@@ -172,17 +138,7 @@ function extractChunks(
 				for (const block of message.content) {
 					switch (block.type) {
 						case "text":
-							if (block.text.length > 0) {
-								chunks.push({
-									filePath,
-									sessionId,
-									entryId: entry.id,
-									kind: "tool_result",
-									role: "",
-									content: capContent(block.text, TOOL_RESULT_CONTENT_CAP),
-									createdAt,
-								});
-							}
+							push("tool_result", "", capContent(block.text, TOOL_RESULT_CONTENT_CAP));
 							break;
 						case "image":
 							break;
