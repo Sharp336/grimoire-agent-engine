@@ -218,7 +218,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 		</div>
 	);
 
-	const previewRequests = recentRequests ?? [];
+	const previewRequests = (recentRequests ?? []).slice(0, 10);
 
 	return (
 		<div className="stats-route-container space-y-6">

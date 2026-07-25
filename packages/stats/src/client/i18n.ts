@@ -99,6 +99,7 @@ const translations: Record<Locale, Record<string, string>> = {
 		"common.output": "Output",
 		"common.cacheRead": "Cache Read",
 		"common.cacheWrite": "Cache Write",
+		"common.conversationTotal": "Conversation Total",
 		"common.reasoning": "Reasoning",
 		"common.tps": "TPS",
 		"common.success": "Success",

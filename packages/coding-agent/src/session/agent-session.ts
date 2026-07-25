@@ -8801,46 +8801,10 @@ export class AgentSession {
 
 	/**
 	 * Format a concise advisor status line for ACP/text output.
+	 * Delegates to SessionAdvisors with locale-aware cost formatting.
 	 */
 	formatAdvisorStatus(): string {
-		const stats = this.getAdvisorStats();
-		if (!stats.active && stats.advisors.length === 0) {
-			return stats.configured
-				? "Advisor setting is enabled, but no model is assigned to the 'advisor' role."
-				: "Advisor is disabled.";
-		}
-		if (stats.advisors.length <= 1) {
-			const s = stats.advisors[0];
-			if (s && s.status === "no_model") {
-				return stats.configured
-					? "Advisor setting is enabled, but no model is assigned to the 'advisor' role."
-					: "Advisor is disabled.";
-			}
-			const contextLine =
-				s.contextWindow > 0
-					? `Context: ${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} tokens (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
-					: `Context: ${s.contextTokens.toLocaleString()} tokens`;
-			const spendParts = [`${s.tokens.input.toLocaleString()} input`, `${s.tokens.output.toLocaleString()} output`];
-			if (s.tokens.cacheRead > 0) spendParts.push(`${s.tokens.cacheRead.toLocaleString()} cache read`);
-			if (s.tokens.cacheWrite > 0) spendParts.push(`${s.tokens.cacheWrite.toLocaleString()} cache write`);
-			const spendLine = `Spend: ${spendParts.join(", ")}, ${formatCost(s.cost)}`;
-			if (!s.model || s.status !== "running") return `Advisor "${s.name}" is ${s.status.replace("_", " ")}.`;
-			return `Advisor is enabled (${s.model.provider}/${s.model.id}). ${contextLine}. ${spendLine}.`;
-		}
-		const lines = [`Advisors enabled (${stats.advisors.length}):`];
-		for (const s of stats.advisors) {
-			const ctx =
-				s.contextWindow > 0
-					? `${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
-					: `${s.contextTokens.toLocaleString()}`;
-			lines.push(
-				`  • ${s.name}${s.model && s.status === "running" ? ` (${s.model.provider}/${s.model.id})` : ` [${s.status}]`} — context ${ctx} tokens, ${formatCost(s.cost)}`,
-			);
-		}
-		lines.push(
-			`Totals: ${stats.tokens.input.toLocaleString()} input, ${stats.tokens.output.toLocaleString()} output, ${formatCost(stats.cost)}.`,
-		);
-		return lines.join("\n");
+		return this.#advisors.formatAdvisorStatus(formatCost);
 	}
 
 	/**

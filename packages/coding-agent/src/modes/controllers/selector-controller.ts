@@ -594,8 +594,9 @@ export class SelectorController {
 			}
 			case "i18n.language": {
 				const lang = typeof value === "string" ? value : String(value);
-				void i18n.setLanguage(lang).then(() => {
+				void i18n.setLanguage(lang).then(async () => {
 					invalidateTipsCache();
+					await this.ctx.refreshSlashCommandState();
 					this.ctx.ui.requestRender();
 				});
 				break;
