@@ -328,10 +328,18 @@ describe("session lock", () => {
 		const alias = path.join(dir, "alias.jsonl");
 		fs.linkSync(session, alias);
 
-		expect(() => acquireSessionLock(session)).toThrow(SessionLockError);
+		expect(() => acquireSessionLock(session)).toThrow(
+			expect.objectContaining({ name: "SessionLockError", code: "unsupported" }),
+		);
 		expect(() => acquireSessionLock(alias)).toThrow(SessionLockError);
 		expect(fs.existsSync(lockPathForSession(session))).toBe(false);
 		expect(fs.existsSync(lockPathForSession(alias))).toBe(false);
+
+		// Removing the extra link restores a guaranteeable single writer.
+		fs.unlinkSync(alias);
+		const lock = acquireSessionLock(session);
+		expect(inspectSessionLock(session).status).toBe("live");
+		lock.release();
 	});
 
 	it("serializes a heartbeat against an explicit stale-steal claim", () => {

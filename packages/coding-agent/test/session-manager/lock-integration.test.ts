@@ -192,6 +192,24 @@ describe("SessionManager persistent lock integration", () => {
 		await manager.close();
 	});
 
+	it("refuses to delete a session owned by another manager", async () => {
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("missing session file");
+		const otherManager = SessionManager.create(cwd, sessions);
+		await otherManager.ensureOnDisk();
+		const otherSession = otherManager.getSessionFile();
+		if (!otherSession) throw new Error("missing other session file");
+
+		await expect(manager.dropSession(otherSession)).rejects.toBeInstanceOf(SessionLockError);
+		expect(fs.existsSync(otherSession)).toBe(true);
+		await expect(SessionManager.open(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
+		await otherManager.close();
+		await manager.close();
+	});
+
 	it("holds ownership until session deletion finishes", async () => {
 		const { cwd, sessions } = fixture();
 		const { promise: started, resolve: deletionStarted } = Promise.withResolvers<void>();

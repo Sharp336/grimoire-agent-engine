@@ -1427,7 +1427,12 @@ export class SessionManager {
 		const resolvedSessionPath = path.resolve(sessionPath);
 		const ownedLock = this.#sessionLock?.handle;
 		const ownsDeletion = ownedLock?.lockPath === lockPathForSession(resolvedSessionPath);
-		const ownedSessionPath = ownsDeletion && ownedLock ? ownedLock.record.sessionFile : resolvedSessionPath;
+		const targetLock =
+			!ownsDeletion && this.#persist && this.#storage instanceof FileSessionStorage
+				? acquireSessionLock(resolvedSessionPath, { onHeartbeatError: this.#sessionLockErrorHandler })
+				: undefined;
+		const deletionLock = ownsDeletion ? ownedLock : targetLock;
+		const ownedSessionPath = deletionLock?.record.sessionFile ?? resolvedSessionPath;
 		try {
 			try {
 				await this.#storage.deleteSessionWithArtifacts(ownedSessionPath);
@@ -1443,6 +1448,7 @@ export class SessionManager {
 			}
 		} finally {
 			if (ownsDeletion) this.#releaseSessionLock();
+			else targetLock?.release();
 		}
 	}
 

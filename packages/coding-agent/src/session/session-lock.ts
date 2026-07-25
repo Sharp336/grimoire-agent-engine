@@ -31,8 +31,12 @@ type ErrorCode = "EEXIST" | "ENOENT" | string;
 
 /** Classification of the current sidecar lock state. */
 export type SessionLockStatus = "missing" | "live" | "suspect" | "stale" | "malformed";
-/** Stable error categories reported by session lock operations. */
-export type SessionLockErrorCode = "locked" | "malformed" | "not-owner" | "io";
+/**
+ * Stable error categories reported by session lock operations. `unsupported`
+ * means the session file itself cannot carry a single-writer guarantee, which
+ * is distinct from a well-formed lock held by someone else (`locked`).
+ */
+export type SessionLockErrorCode = "locked" | "malformed" | "not-owner" | "io" | "unsupported";
 
 /** Validated owner record persisted in the sidecar lock file. */
 export interface SessionLockRecord {
@@ -595,20 +599,26 @@ function ioError(sessionFile: string, lockPath: string, error: unknown): Session
 	);
 }
 
+/**
+ * Sidecar locks are keyed by path, so two hard links to one session would each
+ * get their own lock and both writers would append to the same inode. Refuse
+ * writable ownership instead; read-only snapshot loads are unaffected.
+ */
 function rejectHardLinkedSessionFile(sessionFile: string, lockPath: string): void {
+	let links: number;
 	try {
-		if (fs.statSync(sessionFile).nlink <= 1) return;
-		throw new SessionLockError(
-			"malformed",
-			"Session file has multiple hard links; refusing writable ownership",
-			sessionFile,
-			lockPath,
-		);
+		links = fs.statSync(sessionFile).nlink;
 	} catch (error) {
-		if (error instanceof SessionLockError) throw error;
 		if (errorCode(error) === "ENOENT") return;
 		throw ioError(sessionFile, lockPath, error);
 	}
+	if (links <= 1) return;
+	throw new SessionLockError(
+		"unsupported",
+		`Session file has ${links} hard links; a single writer cannot be guaranteed. Copy it to a new path to resume writing.`,
+		sessionFile,
+		lockPath,
+	);
 }
 
 /** Acquire exclusive write ownership for a session until the returned handle is released. */
