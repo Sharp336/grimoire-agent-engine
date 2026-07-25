@@ -185,6 +185,24 @@ describe("MCPManager reconnect notices", () => {
 		});
 		expect(spacedNotice).toContain("Use /mcp to retry manually.");
 		expect(spacedNotice).not.toContain("/mcp reconnect");
+		const absoluteName = path.join(os.homedir(), "private-mcp-server");
+		const absoluteNotice = formatMCPReconnectNotice({
+			type: "reconnect-failed",
+			serverName: absoluteName,
+			error: "offline",
+		});
+		expect(absoluteNotice).toContain("Use /mcp to retry manually.");
+		expect(absoluteNotice).not.toContain(absoluteName);
+		expect(absoluteNotice).not.toContain("/mcp reconnect");
+		const longName = `mcp-${"x".repeat(100)}`;
+		const longNotice = formatMCPReconnectNotice({
+			type: "reconnect-failed",
+			serverName: longName,
+			error: "offline",
+		});
+		expect(longNotice).toContain("Use /mcp to retry manually.");
+		expect(longNotice).not.toContain(longName);
+		expect(longNotice).not.toContain("/mcp reconnect");
 	});
 
 	it("scopes a supplied manager listener to the session settings and lifetime", async () => {

@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 
@@ -97,13 +98,16 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 
 export function formatMCPReconnectNotice(event: McpReconnectStatusEvent): string {
 	const name = sanitizeMcpServerName(event.serverName);
-	// Keep exact, ordinary names actionable. Whitespace cannot be represented
-	// by the current slash-command parser as one server-name argument, while
-	// control characters are also unsafe in a one-line status message.
-	const hasUnsafeCommandChars = /\s/.test(event.serverName);
-	const recovery = hasUnsafeCommandChars
-		? "Use /mcp to retry manually."
-		: `Run /mcp reconnect ${sanitizeText(event.serverName)} to retry.`;
+	const commandName = sanitizeText(event.serverName);
+	// Preserve an exact command only when its argument is parser-safe and its
+	// full value is already safe to display. Paths and names that require
+	// shortening/truncation use the generic interactive recovery flow instead.
+	const commandNameIsSafe =
+		!/\s/.test(event.serverName) &&
+		!path.isAbsolute(event.serverName) &&
+		!path.win32.isAbsolute(event.serverName) &&
+		commandName === name;
+	const recovery = commandNameIsSafe ? `Run /mcp reconnect ${commandName} to retry.` : "Use /mcp to retry manually.";
 	switch (event.type) {
 		case "reconnecting":
 			return `MCP server "${name}" lost its connection — reconnecting…`;
