@@ -1539,7 +1539,8 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const pendingDownload = Promise.withResolvers<DownloadRecord>();
 		let settled = false;
 		const timer = setTimeout(
-			() => finish(() => pendingDownload.reject(new Error(`playwright.waitForEvent timed out after ${timeoutMs}ms`))),
+			() =>
+				finish(() => pendingDownload.reject(new Error(`playwright.waitForEvent timed out after ${timeoutMs}ms`))),
 			timeoutMs,
 		);
 		timer.unref();
