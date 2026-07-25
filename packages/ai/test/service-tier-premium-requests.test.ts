@@ -67,6 +67,15 @@ describe("serviceTierFamily", () => {
 		}
 	});
 
+	it("classifies relay aliases by their wire id, not the local alias id", () => {
+		const alias = m("custom-relay", "openai-completions", "my-alias", "gpt-4o");
+		expect(serviceTierFamily(alias)).toBe("openai");
+		expect(resolveModelServiceTier({ openai: "priority" }, alias)).toBe("priority");
+		expect(realizesPriorityServiceTier("priority", alias)).toBe(true);
+		// A relay alias whose wire id is not OpenAI-shaped stays unclassified.
+		expect(serviceTierFamily(m("custom-relay", "openai-completions", "gpt-4o", "llama-3-70b"))).toBeUndefined();
+	});
+
 	it("classifies OpenRouter models by id namespace", () => {
 		expect(serviceTierFamily(orOpenAI)).toBe("openai");
 		expect(serviceTierFamily(orGoogle)).toBe("google");

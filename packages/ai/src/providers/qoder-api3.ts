@@ -21,7 +21,7 @@
 
 import { randomUUID } from "node:crypto";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { fetchWithRetry, readSseEvents } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, logger, parseJsonWithRepair, readSseEvents } from "@oh-my-pi/pi-utils";
 import { ProviderHttpError } from "../error";
 import { OPENAPI_BASE, QODER_CLI_VERSION, repairQoderSseBody } from "../registry/oauth/qoder";
 import {
@@ -358,12 +358,28 @@ interface TurnState {
 	sawFinishReason: boolean;
 }
 
-function parseJsonObject(text: string): Record<string, unknown> {
+/**
+ * Parse streamed tool-argument text into an arguments record. Malformed JSON is
+ * never fatal, but it must stay distinguishable from "the model sent no
+ * arguments": on total failure the call surfaces `__parseError`/`__rawJson`
+ * (raw text truncated to 512 chars) instead of a bare `{}`, mirroring the
+ * Anthropic provider's recovery shape.
+ */
+function parseToolArguments(text: string, toolCallId: string): Record<string, unknown> {
+	if (text.trim().length === 0) return {};
 	try {
-		const parsed: unknown = JSON.parse(text);
-		return isRecord(parsed) ? parsed : {};
-	} catch {
-		return {};
+		const parsed: unknown = parseJsonWithRepair(text);
+		if (isRecord(parsed)) return parsed;
+		throw new Error(`tool arguments are ${Array.isArray(parsed) ? "an array" : typeof parsed}, not an object`);
+	} catch (parseError) {
+		const message = parseError instanceof Error ? parseError.message : String(parseError);
+		logger.warn(`qoder-api3: tool call ${toolCallId} arguments are not valid JSON: ${message}`);
+		const maxLen = 512;
+		return {
+			__parseError: message,
+			__rawJson:
+				text.length <= maxLen ? text : `${text.slice(0, maxLen)}… [truncated ${text.length - maxLen} chars]`,
+		};
 	}
 }
 
@@ -413,7 +429,7 @@ async function processApi3Stream(
 	const finishToolBlock = (tool: ToolBlockState): void => {
 		if (tool.ended) return;
 		tool.ended = true;
-		tool.block.arguments = parseJsonObject(tool.argsText);
+		tool.block.arguments = parseToolArguments(tool.argsText, tool.block.id);
 		stream.push({
 			type: "toolcall_end",
 			contentIndex: tool.contentIndex,
@@ -832,7 +848,7 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 			for (const tool of state.toolBlocks.values()) {
 				if (tool.ended) continue;
 				tool.ended = true;
-				tool.block.arguments = parseJsonObject(tool.argsText);
+				tool.block.arguments = parseToolArguments(tool.argsText, tool.block.id);
 				stream.push({
 					type: "toolcall_end",
 					contentIndex: tool.contentIndex,

@@ -21,7 +21,6 @@
  * (`QODER_PRIVATE_DATA_POLICY`) lives in `./qoder` — the WASM emits it from
  * the identity's `data_policy_agreed: false`; do not duplicate it here.
  */
-import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -105,7 +104,8 @@ function hasWasmMagic(bytes: Buffer): boolean {
 
 function isKnownGoodWasm(bytes: Buffer): boolean {
 	return (
-		hasWasmMagic(bytes) && QODER_WASM_KNOWN_GOOD_SHA256.includes(createHash("sha256").update(bytes).digest("hex"))
+		hasWasmMagic(bytes) &&
+		QODER_WASM_KNOWN_GOOD_SHA256.includes(new Bun.CryptoHasher("sha256").update(bytes).digest("hex"))
 	);
 }
 
@@ -930,7 +930,7 @@ export function locateKnownGoodQoderWasm(candidates?: readonly string[]): boolea
 		for (const candidate of candidateFiles()) {
 			const bytes = readCandidateWasm(candidate);
 			if (bytes === null || !isKnownGoodWasm(bytes)) continue;
-			writeCachedWasm(cacheDir, candidate, createHash("sha256").update(bytes).digest("hex"), bytes);
+			writeCachedWasm(cacheDir, candidate, new Bun.CryptoHasher("sha256").update(bytes).digest("hex"), bytes);
 			return true;
 		}
 		return false;
@@ -959,7 +959,7 @@ export function loadQoderWasmBridge(candidates?: readonly string[]): QoderWasmBr
 			if (bytes === null || !isKnownGoodWasm(bytes)) continue;
 			const bridge = instantiateBridge(bytes);
 			if (bridge === null) continue;
-			writeCachedWasm(cacheDir, candidate, createHash("sha256").update(bytes).digest("hex"), bytes);
+			writeCachedWasm(cacheDir, candidate, new Bun.CryptoHasher("sha256").update(bytes).digest("hex"), bytes);
 			return bridge;
 		}
 		return null;
@@ -983,7 +983,7 @@ export function getQoderMachineId(): string {
 	} catch {
 		// first use or unreadable: fall through and mint
 	}
-	const id = randomUUID();
+	const id = crypto.randomUUID();
 	try {
 		fs.mkdirSync(cacheDir, { recursive: true });
 		fs.writeFileSync(idPath, `${id}\n`, { mode: 0o600 });

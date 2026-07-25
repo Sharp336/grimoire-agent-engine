@@ -635,6 +635,36 @@ describe("createQoderApi3Transport", () => {
 		expect(asRecord(signedBody.parameters, "parameters").context_length).toBe(400_000);
 	});
 
+	it("surfaces malformed tool-argument JSON as a truncated parse-error record", async () => {
+		const garbage = `<<<not json${"x".repeat(600)}`;
+		const malformedSse = [
+			`data: ${chunkEnvelope({
+				choices: [
+					{
+						delta: {
+							tool_calls: [{ index: 0, id: "call_bad", function: { name: "get_weather", arguments: garbage } }],
+						},
+						index: 0,
+					},
+				],
+			})}`,
+			`data: ${chunkEnvelope({ choices: [{ delta: {}, finish_reason: "tool_calls", index: 0 }] })}`,
+			`data: ${envelope("[DONE]")}`,
+			FINISH_METRICS_FRAME,
+			"",
+		].join("\n\n");
+		const { result } = await runApi3Turn("qmodel_preview", () => sseResponse(malformedSse));
+
+		const toolCall = result.content.find(block => block.type === "toolCall");
+		expect(toolCall?.type).toBe("toolCall");
+		const args = toolCall?.type === "toolCall" ? toolCall.arguments : undefined;
+		expect(args).not.toEqual({});
+		expect(typeof args?.__parseError).toBe("string");
+		const rawJson = args?.__rawJson;
+		expect(typeof rawJson).toBe("string");
+		expect(rawJson).toBe(`${garbage.slice(0, 512)}… [truncated ${garbage.length - 512} chars]`);
+	});
+
 	// (c) error envelope → error stop with the surfaced message
 	it("maps an error envelope to an error stop with the surfaced message", async () => {
 		const errorSse = [

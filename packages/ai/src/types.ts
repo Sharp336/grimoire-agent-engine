@@ -146,8 +146,12 @@ function hasDedicatedServiceTierControl(provider: Provider | undefined): boolean
 }
 
 function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
+	// Prefer the wire id so relay aliases that rewrite to an OpenAI model still
+	// classify into the openai family (matches `isQoderFastModel` below).
 	return (
-		!hasDedicatedServiceTierControl(model.provider) && isOpenAIServiceTierApi(model.api) && isOpenAIModelId(model.id)
+		!hasDedicatedServiceTierControl(model.provider) &&
+		isOpenAIServiceTierApi(model.api) &&
+		isOpenAIModelId(model.requestModelId ?? model.id)
 	);
 }
 
