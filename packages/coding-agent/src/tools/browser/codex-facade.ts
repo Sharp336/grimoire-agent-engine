@@ -448,6 +448,7 @@ function requireObject(value: unknown, label: string): Record<string, unknown> {
 }
 
 const ROLE_LOCATOR_OPTION_KEYS: Readonly<Record<string, true>> = { name: true, exact: true };
+const TEXT_LOCATOR_OPTION_KEYS: Readonly<Record<string, true>> = { exact: true };
 const CLICK_OPTION_KEYS: Readonly<Record<string, true>> = {
 	button: true,
 	modifiers: true,
@@ -886,6 +887,7 @@ export class CodexLocator {
 
 	getByText(text: string | RegExp, options: CodexTextLocatorOptions = {}): CodexLocator {
 		const value = requireObject(options, "locator.getByText");
+		assertAllowedKeys(value, "locator.getByText", TEXT_LOCATOR_OPTION_KEYS);
 		return this.#child({
 			kind: "within",
 			parent: this.#descriptor,
@@ -895,6 +897,7 @@ export class CodexLocator {
 
 	getByLabel(text: string | RegExp, options: CodexTextLocatorOptions = {}): CodexLocator {
 		const value = requireObject(options, "locator.getByLabel");
+		assertAllowedKeys(value, "locator.getByLabel", TEXT_LOCATOR_OPTION_KEYS);
 		return this.#child({
 			kind: "within",
 			parent: this.#descriptor,
@@ -904,6 +907,7 @@ export class CodexLocator {
 
 	getByPlaceholder(text: string | RegExp, options: CodexTextLocatorOptions = {}): CodexLocator {
 		const value = requireObject(options, "locator.getByPlaceholder");
+		assertAllowedKeys(value, "locator.getByPlaceholder", TEXT_LOCATOR_OPTION_KEYS);
 		return this.#child({
 			kind: "within",
 			parent: this.#descriptor,
@@ -984,16 +988,19 @@ export class CodexPlaywright {
 
 	getByText(text: string | RegExp, options: CodexTextLocatorOptions = {}): CodexLocator {
 		const value = requireObject(options, "playwright.getByText");
+		assertAllowedKeys(value, "playwright.getByText", TEXT_LOCATOR_OPTION_KEYS);
 		return this.#locator({ kind: "text", text: textPattern(text, "playwright.getByText", value.exact) });
 	}
 
 	getByLabel(text: string | RegExp, options: CodexTextLocatorOptions = {}): CodexLocator {
 		const value = requireObject(options, "playwright.getByLabel");
+		assertAllowedKeys(value, "playwright.getByLabel", TEXT_LOCATOR_OPTION_KEYS);
 		return this.#locator({ kind: "label", text: textPattern(text, "playwright.getByLabel", value.exact) });
 	}
 
 	getByPlaceholder(text: string | RegExp, options: CodexTextLocatorOptions = {}): CodexLocator {
 		const value = requireObject(options, "playwright.getByPlaceholder");
+		assertAllowedKeys(value, "playwright.getByPlaceholder", TEXT_LOCATOR_OPTION_KEYS);
 		return this.#locator({
 			kind: "placeholder",
 			text: textPattern(text, "playwright.getByPlaceholder", value.exact),

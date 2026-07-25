@@ -177,6 +177,31 @@ describe("Codex browser public facade closed vocabularies", () => {
 		]);
 	});
 
+	it("rejects unknown text locator option keys at top-level and nested locator boundaries", async () => {
+		const adapter = new RecordingAdapter();
+		const { tab } = await selectedTab(adapter);
+		const typo = { exacct: true } as never;
+		const nested = tab.playwright.locator("#dialog");
+
+		const outcomes = await Promise.all([
+			captureError(() => tab.playwright.getByText("Delete", typo)),
+			captureError(() => tab.playwright.getByLabel("Delete", typo)),
+			captureError(() => tab.playwright.getByPlaceholder("Delete", typo)),
+			captureError(() => nested.getByText("Delete", typo)),
+			captureError(() => nested.getByLabel("Delete", typo)),
+			captureError(() => nested.getByPlaceholder("Delete", typo)),
+		]);
+
+		expect(outcomes).toEqual([
+			{ name: "Error", message: "playwright.getByText does not accept exacct" },
+			{ name: "Error", message: "playwright.getByLabel does not accept exacct" },
+			{ name: "Error", message: "playwright.getByPlaceholder does not accept exacct" },
+			{ name: "Error", message: "locator.getByText does not accept exacct" },
+			{ name: "Error", message: "locator.getByLabel does not accept exacct" },
+			{ name: "Error", message: "locator.getByPlaceholder does not accept exacct" },
+		]);
+	});
+
 	it("rejects inherited property names as click and dblclick modifiers while accepting every valid modifier", async () => {
 		const adapter = new RecordingAdapter();
 		const { tab } = await selectedTab(adapter);

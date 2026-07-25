@@ -260,7 +260,7 @@ describe("Puppeteer Codex download adapter", () => {
 			const [download] = await result;
 			if (!("path" in download)) throw new Error("Expected an immediate download event");
 			session.emit("Browser.downloadProgress", { guid: "immediate-download", state: "completed" });
-			expect(path.basename((await download.path({ timeoutMs: 100 })) ?? "")).toBe("immediate.txt");
+			expect(path.basename((await download.path({ timeoutMs: 100 })) ?? "")).toBe("immediate-download");
 		} finally {
 			releaseSession.resolve(session);
 			await adapter.dispose();
@@ -270,7 +270,7 @@ describe("Puppeteer Codex download adapter", () => {
 		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		let session!: DownloadSessionDouble;
 		session = new DownloadSessionDouble(async (method, params) => {
-			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allow") {
+			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allowAndName") {
 				session.emit("Browser.downloadWillBegin", {
 					guid: "setup-download",
 					suggestedFilename: "setup.txt",
@@ -292,7 +292,7 @@ describe("Puppeteer Codex download adapter", () => {
 			const download = await tab.playwright.waitForEvent("download", { timeoutMs: 100 });
 			if (!("path" in download)) throw new Error("Expected setup-time download event");
 			session.emit("Browser.downloadProgress", { guid: "setup-download", state: "completed" });
-			expect(path.basename((await download.path({ timeoutMs: 100 })) ?? "")).toBe("setup.txt");
+			expect(path.basename((await download.path({ timeoutMs: 100 })) ?? "")).toBe("setup-download");
 		} finally {
 			await adapter.dispose();
 		}
@@ -349,15 +349,49 @@ describe("Puppeteer Codex download adapter", () => {
 				throw new Error(`Expected both download.path() calls to fulfill, received ${JSON.stringify(outcomes)}`);
 			}
 			expect(outcomes[0].value).toBe(outcomes[1].value);
-			expect(path.basename(outcomes[0].value ?? "")).toBe("fixture.txt");
+			expect(path.basename(outcomes[0].value ?? "")).toBe("shared-download");
 
 			const configurationCalls = session.calls.filter(call => call.method === "Browser.setDownloadBehavior");
 			expect(configurationCalls).toHaveLength(1);
 			expect(configurationCalls[0]?.params).toMatchObject({
-				behavior: "allow",
+				behavior: "allowAndName",
 				eventsEnabled: true,
 				downloadPath: path.dirname(outcomes[0].value ?? ""),
 			});
+		} finally {
+			await adapter.dispose();
+		}
+	});
+
+	it("returns distinct actual paths for downloads with the same suggested filename", async () => {
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
+		const session = new DownloadSessionDouble();
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: { url: () => "https://fixture.test/download", title: async () => "Download fixture" } as never,
+			browser: { target: () => ({ createCDPSession: async () => session }) } as never,
+			signal: new AbortController().signal,
+			cwd: ".",
+			captureScreenshot: async () => "",
+		});
+
+		try {
+			const tab = await createCodexBrowserFacade(adapter).tabs.selected();
+			if (!tab) throw new Error("Expected selected Puppeteer tab");
+			const paths: Array<string | null> = [];
+			for (const guid of ["first-guid", "second-guid"]) {
+				const waiting = tab.playwright.waitForEvent("download", { timeoutMs: 100 });
+				await session.downloadListenerRegistered.promise;
+				session.emit("Browser.downloadWillBegin", { guid, suggestedFilename: "duplicate.txt" });
+				const download = await waiting;
+				if (!("path" in download)) throw new Error("Expected a download event");
+				session.emit("Browser.downloadProgress", { guid, state: "completed" });
+				paths.push(await download.path({ timeoutMs: 100 }));
+			}
+			const configuration = session.calls.find(call => call.method === "Browser.setDownloadBehavior");
+			const directory = configuration?.params?.downloadPath;
+			if (typeof directory !== "string") throw new Error("Expected a configured download directory");
+			expect(paths).toEqual([path.join(directory, "first-guid"), path.join(directory, "second-guid")]);
 		} finally {
 			await adapter.dispose();
 		}
@@ -670,7 +704,7 @@ describe("Puppeteer Codex download adapter", () => {
 			session.emit("Browser.downloadProgress", { guid: "foreign-download", state: "completed" });
 			session.emit("Browser.downloadProgress", { guid: "adapter-download", state: "completed" });
 
-			expect(path.basename((await download.path({ timeoutMs: 100 })) ?? "")).toBe("adapter.txt");
+			expect(path.basename((await download.path({ timeoutMs: 100 })) ?? "")).toBe("adapter-download");
 		} finally {
 			await adapter.dispose();
 		}
@@ -741,19 +775,19 @@ describe("Puppeteer Codex download adapter", () => {
 			downloadA.path({ timeoutMs: 100 }),
 			downloadB.path({ timeoutMs: 100 }),
 		]);
-		expect(path.basename(downloadPathA ?? "")).toBe("adapter-a.txt");
-		expect(path.basename(downloadPathB ?? "")).toBe("adapter-b.txt");
+		expect(path.basename(downloadPathA ?? "")).toBe("adapter-a-download");
+		expect(path.basename(downloadPathB ?? "")).toBe("adapter-b-download");
 
 		const behaviorCalls = () =>
 			sessions.flatMap(session => session.calls).filter(call => call.method === "Browser.setDownloadBehavior");
-		const allowCalls = behaviorCalls().filter(call => call.params?.behavior === "allow");
+		const allowCalls = behaviorCalls().filter(call => call.params?.behavior === "allowAndName");
 		await adapterA.dispose();
 		const defaultsAfterFirstDispose = behaviorCalls().filter(call => call.params?.behavior === "default");
 		await adapterB.dispose();
 		const finalDefaultCalls = behaviorCalls().filter(call => call.params?.behavior === "default");
 
 		expect(allowCalls).toHaveLength(1);
-		expect(allowCalls[0]?.params).toMatchObject({ behavior: "allow", eventsEnabled: true });
+		expect(allowCalls[0]?.params).toMatchObject({ behavior: "allowAndName", eventsEnabled: true });
 		const sharedDownloadPath = allowCalls[0]?.params?.downloadPath;
 		expect(typeof sharedDownloadPath).toBe("string");
 		if (typeof sharedDownloadPath !== "string") throw new Error("Shared download path was not configured");
@@ -767,7 +801,7 @@ describe("Puppeteer Codex download adapter", () => {
 	it("derives a stable SHA-256 download-policy identity from the browser endpoint", async () => {
 		const allowConfigured = Promise.withResolvers<void>();
 		const session = new DownloadSessionDouble(async (method, params) => {
-			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allow") allowConfigured.resolve();
+			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allowAndName") allowConfigured.resolve();
 		});
 		const browser = {
 			wsEndpoint: () => "ws://127.0.0.1:9222/devtools/browser/stable-contract",
@@ -787,7 +821,7 @@ describe("Puppeteer Codex download adapter", () => {
 		await session.downloadListenerRegistered.promise;
 		await allowConfigured.promise;
 		const allow = session.calls.find(
-			call => call.method === "Browser.setDownloadBehavior" && call.params?.behavior === "allow",
+			call => call.method === "Browser.setDownloadBehavior" && call.params?.behavior === "allowAndName",
 		);
 		expect(allow?.params?.downloadPath).toBe(
 			path.join(
@@ -833,7 +867,7 @@ describe("Puppeteer Codex download adapter", () => {
 		const enableStarted = Promise.withResolvers<void>();
 		const releaseEnable = Promise.withResolvers<void>();
 		const partialSession = new DownloadSessionDouble(async (method, params) => {
-			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allow") {
+			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allowAndName") {
 				enableStarted.resolve();
 				await releaseEnable.promise;
 			}
@@ -855,7 +889,7 @@ describe("Puppeteer Codex download adapter", () => {
 		for (const session of [normalSession, partialSession]) {
 			const behaviorCalls = session.calls.filter(call => call.method === "Browser.setDownloadBehavior");
 			expect(behaviorCalls).toHaveLength(2);
-			expect(behaviorCalls[0]?.params).toMatchObject({ behavior: "allow", eventsEnabled: true });
+			expect(behaviorCalls[0]?.params).toMatchObject({ behavior: "allowAndName", eventsEnabled: true });
 			expect(behaviorCalls[1]?.params).toMatchObject({ behavior: "default", eventsEnabled: false });
 			expect(session.detachCount).toBe(1);
 		}
@@ -1852,7 +1886,7 @@ describe("Puppeteer final parity blockers", () => {
 		const enableStarted = Promise.withResolvers<void>();
 		const releaseEnable = Promise.withResolvers<void>();
 		const session = new DownloadSessionDouble(async (method, params) => {
-			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allow") {
+			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allowAndName") {
 				enableStarted.resolve();
 				await releaseEnable.promise;
 			}

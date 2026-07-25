@@ -446,7 +446,7 @@ async function acquireDownloadPolicy(
 					try {
 						await fs.mkdir(coordinator.directory, { recursive: true });
 						await session.send("Browser.setDownloadBehavior", {
-							behavior: "allow",
+							behavior: "allowAndName",
 							downloadPath: coordinator.directory,
 							eventsEnabled: true,
 						});
@@ -1694,7 +1694,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				let completion = this.#downloadCompletions.get(event.guid);
 				if (!completion) {
 					const filename = path.basename(event.suggestedFilename) || `download-${event.guid}`;
-					const destination = path.join(directory, filename);
+					const destination = path.join(directory, event.guid);
 					const completionResult = Promise.withResolvers<string | null>();
 					completion = {
 						path: destination,
