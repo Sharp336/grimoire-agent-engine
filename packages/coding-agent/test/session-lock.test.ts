@@ -90,6 +90,33 @@ describe("session lock", () => {
 		}
 	});
 
+	it("completes partial heartbeat writes before publication", () => {
+		const { session } = fixture();
+		let now = 1;
+		const lock = acquireSessionLock(session, {
+			now: () => now,
+			ownerId: OWNER_A,
+			pid: 42,
+			processStartMarker: "marker",
+			processProbe: probe(true),
+		});
+		const writeSync = fs.writeSync;
+		let writes = 0;
+		const partialWrite = (fd: number, buffer: Uint8Array, offset: number, length: number): number => {
+			const writeLength = writes++ === 0 ? Math.max(1, length - 1) : length;
+			return writeSync(fd, buffer, offset, writeLength);
+		};
+		const writeSpy = vi.spyOn(fs, "writeSync").mockImplementation(partialWrite as unknown as typeof fs.writeSync);
+		try {
+			now = 2;
+			lock.heartbeat();
+			expect(inspectSessionLock(session).record?.heartbeatAt).toBe(2);
+		} finally {
+			writeSpy.mockRestore();
+			lock.release();
+		}
+	});
+
 	it("retries release after transient read and unlink failures", () => {
 		const { session } = fixture();
 		const lock = acquireSessionLock(session, {
@@ -293,6 +320,18 @@ describe("session lock", () => {
 			}),
 		).toThrow(SessionLockError);
 		lock.release();
+	});
+
+	it("rejects writable ownership through hard-link aliases", () => {
+		const { dir, session } = fixture();
+		fs.writeFileSync(session, "session");
+		const alias = path.join(dir, "alias.jsonl");
+		fs.linkSync(session, alias);
+
+		expect(() => acquireSessionLock(session)).toThrow(SessionLockError);
+		expect(() => acquireSessionLock(alias)).toThrow(SessionLockError);
+		expect(fs.existsSync(lockPathForSession(session))).toBe(false);
+		expect(fs.existsSync(lockPathForSession(alias))).toBe(false);
 	});
 
 	it("serializes a heartbeat against an explicit stale-steal claim", () => {

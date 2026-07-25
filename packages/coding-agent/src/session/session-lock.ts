@@ -550,8 +550,7 @@ function writeAtomic(lockPath: string, record: SessionLockRecord): void {
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(tempPath, "wx", 0o600);
-		const data = serializedRecord(record);
-		fs.writeSync(fd, data, 0, data.length);
+		writeFullyAndSync(fd, serializedRecord(record));
 		fs.closeSync(fd);
 		fd = undefined;
 		fs.renameSync(tempPath, lockPath);
@@ -596,6 +595,22 @@ function ioError(sessionFile: string, lockPath: string, error: unknown): Session
 	);
 }
 
+function rejectHardLinkedSessionFile(sessionFile: string, lockPath: string): void {
+	try {
+		if (fs.statSync(sessionFile).nlink <= 1) return;
+		throw new SessionLockError(
+			"malformed",
+			"Session file has multiple hard links; refusing writable ownership",
+			sessionFile,
+			lockPath,
+		);
+	} catch (error) {
+		if (error instanceof SessionLockError) throw error;
+		if (errorCode(error) === "ENOENT") return;
+		throw ioError(sessionFile, lockPath, error);
+	}
+}
+
 /** Acquire exclusive write ownership for a session until the returned handle is released. */
 export function acquireSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockHandle {
 	const normalized = normalizeSessionFile(sessionFile);
@@ -608,6 +623,7 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		);
 	}
 	const lockPath = lockPathFor(normalized);
+	rejectHardLinkedSessionFile(normalized, lockPath);
 	const rt = runtime(options);
 	try {
 		fs.mkdirSync(path.dirname(lockPath), { recursive: true });

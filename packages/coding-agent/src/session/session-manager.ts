@@ -1425,10 +1425,9 @@ export class SessionManager {
 	async dropSession(sessionPath: string): Promise<void> {
 		await this.#drainAndCloseWriter();
 		const resolvedSessionPath = path.resolve(sessionPath);
-		const ownedSessionPath =
-			this.#sessionLock?.handle.lockPath === lockPathForSession(resolvedSessionPath)
-				? this.#sessionLock.handle.record.sessionFile
-				: resolvedSessionPath;
+		const ownedLock = this.#sessionLock?.handle;
+		const ownsDeletion = ownedLock?.lockPath === lockPathForSession(resolvedSessionPath);
+		const ownedSessionPath = ownsDeletion && ownedLock ? ownedLock.record.sessionFile : resolvedSessionPath;
 		try {
 			try {
 				await this.#storage.deleteSessionWithArtifacts(ownedSessionPath);
@@ -1443,7 +1442,7 @@ export class SessionManager {
 				}
 			}
 		} finally {
-			this.#releaseSessionLock();
+			if (ownsDeletion) this.#releaseSessionLock();
 		}
 	}
 

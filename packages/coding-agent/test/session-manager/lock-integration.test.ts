@@ -175,19 +175,30 @@ describe("SessionManager persistent lock integration", () => {
 		}
 	});
 
+	it("keeps current ownership when deleting a different session", async () => {
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("missing session file");
+		const otherSession = path.join(sessions, "other.jsonl");
+		fs.writeFileSync(otherSession, "other");
+
+		await manager.dropSession(otherSession);
+		expect(fs.existsSync(otherSession)).toBe(false);
+		await expect(SessionManager.open(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
+		manager.appendMessage({ role: "user", content: "still owned", timestamp: Date.now() });
+		await manager.flush();
+		await manager.close();
+	});
+
 	it("holds ownership until session deletion finishes", async () => {
 		const { cwd, sessions } = fixture();
-		let deletionStarted: (() => void) | undefined;
-		let finishDeletion: (() => void) | undefined;
-		const started = new Promise<void>(resolve => {
-			deletionStarted = resolve;
-		});
-		const finish = new Promise<void>(resolve => {
-			finishDeletion = resolve;
-		});
+		const { promise: started, resolve: deletionStarted } = Promise.withResolvers<void>();
+		const { promise: finish, resolve: finishDeletion } = Promise.withResolvers<void>();
 		class DelayedDeleteStorage extends FileSessionStorage {
 			override async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
-				deletionStarted?.();
+				deletionStarted();
 				await finish;
 				await super.deleteSessionWithArtifacts(sessionPath);
 			}
@@ -200,7 +211,7 @@ describe("SessionManager persistent lock integration", () => {
 		const dropping = manager.dropSession(sessionFile);
 		await started;
 		await expect(SessionManager.open(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
-		finishDeletion?.();
+		finishDeletion();
 		await dropping;
 		expect(fs.existsSync(lockPathForSession(sessionFile))).toBe(false);
 	});
