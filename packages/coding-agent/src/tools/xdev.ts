@@ -276,35 +276,46 @@ export class XdevRegistry {
 
 	/**
 	 * Mount-notice inventory rows for the given device names, keeping the
-	 * rendered bullet list within {@link DOCS_TOTAL_BUDGET}. Prefers listing
-	 * every name and shortening per-tool summaries when a high external
-	 * description cap would otherwise explode a deferred mount notice that
-	 * rides subsequent turns (docs stay one `read xd://` away).
+	 * rendered bullet list within {@link DOCS_TOTAL_BUDGET}.
+	 *
+	 * Two-pass: reserve name-only line cost for every device first so a high
+	 * external description cap cannot drop later tools from the notice
+	 * (with `tools.xdevDocs = "builtins"`, those names are the only signal
+	 * the model gets that they mounted). Remaining budget is spent on
+	 * summaries in catalog order; docs stay one `read xd://` away.
 	 */
 	mountNoticeEntries(names: Iterable<string>): Array<{ name: string; summary: string }> {
 		const budget = XdevRegistry.DOCS_TOTAL_BUDGET;
-		const rows: Array<{ name: string; summary: string }> = [];
-		let used = 0;
-		for (const name of names) {
+		const nameList = [...names];
+		// Pass 1 — name slots only (rendered: `- xd://{{name}}`).
+		const listed: string[] = [];
+		let reserved = 0;
+		for (const name of nameList) {
+			const prefix = `- ${XD_URL_PREFIX}${name}`;
+			const newline = listed.length > 0 ? 1 : 0;
+			const cost = newline + prefix.length;
+			if (reserved + cost > budget && listed.length > 0) break;
+			listed.push(name);
+			reserved += cost;
+		}
+		// Pass 2 — spend leftover budget on summaries in order.
+		let summaryBudget = Math.max(0, budget - reserved);
+		return listed.map(name => {
 			const tool = this.get(name);
 			const fullSummary = tool
 				? promptCatalogSummary(tool, this.#dynamic.has(name) ? this.#externalDescriptionCap : undefined)
 				: "";
-			// Rendered shape in xdev-mount-notice.md: `- xd://{{name}} — {{summary}}`
-			const prefix = `- ${XD_URL_PREFIX}${name}`;
-			const newline = rows.length > 0 ? 1 : 0;
-			const minCost = newline + prefix.length;
-			if (used + minCost > budget && rows.length > 0) break;
-			const sep = fullSummary.length > 0 ? " — " : "";
-			const room = Math.max(0, budget - used - minCost - sep.length);
+			if (fullSummary.length === 0 || summaryBudget <= 3) return { name, summary: "" };
+			// " — " separator between name and summary in the template.
+			const sep = 3;
+			const room = summaryBudget - sep;
 			let summary = fullSummary;
 			if (summary.length > room) {
 				summary = room > 1 ? `${summary.slice(0, room - 1).trimEnd()}…` : "";
 			}
-			used += minCost + (summary.length > 0 ? sep.length + summary.length : 0);
-			rows.push({ name, summary });
-		}
-		return rows;
+			if (summary.length > 0) summaryBudget -= sep + summary.length;
+			return { name, summary };
+		});
 	}
 
 	/** `read xd://` listing with one device per line. */

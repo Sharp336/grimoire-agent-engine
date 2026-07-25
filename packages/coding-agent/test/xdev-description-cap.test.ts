@@ -109,6 +109,11 @@ describe("XdevRegistry external description cap", () => {
 			.map(({ name, summary }) => (summary.length > 0 ? `- xd://${name} — ${summary}` : `- xd://${name}`))
 			.join("\n");
 		expect(rendered.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
+		// Name slots are reserved first: every mounted tool is announced even
+		// when the high per-device cap would otherwise exhaust the budget early.
+		expect(rows.length).toBe(150);
+		expect(rows[0]?.name).toBe("mcp__large_catalog_tool_0");
+		expect(rows[149]?.name).toBe("mcp__large_catalog_tool_149");
 		// First tools keep some summary lede; later rows shrink rather than
 		// emitting uncapped 4000-char descriptions for every device.
 		expect(rows[0]?.summary.length ?? 0).toBeGreaterThan(0);
