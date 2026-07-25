@@ -236,49 +236,46 @@ export type AnyUiMetadata = UiBase & {
 };
 
 /**
- * Marks a setting whose value is a credential.
- *
- * Lives at the top level rather than inside `ui` so it can also describe a
- * setting the settings panel never shows and therefore cannot carry
- * `ui.secret`. Read it through `isCredential`, which is the single accessor
- * both the CLI and the settings panel consult.
- */
-interface CredentialMarker {
+/** Markers for settings whose values need special handling outside the TUI. */
+interface SettingMarkers {
+	/** The value is a credential and must remain redacted on broad listing surfaces. */
 	credential?: true;
+	/** The value may be disclosed by the external `get_settings` RPC command. */
+	rpcReadable?: true;
 }
 
-interface BooleanDef extends CredentialMarker {
+interface BooleanDef extends SettingMarkers {
 	type: "boolean";
 	default: boolean | undefined;
 	ui?: UiBoolean;
 }
 
-interface StringDef extends CredentialMarker {
+interface StringDef extends SettingMarkers {
 	type: "string";
 	default: string | undefined;
 	ui?: UiString;
 }
 
-interface NumberDef extends CredentialMarker {
+interface NumberDef extends SettingMarkers {
 	type: "number";
 	default: number | undefined;
 	ui?: UiNumber;
 }
 
-interface EnumDef<T extends readonly string[]> extends CredentialMarker {
+interface EnumDef<T extends readonly string[]> extends SettingMarkers {
 	type: "enum";
 	values: T;
 	default: T[number];
 	ui?: UiEnum<T>;
 }
 
-interface ArrayDef<T> extends CredentialMarker {
+interface ArrayDef<T> extends SettingMarkers {
 	type: "array";
 	default: T[];
 	ui?: UiArray;
 }
 
-interface RecordDef<T> extends CredentialMarker {
+interface RecordDef<T> extends SettingMarkers {
 	type: "record";
 	default: Record<string, T>;
 	ui?: UiBase;
@@ -600,6 +597,7 @@ export const SETTINGS_SCHEMA = {
 
 	symbolPreset: {
 		type: "enum",
+		rpcReadable: true,
 		values: ["unicode", "nerd", "ascii"] as const,
 		default: "unicode",
 		ui: {
@@ -617,6 +615,7 @@ export const SETTINGS_SCHEMA = {
 
 	colorBlindMode: {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -629,6 +628,7 @@ export const SETTINGS_SCHEMA = {
 	// Status line
 	"statusLine.preset": {
 		type: "enum",
+		rpcReadable: true,
 		values: ["default", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const,
 		default: "default",
 		ui: {
@@ -650,6 +650,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.separator": {
 		type: "enum",
+		rpcReadable: true,
 		values: ["powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii"] as const,
 		default: "powerline-thin",
 		ui: {
@@ -671,6 +672,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.sessionAccent": {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -682,6 +684,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.transparent": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -693,6 +696,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"statusLine.compactThinkingLevel": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -810,6 +814,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.showHookStatus": {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -828,6 +833,7 @@ export const SETTINGS_SCHEMA = {
 	// Images and terminal
 	"terminal.showImages": {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -840,6 +846,7 @@ export const SETTINGS_SCHEMA = {
 
 	"images.autoResize": {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -851,6 +858,7 @@ export const SETTINGS_SCHEMA = {
 
 	"images.blockImages": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -895,6 +903,7 @@ export const SETTINGS_SCHEMA = {
 
 	"terminal.showProgress": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -906,6 +915,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.textSizing": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -918,6 +928,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.renderMermaid": {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -941,6 +952,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.titleState": {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -953,6 +965,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.hyperlinks": {
 		type: "enum",
+		rpcReadable: true,
 		values: ["off", "auto", "always"] as const,
 		default: "auto",
 		ui: {
@@ -965,6 +978,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"tui.tight": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -975,6 +989,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"tui.scrollbackRebuild": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -987,6 +1002,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.shimmer": {
 		type: "enum",
+		rpcReadable: true,
 		values: ["classic", "kitt", "disabled"] as const,
 		default: "classic",
 		ui: {
@@ -1004,6 +1020,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.smoothStreaming": {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -1015,6 +1032,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.showTokenUsage": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -1026,6 +1044,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.cacheMissMarker": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -1037,6 +1056,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.collapseCompacted": {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -1049,6 +1069,7 @@ export const SETTINGS_SCHEMA = {
 
 	showHardwareCursor: {
 		type: "boolean",
+		rpcReadable: true,
 		default: true, // will be computed based on platform if undefined
 		ui: {
 			tab: "appearance",
@@ -1060,6 +1081,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.imeSafeCursor": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -4729,6 +4751,7 @@ export const SETTINGS_SCHEMA = {
 
 	"task.showResolvedModelBadge": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -5572,6 +5595,15 @@ export function isCredential(path: SettingPath): boolean {
 	// both here keeps ONE accessor, so the two spellings cannot produce
 	// different behaviour on different surfaces.
 	return getUi(path)?.secret === true;
+ * Whether a setting's VALUE may be disclosed to an external client.
+ *
+ * Explicit opt-in only: an unannotated setting is withheld, so a new setting
+ * can never leak by omission. This is independent of `ui.secret`, which
+ * governs TUI masking and must not authorize disclosure.
+ */
+export function isRpcReadable(path: SettingPath): boolean {
+	const def = SETTINGS_SCHEMA[path];
+	return "rpcReadable" in def && def.rpcReadable === true;
 }
 
 /** Get UI metadata for a path (undefined if no UI) */
