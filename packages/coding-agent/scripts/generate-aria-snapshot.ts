@@ -98,8 +98,14 @@ function textOf(element: Element): string {
 	return normalizeText(element.textContent);
 }
 
+function composedParent(element: Element): Element | null {
+	if (element.parentElement) return element.parentElement;
+	const root = element.getRootNode();
+	return "host" in root ? (root as ShadowRoot).host : null;
+}
+
 function isInertForAria(element: Element): boolean {
-	for (let current: Element | null = element; current; current = current.parentElement) {
+	for (let current: Element | null = element; current; current = composedParent(current)) {
 		if (current.hasAttribute("inert")) return true;
 	}
 	return false;

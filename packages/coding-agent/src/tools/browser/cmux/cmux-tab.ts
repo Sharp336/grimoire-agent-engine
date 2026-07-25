@@ -626,6 +626,7 @@ export class CmuxTab {
 			Math.max(1, Math.ceil(deadline - Date.now())),
 		);
 		const writeSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
+		let renamed = false;
 		let published = false;
 		try {
 			await fs.promises.writeFile(temporary, data, { signal: writeSignal });
@@ -634,6 +635,11 @@ export class CmuxTab {
 				throw new ToolError(`${operation} timed out`);
 			}
 			await fs.promises.rename(temporary, destination);
+			renamed = true;
+			throwIfAborted(signal);
+			if (timeoutController.signal.aborted || Date.now() >= deadline) {
+				throw new ToolError(`${operation} timed out`);
+			}
 			published = true;
 		} catch (error) {
 			throwIfAborted(signal);
@@ -641,7 +647,8 @@ export class CmuxTab {
 			throw error;
 		} finally {
 			clearTimeout(timer);
-			if (!published) await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+			if (!published)
+				await fs.promises.rm(renamed ? destination : temporary, { force: true }).catch(() => undefined);
 		}
 	}
 

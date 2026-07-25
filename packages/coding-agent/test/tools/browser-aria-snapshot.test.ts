@@ -140,4 +140,32 @@ describe("generated ARIA locator runtime", () => {
 			delete globals.__ompCodexAriaState;
 		}
 	});
+
+	it("treats a shadow descendant as inert when its host is inert", () => {
+		const { document, window } = parseHTML("<html><body><div id=host inert></div></body></html>");
+		const host = document.getElementById("host");
+		if (!host) throw new Error("Expected shadow host");
+		const shadowRoot = host.attachShadow({ mode: "open" });
+		shadowRoot.innerHTML = '<button aria-label="Shadow Action">Run</button>';
+		const button = shadowRoot.querySelector("button");
+		if (!button) throw new Error("Expected shadow button");
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
+		const globals = globalThis as unknown as Record<string, unknown>;
+		try {
+			new Function("document", "Element", "window", `return (${buildAriaRuntimeInstallerSource()})();`)(
+				document,
+				window.Element,
+				window,
+			);
+			const query = globals.__ompCodexAriaQuery as (descriptor: unknown) => unknown[];
+			const state = globals.__ompCodexAriaState as (element: unknown) => { hidden: boolean };
+			expect(
+				query({ kind: "role", role: "button", name: { kind: "string", value: "Shadow Action", exact: true } }),
+			).toEqual([]);
+			expect(state(button).hidden).toBe(true);
+		} finally {
+			delete globals.__ompCodexAriaQuery;
+			delete globals.__ompCodexAriaState;
+		}
+	});
 });

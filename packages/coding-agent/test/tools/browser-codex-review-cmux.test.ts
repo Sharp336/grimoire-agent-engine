@@ -953,6 +953,35 @@ describe("cmux Codex browser review regressions", () => {
 		expect(await outcome).toBeUndefined();
 	});
 
+	it("removes published cmux media when its run is cancelled during rename", async () => {
+		const rename = Promise.withResolvers<void>();
+		spyOn(fs.promises, "rename").mockImplementation(async () => await rename.promise);
+		spyOn(fs.promises, "writeFile").mockResolvedValue(undefined);
+		const remove = spyOn(fs.promises, "rm").mockResolvedValue(undefined);
+		const controller = new AbortController();
+		const destination = "/tmp/cmux-media-cancelled.bin";
+		const tab = new CmuxTab({ client: {} as never, surfaceId: "surface-contract" });
+		tab.setRunContext({
+			session: { cwd: "/tmp" },
+			output: {},
+			screenshots: [],
+			signal: controller.signal,
+			timeoutMs: 1_000,
+		} as never);
+		const outcome = tab.codexPersistFile(destination, new Uint8Array([1, 2, 3]), 1_000, "media download").then(
+			() => undefined,
+			error => error as Error,
+		);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		controller.abort();
+		rename.resolve();
+
+		expect((await outcome)?.name).toBe("ToolAbortError");
+		expect(remove).toHaveBeenCalledWith(destination, { force: true });
+	});
+
 	it("returns one canonical visible DOM DTO with cmux ref node ids", async () => {
 		const current = await selectedTab(
 			facadeFor({
