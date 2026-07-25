@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed unused collab-web exports identified by knip: the `ENVELOPE_HEADER_LENGTH` and `ROOM_ID_BYTES` re-exports from `src/lib/link.ts`, the `export` of `setThemePreference` and the `useSystemTheme` reader from `src/lib/theme.ts`, and the `export` of the `ToolResultText` interface from `src/tool-render/types.ts`. ([#4546](https://github.com/can1357/oh-my-pi/pull/4546))
+
 ## [16.3.3] - 2026-07-02
 
 ### Fixed
