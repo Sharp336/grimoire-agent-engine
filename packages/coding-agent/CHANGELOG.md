@@ -6,13 +6,13 @@
 
 - `omp usage` now surfaces auto-disabled credentials as red `✗` tombstone rows (identity, how long ago, the shortened upstream cause — e.g. `Refresh token expired` — and a re-login hint), including a provider section when no active credential remains. User-driven tombstones (`replaced by newer credential`, `deleted by user`) and API-key rows stay hidden. Requires a broker with `GET /v1/credentials/disabled`; older brokers degrade to no tombstone rows.
 - `omp usage` warns about Anthropic's ~30-day OAuth grant lifetime: accounts whose interactive login (`authorizedAt`) is within a week of the deadline get a yellow `⚠ re-login within <time>` line, and past-deadline accounts a red one. Grants die server-side exactly ~30 days after login regardless of refresh rotation, so this is the only warning before the broker auto-disables the row.
+- Added `mcp.awaitStartupMs` (default `0`): interactive sessions can opt into waiting up to the given milliseconds for MCP servers before assembling the tool registry and system prompt, so connected/cached tools mount into the initial `xd://` inventory instead of arriving via the hidden mount-notice message that then rides every request until compaction. The budget threads through to the `connectServers` startup gate (previously a fixed 250ms constant); slow or uncached servers still register in the background.
 
 ### Fixed
 
 - Fixed the Docker `natives-builder` stage failing to build releases ≥ 17.1.1: the native audio stack added bindgen (miniaudio needs libclang) and a bundled-opus CMake build (needs cmake + make), none of which were installed in the slim builder image.
 - Fixed `omp usage` duplicating org-less legacy accounts as "no usage data" rows whenever any sibling report carried an organization (mixed pools of pre-org-capture rows and fresh org-scoped logins): an org-less account is now covered by its own org-less report, while org-attributed sibling reports still never count as its coverage.
 - `omp usage` revalidates the broker credential snapshot before rendering: live usage reports were previously paired with a disk-cached account list up to an hour old, so a just-completed re-login (org-less row upserted to org-scoped) rendered as a phantom duplicate until the cache expired.
-- Added `mcp.awaitStartupMs` (default `0`): interactive sessions can opt into waiting up to the given milliseconds for MCP servers before assembling the tool registry and system prompt, so connected/cached tools mount into the initial `xd://` inventory instead of arriving via the hidden mount-notice message that then rides every request until compaction. The budget threads through to the `connectServers` startup gate (previously a fixed 250ms constant); slow or uncached servers still register in the background.
 
 ## [17.1.3] - 2026-07-24
 
