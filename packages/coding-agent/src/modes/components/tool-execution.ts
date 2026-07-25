@@ -299,6 +299,14 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
 	#imageComponents: Image[] = [];
 	#imageSpacers: Spacer[] = [];
+	/**
+	 * Monotonic content version reported to the transcript container via
+	 * {@link getTranscriptBlockVersion}. Bumped by `#updateDisplay()` — the
+	 * choke point every mutator funnels through — so a mutation landing after
+	 * the block reports finalized (most notably a result arriving after
+	 * {@link seal}) cannot be masked by the committed-scrollback replay.
+	 */
+	#blockVersion = 0;
 	readonly #instanceId = ++toolExecutionInstanceSeq;
 	#toolName: string;
 	#toolLabel: string;
@@ -618,9 +626,9 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		const paintedPartialWidth = this.#paintedPartialWidth;
 		// Clear only the pending-to-first-result latch; `render()` re-arms it.
 		this.#firstResultViewportRepaintShapePainted = false;
-		// Consume live paint evidence before any display mutation or the
-		// synchronous resetDisplay() below, so a duplicate final or reentrant
-		// render cannot replay the reset. A partial keeps the evidence intact.
+		// Consume live paint evidence before any display mutation, so a duplicate
+		// final or reentrant render cannot replay the reset. A partial keeps the
+		// evidence intact.
 		if (!isPartial && this.#settlementState === "live-painted") {
 			this.#settlementState = "live-unpainted";
 			this.#paintedPartialLineCount = 0;
@@ -641,12 +649,9 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// last painted partial. Same-height settles keep the in-place path.
 		let settlementTopologyChanged = false;
 		if (provisionalResultSettled) {
-			if (paintedPartialWidth <= 0) {
-				settlementTopologyChanged = true;
-			} else {
-				const finalLineCount = super.render(paintedPartialWidth).length;
-				settlementTopologyChanged = finalLineCount !== paintedPartialLineCount;
-			}
+			settlementTopologyChanged =
+				paintedPartialWidth <= 0 ||
+				this.#measureSettledHeightOutsideCompose(paintedPartialWidth) !== paintedPartialLineCount;
 		}
 		this.#resetDisplayForResultTopologyChange(
 			hadNoResult && firstResultRepaintShapePainted,
@@ -913,6 +918,15 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	/**
+	 * Content version for the transcript's committed-scrollback render bypass.
+	 * A sealed block reports finalized, so without this the container would
+	 * replay its previous rows and a late terminal result would never appear.
+	 */
+	getTranscriptBlockVersion(): number {
+		return this.#blockVersion;
+	}
+
+	/**
 	 * Mark the tool terminal even though no result arrived (the turn aborted or
 	 * abandoned it) and stop animating, so it can freeze and stops pinning the
 	 * transcript live region.
@@ -990,6 +1004,13 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 		this.#rebuildDisplay();
 		this.#displayBuilt = true;
+		// Every mutator funnels through here, so this is the choke point that
+		// reports content change to the transcript (see
+		// {@link getTranscriptBlockVersion}). A result arriving after `seal()` —
+		// an abort/rewind that later receives its terminal payload — reshapes the
+		// block while it already reports finalized, and the container replays its
+		// committed rows unless the version moves.
+		this.#blockVersion++;
 	}
 
 	#rendererFlag(name: "forceResultViewportRepaintOnSettle"): boolean {
@@ -1013,6 +1034,27 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			toolValue !== undefined ? toolValue : toolRenderers[this.#toolName]?.forceFirstResultViewportRepaint;
 		if (typeof value === "function") return value(this.#args, this.#renderState);
 		return value === true;
+	}
+	/**
+	 * Height the settled block composes to at `width`, measured outside the
+	 * renderer's compose.
+	 *
+	 * `Image.render()` is stateful against the shared {@link ImageBudget}: it
+	 * records display order, queues transmissions, and raises the image's
+	 * reserved-row floor. Those effects are only coherent between the renderer's
+	 * `beginPass()`/`endPass()`, so an image-bearing block cannot be measured
+	 * here — composing it would let the budget hand out a live graphic the
+	 * authoritative pass then suppresses, padding the text fallback to a height
+	 * that never reached the terminal. Such a settle reports an incomparable
+	 * height and takes the unconditional reset, which is what an image-bearing
+	 * settle needs anyway: the block reshapes when the image resolves.
+	 *
+	 * An image-free block composes only text, so the measurement is a pure
+	 * function of the display tree and safe outside the pass.
+	 */
+	#measureSettledHeightOutsideCompose(width: number): number {
+		if (this.#imageComponents.length > 0) return -1;
+		return super.render(width).length;
 	}
 
 	/**

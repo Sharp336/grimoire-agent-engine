@@ -1,8 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
 import { type Component, Text, TUI } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../../tui/test/render-stress-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
@@ -159,13 +159,18 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 		vi.restoreAllMocks();
 	});
 
-	function makeComponent(args: unknown, tool: AgentTool | undefined = makeFakeTool()) {
+	/** Builds a component on a stub TUI, exposing the reset spy the seams assert on. */
+	function makeComponentFor(toolName: string, args: unknown, tool: AgentTool | undefined) {
 		const resetDisplay = vi.fn();
 		const ui = { requestRender() {}, requestComponentRender() {}, resetDisplay } as unknown as TUI;
-		const component = new ToolExecutionComponent("fake_device", args, {}, tool, ui);
+		const component = new ToolExecutionComponent(toolName, args, {}, tool, ui);
 		components.push(component);
 		resetDisplay.mockClear();
 		return { component, resetDisplay };
+	}
+
+	function makeComponent(args: unknown, tool: AgentTool | undefined = makeFakeTool()) {
+		return makeComponentFor("fake_device", args, tool);
 	}
 
 	it("forces a viewport repaint when a painted streamed placeholder receives its first result", () => {
@@ -404,39 +409,50 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("Output final output");
 	});
 
-	it("opts exactly the topology-changing built-in renderers into settlement repaint", () => {
-		const flagged = Object.keys(toolRenderers)
-			.filter(name => toolRenderers[name]?.forceResultViewportRepaintOnSettle === true)
-			.sort();
-		expect(flagged).toEqual([
-			"apply_patch",
-			"bash",
-			"edit",
-			"eval",
-			"github",
-			"glob",
-			"hub",
-			"task",
-			"vibe_wait",
-			"write",
-		]);
-		// edit and apply_patch share one renderer object.
-		expect(toolRenderers.edit).toBe(toolRenderers.apply_patch);
-		// Non-wait vibe ops and search/read-like tools stay opted out.
-		for (const name of [
-			"vibe_spawn",
-			"vibe_send",
-			"vibe_list",
-			"vibe_kill",
-			"read",
-			"grep",
-			"todo",
-			"browser",
-			"debug",
-		]) {
-			expect(toolRenderers[name]?.forceResultViewportRepaintOnSettle ?? false).toBe(false);
-		}
+	it("makes a result that arrives after seal visible in the committed transcript", () => {
+		const container = new TranscriptContainer();
+		const { component } = makeComponent({ host: "router", command: "uptime" });
+		container.addChild(component);
+
+		component.updateResult(toolResult("partial output"), true);
+		expect(Bun.stripANSI(container.render(80).join("\n"))).toContain("provisional partial output");
+
+		// An abort/rewind seals the block. Its finalized rows then reach native
+		// scrollback, so the transcript replays them instead of re-rendering the
+		// child — the state in which a late result used to stay invisible.
+		component.seal();
+		const sealedRows = container.render(80);
+		container.setNativeScrollbackCommittedRows(sealedRows.length);
+		expect(container.render(80)).toEqual(sealedRows);
+
+		// The tool's terminal result still lands afterwards.
+		component.updateResult(toolResult("final output"), false);
+
+		expect(Bun.stripANSI(container.render(80).join("\n"))).toContain("Output final output");
 	});
+
+	// Settlement repaint is a rendering contract, not a registry shape: a
+	// height-changing settle resets the viewport for a renderer that opted in
+	// and leaves the in-place path alone for one that did not.
+	for (const [toolName, args, settles] of [
+		["bash", { command: "uptime" }, true],
+		["grep", { pattern: "needle" }, false],
+	] as const) {
+		it(`${settles ? "settles" : "does not settle"} a height-changing final for the ${toolName} renderer`, () => {
+			const { component, resetDisplay } = makeComponentFor(toolName, args, undefined);
+			component.updateResult(multilineResult("prov", 20), true);
+			const paintedPartialHeight = component.render(80).length;
+			resetDisplay.mockClear();
+
+			component.updateResult(multilineResult("fin", 4), false);
+
+			// Both renderers really do change height here, so the opted-out case
+			// is a decision to stay in place rather than a settle that never had
+			// anything to compare.
+			expect(component.render(80).length).not.toBe(paintedPartialHeight);
+			expect(resetDisplay).toHaveBeenCalledTimes(settles ? 1 : 0);
+		});
+	}
 
 	it("emits exactly one ED3 and leaves one final block on a direct terminal when a long partial settles", async () => {
 		await withSettlementEnv({ TERM: "xterm-256color" }, async () => {
