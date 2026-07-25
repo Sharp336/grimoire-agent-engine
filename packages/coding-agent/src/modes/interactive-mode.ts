@@ -1264,6 +1264,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// project's configuration. Without this, the previous project's
 			// exclusions leak and newly-excluded providers are still used.
 			applyProviderGlobalsFromSettings(settings);
+			// Project configs may set a different xd:// external description cap;
+			// reapply so the live registry matches destination settings (selector
+			// handleSettingChange does not run on /move).
+			await this.session.applyXdevExternalDescriptionCap(settings.get("tools.xdevExternalDescriptionCap") ?? 200);
 		}
 		// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
 		// the next prompt sees everything scoped to the new project directory.

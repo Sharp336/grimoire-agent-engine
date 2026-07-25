@@ -104,7 +104,8 @@ describe("XdevRegistry external description cap", () => {
 		registry.reconcile(tools);
 
 		const inventory = registry.mountNoticeEntries(tools.map(tool => tool.name));
-		// Render the same bullet shape the mount-notice template uses.
+		// Render the same bullet shape the mount-notice template uses
+		// (` — ` only when summary is non-empty).
 		const rendered = [
 			...inventory.entries.map(({ name, summary }) =>
 				summary.length > 0 ? `- xd://${name} — ${summary}` : `- xd://${name}`,
@@ -112,6 +113,7 @@ describe("XdevRegistry external description cap", () => {
 			...(inventory.omittedLine ? [inventory.omittedLine] : []),
 		].join("\n");
 		expect(rendered.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
+		expect(inventory.usedChars).toBe(rendered.length);
 		expect(inventory.usedChars).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
 		// Name slots are reserved first: every mounted tool is announced even
 		// when the high per-device cap would otherwise exhaust the budget early.

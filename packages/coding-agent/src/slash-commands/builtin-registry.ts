@@ -1880,6 +1880,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			setProjectDir(resolvedPath);
 			await runtime.settings.reloadForCwd(resolvedPath);
 			applyProviderGlobalsFromSettings(runtime.settings);
+			// Project configs may set a different xd:// external description cap;
+			// reapply so the live registry matches destination settings.
+			await runtime.session.applyXdevExternalDescriptionCap(
+				runtime.settings.get("tools.xdevExternalDescriptionCap") ?? 200,
+			);
 			// Reload plugin/capability caches so the next prompt sees commands and
 			// capabilities scoped to the new cwd.
 			await runtime.reloadPlugins();

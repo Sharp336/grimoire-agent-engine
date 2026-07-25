@@ -3,7 +3,7 @@ The xd:// device inventory changed.
 {{#if added.length}}
 These tools became available:
 {{#each added}}
-- xd://{{this.name}} — {{this.summary}}
+- xd://{{this.name}}{{#if this.summary}} — {{this.summary}}{{/if}}
 {{/each}}
 {{#if omitted_line}}
 {{omitted_line}}
