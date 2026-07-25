@@ -54,9 +54,15 @@ export async function buildGuidedGoalContextPrompt(cwd: string): Promise<string 
 		// cross-level dedup) so an identical user-level file cannot win the dedupe
 		// (which keeps the last entry per content) and then be dropped here, leaving
 		// the interview context-free despite an applicable project file.
+		//
+		// `rootDir` confines `@`-import expansion to the project. AGENTS.md is
+		// attacker-controlled in a hostile checkout, and this prompt is sent to the
+		// plan/slow provider — possibly not the one backing the active model — so an
+		// unconstrained `@~/.ssh/id_rsa` would exfiltrate any readable file. `level`
+		// alone does not cover this: it picks the source files, not their targets.
 		const contextFiles = await withDeadline(
 			"loadProjectContextFiles",
-			loadProjectContextFiles({ cwd, level: "project" }),
+			loadProjectContextFiles({ cwd, level: "project", rootDir: cwd }),
 			[],
 		);
 		if (contextFiles.length === 0) return undefined;

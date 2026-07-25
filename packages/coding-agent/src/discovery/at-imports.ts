@@ -22,6 +22,7 @@
  *
  * @see https://docs.claude.com/en/docs/claude-code/memory#import-additional-files
  */
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -53,35 +54,76 @@ export interface ExpandAtImportsOptions {
 	maxDepth?: number;
 	/** Override the home directory used to resolve `~/...` (default: `os.homedir()`). */
 	home?: string;
+	/**
+	 * Containment boundary. When set, every import target must resolve — after
+	 * symlink resolution — to a path inside this directory; anything else is
+	 * refused and its `@token` is left verbatim.
+	 *
+	 * Opt-in, because the ordinary system-prompt path legitimately expands
+	 * user-level context (`~/.agent/AGENTS.md` and its `~/…` imports) and must
+	 * keep doing so. Callers that hand repository-controlled content to a
+	 * provider set it, so a hostile `AGENTS.md` cannot turn `@~/.ssh/id_rsa`,
+	 * `@/etc/passwd`, or `@../../secrets` into an outbound prompt.
+	 */
+	rootDir?: string;
+}
+
+/** Invariant state shared by every hop of a single expansion tree. */
+interface ExpandContext {
+	maxDepth: number;
+	home: string;
+	/** Real path that imports may not escape, or null when unconstrained. */
+	root: string | null;
+	/** Shared across the whole tree so cycles spanning several files break. */
+	visited: Set<string>;
 }
 
 /**
  * Expand `@path/to/file` references in `content` against `filePath`'s directory.
  *
  * Returns the expanded text. When no imports match, the original string is
- * returned unchanged.
+ * returned unchanged. With {@link ExpandAtImportsOptions.rootDir} set, targets
+ * outside that directory are left as literal `@tokens`.
  */
 export async function expandAtImports(
 	content: string,
 	filePath: string,
 	options: ExpandAtImportsOptions = {},
 ): Promise<string> {
-	const maxDepth = options.maxDepth ?? MAX_AT_IMPORT_DEPTH;
-	const home = options.home ?? os.homedir();
 	const absoluteSource = path.resolve(filePath);
-	const visited = new Set<string>([absoluteSource]);
-	return await expand(content, path.dirname(absoluteSource), 0, maxDepth, home, visited);
+	// Fail closed when the root itself cannot be resolved: no real path sits
+	// under an unresolvable prefix, so keeping the lexical path only ever
+	// over-rejects. Never fall back to `null`, which would disable containment.
+	const rootDir = options.rootDir === undefined ? undefined : path.resolve(options.rootDir);
+	const ctx: ExpandContext = {
+		maxDepth: options.maxDepth ?? MAX_AT_IMPORT_DEPTH,
+		home: options.home ?? os.homedir(),
+		root: rootDir === undefined ? null : ((await realPath(rootDir)) ?? rootDir),
+		visited: new Set<string>([absoluteSource]),
+	};
+	return await expand(content, path.dirname(absoluteSource), 0, ctx);
 }
 
-async function expand(
-	content: string,
-	baseDir: string,
-	depth: number,
-	maxDepth: number,
-	home: string,
-	visited: Set<string>,
-): Promise<string> {
-	if (depth >= maxDepth) return content;
+async function realPath(target: string): Promise<string | null> {
+	try {
+		return await fs.realpath(target);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * True when `target` is `root` itself or sits beneath it. Both arguments must
+ * already be real paths, so a symlink pointing out of the tree cannot pass.
+ */
+function isContained(root: string, target: string): boolean {
+	const rel = path.relative(root, target);
+	if (rel === "") return true;
+	return rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
+async function expand(content: string, baseDir: string, depth: number, ctx: ExpandContext): Promise<string> {
+	if (depth >= ctx.maxDepth) return content;
 
 	const segments = splitMarkdownSegments(content);
 	const out: string[] = [];
@@ -90,34 +132,20 @@ async function expand(
 			out.push(segment.text);
 			continue;
 		}
-		out.push(await expandTextSegment(segment.text, baseDir, depth, maxDepth, home, visited));
+		out.push(await expandTextSegment(segment.text, baseDir, depth, ctx));
 	}
 	return out.join("");
 }
 
-async function expandTextSegment(
-	text: string,
-	baseDir: string,
-	depth: number,
-	maxDepth: number,
-	home: string,
-	visited: Set<string>,
-): Promise<string> {
+async function expandTextSegment(text: string, baseDir: string, depth: number, ctx: ExpandContext): Promise<string> {
 	const lines = text.split("\n");
 	for (let i = 0; i < lines.length; i++) {
-		lines[i] = await expandLine(lines[i], baseDir, depth, maxDepth, home, visited);
+		lines[i] = await expandLine(lines[i], baseDir, depth, ctx);
 	}
 	return lines.join("\n");
 }
 
-async function expandLine(
-	line: string,
-	baseDir: string,
-	depth: number,
-	maxDepth: number,
-	home: string,
-	visited: Set<string>,
-): Promise<string> {
+async function expandLine(line: string, baseDir: string, depth: number, ctx: ExpandContext): Promise<string> {
 	if (!line.includes("@")) return line;
 
 	const matches: Array<{ start: number; end: number; importPath: string }> = [];
@@ -144,7 +172,7 @@ async function expandLine(
 	let cursor = 0;
 	for (const m of matches) {
 		parts.push(line.slice(cursor, m.start));
-		const expanded = await resolveAndExpand(m.importPath, baseDir, depth, maxDepth, home, visited);
+		const expanded = await resolveAndExpand(m.importPath, baseDir, depth, ctx);
 		parts.push(expanded ?? line.slice(m.start, m.end));
 		cursor = m.end;
 	}
@@ -156,14 +184,26 @@ async function resolveAndExpand(
 	importPath: string,
 	baseDir: string,
 	depth: number,
-	maxDepth: number,
-	home: string,
-	visited: Set<string>,
+	ctx: ExpandContext,
 ): Promise<string | null> {
-	const resolved = resolveImportPath(importPath, baseDir, home);
-	if (visited.has(resolved)) {
+	const resolved = resolveImportPath(importPath, baseDir, ctx.home);
+	if (ctx.visited.has(resolved)) {
 		logger.debug("@-import: skipping cyclic include", { path: resolved });
 		return null;
+	}
+
+	if (ctx.root !== null) {
+		// Test the *real* path: `@~/…`, `@/etc/…`, `@../../…`, and any symlink
+		// aimed out of the tree all collapse to a target outside the root.
+		// Checked before the read so a refused file is never opened at all.
+		const real = await realPath(resolved);
+		if (real === null || !isContained(ctx.root, real)) {
+			logger.debug("@-import: refusing target outside the project root", {
+				path: resolved,
+				root: ctx.root,
+			});
+			return null;
+		}
 	}
 
 	const content = await readFile(resolved);
@@ -172,10 +212,8 @@ async function resolveAndExpand(
 		return null;
 	}
 
-	// Visited is shared across the whole expansion tree to break cycles,
-	// even cycles that span multiple importing files.
-	visited.add(resolved);
-	return await expand(content, path.dirname(resolved), depth + 1, maxDepth, home, visited);
+	ctx.visited.add(resolved);
+	return await expand(content, path.dirname(resolved), depth + 1, ctx);
 }
 
 function resolveImportPath(importPath: string, baseDir: string, home: string): string {

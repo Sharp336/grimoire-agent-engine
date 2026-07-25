@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as core from "@oh-my-pi/pi-agent-core";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -340,6 +341,110 @@ describe("guided goal setup", () => {
 			expect(rendered).not.toContain("USER_IMPORT_PAYLOAD");
 		} finally {
 			setAgentDir(originalAgentDir);
+		}
+	});
+
+	it("buildGuidedGoalContextPrompt refuses @-imports that escape the project directory", async () => {
+		// Security: AGENTS.md is attacker-controlled in a hostile checkout and this
+		// prompt is sent to the plan/slow provider. Home-relative, absolute, and
+		// traversal targets must never be interpolated; in-project ones still must.
+		using outside = await TempDir.create("@guided-goal-outside-");
+		const projectDir = outside.join("project");
+		await fs.mkdir(projectDir, { recursive: true });
+
+		// Two distinct outside files: sharing one would let the cycle-breaker mask
+		// the second reference, making that case pass for the wrong reason.
+		const absoluteFile = outside.join("outside-absolute.md");
+		await Bun.write(absoluteFile, "ABSOLUTE_PAYLOAD\n");
+		await Bun.write(outside.join("outside-traversal.md"), "TRAVERSAL_PAYLOAD\n");
+
+		using fakeHome = await TempDir.create("@guided-goal-home-");
+		await Bun.write(fakeHome.join("id_rsa"), "HOME_PAYLOAD\n");
+
+		// Legitimate in-project import must keep working.
+		await Bun.write(path.join(projectDir, "docs", "rules.md"), "INPROJECT_PAYLOAD\n");
+
+		await Bun.write(
+			path.join(projectDir, "AGENTS.md"),
+			[
+				"Home: @~/id_rsa",
+				`Absolute: @${absoluteFile}`,
+				"Traversal: @../outside-traversal.md",
+				"Local: @docs/rules.md",
+				"",
+			].join("\n"),
+		);
+
+		// `os.homedir()` is resolved once at startup in Bun, so mutating
+		// process.env.HOME at runtime does not move `~`. Spy on it, or the
+		// `@~/…` assertion below passes vacuously against the real home.
+		spyOn(os, "homedir").mockReturnValue(fakeHome.path());
+		try {
+			const rendered = await buildGuidedGoalContextPrompt(projectDir);
+
+			expect(rendered).toBeDefined();
+			// Guard against a vacuous assertion: the in-project import really expanded,
+			// so the block below is proving containment, not an empty prompt.
+			expect(rendered).toContain("INPROJECT_PAYLOAD");
+			expect(rendered).not.toContain("HOME_PAYLOAD");
+			expect(rendered).not.toContain("ABSOLUTE_PAYLOAD");
+			expect(rendered).not.toContain("TRAVERSAL_PAYLOAD");
+		} finally {
+			capabilityFs.clearCache();
+		}
+	});
+
+	it("buildGuidedGoalContextPrompt refuses an in-project symlink that points outside", async () => {
+		// Containment must test the REAL path. `readFile` stats through symlinks, so
+		// a link whose lexical path sits inside the project would otherwise leak its
+		// target. This is the case a lexical-only path.relative check cannot catch.
+		using outside = await TempDir.create("@guided-goal-symlink-");
+		const projectDir = outside.join("project");
+		await fs.mkdir(projectDir, { recursive: true });
+
+		const escapedFile = outside.join("outside-secret.md");
+		await Bun.write(escapedFile, "SYMLINK_PAYLOAD\n");
+		await fs.symlink(escapedFile, path.join(projectDir, "linked.md"));
+
+		await Bun.write(path.join(projectDir, "local.md"), "LOCAL_PAYLOAD\n");
+		await Bun.write(path.join(projectDir, "AGENTS.md"), "Linked: @linked.md\nLocal: @local.md\n");
+
+		try {
+			const rendered = await buildGuidedGoalContextPrompt(projectDir);
+
+			expect(rendered).toBeDefined();
+			// Vacuity guard: a sibling non-symlink import in the same file expands.
+			expect(rendered).toContain("LOCAL_PAYLOAD");
+			expect(rendered).not.toContain("SYMLINK_PAYLOAD");
+		} finally {
+			capabilityFs.clearCache();
+		}
+	});
+
+	it("buildGuidedGoalContextPrompt applies containment to nested @-imports", async () => {
+		// The boundary must hold at every hop, not just the one named by AGENTS.md:
+		// an allowed in-project file that itself imports `@~/…` must not leak either.
+		using outside = await TempDir.create("@guided-goal-nested-");
+		const projectDir = outside.join("project");
+		await fs.mkdir(projectDir, { recursive: true });
+
+		using fakeHome = await TempDir.create("@guided-goal-nested-home-");
+		await Bun.write(fakeHome.join("id_rsa"), "NESTED_HOME_PAYLOAD\n");
+
+		await Bun.write(path.join(projectDir, "chain.md"), "CHAIN_PAYLOAD then @~/id_rsa\n");
+		await Bun.write(path.join(projectDir, "AGENTS.md"), "Start: @chain.md\n");
+
+		// See the escape test: `~` follows os.homedir(), not process.env.HOME.
+		spyOn(os, "homedir").mockReturnValue(fakeHome.path());
+		try {
+			const rendered = await buildGuidedGoalContextPrompt(projectDir);
+
+			expect(rendered).toBeDefined();
+			// Vacuity guard: the first hop expanded, so the second hop was reached.
+			expect(rendered).toContain("CHAIN_PAYLOAD");
+			expect(rendered).not.toContain("NESTED_HOME_PAYLOAD");
+		} finally {
+			capabilityFs.clearCache();
 		}
 	});
 

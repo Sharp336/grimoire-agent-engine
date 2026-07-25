@@ -400,6 +400,17 @@ export interface LoadContextFilesOptions {
 	 * other level cannot shadow a kept one. Default: keep both levels.
 	 */
 	level?: "user" | "project";
+	/**
+	 * Confine `@`-import expansion to this directory. Targets that resolve —
+	 * after symlink resolution — outside it are left as literal `@tokens`.
+	 *
+	 * Unset by default so the system prompt keeps expanding user-level context
+	 * (`~/.agent/AGENTS.md` and its `~/…` imports). Callers that forward
+	 * repository-controlled content to a provider set it, because an `AGENTS.md`
+	 * is attacker-controlled in a hostile checkout and `level: "project"`
+	 * constrains only which files are read, not where their imports point.
+	 */
+	rootDir?: string;
 }
 
 function dedupeExactContextFiles<
@@ -442,7 +453,7 @@ export async function loadProjectContextFiles(options: LoadContextFilesOptions =
 		items.map(async contextFile => {
 			return {
 				path: contextFile.path,
-				content: await expandAtImports(contextFile.content, contextFile.path),
+				content: await expandAtImports(contextFile.content, contextFile.path, { rootDir: options.rootDir }),
 				depth: contextFile.depth,
 				level: contextFile.level,
 			};

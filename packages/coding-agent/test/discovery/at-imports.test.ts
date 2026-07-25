@@ -159,4 +159,93 @@ describe("expandAtImports", () => {
 
 		expect(expanded).toContain("See INLINED, and then continue.");
 	});
+
+	/**
+	 * `rootDir` is the opt-in containment boundary used by callers that feed
+	 * repository-controlled context to a provider. The default (unset) behavior
+	 * must stay wide open: the ordinary system-prompt path legitimately expands
+	 * user-level context such as `~/.agent/AGENTS.md` and its `~/…` imports.
+	 */
+	describe("rootDir containment", () => {
+		test("still expands a ~/ import when rootDir is unset", async () => {
+			// Non-regression twin of the blocking test below. If containment ever
+			// became unconditional, the ordinary system-prompt path would silently
+			// stop resolving user-level imports and only this test would catch it.
+			const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-at-home-open-"));
+			try {
+				await fs.writeFile(path.join(fakeHome, "note.md"), "USER_NOTE");
+
+				const expanded = await expandAtImports("See @~/note.md.\n", path.join(tmp, "AGENTS.md"), {
+					home: fakeHome,
+				});
+
+				expect(expanded).toContain("See USER_NOTE");
+			} finally {
+				await removeWithRetries(fakeHome);
+			}
+		});
+
+		test("refuses ~/ and absolute imports once rootDir is set", async () => {
+			const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-at-home-closed-"));
+			const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), "omp-at-elsewhere-"));
+			try {
+				await fs.writeFile(path.join(fakeHome, "note.md"), "USER_NOTE");
+				const absoluteFile = path.join(elsewhere, "abs.md");
+				await fs.writeFile(absoluteFile, "ABS_NOTE");
+				await writeFile("local.md", "LOCAL_NOTE");
+
+				const source = path.join(tmp, "AGENTS.md");
+				const input = `Home @~/note.md abs @${absoluteFile} local @local.md\n`;
+
+				const expanded = await expandAtImports(input, source, { home: fakeHome, rootDir: tmp });
+
+				// In-tree import still resolves; both escapes stay literal tokens.
+				expect(expanded).toContain("local LOCAL_NOTE");
+				expect(expanded).not.toContain("USER_NOTE");
+				expect(expanded).not.toContain("ABS_NOTE");
+				expect(expanded).toContain("@~/note.md");
+			} finally {
+				await removeWithRetries(fakeHome);
+				await removeWithRetries(elsewhere);
+			}
+		});
+
+		test("refuses a traversal target that escapes rootDir", async () => {
+			// The importing file sits in a subdir, so `../../` climbs out of `tmp`
+			// to a real file the caller never meant to expose.
+			const outsideFile = path.join(tmp, "..", `omp-at-escape-${process.pid}.md`);
+			await fs.writeFile(outsideFile, "ESCAPED_NOTE");
+			try {
+				const nestedRoot = path.join(tmp, "pkg");
+				const source = await writeFile("pkg/AGENTS.md", "");
+				const rel = path.relative(nestedRoot, outsideFile);
+
+				const expanded = await expandAtImports(`Read @${rel}\n`, source, { rootDir: nestedRoot });
+
+				expect(expanded).not.toContain("ESCAPED_NOTE");
+				expect(expanded).toContain(`@${rel}`);
+			} finally {
+				await removeWithRetries(outsideFile);
+			}
+		});
+
+		test("refuses a symlink inside rootDir that points outside it", async () => {
+			// Containment tests the canonicalized target: `readFile` stats through
+			// symlinks, so a lexical prefix check would happily read the target.
+			const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), "omp-at-symlink-"));
+			try {
+				const secret = path.join(elsewhere, "secret.md");
+				await fs.writeFile(secret, "SYMLINKED_NOTE");
+				await fs.symlink(secret, path.join(tmp, "linked.md"));
+				const source = path.join(tmp, "AGENTS.md");
+
+				const expanded = await expandAtImports("Read @linked.md\n", source, { rootDir: tmp });
+
+				expect(expanded).not.toContain("SYMLINKED_NOTE");
+				expect(expanded).toContain("@linked.md");
+			} finally {
+				await removeWithRetries(elsewhere);
+			}
+		});
+	});
 });
