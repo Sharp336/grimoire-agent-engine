@@ -198,8 +198,8 @@ export class MCPManager {
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void;
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
-	/** Channel for user-visible reconnect notices (`mcp.reconnectNotices`). */
-	#onConnectionStatus?: (event: McpConnectionStatusEvent) => void;
+	/** Channels for user-visible reconnect notices (`mcp.reconnectNotices`). */
+	#connectionStatusListeners = new Set<(event: McpConnectionStatusEvent) => void>();
 	#reconnectNoticesEnabled = false;
 	#notificationsEnabled = false;
 	#notificationsEpoch = 0;
@@ -240,19 +240,32 @@ export class MCPManager {
 		this.#reconnectNoticesEnabled = enabled;
 	}
 
-	/** Register the channel reconnect notices are emitted on (interactive sessions). */
+	/** Replace the reconnect-status channel (primarily for direct manager consumers). */
 	setOnConnectionStatus(handler: ((event: McpConnectionStatusEvent) => void) | undefined): void {
-		this.#onConnectionStatus = handler;
+		this.#connectionStatusListeners.clear();
+		if (handler) this.#connectionStatusListeners.add(handler);
+	}
+
+	/** Subscribe without replacing another session's reconnect-status channel. */
+	addConnectionStatusListener(handler: (event: McpConnectionStatusEvent) => void): () => void {
+		this.#connectionStatusListeners.add(handler);
+		return () => this.#connectionStatusListeners.delete(handler);
 	}
 
 	/** Fire a reconnect notice when enabled; a throwing consumer must never break reconnects. */
 	#emitReconnectNotice(event: McpConnectionStatusEvent): void {
 		if (!this.#reconnectNoticesEnabled) return;
-		try {
-			this.#onConnectionStatus?.(event);
-		} catch {
-			// notice delivery is best-effort by design
+		for (const listener of this.#connectionStatusListeners) {
+			try {
+				listener(event);
+			} catch {
+				// notice delivery is best-effort by design
+			}
 		}
+	}
+
+	#emitReconnectFailure(name: string, error: string, manual = false): void {
+		if (!manual) this.#emitReconnectNotice({ type: "reconnect-failed", serverName: name, error });
 	}
 
 	/**
@@ -920,22 +933,31 @@ export class MCPManager {
 		const oldConnection = this.#connections.get(name);
 		let config = oldConnection?.config ?? this.#serverConfigs.get(name);
 		const source = this.#sources.get(name) ?? oldConnection?._source;
-		if (!config) return null;
+		if (!config) {
+			this.#emitReconnectFailure(name, "No saved server configuration is available.", manual);
+			return null;
+		}
 
 		if (authChallenge) {
 			if (!this.#authHandler) {
+				const error = "No authentication handler is configured.";
 				logger.error("MCP auth challenge cannot be handled; no auth handler is configured", {
 					path: `mcp:${name}`,
 				});
+				this.#emitReconnectFailure(name, error, manual);
 				return null;
 			}
 			try {
 				const refreshedConfig = await this.#authHandler(name, authChallenge);
-				if (!refreshedConfig) return null;
+				if (!refreshedConfig) {
+					this.#emitReconnectFailure(name, "Authentication did not produce a server configuration.", manual);
+					return null;
+				}
 				config = refreshedConfig;
 				this.#serverConfigs.set(name, config);
 			} catch (error) {
 				logger.error("MCP auth challenge handling failed", { path: `mcp:${name}`, error });
+				this.#emitReconnectFailure(name, error instanceof Error ? error.message : String(error), manual);
 				return null;
 			}
 		}
@@ -993,7 +1015,7 @@ export class MCPManager {
 					await Bun.sleep(delays[attempt]);
 				} else {
 					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
-					if (!manual) this.#emitReconnectNotice({ type: "reconnect-failed", serverName: name, error: msg });
+					this.#emitReconnectFailure(name, msg, manual);
 					// Don't remove stale tools — keep them in the registry so they
 					// remain selected. Calls will fail with MCP errors, which
 					// triggers the tool-level reconnect, or the user can run

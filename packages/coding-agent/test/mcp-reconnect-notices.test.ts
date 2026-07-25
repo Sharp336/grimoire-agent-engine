@@ -2,8 +2,20 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
-import type { McpConnectionStatusEvent } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
+import {
+	formatMCPReconnectNotice,
+	isMcpConnectionStatusEvent,
+	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
+	type McpConnectionStatusEvent,
+} from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 // Contract: with `mcp.reconnectNotices` enabled, the automatic reconnect path
@@ -106,4 +118,90 @@ describe("MCPManager reconnect notices", () => {
 		expect(manager.getConnectionStatus("crashy")).toBe("connected");
 		expect(events.filter(event => event.type.startsWith("reconnect"))).toEqual([]);
 	}, 25_000);
+
+	it("emits a terminal failure when reconnect cannot start", async () => {
+		const events: McpConnectionStatusEvent[] = [];
+		manager = new MCPManager(tempDir, null);
+		manager.setOnConnectionStatus(event => events.push(event));
+		manager.setReconnectNoticesEnabled(true);
+
+		expect(await manager.reconnectServer("missing")).toBeNull();
+		expect(events.map(event => event.type)).toEqual(["reconnecting", "reconnect-failed"]);
+		expect(events[1]).toMatchObject({
+			serverName: "missing",
+			error: "No saved server configuration is available.",
+		});
+	});
+
+	it("adds and removes a listener without replacing the owner", async () => {
+		const owner: McpConnectionStatusEvent[] = [];
+		const shared: McpConnectionStatusEvent[] = [];
+		manager = new MCPManager(tempDir, null);
+		manager.setOnConnectionStatus(event => owner.push(event));
+		const unsubscribe = manager.addConnectionStatusListener(event => shared.push(event));
+		manager.setReconnectNoticesEnabled(true);
+
+		await manager.reconnectServer("first");
+		unsubscribe();
+		await manager.reconnectServer("second");
+		expect(owner).toHaveLength(4);
+		expect(shared).toHaveLength(2);
+	});
+
+	it("keeps recovery notices on one line for unsafe server names", () => {
+		const notice = formatMCPReconnectNotice({
+			type: "reconnect-failed",
+			serverName: "bad\tserver\nname",
+			error: "offline",
+		});
+		expect(notice).not.toContain("\t");
+		expect(notice).not.toContain("\n");
+		expect(notice).toContain("Use /mcp to retry manually.");
+		expect(notice).not.toContain("/mcp reconnect");
+	});
+
+	it("wires a supplied UI manager without replacing its owner", async () => {
+		const owner: McpConnectionStatusEvent[] = [];
+		const uiEvents: McpConnectionStatusEvent[] = [];
+		manager = new MCPManager(tempDir, null);
+		manager.setOnConnectionStatus(event => owner.push(event));
+		const eventBus = new EventBus();
+		const unsubscribe = eventBus.on(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event => {
+			if (isMcpConnectionStatusEvent(event)) uiEvents.push(event);
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.reconnectNotices": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			eventBus,
+			mcpManager: manager,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+			hasUI: true,
+		});
+		try {
+			await manager.reconnectServer("during-session");
+			expect(owner).toHaveLength(2);
+			expect(uiEvents).toHaveLength(2);
+		} finally {
+			await session.dispose();
+			unsubscribe();
+			authStorage.close();
+		}
+
+		await manager.reconnectServer("after-dispose");
+		expect(owner).toHaveLength(4);
+		expect(uiEvents).toHaveLength(2);
+	});
 });

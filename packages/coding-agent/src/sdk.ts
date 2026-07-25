@@ -1800,8 +1800,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (settings.get("mcp.notifications")) {
 					mcpManager.setNotificationsEnabled(true);
 				}
-				mcpManager.setReconnectNoticesEnabled(settings.get("mcp.reconnectNotices"));
-				mcpManager.setOnConnectionStatus(onMCPStatus);
 
 				const deferredMCPManager = mcpManager;
 				startDeferredMCPDiscovery = liveSession => {
@@ -1853,6 +1851,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					customTools.push(...mcpResult.tools.map(loaded => loaded.tool));
 				}
 			}
+		}
+		if (options.hasUI && mcpManager) {
+			mcpManager.setReconnectNoticesEnabled(settings.get("mcp.reconnectNotices"));
+			const unsubscribeReconnectStatus = mcpManager.addConnectionStatusListener(onMCPStatus);
+			postmortem.register("mcp-reconnect-status-cleanup", unsubscribeReconnectStatus);
 		}
 		// Only top-level sessions own the global MCPManager. Subagents already
 		// receive the parent's manager via `options.mcpManager`, and reassigning

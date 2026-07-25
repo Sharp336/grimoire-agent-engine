@@ -97,19 +97,22 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 
 export function formatMCPReconnectNotice(event: McpReconnectStatusEvent): string {
 	const name = sanitizeMcpServerName(event.serverName);
-	// Recovery commands embed the FULL server name (sanitized for control
-	// chars only): sanitizeMcpServerName truncates to 40 cells, which would
-	// point the command at a nonexistent truncated server.
-	const fullName = sanitizeText(event.serverName);
+	// Keep exact, ordinary names actionable. Control characters cannot be
+	// represented safely in a one-line slash command, so those notices direct
+	// the user to the interactive MCP menu instead.
+	const hasUnsafeCommandChars = /[\r\n\t]/.test(event.serverName);
+	const recovery = hasUnsafeCommandChars
+		? "Use /mcp to retry manually."
+		: `Run /mcp reconnect ${sanitizeText(event.serverName)} to retry.`;
 	switch (event.type) {
 		case "reconnecting":
 			return `MCP server "${name}" lost its connection — reconnecting…`;
 		case "reconnected":
 			return `MCP server "${name}" reconnected.`;
 		case "reconnect-failed":
-			return `MCP server "${name}" could not reconnect: ${sanitizeMcpStatusError(event.error)} Run /mcp reconnect ${fullName} to retry.`;
+			return `MCP server "${name}" could not reconnect: ${sanitizeMcpStatusError(event.error)} ${recovery}`;
 		case "reconnect-suspended":
-			return `MCP server "${name}" crashed ${event.crashes} times in quick succession — automatic reconnects suspended. Fix the server, then run /mcp reconnect ${fullName}.`;
+			return `MCP server "${name}" crashed ${event.crashes} times in quick succession — automatic reconnects suspended. Fix the server, then ${recovery.charAt(0).toLowerCase()}${recovery.slice(1)}`;
 	}
 }
 
