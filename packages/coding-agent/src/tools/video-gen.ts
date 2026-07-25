@@ -9,7 +9,7 @@ import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import videoGenDescription from "../prompts/tools/video-gen.md" with { type: "text" };
 import { resolveImageReferenceUrl } from "./media-input";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
-import { shortenPath } from "./render-utils";
+import { replaceTabs, shortenPath } from "./render-utils";
 import { AUTO_VIDEO_PROVIDER_ORDER, isVideoProviderId, type VideoProvider } from "./video-providers";
 
 const DEFAULT_XAI_VIDEO_MODEL = "grok-imagine-video";
@@ -186,12 +186,21 @@ function reportProgress(
 	onUpdate({ content: [{ type: "text", text: `${provider}/${model}: ${status}${pct}` }] });
 }
 
+/** Upper bound on provider-controlled error text embedded in a tool result. */
+const MAX_PROVIDER_MESSAGE_CHARS = 300;
+
 /**
  * Best-effort human message from an error response.
  *
  * Never throws: callers use the result to decide whether a transient status is
  * retryable, so a truncated body on a 502 must not abandon an already-paid job
  * before that decision is reached.
+ *
+ * The text is provider-controlled and ends up in a rendered tool result, so
+ * tabs are flattened and the length is bounded. The cap is deliberately the
+ * existing 300 characters rather than a `TRUNCATE_LENGTHS` width: those are TUI
+ * line widths, and this string is also read by the model, which needs the
+ * provider's actual complaint rather than its first 110 characters.
  */
 async function readErrorMessage(response: Response): Promise<string> {
 	let rawText: string;
@@ -200,14 +209,15 @@ async function readErrorMessage(response: Response): Promise<string> {
 	} catch {
 		return `HTTP ${response.status} (unreadable body)`;
 	}
+	let message = rawText;
 	try {
 		const parsed = JSON.parse(rawText) as { error?: { message?: string } | string };
-		if (typeof parsed.error === "string") return parsed.error;
-		if (parsed.error?.message) return parsed.error.message;
+		if (typeof parsed.error === "string") message = parsed.error;
+		else if (parsed.error?.message) message = parsed.error.message;
 	} catch {
 		// Keep raw text.
 	}
-	return rawText.slice(0, 300);
+	return replaceTabs(message).slice(0, MAX_PROVIDER_MESSAGE_CHARS);
 }
 
 /**
