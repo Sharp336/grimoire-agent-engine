@@ -226,8 +226,9 @@ describe("session lock", () => {
 			processProbe: probe(false),
 		});
 		const unlinkSync = fs.unlinkSync;
+		let claimRemovals = 0;
 		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
-			if (String(target).endsWith(".steal")) {
+			if (String(target).endsWith(".steal") && ++claimRemovals === 2) {
 				const error = new Error("claim cleanup denied") as NodeJS.ErrnoException;
 				error.code = "EACCES";
 				throw error;
@@ -340,6 +341,36 @@ describe("session lock", () => {
 		const lock = acquireSessionLock(session);
 		expect(inspectSessionLock(session).status).toBe("live");
 		lock.release();
+	});
+
+	it("does not publish ownership while another mutation claim is live", () => {
+		const { session } = fixture();
+		const claimPath = `${lockPathForSession(session)}.steal`;
+		fs.writeFileSync(
+			claimPath,
+			JSON.stringify({
+				protocolVersion: 1,
+				ownerId: OWNER_B,
+				pid: 43,
+				processStartMarker: "marker-b",
+				hostname: "claim-host",
+				createdAt: 20_000,
+				sessionFile: lockPathForSession(session).slice(0, -".lock".length),
+			}),
+			{ flag: "wx", mode: 0o600 },
+		);
+
+		expect(() =>
+			acquireSessionLock(session, {
+				now: () => 20_001,
+				ownerId: OWNER_A,
+				pid: 42,
+				processStartMarker: "marker-a",
+				processProbe: probe(true),
+				hostname: "claim-host",
+			}),
+		).toThrow(SessionLockError);
+		expect(fs.existsSync(lockPathForSession(session))).toBe(false);
 	});
 
 	it("serializes a heartbeat against an explicit stale-steal claim", () => {

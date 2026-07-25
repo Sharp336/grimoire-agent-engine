@@ -661,11 +661,44 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		sessionFile: normalized,
 	};
 
+	const claimPath = claimPathFor(lockPath);
 	let acquired = false;
+	let initialClaimed = false;
+	let initialClaimRemovalError: SessionLockError | undefined;
 	try {
+		recoverClaim(claimPath, normalized, rt);
+		initialClaimed = writeClaim(claimPath, claim());
+		if (!initialClaimed) {
+			throw new SessionLockError(
+				"locked",
+				"Session lock mutation is claimed by another owner",
+				normalized,
+				lockPath,
+			);
+		}
 		acquired = writeExclusive(lockPath, record);
 	} catch (error) {
+		if (error instanceof SessionLockError) throw error;
 		throw ioError(normalized, lockPath, error);
+	} finally {
+		if (initialClaimed) {
+			try {
+				removeClaim(claimPath, normalized, rt.ownerId);
+			} catch (error) {
+				initialClaimRemovalError = ioError(normalized, lockPath, error);
+			}
+		}
+	}
+	if (initialClaimRemovalError) {
+		if (acquired) {
+			try {
+				const current = readRecord(lockPath, normalized);
+				if (current.kind === "record" && sameOwner(current.record, record)) fs.unlinkSync(lockPath);
+			} catch {
+				// Preserve the claim-cleanup failure; lock inspection remains fail-closed.
+			}
+		}
+		throw initialClaimRemovalError;
 	}
 	if (!acquired) {
 		let inspection: SessionLockInspection;
@@ -677,7 +710,6 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		if (inspection.status === "malformed") throw malformedError(normalized, inspection);
 		if (!inspection.stealable || !inspection.record) throw lockedError(normalized, inspection);
 
-		const claimPath = claimPathFor(lockPath);
 		let claimed = false;
 		let claimRemovalError: SessionLockError | undefined;
 		try {
