@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
-import { mkdir } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as core from "@oh-my-pi/pi-agent-core";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -288,7 +288,7 @@ describe("guided goal setup", () => {
 		const originalAgentDir = getAgentDir();
 		using userHome = await TempDir.create("@guided-goal-user-home-");
 		const userAgentDir = path.join(userHome.path(), "agent");
-		await mkdir(userAgentDir, { recursive: true });
+		await fs.mkdir(userAgentDir, { recursive: true });
 		await Bun.write(path.join(userAgentDir, "AGENTS.md"), shared);
 		setAgentDir(userAgentDir);
 		try {
