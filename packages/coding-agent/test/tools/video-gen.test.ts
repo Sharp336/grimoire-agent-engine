@@ -6,9 +6,11 @@ import {
 	MAX_POLL_FAILURES,
 	setVideoProviderOrder,
 	VideoJobPoller,
+	videoGenSchema,
 	videoGenTool,
 } from "@oh-my-pi/pi-coding-agent/tools/video-gen";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { type } from "arktype";
 
 const writtenPaths: string[] = [];
 
@@ -20,6 +22,8 @@ afterEach(async () => {
 interface CredentialedProviders {
 	xai?: boolean;
 	openrouter?: boolean;
+	/** Bearer the xAI resolver hands out, read fresh each call so a test can rotate it. */
+	xaiKey?: () => string;
 }
 
 function createContext(fetchMock: typeof fetch, available: CredentialedProviders): CustomToolContext {
@@ -43,7 +47,7 @@ function createContext(fetchMock: typeof fetch, available: CredentialedProviders
 				rotateSessionCredential: async () => false,
 			},
 			resolver: (provider: string) => async () =>
-				provider === "openrouter" ? "test-openrouter-key" : "test-xai-token",
+				provider === "openrouter" ? "test-openrouter-key" : (available.xaiKey?.() ?? "test-xai-token"),
 		} as unknown as ModelRegistry,
 		model: undefined,
 		isIdle: () => true,
@@ -75,6 +79,12 @@ function sequencedFetch(handlers: Array<(url: string, init?: RequestInit) => Res
 
 function json(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+/** First text block of a tool result — `toMatchObject` + asymmetric matchers misreports here. */
+function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
+	const block = result.content[0];
+	return block?.type === "text" ? (block.text ?? "") : "";
 }
 
 describe("videoGenTool", () => {
@@ -201,7 +211,182 @@ describe("videoGenTool", () => {
 
 		expect(calls).toHaveLength(0);
 		expect(result.isError).toBe(true);
-		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("XAI_API_KEY") });
+		expect(resultText(result)).toContain("XAI_API_KEY");
+	});
+	it("does not run a second billed generation on another provider once a job is submitted", async () => {
+		// xAI accepts the job (billing starts), then the generation itself fails.
+		// Falling through to OpenRouter here would charge for a whole second video.
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-doomed" }),
+			() => json({ status: "failed", error: { message: "content moderation" } }),
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-committed",
+			{ prompt: "something", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4` },
+			undefined,
+			createContext(fetchMock, { xai: true, openrouter: true }),
+		);
+
+		expect(calls.map(c => c.url)).toEqual([
+			"https://api.x.ai/v1/videos/generations",
+			"https://api.x.ai/v1/videos/req-doomed",
+		]);
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("req-doomed");
+	});
+
+	it("does not run a second billed generation when the download of a finished job fails", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-dl" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4", duration: 2 } }),
+			() => new Response("gone", { status: 502 }),
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-dl-fail",
+			{ prompt: "something", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4` },
+			undefined,
+			createContext(fetchMock, { xai: true, openrouter: true }),
+		);
+
+		expect(calls).toHaveLength(3);
+		expect(calls.every(c => !c.url.startsWith("https://openrouter.ai"))).toBe(true);
+		expect(result.isError).toBe(true);
+		// The bytes are still retrievable by hand, so name the job and its URL.
+		expect(resultText(result)).toContain("req-dl");
+		expect(resultText(result)).toContain("https://vidgen.x.ai/out.mp4");
+	});
+
+	it("rotates credentials on a polling 401 without resubmitting the job", async () => {
+		// `withAuth` retries its callback on an auth error. If one callback spans
+		// submit+poll, a mid-job token rotation starts a second paid generation.
+		let token = "stale-token";
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-auth" }),
+			() => {
+				token = "fresh-token";
+				return json({ error: { message: "expired" } }, 401);
+			},
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4", duration: 1 } }),
+			() => new Response(new Uint8Array([1])),
+		]);
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+
+		const result = await videoGenTool.execute(
+			"call-auth-rotate",
+			{ prompt: "something", output_path: outputPath },
+			undefined,
+			createContext(fetchMock, { xai: true, xaiKey: () => token }),
+		);
+
+		const submits = calls.filter(c => c.url.endsWith("/videos/generations"));
+		expect(submits).toHaveLength(1);
+		expect(calls[2].headers.get("authorization")).toBe("Bearer fresh-token");
+		expect(result.isError).toBeUndefined();
+		expect(result.details).toMatchObject({ requestId: "req-auth" });
+	});
+
+	it("still falls through to the next provider when the first has no credentials", async () => {
+		// The no-fallback rule must only bind AFTER submission — an uncredentialed
+		// provider has billed nothing, so the chain has to keep going.
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ id: "job-fb", polling_url: "https://openrouter.ai/api/v1/videos/job-fb", status: "pending" }),
+			() =>
+				json({
+					status: "completed",
+					unsigned_urls: ["https://openrouter.ai/api/v1/videos/job-fb/content"],
+					usage: { cost: 0.25 },
+				}),
+			() => new Response(new Uint8Array([3, 3, 3])),
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-fallback",
+			{ prompt: "a kite", output_path: outputPath },
+			undefined,
+			createContext(fetchMock, { openrouter: true }),
+		);
+
+		expect(calls[0].url).toBe("https://openrouter.ai/api/v1/videos");
+		expect(result.isError).toBeUndefined();
+		// OpenRouter reports spend on the poll response; surface it like xAI's ticks.
+		expect(result.details).toMatchObject({ provider: "openrouter", costUsd: 0.25 });
+	});
+
+	it("sends OpenRouter image-to-video in the documented frame_images shape", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ id: "job-i2v", polling_url: "https://openrouter.ai/api/v1/videos/job-i2v", status: "pending" }),
+			() => json({ status: "completed", unsigned_urls: ["https://openrouter.ai/api/v1/videos/job-i2v/content"] }),
+			() => new Response(new Uint8Array([4])),
+		]);
+
+		await videoGenTool.execute(
+			"call-or-i2v",
+			{
+				prompt: "drift",
+				output_path: outputPath,
+				model: "google/veo-3.1-fast",
+				image: "https://example.test/still.png",
+			},
+			undefined,
+			createContext(fetchMock, { openrouter: true }),
+		);
+
+		expect(calls[0].body?.frame_images).toEqual([
+			{ type: "image_url", image_url: { url: "https://example.test/still.png" }, frame_type: "first_frame" },
+		]);
+	});
+
+	it("routes an xAI 1080p image-to-video request to the only model that serves it", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-hd" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4", duration: 4 } }),
+			() => new Response(new Uint8Array([5])),
+		]);
+
+		await videoGenTool.execute(
+			"call-1080p",
+			{
+				prompt: "push in",
+				output_path: outputPath,
+				image: "https://example.test/still.png",
+				resolution: "1080p",
+			},
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls[0].body).toMatchObject({ model: "grok-imagine-video-1.5", resolution: "1080p" });
+	});
+
+	it("refuses xAI 1080p text-to-video locally instead of sending a doomed request", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+
+		const result = await videoGenTool.execute(
+			"call-1080p-t2v",
+			{ prompt: "no image", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`, resolution: "1080p" },
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("1080p");
+	});
+
+	it("rejects a fractional duration at the schema boundary", () => {
+		const base = { prompt: "x", output_path: "/tmp/x.mp4" };
+		expect(videoGenSchema({ ...base, duration: 4.5 })).toBeInstanceOf(type.errors);
+		expect(videoGenSchema({ ...base, duration: 4 })).not.toBeInstanceOf(type.errors);
+		expect(videoGenSchema({ ...base, duration: 20 })).toBeInstanceOf(type.errors);
 	});
 });
 
@@ -212,7 +397,9 @@ describe("VideoJobPoller", () => {
 			attempt += 1;
 			return handler(attempt);
 		}) as unknown as typeof fetch;
-		return new VideoJobPoller("test", {}, fetchMock, new AbortController().signal);
+		// A static string key keeps `withAuth` on its no-retry path, isolating the
+		// poller's own transient-failure budget.
+		return new VideoJobPoller("test", "static-key", () => ({}), fetchMock, new AbortController().signal);
 	}
 
 	it("absorbs transient failures up to the budget, then surfaces the provider status", async () => {
