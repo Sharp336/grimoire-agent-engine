@@ -1,5 +1,6 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type } from "arktype";
+import type { MemoryBackendSaveResult } from "../memory-backend/types";
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -37,11 +38,12 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
 		if (backend === "supermemory") {
 			const memory = this.session.getMemoryRuntime?.();
 			if (!memory) throw new Error("Supermemory backend is not initialised for this session.");
-			const results = await Promise.all(
-				params.items.map(item =>
-					memory.save({ content: item.content, context: item.context, source: "coding-agent-retain" }),
-				),
-			);
+			const results: MemoryBackendSaveResult[] = [];
+			for (const item of params.items) {
+				results.push(
+					await memory.save({ content: item.content, context: item.context, source: "coding-agent-retain" }),
+				);
+			}
 			const stored = results.reduce((total, result) => total + result.stored, 0);
 			const failures = results
 				.map((result, index) =>

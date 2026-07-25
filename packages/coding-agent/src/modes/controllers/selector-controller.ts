@@ -445,12 +445,6 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
 				break;
-			case "memory.backend":
-				void this.ctx.session.applyMemoryBackend().catch(err => {
-					this.ctx.showError(`Failed to apply memory backend: ${err}`);
-				});
-				break;
-
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;

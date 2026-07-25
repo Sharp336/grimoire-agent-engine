@@ -23,6 +23,7 @@ import {
 	resolveSupermemoryContainerTag,
 	type SupermemoryConfig,
 } from "./config";
+import { escapeSupermemoryXmlText } from "./content";
 import instructions from "./instructions.md" with { type: "text" };
 
 interface SupermemoryScopeSnapshot {
@@ -96,30 +97,20 @@ const containerStates = new Map<string, SupermemoryContainerState>();
 const RETENTION_SHUTDOWN_TIMEOUT_MS = 2_000;
 const MAX_AUTOMATIC_TRANSCRIPT_CHARS = 60_000;
 
-const XML_ESCAPES: Record<string, string> = {
-	"&": "&amp;",
-	"<": "&lt;",
-	">": "&gt;",
-	'"': "&quot;",
-	"'": "&apos;",
-};
-
-function escapeXmlText(value: string): string {
-	return value.replace(/[&<>"']/g, character => XML_ESCAPES[character] ?? character);
-}
-
 function formatProfile(profile: { static: string[]; dynamic: string[] }): string | undefined {
 	const sections: string[] = [];
 	if (profile.static.length > 0)
-		sections.push(`Static facts:\n${profile.static.map(item => `- ${escapeXmlText(item)}`).join("\n")}`);
+		sections.push(`Static facts:\n${profile.static.map(item => `- ${escapeSupermemoryXmlText(item)}`).join("\n")}`);
 	if (profile.dynamic.length > 0)
-		sections.push(`Recent context:\n${profile.dynamic.map(item => `- ${escapeXmlText(item)}`).join("\n")}`);
+		sections.push(
+			`Recent context:\n${profile.dynamic.map(item => `- ${escapeSupermemoryXmlText(item)}`).join("\n")}`,
+		);
 	return sections.length > 0 ? `<supermemory_profile>\n${sections.join("\n\n")}\n</supermemory_profile>` : undefined;
 }
 
 function formatSearch(items: SupermemorySearchItem[]): string | undefined {
 	return items.length > 0
-		? `<supermemory_recall>\n${items.map(item => `- ${escapeXmlText(item.content)}`).join("\n")}
+		? `<supermemory_recall>\n${items.map(item => `- ${escapeSupermemoryXmlText(item.content)}`).join("\n")}
 </supermemory_recall>`
 		: undefined;
 }

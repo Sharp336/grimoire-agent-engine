@@ -436,6 +436,30 @@ describe("retain.execute", () => {
 			}),
 		).rejects.toThrow("Supermemory stored 1 of 2 memories; failed item 2: HTTP 503.");
 	});
+
+	it("serializes Supermemory multi-item retains to avoid request bursts", async () => {
+		const settings = Settings.isolated({ "memory.backend": "supermemory" });
+		const session = makeSession(settings);
+		const firstSave = Promise.withResolvers<void>();
+		let saveCalls = 0;
+		session.getMemoryRuntime = (): MemoryRuntimeContext => ({
+			status: async () => ({ backend: "supermemory", active: true, writable: true, searchable: true }),
+			search: async query => ({ backend: "supermemory", query, count: 0, items: [] }),
+			save: async () => {
+				saveCalls++;
+				if (saveCalls === 1) await firstSave.promise;
+				return { backend: "supermemory", stored: 1 };
+			},
+		});
+
+		const execution = MemoryRetainTool.createIf(session)!.execute("call-supermemory-serial", {
+			items: [{ content: "first" }, { content: "second" }, { content: "third" }],
+		});
+		expect(saveCalls).toBe(1);
+		firstSave.resolve();
+		await expect(execution).resolves.toMatchObject({ details: { count: 3 } });
+		expect(saveCalls).toBe(3);
+	});
 });
 
 describe("retain.execute (Mnemopi backend)", () => {

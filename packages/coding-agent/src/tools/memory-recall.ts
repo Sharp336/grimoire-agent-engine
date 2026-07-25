@@ -3,6 +3,7 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
+import { escapeSupermemoryXmlText } from "../supermemory/content";
 import type { ToolSession } from ".";
 
 const memoryRecallSchema = type({
@@ -10,14 +11,6 @@ const memoryRecallSchema = type({
 });
 
 export type MemoryRecallParams = typeof memoryRecallSchema.infer;
-
-const XML_ESCAPES: Record<string, string> = {
-	"&": "&amp;",
-	"<": "&lt;",
-	">": "&gt;",
-	'"': "&quot;",
-	"'": "&apos;",
-};
 
 function formatSupermemoryRecall(
 	items: readonly { content: string; source?: string; timestamp?: string; score?: number }[],
@@ -28,9 +21,9 @@ ${items
 	.map((item, index) => {
 		const metadata = [item.source, item.timestamp, item.score === undefined ? undefined : `score ${item.score}`]
 			.filter((value): value is string => value !== undefined)
-			.map(value => value.replace(/[&<>"']/g, character => XML_ESCAPES[character] ?? character))
+			.map(escapeSupermemoryXmlText)
 			.join(" · ");
-		const content = item.content.replace(/[&<>"']/g, character => XML_ESCAPES[character] ?? character);
+		const content = escapeSupermemoryXmlText(item.content);
 		return `${index + 1}. ${content}${metadata ? `\n   ${metadata}` : ""}`;
 	})
 	.join("\n\n")}
