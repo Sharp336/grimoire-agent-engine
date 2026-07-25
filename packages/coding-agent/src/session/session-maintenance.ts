@@ -185,6 +185,7 @@ export interface SessionMaintenanceHost {
 	isGeneratingHandoff(): boolean;
 	promptGeneration(): number;
 	sessionId(): string;
+	usageScopeId(): string;
 	messages(): AgentMessage[];
 	baseSystemPrompt(): string[];
 	goalModeState(): GoalModeState | undefined;
@@ -1381,7 +1382,13 @@ export class SessionMaintenance {
 		if (!candidate) return undefined;
 		if (modelsAreEqual(candidate, currentModel)) return undefined;
 		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
-		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+		// Compaction and promotion must resolve credentials under the session's
+		// usage scope, not the provider prompt-cache id: a compaction/fallback model
+		// backed by an extension usage provider would otherwise bypass that
+		// provider's credential ranking and quota blocks.
+		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), {
+			usageScopeId: this.#host.usageScopeId(),
+		});
 		if (!apiKey) return undefined;
 		return candidate;
 	}
@@ -1456,14 +1463,19 @@ export class SessionMaintenance {
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 
 		for (const candidate of candidates) {
-			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), {
+				usageScopeId: this.#host.usageScopeId(),
+			});
 			if (!apiKey) continue;
 
 			try {
 				return await compact(
 					this.#host.obfuscatePreparationForProvider(preparation),
 					candidate,
-					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
+					this.#host.modelRegistry.resolver(candidate, {
+						sessionId: this.#host.sessionId(),
+						usageScopeId: this.#host.usageScopeId(),
+					}),
 					this.#host.obfuscateTextForProvider(customInstructions),
 					signal,
 					{
@@ -2484,7 +2496,9 @@ export class SessionMaintenance {
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
-					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), {
+						usageScopeId: this.#host.usageScopeId(),
+					});
 					if (!apiKey) continue;
 
 					let attempt = 0;
@@ -2493,7 +2507,10 @@ export class SessionMaintenance {
 							compactResult = await compact(
 								this.#host.obfuscatePreparationForProvider(preparation),
 								candidate,
-								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
+								this.#host.modelRegistry.resolver(candidate, {
+									sessionId: this.#host.sessionId(),
+									usageScopeId: this.#host.usageScopeId(),
+								}),
 								undefined,
 								autoCompactionSignal,
 								{

@@ -9,14 +9,15 @@ import {
 	filterProviderReplayMessages,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import type {
-	Context,
-	CredentialDisabledEvent,
-	Message,
-	Model,
-	ModelUsageHealth,
-	ProviderSessionState,
-	SimpleStreamOptions,
+import {
+	type Context,
+	type CredentialDisabledEvent,
+	type Message,
+	type Model,
+	type ModelUsageHealth,
+	type ProviderSessionState,
+	type SimpleStreamOptions,
+	UsageProviderRegistry,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
@@ -74,6 +75,7 @@ import {
 import { discoverCustomToolPaths, loadCustomTools, type ToolPathWithSource } from "./extensibility/custom-tools";
 import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
 import {
+	collectExtensionUsageProviderRegistrations,
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	type ExtensionContext,
@@ -143,6 +145,7 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
+import { advisorToolIdentity } from "./session/session-advisors";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
@@ -710,6 +713,11 @@ export async function loadCliExtensionProviders(
 	const eventBus = new EventBus();
 	const extensionsResult = await loadSessionExtensions(options, cwd, settings, eventBus);
 	const activeSources = extensionsResult.extensions.map(extension => extension.path);
+	const usageRegistrations = collectExtensionUsageProviderRegistrations(extensionsResult.extensions);
+	new UsageProviderRegistry().syncRegistrations(activeSources, usageRegistrations);
+	for (const { name, config } of extensionsResult.runtime.pendingProviderRegistrations) {
+		modelRegistry.validateProviderRegistration(name, config);
+	}
 	modelRegistry.syncExtensionSources(activeSources);
 	for (const sourceId of new Set(activeSources)) {
 		modelRegistry.clearSourceRegistrations(sourceId);
@@ -718,6 +726,7 @@ export async function loadCliExtensionProviders(
 		modelRegistry.registerProvider(name, config, sourceId);
 	}
 	extensionsResult.runtime.pendingProviderRegistrations = [];
+	modelRegistry.authStorage.syncExtensionUsageProviders(activeSources, usageRegistrations);
 	await modelRegistry.refreshRuntimeProviders();
 }
 
@@ -2482,6 +2491,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
 			localProtocolOptions,
+			// Live closures, not captured values: the runner is constructed before
+			// `session` is assigned (see `let session!` above, set once startup
+			// completes), and extensions create contexts long after that. Reading
+			// through the closure is what makes `ctx.providerSessionId` /
+			// `ctx.usageProviderScopeId` non-undefined for session-scoped usage
+			// providers instead of silently resolving in the global scope.
+			{
+				getProviderSessionId: () => (hasSession ? session.sessionId : undefined),
+				getUsageProviderScopeId: () => (hasSession ? session.usageProviderScopeId : undefined),
+			},
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -2493,6 +2512,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const getSessionContext = () => ({
 			sessionManager,
 			modelRegistry,
+			providerSessionId: session.sessionId,
+			usageProviderScopeId: session.usageProviderScopeId,
 			model: agent.state.model,
 			isIdle: () => !session.isStreaming,
 			hasQueuedMessages: () => session.queuedMessageCount > 0,
@@ -3063,6 +3084,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			hasEditTool: true,
 			requireYieldTool: false,
 			getSessionId: () => {
+				// Roster advisors share this one toolset, so prefer the identity the
+				// running advisor bound (see `advisorToolIdentity`). The flat
+				// `<session>-advisor` id stays the fallback for tool state touched
+				// outside an advisor turn.
+				const bound = advisorToolIdentity.getStore();
+				if (bound) return bound.sessionLabel;
 				const id = sessionManager.getSessionId?.();
 				return id ? `${id}-advisor` : null;
 			},
@@ -3087,6 +3114,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Owned only when this session created the manager; subagents receive a
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
 		const ownedMcpManager = options.mcpManager ? undefined : mcpManager;
+		// Snapshot the runner's extension usage-provider registrations once at
+		// construction; AgentSession receives them instead of introspecting the runner.
+		const usageProviderRegistrations = collectExtensionUsageProviderRegistrations(extensionRunner.getExtensions());
 		session = new AgentSession({
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
@@ -3113,6 +3143,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
+			usageProviderRegistrations,
 			customCommands: customCommandsResult.commands,
 			skills,
 			skillWarnings,

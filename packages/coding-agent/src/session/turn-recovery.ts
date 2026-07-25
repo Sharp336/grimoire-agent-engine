@@ -105,6 +105,7 @@ export interface TurnRecoveryHost {
 	streamingEditAbortTriggered(): boolean;
 	promptGeneration(): number;
 	sessionId(): string;
+	usageScopeId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { delayMs?: number; generation?: number }): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -984,8 +985,15 @@ export class TurnRecovery {
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
+		// Forwarding `options` wholesale sent no usage scope (it carries only
+		// pinFallback/apiKey/signal), so fallback auth resolved under the provider
+		// prompt-cache id and skipped session-scoped quota reports and ranking.
 		const apiKey =
-			options?.apiKey ?? (await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), options));
+			options?.apiKey ??
+			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), {
+				signal: options?.signal,
+				usageScopeId: this.#host.usageScopeId(),
+			}));
 		if (!apiKey) {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
@@ -1029,7 +1037,9 @@ export class TurnRecovery {
 			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 			if (!candidate) continue;
-			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), {
+				usageScopeId: this.#host.usageScopeId(),
+			});
 			if (!apiKey) continue;
 			await this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
 			return true;
@@ -1108,7 +1118,9 @@ export class TurnRecovery {
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
 		if (!baseModel) return false;
-		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
+		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId(), {
+			usageScopeId: this.#host.usageScopeId(),
+		});
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
 		this.#host.setModelWithProviderSessionReset(baseModel);
@@ -1158,7 +1170,9 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return;
-		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
+		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId(), {
+			usageScopeId: this.#host.usageScopeId(),
+		});
 		if (!apiKey) return;
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
@@ -1298,6 +1312,7 @@ export class TurnRecovery {
 				activeModel.provider,
 				this.#host.sessionId(),
 				{
+					usageScopeId: this.#host.usageScopeId(),
 					retryAfterMs,
 					baseUrl: activeModel.baseUrl,
 					modelId: activeModel.id,

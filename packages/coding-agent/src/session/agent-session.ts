@@ -71,7 +71,7 @@ import type {
 	ToolResultMessage,
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { deriveClaudeDeviceId, type Effort, streamSimple } from "@oh-my-pi/pi-ai";
+import { deriveClaudeDeviceId, type Effort, streamSimple, UsageProviderRegistry } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -560,6 +560,8 @@ export class AgentSession {
 	#modelRegistry: ModelRegistry;
 	#usageFallbackConfirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined;
 	#usageReserveApprovedSelector: string | undefined;
+	#usageProviderScopeId: string;
+	#unregisterUsageProviderScope: (() => void) | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
@@ -861,6 +863,7 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
+		this.#usageProviderScopeId = config.usageProviderScopeId ?? Bun.randomUUIDv7();
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -940,6 +943,7 @@ export class AgentSession {
 			agent: this.agent,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			usageScopeId: () => this.#usageProviderScopeId,
 			sessionManager: this.sessionManager,
 			providerSessionState: this.#providerSessionState,
 			model: () => this.model,
@@ -964,6 +968,33 @@ export class AgentSession {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		const usageProviders = config.usageProviderRegistrations ?? [];
+		// Only stand up the transient usage-provider scope when extensions actually
+		// registered providers; with none, builtin usage behaviour is unchanged and
+		// the session needs no scope registration or scoped credential override.
+		if (usageProviders.length > 0) {
+			const usageRegistry = new UsageProviderRegistry();
+			usageRegistry.syncRegistrations(
+				[...new Set(usageProviders.map(registration => registration.sourceId))],
+				usageProviders,
+			);
+			this.#unregisterUsageProviderScope = this.#modelRegistry.authStorage.registerSessionUsageProviders(
+				this.#usageProviderScopeId,
+				{
+					resolve: provider => usageRegistry.resolve(provider),
+					cacheKeyVersion: provider => {
+						const version = usageRegistry.cacheKeyVersion(provider);
+						return version === null ? null : `${this.#usageProviderScopeId}:${version}`;
+					},
+					providerIds: () => usageRegistry.providerIds(),
+				},
+			);
+			this.agent.getApiKey = model =>
+				this.#modelRegistry.resolver(model, {
+					sessionId: this.sessionId,
+					usageScopeId: this.#usageProviderScopeId,
+				});
+		}
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -982,6 +1013,7 @@ export class AgentSession {
 			streamingEditAbortTriggered: () => this.#streamingEditGuard.abortTriggered,
 			promptGeneration: () => this.#promptGeneration,
 			sessionId: () => this.sessionId,
+			usageScopeId: () => this.#usageProviderScopeId,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
@@ -1001,6 +1033,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
+			usageScopeId: () => this.#usageProviderScopeId,
 			sessionId: () => this.sessionId,
 		};
 		this.#stats = new SessionStatsTracker(statsHost);
@@ -1307,6 +1340,7 @@ export class AgentSession {
 			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage) =>
 				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage),
 			createCodexCompactionContext: createMaintenanceCodexCompactionContext,
+			usageScopeId: () => this.#usageProviderScopeId,
 			sessionId: () => this.sessionId,
 		};
 		this.#advisors = new SessionAdvisors(advisorsHost, {
@@ -1362,6 +1396,7 @@ export class AgentSession {
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
+			usageScopeId: () => this.#usageProviderScopeId,
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -1391,6 +1426,7 @@ export class AgentSession {
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
+			usageScopeId: () => this.#usageProviderScopeId,
 			sessionFile: () => this.sessionFile,
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
 			assertVibeSessionTransitionAllowed: action => this.#assertVibeSessionTransitionAllowed(action),
@@ -1437,6 +1473,10 @@ export class AgentSession {
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
 		this.#unsubscribeModelRoles = onModelRolesChanged(() => this.#advisors.onModelRolesChanged());
 	}
+	get usageProviderScopeId(): string {
+		return this.#usageProviderScopeId;
+	}
+
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this.#modelRegistry;
@@ -2402,6 +2442,7 @@ export class AgentSession {
 				if (assistantMsg.provider === "opencode-go") {
 					this.#modelRegistry.authStorage.recordUsageCost(assistantMsg.provider, assistantMsg.usage.cost.total, {
 						sessionId: this.#activeProviderSessionId(),
+						usageScopeId: this.#usageProviderScopeId,
 						recordedAt: assistantMsg.timestamp,
 						baseUrl: this.#modelRegistry.getProviderBaseUrl?.(assistantMsg.provider),
 					});
@@ -3397,6 +3438,8 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#unregisterUsageProviderScope?.();
+		this.#unregisterUsageProviderScope = undefined;
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
@@ -5077,6 +5120,8 @@ export class AgentSession {
 			cwd: this.sessionManager.getCwd(),
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
+			providerSessionId: this.sessionId,
+			usageProviderScopeId: this.#usageProviderScopeId,
 			model: this.model ?? undefined,
 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
 			isIdle: () => !this.isStreaming,
@@ -7766,6 +7811,7 @@ export class AgentSession {
 				}
 				return this.#modelRegistry.getProviderBaseUrl?.(provider);
 			},
+			usageScopeId: this.#usageProviderScopeId,
 			signal,
 		});
 	}
