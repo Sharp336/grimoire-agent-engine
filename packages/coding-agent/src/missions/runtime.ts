@@ -252,6 +252,9 @@ export class MissionRuntimeError extends Error {
 /** Thrown when a session transition would interrupt in-flight mission work. */
 export const MISSION_BUSY = "MISSION_BUSY";
 
+/** Thrown when a transition would rewrite or relocate the transcript a live mission owns. */
+export const INVALID_MISSION_TRANSITION = "INVALID_MISSION_TRANSITION";
+
 // ════════════════════════════════════════════════════════════════════════════
 // Prompt rendering
 // ════════════════════════════════════════════════════════════════════════════

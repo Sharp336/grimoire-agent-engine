@@ -25,7 +25,15 @@ import {
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
-import { MISSION_BUSY, type MissionRuntime, MissionRuntimeError } from "../../missions/runtime";
+import {
+	INVALID_MISSION_TRANSITION,
+	MISSION_BUSY,
+	type MissionRuntime,
+	MissionRuntimeError,
+} from "../../missions/runtime";
+
+export { INVALID_MISSION_TRANSITION };
+
 import type { MissionState } from "../../missions/types";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
@@ -113,7 +121,6 @@ export type RpcSessionChangeResult =
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
 /** Machine-readable reason for a mission transition the runtime refuses. */
-export const INVALID_MISSION_TRANSITION = "INVALID_MISSION_TRANSITION";
 
 import { type MissionRestartRuntime, restartMission } from "../../missions/runtime";
 

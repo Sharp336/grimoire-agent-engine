@@ -139,7 +139,7 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
-import { MISSION_BUSY, MissionRuntime } from "../missions/runtime";
+import { INVALID_MISSION_TRANSITION, MISSION_BUSY, MissionRuntime } from "../missions/runtime";
 import type { MissionState } from "../missions/types";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
@@ -4318,7 +4318,7 @@ export class AgentSession {
 	#assertMissionTransitionAllowed(kind: "suspend" | "destructive"): void {
 		if (!this.#missionRuntime.hasActiveMission()) return;
 		if (this.#missionRuntime.isBusy()) throw new Error(MISSION_BUSY);
-		if (kind === "destructive") throw new Error("INVALID_MISSION_TRANSITION");
+		if (kind === "destructive") throw new Error(INVALID_MISSION_TRANSITION);
 	}
 
 	get goalRuntime(): GoalRuntime {
