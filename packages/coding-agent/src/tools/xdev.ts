@@ -318,6 +318,12 @@ export class XdevRegistry {
 		const overflow: Tool[] = [];
 		const inlineGlobs = compileInlineGlobs(inlinePatterns);
 		let used = 0;
+		const fits = (section: string): boolean =>
+			used + (sections.length > 0 ? 2 : 0) + section.length <= XdevRegistry.DOCS_TOTAL_BUDGET;
+		const append = (section: string): void => {
+			used += (sections.length > 0 ? 2 : 0) + section.length;
+			sections.push(section);
+		};
 		for (const tool of this.list()) {
 			if (!this.#shouldInline(tool, mode, inlineGlobs)) {
 				overflow.push(tool);
@@ -325,25 +331,24 @@ export class XdevRegistry {
 			}
 			const descriptionCap = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
-			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET) {
+			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || !fits(docs)) {
 				overflow.push(tool);
 				continue;
 			}
-			used += docs.length;
-			sections.push(docs);
+			append(docs);
 		}
 		if (overflow.length > 0) {
-			sections.push(
-				[
-					"## Additional devices (docs on demand)",
-					...overflow.map(tool => {
-						const maxLength = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
-						return `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxLength)}`;
-					}),
-					"",
-					`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
-				].join("\n"),
-			);
+			const heading = "## Additional devices (docs on demand)";
+			const footer = `Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`;
+			const lines: string[] = [];
+			for (const tool of overflow) {
+				const maxLength = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
+				const line = `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxLength)}`;
+				const catalog = [heading, ...lines, line, "", footer].join("\n");
+				if (!fits(catalog)) break;
+				lines.push(line);
+			}
+			if (lines.length > 0) append([heading, ...lines, "", footer].join("\n"));
 		}
 		return sections.join("\n\n");
 	}

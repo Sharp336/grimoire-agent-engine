@@ -79,4 +79,19 @@ describe("XdevRegistry external description cap", () => {
 		expect(docs).not.toContain(LONG_DESCRIPTION);
 		expect(docs).toContain("… (full docs: read xd://");
 	});
+
+	it("keeps the complete catalog within the aggregate docs budget", () => {
+		const registry = new XdevRegistry([], 4000);
+		registry.reconcile(
+			Array.from({ length: 150 }, (_, index) =>
+				fakeTool(`mcp__large_catalog_tool_${index}`, `Tool ${index}. ${"x".repeat(5000)}`),
+			),
+		);
+
+		const docs = registry.docsAll("catalog");
+		expect(docs.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
+		expect(docs).toContain("## Additional devices (docs on demand)");
+		expect(docs).toContain("- xd://mcp__large_catalog_tool_0 —");
+		expect(docs).not.toContain("- xd://mcp__large_catalog_tool_149 —");
+	});
 });
