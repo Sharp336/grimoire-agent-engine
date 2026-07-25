@@ -2,12 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed restricted and discovery-disabled child sessions erasing source-scoped custom APIs from a shared parent model registry, which made extension-backed advisor models unavailable.
-
-## [17.0.8] - 2026-07-22
-
 ### Added
 
 - Added extension-model `requestModelId` support so provider plugins can expose local model aliases while preserving the upstream wire model id.
@@ -15,9 +9,13 @@
 
 ### Fixed
 
+- Fixed restricted and discovery-disabled child sessions erasing source-scoped custom APIs from a shared parent model registry, which made extension-backed advisor models unavailable.
 - Fixed exact bundled alias overrides dropping `requestModelId`, and priority broadcasts omitting Qoder's `kmodel` high-speed tier.
-- Added `/tree` re-answer for a past `ask` toolResult: selecting it now re-opens the picker with the original questions and branches the new answer as a sibling toolResult, leaving the original answer's branch reachable ([#5895](https://github.com/can1357/oh-my-pi/pull/5895) by [@Mathews-Tom](https://github.com/Mathews-Tom)).
-- Added configurable Hindsight client request deadlines via `hindsight.requestTimeoutMs` / `reflectTimeoutMs` / `recallTimeoutMs` / `retainTimeoutMs` settings (and matching `HINDSIGHT_*_TIMEOUT_MS` env vars).
+
+## [17.0.8] - 2026-07-22
+
+### Added
+
 - Added a `/tree` re-answer option for past `ask` tool results, allowing users to re-open the picker with original questions and branch the new answer as a sibling while keeping the original branch reachable.
 - Added configurable Hindsight client request deadlines via `hindsight.requestTimeoutMs`, `reflectTimeoutMs`, `recallTimeoutMs`, and `retainTimeoutMs` settings (and matching `HINDSIGHT_*_TIMEOUT_MS` environment variables).
 - Added `omp-linux-musl-x64` and `omp-linux-musl-arm64` release binaries for Alpine and other musl-based Linux distributions, with automatic musl selection in the installer and self-updater.

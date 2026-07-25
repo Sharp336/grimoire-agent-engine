@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Qoder's authenticated nine-model catalog, including ten context-window aliases that route to their base model with the selected 400K or 1M window.
+- Restored Qoder's six api3-only families (`cmodel`, `qmodel_preview`, `qmodel_latest`, `kmodel_latest`, `gm51model`, `dfmodel`) plus their twelve context aliases, flagged `compat.api3` so dispatch routes them to the WASM-signed transport; the catalog is back to fifteen base models and 37 rows.
+
 ### Changed
 
 - Renamed `codex-auto-review` model to `GPT-5.3 Codex Spark` with updated pricing and capabilities
@@ -12,26 +17,14 @@
 - Reduced max output tokens for an unspecified model from 16384 to 8192
 - Added image input support to Venice AI text model
 
+### Fixed
+
+- Prevented credential-scoped Devin discovery from rewriting the bundled catalog during generation; per-credential runtime discovery remains authoritative.
+
 ## [17.0.8] - 2026-07-22
 
 ### Added
 
-- Added Qoder's authenticated nine-model catalog, including ten context-window aliases that route to their base model with the selected 400K or 1M window.
-- Restored Qoder's six api3-only families (`cmodel`, `qmodel_preview`, `qmodel_latest`, `kmodel_latest`, `gm51model`, `dfmodel`) plus their twelve context aliases, flagged `compat.api3` so dispatch routes them to the WASM-signed transport; the catalog is back to fifteen base models and 37 rows.
-
-### Fixed
-
-- Prevented credential-scoped Devin discovery from rewriting the bundled catalog during generation; per-credential runtime discovery remains authoritative.
-- Added MiniMax M3 model with reasoning and multi-modal support
-- Added Gemini 3.5 Flash Lite model across multiple providers
-- Added Gemini 3.6 Flash model across multiple providers with thinking support
-- Added Hy3 model with reasoning and effort-based thinking
-- Added Doubao-Seed-Character model with image input support
-- Added LongCat 2.0 model across multiple providers
-- Added Laguna S 2.1 model (free and paid tiers) across multiple providers
-- Added Qwen 3.6 35B A3B model with thinking support
-- Added SWE-1.6 Slow model to devin agent catalog
-- Added XiaomiMiMo/MiMo-V2.5 model with reasoning support
 - Added support for several new models across multiple providers, including MiniMax M3, Gemini 3.5 Flash Lite, Gemini 3.6 Flash (with thinking support), Hy3, Doubao-Seed-Character, LongCat 2.0, Laguna S 2.1 (free and paid tiers), Qwen 3.6 35B A3B, SWE-1.6 Slow (devin agent catalog), and XiaomiMiMo/MiMo-V2.5.
 
 ### Changed

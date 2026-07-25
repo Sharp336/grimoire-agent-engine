@@ -48,6 +48,12 @@ import type {
 } from "../types";
 import { raceWithSignal } from "../utils/abort";
 import { type AssistantMessageEventStream, createAssistantMessageEventStream } from "../utils/event-stream";
+import {
+	armPreResponseTimeout,
+	getOpenAIStreamFirstEventTimeoutMs,
+	getOpenAIStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+} from "../utils/idle-iterator";
 import { toolWireSchema } from "../utils/schema/wire";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { convertMessages, parseChunkUsage } from "./openai-completions";
@@ -376,6 +382,8 @@ async function processApi3Stream(
 	onFirstToken: () => void,
 	signal: AbortSignal | undefined,
 	onSseEvent: ((event: RawSseEvent) => void) | undefined,
+	idleTimeoutMs: number | undefined,
+	firstEventTimeoutMs: number | undefined,
 ): Promise<void> {
 	const { output } = state;
 
@@ -613,7 +621,16 @@ async function processApi3Stream(
 		}
 	};
 
-	for await (const event of readSseEvents(deps.repair(body), signal)) {
+	// OpenAI-family idle/first-event watchdogs (same helpers as openai-completions /
+	// ollama): a silent SSE body must surface StreamTimeoutError rather than hang.
+	const timedEvents = iterateWithIdleTimeout(readSseEvents(deps.repair(body), signal), {
+		idleTimeoutMs,
+		firstItemTimeoutMs: firstEventTimeoutMs,
+		firstItemErrorMessage: "Qoder api3 stream timed out while waiting for the first event",
+		errorMessage: "Qoder api3 stream stalled while waiting for the next event",
+		abortSignal: signal,
+	});
+	for await (const event of timedEvents) {
 		notifyRawSseEvent(onSseEvent, event);
 		handleDataPayload(event.data);
 		if (state.errorMessage !== undefined) break;
@@ -855,23 +872,37 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 			}
 			const plaintext = JSON.stringify(body);
 			let prepared: QoderPreparedRequest | undefined;
-			const response = await fetchWithRetry(
-				() => {
-					prepared = ctx.prepareInferRequest(deps.api3Base, plaintext, route.wireId, "system");
-					return prepared.url;
-				},
-				{
-					method: "POST",
-					signal: options?.signal,
-					fetch: fetchImpl,
-					maxAttempts: API3_MAX_ATTEMPTS,
-					timeout: false,
-					prepareInit: () => {
-						if (prepared === undefined) throw new Error("Qoder api3 request was not prepared");
-						return { headers: prepared.headers, body: prepared.body ?? "" };
+			// Bun's native fetch ceiling is disabled below (`timeout: false`) so the
+			// OpenAI-family first-event/idle watchdogs govern stalled streams — same
+			// pattern as ollama/bedrock (issue #2422). Arm a clearable pre-response
+			// timer around the whole retry loop; clear it the instant headers arrive
+			// so it never aborts an actively streaming body.
+			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
+			const firstEventTimeoutMs =
+				options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
+			const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
+			let response: Response;
+			try {
+				response = await fetchWithRetry(
+					() => {
+						prepared = ctx.prepareInferRequest(deps.api3Base, plaintext, route.wireId, "system");
+						return prepared.url;
 					},
-				},
-			);
+					{
+						method: "POST",
+						signal: watchdog.signal,
+						fetch: fetchImpl,
+						maxAttempts: API3_MAX_ATTEMPTS,
+						timeout: false,
+						prepareInit: () => {
+							if (prepared === undefined) throw new Error("Qoder api3 request was not prepared");
+							return { headers: prepared.headers, body: prepared.body ?? "" };
+						},
+					},
+				);
+			} finally {
+				watchdog.clear();
+			}
 			if (options?.onResponse !== undefined) {
 				const headers: Record<string, string> = {};
 				response.headers.forEach((value, key) => {
@@ -899,6 +930,8 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 				onFirstToken,
 				options?.signal,
 				options?.onSseEvent ? event => options.onSseEvent?.(event, model) : undefined,
+				idleTimeoutMs,
+				firstEventTimeoutMs,
 			);
 
 			// Terminal: close any open block, finish pending tool calls, then

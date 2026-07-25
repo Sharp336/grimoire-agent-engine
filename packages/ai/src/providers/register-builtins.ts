@@ -500,9 +500,9 @@ export const streamOpenAICompletions = createLazyStream(
 	loadOpenAICompletionsProviderModule,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
-// The api3 transport has no idle watchdog of its own, so the generic lazy-stream
-// first-event/idle limits apply (unlike the self-policing openai-completions).
-export const streamQoderApi3 = createLazyStream(loadQoderApi3ProviderModule);
+// The api3 transport arms its own OpenAI-family first-event/idle watchdogs
+// (armPreResponseTimeout + iterateWithIdleTimeout), matching openai-completions.
+export const streamQoderApi3 = createLazyStream(loadQoderApi3ProviderModule, PROVIDER_HANDLED_STREAM_TIMEOUTS);
 export const streamOpenAIResponses = createLazyStream(
 	loadOpenAIResponsesProviderModule,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
