@@ -2309,9 +2309,14 @@ describe("cmux Codex browser review regressions", () => {
 	});
 
 	it("activates checkbox controls before verifying their checked state", async () => {
-		const { document, window } = parseHTML('<html><body><input id="toggle" type="checkbox"></body></html>');
-		const input = document.getElementById("toggle") as unknown as { checked: boolean } | null;
-		if (!input) throw new Error("Expected checkbox fixture");
+		const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
+		const host = document.getElementById("host");
+		if (!host) throw new Error("Expected checkbox shadow host");
+		const shadowRoot = host.attachShadow({ mode: "open" });
+		const input = document.createElement("input") as unknown as { checked: boolean };
+		Reflect.set(input, "id", "toggle");
+		Reflect.set(input, "type", "checkbox");
+		shadowRoot.append(input as never);
 		const clickStates: boolean[] = [];
 		Reflect.set(input, "getBoundingClientRect", () => ({ x: 0, y: 0, left: 0, top: 0, width: 20, height: 20 }));
 		Reflect.set(input, "scrollIntoView", () => undefined);
@@ -2320,7 +2325,8 @@ describe("cmux Codex browser review regressions", () => {
 			input.checked = !input.checked;
 			clickStates.push(input.checked);
 		});
-		Reflect.set(document, "elementFromPoint", () => input);
+		Reflect.set(shadowRoot, "elementFromPoint", () => input);
+		Reflect.set(document, "elementFromPoint", () => host);
 		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible", opacity: "1" }));
 		const current = await selectedTab(
 			facadeFor({
@@ -2332,7 +2338,7 @@ describe("cmux Codex browser review regressions", () => {
 				},
 			}),
 		);
-		const locator = current.playwright.locator("#toggle");
+		const locator = current.playwright.getByRole("checkbox");
 
 		await locator.check();
 		await locator.uncheck();

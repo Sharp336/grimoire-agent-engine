@@ -21,6 +21,8 @@ class RecordingAdapter implements CodexBrowserAdapter {
 		if (operation === "tab.selected") return { id: "1" } as T;
 		if (operation === "tab.content.exportGsuite") return "exported" as T;
 		if (operation === "tabs.content" || operation === "tab.dev.logs") return [] as T;
+		if (operation === "playwright.waitForEvent") return { token: "download-token" } as T;
+		if (operation === "playwright.download.path") return null as T;
 		return undefined as T;
 	}
 }
@@ -211,6 +213,20 @@ describe("Codex browser public facade closed vocabularies", () => {
 		).resolves.toEqual({
 			name: "Error",
 			message: "locator.filter does not accept hasTex",
+		});
+	});
+
+	it("preserves an uncapped download.path completion timeout", async () => {
+		const adapter = new RecordingAdapter();
+		const { tab } = await selectedTab(adapter);
+		const download = await tab.playwright.waitForEvent("download");
+		if (!("path" in download)) throw new Error("Expected a download value");
+
+		await download.path({ timeoutMs: 30_000 });
+
+		expect(adapter.calls.at(-1)).toMatchObject({
+			operation: "playwright.download.path",
+			args: { timeoutMs: 30_000 },
 		});
 	});
 

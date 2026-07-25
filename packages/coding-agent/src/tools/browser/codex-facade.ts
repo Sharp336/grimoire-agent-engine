@@ -569,7 +569,10 @@ class DownloadValue implements CodexDownload {
 	}
 
 	async path(options: { timeoutMs?: number } = {}): Promise<string | null> {
-		const timeoutMs = selectorTimeout(options.timeoutMs, "download.path");
+		const timeoutMs =
+			options.timeoutMs === undefined
+				? SELECTOR_TIMEOUT_MS
+				: positiveInteger(options.timeoutMs, "download.path timeoutMs");
 		return await this.#adapter.invoke<string | null>("playwright.download.path", {
 			tabId: this.#tabId,
 			token: this.#token,

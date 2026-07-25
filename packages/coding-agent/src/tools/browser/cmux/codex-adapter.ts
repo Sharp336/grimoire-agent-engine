@@ -265,8 +265,15 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		const rect = target.getBoundingClientRect();
 		if (rect.width <= 0 || rect.height <= 0) throw new Error("Locator target is not actionable");
 		const ownerDocument = target.ownerDocument || document;
-		const hit = ownerDocument.elementFromPoint?.((rect.left ?? rect.x) + rect.width / 2, (rect.top ?? rect.y) + rect.height / 2);
-		for (let current = hit; current; current = current.parentElement) {
+		const x = (rect.left ?? rect.x) + rect.width / 2;
+		const y = (rect.top ?? rect.y) + rect.height / 2;
+		let hit = ownerDocument.elementFromPoint?.(x, y);
+		while (hit?.shadowRoot?.elementFromPoint) {
+			const nested = hit.shadowRoot.elementFromPoint(x, y);
+			if (!nested || nested === hit) break;
+			hit = nested;
+		}
+		for (let current = hit; current; current = composedParent(current)) {
 			if (current === target) return;
 		}
 		throw new Error("Locator target does not receive pointer events at its center");
