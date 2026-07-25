@@ -5,6 +5,8 @@ import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/provid
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -616,6 +618,39 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("xd://mcp__nucleus_search");
 		expect(notices[0]).not.toContain("TAIL");
+	});
+
+	it("applies a settings description-cap change to the active xd prompt", async () => {
+		const registry = new XdevRegistry([], 50);
+		const description = `Search ${"x".repeat(400)} TAIL`;
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", description);
+		const rebuiltWithFullDescription = Promise.withResolvers<void>();
+		let expectFullDescription = false;
+		const { session } = newSession(
+			async () => {
+				const prompt = registry.docsAll("inline");
+				if (expectFullDescription && prompt.includes(description)) rebuiltWithFullDescription.resolve();
+				return prompt;
+			},
+			{ xdevRegistry: registry },
+		);
+		const errors: string[] = [];
+		const controller = new SelectorController({
+			session,
+			showError: (message: string) => errors.push(message),
+		} as unknown as InteractiveModeContext);
+
+		await session.refreshMCPTools([search]);
+		expect(session.agent.state.systemPrompt.join("\n")).not.toContain(description);
+
+		expectFullDescription = true;
+		session.settings.set("tools.xdevExternalDescriptionCap", 1000);
+		controller.handleSettingChange("tools.xdevExternalDescriptionCap", 1000);
+		await rebuiltWithFullDescription.promise;
+		await Promise.resolve();
+
+		expect(session.agent.state.systemPrompt.join("\n")).toContain(description);
+		expect(errors).toEqual([]);
 	});
 
 	it("inlines configured late xd:// device docs in mount notices", async () => {
