@@ -2715,6 +2715,36 @@ export class SessionManager {
 	}
 
 	/**
+	 * Load a detached in-memory view of an existing session without taking its
+	 * writer lock, writing the session, or updating terminal breadcrumbs.
+	 */
+	static async openSnapshot(
+		filePath: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<SessionManager> {
+		const resolvedFilePath = path.resolve(filePath);
+		storage.statSync(resolvedFilePath);
+		const titleSlot = await readTitleSlotFromFile(resolvedFilePath, storage);
+		const fileEntries = await loadEntriesFromFile(resolvedFilePath, storage);
+		if (fileEntries.length === 0) throw new Error(`Session file is empty or invalid: ${resolvedFilePath}`);
+
+		migrateToCurrentVersion(fileEntries);
+		const header = fileEntries[0] as SessionHeader;
+		const recordedCwd = header.cwd ? path.resolve(header.cwd) : undefined;
+		const cwd = recordedCwd && (await directoryExists(recordedCwd)) ? recordedCwd : getProjectDir();
+		const manager = new SessionManager(cwd, path.dirname(resolvedFilePath), false, storage);
+		manager.#sessionFile = resolvedFilePath;
+		await resolveBlobRefsInEntries(fileEntries, manager.#blobs);
+		manager.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
+		manager.#additionalDirectories = header.additionalDirectories ?? [];
+		manager.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
+		manager.#hasTitleSlot = titleSlot !== undefined;
+		manager.#fileIsCurrent = true;
+		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		return manager;
+	}
+
+	/**
 	 * Lock-free peek for cold subagent revival: returns the recorded working
 	 * directory (session header) and the latest `session_init` contract (system
 	 * prompt / tools / output schema) WITHOUT taking the single-writer lock that

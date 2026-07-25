@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { exportFromFile } from "../../src/export/html";
 import { inspectSessionLock, lockPathForSession, SessionLockError } from "../../src/session/session-lock";
 import { SessionManager } from "../../src/session/session-manager";
 
@@ -35,6 +36,23 @@ describe("SessionManager persistent lock integration", () => {
 
 		const reopened = await SessionManager.open(sessionFile);
 		await reopened.close();
+	});
+
+	it("allows lock-free snapshots and exports while the writer is active", async () => {
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		manager.appendMessage({ role: "user", content: "snapshot", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("missing session file");
+
+		const snapshot = await SessionManager.openSnapshot(sessionFile);
+		expect(snapshot.getEntries().some(entry => entry.type === "message")).toBe(true);
+		const outputPath = path.join(path.dirname(cwd), "session.html");
+		expect(await exportFromFile(sessionFile, { outputPath, includeSubSessions: false })).toBe(outputPath);
+		expect(fs.existsSync(outputPath)).toBe(true);
+		await expect(SessionManager.open(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
+		await manager.close();
 	});
 
 	it("keeps manager ownership retryable when close cannot remove the lock", async () => {
