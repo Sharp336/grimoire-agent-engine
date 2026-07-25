@@ -49,7 +49,23 @@ export * from "./session/session-dump-format";
 export * from "./session/session-entries";
 export * from "./session/session-listing";
 export * from "./session/session-loader";
-export * from "./session/session-lock";
+export {
+	acquireSessionLock,
+	inspectSessionLock,
+	lockPathForSession,
+	SESSION_LOCK_HEARTBEAT_MS,
+	SESSION_LOCK_PROTOCOL_VERSION,
+	SESSION_LOCK_STEAL_AFTER_MS,
+	SESSION_LOCK_SUSPECT_AFTER_MS,
+	SessionLockError,
+	type SessionLockErrorCode,
+	type SessionLockHandle,
+	type SessionLockInspection,
+	type SessionLockOptions,
+	type SessionLockProcessProbe,
+	type SessionLockRecord,
+	type SessionLockStatus,
+} from "./session/session-lock";
 export * from "./session/session-manager";
 export * from "./session/session-migrations";
 export * from "./session/session-storage";

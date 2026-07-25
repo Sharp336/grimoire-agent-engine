@@ -657,11 +657,17 @@ export class SessionManager {
 
 	#releaseSessionLock(): void {
 		const lock = this.#sessionLock;
-		this.#sessionLock = undefined;
 		if (!lock) return;
+		if (lock.references > 1) {
+			lock.errorHandlers.delete(this.#sessionLockErrorHandler);
+			lock.references--;
+			this.#sessionLock = undefined;
+			return;
+		}
+		lock.handle.release();
 		lock.errorHandlers.delete(this.#sessionLockErrorHandler);
-		lock.references--;
-		if (lock.references === 0) lock.handle.release();
+		lock.references = 0;
+		this.#sessionLock = undefined;
 	}
 
 	async #closeWriterHandle(): Promise<void> {
@@ -1550,7 +1556,7 @@ export class SessionManager {
 						}
 					}
 				} catch (err) {
-					targetLock?.release();
+					try {
 					if (artifactsMoved) {
 						try {
 							await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
@@ -1570,7 +1576,9 @@ export class SessionManager {
 							);
 						}
 					}
-
+					} finally {
+						targetLock?.release();
+					}
 					throw err;
 				}
 

@@ -65,6 +65,72 @@ describe("session lock", () => {
 		expect(fs.existsSync(lockPathForSession(session))).toBe(false);
 	});
 
+	it("removes a partially written lock record", () => {
+		const { session } = fixture();
+		const writeSync = fs.writeSync;
+		let writes = 0;
+		const partialWrite = (fd: number, buffer: Uint8Array, offset: number, length: number): number => {
+			if (writes++ === 0) return writeSync(fd, buffer, offset, Math.max(1, length - 1));
+			const error = new Error("write failed") as NodeJS.ErrnoException;
+			error.code = "EIO";
+			throw error;
+		};
+		const writeSpy = vi.spyOn(fs, "writeSync").mockImplementation(partialWrite as unknown as typeof fs.writeSync);
+		try {
+			expect(() =>
+				acquireSessionLock(session, {
+					ownerId: OWNER_A,
+					pid: 42,
+					processStartMarker: "marker",
+					processProbe: probe(true),
+				}),
+			).toThrow(SessionLockError);
+			expect(fs.existsSync(lockPathForSession(session))).toBe(false);
+		} finally {
+			writeSpy.mockRestore();
+		}
+	});
+
+	it("retries release after transient read and unlink failures", () => {
+		const { session } = fixture();
+		const lock = acquireSessionLock(session, {
+			ownerId: OWNER_A,
+			pid: 42,
+			processStartMarker: "marker",
+			processProbe: probe(true),
+		});
+		const lockPath = lockPathForSession(session);
+		const readFileSync = fs.readFileSync;
+		const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((target, options) => {
+			if (String(target) === lockPath) {
+				const error = new Error("read failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return readFileSync(target, options as never);
+		}) as typeof fs.readFileSync);
+		expect(() => lock.release()).toThrow(SessionLockError);
+		expect(lock.released).toBe(false);
+		readSpy.mockRestore();
+
+		const unlinkSync = fs.unlinkSync;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (String(target) === lockPath) {
+				const error = new Error("unlink failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		expect(() => lock.release()).toThrow(SessionLockError);
+		expect(lock.released).toBe(false);
+		unlinkSpy.mockRestore();
+
+		lock.release();
+		expect(lock.released).toBe(true);
+		expect(fs.existsSync(lockPath)).toBe(false);
+	});
+
 	it("prevents competing writers and classifies suspect locks", () => {
 		const { session } = fixture();
 		const now = 20_000;
@@ -206,21 +272,25 @@ describe("session lock", () => {
 		).toBe("malformed");
 	});
 
-	it("uses canonical real paths for symlink aliases and preserves 0600 claims", () => {
+	it("keeps the lock path stable when an opened symlink is atomically replaced", () => {
 		const { dir, session } = fixture();
 		fs.writeFileSync(session, "session");
 		const alias = path.join(dir, "alias.jsonl");
 		fs.symlinkSync(session, alias);
-		expect(lockPathForSession(alias)).toBe(lockPathForSession(session));
+		const aliasLockPath = lockPathForSession(alias);
 		const lock = acquireSessionLock(alias, {
 			ownerId: OWNER_A,
 			pid: 42,
 			processStartMarker: "marker",
 			processProbe: probe(true),
 		});
-		expect(fs.statSync(lockPathForSession(session)).mode & 0o777).toBe(0o600);
+		expect(fs.statSync(aliasLockPath).mode & 0o777).toBe(0o600);
+
+		fs.unlinkSync(alias);
+		fs.writeFileSync(alias, "rewritten session");
+		expect(lockPathForSession(alias)).toBe(aliasLockPath);
 		expect(() =>
-			acquireSessionLock(session, {
+			acquireSessionLock(alias, {
 				ownerId: OWNER_B,
 				pid: 43,
 				processStartMarker: "marker-b",
@@ -307,5 +377,12 @@ describe("session lock", () => {
 		expect(marker).not.toBeNull();
 		if (!marker) throw new Error("missing process start marker");
 		expect(__internalsForTesting.defaultProcessProbe.isAlive(process.pid, marker)).toBe(true);
+	});
+
+	it("accepts Bun's UUIDv7 owner ids", () => {
+		const { session } = fixture();
+		const lock = acquireSessionLock(session);
+		expect(inspectSessionLock(session).record?.ownerId).toBe(lock.record.ownerId);
+		lock.release();
 	});
 });

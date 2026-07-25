@@ -1,19 +1,21 @@
-import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+/** On-disk format version for session lock records. */
 export const SESSION_LOCK_PROTOCOL_VERSION = 1;
+/** Default interval between owner heartbeat updates. */
 export const SESSION_LOCK_HEARTBEAT_MS = 5_000;
+/** Age after which a lock is reported as suspect. */
 export const SESSION_LOCK_SUSPECT_AFTER_MS = 15_000;
+/** Minimum age before a lock owned by a confirmed-dead process may be replaced. */
 export const SESSION_LOCK_STEAL_AFTER_MS = 20_000;
 const MAX_LOCK_BYTES = 16 * 1024;
 const MAX_OWNER_ID_BYTES = 64;
 const MAX_MARKER_BYTES = 256;
 const MAX_HOSTNAME_BYTES = 255;
 const MAX_SESSION_PATH_BYTES = 4 * 1024;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LOCK_KEYS: Record<string, true> = {
 	protocolVersion: true,
 	ownerId: true,
@@ -27,9 +29,12 @@ const LOCK_KEYS: Record<string, true> = {
 
 type ErrorCode = "EEXIST" | "ENOENT" | string;
 
+/** Classification of the current sidecar lock state. */
 export type SessionLockStatus = "missing" | "live" | "suspect" | "stale" | "malformed";
+/** Stable error categories reported by session lock operations. */
 export type SessionLockErrorCode = "locked" | "malformed" | "not-owner" | "io";
 
+/** Validated owner record persisted in the sidecar lock file. */
 export interface SessionLockRecord {
 	protocolVersion: number;
 	ownerId: string;
@@ -41,11 +46,13 @@ export interface SessionLockRecord {
 	sessionFile: string;
 }
 
+/** Platform-specific process identity checks used for stale-owner recovery. */
 export interface SessionLockProcessProbe {
 	isAlive(pid: number, processStartMarker: string): boolean | "unknown";
 	processStartMarker(pid: number): string | null;
 }
 
+/** Overrides for lock identity, timing, and process probing. */
 export interface SessionLockOptions {
 	now?: () => number;
 	ownerId?: string;
@@ -57,6 +64,7 @@ export interface SessionLockOptions {
 	onHeartbeatError?: (error: SessionLockError) => void;
 }
 
+/** Observed lock state and stale-recovery eligibility. */
 export interface SessionLockInspection {
 	lockPath: string;
 	status: SessionLockStatus;
@@ -66,6 +74,7 @@ export interface SessionLockInspection {
 	stealable: boolean;
 }
 
+/** Error raised when lock ownership or lock-file I/O prevents an operation. */
 export class SessionLockError extends Error {
 	readonly code: SessionLockErrorCode;
 	readonly sessionFile: string;
@@ -93,6 +102,7 @@ export class SessionLockError extends Error {
 	}
 }
 
+/** Exclusive session ownership handle with heartbeat and release operations. */
 export interface SessionLockHandle {
 	readonly record: SessionLockRecord;
 	readonly lockPath: string;
@@ -150,11 +160,13 @@ function defaultProcessStartMarker(pid: number): string | null {
 
 	if (process.platform === "darwin") {
 		try {
-			// execFileSync passes argv directly: no shell interpolation of a PID.
-			const value = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "ignore"],
-			}).trim();
+			const processInfo = Bun.spawnSync(["ps", "-p", String(pid), "-o", "lstart="], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "ignore",
+			});
+			if (!processInfo.success) return null;
+			const value = processInfo.stdout.toString().trim();
 			return value ? `darwin:${value}` : null;
 		} catch {
 			return null;
@@ -163,19 +175,23 @@ function defaultProcessStartMarker(pid: number): string | null {
 
 	if (process.platform === "win32") {
 		try {
-			const value = execFileSync(
-				"powershell.exe",
+			const processInfo = Bun.spawnSync(
 				[
+					"powershell.exe",
 					"-NoProfile",
 					"-NonInteractive",
 					"-Command",
 					`(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()`,
 				],
 				{
-					encoding: "utf8",
-					stdio: ["ignore", "pipe", "ignore"],
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "ignore",
+					timeout: 3_000,
 				},
-			).trim();
+			);
+			if (!processInfo.success) return null;
+			const value = processInfo.stdout.toString().trim();
 			return value ? `win32:${value}` : null;
 		} catch {
 			return null;
@@ -202,13 +218,9 @@ const defaultProcessProbe: SessionLockProcessProbe = {
 function normalizeSessionFile(sessionFile: string): string {
 	const resolved = path.resolve(sessionFile);
 	try {
-		return fs.realpathSync(resolved);
+		return path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved));
 	} catch {
-		try {
-			return path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved));
-		} catch {
-			return resolved;
-		}
+		return resolved;
 	}
 }
 
@@ -226,7 +238,7 @@ function runtime(options: SessionLockOptions): SessionLockRuntime {
 	const processProbe = options.processProbe ?? defaultProcessProbe;
 	const processStartMarker = options.processStartMarker ?? processProbe.processStartMarker(pid);
 	if (!processStartMarker) throw new Error(`Unable to determine process start marker for pid ${pid}`);
-	const ownerId = options.ownerId ?? randomUUID();
+	const ownerId = options.ownerId ?? Bun.randomUUIDv7();
 	if (!UUID_PATTERN.test(ownerId)) throw new Error("Session lock ownerId must be a UUID");
 	const hostname = options.hostname ?? os.hostname();
 	if (!hostname || byteLength(hostname) > MAX_HOSTNAME_BYTES) throw new Error("Session lock hostname is invalid");
@@ -403,6 +415,7 @@ function inspectWithRuntime(sessionFile: string, rt: SessionLockRuntime): Sessio
 	return { lockPath, status, record, heartbeatAgeMs, processAlive: alive, stealable: stale };
 }
 
+/** Inspect a session sidecar without acquiring ownership. */
 export function inspectSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockInspection {
 	const normalized = normalizeSessionFile(sessionFile);
 	const lockPath = lockPathFor(normalized);
@@ -431,18 +444,44 @@ function serializedRecord(record: SessionLockRecord): Buffer {
 	return data;
 }
 
+function writeFullyAndSync(fd: number, data: Buffer): void {
+	let offset = 0;
+	while (offset < data.byteLength) {
+		const written = fs.writeSync(fd, data, offset, data.byteLength - offset);
+		if (written === 0) throw new Error("Session lock write made no progress");
+		offset += written;
+	}
+	fs.fsyncSync(fd);
+}
+
 function writeExclusive(lockPath: string, record: SessionLockRecord): boolean {
+	const data = serializedRecord(record);
 	let fd: number | undefined;
+	let created = false;
 	try {
 		fd = fs.openSync(lockPath, "wx", 0o600);
-		const data = serializedRecord(record);
-		fs.writeSync(fd, data, 0, data.length);
+		created = true;
+		writeFullyAndSync(fd, data);
+		fs.closeSync(fd);
+		fd = undefined;
 		return true;
 	} catch (error) {
-		if (errorCode(error) === "EEXIST") return false;
+		if (!created && errorCode(error) === "EEXIST") return false;
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// Preserve the original write failure.
+			}
+		}
+		if (created) {
+			try {
+				fs.unlinkSync(lockPath);
+			} catch {
+				// Preserve the original write failure.
+			}
+		}
 		throw error;
-	} finally {
-		if (fd !== undefined) fs.closeSync(fd);
 	}
 }
 
@@ -453,8 +492,7 @@ function writeClaim(claimPath: string, claim: SessionLockClaim): boolean {
 		fd = fs.openSync(tempPath, "wx", 0o600);
 		const data = Buffer.from(JSON.stringify(claim), "utf8");
 		if (data.byteLength > MAX_LOCK_BYTES) throw new Error("Session lock claim exceeds size limit");
-		fs.writeSync(fd, data, 0, data.length);
-		fs.fsyncSync(fd);
+		writeFullyAndSync(fd, data);
 		fs.closeSync(fd);
 		fd = undefined;
 		try {
@@ -559,6 +597,7 @@ function ioError(sessionFile: string, lockPath: string, error: unknown): Session
 	);
 }
 
+/** Acquire exclusive write ownership for a session until the returned handle is released. */
 export function acquireSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockHandle {
 	const normalized = normalizeSessionFile(sessionFile);
 	if (byteLength(normalized) > MAX_SESSION_PATH_BYTES) {
@@ -711,20 +750,21 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		heartbeat,
 		release(): void {
 			if (released) return;
-			released = true;
-			clearInterval(timer);
 			let current: LoadedRecord;
 			try {
 				current = readRecord(lockPath, normalized);
 			} catch (error) {
 				throw ioError(normalized, lockPath, error);
 			}
-			if (current.kind !== "record" || !sameOwner(current.record, record)) return;
-			try {
-				fs.unlinkSync(lockPath);
-			} catch (error) {
-				if (errorCode(error) !== "ENOENT") throw ioError(normalized, lockPath, error);
+			if (current.kind === "record" && sameOwner(current.record, record)) {
+				try {
+					fs.unlinkSync(lockPath);
+				} catch (error) {
+					if (errorCode(error) !== "ENOENT") throw ioError(normalized, lockPath, error);
+				}
 			}
+			released = true;
+			clearInterval(timer);
 		},
 		get released() {
 			return released;
@@ -732,9 +772,11 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 	};
 }
 
+/** Return the canonical sidecar lock path for a session file. */
 export function lockPathForSession(sessionFile: string): string {
 	return lockPathFor(sessionFile);
 }
+
 export const __internalsForTesting = {
 	parseClaim,
 	defaultProcessStartMarker,
