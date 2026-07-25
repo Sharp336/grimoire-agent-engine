@@ -99,14 +99,17 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 export function formatMCPReconnectNotice(event: McpReconnectStatusEvent): string {
 	const name = sanitizeMcpServerName(event.serverName);
 	const commandName = sanitizeText(event.serverName);
-	// Preserve an exact command only when its argument is parser-safe and its
-	// full value is already safe to display. Paths and names that require
-	// shortening/truncation use the generic interactive recovery flow instead.
+	// Preserve an exact command only when the advertised argument is the real
+	// server key: parser-safe, display-safe, and unchanged by sanitization.
+	// Control/ANSI stripping that would make `commandName === name` while
+	// both differ from the original key must fall back to generic `/mcp`
+	// (exact reconnect lookup would miss `server\x01` if we advertised `server`).
 	const commandNameIsSafe =
 		!/\s/.test(event.serverName) &&
 		!path.isAbsolute(event.serverName) &&
 		!path.win32.isAbsolute(event.serverName) &&
-		commandName === name;
+		commandName === event.serverName &&
+		name === event.serverName;
 	const recovery = commandNameIsSafe ? `Run /mcp reconnect ${commandName} to retry.` : "Use /mcp to retry manually.";
 	switch (event.type) {
 		case "reconnecting":

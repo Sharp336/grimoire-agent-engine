@@ -218,6 +218,16 @@ describe("MCPManager reconnect notices", () => {
 		expect(longNotice).toContain("Use /mcp to retry manually.");
 		expect(longNotice).not.toContain(longName);
 		expect(longNotice).not.toContain("/mcp reconnect");
+		// Control chars strip equally from display + command text; equality of
+		// the two sanitized forms must not advertise a reconnect key that no
+		// longer matches the manager's real server name.
+		const controlNotice = formatMCPReconnectNotice({
+			type: "reconnect-failed",
+			serverName: "server\u0001",
+			error: "offline",
+		});
+		expect(controlNotice).toContain("Use /mcp to retry manually.");
+		expect(controlNotice).not.toContain("/mcp reconnect");
 	});
 
 	it("scopes a supplied manager listener to the session settings and lifetime", async () => {
