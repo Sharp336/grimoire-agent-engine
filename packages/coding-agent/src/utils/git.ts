@@ -1834,6 +1834,49 @@ export const ref = {
 			),
 		);
 	},
+
+	/**
+	 * True when `ancestor` is an ancestor of `descendant` (`git merge-base --is-ancestor`).
+	 * Exit 0 → true, exit 1 → false; any other exit throws.
+	 */
+	async isAncestor(cwd: string, ancestor: string, descendant: string, signal?: AbortSignal): Promise<boolean> {
+		const args = ["merge-base", "--is-ancestor", ancestor, descendant];
+		const result = await git(cwd, args, { readOnly: true, signal });
+		if (result.exitCode === 0) return true;
+		if (result.exitCode === 1) return false;
+		throw new GitCommandError(args, result);
+	},
+
+	/**
+	 * Compare-and-swap a ref via `git update-ref <ref> <new> <old>`.
+	 * Returns true on success, false when the CAS lost because the ref moved,
+	 * and throws on any other failure.
+	 */
+	async update(
+		cwd: string,
+		refName: string,
+		newSha: string,
+		expectedOldSha: string,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		const args = ["update-ref", refName, newSha, expectedOldSha];
+		const result = await git(cwd, args, { signal });
+		if (result.exitCode === 0) return true;
+		// Git reports a lost CAS as exit 128 with "is at <sha> but expected <sha>".
+		if (/but expected /i.test(result.stderr)) return false;
+		throw new GitCommandError(args, result);
+	},
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// API: merge
+// ════════════════════════════════════════════════════════════════════════════
+
+export const merge = {
+	/** Fast-forward the current branch to `ref` (`git merge --ff-only`). */
+	async fastForwardOnly(cwd: string, ref: string, signal?: AbortSignal): Promise<void> {
+		await runEffect(cwd, ["merge", "--ff-only", ref], { signal });
+	},
 };
 
 // ════════════════════════════════════════════════════════════════════════════
