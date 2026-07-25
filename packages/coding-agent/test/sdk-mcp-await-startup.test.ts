@@ -95,6 +95,13 @@ describe("createAgentSession with mcp.awaitStartupMs (interactive UI)", () => {
 			settings: Settings.isolated({ "mcp.awaitStartupMs": 5000 }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
+			extensions: [
+				async () => {
+					// Let prompts/list finish before session callbacks are installed,
+					// forcing the awaited replay to seed commands from manager state.
+					await Bun.sleep(100);
+				},
+			],
 			skills: [],
 			contextFiles: [],
 			promptTemplates: [],

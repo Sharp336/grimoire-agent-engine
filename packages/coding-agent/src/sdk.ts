@@ -3466,6 +3466,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// empty tool list so instruction-only servers are observed.
 			if (deferMCPDiscoveryForUI && !startDeferredMCPDiscovery) {
 				await session.refreshMCPTools(mcpManager.getTools());
+				session.setMCPPromptCommands(buildMCPPromptCommands(mcpManager));
 			}
 			const notificationDebounceTimers = new Map<string, Timer>();
 			const clearDebounceTimers = () => {
