@@ -26,10 +26,11 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
-import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseStreamingJson, prompt } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
 import type { Theme } from "../modes/theme/theme";
+import omittedCatalogTemplate from "../prompts/tools/xdev-omitted-catalog.md" with { type: "text" };
 import { renderDefaultToolExecution } from "./default-renderer";
 import type { Tool } from "./index";
 import { replaceTabs } from "./render-utils";
@@ -321,7 +322,7 @@ export class XdevRegistry {
 		const heading = "## Additional devices (docs on demand)";
 		const footer = `Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`;
 		const omittedLine = (count: number): string =>
-			`- ${count} more devices omitted — read ${XD_URL_PREFIX} for the complete inventory.`;
+			prompt.render(omittedCatalogTemplate, { count, inventory_url: XD_URL_PREFIX }).trim();
 		const catalogLength = (lineChars: number, lineCount: number, omitted: number): number =>
 			heading.length +
 			lineChars +
