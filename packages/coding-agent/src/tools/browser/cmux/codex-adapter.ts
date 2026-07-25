@@ -547,16 +547,24 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 			fileEvents: [],
 			clickListener: null,
 			nativeActivationTarget: null,
+			trustedActivation: false,
 			active: true,
 		};
 		state.clickListener = event => {
+			if (event.isTrusted) {
+				state.trustedActivation = true;
+				queueMicrotask(() => {
+					state.trustedActivation = false;
+				});
+			}
 			const target = event.target instanceof Element ? event.target : null;
 			const input = target?.closest('input[type="file"]');
 			if (!input) return;
 			const nativeActivation = state.nativeActivationTarget === input;
 			if (nativeActivation) state.nativeActivationTarget = null;
+			const delegatedActivation = !event.isTrusted && state.trustedActivation === true;
 			queueMicrotask(() => {
-				if (state.active !== true || (!event.isTrusted && !nativeActivation) || event.defaultPrevented || input.disabled === true || input.isConnected === false) return;
+				if (state.active !== true || (!event.isTrusted && !nativeActivation && !delegatedActivation) || event.defaultPrevented || input.disabled === true || input.isConnected === false) return;
 				const token = "file-" + state.tokenNamespace + "-" + state.nextToken++;
 				input.setAttribute("data-omp-codex-file-token", token);
 				state.fileEvents.push({ sequence: ++state.fileEventSequence, token, multiple: input.multiple === true });

@@ -103,10 +103,10 @@ function appendBrowserLog(state: PuppeteerCodexSessionState, level: string, text
 
 function runtimeExceptionText(event: RuntimeExceptionEvent): string {
 	const details = event.exceptionDetails;
-	const direct = typeof details?.text === "string" ? details.text.trim() : "";
-	if (direct) return direct;
 	const description = typeof details?.exception?.description === "string" ? details.exception.description.trim() : "";
 	if (description) return description;
+	const direct = typeof details?.text === "string" ? details.text.trim() : "";
+	if (direct) return direct;
 	return details?.exception ? runtimeValueText(details.exception) : "Uncaught exception";
 }
 
@@ -161,6 +161,7 @@ interface PageEditableElement {
 	disabled?: boolean;
 	getAttribute(name: string): string | null;
 	isContentEditable: boolean;
+	shadowRoot?: { activeElement: PageEditableElement | null };
 	readOnly?: boolean;
 	selectionEnd: number | null;
 	selectionStart: number | null;
@@ -2710,7 +2711,8 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #typeIntoActiveElement(text: string, label: "cua.type" | "dom_cua.type"): Promise<void> {
 		const before = await this.#page.evaluate(() => {
 			const pageDocument = document as unknown as PageDocumentLike;
-			const active = pageDocument.activeElement;
+			let active = pageDocument.activeElement;
+			while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
 			if (!active) return null;
 			const tag = active.tagName.toLowerCase();
 			const target = active as unknown as PageEditableElement;
@@ -2749,7 +2751,8 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		await this.#page.keyboard.type(text);
 		const after = await this.#page.evaluate(() => {
 			const pageDocument = document as unknown as PageDocumentLike;
-			const active = pageDocument.activeElement;
+			let active = pageDocument.activeElement;
+			while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
 			if (!active) return null;
 			const target = active as unknown as PageEditableElement;
 			return target.isContentEditable ? (target.textContent ?? "") : target.value;

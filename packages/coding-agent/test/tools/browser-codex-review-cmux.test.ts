@@ -1454,6 +1454,21 @@ describe("cmux Codex browser review regressions", () => {
 		}
 	});
 
+	it("records a delegated file-input activation during a trusted user gesture", async () => {
+		const probe = observerProbe();
+		const adapter = adapterForObserver(probe);
+		await adapter.beginRun();
+
+		try {
+			probe.fire(probe.anchor, false, false, true);
+			probe.fire(probe.file, false, false, false);
+			await Promise.resolve();
+			expect(probe.file.getAttribute("data-omp-codex-file-token")).toMatch(/^file-/);
+		} finally {
+			await adapter.dispose();
+		}
+	});
+
 	it("records native adapter file activation without accepting arbitrary untrusted page events", async () => {
 		const probe = observerProbe(true);
 		const commands: string[] = [];

@@ -150,8 +150,11 @@ describe("Puppeteer Codex log capture", () => {
 		await attachPuppeteerCodexLogCapture(page, state);
 		session.emit("Runtime.exceptionThrown", {
 			exceptionDetails: {
-				text: "Uncaught ReferenceError: missingValue is not defined",
-				exception: { type: "object", description: "ReferenceError: missingValue is not defined" },
+				text: "Uncaught",
+				exception: {
+					type: "object",
+					description: "ReferenceError: missingValue is not defined\n    at fixture.js:1:1",
+				},
 			},
 		});
 		session.emit("Runtime.exceptionThrown", {
@@ -162,7 +165,7 @@ describe("Puppeteer Codex log capture", () => {
 		});
 
 		expect(state.logs.map(({ level, text }) => ({ level, text }))).toEqual([
-			{ level: "error", text: "Uncaught ReferenceError: missingValue is not defined" },
+			{ level: "error", text: "ReferenceError: missingValue is not defined\n    at fixture.js:1:1" },
 			{ level: "error", text: "TypeError: detailed exception" },
 		]);
 		await detachPuppeteerCodexLogCapture(state);
@@ -1082,6 +1085,21 @@ describe("Puppeteer final parity blockers", () => {
 				 return {nested:await nested.count(),framed:await framed.count(),errors};`,
 			);
 			expect(result).toEqual({ nested: 0, framed: 0, errors: [expect.any(String), expect.any(String)] });
+		});
+	}, 20_000);
+
+	it("types into the deepest focused editor inside an open shadow root", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{ const host=document.createElement("div"); host.id="editor-host"; document.body.append(host); const input=host.attachShadow({mode:"open"}).appendChild(document.createElement("input")); input.focus(); });
+				 await t.cua.type({text:"A"});
+				 await t.dom_cua.type({text:"B"});
+				 return {value:await page.evaluate(()=>document.querySelector("#editor-host").shadowRoot.activeElement.value)};`,
+			);
+			expect(result).toEqual({ value: "AB" });
 		});
 	}, 20_000);
 
