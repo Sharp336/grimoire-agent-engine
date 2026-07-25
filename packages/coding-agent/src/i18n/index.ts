@@ -86,7 +86,7 @@ class I18nManager {
 	#loadEmbedded(lang: string): void {
 		const prefix = `${lang}-`;
 		for (const [key, data] of Object.entries(EMBEDDED_TRANSLATIONS)) {
-			if (!key.startsWith(prefix)) continue;
+			if (key !== lang && !key.startsWith(prefix)) continue;
 			this.#mergeTranslations(this.#dict, data);
 		}
 	}

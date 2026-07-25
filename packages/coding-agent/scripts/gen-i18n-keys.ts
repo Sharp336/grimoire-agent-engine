@@ -79,17 +79,17 @@ function extractArgsAndFlagsScoped(content: string, commandName: string): Record
 
 	// Extract arg descriptions: name: Args.string({ description: "..." })
 	// Support multiline by matching the full Args call
-	const argRe = /(\w+):\s*Args\.\w+\(\{[^}]*?description:\s*"([^"]+)"/gs;
+	const argRe = /(?:("|')?)([\w-]+)\1:\s*Args\.\w+\(\{[^}]*?description:\s*"([^"]+)"/gs;
 	for (const match of extractMatches(argRe, content)) {
-		const key = `${commandName}.args.${match[1]}.description`;
-		if (!result[key]) result[key] = match[2];
+		const key = `${commandName}.args.${match[2]}.description`;
+		if (!result[key]) result[key] = match[3];
 	}
 
 	// Extract flag descriptions: name: Flags.string({ description: "..." })
-	const flagRe = /(\w+):\s*Flags\.\w+\(\{[^}]*?description:\s*"([^"]+)"/gs;
+	const flagRe = /(?:("|')?)([\w-]+)\1:\s*Flags\.\w+\(\{[^}]*?description:\s*"([^"]+)"/gs;
 	for (const match of extractMatches(flagRe, content)) {
-		const key = `${commandName}.flags.${match[1]}.description`;
-		if (!result[key]) result[key] = match[2];
+		const key = `${commandName}.flags.${match[2]}.description`;
+		if (!result[key]) result[key] = match[3];
 	}
 
 	return result;
