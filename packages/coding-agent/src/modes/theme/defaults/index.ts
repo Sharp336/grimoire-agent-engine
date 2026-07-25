@@ -96,6 +96,7 @@ import porcelain from "./porcelain.json" with { type: "json" };
 import quartz from "./quartz.json" with { type: "json" };
 import sandstone from "./sandstone.json" with { type: "json" };
 import titanium from "./titanium.json" with { type: "json" };
+import titanium_dracula from "./titanium-dracula.json" with { type: "json" };
 
 export const defaultThemes = {
 	alabaster: alabaster,
@@ -196,4 +197,5 @@ export const defaultThemes = {
 	quartz: quartz,
 	sandstone: sandstone,
 	titanium: titanium,
+	"titanium-dracula": titanium_dracula,
 };
