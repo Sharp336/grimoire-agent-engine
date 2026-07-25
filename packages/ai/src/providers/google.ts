@@ -1,3 +1,4 @@
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
 import type { Context, Model, StreamFunction } from "../types";
@@ -35,7 +36,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 			// `model.baseUrl` already includes the API version segment when set (mirrors the
 			// `apiVersion: ""` reset that the SDK relied on for custom base URLs).
 			const base = model.baseUrl?.trim() || DEFAULT_GENERATIVE_LANGUAGE_BASE;
-			const url = `${base}/models/${model.id}:streamGenerateContent?alt=sse`;
+			const url = `${base}/models/${resolveWireModelId(model, undefined)}:streamGenerateContent?alt=sse`;
 			const headers: Record<string, string> = {
 				"x-goog-api-key": apiKey,
 				...(model.headers ?? {}),

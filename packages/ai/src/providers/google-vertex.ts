@@ -1,3 +1,4 @@
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Context, Model, StreamFunction } from "../types";
@@ -29,6 +30,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 		retainTextSignature: true,
 		prepare: async (): Promise<GoogleGenAIRequestPlan> => {
 			const apiKey = resolveApiKey(options);
+			const wireModelId = resolveWireModelId(model, undefined);
 			const params = buildGoogleGenerateContentParams(model, context, options ?? {});
 			params.config ||= {};
 			if (!params.config.safetySettings) {
@@ -70,7 +72,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 				const explicitLocation = options?.location;
 				const location = explicitLocation ?? resolveAmbientLocation() ?? "global";
 				const host = resolveEndpointHost(location);
-				const path = `${API_VERSION}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
+				const path = `${API_VERSION}/publishers/google/models/${wireModelId}:streamGenerateContent?alt=sse`;
 				const useGlobalFallback = !explicitLocation && host !== "aiplatform.googleapis.com";
 				return {
 					params,
@@ -88,7 +90,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 			const location = resolveLocation(options);
 			const accessToken = await getVertexAccessToken({ signal: options?.signal, fetch: options?.fetch });
 			const host = resolveEndpointHost(location);
-			const url = `https://${host}/${API_VERSION}/projects/${project}/locations/${location}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
+			const url = `https://${host}/${API_VERSION}/projects/${project}/locations/${location}/publishers/google/models/${wireModelId}:streamGenerateContent?alt=sse`;
 			return {
 				params,
 				url,

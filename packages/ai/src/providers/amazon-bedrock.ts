@@ -8,7 +8,11 @@
  */
 
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { mapEffortToAnthropicAdaptiveEffort, requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
+import {
+	mapEffortToAnthropicAdaptiveEffort,
+	requireSupportedEffort,
+	resolveWireModelId,
+} from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { $env, $flag, fetchWithRetry, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
@@ -337,8 +341,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			options?.onPayload?.(commandInput, model);
 
 			const host = `bedrock-runtime.${region}.amazonaws.com`;
-			const url = `https://${host}/model/${encodeURIComponent(model.id)}/converse-stream`;
-			const urlPath = `/model/${encodeURIComponent(model.id)}/converse-stream`;
+			const wireModelId = resolveWireModelId(model, undefined);
+			const url = `https://${host}/model/${encodeURIComponent(wireModelId)}/converse-stream`;
+			const urlPath = `/model/${encodeURIComponent(wireModelId)}/converse-stream`;
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,

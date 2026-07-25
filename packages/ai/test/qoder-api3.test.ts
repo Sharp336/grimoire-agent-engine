@@ -30,6 +30,7 @@ import type {
 	Tool,
 } from "@oh-my-pi/pi-ai/types";
 import { isQoderApi3Model } from "@oh-my-pi/pi-ai/types";
+import { withEmptyCompletionRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // ---------------------------------------------------------------------------
@@ -1159,6 +1160,102 @@ describe("api3 stream termination", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
 		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// (i2) empty-completion retry: a degenerate complete-but-empty stream is
+// retried (mirrors the OpenAI-completions / Anthropic policy) instead of
+// silently halting the agent on a lone `done` with no content.
+// ---------------------------------------------------------------------------
+
+describe("api3 empty-completion retry", () => {
+	// A degenerate complete-but-empty turn (empty `delta` + `finish_reason:"stop"`
+	// + `[DONE]`) delivers a lone `start`/`done` with no content. Unretried that
+	// silently halts the agent mid-task; the transport is wrapped with the same
+	// bounded empty-completion retry the OpenAI-completions path uses so a flaky
+	// empty stop is re-requested instead of surfaced.
+	const DEGENERATE_EMPTY_SSE = [
+		`data: ${chunkEnvelope({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] })}`,
+		`data: ${envelope("[DONE]")}`,
+		FINISH_METRICS_FRAME,
+	].join("\n\n");
+
+	const CONTENT_SSE = [
+		`data: ${chunkEnvelope({ choices: [{ delta: { content: "OK" }, index: 0 }] })}`,
+		`data: ${chunkEnvelope({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] })}`,
+		`data: ${envelope("[DONE]")}`,
+		FINISH_METRICS_FRAME,
+	].join("\n\n");
+
+	it("a degenerate empty stop alone (no retry wrapper) surfaces as an empty done", async () => {
+		// Baseline: the single-attempt transport emits a contentless terminal
+		// `done` — the failure the retry wrapper exists to absorb.
+		const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(DEGENERATE_EMPTY_SSE));
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([]);
+		expect(events.map(event => event.type)).toEqual(["start", "done"]);
+	});
+
+	it("withEmptyCompletionRetry retries a degenerate empty stop and delivers the next attempt's content", async () => {
+		const { bridge } = fakeBridge();
+		// First attempt returns the degenerate empty stop; the retry returns
+		// content. Selected by request order so the closure reads the count
+		// the fetch runs at, not the pre-increment value.
+		let inferCall = 0;
+		const fetches = fakeApi3Fetch(() => {
+			inferCall += 1;
+			return sseResponse(inferCall === 1 ? DEGENERATE_EMPTY_SSE : CONTENT_SSE);
+		});
+		const transport = makeTransport(bridge);
+		const model = api3Model(specById("qmodel_preview"));
+		let attempts = 0;
+		// Mirrors the production `streamQoderApi3` closure: each attempt rebuilds
+		// the route from the model so a retry never inherits stale route state.
+		const wrapped = withEmptyCompletionRetry(model, userContext(), undefined, (attemptModel, attemptContext) => {
+			attempts += 1;
+			return transport.stream(buildApi3Route(attemptModel), attemptModel, attemptContext, {
+				apiKey: "qoder-test-token",
+				fetch: fetches.fetchImpl,
+			});
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of wrapped) events.push(event);
+		const result = await wrapped.result();
+
+		// The empty first attempt was discarded and a fresh request was issued.
+		expect(attempts).toBe(2);
+		expect(fetches.inferRequests).toHaveLength(2);
+		// Exactly one `start` — the empty attempt's buffered `start` was dropped.
+		expect(events.filter(event => event.type === "start")).toHaveLength(1);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toContainEqual({ type: "text", text: "OK" });
+		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+	});
+
+	it("withEmptyCompletionRetry commits to the first attempt once content streams (no retry, no duplicate start)", async () => {
+		const { bridge } = fakeBridge();
+		let attempt = 0;
+		const fetches = fakeApi3Fetch(() => sseResponse(CONTENT_SSE));
+		const transport = makeTransport(bridge);
+		const model = api3Model(specById("qmodel_preview"));
+		const wrapped = withEmptyCompletionRetry(model, userContext(), undefined, (attemptModel, attemptContext) => {
+			attempt += 1;
+			return transport.stream(buildApi3Route(attemptModel), attemptModel, attemptContext, {
+				apiKey: "qoder-test-token",
+				fetch: fetches.fetchImpl,
+			});
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of wrapped) events.push(event);
+		const result = await wrapped.result();
+
+		expect(attempt).toBe(1);
+		expect(fetches.inferRequests).toHaveLength(1);
+		expect(events.filter(event => event.type === "start")).toHaveLength(1);
+		expect(result.content).toContainEqual({ type: "text", text: "OK" });
 	});
 });
 

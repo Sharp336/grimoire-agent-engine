@@ -47,6 +47,7 @@ import type {
 	Usage,
 } from "../types";
 import { raceWithSignal } from "../utils/abort";
+import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
 import { type AssistantMessageEventStream, createAssistantMessageEventStream } from "../utils/event-stream";
 import {
 	armPreResponseTimeout,
@@ -1092,5 +1093,13 @@ export function streamQoderApi3(
 ): AssistantMessageEventStream {
 	const transport = getSharedApi3Transport();
 	if (transport === null) return streamApi3Unavailable(model);
-	return transport.stream(buildApi3Route(model), model, context, options);
+	// Wrap the single-attempt transport stream with the same bounded
+	// empty-completion retry the OpenAI-completions path uses: a benign
+	// terminal stop carrying no content (Qoder's degenerate `delta:{}` +
+	// `finish_reason:"stop"` + `[DONE]`) silently halts the agent mid-task,
+	// so it is retried instead of surfaced. Each attempt builds a fresh
+	// route/request/output so a retry never inherits stale metadata.
+	return withEmptyCompletionRetry(model, context, options, (attemptModel, attemptContext, attemptOptions) =>
+		transport.stream(buildApi3Route(attemptModel), attemptModel, attemptContext, attemptOptions),
+	);
 }

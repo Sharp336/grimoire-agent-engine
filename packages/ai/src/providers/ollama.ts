@@ -1,3 +1,4 @@
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -312,7 +313,7 @@ function createChatBody(model: Model<"ollama-chat">, context: Context, options: 
 	const selectedTools = selectToolsForToolChoice(context.tools, options?.toolChoice);
 	const tools = convertTools(selectedTools);
 	return {
-		model: model.id,
+		model: resolveWireModelId(model, undefined),
 		messages: convertMessages(model, context),
 		...(tools ? { tools } : {}),
 		...(think !== undefined ? { think } : {}),
