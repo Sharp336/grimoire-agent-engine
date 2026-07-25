@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { CmuxTab, runCmuxCode } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import type { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
@@ -137,6 +138,12 @@ function makePuppeteerBrowser(targetIds: readonly string[], probe?: PuppeteerPag
 			setRequestInterception: async (enabled: boolean) => {
 				probe?.requestInterception.push(enabled);
 			},
+			bringToFront: async () => undefined,
+			screenshot: async () =>
+				Buffer.from(
+					"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XxR5WQAAAABJRU5ErkJggg==",
+					"base64",
+				),
 			on(type: string, handler: (...args: unknown[]) => void) {
 				let handlers = listeners.get(type);
 				if (!handlers) {
@@ -554,6 +561,48 @@ describe("Codex agent.browser Puppeteer inline-worker lifecycle", () => {
 				priorDescriptorRestoredAfterCompletion: true,
 			},
 		]);
+	}, 20_000);
+
+	it("reads persisted screenshot bytes through fs.promises", async () => {
+		const screenshotBytes = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XxR5WQAAAABJRU5ErkJggg==",
+			"base64",
+		);
+		const browser = makePuppeteerBrowser(["screenshot-read"]);
+		const connectSpy = spyOn(puppeteer, "connect").mockResolvedValue(browser);
+		const bunFileSpy = spyOn(Bun, "file").mockImplementation(() => {
+			throw new Error("Bun.file screenshot read used");
+		});
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const readFileSpy = spyOn(fs.promises, "readFile").mockResolvedValue(screenshotBytes);
+		const harness = createPuppeteerWorkerHarness();
+
+		try {
+			await initializePuppeteerWorker(harness, "screenshot-read");
+			const result = harness.waitFor(message => message.type === "result" && message.id === "screenshot-run");
+			harness.send({
+				type: "run",
+				id: "screenshot-run",
+				name: "screenshot-run",
+				code: "const tab = await agent.browser.tabs.selected(); return (await tab.playwright.screenshot()).toBase64();",
+				timeoutMs: 5_000,
+				session: { cwd: process.cwd() },
+			});
+			await expect(waitForLifecycleStep(result, "screenshot read")).resolves.toMatchObject({
+				type: "result",
+				id: "screenshot-run",
+				ok: true,
+				payload: { returnValue: screenshotBytes.toString("base64") },
+			});
+			expect(readFileSpy).toHaveBeenCalledTimes(1);
+			expect(bunFileSpy).not.toHaveBeenCalled();
+		} finally {
+			readFileSpy.mockRestore();
+			writeSpy.mockRestore();
+			bunFileSpy.mockRestore();
+			connectSpy.mockRestore();
+			await harness.close().catch(() => undefined);
+		}
 	}, 20_000);
 
 	it("runs page cleanup and resets active state when adapter disposal fails without replacing the primary error", async () => {

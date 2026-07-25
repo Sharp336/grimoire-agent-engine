@@ -449,6 +449,13 @@ function requireObject(value: unknown, label: string): Record<string, unknown> {
 
 const ROLE_LOCATOR_OPTION_KEYS: Readonly<Record<string, true>> = { name: true, exact: true };
 const TEXT_LOCATOR_OPTION_KEYS: Readonly<Record<string, true>> = { exact: true };
+const FILTER_OPTION_KEYS: Readonly<Record<string, true>> = {
+	hasText: true,
+	hasNotText: true,
+	has: true,
+	hasNot: true,
+	visible: true,
+};
 const CLICK_OPTION_KEYS: Readonly<Record<string, true>> = {
 	button: true,
 	modifiers: true,
@@ -654,6 +661,7 @@ export class CodexLocator {
 
 	filter(options: CodexLocatorFilterOptions): CodexLocator {
 		const value = requireObject(options, "locator.filter");
+		assertAllowedKeys(value, "locator.filter", FILTER_OPTION_KEYS);
 		const has = value.has === undefined ? undefined : this.#sameTab(value.has, "locator.filter has").#descriptor;
 		const hasNot =
 			value.hasNot === undefined ? undefined : this.#sameTab(value.hasNot, "locator.filter hasNot").#descriptor;

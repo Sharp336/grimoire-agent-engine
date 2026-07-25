@@ -290,7 +290,19 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	}
 	if (command === "setChecked") {
 		if (String(element.tagName || "").toLowerCase() !== "input" || !["checkbox", "radio"].includes(element.type)) throw new Error("locator.setChecked requires a checkbox or radio element");
-		element.checked = !!payload.checked; dispatch(element, "input"); dispatch(element, "change"); return true;
+		const checked = !!payload.checked;
+		if (element.checked === checked) return true;
+		if (payload.force === true) {
+			element.checked = checked;
+			dispatch(element, "input");
+			dispatch(element, "change");
+			return true;
+		}
+		assertReceivesPointerAtCenter(element);
+		if (typeof element.click !== "function") throw new Error("locator.setChecked target cannot be activated");
+		element.click();
+		if (element.checked !== checked) throw new Error("locator.setChecked did not reach the requested state");
+		return true;
 	}
 	throw new Error("Unsupported locator command " + command);
 }`;

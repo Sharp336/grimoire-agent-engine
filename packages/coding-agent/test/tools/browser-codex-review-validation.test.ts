@@ -202,6 +202,18 @@ describe("Codex browser public facade closed vocabularies", () => {
 		]);
 	});
 
+	it("rejects unknown locator.filter option keys", async () => {
+		const adapter = new RecordingAdapter();
+		const { tab } = await selectedTab(adapter);
+
+		expect(
+			captureError(() => tab.playwright.locator("button").filter({ hasTex: "Delete" } as never)),
+		).resolves.toEqual({
+			name: "Error",
+			message: "locator.filter does not accept hasTex",
+		});
+	});
+
 	it("rejects inherited property names as click and dblclick modifiers while accepting every valid modifier", async () => {
 		const adapter = new RecordingAdapter();
 		const { tab } = await selectedTab(adapter);

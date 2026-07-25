@@ -2308,6 +2308,40 @@ describe("cmux Codex browser review regressions", () => {
 		}
 	});
 
+	it("activates checkbox controls before verifying their checked state", async () => {
+		const { document, window } = parseHTML('<html><body><input id="toggle" type="checkbox"></body></html>');
+		const input = document.getElementById("toggle") as unknown as { checked: boolean } | null;
+		if (!input) throw new Error("Expected checkbox fixture");
+		const clickStates: boolean[] = [];
+		Reflect.set(input, "getBoundingClientRect", () => ({ x: 0, y: 0, left: 0, top: 0, width: 20, height: 20 }));
+		Reflect.set(input, "scrollIntoView", () => undefined);
+		Reflect.set(input, "focus", () => undefined);
+		Reflect.set(input, "click", () => {
+			input.checked = !input.checked;
+			clickStates.push(input.checked);
+		});
+		Reflect.set(document, "elementFromPoint", () => input);
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible", opacity: "1" }));
+		const current = await selectedTab(
+			facadeFor({
+				async codexEvaluate(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window });
+				},
+				async codexWait() {
+					throw new Error("Checkbox should be immediately actionable");
+				},
+			}),
+		);
+		const locator = current.playwright.locator("#toggle");
+
+		await locator.check();
+		await locator.uncheck();
+		await locator.setChecked(true);
+
+		expect(input.checked).toBe(true);
+		expect(clickStates).toEqual([true, false, true]);
+	});
+
 	it("rejects fill and type on non-editable targets without mutating them", async () => {
 		const events: string[] = [];
 		const view = {
