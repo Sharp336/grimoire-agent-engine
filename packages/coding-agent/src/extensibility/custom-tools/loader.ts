@@ -19,6 +19,7 @@ import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
 import * as PiCodingAgent from "../../index";
 import * as typebox from "../typebox";
 import { createNoOpUIContext, resolvePath, withHostGuard } from "../utils";
+import { loadToolboxTool, TOOLBOX_PROVIDER_ID } from "./toolbox";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
 
 interface LoadToolResult {
@@ -72,6 +73,10 @@ async function loadTool(
 				},
 			],
 		};
+	}
+
+	if (source?.provider === TOOLBOX_PROVIDER_ID) {
+		return loadToolboxTool(resolvedPath, source);
 	}
 
 	try {
