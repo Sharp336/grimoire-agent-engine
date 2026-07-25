@@ -445,6 +445,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
 				break;
+			case "tools.xdevExternalDescriptionCap":
+				void this.ctx.session.applyXdevExternalDescriptionCap(Number(value)).catch(err => {
+					this.ctx.showError(`Failed to apply xd:// description cap: ${err}`);
+				});
+				break;
 			case "memory.backend":
 				void this.ctx.session.applyMemoryBackend().catch(err => {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);

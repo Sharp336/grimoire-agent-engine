@@ -4198,7 +4198,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "xd:// Description Cap",
 			description:
-				"Maximum description characters embedded per external (MCP/custom/extension) xd:// device in the system prompt and catalog listings. Schemas are never truncated; the full description stays one `read xd://<tool>` away. Applies to new sessions.",
+				"Maximum description characters embedded per external (MCP/custom/extension) xd:// device in the system prompt and catalog listings. Schemas are never truncated; the full description stays one `read xd://<tool>` away.",
 			options: [
 				{ value: "100", label: "100 chars (tight)" },
 				{ value: "200", label: "200 chars (default)" },

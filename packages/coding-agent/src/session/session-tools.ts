@@ -146,6 +146,11 @@ export class SessionTools {
 		this.#baseSystemPrompt = prompt;
 	}
 
+	/** Updates the description cap used by the session-owned xd:// registry. */
+	setXdevExternalDescriptionCap(cap: number): void {
+		this.#xdevRegistry?.setExternalDescriptionCap(cap);
+	}
+
 	/** Skills currently rendered into the system prompt. */
 	get skills(): Skill[] {
 		return this.#skills;

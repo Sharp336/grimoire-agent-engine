@@ -17,4 +17,19 @@ describe("SelectorController prompt-affecting settings", () => {
 		expect(refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
+
+	it("applies xdev description cap changes to the active session", async () => {
+		const applyXdevExternalDescriptionCap = vi.fn(async () => {});
+		const ctx = {
+			session: { applyXdevExternalDescriptionCap },
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new SelectorController(ctx);
+
+		controller.handleSettingChange("tools.xdevExternalDescriptionCap", "1000");
+		await Promise.resolve();
+
+		expect(applyXdevExternalDescriptionCap).toHaveBeenCalledWith(1000);
+		expect(ctx.showError).not.toHaveBeenCalled();
+	});
 });
