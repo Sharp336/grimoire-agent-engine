@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Bar } from "react-chartjs-2";
+import { useTranslation } from "../i18n";
 import { getProviderDashboardStats } from "../api";
 import {
 	barDatasetStyle,
@@ -68,9 +69,9 @@ export function ProvidersRoute({ active, range, refreshTrigger }: ProvidersRoute
 // ---------------------------------------------------------------------------
 
 function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) {
+	const { locale } = useTranslation();
 	const formatCost = useFormatCost();
 	const grandTotal = useMemo(() => providers.reduce((sum, p) => sum + p.totalTokens, 0), [providers]);
-
 	const columns: DataTableColumn<ProviderAggregate>[] = [
 		{ key: "provider", header: "Provider", render: p => <span className="font-medium">{p.provider}</span> },
 		{ key: "requests", header: "Requests", numeric: true, render: p => formatInteger(p.totalRequests) },
@@ -99,7 +100,7 @@ function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) 
 			numeric: true,
 			render: p => formatPercent(grandTotal > 0 ? p.totalTokens / grandTotal : 0),
 		},
-		{ key: "cost", header: "Cost", numeric: true, render: p => formatCost(p.totalCost) },
+		{ key: "cost", header: "Cost", numeric: true, render: p => formatCost(p.totalCost, undefined, locale) },
 		{ key: "tps", header: "Tok/s", numeric: true, render: p => formatTokensPerSecond(p.avgTokensPerSecond) },
 	];
 

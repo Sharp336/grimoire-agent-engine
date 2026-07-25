@@ -131,7 +131,7 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 				),
 			},
 		],
-		[t, locale],
+		[t, locale, formatCost],
 	);
 
 	const renderMobileCard = (item: MessageStats, onClick?: () => void) => (

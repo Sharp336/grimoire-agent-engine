@@ -198,8 +198,8 @@ describe("Command Help i18n Integration", () => {
 		test("translates flag descriptions with translator", () => {
 			const translator = (text: string, key: string) => {
 				const translations: Record<string, string> = {
-					"flags.model.description": "使用的模型",
-					"flags.verbose.description": "启用详细输出",
+					"mock.flags.model.description": "使用的模型",
+					"mock.flags.verbose.description": "启用详细输出",
 				};
 				return translations[key] || text;
 			};
@@ -216,7 +216,7 @@ describe("Command Help i18n Integration", () => {
 		test("translates argument descriptions with translator", () => {
 			const translator = (text: string, key: string) => {
 				const translations: Record<string, string> = {
-					"args.file.description": "输入文件路径",
+					"mock.args.file.description": "输入文件路径",
 				};
 				return translations[key] || text;
 			};
