@@ -1,4 +1,3 @@
-import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -200,6 +199,16 @@ interface DownloadedMedia {
 const MAX_DECODED_MEDIA_BYTES = 32 * 1024 * 1024;
 const CANONICAL_BASE64_CHUNK = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
+function deepestElementAtPoint(x: number, y: number): Element | null {
+	let hit = document.elementFromPoint(x, y);
+	while (hit?.shadowRoot) {
+		const nested = hit.shadowRoot.elementFromPoint(x, y);
+		if (!nested || nested === hit) break;
+		hit = nested;
+	}
+	return hit;
+}
+
 function decodeBoundedMediaChunks(base64Chunks: readonly string[]): Buffer[] {
 	let byteLength = 0;
 	for (const chunk of base64Chunks) {
@@ -355,7 +364,7 @@ async function countLiveDownloadPolicyLeases(leaseDirectory: string): Promise<nu
 async function acquireDownloadPolicyLease(downloadDirectory: string): Promise<DownloadPolicyLease> {
 	const stateRoot = `${downloadDirectory}.policy`;
 	const leaseDirectory = path.join(stateRoot, "leases");
-	const leasePath = path.join(leaseDirectory, `owner-${randomUUID()}.lease`);
+	const leasePath = path.join(leaseDirectory, `owner-${crypto.randomUUID()}.lease`);
 	await withDownloadPolicyLock(stateRoot, async () => {
 		await fs.mkdir(leaseDirectory, { recursive: true });
 		await countLiveDownloadPolicyLeases(leaseDirectory);
@@ -392,7 +401,7 @@ function browserDownloadLocation(browser: Browser, cwd: string): DownloadPolicyL
 	try {
 		const endpoint = browser.wsEndpoint();
 		if (typeof endpoint === "string" && endpoint.length > 0) {
-			const identity = createHash("sha256").update(endpoint).digest("hex");
+			const identity = new Bun.CryptoHasher("sha256").update(endpoint).digest("hex");
 			return {
 				directory: path.join(os.tmpdir(), "oh-my-pi-codex-downloads", identity),
 				requiresLease: true,
@@ -401,7 +410,7 @@ function browserDownloadLocation(browser: Browser, cwd: string): DownloadPolicyL
 	} catch {
 		// Reduced Browser doubles may not implement a usable endpoint.
 	}
-	return { directory: path.join(cwd, `codex-download-${randomUUID()}`), requiresLease: false };
+	return { directory: path.join(cwd, `codex-download-${crypto.randomUUID()}`), requiresLease: false };
 }
 
 function getDownloadPolicyCoordinator(browser: Browser, cwd: string): DownloadPolicyCoordinator {
@@ -1281,11 +1290,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async #elementScreenshot(args: Readonly<Record<string, unknown>>): Promise<string> {
-		const handle = await this.#page.evaluateHandle(
-			(x, y) => document.elementFromPoint(x, y),
-			numberArg(args, "x"),
-			numberArg(args, "y"),
-		);
+		const handle = await this.#page.evaluateHandle(deepestElementAtPoint, numberArg(args, "x"), numberArg(args, "y"));
 		const element = handle.asElement();
 		if (!element) {
 			await handle.dispose();
@@ -2020,8 +2025,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (typeof (handle as unknown as { evaluate?: unknown }).evaluate !== "function") return true;
 		return await handle.evaluate(element => {
 			if (element.matches(":disabled")) return false;
-			for (let current: Element | null = element; current; current = current.parentElement) {
+			for (let current: Element | null = element; current; ) {
 				if (current.getAttribute("aria-disabled")?.trim().toLowerCase() === "true") return false;
+				const pageCurrent = current as Element & { assignedSlot?: Element | null };
+				const root = current.getRootNode() as unknown as { host?: Element };
+				current = pageCurrent.assignedSlot ?? current.parentElement ?? root.host ?? null;
 			}
 			return true;
 		});
@@ -2797,11 +2805,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			"cua.downloadMedia",
 		);
 		const rawHandle = await this.#runBeforeDeadline(deadline, () =>
-			this.#page.evaluateHandle(
-				(x, y) => document.elementFromPoint(x, y),
-				numberArg(args, "x"),
-				numberArg(args, "y"),
-			),
+			this.#page.evaluateHandle(deepestElementAtPoint, numberArg(args, "x"), numberArg(args, "y")),
 		);
 		const element = rawHandle.asElement() as ElementHandle | null;
 		if (!element) {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -733,6 +734,42 @@ describe("Puppeteer Codex download adapter", () => {
 		expect(finalDefaultCalls[0]?.params).toEqual({ behavior: "default", eventsEnabled: false });
 	});
 
+	it("derives a stable SHA-256 download-policy identity from the browser endpoint", async () => {
+		const allowConfigured = Promise.withResolvers<void>();
+		const session = new DownloadSessionDouble(async (method, params) => {
+			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allow") allowConfigured.resolve();
+		});
+		const browser = {
+			wsEndpoint: () => "ws://127.0.0.1:9222/devtools/browser/stable-contract",
+			target: () => ({ createCDPSession: async () => session }),
+		} as never;
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: { url: () => "about:blank", title: async () => "Download identity" } as never,
+			browser,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+		const tab = await createCodexBrowserFacade(adapter).tabs.selected();
+		if (!tab) throw new Error("Expected selected Puppeteer tab");
+		const waiting = tab.playwright.waitForEvent("download", { timeoutMs: 10_000 }).catch(() => undefined);
+		await session.downloadListenerRegistered.promise;
+		await allowConfigured.promise;
+		const allow = session.calls.find(
+			call => call.method === "Browser.setDownloadBehavior" && call.params?.behavior === "allow",
+		);
+		expect(allow?.params?.downloadPath).toBe(
+			path.join(
+				os.tmpdir(),
+				"oh-my-pi-codex-downloads",
+				"417f7e528c526770da2e12155a63747e09d3c02963428ab9cdfe64c6afc8f179",
+			),
+		);
+		await adapter.dispose();
+		await waiting;
+	});
+
 	it("resets download behavior and disables events after normal disposal and interrupted initialization", async () => {
 		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		const page = {
@@ -953,6 +990,37 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("treats disabled shadow hosts as disabling nested controls and click actionability", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected(); const p=t.playwright;
+				 await page.evaluate(()=>{
+				   const host=document.createElement("div"); host.id="disabled-shadow-host"; host.setAttribute("aria-disabled"," TrUe ");
+				   Object.assign(host.style,{position:"fixed",left:"200px",top:"160px",width:"120px",height:"40px"});
+				   const root=host.attachShadow({mode:"open"});
+				   root.innerHTML='<button style="position:absolute;inset:0;width:100%;height:100%">Disabled shadow target</button>';
+				   globalThis.__disabledShadowClicks=0; root.querySelector("button").addEventListener("click",()=>globalThis.__disabledShadowClicks++);
+				   document.body.append(host);
+				 });
+				 const locator=p.getByRole("button",{name:"Disabled shadow target",exact:true});
+				 const enabled=await locator.isEnabled();
+				 let locatorError=""; try { await locator.click({timeoutMs:50}); } catch(error) { locatorError=String(error); }
+				 const snapshot=await t.dom_cua.get_visible_dom(); const node=snapshot.nodes.find(item=>item.text==="Disabled shadow target");
+				 let domError=""; if (node) try { await t.dom_cua.click({node_id:node.node_id,timeoutMs:50}); } catch(error) { domError=String(error); }
+				 return {enabled,locatorError,domError,clicks:await page.evaluate(()=>globalThis.__disabledShadowClicks)};`,
+				10,
+			);
+			expect(result).toEqual({
+				enabled: false,
+				locatorError: expect.stringContaining("timed out"),
+				domError: expect.stringContaining("timed out"),
+				clicks: 0,
+			});
+		});
+	}, 20_000);
+
 	it("rejects fill and type on non-editable elements without mutating them", async () => {
 		await withPuppeteerTool(async (tool, name) => {
 			const result = await runBrowserCode(
@@ -1104,6 +1172,30 @@ describe("Puppeteer final parity blockers", () => {
 			expect(result).toEqual([
 				expect.objectContaining({ tagName: "button", role: "button", ariaName: "Deep shadow action" }),
 			]);
+		});
+	}, 20_000);
+
+	it("screenshots the deepest nested open-shadow element at coordinates", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{
+				   const outer=document.createElement("div");
+				   Object.assign(outer.style,{position:"fixed",left:"360px",top:"190px",width:"140px",height:"60px",background:"red"});
+				   const outerRoot=outer.attachShadow({mode:"open"});
+				   const inner=document.createElement("div"); Object.assign(inner.style,{display:"block",width:"100%",height:"100%"}); outerRoot.append(inner);
+				   const innerRoot=inner.attachShadow({mode:"open"});
+				   innerRoot.innerHTML='<button style="position:absolute;left:30px;top:20px;width:40px;height:20px;padding:0;border:0">Deep</button>';
+				   document.body.append(outer);
+				 });
+				 const image=await t.playwright.elementScreenshot({x:400,y:220});
+				 const encoded=image.toBase64();
+				 const bytes=Uint8Array.from(atob(encoded),character=>character.charCodeAt(0)); const view=new DataView(bytes.buffer);
+				 return {width:view.getUint32(16),height:view.getUint32(20)};`,
+			);
+			expect(result).toEqual({ width: 50, height: 25 });
 		});
 	}, 20_000);
 
@@ -2279,5 +2371,76 @@ describe("Puppeteer final parity blockers", () => {
 			await adapter.dispose();
 		}
 		expect(requested).toEqual(["https://fixture.test/responsive.webp", "https://fixture.test/responsive.webp"]);
+	});
+
+	it("descends nested open shadow roots before coordinate media source lookup", async () => {
+		const requested: string[] = [];
+		const fetchMock: typeof globalThis.fetch = Object.assign(
+			async (input: string | URL | Request) => {
+				requested.push(String(input));
+				return new Response(new Uint8Array([65]), { headers: { "content-type": "image/png" } });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+		spyOn(fs, "open").mockResolvedValue({
+			writeFile: async () => undefined,
+			sync: async () => undefined,
+			close: async () => undefined,
+		} as never);
+		spyOn(fs, "rename").mockResolvedValue(undefined);
+		const deepMedia = {
+			currentSrc: "https://fixture.test/deep-shadow.png",
+			getAttribute: () => null,
+			querySelector: () => null,
+		};
+		const innerHost = {
+			shadowRoot: { elementFromPoint: () => deepMedia },
+			getAttribute: () => null,
+			querySelector: () => null,
+		};
+		const outerHost = {
+			shadowRoot: { elementFromPoint: () => innerHost },
+			getAttribute: () => null,
+			querySelector: () => null,
+		};
+		const globals = globalThis as unknown as Record<string, unknown>;
+		const documentDescriptor = Object.getOwnPropertyDescriptor(globals, "document");
+		Object.defineProperty(globals, "document", {
+			value: { baseURI: "https://fixture.test/", elementFromPoint: () => outerHost },
+			configurable: true,
+		});
+		try {
+			const page = {
+				url: () => "about:blank",
+				evaluateHandle: async (callback: (x: number, y: number) => unknown, x: number, y: number) => {
+					const target = callback(x, y) as typeof deepMedia;
+					const handle: Record<string, unknown> = {
+						asElement: () => handle,
+						dispose: async () => undefined,
+						evaluate: async (
+							pageCallback: (element: typeof deepMedia, timeoutMs: number, label: string) => Promise<unknown>,
+							timeoutMs: number,
+							label: string,
+						) => await pageCallback(target, timeoutMs, label),
+					};
+					return handle;
+				},
+			};
+			const adapter = new PuppeteerCodexBrowserAdapter({
+				currentTabId: "1",
+				page: page as never,
+				browser: {} as never,
+				signal: new AbortController().signal,
+				cwd: "/tmp/browser-contract",
+				captureScreenshot: async () => "",
+			});
+			await adapter.invoke("cua.downloadMedia", { tabId: "1", x: 10, y: 20, timeoutMs: 1_000 });
+			await adapter.dispose();
+		} finally {
+			if (documentDescriptor) Object.defineProperty(globals, "document", documentDescriptor);
+			else delete globals.document;
+		}
+		expect(requested).toEqual(["https://fixture.test/deep-shadow.png"]);
 	});
 });
