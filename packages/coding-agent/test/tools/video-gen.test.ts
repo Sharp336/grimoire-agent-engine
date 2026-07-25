@@ -317,6 +317,52 @@ describe("videoGenTool", () => {
 		expect(result.details).toMatchObject({ provider: "openrouter", costUsd: 0.25 });
 	});
 
+	it("tolerates a null cost from OpenRouter instead of crashing after the file is written", async () => {
+		// `null !== undefined`, so an unguarded `costUsd` reaches `.toFixed()` and
+		// throws only after the video has already landed on disk.
+		const nullCostPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(nullCostPath);
+		const { fetch: nullCostFetch } = sequencedFetch([
+			() => json({ id: "job-null", polling_url: "https://openrouter.ai/api/v1/videos/job-null" }),
+			() =>
+				json({
+					status: "completed",
+					unsigned_urls: ["https://openrouter.ai/api/v1/videos/job-null/content"],
+					usage: { cost: null },
+				}),
+			() => new Response(new Uint8Array([8])),
+		]);
+
+		const nullCostResult = await videoGenTool.execute(
+			"call-null-cost",
+			{ prompt: "x", output_path: nullCostPath },
+			undefined,
+			createContext(nullCostFetch, { openrouter: true }),
+		);
+
+		expect(nullCostResult.isError).toBeUndefined();
+		expect(nullCostResult.details?.costUsd).toBeUndefined();
+		expect(await Bun.file(nullCostPath).bytes()).toEqual(new Uint8Array([8]));
+	});
+	it("treats an accepted submission with an unreadable body as committed, not as a fallback", async () => {
+		// HTTP 200 means the job exists and is billing. A body that will not parse
+		// must not escape as an ordinary error and start a second generation.
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => new Response("<html>edge error</html>", { status: 200, headers: { "content-type": "text/html" } }),
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-bad-body",
+			{ prompt: "x", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4` },
+			undefined,
+			createContext(fetchMock, { xai: true, openrouter: true }),
+		);
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe("https://api.x.ai/v1/videos/generations");
+		expect(result.isError).toBe(true);
+	});
+
 	it("sends OpenRouter image-to-video in the documented frame_images shape", async () => {
 		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
 		writtenPaths.push(outputPath);

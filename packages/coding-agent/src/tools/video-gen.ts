@@ -287,6 +287,66 @@ interface XAIVideoStatus {
 	usage?: { cost_in_usd_ticks?: number };
 }
 
+/**
+ * Statuses docs.x.ai documents as terminal failures. Membership is checked
+ * against provider-supplied strings, so this is a Set rather than a record —
+ * an object index would resolve `constructor`/`toString` off the prototype.
+ */
+const XAI_FAILED_STATUSES: ReadonlySet<string> = new Set(["failed", "expired", "cancelled", "canceled"]);
+
+/**
+ * POST a generation request under `withAuth`.
+ *
+ * HTTP 200 is the commit point: a job now exists and is billing per second.
+ * Everything from that response onward — including a body that will not parse —
+ * is raised as `VideoJobCommittedError`, so it can neither be replayed by a
+ * credential rotation nor fall through into a second billed generation.
+ *
+ * Failures before the 200 stay ordinary errors and may fall through to another
+ * provider. That includes transport rejections, which are strictly speaking
+ * ambiguous — a socket can die after the server accepted the job. Treating them
+ * as committed was considered and rejected: a rejected `fetch` overwhelmingly
+ * means nothing was accepted, the alternative turns any unreachable provider
+ * into a hard tool failure instead of a fallback, and the errno detail needed to
+ * tell the two apart is runtime-specific and cannot be verified against the real
+ * providers. The residual exposure is one lost response on an accepted job.
+ */
+async function submitVideoJob<T>(
+	provider: VideoProvider,
+	label: string,
+	apiKey: ApiKey,
+	url: string,
+	body: unknown,
+	buildHeaders: (key: string) => Record<string, string>,
+	fetchImpl: FetchImpl,
+	signal: AbortSignal,
+): Promise<T> {
+	return withAuth(
+		apiKey,
+		async key => {
+			const submit = await fetchImpl(url, {
+				method: "POST",
+				headers: buildHeaders(key),
+				body: JSON.stringify(body),
+				signal,
+			});
+			if (!submit.ok) {
+				throw new ProviderHttpError(
+					`${label} video request failed (${submit.status}): ${await readErrorMessage(submit)}`,
+					submit.status,
+					{ headers: submit.headers },
+				);
+			}
+			try {
+				return (await submit.json()) as T;
+			} catch (error) {
+				throw new VideoJobCommittedError(provider, UNKNOWN_JOB_ID, error);
+			}
+		},
+		{ signal },
+	);
+}
+
 function xaiHeaders(key: string): Record<string, string> {
 	return {
 		Authorization: `Bearer ${key}`,
@@ -311,34 +371,18 @@ async function generateXaiVideo(
 	if (params.resolution !== undefined) body.resolution = params.resolution;
 	if (imageUrl) body.image = { url: imageUrl };
 
-	// Only the submission runs under `withAuth`: a 401 here means no job was
-	// created, so replaying it with a rotated credential is safe — replaying it
-	// after the job exists would not be. A 200 is the commit point, so the id is
-	// parsed OUTSIDE the callback; raising inside would both risk a replayed POST
-	// and escape as an ordinary error that lets the caller fall through to
-	// another provider and pay twice.
-	const submitted = await withAuth(
+	const submitted = await submitVideoJob<{ request_id?: string }>(
+		"xai",
+		"xAI",
 		apiKey,
-		async key => {
-			const submit = await fetchImpl(`${baseUrl}/videos/generations`, {
-				method: "POST",
-				headers: xaiHeaders(key),
-				body: JSON.stringify(body),
-				signal,
-			});
-			if (!submit.ok) {
-				throw new ProviderHttpError(
-					`xAI video request failed (${submit.status}): ${await readErrorMessage(submit)}`,
-					submit.status,
-					{ headers: submit.headers },
-				);
-			}
-			return (await submit.json()) as { request_id?: string };
-		},
-		{ signal },
+		`${baseUrl}/videos/generations`,
+		body,
+		xaiHeaders,
+		fetchImpl,
+		signal,
 	);
 	const requestId = submitted.request_id;
-	if (!requestId) {
+	if (typeof requestId !== "string" || requestId.length === 0) {
 		throw new VideoJobCommittedError(
 			"xai",
 			UNKNOWN_JOB_ID,
@@ -361,16 +405,23 @@ async function generateXaiVideo(
 			}
 			if (status.status === "done") {
 				const url = status.video?.url;
-				if (!url) throw new Error("xAI reported a finished video with no URL.");
+				if (typeof url !== "string" || url.length === 0) {
+					throw new Error("xAI reported a finished video with no URL.");
+				}
 				const ticks = status.usage?.cost_in_usd_ticks;
 				return {
 					url,
 					requestId,
-					durationSeconds: status.video?.duration,
+					// Providers may send `null` here; `null !== undefined` would slip past
+					// the presence checks in the summary and render "duration=nulls".
+					durationSeconds: typeof status.video?.duration === "number" ? status.video.duration : undefined,
 					costUsd: typeof ticks === "number" ? ticks / USD_TICKS_PER_DOLLAR : undefined,
 				};
 			}
-			if (status.status && status.status !== "pending") {
+			// Only abandon the job on a status documented as terminal. Treating every
+			// unrecognised value as failure would kill a running, billing generation
+			// the first time the provider adds a state such as `queued`.
+			if (status.status && XAI_FAILED_STATUSES.has(status.status)) {
 				const detail = status.error?.message ? `: ${status.error.message}` : "";
 				throw new Error(`xAI video generation ${status.status}${detail}`);
 			}
@@ -391,8 +442,12 @@ interface OpenRouterVideoStatus {
 	usage?: { cost?: number };
 }
 
-/** Terminal success states across OpenRouter's brokered backends. */
-const OPENROUTER_DONE_STATUSES: Record<string, true> = { completed: true, succeeded: true, done: true };
+/**
+ * Terminal success states across OpenRouter's brokered backends. A Set, not a
+ * record: the key comes from the provider, and an object index would resolve
+ * `constructor`/`toString` off the prototype and declare the job complete.
+ */
+const OPENROUTER_DONE_STATUSES: ReadonlySet<string> = new Set(["completed", "succeeded", "done"]);
 
 function openRouterHeaders(key: string): Record<string, string> {
 	return { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
@@ -417,39 +472,27 @@ async function generateOpenRouterVideo(
 		body.frame_images = [{ type: "image_url", image_url: { url: imageUrl }, frame_type: "first_frame" }];
 	}
 
-	// Submission only — see the equivalent note in `generateXaiVideo`.
-	const submitted = await withAuth(
+	const submitted = await submitVideoJob<{ id?: string; polling_url?: string }>(
+		"openrouter",
+		"OpenRouter",
 		apiKey,
-		async key => {
-			const submit = await fetchImpl(OPENROUTER_VIDEO_URL, {
-				method: "POST",
-				headers: openRouterHeaders(key),
-				body: JSON.stringify(body),
-				signal,
-			});
-			if (!submit.ok) {
-				throw new ProviderHttpError(
-					`OpenRouter video request failed (${submit.status}): ${await readErrorMessage(submit)}`,
-					submit.status,
-					{ headers: submit.headers },
-				);
-			}
-			return (await submit.json()) as { id?: string; polling_url?: string };
-		},
-		{ signal },
+		OPENROUTER_VIDEO_URL,
+		body,
+		openRouterHeaders,
+		fetchImpl,
+		signal,
 	);
 	const requestId = submitted.id;
-	const pollingUrl = submitted.polling_url ?? (requestId ? `${OPENROUTER_VIDEO_URL}/${requestId}` : undefined);
-	if (!requestId || !pollingUrl) {
+	if (typeof requestId !== "string" || requestId.length === 0) {
 		// Submit returned 200, so a job exists and is billing even though the
 		// response is unusable — commit rather than retry on another provider.
 		throw new VideoJobCommittedError(
 			"openrouter",
-			requestId ?? UNKNOWN_JOB_ID,
+			UNKNOWN_JOB_ID,
 			new Error("OpenRouter accepted the request but returned no job id."),
 		);
 	}
-
+	const pollingUrl = submitted.polling_url ?? `${OPENROUTER_VIDEO_URL}/${requestId}`;
 	try {
 		const poller = new VideoJobPoller("OpenRouter", apiKey, openRouterHeaders, fetchImpl, signal);
 		for (;;) {
@@ -460,10 +503,20 @@ async function generateOpenRouterVideo(
 				continue;
 			}
 			const state = status.status ?? "pending";
-			if (OPENROUTER_DONE_STATUSES[state]) {
+			if (OPENROUTER_DONE_STATUSES.has(state)) {
 				const url = status.unsigned_urls?.[0];
-				if (!url) throw new Error("OpenRouter reported a finished video with no URL.");
-				return { url, requestId, downloadApiKey: apiKey, costUsd: status.usage?.cost };
+				if (typeof url !== "string" || url.length === 0) {
+					throw new Error("OpenRouter reported a finished video with no URL.");
+				}
+				// A `null` cost would survive the `!== undefined` guard in the summary
+				// and crash on `.toFixed()` after the video is already on disk.
+				const cost = status.usage?.cost;
+				return {
+					url,
+					requestId,
+					downloadApiKey: apiKey,
+					costUsd: typeof cost === "number" ? cost : undefined,
+				};
 			}
 			if (state === "failed" || state === "cancelled" || state === "expired") {
 				const message = typeof status.error === "string" ? status.error : status.error?.message;
@@ -573,7 +626,7 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 				let job: VideoJobResult;
 				try {
 					if (provider === "xai") {
-						const resolved = ctx.modelRegistry ? await resolveXaiKey(ctx.modelRegistry, model, sessionId) : null;
+						const resolved = await resolveXaiKey(ctx.modelRegistry, model, sessionId);
 						if (!resolved) continue;
 						foundCredentials = true;
 						job = await generateXaiVideo(
@@ -606,10 +659,16 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 					// A committed job has already billed. Report it instead of running
 					// a second paid generation on the next provider.
 					if (error instanceof VideoJobCommittedError) {
-						return {
-							isError: true,
-							content: [{ type: "text" as const, text: `${provider} video generation failed. ${message}` }],
-						};
+						// Neither the fence nor a user cancel stops the generation
+						// server-side, so say the job is still running rather than
+						// implying it was lost — and do not conflate the two causes.
+						let text = `${provider} video generation failed. ${message}`;
+						if (timeoutSignal.aborted) {
+							text = `${provider} job ${error.requestId} is still generating; the tool stopped waiting after ${VIDEO_TIMEOUT / 60_000} minutes. Nothing was re-submitted.`;
+						} else if (requestSignal.aborted) {
+							text = `${provider} job ${error.requestId} is still generating; the tool call was cancelled. Nothing was re-submitted.`;
+						}
+						return { isError: true, content: [{ type: "text" as const, text }] };
 					}
 					failures.push(`${provider}: ${message}`);
 					continue;
@@ -638,8 +697,30 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 						],
 					};
 				}
-				const bytes = new Uint8Array(await download.arrayBuffer());
-				await Bun.write(outputPath, bytes);
+				// Buffer the body, then write. `Bun.write(path, response)` would stream
+				// and avoid holding the clip in memory, but on Bun 1.4.0-canary.1 it
+				// never resolves for a fetched Response — reproduced against a real
+				// vidgen.x.ai URL with and without an AbortSignal, while the buffered
+				// form completed the same download in 73 ms. Mocked Responses do not
+				// reproduce it, so keep this path buffered until Bun is fixed.
+				let bytes: Uint8Array;
+				try {
+					bytes = new Uint8Array(await download.arrayBuffer());
+					await Bun.write(outputPath, bytes);
+				} catch (error) {
+					// The video is paid for and still fetchable; a full disk or a bad
+					// output_path must not lose the URL.
+					const message = error instanceof Error ? error.message : String(error);
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text" as const,
+								text: `${provider} job ${job.requestId} downloaded but writing ${displayPath} failed (${message}). The video is still retrievable at ${job.url}`,
+							},
+						],
+					};
+				}
 
 				const parts = [`Saved ${bytes.length} bytes to ${displayPath}`, `provider=${provider}`, `model=${model}`];
 				if (job.durationSeconds !== undefined) parts.push(`duration=${job.durationSeconds}s`);
