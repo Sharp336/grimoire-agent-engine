@@ -948,6 +948,37 @@ describe("resolveAgentModelPatterns", () => {
 		expect(dashed.model?.provider).toBe("anthropic");
 		expect(dashed.model?.id).toBe("claude-opus-4-8");
 	});
+
+	test("@reviewer does NOT inherit the configured default — it resolves to the slow priority chain (Option-A guard)", () => {
+		// Same setup: a cheap default is configured; slow and reviewer are both unassigned.
+		// @slow IS in shouldInheritDefaultBeforePriority so it inherits the default; @reviewer
+		// is NOT, so it resolves via its slow-chain alias instead. Adding `reviewer` to
+		// shouldInheritDefaultBeforePriority would flip @reviewer to inherit and fail this test.
+		const withDefault = Settings.isolated({ modelRoles: { default: "local/llama" } });
+		const noDefault = Settings.isolated();
+
+		// Contrast anchor: @slow inherits the configured cheap default.
+		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings: withDefault })).toEqual(["local/llama"]);
+
+		const reviewerPatterns = resolveAgentModelPatterns({ agentModel: "@reviewer", settings: withDefault });
+		// @reviewer does NOT inherit the cheap default…
+		expect(reviewerPatterns).not.toEqual(["local/llama"]);
+		// …it resolves to the slow priority chain — the same baseline @slow uses with nothing
+		// configured, and the same as its @advisor sibling (both alias the slow chain).
+		expect(reviewerPatterns).toEqual(resolveAgentModelPatterns({ agentModel: "@slow", settings: noDefault }));
+		expect(reviewerPatterns).toEqual(resolveAgentModelPatterns({ agentModel: "@advisor", settings: withDefault }));
+	});
+
+	test("an explicit modelRoles.reviewer assignment wins over the slow baseline", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/llama",
+				reviewer: "openai/gpt-4o",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@reviewer", settings })).toEqual(["openai/gpt-4o"]);
+	});
 });
 
 describe("resolveModelFromString", () => {

@@ -952,13 +952,15 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
  * list. The advisor — a second-opinion reviewer — defaults to the `slow`
  * reasoning chain, but (unlike the `slow` role, see
  * {@link shouldInheritDefaultBeforePriority}) never inherits the primary's
- * model, so it stays a distinct strong model out of the box. The `tiny` role —
+ * model, so it stays a distinct strong model out of the box. The `reviewer` role —
+ * the bundled code-review agent — aliases the same `slow` chain. The `tiny` role —
  * the override for online title/memory/classifier tasks — reuses the `smol`
  * fast chain so an unset tiny role auto-resolves to the same fast model smol
  * would pick.
  */
 const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
 	advisor: "slow",
+	reviewer: "slow",
 	tiny: "smol",
 };
 

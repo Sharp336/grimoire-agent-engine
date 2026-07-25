@@ -6,6 +6,13 @@
 
 - `omp usage` now surfaces auto-disabled credentials as red `✗` tombstone rows (identity, how long ago, the shortened upstream cause — e.g. `Refresh token expired` — and a re-login hint), including a provider section when no active credential remains. User-driven tombstones (`replaced by newer credential`, `deleted by user`) and API-key rows stay hidden. Requires a broker with `GET /v1/credentials/disabled`; older brokers degrade to no tombstone rows.
 - `omp usage` warns about Anthropic's ~30-day OAuth grant lifetime: accounts whose interactive login (`authorizedAt`) is within a week of the deadline get a yellow `⚠ re-login within <time>` line, and past-deadline accounts a red one. Grants die server-side exactly ~30 days after login regardless of refresh rotation, so this is the only warning before the broker auto-disables the row.
+- The `github` tool now instructs the agent to run a code review before opening a PR: before `pr_create`, the agent dispatches the `reviewer` agent via `task` against the working diff that will become the PR (e.g. `git diff <base>...HEAD`), surfaces any P0/P1 findings, and only creates the PR once they are resolved or the user confirms. The guidance ships only when the `github` tool is enabled.
+- `/review` now accepts a bare PR number in the current checkout's repo: `/review 23` and `/review #23` resolve to PR #23 via the existing cwd→`owner/repo` resolver (the same one backing `pr://<N>`), so a full `owner/repo/N` ref or GitHub URL is no longer required to review a PR by number.
+- Added a first-class `reviewer` model role, assignable under `/model` alongside `default`/`smol`/`slow`/`advisor`/etc. The bundled code-review agent resolves through it.
+
+### Changed
+
+- The bundled `reviewer` agent now resolves through the new `@reviewer` model role instead of `@slow`. Unconfigured, `@reviewer` defaults to a strong independent reasoning model (the `slow` priority chain — GPT-5.x / Opus / Codex, like the `advisor` role) and does NOT inherit your configured `default`, whereas `@slow` did. If you relied on the reviewer running on your default model, assign that model to the `reviewer` role under `/model`.
 
 ### Fixed
 
