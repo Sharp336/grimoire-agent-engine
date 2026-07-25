@@ -50,9 +50,15 @@ export interface GuidedGoalTurnOptions {
  */
 export async function buildGuidedGoalContextPrompt(cwd: string): Promise<string | undefined> {
 	try {
-		const loaded = await withDeadline("loadProjectContextFiles", loadProjectContextFiles({ cwd }), []);
-		// User-level files must not keep empty projects from the context-free path.
-		const contextFiles = loaded.filter(file => file.level === "project");
+		// Filter to project-level files inside loadProjectContextFiles (before its
+		// cross-level dedup) so an identical user-level file cannot win the dedupe
+		// (which keeps the last entry per content) and then be dropped here, leaving
+		// the interview context-free despite an applicable project file.
+		const contextFiles = await withDeadline(
+			"loadProjectContextFiles",
+			loadProjectContextFiles({ cwd, level: "project" }),
+			[],
+		);
 		if (contextFiles.length === 0) return undefined;
 		return prompt.render(guidedGoalContextPrompt, { contextFiles }).trim() || undefined;
 	} catch (err) {

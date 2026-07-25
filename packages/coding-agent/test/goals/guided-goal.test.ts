@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { mkdir } from "node:fs/promises";
 import * as path from "node:path";
 import * as core from "@oh-my-pi/pi-agent-core";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -13,7 +14,7 @@ import { AgentSession as RealAgentSession } from "@oh-my-pi/pi-coding-agent/sess
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const planModel = { provider: "test", id: "plan" } as unknown as Model<Api>;
 const slowModel = { provider: "test", id: "slow" } as unknown as Model<Api>;
@@ -277,6 +278,36 @@ describe("guided goal setup", () => {
 		expect(rendered!.match(/<repository-context>/g)?.length).toBe(1);
 	});
 
+	it("buildGuidedGoalContextPrompt keeps a project AGENTS.md that exactly matches a user-level file", async () => {
+		// Regression: loadProjectContextFiles sorts by depth descending and its
+		// exact-content dedup keeps the LAST entry, so a user-level file (no depth)
+		// shadows a byte-identical project file. Filtering to project level after
+		// that dedup dropped the surviving user copy, leaving /guided-goal with no
+		// context despite an applicable project AGENTS.md.
+		const shared = "Use Bun, never tsc.\n";
+		const originalAgentDir = getAgentDir();
+		using userHome = await TempDir.create("@guided-goal-user-home-");
+		const userAgentDir = path.join(userHome.path(), "agent");
+		await mkdir(userAgentDir, { recursive: true });
+		await Bun.write(path.join(userAgentDir, "AGENTS.md"), shared);
+		setAgentDir(userAgentDir);
+		try {
+			using projectDir = await TempDir.create("@guided-goal-project-match-");
+			await Bun.write(projectDir.join("AGENTS.md"), shared);
+
+			const rendered = await buildGuidedGoalContextPrompt(projectDir.path());
+
+			expect(rendered).toBeDefined();
+			expect(rendered).toContain("<repository-context>");
+			expect(rendered).toContain(shared.trim());
+			// The block must cite the project file, not the identical user-level one.
+			expect(rendered).toContain(projectDir.join("AGENTS.md"));
+			expect(rendered).not.toContain(userAgentDir);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
+	});
+
 	it("includes contextPrompt in the system prompt array when provided", async () => {
 		const complete = spyOn(core, "instrumentedCompleteSimple").mockResolvedValue(
 			mockResponse({ kind: "question", question: "What is done?" }) as never,
@@ -315,21 +346,16 @@ describe("guided goal setup", () => {
 
 			await harness.mode.handleGuidedGoalCommand("Ship the feature");
 
+			// Every turn's system prompt carries the project context block — the
+			// observable per-turn injection contract. (A string-equality check across
+			// turns would pass even if each turn rebuilt an identical block, so it
+			// proves nothing beyond this loop.)
 			expect(complete.mock.calls.length).toBe(2);
 			for (const call of complete.mock.calls) {
 				const sent = call[1] as { systemPrompt: string[] };
 				expect(sent.systemPrompt.length).toBeGreaterThanOrEqual(2);
 				expect(sent.systemPrompt.some(block => block.includes(marker))).toBe(true);
 			}
-			// Same context block reused across turns (built once, passed through).
-			const firstContext = (complete.mock.calls[0]![1] as { systemPrompt: string[] }).systemPrompt.find(b =>
-				b.includes(marker),
-			);
-			const secondContext = (complete.mock.calls[1]![1] as { systemPrompt: string[] }).systemPrompt.find(b =>
-				b.includes(marker),
-			);
-			expect(firstContext).toBeDefined();
-			expect(secondContext).toBe(firstContext);
 		} finally {
 			await harness.cleanup();
 		}

@@ -143,7 +143,7 @@ export async function withDeadline<T>(
 		onError?: (name: string, error: unknown) => void;
 	},
 ): Promise<T> {
-	let ownTimer: ReturnType<typeof setTimeout> | undefined;
+	let ownTimer: NodeJS.Timeout | undefined;
 	let deadline = options?.deadline;
 	if (!deadline) {
 		const resolvers = Promise.withResolvers<"__timeout__">();
@@ -394,6 +394,12 @@ export async function resolvePromptInput(input: string | undefined, description:
 export interface LoadContextFilesOptions {
 	/** Working directory to start walking up from. Default: getProjectDir() */
 	cwd?: string;
+	/**
+	 * Restrict results to a single level. When set, files at the other level are
+	 * dropped before cross-level deduplication so an identical file at the
+	 * other level cannot shadow a kept one. Default: keep both levels.
+	 */
+	level?: "user" | "project";
 }
 
 function dedupeExactContextFiles<
@@ -422,7 +428,7 @@ export async function loadProjectContextFiles(options: LoadContextFilesOptions =
 	// in their content. The expansion uses the file's own directory as the
 	// resolution base so relative imports work the same way Claude Code,
 	// Goose, and other tools document.
-	const files = await Promise.all(
+	const allFiles = await Promise.all(
 		result.items.map(async item => {
 			const contextFile = item as ContextFile;
 			return {
@@ -433,6 +439,12 @@ export async function loadProjectContextFiles(options: LoadContextFilesOptions =
 			};
 		}),
 	);
+
+	// Restrict to one level before sort + cross-level dedup so an identical file
+	// at the other level cannot win the dedupe (which keeps the last entry per
+	// content) and then be dropped by a downstream level filter. The system
+	// prompt path leaves this unset to keep both levels.
+	const files = options.level ? allFiles.filter(file => file.level === options.level) : allFiles;
 
 	// Sort by depth (descending): higher depth (farther from cwd) comes first,
 	// so files closer to cwd appear later and are more prominent
