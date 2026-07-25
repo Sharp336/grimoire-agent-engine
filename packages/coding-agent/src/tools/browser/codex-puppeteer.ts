@@ -1536,34 +1536,31 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async #waitForDownload(timeoutMs: number): Promise<{ token: string }> {
-		let rejectWaiter!: (reason: unknown) => void;
-		const downloadPromise = new Promise<DownloadRecord>((resolve, reject) => {
-			let settled = false;
-			const timer = setTimeout(
-				() => finish(() => reject(new Error(`playwright.waitForEvent timed out after ${timeoutMs}ms`))),
-				timeoutMs,
-			);
-			timer.unref();
-			const aborted = () => finish(() => reject(this.#signal.reason));
-			const waiter: DownloadWaiter = {
-				resolve: value => finish(() => resolve(value)),
-				reject: reason => finish(() => reject(reason)),
-			};
-			rejectWaiter = waiter.reject;
-			const finish = (settle: () => void) => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timer);
-				this.#signal.removeEventListener("abort", aborted);
-				this.#downloadWaiters.delete(waiter);
-				settle();
-			};
-			this.#signal.addEventListener("abort", aborted, { once: true });
-			this.#downloadWaiters.add(waiter);
-			if (this.#signal.aborted) aborted();
-		});
-		void this.#ensureDownloadSession().catch(error => rejectWaiter(error));
-		const download = await downloadPromise;
+		const pendingDownload = Promise.withResolvers<DownloadRecord>();
+		let settled = false;
+		const timer = setTimeout(
+			() => finish(() => pendingDownload.reject(new Error(`playwright.waitForEvent timed out after ${timeoutMs}ms`))),
+			timeoutMs,
+		);
+		timer.unref();
+		const aborted = () => finish(() => pendingDownload.reject(this.#signal.reason));
+		const waiter: DownloadWaiter = {
+			resolve: value => finish(() => pendingDownload.resolve(value)),
+			reject: reason => finish(() => pendingDownload.reject(reason)),
+		};
+		const finish = (settle: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			this.#signal.removeEventListener("abort", aborted);
+			this.#downloadWaiters.delete(waiter);
+			settle();
+		};
+		this.#signal.addEventListener("abort", aborted, { once: true });
+		this.#downloadWaiters.add(waiter);
+		if (this.#signal.aborted) aborted();
+		void this.#ensureDownloadSession().catch(error => waiter.reject(error));
+		const download = await pendingDownload.promise;
 		const token = `download-${Snowflake.next()}`;
 		this.#downloads.set(token, download);
 		return { token };
@@ -1639,14 +1636,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				if (!completion) {
 					const filename = path.basename(event.suggestedFilename) || `download-${event.guid}`;
 					const destination = path.join(directory, filename);
-					let resolveCompletion!: (value: string | null) => void;
-					const completionPromise = new Promise<string | null>(resolve => {
-						resolveCompletion = resolve;
-					});
+					const completionResult = Promise.withResolvers<string | null>();
 					completion = {
 						path: destination,
-						download: { filename, completion: completionPromise },
-						resolve: resolveCompletion,
+						download: { filename, completion: completionResult.promise },
+						resolve: completionResult.resolve,
 						settled: false,
 					};
 					this.#downloadCompletions.set(event.guid, completion);
@@ -1680,25 +1674,25 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const download = this.#downloads.get(token);
 		if (!download) throw new Error("Download is no longer available");
 		const timeoutMs = numberArg(args, "timeoutMs");
-		return await new Promise<string | null>((resolve, reject) => {
-			const timer = setTimeout(
-				() => finish(() => reject(new Error(`download.path timed out after ${timeoutMs}ms`))),
-				timeoutMs,
-			);
-			timer.unref();
-			const aborted = () => finish(() => reject(this.#signal.reason));
-			const finish = (settle: () => void) => {
-				clearTimeout(timer);
-				this.#signal.removeEventListener("abort", aborted);
-				settle();
-			};
-			this.#signal.addEventListener("abort", aborted, { once: true });
-			download.completion.then(
-				value => finish(() => resolve(value)),
-				error => finish(() => reject(error)),
-			);
-			if (this.#signal.aborted) aborted();
-		});
+		const pathResult = Promise.withResolvers<string | null>();
+		const timer = setTimeout(
+			() => finish(() => pathResult.reject(new Error(`download.path timed out after ${timeoutMs}ms`))),
+			timeoutMs,
+		);
+		timer.unref();
+		const aborted = () => finish(() => pathResult.reject(this.#signal.reason));
+		const finish = (settle: () => void) => {
+			clearTimeout(timer);
+			this.#signal.removeEventListener("abort", aborted);
+			settle();
+		};
+		this.#signal.addEventListener("abort", aborted, { once: true });
+		download.completion.then(
+			value => finish(() => pathResult.resolve(value)),
+			error => finish(() => pathResult.reject(error)),
+		);
+		if (this.#signal.aborted) aborted();
+		return await pathResult.promise;
 	}
 
 	async #setFileChooserFiles(args: Readonly<Record<string, unknown>>): Promise<void> {
@@ -2038,7 +2032,12 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			const x = rect.left + rect.width / 2;
 			const y = rect.top + rect.height / 2;
 			if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) return false;
-			const hit = element.ownerDocument.elementFromPoint(x, y);
+			let hit = element.ownerDocument.elementFromPoint(x, y);
+			while (hit?.shadowRoot) {
+				const nested = hit.shadowRoot.elementFromPoint(x, y);
+				if (!nested || nested === hit) break;
+				hit = nested;
+			}
 			return hit !== null && (hit === element || element.contains(hit));
 		});
 	}
@@ -2347,17 +2346,22 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		await this.#disposeHandlesBeforeDeadline(previous, deadline);
 		if (this.#disposed) throw new Error("Puppeteer adapter was disposed");
 		const collectionPromise = this.#page.evaluateHandle(() => {
+			interface PageRoot {
+				querySelectorAll(selector: string): ArrayLike<PageElement>;
+			}
 			interface PageElement {
 				getAttribute(name: string): string | null;
 				getBoundingClientRect(): { width: number; height: number };
+				getRootNode(): PageRoot;
 				hasAttribute(name: string): boolean;
 				isContentEditable?: boolean;
 				parentElement: PageElement | null;
+				shadowRoot: PageRoot | null;
 				tabIndex?: number;
 				tagName: string;
 			}
 			const root = globalThis as unknown as {
-				document: { querySelectorAll(selector: string): ArrayLike<PageElement> };
+				document: PageRoot;
 				getComputedStyle(element: PageElement): { display: string; opacity: string; visibility: string };
 			};
 			const roleOf = (element: PageElement): string | null => {
@@ -2431,12 +2435,21 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				"treeitem",
 			];
 			const pageDocument = root.document;
-			return Array.from(
-				pageDocument.querySelectorAll(
-					"a,area,button,input,textarea,select,option,[role],[tabindex],[contenteditable]",
-				),
-			).filter((element: PageElement) => {
-				for (let current: PageElement | null = element; current; current = current.parentElement) {
+			const selector = "a,area,button,input,textarea,select,option,[role],[tabindex],[contenteditable]";
+			const roots: PageRoot[] = [pageDocument];
+			const elements: PageElement[] = [];
+			for (const currentRoot of roots) {
+				elements.push(...Array.from(currentRoot.querySelectorAll(selector)));
+				for (const candidate of Array.from(currentRoot.querySelectorAll("*"))) {
+					if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
+				}
+			}
+			const composedParent = (element: PageElement): PageElement | null => {
+				const elementRoot = element.getRootNode() as PageRoot & { host?: PageElement };
+				return element.parentElement ?? elementRoot.host ?? null;
+			};
+			return elements.filter((element: PageElement) => {
+				for (let current: PageElement | null = element; current; current = composedParent(current)) {
 					const style = root.getComputedStyle(current);
 					if (
 						current.hasAttribute("hidden") ||

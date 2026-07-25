@@ -892,6 +892,32 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("clicks actionable targets inside open shadow roots without weakening cover checks", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected(); const p=t.playwright;
+				 await page.evaluate(()=>{
+				   const host=document.createElement("div"); host.id="shadow-host";
+				   const root=host.attachShadow({mode:"open"});
+				   root.innerHTML='<button style="position:fixed;left:200px;top:100px;width:120px;height:40px">Shadow target</button>';
+				   globalThis.__shadowClicks=0; root.querySelector("button").addEventListener("click",()=>globalThis.__shadowClicks++);
+				   document.body.append(host);
+				 });
+				 await p.getByRole("button",{name:"Shadow target",exact:true}).click({timeoutMs:200});
+				 await p.getByText("Shadow target",{exact:true}).click({timeoutMs:200});
+				 const snapshot=await t.dom_cua.get_visible_dom();
+				 const node=snapshot.nodes.find(item=>item.text==="Shadow target");
+				 if (!node) return {clicks:await page.evaluate(()=>globalThis.__shadowClicks),nodeFound:false};
+				 await t.dom_cua.click({node_id:node.node_id,timeoutMs:200});
+				 return {clicks:await page.evaluate(()=>globalThis.__shadowClicks),nodeFound:true};`,
+				10,
+			);
+			expect(result).toEqual({ clicks: 3, nodeFound: true });
+		});
+	}, 20_000);
+
 	it("rejects fill and type on non-editable elements without mutating them", async () => {
 		await withPuppeteerTool(async (tool, name) => {
 			const result = await runBrowserCode(
