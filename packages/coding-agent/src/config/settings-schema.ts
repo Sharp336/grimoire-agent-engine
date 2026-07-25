@@ -2783,6 +2783,7 @@ export const SETTINGS_SCHEMA = {
 			label: "Mnemopi Embedding API Key",
 			description: "Optional embedding API key passed to Mnemopi",
 			condition: "mnemopiActive",
+			secret: true,
 		},
 	},
 	"mnemopi.llmMode": {
@@ -2827,6 +2828,7 @@ export const SETTINGS_SCHEMA = {
 			label: "Mnemopi LLM API Key",
 			description: "Optional LLM API key for Mnemopi remote mode",
 			condition: "mnemopiActive",
+			secret: true,
 		},
 	},
 	"mnemopi.llmModel": {

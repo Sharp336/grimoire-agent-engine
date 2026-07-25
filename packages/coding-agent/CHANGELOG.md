@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Mnemopi embedding and LLM API keys rendering in plain text in the settings panel and its text editor. Both are now marked `secret` like `hindsight.apiToken`, so the settings row shows dots and the editor input is masked while you type. A schema test now fails when a credential-shaped setting the panel can display is added without masking.
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed
