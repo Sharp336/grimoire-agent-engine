@@ -485,10 +485,22 @@ export class MCPManager {
 					if (sources[name]) {
 						connection._source = sources[name];
 					}
-					if (this.#pendingConnections.get(name) === connectionPromise) {
-						this.#pendingConnections.delete(name);
-						this.#connections.set(name, connection);
+					// disconnectAll() may clear #pendingConnections after connect
+					// resolved but before this continuation runs — abort is too late
+					// to cancel connectToServer, so close the untracked transport
+					// instead of wiring onClose/listTools on a leaked process.
+					if (this.#pendingConnections.get(name) !== connectionPromise) {
+						connection.transport.onClose = undefined;
+						void disconnectServer(connection).catch(error => {
+							logger.debug("Failed to close raced MCP connection", {
+								path: `mcp:${name}`,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						});
+						throw new Error(`MCP connection cancelled: ${name}`);
 					}
+					this.#pendingConnections.delete(name);
+					this.#connections.set(name, connection);
 
 					// Wire auth refresh for HTTP-like transports so 401s trigger token refresh.
 					// Gate on a resolvable managed credential, not on the auth block:
