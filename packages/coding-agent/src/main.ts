@@ -351,7 +351,7 @@ export async function submitInteractiveInput(
 	}
 }
 
-type AcpSessionFactory = (cwd: string) => Promise<AgentSession>;
+type AcpSessionFactory = (cwd: string, sessionManager?: SessionManager) => Promise<AgentSession>;
 
 export interface AcpSessionFactoryOptions {
 	baseOptions: CreateAgentSessionOptions;
@@ -395,10 +395,10 @@ async function loadTrustedSessionExtensions(
  * tool registry and shadow the client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
-	return async cwd => {
+	return async (cwd, sessionManager) => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
-		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
-		const agentId = `acp:${nextSessionManager.getSessionId()}`;
+		const nextSessionManager = sessionManager ?? SessionManager.create(cwd, args.sessionDir);
+		const agentId = `acp:${sessionManager ? Bun.randomUUIDv7() : nextSessionManager.getSessionId()}`;
 		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
 		// host can open `session/new` for any client-supplied workspace, so
 		// re-discover `TITLE_SYSTEM.md` against THIS session's `cwd` to keep the

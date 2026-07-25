@@ -152,8 +152,9 @@ class FakeAgentSession {
 	constructor(
 		cwd: string,
 		private readonly models: Model[] = TEST_MODELS,
+		sessionManager?: SessionManager,
 	) {
-		this.sessionManager = SessionManager.create(cwd);
+		this.sessionManager = sessionManager ?? SessionManager.create(cwd);
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent = {
 			sessionId: this.sessionId,
@@ -495,8 +496,8 @@ async function createHarness(
 
 	const initialSession = new FakeAgentSession(cwdA);
 	sessions.push(initialSession);
-	const factory = async (cwd: string): Promise<AgentSession> => {
-		const session = new FakeAgentSession(cwd);
+	const factory = async (cwd: string, sessionManager?: SessionManager): Promise<AgentSession> => {
+		const session = new FakeAgentSession(cwd, TEST_MODELS, sessionManager);
 		sessions.push(session);
 		return session as unknown as AgentSession;
 	};
@@ -1055,6 +1056,7 @@ describe("ACP agent", () => {
 		stored.sessionManager.appendMessage(makeAssistantMessage("reply", "reasoning"));
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		const loaded = await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1396,6 +1398,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1511,6 +1514,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1561,6 +1565,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1665,6 +1670,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,

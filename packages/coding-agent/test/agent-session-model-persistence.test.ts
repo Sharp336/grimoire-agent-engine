@@ -466,6 +466,7 @@ describe("AgentSession model persistence", () => {
 		await sessionManager.flush();
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected interrupted session file");
+		await sessionManager.close();
 
 		const result = await createStartupResumeSession(sessionFile);
 		const messages = result.session.sessionManager.buildSessionContext({ transcript: true }).messages;

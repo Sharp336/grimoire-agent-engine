@@ -152,6 +152,7 @@ describe("AgentSession per-turn prune persistence", () => {
 		await sessionManager.flush();
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted session file");
+		await sessionManager.close();
 		const reloaded = await SessionManager.open(sessionFile, tempDir.path());
 		const rebuilt = reloaded
 			.buildSessionContext()
@@ -161,5 +162,6 @@ describe("AgentSession per-turn prune persistence", () => {
 		}
 		const rebuiltText = rebuilt.content.find(block => block.type === "text");
 		expect(rebuiltText?.type === "text" ? rebuiltText.text : undefined).toBe(USELESS_NOTICE);
+		await reloaded.close();
 	});
 });

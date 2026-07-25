@@ -112,12 +112,14 @@ describe("SessionManager workspace directories", () => {
 
 		const file = session.getSessionFile();
 		expect(file).toBeDefined();
+		await session.close();
 		const reopened = await SessionManager.open(file!);
 		expect(reopened.getAdditionalDirectories()).toEqual([path.join(tempDir.path(), "sibling")]);
 		expect([reopened.getCwd(), ...reopened.getAdditionalDirectories()]).toEqual([
 			tempDir.path(),
 			path.join(tempDir.path(), "sibling"),
 		]);
+		await reopened.close();
 	});
 
 	it("clears the header field when the last additional directory is removed", async () => {
@@ -176,11 +178,13 @@ describe("SessionManager workspace directories", () => {
 		// Once the session produces durable output, the header carries the roots.
 		session.appendMessage(makeAssistantMessage());
 		await session.flush();
+		await session.close();
 		const reopened = await SessionManager.open(session.getSessionFile()!);
 		expect(reopened.getAdditionalDirectories()).toEqual([
 			path.join(tempDir.path(), "extra"),
 			path.join(tempDir.path(), "extra2"),
 		]);
+		await reopened.close();
 	});
 
 	it("forkFrom preserves additionalDirectories from the source session", async () => {

@@ -215,7 +215,7 @@ type MCPSourceMap = {
 	[name: string]: MCPSource;
 };
 
-type CreateAcpSession = (cwd: string) => Promise<AgentSession>;
+type CreateAcpSession = (cwd: string, sessionManager?: SessionManager) => Promise<AgentSession>;
 
 type AcpSpeechOption = {
 	value: string;
@@ -1096,11 +1096,21 @@ export class AcpAgent implements Agent {
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
 		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
-		const session = await this.#createSession(path.resolve(params.cwd));
+		const source = this.#sessions.get(params.sessionId);
+		const sourceClone = source?.session.sessionManager.cloneCurrentSession();
+		let session: AgentSession;
 		try {
-			const success = await session.switchSession(sourcePath);
-			if (!success) {
-				throw new Error(`ACP session fork was cancelled: ${params.sessionId}`);
+			session = await this.#createSession(path.resolve(params.cwd), sourceClone);
+		} catch (error) {
+			await sourceClone?.close();
+			throw error;
+		}
+		try {
+			if (!sourceClone) {
+				const success = await session.switchSession(sourcePath);
+				if (!success) {
+					throw new Error(`ACP session fork was cancelled: ${params.sessionId}`);
+				}
 			}
 			const forked = await session.fork();
 			if (!forked) {
