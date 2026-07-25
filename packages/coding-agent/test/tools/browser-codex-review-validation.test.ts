@@ -161,6 +161,22 @@ describe("Codex browser public facade closed vocabularies", () => {
 		);
 	});
 
+	it("rejects unknown getByRole option keys at top-level and nested locator boundaries", async () => {
+		const adapter = new RecordingAdapter();
+		const { tab } = await selectedTab(adapter);
+		const typo = { nmae: "Delete" } as never;
+
+		const outcomes = await Promise.all([
+			captureError(() => tab.playwright.getByRole("button", typo)),
+			captureError(() => tab.playwright.locator("#dialog").getByRole("button", typo)),
+		]);
+
+		expect(outcomes).toEqual([
+			{ name: "Error", message: "playwright.getByRole does not accept nmae" },
+			{ name: "Error", message: "locator.getByRole does not accept nmae" },
+		]);
+	});
+
 	it("rejects inherited property names as click and dblclick modifiers while accepting every valid modifier", async () => {
 		const adapter = new RecordingAdapter();
 		const { tab } = await selectedTab(adapter);

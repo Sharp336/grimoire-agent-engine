@@ -1874,9 +1874,9 @@ describe("cmux Codex browser review regressions", () => {
 				throw new Error(`unsupported_method: ${method}`);
 			},
 			async waitForNavigation(options: { signal?: AbortSignal }) {
-				return await new Promise<null>((_resolve, reject) => {
-					options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
-				});
+				const navigation = Promise.withResolvers<null>();
+				options.signal?.addEventListener("abort", () => navigation.reject(options.signal?.reason), { once: true });
+				return await navigation.promise;
 			},
 		});
 		const reloadTab = await selectedTab(reloadBrowser);
@@ -2293,7 +2293,7 @@ describe("cmux Codex browser review regressions", () => {
 		const probe = observerProbe();
 		class BlobProbe {}
 		class ClipboardItemProbe {}
-		const navigator = { clipboard: { write: () => new Promise<void>(() => undefined) } };
+		const navigator = { clipboard: { write: () => Promise.withResolvers<void>().promise } };
 		const evaluate = (source: string, args: unknown[]) =>
 			runPageEvaluator(source, args, {
 				document: probe.document,
@@ -2818,16 +2818,16 @@ describe("cmux Codex browser review regressions", () => {
 			surfaceId: "surface-contract",
 			async waitForNavigation(options: { signal?: AbortSignal }) {
 				pollSignal = options.signal;
-				return await new Promise<null>((_resolve, reject) => {
-					options.signal?.addEventListener(
-						"abort",
-						() => {
-							pollSettled = true;
-							reject(options.signal?.reason ?? new Error("navigation canceled"));
-						},
-						{ once: true },
-					);
-				});
+				const navigation = Promise.withResolvers<null>();
+				options.signal?.addEventListener(
+					"abort",
+					() => {
+						pollSettled = true;
+						navigation.reject(options.signal?.reason ?? new Error("navigation canceled"));
+					},
+					{ once: true },
+				);
+				return await navigation.promise;
 			},
 		} as never);
 		const navigation = adapter.invoke("playwright.expectNavigation", {

@@ -446,6 +446,24 @@ function requireObject(value: unknown, label: string): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+const ROLE_LOCATOR_OPTION_KEYS: Readonly<Record<string, true>> = { name: true, exact: true };
+const CLICK_OPTION_KEYS: Readonly<Record<string, true>> = {
+	button: true,
+	modifiers: true,
+	force: true,
+	timeoutMs: true,
+};
+
+function assertAllowedKeys(
+	value: Readonly<Record<string, unknown>>,
+	label: string,
+	allowedKeys: Readonly<Record<string, true>>,
+): void {
+	for (const key of Object.keys(value)) {
+		if (!Object.hasOwn(allowedKeys, key)) throw new Error(`${label} does not accept ${key}`);
+	}
+}
+
 function requireString(value: unknown, label: string, allowEmpty = false): string {
 	if (typeof value !== "string" || (!allowEmpty && value.length === 0)) throw new Error(`${label} requires a string`);
 	return value;
@@ -688,10 +706,7 @@ export class CodexLocator {
 
 	#clickOptions(options: CodexLocatorClickOptions, label: string): Readonly<Record<string, unknown>> {
 		const value = requireObject(options, label);
-		const allowedKeys: Record<string, true> = { button: true, modifiers: true, force: true, timeoutMs: true };
-		for (const key of Object.keys(value)) {
-			if (!Object.hasOwn(allowedKeys, key)) throw new Error(`${label} does not accept ${key}`);
-		}
+		assertAllowedKeys(value, label, CLICK_OPTION_KEYS);
 		const button = value.button;
 		if (button !== undefined && button !== "left" && button !== "middle" && button !== "right") {
 			throw new Error(`${label} button must be 'left', 'middle', or 'right'`);
@@ -859,6 +874,7 @@ export class CodexLocator {
 
 	getByRole(role: string, options: CodexRoleLocatorOptions = {}): CodexLocator {
 		const value = requireObject(options, "locator.getByRole");
+		assertAllowedKeys(value, "locator.getByRole", ROLE_LOCATOR_OPTION_KEYS);
 		const descriptor: CodexLocatorDescriptor = {
 			kind: "role",
 			role: requireString(role, "locator.getByRole"),
@@ -957,6 +973,7 @@ export class CodexPlaywright {
 
 	getByRole(role: string, options: CodexRoleLocatorOptions = {}): CodexLocator {
 		const value = requireObject(options, "playwright.getByRole");
+		assertAllowedKeys(value, "playwright.getByRole", ROLE_LOCATOR_OPTION_KEYS);
 		return this.#locator({
 			kind: "role",
 			role: requireString(role, "playwright.getByRole"),

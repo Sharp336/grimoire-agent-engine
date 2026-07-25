@@ -1366,7 +1366,7 @@ describe("Puppeteer final parity blockers", () => {
 	});
 
 	it("bounds selector resolution, read, action, media, and file chooser bodies", async () => {
-		const never = new Promise<never>(() => undefined);
+		const never = Promise.withResolvers<never>().promise;
 		const optionsFor = (page: Record<string, unknown>) => ({
 			currentTabId: "1",
 			page: { url: () => "https://fixture.test/current", ...page } as never,
@@ -1553,7 +1553,7 @@ describe("Puppeteer final parity blockers", () => {
 	});
 
 	it("bounds visible DOM construction, disposes every created handle, and cannot publish after disposal", async () => {
-		const never = new Promise<never>(() => undefined);
+		const never = Promise.withResolvers<never>().promise;
 		let collectionDisposals = 0;
 		let elementDisposals = 0;
 		let scalarDisposals = 0;
@@ -1740,7 +1740,7 @@ describe("Puppeteer final parity blockers", () => {
 	});
 
 	it("uses one bounded deadline for DOM-CUA lookup and every node action", async () => {
-		const never = new Promise<never>(() => undefined);
+		const never = Promise.withResolvers<never>().promise;
 		const metadata = { tag: "button", role: "button", text: "Target", x: 0, y: 0, width: 1, height: 1 };
 		let mode = "snapshot";
 		let evaluationCount = 0;
