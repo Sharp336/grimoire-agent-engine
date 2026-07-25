@@ -850,6 +850,25 @@ describe("cmux Codex browser review regressions", () => {
 		expect(await current.playwright.getByRole("textbox", { name: "Native Name", exact: true }).count()).toBe(0);
 	});
 
+	it("rejects ambiguous cmux single-element reads while preserving multi-element counts", async () => {
+		const { document, window } = parseHTML("<html><body><button>First</button><button>Second</button></body></html>");
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible", opacity: "1" }));
+		const current = await selectedTab(
+			facadeFor({
+				async codexEvaluate(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window });
+				},
+			}),
+		);
+		const locator = current.playwright.getByRole("button");
+
+		expect(await locator.count()).toBe(2);
+		expect(await caughtError(() => locator.innerText())).toEqual({
+			name: "Error",
+			message: "locator.innerText resolved to 2 elements; use first() or nth()",
+		});
+	});
+
 	it("uses canonical implicit roles and accessible names in elementInfo", async () => {
 		const nativeLabel = { innerText: "Native Name", textContent: "Native Name" };
 		const checkbox = {
@@ -1873,9 +1892,10 @@ describe("cmux Codex browser review regressions", () => {
 			async codexRequest(method: string) {
 				throw new Error(`unsupported_method: ${method}`);
 			},
-			async waitForNavigation(options: { signal?: AbortSignal }) {
+			async waitForNavigation(options: { signal?: AbortSignal; onReady?: () => void }) {
 				const navigation = Promise.withResolvers<null>();
 				options.signal?.addEventListener("abort", () => navigation.reject(options.signal?.reason), { once: true });
+				options.onReady?.();
 				return await navigation.promise;
 			},
 		});
@@ -2415,9 +2435,10 @@ describe("cmux Codex browser review regressions", () => {
 		const historyPrepareTimeouts: number[] = [];
 		const historyAdapter = new CmuxCodexBrowserAdapter({
 			surfaceId: "surface-contract",
-			async waitForNavigation(options: { timeout: number }) {
+			async waitForNavigation(options: { timeout: number; onReady?: () => void }) {
 				navigationTimeouts.push(options.timeout);
 				now = 40;
+				options.onReady?.();
 				return null;
 			},
 			async codexEvaluate(source: string, _args: unknown[], timeoutMs: number) {
@@ -2811,12 +2832,38 @@ describe("cmux Codex browser review regressions", () => {
 		expect(snapshotOptions).toEqual({ preserveRefs: true });
 	});
 
+	it("resolves cmux navigation readiness only after its baseline is installed", async () => {
+		const completion = Promise.withResolvers<null>();
+		let onReady: (() => void) | undefined;
+		const adapter = new CmuxCodexBrowserAdapter({
+			surfaceId: "surface-contract",
+			async waitForNavigation(options: { onReady?: () => void }) {
+				onReady = options.onReady;
+				return await completion.promise;
+			},
+		} as never);
+		const args = { tabId: "1", navigationId: "ready", timeoutMs: 1_000 };
+		let armed = false;
+		const readiness = adapter.invoke("playwright.expectNavigation.ready", args).then(() => {
+			armed = true;
+		});
+		await Promise.resolve();
+
+		expect(onReady).toBeDefined();
+		expect(armed).toBe(false);
+		onReady?.();
+		await readiness;
+		const navigation = adapter.invoke("playwright.expectNavigation", args);
+		completion.resolve(null);
+		await navigation;
+	});
+
 	it("aborts and settles the underlying cmux navigation poll when expectNavigation is canceled", async () => {
 		let pollSignal: AbortSignal | undefined;
 		let pollSettled = false;
 		const adapter = new CmuxCodexBrowserAdapter({
 			surfaceId: "surface-contract",
-			async waitForNavigation(options: { signal?: AbortSignal }) {
+			async waitForNavigation(options: { signal?: AbortSignal; onReady?: () => void }) {
 				pollSignal = options.signal;
 				const navigation = Promise.withResolvers<null>();
 				options.signal?.addEventListener(
@@ -2827,14 +2874,13 @@ describe("cmux Codex browser review regressions", () => {
 					},
 					{ once: true },
 				);
+				options.onReady?.();
 				return await navigation.promise;
 			},
 		} as never);
-		const navigation = adapter.invoke("playwright.expectNavigation", {
-			tabId: "1",
-			navigationId: "cancel-me",
-			timeoutMs: 1_000,
-		});
+		const args = { tabId: "1", navigationId: "cancel-me", timeoutMs: 1_000 };
+		await adapter.invoke("playwright.expectNavigation.ready", args);
+		const navigation = adapter.invoke("playwright.expectNavigation", args);
 		await Promise.resolve();
 
 		await adapter.invoke("playwright.expectNavigation.cancel", { tabId: "1", navigationId: "cancel-me" });
@@ -2875,12 +2921,14 @@ describe("cmux Codex browser review regressions", () => {
 			new CmuxTab({ client: client as never, surfaceId: "surface-contract" }),
 		);
 
-		await adapter.invoke("playwright.expectNavigation", {
+		const args = {
 			tabId: "1",
 			navigationId: "deadline",
 			waitUntil: "load",
 			timeoutMs: 100,
-		});
+		};
+		await adapter.invoke("playwright.expectNavigation.ready", args);
+		await adapter.invoke("playwright.expectNavigation", args);
 
 		expect(urlRead).toBe(1);
 		expect(calls.slice(0, 3).map(call => [call.method, call.timeoutMs])).toEqual([
@@ -2899,8 +2947,9 @@ describe("cmux Codex browser review regressions", () => {
 		const navigationDone = Promise.withResolvers<null>();
 		const adapter = new CmuxCodexBrowserAdapter({
 			surfaceId: "surface-contract",
-			waitForNavigation(options: { timeout?: number }) {
+			waitForNavigation(options: { timeout?: number; onReady?: () => void }) {
 				navigationTimeout = options.timeout;
+				options.onReady?.();
 				return navigationDone.promise;
 			},
 			async codexEvaluate(source: string, _args: unknown[], timeoutMs: number) {
@@ -3244,9 +3293,10 @@ describe("cmux Codex browser review regressions", () => {
 		const navigation = Promise.withResolvers<null>();
 		const adapter = new CmuxCodexBrowserAdapter({
 			surfaceId: "surface-contract",
-			waitForNavigation(options: { signal?: AbortSignal }) {
+			waitForNavigation(options: { signal?: AbortSignal; onReady?: () => void }) {
 				sequence.push("arm");
 				navigationSignal = options.signal;
+				options.onReady?.();
 				return navigation.promise;
 			},
 			async codexRequest(method: string) {

@@ -108,6 +108,7 @@ export type CodexBrowserOperation =
 	| "playwright.waitForLoadState"
 	| "playwright.waitForTimeout"
 	| "playwright.expectNavigation"
+	| "playwright.expectNavigation.ready"
 	| "playwright.expectNavigation.cancel"
 	| "playwright.waitForEvent"
 	| "playwright.download.path"
@@ -1065,18 +1066,18 @@ export class CodexPlaywright {
 		if (typeof callback !== "function") throw new Error("playwright.expectNavigation requires a callback");
 		const value = requireObject(options, "playwright.expectNavigation");
 		const navigationId = crypto.randomUUID();
-		const navigation = this.#adapter
-			.invoke<void>("playwright.expectNavigation", {
-				tabId: this.#tabId,
-				navigationId,
-				url: value.url === undefined ? undefined : textPattern(value.url, "playwright.expectNavigation url"),
-				waitUntil: loadState(value.waitUntil, "playwright.expectNavigation"),
-				timeoutMs: navigationTimeout(value.timeoutMs, "playwright.expectNavigation"),
-			})
-			.then(
-				() => ({ kind: "navigation" as const }),
-				error => ({ kind: "navigationError" as const, error }),
-			);
+		const navigationArgs = {
+			tabId: this.#tabId,
+			navigationId,
+			url: value.url === undefined ? undefined : textPattern(value.url, "playwright.expectNavigation url"),
+			waitUntil: loadState(value.waitUntil, "playwright.expectNavigation"),
+			timeoutMs: navigationTimeout(value.timeoutMs, "playwright.expectNavigation"),
+		};
+		await this.#adapter.invoke<void>("playwright.expectNavigation.ready", navigationArgs);
+		const navigation = this.#adapter.invoke<void>("playwright.expectNavigation", navigationArgs).then(
+			() => ({ kind: "navigation" as const }),
+			error => ({ kind: "navigationError" as const, error }),
+		);
 		const cancelNavigation = async (): Promise<void> => {
 			await this.#adapter
 				.invoke<void>("playwright.expectNavigation.cancel", { tabId: this.#tabId, navigationId })

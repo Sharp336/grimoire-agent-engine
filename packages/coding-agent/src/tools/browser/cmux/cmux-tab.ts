@@ -808,7 +808,12 @@ export class CmuxTab {
 		throw new ToolError(`tab.waitForUrl() timed out after ${timeoutMs}ms`);
 	}
 
-	async waitForNavigation(opts?: { waitUntil?: WaitUntil; timeout?: number; signal?: AbortSignal }): Promise<null> {
+	async waitForNavigation(opts?: {
+		waitUntil?: WaitUntil;
+		timeout?: number;
+		signal?: AbortSignal;
+		onReady?: () => void;
+	}): Promise<null> {
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		const runSignal = this.#runContext?.signal;
 		const signal =
@@ -838,6 +843,7 @@ export class CmuxTab {
 					: {};
 			const startUrl = typeof baseline.url === "string" && baseline.url.length > 0 ? baseline.url : this.#lastUrl;
 			if (typeof baseline.url === "string" && baseline.url.length > 0) this.#lastUrl = baseline.url;
+			opts?.onReady?.();
 			while (true) {
 				const result = (await this.#request(
 					"browser.url.get",

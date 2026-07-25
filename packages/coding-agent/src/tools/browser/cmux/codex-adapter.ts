@@ -175,6 +175,7 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	if (command === "status") return { attached: elements.length > 0, visible: !!element && visible(element), enabled: !!element && !disabled(element) };
 	if (command === "count") return elements.length;
 	if (command === "allTextContents") return elements.map(item => String(item.textContent ?? ""));
+	if (elements.length > 1) throw new Error("locator." + command + " resolved to " + elements.length + " elements; use first() or nth()");
 	if (command === "isVisible") return !!element && visible(element);
 	if (command === "isEnabled") return !!element && !disabled(element);
 	if (!element) throw new Error("Locator did not resolve to an element");
@@ -881,7 +882,7 @@ export interface CmuxCodexBrowserSessionState {
 export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	readonly #tab: CmuxTab;
 	readonly #state: CmuxCodexBrowserSessionState;
-	readonly #navigationCancels = new Map<string, () => void>();
+	readonly #navigationWaiters = new Map<string, { cancel: () => void; completion: Promise<void> }>();
 	readonly #tokenNamespace = crypto.randomUUID();
 	#runState: "new" | "active" | "ended" = "new";
 	#fileChooserReadiness: Promise<number> | undefined;
@@ -910,8 +911,8 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	async endRun(): Promise<void> {
 		if (this.#runState === "ended") return;
 		this.#runState = "ended";
-		for (const cancel of this.#navigationCancels.values()) cancel();
-		this.#navigationCancels.clear();
+		for (const waiter of this.#navigationWaiters.values()) waiter.cancel();
+		this.#navigationWaiters.clear();
 		await this.#cleanupPageState();
 	}
 
@@ -1022,17 +1023,20 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				const timeoutMs = numberArg(args, "timeoutMs", NAVIGATION_TIMEOUT_MS);
 				const deadline = Date.now() + timeoutMs;
 				const controller = new AbortController();
-				const navigation = this.#tab
-					.waitForNavigation({
-						waitUntil: "load",
-						timeout: remainingMs(deadline, "tab.reload"),
-						signal: controller.signal,
-					})
-					.then(
-						() => ({ error: undefined }),
-						(error: unknown) => ({ error }),
-					);
+				const readiness = Promise.withResolvers<void>();
+				const waiting = this.#tab.waitForNavigation({
+					waitUntil: "load",
+					timeout: remainingMs(deadline, "tab.reload"),
+					signal: controller.signal,
+					onReady: readiness.resolve,
+				});
+				void waiting.catch(error => readiness.reject(error));
+				const navigation = waiting.then(
+					() => ({ error: undefined }),
+					(error: unknown) => ({ error }),
+				);
 				try {
+					await readiness.promise;
 					try {
 						await this.#tab.codexRequest("browser.reload", {}, remainingMs(deadline, "tab.reload"));
 					} catch (error) {
@@ -1142,17 +1146,15 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			case "playwright.waitForTimeout":
 				await this.#tab.codexWait(numberArg(args, "timeoutMs"));
 				return undefined as T;
-			case "playwright.expectNavigation": {
-				const state = waitUntilArg(args.waitUntil);
-				if (state === "networkidle")
-					throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.EXPECT_NAVIGATION_NETWORKIDLE);
+			case "playwright.expectNavigation.ready":
+				await this.#prepareExpectNavigation(args);
+				return undefined as T;
+			case "playwright.expectNavigation":
 				await this.#expectNavigation(args);
 				return undefined as T;
-			}
 			case "playwright.expectNavigation.cancel": {
 				const navigationId = stringArg(args, "navigationId");
-				this.#navigationCancels.get(navigationId)?.();
-				this.#navigationCancels.delete(navigationId);
+				this.#navigationWaiters.get(navigationId)?.cancel();
 				return undefined as T;
 			}
 			case "playwright.waitForEvent":
@@ -1538,17 +1540,20 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #historyNavigation(delta: number, timeoutMs: number): Promise<void> {
 		const deadline = Date.now() + timeoutMs;
 		const controller = new AbortController();
-		const navigation = this.#tab
-			.waitForNavigation({
-				waitUntil: "load",
-				timeout: remainingMs(deadline, "history navigation"),
-				signal: controller.signal,
-			})
-			.then(
-				() => ({ error: undefined }),
-				(error: unknown) => ({ error }),
-			);
+		const readiness = Promise.withResolvers<void>();
+		const waiting = this.#tab.waitForNavigation({
+			waitUntil: "load",
+			timeout: remainingMs(deadline, "history navigation"),
+			signal: controller.signal,
+			onReady: readiness.resolve,
+		});
+		void waiting.catch(error => readiness.reject(error));
+		const navigation = waiting.then(
+			() => ({ error: undefined }),
+			(error: unknown) => ({ error }),
+		);
 		try {
+			await readiness.promise;
 			await this.#tab.codexEvaluate<boolean>(
 				`delta => { history.go(delta); return true; }`,
 				[delta],
@@ -1580,38 +1585,63 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		}
 	}
 
-	async #expectNavigation(args: Readonly<Record<string, unknown>>): Promise<void> {
+	async #prepareExpectNavigation(args: Readonly<Record<string, unknown>>): Promise<void> {
 		const timeoutMs = numberArg(args, "timeoutMs", NAVIGATION_TIMEOUT_MS);
 		const deadline = Date.now() + timeoutMs;
 		const state = waitUntilArg(args.waitUntil);
 		if (state === "networkidle")
 			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.EXPECT_NAVIGATION_NETWORKIDLE);
 		const navigationId = stringArg(args, "navigationId");
+		this.#navigationWaiters.get(navigationId)?.cancel();
 		const controller = new AbortController();
+		const readiness = Promise.withResolvers<void>();
 		let cancelled = false;
-		this.#navigationCancels.set(navigationId, () => {
+		const cancel = () => {
 			cancelled = true;
-			controller.abort(new ToolError("playwright.expectNavigation canceled"));
-		});
-		try {
-			await this.#tab.waitForNavigation({
-				waitUntil: state,
-				timeout: remainingMs(deadline, "playwright.expectNavigation"),
-				signal: controller.signal,
-			});
-			const pattern = textPatternArg(args.url);
-			if (pattern) {
-				await this.#waitForUrl(
-					pattern,
-					state,
-					remainingMs(deadline, "playwright.expectNavigation"),
-					controller.signal,
-				);
+			const error = new ToolError("playwright.expectNavigation canceled");
+			readiness.reject(error);
+			controller.abort(error);
+		};
+		const completion = (async () => {
+			try {
+				await this.#tab.waitForNavigation({
+					waitUntil: state,
+					timeout: remainingMs(deadline, "playwright.expectNavigation"),
+					signal: controller.signal,
+					onReady: readiness.resolve,
+				});
+				const pattern = textPatternArg(args.url);
+				if (pattern) {
+					await this.#waitForUrl(
+						pattern,
+						state,
+						remainingMs(deadline, "playwright.expectNavigation"),
+						controller.signal,
+					);
+				}
+			} catch (error) {
+				if (!cancelled) throw error;
 			}
+		})();
+		void completion.catch(error => readiness.reject(error));
+		const waiter = { cancel, completion };
+		this.#navigationWaiters.set(navigationId, waiter);
+		try {
+			await readiness.promise;
 		} catch (error) {
-			if (!cancelled) throw error;
+			if (this.#navigationWaiters.get(navigationId) === waiter) this.#navigationWaiters.delete(navigationId);
+			throw error;
+		}
+	}
+
+	async #expectNavigation(args: Readonly<Record<string, unknown>>): Promise<void> {
+		const navigationId = stringArg(args, "navigationId");
+		const waiter = this.#navigationWaiters.get(navigationId);
+		if (!waiter) throw new ToolError("playwright.expectNavigation was not prepared");
+		try {
+			await waiter.completion;
 		} finally {
-			this.#navigationCancels.delete(navigationId);
+			if (this.#navigationWaiters.get(navigationId) === waiter) this.#navigationWaiters.delete(navigationId);
 		}
 	}
 

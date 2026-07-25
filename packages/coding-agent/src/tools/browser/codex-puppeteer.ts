@@ -604,7 +604,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	readonly #downloads = new Map<string, DownloadRecord>();
 	readonly #downloadCompletions = new Map<string, DownloadCompletionRecord>();
 	readonly #downloadWaiters = new Set<DownloadWaiter>();
-	readonly #navigationWaiters = new Map<string, AbortController>();
+	readonly #navigationWaiters = new Map<string, { cancel: () => void; completion: Promise<void> }>();
 	readonly #domNodes = new Map<string, ElementHandle>();
 	readonly #latePageCleanups = new Set<Promise<void>>();
 	#domSnapshotGeneration = 0;
@@ -634,7 +634,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	async dispose(): Promise<void> {
 		this.#disposed = true;
 		this.#domSnapshotGeneration++;
-		for (const controller of this.#navigationWaiters.values()) controller.abort();
+		for (const waiter of this.#navigationWaiters.values()) waiter.cancel();
 		for (const waiter of [...this.#downloadWaiters]) waiter.reject(new Error("Puppeteer adapter was disposed"));
 		void this.#downloadSessionPromise?.catch(() => undefined);
 		const session = this.#downloadSession;
@@ -766,11 +766,14 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			case "playwright.waitForTimeout":
 				await untilAborted(this.#signal, () => Bun.sleep(numberArg(args, "timeoutMs")));
 				return undefined;
+			case "playwright.expectNavigation.ready":
+				await this.#prepareExpectNavigation(args);
+				return undefined;
 			case "playwright.expectNavigation":
 				await this.#expectNavigation(args);
 				return undefined;
 			case "playwright.expectNavigation.cancel":
-				this.#navigationWaiters.get(stringArg(args, "navigationId"))?.abort();
+				this.#navigationWaiters.get(stringArg(args, "navigationId"))?.cancel();
 				return undefined;
 			case "playwright.waitForEvent":
 				return await this.#waitForEvent(args);
@@ -856,12 +859,12 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				);
 			case "locator.isEnabled":
 				return await this.#withResolved(locatorArgs(args), "locator.isEnabled", async handles => {
-					const first = handles[0];
+					const first = this.#singleHandle(handles, "locator.isEnabled");
 					return first ? await this.#isEnabled(first) : false;
 				});
 			case "locator.isVisible":
 				return await this.#withResolved(locatorArgs(args), "locator.isVisible", async handles => {
-					const first = handles[0];
+					const first = this.#singleHandle(handles, "locator.isVisible");
 					return first ? await this.#isVisible(first) : false;
 				});
 			case "locator.waitFor":
@@ -1479,10 +1482,42 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		}
 	}
 
+	async #prepareExpectNavigation(args: Readonly<Record<string, unknown>>): Promise<void> {
+		const navigationId = stringArg(args, "navigationId");
+		this.#navigationWaiters.get(navigationId)?.cancel();
+		const controller = new AbortController();
+		const readiness = Promise.withResolvers<void>();
+		const completion = this.#runExpectedNavigation(args, controller, readiness.resolve);
+		void completion.catch(error => readiness.reject(error));
+		const waiter = {
+			cancel: () => controller.abort(new Error("playwright.expectNavigation canceled")),
+			completion,
+		};
+		this.#navigationWaiters.set(navigationId, waiter);
+		try {
+			await readiness.promise;
+		} catch (error) {
+			if (this.#navigationWaiters.get(navigationId) === waiter) this.#navigationWaiters.delete(navigationId);
+			throw error;
+		}
+	}
+
 	async #expectNavigation(args: Readonly<Record<string, unknown>>): Promise<void> {
 		const navigationId = stringArg(args, "navigationId");
-		const controller = new AbortController();
-		this.#navigationWaiters.set(navigationId, controller);
+		const waiter = this.#navigationWaiters.get(navigationId);
+		if (!waiter) throw new Error("playwright.expectNavigation was not prepared");
+		try {
+			await waiter.completion;
+		} finally {
+			if (this.#navigationWaiters.get(navigationId) === waiter) this.#navigationWaiters.delete(navigationId);
+		}
+	}
+
+	async #runExpectedNavigation(
+		args: Readonly<Record<string, unknown>>,
+		controller: AbortController,
+		onReady: () => void,
+	): Promise<void> {
 		const signal = AbortSignal.any([this.#signal, controller.signal]);
 		const timeoutMs = numberArg(args, "timeoutMs");
 		const deadline = Date.now() + timeoutMs;
@@ -1498,6 +1533,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			abortListener = () => canceled.reject(signal.reason ?? new Error("playwright.expectNavigation canceled"));
 			signal.addEventListener("abort", abortListener, { once: true });
 			if (signal.aborted) abortListener();
+			else onReady();
 			await Promise.race([navigation, canceled.promise]);
 			if (state === "networkidle") {
 				await untilAborted(signal, () =>
@@ -1513,7 +1549,6 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			}
 		} finally {
 			if (abortListener) signal.removeEventListener("abort", abortListener);
-			if (this.#navigationWaiters.get(navigationId) === controller) this.#navigationWaiters.delete(navigationId);
 		}
 	}
 
@@ -1739,6 +1774,13 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		}
 	}
 
+	#singleHandle(handles: readonly ElementHandle[], label: string): ElementHandle | undefined {
+		if (handles.length > 1) {
+			throw new Error(`${label} resolved to ${handles.length} elements; use first() or nth()`);
+		}
+		return handles[0];
+	}
+
 	async #withActionHandle<T>(
 		args: LocatorArgs,
 		label: string,
@@ -1759,6 +1801,10 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			}
 			this.#operationRemaining(deadline);
 			const handles = await this.#resolve(args.locator, deadline);
+			if (handles.length > 1) {
+				await this.#disposeHandlesBeforeDeadline(handles, deadline);
+				throw new Error(`${label} resolved to ${handles.length} elements; use first() or nth()`);
+			}
 			const first = handles.shift();
 			await this.#disposeHandlesBeforeDeadline(handles, deadline);
 			if (first) {
@@ -2336,6 +2382,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			throwIfAborted(this.#signal);
 			this.#operationRemaining(deadline);
 			const handles = await this.#resolve(parsed.locator, deadline);
+			this.#singleHandle(handles, "locator.waitFor");
 			let visible = false;
 			const attached = handles.length > 0;
 			try {

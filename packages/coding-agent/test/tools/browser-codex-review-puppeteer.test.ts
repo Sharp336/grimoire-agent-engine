@@ -1365,6 +1365,32 @@ describe("Puppeteer final parity blockers", () => {
 		await adapter.dispose();
 	});
 
+	it("rejects ambiguous Puppeteer single-element reads while preserving multi-element counts", async () => {
+		let disposals = 0;
+		const handle = {
+			evaluate: async () => "text",
+			dispose: async () => {
+				disposals++;
+			},
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: { url: () => "https://fixture.test/current", $$: async () => [handle, handle] } as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+		const args = { tabId: "1", locator: { kind: "css", selector: "button" }, timeoutMs: 100 };
+
+		expect(await adapter.invoke<number>("locator.count", args)).toBe(2);
+		await expect(adapter.invoke("locator.innerText", args)).rejects.toThrow(
+			"locator.innerText resolved to 2 elements; use first() or nth()",
+		);
+		expect(disposals).toBe(4);
+		await adapter.dispose();
+	});
+
 	it("bounds selector resolution, read, action, media, and file chooser bodies", async () => {
 		const never = Promise.withResolvers<never>().promise;
 		const optionsFor = (page: Record<string, unknown>) => ({

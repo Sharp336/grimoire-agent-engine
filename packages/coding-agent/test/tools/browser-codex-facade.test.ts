@@ -943,6 +943,37 @@ describe("Codex agent.browser public contract", () => {
 		expect(adapter.calls.filter(entry => entry.operation === "locator.selectOption")).toHaveLength(1);
 	});
 
+	it("waits for navigation readiness before invoking the trigger callback", async () => {
+		const readiness = Promise.withResolvers<void>();
+		const navigation = Promise.withResolvers<void>();
+		const events: string[] = [];
+		const adapter = new RecordingAdapter(operation => {
+			if (operation === "tab.selected") return { id: "1" };
+			if (operation === "playwright.expectNavigation.ready") {
+				events.push("arming");
+				return readiness.promise;
+			}
+			if (operation === "playwright.expectNavigation") {
+				events.push("waiting");
+				return navigation.promise;
+			}
+			return undefined;
+		});
+		const current = await createCodexBrowserFacade(adapter).tabs.selected();
+		if (!current) throw new Error("Expected selected contract tab");
+		const outcome = current.playwright.expectNavigation(() => {
+			events.push("callback");
+			navigation.resolve();
+			return "triggered";
+		});
+		await Promise.resolve();
+
+		expect(events).toEqual(["arming"]);
+		readiness.resolve();
+		expect(await outcome).toBe("triggered");
+		expect(events).toEqual(["arming", "waiting", "callback"]);
+	});
+
 	it("rejects expectNavigation promptly when navigation fails while its callback never resolves", async () => {
 		const callback = Promise.withResolvers<void>();
 		const adapter = new RecordingAdapter(operation => {
