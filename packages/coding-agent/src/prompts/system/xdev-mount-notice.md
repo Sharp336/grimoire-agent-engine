@@ -5,6 +5,9 @@ These tools became available:
 {{#each added}}
 - xd://{{this.name}} — {{this.summary}}
 {{/each}}
+{{#if omitted_line}}
+{{omitted_line}}
+{{/if}}
 Read `xd://<tool>` for docs + JSON schema before first use; write the JSON args object to `xd://<tool>` to execute.
 {{/if}}
 {{#if removed.length}}

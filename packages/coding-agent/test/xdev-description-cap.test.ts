@@ -103,26 +103,53 @@ describe("XdevRegistry external description cap", () => {
 		);
 		registry.reconcile(tools);
 
-		const rows = registry.mountNoticeEntries(tools.map(tool => tool.name));
+		const inventory = registry.mountNoticeEntries(tools.map(tool => tool.name));
 		// Render the same bullet shape the mount-notice template uses.
-		const rendered = rows
-			.map(({ name, summary }) => (summary.length > 0 ? `- xd://${name} — ${summary}` : `- xd://${name}`))
-			.join("\n");
+		const rendered = [
+			...inventory.entries.map(({ name, summary }) =>
+				summary.length > 0 ? `- xd://${name} — ${summary}` : `- xd://${name}`,
+			),
+			...(inventory.omittedLine ? [inventory.omittedLine] : []),
+		].join("\n");
 		expect(rendered.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
+		expect(inventory.usedChars).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
 		// Name slots are reserved first: every mounted tool is announced even
 		// when the high per-device cap would otherwise exhaust the budget early.
-		expect(rows.length).toBe(150);
-		expect(rows[0]?.name).toBe("mcp__large_catalog_tool_0");
-		expect(rows[149]?.name).toBe("mcp__large_catalog_tool_149");
+		expect(inventory.entries.length).toBe(150);
+		expect(inventory.omitted).toBe(0);
+		expect(inventory.entries[0]?.name).toBe("mcp__large_catalog_tool_0");
+		expect(inventory.entries[149]?.name).toBe("mcp__large_catalog_tool_149");
 		// First tools keep some summary lede; later rows shrink rather than
 		// emitting uncapped 4000-char descriptions for every device.
-		expect(rows[0]?.summary.length ?? 0).toBeGreaterThan(0);
-		expect(rows.some(row => row.summary.length < 4000)).toBe(true);
-		// docsFor stays under the same budget for the same batch.
+		expect(inventory.entries[0]?.summary.length ?? 0).toBeGreaterThan(0);
+		expect(inventory.entries.some(row => row.summary.length < 4000)).toBe(true);
+		// Shared budget: inventory + docsFor remainder stay within one total.
+		const docsBudget = Math.max(0, XdevRegistry.DOCS_TOTAL_BUDGET - inventory.usedChars);
 		const docs = registry.docsFor(
 			tools.map(tool => tool.name),
 			"inline",
+			[],
+			docsBudget,
 		);
-		expect(docs.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
+		expect(inventory.usedChars + docs.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
+	});
+
+	it("announces devices omitted when name-only rows exhaust the budget", () => {
+		const registry = new XdevRegistry([], 0);
+		// Pathologically long names so name-only bullets exceed a tiny budget.
+		const tools = Array.from({ length: 20 }, (_, index) =>
+			fakeTool(`mcp__${"x".repeat(200)}_${index}`, `Tool ${index}`),
+		);
+		registry.reconcile(tools);
+		const tinyBudget = 800;
+		const inventory = registry.mountNoticeEntries(
+			tools.map(tool => tool.name),
+			tinyBudget,
+		);
+		expect(inventory.entries.length).toBeGreaterThan(0);
+		expect(inventory.omitted).toBeGreaterThan(0);
+		expect(inventory.omittedLine).toMatch(/more devices omitted — read xd:\/\//);
+		expect(inventory.usedChars).toBeLessThanOrEqual(tinyBudget);
+		expect(inventory.entries.length + inventory.omitted).toBe(20);
 	});
 });

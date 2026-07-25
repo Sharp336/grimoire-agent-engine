@@ -275,32 +275,49 @@ export class XdevRegistry {
 	}
 
 	/**
-	 * Mount-notice inventory rows for the given device names, keeping the
-	 * rendered bullet list within {@link DOCS_TOTAL_BUDGET}.
+	 * Mount-notice inventory for the given device names within `budget`
+	 * (default {@link DOCS_TOTAL_BUDGET}).
 	 *
-	 * Two-pass: reserve name-only line cost for every device first so a high
-	 * external description cap cannot drop later tools from the notice
-	 * (with `tools.xdevDocs = "builtins"`, those names are the only signal
-	 * the model gets that they mounted). Remaining budget is spent on
-	 * summaries in catalog order; docs stay one `read xd://` away.
+	 * Two-pass: reserve name-only line cost first so a high external
+	 * description cap cannot drop later tools mid-list; remaining budget
+	 * funds summaries. Devices that still do not fit contribute to
+	 * `omitted` with a `read xd://` pointer so the model knows they exist
+	 * when `tools.xdevDocs` is builtins-only.
 	 */
-	mountNoticeEntries(names: Iterable<string>): Array<{ name: string; summary: string }> {
-		const budget = XdevRegistry.DOCS_TOTAL_BUDGET;
+	mountNoticeEntries(
+		names: Iterable<string>,
+		budget: number = XdevRegistry.DOCS_TOTAL_BUDGET,
+	): {
+		entries: Array<{ name: string; summary: string }>;
+		omitted: number;
+		/** Rendered size of the inventory bullets (+ omission line if any). */
+		usedChars: number;
+		omittedLine: string;
+	} {
 		const nameList = [...names];
-		// Pass 1 — name slots only (rendered: `- xd://{{name}}`).
+		const omissionLine = (count: number): string =>
+			count > 0 ? prompt.render(omittedCatalogTemplate, { count, inventory_url: XD_URL_PREFIX }).trim() : "";
+		// Pass 1 — name slots, always reserving room for an omission line for
+		// any devices that would remain if we stop after this name.
 		const listed: string[] = [];
 		let reserved = 0;
-		for (const name of nameList) {
+		for (let i = 0; i < nameList.length; i++) {
+			const name = nameList[i]!;
 			const prefix = `- ${XD_URL_PREFIX}${name}`;
 			const newline = listed.length > 0 ? 1 : 0;
 			const cost = newline + prefix.length;
-			if (reserved + cost > budget && listed.length > 0) break;
+			const restAfterThis = nameList.length - i - 1;
+			const omitCost = restAfterThis > 0 ? 1 + omissionLine(restAfterThis).length : 0;
+			if (reserved + cost + omitCost > budget && listed.length > 0) break;
 			listed.push(name);
 			reserved += cost;
 		}
+		const omitted = nameList.length - listed.length;
+		const omittedText = omissionLine(omitted);
+		const omitChars = omittedText.length > 0 ? 1 + omittedText.length : 0;
 		// Pass 2 — spend leftover budget on summaries in order.
-		let summaryBudget = Math.max(0, budget - reserved);
-		return listed.map(name => {
+		let summaryBudget = Math.max(0, budget - reserved - omitChars);
+		const entries = listed.map(name => {
 			const tool = this.get(name);
 			const fullSummary = tool
 				? promptCatalogSummary(tool, this.#dynamic.has(name) ? this.#externalDescriptionCap : undefined)
@@ -316,6 +333,13 @@ export class XdevRegistry {
 			if (summary.length > 0) summaryBudget -= sep + summary.length;
 			return { name, summary };
 		});
+		const summaryUsed = entries.reduce((n, { summary }) => n + (summary.length > 0 ? 3 + summary.length : 0), 0);
+		return {
+			entries,
+			omitted,
+			usedChars: reserved + summaryUsed + omitChars,
+			omittedLine: omittedText,
+		};
 	}
 
 	/** `read xd://` listing with one device per line. */
@@ -416,8 +440,17 @@ export class XdevRegistry {
 		return sections.join("\n\n");
 	}
 
-	/** Docs for selected mounted devices under the configured prompt-doc policy. */
-	docsFor(names: Iterable<string>, mode: XdevDocsMode, inlinePatterns: readonly string[] = []): string {
+	/**
+	 * Docs for selected mounted devices under the configured prompt-doc policy.
+	 * `budget` defaults to {@link DOCS_TOTAL_BUDGET}; callers that share a budget
+	 * with mount-notice inventory (e.g. session tools) pass the remainder.
+	 */
+	docsFor(
+		names: Iterable<string>,
+		mode: XdevDocsMode,
+		inlinePatterns: readonly string[] = [],
+		budget: number = XdevRegistry.DOCS_TOTAL_BUDGET,
+	): string {
 		const sections: string[] = [];
 		const inlineGlobs = compileInlineGlobs(inlinePatterns);
 		let used = 0;
@@ -427,10 +460,7 @@ export class XdevRegistry {
 			const descriptionCap = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
 			const sep = sections.length > 0 ? 2 : 0;
-			if (
-				docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP ||
-				used + sep + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET
-			) {
+			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + sep + docs.length > budget) {
 				continue;
 			}
 			used += sep + docs.length;

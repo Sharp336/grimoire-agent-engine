@@ -19,7 +19,7 @@ import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { isMountableUnderXdev, type XdevRegistry } from "../tools/xdev";
+import { isMountableUnderXdev, XdevRegistry } from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { formatLocalCalendarDate } from "../utils/local-date";
 import {
@@ -576,21 +576,34 @@ export class SessionTools {
 		const pending = this.#pendingXdevMountDelta;
 		if (!pending) return undefined;
 		this.#pendingXdevMountDelta = undefined;
-		// Aggregate-budget the inventory rows: a high external description cap
-		// must not turn a large deferred mount batch into a multi-100k notice.
-		const added = this.#xdevRegistry
-			? this.#xdevRegistry.mountNoticeEntries(pending.added)
-			: [...pending.added].map(name => ({ name, summary: "" }));
+		// One shared budget for inventory + inline docs so a high external
+		// description cap cannot produce ~2× DOCS_TOTAL_BUDGET notices.
+		const totalBudget = XdevRegistry.DOCS_TOTAL_BUDGET;
+		const inventory = this.#xdevRegistry
+			? this.#xdevRegistry.mountNoticeEntries(pending.added, totalBudget)
+			: {
+					entries: [...pending.added].map(name => ({ name, summary: "" })),
+					omitted: 0,
+					usedChars: 0,
+					omittedLine: "",
+				};
+		const docsBudget = Math.max(0, totalBudget - inventory.usedChars);
 		const removed = [...pending.removed].map(name => ({ name }));
 		const docs = this.#xdevRegistry?.docsFor(
 			pending.added,
 			this.#host.settings.get("tools.xdevDocs"),
 			this.#host.settings.get("tools.xdevInlineDevices"),
+			docsBudget,
 		);
 		return {
 			role: "custom",
 			customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
-			content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
+			content: prompt.render(xdevMountNoticePrompt, {
+				added: inventory.entries,
+				removed,
+				docs,
+				omitted_line: inventory.omittedLine || undefined,
+			}),
 			attribution: "agent",
 			display: false,
 			timestamp: Date.now(),
