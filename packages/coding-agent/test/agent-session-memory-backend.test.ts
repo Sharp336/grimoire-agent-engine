@@ -108,6 +108,22 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getAllToolNames()).toEqual(["read"]);
 		expect(current.systemPrompt).toEqual(["backend:off;tools:read"]);
 	});
+	it("applies a deferred backend change when a new session starts", async () => {
+		const current = createSession(async () =>
+			settings.get("memory.backend") === "mnemopi" ? [createTool("retain"), createTool("memory_edit")] : [],
+		);
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+		expect(getMnemopiSessionState(current)).toBeDefined();
+
+		settings.override("memory.backend", "off");
+		await current.newSession();
+
+		expect(current.getMemoryBackend()?.id).toBe("off");
+		expect(getMnemopiSessionState(current)).toBeUndefined();
+		expect(current.getActiveToolNames()).toEqual(["read"]);
+	});
+
 	it("cancels a displaced local startup generation", async () => {
 		const current = createSession(async () => []);
 		const localStartup = current.beginLocalMemoryStartup();

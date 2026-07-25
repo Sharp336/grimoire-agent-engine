@@ -6772,6 +6772,9 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			if (this.#memoryBackend?.id !== this.settings.get("memory.backend")) {
+				await this.#memory.applyMemoryBackend();
+			}
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 			this.#pendingNextTurnMessages = [];

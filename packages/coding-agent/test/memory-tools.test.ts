@@ -239,7 +239,12 @@ describe("Supermemory tool factories", () => {
 	it("makes the generic retain and recall tools available when selected", () => {
 		const session = makeSession(Settings.isolated({ "memory.backend": "supermemory" }));
 		expect(MemoryRetainTool.createIf(session)).toBeInstanceOf(MemoryRetainTool);
-		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
+		const recall = MemoryRecallTool.createIf(session);
+		expect(recall).toBeInstanceOf(MemoryRecallTool);
+		expect(recall?.description).toContain("Search Supermemory");
+		expect(recall?.description).not.toContain("memory_edit");
+		expect(recall?.description).not.toContain("reflect");
+		expect(recall?.description).not.toContain("memory://");
 		expect(MemoryReflectTool.createIf(session)).toBeNull();
 		expect(MemoryEditTool.createIf(session)).toBeNull();
 	});

@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { extractMessages } from "../hindsight/transcript";
 import type {
@@ -25,6 +25,8 @@ import {
 } from "./config";
 import { escapeSupermemoryXmlText } from "./content";
 import instructions from "./instructions.md" with { type: "text" };
+import profileContextTemplate from "./profile-context.md" with { type: "text" };
+import recallContextTemplate from "./recall-context.md" with { type: "text" };
 
 interface SupermemoryScopeSnapshot {
 	client: SupermemoryClient;
@@ -98,21 +100,18 @@ const RETENTION_SHUTDOWN_TIMEOUT_MS = 2_000;
 const MAX_AUTOMATIC_TRANSCRIPT_CHARS = 60_000;
 
 function formatProfile(profile: { static: string[]; dynamic: string[] }): string | undefined {
-	const sections: string[] = [];
-	if (profile.static.length > 0)
-		sections.push(`Static facts:\n${profile.static.map(item => `- ${escapeSupermemoryXmlText(item)}`).join("\n")}`);
-	if (profile.dynamic.length > 0)
-		sections.push(
-			`Recent context:\n${profile.dynamic.map(item => `- ${escapeSupermemoryXmlText(item)}`).join("\n")}`,
-		);
-	return sections.length > 0 ? `<supermemory_profile>\n${sections.join("\n\n")}\n</supermemory_profile>` : undefined;
+	if (profile.static.length === 0 && profile.dynamic.length === 0) return undefined;
+	return prompt.render(profileContextTemplate, {
+		static_facts: profile.static.map(item => `- ${escapeSupermemoryXmlText(item)}`).join("\n") || undefined,
+		dynamic_facts: profile.dynamic.map(item => `- ${escapeSupermemoryXmlText(item)}`).join("\n") || undefined,
+	});
 }
 
 function formatSearch(items: SupermemorySearchItem[]): string | undefined {
-	return items.length > 0
-		? `<supermemory_recall>\n${items.map(item => `- ${escapeSupermemoryXmlText(item.content)}`).join("\n")}
-</supermemory_recall>`
-		: undefined;
+	if (items.length === 0) return undefined;
+	return prompt.render(recallContextTemplate, {
+		items: items.map(item => `- ${escapeSupermemoryXmlText(item.content)}`).join("\n"),
+	});
 }
 
 function transcriptForRetentionWindow(
