@@ -42,6 +42,8 @@ const EXPLICIT_CHECKPOINTS_4096_1H: ResolvedBedrockCompat = {
 	promptCacheMaximumCheckpoints: 4,
 };
 
+// AWS モデルカード: 512 トークン、最大 4 個のキャッシュチェックポイント、5 分と 1 時間の TTL。
+// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5.html
 const EXPLICIT_CHECKPOINTS_512_1H: ResolvedBedrockCompat = {
 	promptCacheMode: "explicit",
 	supportsLongPromptCacheRetention: true,
