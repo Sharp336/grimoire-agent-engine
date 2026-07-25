@@ -8,6 +8,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { PROMPT_NAME, SERVER_INSTRUCTIONS, TOOL_NAME } from "./fixtures/instructions-mcp";
@@ -221,6 +222,40 @@ describe("createAgentSession with mcp.awaitStartupMs (interactive UI)", () => {
 			expect(MCPManager.instance()).toBe(previousManager);
 		} finally {
 			MCPManager.setInstance(previousManager);
+		}
+	}, 20_000);
+
+	it("restores the prior MCP manager when awaited replay fails", async () => {
+		const originalManager = MCPManager.instance();
+		const previousManager = new MCPManager(tempDir);
+		MCPManager.setInstance(previousManager);
+		const refresh = spyOn(AgentSession.prototype, "refreshMCPTools").mockRejectedValue(
+			new Error("simulated awaited replay failure"),
+		);
+		try {
+			await expect(
+				createAgentSession({
+					cwd: tempDir,
+					agentDir: tempDir,
+					modelRegistry,
+					sessionManager: SessionManager.inMemory(),
+					settings: Settings.isolated({ "mcp.awaitStartupMs": 5000 }),
+					model: getBundledModel("openai", "gpt-4o-mini"),
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableLsp: false,
+					skipPythonPreflight: true,
+					enableMCP: true,
+					hasUI: true,
+				}),
+			).rejects.toThrow("simulated awaited replay failure");
+			expect(MCPManager.instance()).toBe(previousManager);
+		} finally {
+			refresh.mockRestore();
+			MCPManager.setInstance(originalManager);
 		}
 	}, 20_000);
 });

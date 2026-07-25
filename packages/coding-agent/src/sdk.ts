@@ -3510,8 +3510,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		unsubscribeCredentialDisabled?.();
 		try {
 			if (hasSession) {
-				await session.dispose();
-				if (hasRegistered) unregisterUnlessParked();
+				try {
+					await session.dispose();
+				} finally {
+					if (hasRegistered) unregisterUnlessParked();
+					if (ownedMCPManager && MCPManager.instance() === ownedMCPManager) {
+						MCPManager.setInstance(previousMCPManager);
+					}
+				}
 			} else {
 				if (hasRegistered) unregisterUnlessParked();
 				if (ownedMCPManager) {
