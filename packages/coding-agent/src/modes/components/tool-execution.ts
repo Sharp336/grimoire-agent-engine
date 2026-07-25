@@ -384,6 +384,12 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	// `history` at seal/detached-task retirement. Not rendered data — excluded
 	// from the display memo key.
 	#settlementState: ResultSettlementRepaintState = "live-unpainted";
+	// Observed geometry of the last composed partial-result frame. Settlement
+	// only pays for a full viewport reset when the final render differs in
+	// height from this painted shape; same-height settles keep the ordinary
+	// in-place repaint path (avoids ED3 scrollback wipe for stable stream tails).
+	#paintedPartialLineCount = 0;
+	#paintedPartialWidth = 0;
 	#renderState: {
 		spinnerFrame?: number;
 		expanded: boolean;
@@ -607,6 +613,9 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			!isPartial &&
 			this.#settlementState === "live-painted" &&
 			this.#rendererFlag("forceResultViewportRepaintOnSettle");
+		// Snapshot painted partial geometry before consuming settlement evidence.
+		const paintedPartialLineCount = this.#paintedPartialLineCount;
+		const paintedPartialWidth = this.#paintedPartialWidth;
 		// Clear only the pending-to-first-result latch; `render()` re-arms it.
 		this.#firstResultViewportRepaintShapePainted = false;
 		// Consume live paint evidence before any display mutation or the
@@ -614,6 +623,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// render cannot replay the reset. A partial keeps the evidence intact.
 		if (!isPartial && this.#settlementState === "live-painted") {
 			this.#settlementState = "live-unpainted";
+			this.#paintedPartialLineCount = 0;
+			this.#paintedPartialWidth = 0;
 		}
 		this.#result = result;
 		this.#resultVersion++;
@@ -626,9 +637,20 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#updateSpinnerAnimation();
 		this.#updateTodoStrikeAnimation();
 		this.#updateDisplay();
+		// Settlement reset only when the final compose differs in height from the
+		// last painted partial. Same-height settles keep the in-place path.
+		let settlementTopologyChanged = false;
+		if (provisionalResultSettled) {
+			if (paintedPartialWidth <= 0) {
+				settlementTopologyChanged = true;
+			} else {
+				const finalLineCount = super.render(paintedPartialWidth).length;
+				settlementTopologyChanged = finalLineCount !== paintedPartialLineCount;
+			}
+		}
 		this.#resetDisplayForResultTopologyChange(
 			hadNoResult && firstResultRepaintShapePainted,
-			provisionalResultSettled,
+			settlementTopologyChanged,
 		);
 		// Convert non-PNG images to PNG for Kitty protocol (async)
 		this.#maybeConvertImagesForKitty();
@@ -996,8 +1018,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	/**
 	 * Emit exactly one full-viewport reset when a result update changed the
 	 * block's terminal topology. Both effects are precomputed by the caller
-	 * (which owns the renderer-flag and lifecycle checks); this only ORs them so
-	 * the settlement state is already consumed before the synchronous reset.
+	 * (renderer-flag / lifecycle / observed painted-vs-final height); this only
+	 * ORs them so the settlement state is already consumed before the reset.
 	 */
 	#resetDisplayForResultTopologyChange(
 		paintedPendingShapeReplaced: boolean,
@@ -1020,6 +1042,12 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// it) and never revives an absorbed `history` block.
 		if (this.#settlementState === "live-unpainted" && this.#result !== undefined && this.#isPartial) {
 			this.#settlementState = "live-painted";
+		}
+		// Record the painted partial's observed height so settlement can gate the
+		// destructive reset on a real topology change rather than every settle.
+		if (this.#settlementState === "live-painted" && this.#result !== undefined && this.#isPartial) {
+			this.#paintedPartialLineCount = lines.length;
+			this.#paintedPartialWidth = width;
 		}
 		return lines;
 	}

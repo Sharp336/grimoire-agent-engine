@@ -197,15 +197,29 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 		expect(resetDisplay).not.toHaveBeenCalled();
 	});
 
-	it("forces a viewport repaint when a painted provisional partial result settles", () => {
+	it("forces a viewport repaint when a painted provisional partial result settles to a different height", () => {
+		const { component, resetDisplay } = makeComponent({ host: "router", command: "uptime" });
+		component.updateResult(multilineResult("prov", 20), true);
+		component.render(80);
+		resetDisplay.mockClear();
+
+		component.updateResult(multilineResult("fin", 4), false);
+
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not resetDisplay when a painted partial settles at the same rendered height", () => {
 		const { component, resetDisplay } = makeComponent({ host: "router", command: "uptime" });
 		component.updateResult(toolResult("partial output"), true);
 		component.render(80);
 		resetDisplay.mockClear();
 
+		// Same single-line result chrome height as the provisional frame — settle
+		// must keep the ordinary in-place repaint path (no ED3 scrollback wipe).
 		component.updateResult(toolResult("final output"), false);
 
-		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).not.toHaveBeenCalled();
+		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("Output final output");
 	});
 
 	it("does not repaint when the provisional partial result never reaches the terminal", () => {
@@ -303,14 +317,14 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 
 	it("settles exactly once when a painted partial coalesces with a newer partial before the final", () => {
 		const { component, resetDisplay } = makeComponent({ host: "router", command: "uptime" });
-		component.updateResult(toolResult("partial 1"), true);
+		component.updateResult(multilineResult("prov", 20), true);
 		// Partial 1 reaches the terminal → live-painted.
 		component.render(80);
 		resetDisplay.mockClear();
 		// A newer partial coalesces in without its own render; the paint evidence
 		// from partial 1 must survive so the final still settles once.
-		component.updateResult(toolResult("partial 2"), true);
-		component.updateResult(toolResult("final output"), false);
+		component.updateResult(multilineResult("prov", 20), true);
+		component.updateResult(multilineResult("fin", 4), false);
 
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
 	});
@@ -327,19 +341,19 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 
 	it("keeps the settlement reset count at one across a duplicate success final", () => {
 		const { component, resetDisplay } = makeComponent({ host: "router", command: "uptime" });
-		component.updateResult(toolResult("partial output"), true);
+		component.updateResult(multilineResult("prov", 20), true);
 		component.render(80);
 		resetDisplay.mockClear();
 
-		component.updateResult(toolResult("final output"), false);
-		component.updateResult(toolResult("final output"), false);
+		component.updateResult(multilineResult("fin", 4), false);
+		component.updateResult(multilineResult("fin", 4), false);
 
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps the settlement reset count at one across a duplicate error final", () => {
 		const { component, resetDisplay } = makeComponent({ host: "router", command: "uptime" });
-		component.updateResult(toolResult("partial output"), true);
+		component.updateResult(multilineResult("prov", 20), true);
 		component.render(80);
 		resetDisplay.mockClear();
 

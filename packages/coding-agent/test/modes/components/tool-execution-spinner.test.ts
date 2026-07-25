@@ -9,6 +9,19 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 // must keep the spinner glyph tied to the shared tool-frame ticker. This covers
 // both the shared ToolExecutionComponent interval and renderer-local caches that
 // would otherwise keep serving the first pending frame.
+
+function makeTuiStub() {
+	const requestRender = vi.fn();
+	const requestComponentRender = vi.fn();
+	const resetDisplay = vi.fn();
+	return {
+		requestRender,
+		requestComponentRender,
+		resetDisplay,
+		ui: { requestRender, requestComponentRender, resetDisplay } as unknown as TUI,
+	};
+}
+
 describe("ToolExecutionComponent live preview spinners", () => {
 	beforeAll(async () => {
 		await initTheme();
@@ -21,14 +34,13 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 	it("animates the eval pending cell while the call is live", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const requestComponentRender = vi.fn();
+		const { ui, requestRender, requestComponentRender } = makeTuiStub();
 		const component = new ToolExecutionComponent(
 			"eval",
 			{ language: "py", code: "import time\ntime.sleep(10)" },
 			{},
 			undefined,
-			{ requestRender, requestComponentRender } as unknown as TUI,
+			ui,
 			process.cwd(),
 		);
 
@@ -49,16 +61,8 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 	it("does not tick headerless bash pending previews", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const requestComponentRender = vi.fn();
-		const component = new ToolExecutionComponent(
-			"bash",
-			{ command: "sleep 600" },
-			{},
-			undefined,
-			{ requestRender, requestComponentRender } as unknown as TUI,
-			process.cwd(),
-		);
+		const { ui, requestRender, requestComponentRender } = makeTuiStub();
+		const component = new ToolExecutionComponent("bash", { command: "sleep 600" }, {}, undefined, ui, process.cwd());
 
 		try {
 			requestRender.mockClear();
@@ -73,14 +77,13 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 	it("does not tick detached async bash result snapshots", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const requestComponentRender = vi.fn();
+		const { ui, requestRender, requestComponentRender } = makeTuiStub();
 		const component = new ToolExecutionComponent(
 			"bash",
 			{ command: "sleep 600", async: true },
 			{},
 			undefined,
-			{ requestRender, requestComponentRender } as unknown as TUI,
+			ui,
 			process.cwd(),
 		);
 
@@ -107,14 +110,13 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 	it("does not tick github pending previews whose Text is materialized per rebuild", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const requestComponentRender = vi.fn();
+		const { ui, requestRender, requestComponentRender } = makeTuiStub();
 		const component = new ToolExecutionComponent(
 			"github",
 			{ op: "run_watch", run: "12345" },
 			{},
 			undefined,
-			{ requestRender, requestComponentRender } as unknown as TUI,
+			ui,
 			process.cwd(),
 		);
 
@@ -131,19 +133,11 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 	it("does not tick custom tools whose pending label is a static tool-name Text", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const requestComponentRender = vi.fn();
+		const { ui, requestRender, requestComponentRender } = makeTuiStub();
 		// A renderResult-only custom tool renders the static tool-name label
 		// while pending, so the spinner interval must not start.
 		const tool = { name: "ext_tool", renderResult: () => undefined };
-		const component = new ToolExecutionComponent(
-			"ext_tool",
-			{ input: 1 },
-			{},
-			tool as never,
-			{ requestRender, requestComponentRender } as unknown as TUI,
-			process.cwd(),
-		);
+		const component = new ToolExecutionComponent("ext_tool", { input: 1 }, {}, tool as never, ui, process.cwd());
 
 		try {
 			requestRender.mockClear();
@@ -157,14 +151,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	});
 
 	it("pins the live vibe_wait wall and releases it after the final result", () => {
-		const component = new ToolExecutionComponent(
-			"vibe_wait",
-			{},
-			{},
-			undefined,
-			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
-			process.cwd(),
-		);
+		const component = new ToolExecutionComponent("vibe_wait", {}, {}, undefined, makeTuiStub().ui, process.cwd());
 		const transcript = new TranscriptContainer();
 		transcript.addChild(component);
 
@@ -192,7 +179,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			{ op: "wait" },
 			{},
 			undefined,
-			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			makeTuiStub().ui,
 			process.cwd(),
 		);
 		const transcript = new TranscriptContainer();
