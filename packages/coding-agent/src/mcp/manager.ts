@@ -200,6 +200,7 @@ export class MCPManager {
 	#connections = new Map<string, MCPServerConnection>();
 	#tools: CustomTool<TSchema, MCPToolDetails>[] = [];
 	#pendingConnections = new Map<string, Promise<MCPServerConnection>>();
+	#pendingConnectionAborts = new Map<string, AbortController>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
@@ -422,6 +423,9 @@ export class MCPManager {
 			// and falls back to cached/deferred tools.
 			this.#serverConfigs.set(name, config);
 
+			const abortController = new AbortController();
+			this.#pendingConnectionAborts.set(name, abortController);
+
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config);
@@ -432,6 +436,7 @@ export class MCPManager {
 					onRequest: (method, params) => {
 						return this.#handleServerRequest(method, params);
 					},
+					signal: abortController.signal,
 				});
 			})().then(
 				connection => {
@@ -483,7 +488,7 @@ export class MCPManager {
 			this.#pendingConnections.set(name, connectionPromise);
 
 			const toolsPromise = connectionPromise.then(async connection => {
-				const serverTools = await listTools(connection);
+				const serverTools = await listTools(connection, { signal: abortController.signal });
 				return { connection, serverTools };
 			});
 			this.#pendingToolLoads.set(name, toolsPromise);
@@ -504,8 +509,14 @@ export class MCPManager {
 
 					onStatus?.({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
+					if (this.#pendingConnectionAborts.get(name) === abortController) {
+						this.#pendingConnectionAborts.delete(name);
+					}
 				})
 				.catch(error => {
+					if (this.#pendingConnectionAborts.get(name) === abortController) {
+						this.#pendingConnectionAborts.delete(name);
+					}
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
 					const message = error instanceof Error ? error.message : String(error);
@@ -771,6 +782,8 @@ export class MCPManager {
 	 * Disconnect from a specific server.
 	 */
 	async disconnectServer(name: string): Promise<void> {
+		this.#pendingConnectionAborts.get(name)?.abort();
+		this.#pendingConnectionAborts.delete(name);
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#pendingReconnections.delete(name);
@@ -810,6 +823,7 @@ export class MCPManager {
 		// Invalidate any in-flight reconnection attempts that outlive this call.
 		// They captured the old epoch; after increment they'll detect staleness.
 		this.#epoch++;
+		for (const controller of this.#pendingConnectionAborts.values()) controller.abort();
 		// Detach onClose before closing to prevent spurious reconnect attempts
 		for (const conn of this.#connections.values()) {
 			conn.transport.onClose = undefined;
@@ -820,6 +834,7 @@ export class MCPManager {
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
 		this.#pendingReconnections.clear();
+		this.#pendingConnectionAborts.clear();
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
 		this.#serverConfigs.clear();

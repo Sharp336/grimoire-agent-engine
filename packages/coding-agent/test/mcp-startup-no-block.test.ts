@@ -16,13 +16,14 @@
  * left in flight; its tools surface via the background `#onToolsChanged`
  * path if/when it eventually connects.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import * as mcpClient from "../src/mcp/client";
 import { MCPManager } from "../src/mcp/manager";
-import type { MCPStdioServerConfig } from "../src/mcp/types";
+import type { MCPServerConnection, MCPStdioServerConfig } from "../src/mcp/types";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
 const BUN_EXEC = process.execPath;
@@ -74,4 +75,37 @@ describe("MCP startup (issue #2100)", () => {
 			await manager.disconnectAll();
 		}
 	}, 15_000);
+
+	it("aborts a pending connection when the manager disconnects", async () => {
+		const manager = new MCPManager(workDir);
+		const pending = Promise.withResolvers<MCPServerConnection>();
+		let signal: AbortSignal | undefined;
+		const connect = spyOn(mcpClient, "connectToServer").mockImplementation((_name, _config, options) => {
+			signal = options?.signal;
+			signal?.addEventListener(
+				"abort",
+				() => pending.reject(new DOMException("Connection cancelled", "AbortError")),
+				{ once: true },
+			);
+			return pending.promise;
+		});
+		const config: MCPStdioServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: [FIXTURE_PATH],
+		};
+
+		try {
+			const result = await manager.connectServers({ pending: config }, {}, undefined, 0);
+			expect(result.tools).toEqual([]);
+			expect(signal?.aborted).toBe(false);
+
+			await manager.disconnectAll();
+			expect(signal?.aborted).toBe(true);
+		} finally {
+			pending.reject(new DOMException("Test cleanup", "AbortError"));
+			connect.mockRestore();
+			await manager.disconnectAll();
+		}
+	});
 });
