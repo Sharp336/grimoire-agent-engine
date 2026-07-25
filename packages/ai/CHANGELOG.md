@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added LLM Gateway (DevPass) to the provider registry with an API-key login flow validated against chat completions (`LLM_GATEWAY_API_KEY`).
+- Added LLM Gateway (DevPass) to the provider registry with an API-key login flow that stores the key without a validating request (`LLM_GATEWAY_API_KEY`). `/v1/models` is public (returns 200 for any key) and cannot verify credentials, so a mistyped or revoked key is stored and login reports success, with authentication failing on the first real model request — the same approach as `vercel-ai-gateway` and `cloudflare-ai-gateway`.
 
 ## [16.1.19] - 2026-06-25
 
