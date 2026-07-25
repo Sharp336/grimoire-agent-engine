@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a process timeout leaking an unhandled rejection: `attachTimeout` observed the child lifecycle without the no-op catch its sibling `attachSignal` already had, so a timed-out process could surface an unhandled `TimeoutError` after the caller had already settled.
+
 ## [17.0.9] - 2026-07-23
 
 ### Breaking Changes
