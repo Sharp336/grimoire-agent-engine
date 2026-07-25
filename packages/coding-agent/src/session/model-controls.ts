@@ -373,7 +373,9 @@ export class ModelControls {
 			if (apiKeysByProvider.has(provider)) {
 				apiKey = apiKeysByProvider.get(provider);
 			} else {
-				apiKey = await this.#host.modelRegistry.getApiKeyForProvider(provider, this.#host.sessionId());
+				apiKey = await this.#host.modelRegistry.getApiKeyForProvider(provider, this.#host.sessionId(), {
+					usageScopeId: this.#host.usageScopeId(),
+				});
 				apiKeysByProvider.set(provider, apiKey);
 			}
 

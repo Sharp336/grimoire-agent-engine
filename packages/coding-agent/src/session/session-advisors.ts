@@ -120,7 +120,29 @@ export function bindToolsToAsyncSessionIdentity<T extends AgentTool<any>>(
 ): T[] {
 	return tools.map(tool => {
 		const bound = Object.defineProperties({}, Object.getOwnPropertyDescriptors(tool)) as T;
+		// Own descriptors miss everything a class-based tool exposes through its
+		// prototype - `description`, but also the `parameters` schema that Eval,
+		// Edit and Task build behind a getter. Dropping those hands `undefined` to
+		// `toolWireSchema` and fails the advisor turn before any tool runs. Each
+		// accessor is re-published as a delegating getter rather than a copied
+		// value because it may read `#private` state, which only resolves against
+		// the original instance.
+		for (
+			let proto = Object.getPrototypeOf(tool);
+			proto !== null && proto !== Object.prototype;
+			proto = Object.getPrototypeOf(proto)
+		) {
+			for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(proto))) {
+				if (key === "constructor" || descriptor.get === undefined || Object.hasOwn(bound, key)) continue;
+				Object.defineProperty(bound, key, {
+					configurable: true,
+					enumerable: true,
+					get: () => tool[key as keyof T],
+				});
+			}
+		}
 		Object.defineProperty(bound, "description", {
+			configurable: true,
 			enumerable: true,
 			get: () => tool.description,
 		});

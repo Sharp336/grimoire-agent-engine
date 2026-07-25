@@ -406,7 +406,12 @@ describe("AgentSession message pipeline", () => {
 		expect(keys).toEqual(["old-key", "next-key"]);
 		expect(capturedOptions?.promptCacheKey).toBe(cacheSessionId);
 		expect(capturedOptions?.sessionId).toStartWith(`${cacheSessionId}:side:`);
-		expect(resolver).toHaveBeenCalledWith(model, cacheSessionId);
+		// The ephemeral turn must resolve under the session's usage scope, or /btw
+		// and /omfg silently bypass an extension's usage provider.
+		expect(resolver).toHaveBeenCalledWith(model, {
+			sessionId: cacheSessionId,
+			usageScopeId: session.usageProviderScopeId,
+		});
 	});
 
 	it("applies configured OpenRouter routing variant to ephemeral side-channel options", async () => {

@@ -28,6 +28,9 @@ export interface ClassifyUnexpectedStopDeps {
 	settings: Settings;
 	registry: ModelRegistry;
 	sessionId: string;
+	/** Session usage-provider scope, so the classifier's tiny-model call resolves
+	 *  extension-provided credentials like every other session request. */
+	usageScopeId?: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	signal?: AbortSignal;
 }
@@ -72,7 +75,7 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 	if (!model) {
 		throw new Error("unexpected-stop: no tiny/smol model available for classification");
 	}
-	const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
+	const apiKey = await deps.registry.getApiKey(model, deps.sessionId, { usageScopeId: deps.usageScopeId });
 	if (!apiKey) {
 		throw new Error(`unexpected-stop: no API key for ${model.provider}/${model.id}`);
 	}
@@ -86,7 +89,7 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 			messages: [{ role: "user", content: text, timestamp: Date.now() }],
 		},
 		{
-			apiKey: deps.registry.resolver(model, deps.sessionId),
+			apiKey: deps.registry.resolver(model, { sessionId: deps.sessionId, usageScopeId: deps.usageScopeId }),
 			maxTokens,
 			disableReasoning: true,
 			metadata,

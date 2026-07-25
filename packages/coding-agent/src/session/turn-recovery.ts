@@ -553,6 +553,7 @@ export class TurnRecovery {
 				settings: this.#host.settings,
 				registry: this.#host.modelRegistry,
 				sessionId: this.#host.sessionId(),
+				usageScopeId: this.#host.usageScopeId(),
 				metadataResolver: (provider: string) => this.#host.agent.metadataForProvider(provider),
 				signal: controller.signal,
 			});

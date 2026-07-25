@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed advisor tools losing any member exposed through a class prototype when bound to a per-advisor identity. Eval, Edit and Task build their `parameters` schema behind a getter, so the own-descriptor clone dropped it and `normalizeTools` handed `undefined` to `toolWireSchema`, failing the advisor turn before any tool ran. Inherited accessors are now re-published as delegating getters, which also keeps getters backed by `#private` state working.
+- Fixed session credential resolution bypassing the session usage-provider scope on several paths, so an extension-registered usage provider was ignored by ephemeral `/btw` and `/omfg` turns, branch summaries, main-turn key validation, scoped-model availability checks, and the unexpected-stop classifier.
+
 ## [17.1.1] - 2026-07-24
 
 ### Added

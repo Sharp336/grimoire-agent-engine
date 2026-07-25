@@ -3766,7 +3766,10 @@ export class AgentSession {
 			if (signal.aborted) return;
 			let apiKey: string | undefined;
 			try {
-				apiKey = await this.#modelRegistry.getApiKey(candidateModel, this.sessionId, { signal });
+				apiKey = await this.#modelRegistry.getApiKey(candidateModel, this.sessionId, {
+					signal,
+					usageScopeId: this.#usageProviderScopeId,
+				});
 			} catch {
 				if (signal.aborted) return;
 				continue;
@@ -4876,7 +4879,7 @@ export class AgentSession {
 			}
 
 			// Validate API key
-			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
+			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId, this.#usageProviderScopeId);
 			if (!apiKey) {
 				throw new Error(
 					`No API key found for ${this.model.provider}.\n\n` +
@@ -6766,7 +6769,10 @@ export class AgentSession {
 		const context = await this.agent.buildSideRequestContext(llmMessages);
 		const options = this.prepareSimpleStreamOptions(
 			{
-				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
+				apiKey: this.#modelRegistry.resolver(model, {
+					sessionId: cacheSessionId,
+					usageScopeId: this.#usageProviderScopeId,
+				}),
 				// Side-channel turns must not share OpenAI/Codex append-only
 				// conversation state with the main agent turn: IRC and /btw can run
 				// while the main turn is mid-tool-call. Keep the prompt-cache key
@@ -7513,14 +7519,17 @@ export class AgentSession {
 		let summaryDetails: unknown;
 		if (options.summarize && entriesToSummarize.length > 0 && !hookSummary) {
 			const model = this.model!;
-			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
+			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId, this.#usageProviderScopeId);
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
 			}
 			const branchSummarySettings = this.settings.getGroup("branchSummary");
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
-				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
+				apiKey: this.#modelRegistry.resolver(model, {
+					sessionId: this.sessionId,
+					usageScopeId: this.#usageProviderScopeId,
+				}),
 				signal: this.#branchSummaryAbortController.signal,
 				customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
 				reserveTokens: branchSummarySettings.reserveTokens,

@@ -120,4 +120,35 @@ describe("bindToolsToAsyncSessionIdentity", () => {
 		expect(spec.description).toBe("private probe tool");
 		expect(spec.parameters).toBe(tool.parameters);
 	});
+
+	it("preserves a parameter schema exposed only through a prototype getter", () => {
+		// Eval, Edit and Task build their schema behind a getter, so an own-descriptor
+		// clone drops `parameters` and normalizeTools hands undefined to
+		// toolWireSchema, failing the advisor turn before any tool runs.
+		class SchemaTool {
+			#parameters = { type: "object", properties: { path: { type: "string" } } };
+			name = "schema-probe";
+			label = "Schema Probe";
+			description = "schema probe tool";
+
+			get parameters(): unknown {
+				return this.#parameters;
+			}
+
+			async execute() {
+				return { content: [] };
+			}
+		}
+
+		const identity = new AsyncLocalStorage<ToolSessionIdentity>();
+		const tool = new SchemaTool() as unknown as Tool;
+		const [bound] = bindToolsToAsyncSessionIdentity([tool], identity, {
+			providerSessionId: "provider-a",
+			sessionLabel: "session-a-advisor",
+		});
+		const spec = { ...bound! };
+
+		expect(spec.parameters).toBe(tool.parameters);
+		expect(bound!.parameters).toBe(tool.parameters);
+	});
 });
