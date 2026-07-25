@@ -1224,6 +1224,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSlashCommands = [...retainedCommands, ...skillCommands];
 	}
 
+	/** Rebuild built-in slash commands (e.g., after language change). */
+	rebuildBuiltinSlashCommands(): void {
+		const builtinCommands = buildTuiBuiltinSlashCommands({ ctx: this });
+		const retained = this.#pendingSlashCommands.filter(
+			cmd => !builtinCommands.some(builtin => builtin.name === cmd.name),
+		);
+		this.#pendingSlashCommands = [...builtinCommands, ...retained];
+	}
+
 	/** Reload slash commands and autocomplete for the provided working directory. */
 	async refreshSlashCommandState(cwd?: string): Promise<void> {
 		const basePath = cwd ?? this.sessionManager.getCwd();

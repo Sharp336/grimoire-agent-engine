@@ -483,6 +483,13 @@ const translations: Record<Locale, Record<string, string>> = {
 		"nav.collapseMenu": "收起菜单",
 		"nav.expandMenu": "展开菜单",
 
+		// Top bar
+		"topBar.observability": "可观测性",
+		"topBar.languageToggle": "切换语言",
+		"topBar.openMenu": "打开菜单",
+		"topBar.notUpdated": "未更新",
+		"topBar.updated": "更新于 {time}",
+
 		// Time ranges
 		"range.all": "全部",
 		"range.allTime": "全部时间",
@@ -508,6 +515,7 @@ const translations: Record<Locale, Record<string, string>> = {
 		// Sync button
 		"sync.syncing": "同步中...",
 		"sync.syncDb": "同步数据库",
+		"sync.synced": "已同步 {count} 个请求",
 		"sync.success": "同步完成: 发现 {count} 个新请求。",
 		"sync.failed": "同步失败: {error}",
 
@@ -549,6 +557,9 @@ const translations: Record<Locale, Record<string, string>> = {
 		"common.noData": "暂无数据",
 		"common.retry": "重试",
 		"common.failedToLoad": "加载数据失败",
+		"common.time": "时间",
+		"common.tokens": "Tokens",
+		"common.cost": "成本",
 
 		// Overview route
 		"overview.throughput": "系统吞吐量",
@@ -697,8 +708,6 @@ const translations: Record<Locale, Record<string, string>> = {
 		"behavior.allCombined": "所有信号合计",
 		"behavior.model": "模型",
 		"behavior.messagesCol": "消息数",
-		"behavior.capsPercent": "大写 %",
-		"behavior.profanityPercent": "脏话 %",
 		"behavior.anguishPercent": "痛苦 %",
 		"behavior.frustrationPercent": "沮丧 %",
 		"behavior.hitsPercent": "命中 %",
@@ -828,6 +837,7 @@ const translations: Record<Locale, Record<string, string>> = {
 		"tools.metric.charsSuffix": "字符",
 		"tools.chart.title": "调用趋势",
 		"tools.chart.subtitle": "{window}内的工具调用，按工具堆叠",
+		"tools.chart.noData": "暂无数据",
 		"tools.chart.tooltipCallsSuffix": "次调用",
 		"tools.chart.other": "其他",
 		"tools.table.byToolTitle": "按工具",

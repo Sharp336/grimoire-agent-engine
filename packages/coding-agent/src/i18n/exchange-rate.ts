@@ -174,14 +174,16 @@ export async function formatCostWithExchange(usdAmount: number): Promise<[string
 
 /**
  * Sync cost formatter. Returns "$X.XX" for en locale, "$X.XX (≈¥Y.YY)" for zh.
+ * Honors user-configured exchange rate via getExchangeRateSync().
  */
+
 export function formatCost(usdAmount: number): string {
 	const usd = formatUSDFormat(usdAmount);
 	if (!shouldConvertCurrency()) {
 		return usd;
 	}
-	ensureCacheInitialized();
-	const cnyAmount = usdAmount * currentRate;
+	const rate = getExchangeRateSync();
+	const cnyAmount = usdAmount * rate;
 	return `${usd} (≈¥${cnyAmount.toFixed(2)})`;
 }
 
