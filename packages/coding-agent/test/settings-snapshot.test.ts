@@ -103,21 +103,71 @@ describe("settings snapshot", () => {
 		}
 	});
 
-	it("keeps the allowlist inside its reviewed shape", () => {
-		// The schema type permits opting in any setting. This starter set is
-		// deliberately narrower: settings the panel already shows, whose values
-		// are a bool or one of a fixed enum, so none can carry a path, a URL or
-		// a credential. Broadening it must be a deliberate edit here, not a
-		// quiet annotation elsewhere.
-		const allowlisted = paths.filter(path => isRpcReadable(path));
-		expect(allowlisted.length).toBeGreaterThan(0);
-		for (const path of allowlisted) {
-			const ui = getUi(path);
-			expect(ui).toBeDefined();
-			expect(ui?.tab).toBe("appearance");
-			expect(ui?.secret).not.toBe(true);
-			expect(["boolean", "enum"]).toContain(SETTINGS_SCHEMA[path].type);
+	it("discloses exactly the reviewed set and nothing else", () => {
+		// Read off the built snapshot, not off `isRpcReadable`: deriving the
+		// expectation from the same helper the code uses would pass no matter what
+		// the endpoint actually emits.
+		//
+		// The list is exact on purpose. Annotating one more setting widens
+		// disclosure, and a category check ("appearance booleans and enums") would
+		// still pass while it happened. Widening this set must be a deliberate
+		// edit here.
+		const disclosed = buildSettingsSnapshot(Settings.isolated())
+			.settings.filter(entry => entry.redacted !== true)
+			.map(entry => entry.path)
+			.sort();
+		expect(disclosed).toEqual([
+			"colorBlindMode",
+			"display.cacheMissMarker",
+			"display.collapseCompacted",
+			"display.shimmer",
+			"display.showTokenUsage",
+			"display.smoothStreaming",
+			"images.autoResize",
+			"images.blockImages",
+			"showHardwareCursor",
+			"statusLine.compactThinkingLevel",
+			"statusLine.preset",
+			"statusLine.separator",
+			"statusLine.sessionAccent",
+			"statusLine.showHookStatus",
+			"statusLine.transparent",
+			"symbolPreset",
+			"task.showResolvedModelBadge",
+			"terminal.showImages",
+			"terminal.showProgress",
+			"tui.hyperlinks",
+			"tui.imeSafeCursor",
+			"tui.renderMermaid",
+			"tui.scrollbackRebuild",
+			"tui.textSizing",
+			"tui.tight",
+			"tui.titleState",
+		]);
+	});
+
+	it("keeps every disclosed setting inside its reviewed shape", () => {
+		// Settings the panel already shows, whose values are a bool or one of a
+		// fixed enum, so none can carry a path, a URL or a credential.
+		for (const entry of buildSettingsSnapshot(Settings.isolated()).settings) {
+			if (entry.redacted === true) continue;
+			expect(entry.ui).toBeDefined();
+			expect(entry.ui?.tab).toBe("appearance");
+			expect(entry.ui?.secret).not.toBe(true);
+			expect(["boolean", "enum"]).toContain(entry.type);
 		}
+	});
+
+	it("preserves the rendering metadata a client would otherwise duplicate", () => {
+		const byPath = new Map(buildSettingsSnapshot(Settings.isolated()).settings.map(e => [e.path, e]));
+		// Static choices, including their labels.
+		expect(byPath.get("symbolPreset")?.ui?.options).toEqual(getUi("symbolPreset")?.options);
+		// A runtime-populated submenu must stay distinguishable from "no choices".
+		expect(byPath.get("theme.dark")?.ui?.options).toBe("runtime");
+		// Ordered selection semantics.
+		expect(byPath.get("providers.webSearchOrder")?.ui?.ordered).toBe(true);
+		// A config-only setting keeps its top-level prose.
+		expect(byPath.get("tui.maxInlineImageColumns")?.description).toContain("inline images");
 	});
 
 	it("scopes to a tab and exposes enum choices", () => {
