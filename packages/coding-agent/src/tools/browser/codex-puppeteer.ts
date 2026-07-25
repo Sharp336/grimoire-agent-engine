@@ -897,8 +897,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				await this.#pressKeys(args.keys);
 				return undefined;
 			case "cua.move":
-				await this.#pressKeys(args.keys);
-				await this.#page.mouse.move(numberArg(args, "x"), numberArg(args, "y"));
+				await this.#coordinateMove(args);
 				return undefined;
 			case "cua.scroll":
 				await this.#pressKeys(args.keypress);
@@ -1142,7 +1141,12 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #elementInfo(args: Readonly<Record<string, unknown>>): Promise<unknown> {
 		const rawHandle = await this.#page.evaluateHandle(
 			(x, y, includeNonInteractable) => {
-				const hit = document.elementFromPoint(x, y);
+				let hit = document.elementFromPoint(x, y);
+				while (hit?.shadowRoot) {
+					const nested = hit.shadowRoot.elementFromPoint(x, y);
+					if (!nested || nested === hit) break;
+					hit = nested;
+				}
 				if (!hit || includeNonInteractable) return hit;
 				const interactiveRoles: Record<string, true> = {
 					button: true,
@@ -1163,7 +1167,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					textbox: true,
 					treeitem: true,
 				};
-				for (let current: Element | null = hit; current; current = current.parentElement) {
+				for (let current: Element | null = hit; current; ) {
 					const tagName = current.tagName.toLowerCase();
 					const inputType = (current.getAttribute("type") ?? "text").toLowerCase();
 					const explicitRole = (current.getAttribute("role") ?? "").trim().split(/\s+/)[0] ?? "";
@@ -1179,6 +1183,9 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 						(htmlCurrent.tabIndex ?? -1) >= 0 ||
 						htmlCurrent.isContentEditable === true;
 					if (nativelyInteractable || interactiveRoles[explicitRole] === true) return current;
+					const pageCurrent = current as Element & { assignedSlot?: Element | null };
+					const root = current.getRootNode() as unknown as { host?: Element };
+					current = pageCurrent.assignedSlot ?? current.parentElement ?? root.host ?? null;
 				}
 				return hit;
 			},
@@ -2039,7 +2046,13 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				if (!nested || nested === hit) break;
 				hit = nested;
 			}
-			return hit !== null && (hit === element || element.contains(hit));
+			for (let current = hit; current; ) {
+				if (current === element) return true;
+				const pageCurrent = current as Element & { assignedSlot?: Element | null };
+				const root = current.getRootNode() as unknown as { host?: Element };
+				current = pageCurrent.assignedSlot ?? current.parentElement ?? root.host ?? null;
+			}
+			return false;
 		});
 	}
 
@@ -2697,11 +2710,9 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		return "left";
 	}
 
-	async #coordinateDrag(args: Readonly<Record<string, unknown>>): Promise<void> {
-		const keys = Array.isArray(args.keys) ? (args.keys as string[]) : [];
+	async #withHeldKeys(rawKeys: unknown, action: () => Promise<void>): Promise<void> {
+		const keys = Array.isArray(rawKeys) ? (rawKeys as string[]) : [];
 		const pressed: string[] = [];
-		const points = args.path as Array<{ x: number; y: number }>;
-		let mouseDownAttempted = false;
 		let failure: unknown;
 		let cleanupFailure: unknown;
 		try {
@@ -2709,23 +2720,10 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				pressed.push(key);
 				await this.#page.keyboard.down(key as KeyInput);
 			}
-			await this.#page.mouse.move(points[0].x, points[0].y);
-			mouseDownAttempted = true;
-			await this.#page.mouse.down();
-			for (let index = 1; index < points.length; index++) {
-				const point = points[index]!;
-				await this.#page.mouse.move(point.x, point.y);
-			}
+			await action();
 		} catch (error) {
 			failure = error;
 		} finally {
-			if (mouseDownAttempted) {
-				try {
-					await this.#page.mouse.up();
-				} catch (error) {
-					cleanupFailure ??= error;
-				}
-			}
 			for (let index = pressed.length - 1; index >= 0; index--) {
 				try {
 					await this.#page.keyboard.up(pressed[index]! as KeyInput);
@@ -2736,6 +2734,42 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		}
 		if (failure !== undefined) throw failure;
 		if (cleanupFailure !== undefined) throw cleanupFailure;
+	}
+
+	async #coordinateMove(args: Readonly<Record<string, unknown>>): Promise<void> {
+		await this.#withHeldKeys(args.keys, async () => {
+			await this.#page.mouse.move(numberArg(args, "x"), numberArg(args, "y"));
+		});
+	}
+
+	async #coordinateDrag(args: Readonly<Record<string, unknown>>): Promise<void> {
+		const points = args.path as Array<{ x: number; y: number }>;
+		await this.#withHeldKeys(args.keys, async () => {
+			let mouseDownAttempted = false;
+			let failure: unknown;
+			let cleanupFailure: unknown;
+			try {
+				await this.#page.mouse.move(points[0].x, points[0].y);
+				mouseDownAttempted = true;
+				await this.#page.mouse.down();
+				for (let index = 1; index < points.length; index++) {
+					const point = points[index]!;
+					await this.#page.mouse.move(point.x, point.y);
+				}
+			} catch (error) {
+				failure = error;
+			} finally {
+				if (mouseDownAttempted) {
+					try {
+						await this.#page.mouse.up();
+					} catch (error) {
+						cleanupFailure = error;
+					}
+				}
+			}
+			if (failure !== undefined) throw failure;
+			if (cleanupFailure !== undefined) throw cleanupFailure;
+		});
 	}
 
 	async #downloadLocatorMedia(args: Readonly<Record<string, unknown>>): Promise<void> {

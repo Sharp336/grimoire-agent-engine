@@ -900,13 +900,15 @@ describe("Puppeteer final parity blockers", () => {
 				`const t=await agent.browser.tabs.selected(); const p=t.playwright;
 				 await page.evaluate(()=>{
 				   const host=document.createElement("div"); host.id="shadow-host";
+				   Object.assign(host.style,{position:"fixed",left:"200px",top:"100px",width:"120px",height:"40px"});
 				   const root=host.attachShadow({mode:"open"});
-				   root.innerHTML='<button style="position:fixed;left:200px;top:100px;width:120px;height:40px">Shadow target</button>';
+				   root.innerHTML='<button style="position:absolute;inset:0;width:100%;height:100%">Shadow target</button>';
 				   globalThis.__shadowClicks=0; root.querySelector("button").addEventListener("click",()=>globalThis.__shadowClicks++);
 				   document.body.append(host);
 				 });
 				 await p.getByRole("button",{name:"Shadow target",exact:true}).click({timeoutMs:200});
 				 await p.getByText("Shadow target",{exact:true}).click({timeoutMs:200});
+				 await p.locator("#shadow-host").click({timeoutMs:200});
 				 const snapshot=await t.dom_cua.get_visible_dom();
 				 const node=snapshot.nodes.find(item=>item.text==="Shadow target");
 				 if (!node) return {clicks:await page.evaluate(()=>globalThis.__shadowClicks),nodeFound:false};
@@ -914,7 +916,7 @@ describe("Puppeteer final parity blockers", () => {
 				 return {clicks:await page.evaluate(()=>globalThis.__shadowClicks),nodeFound:true};`,
 				10,
 			);
-			expect(result).toEqual({ clicks: 3, nodeFound: true });
+			expect(result).toEqual({ clicks: 4, nodeFound: true });
 		});
 	}, 20_000);
 
@@ -1045,6 +1047,30 @@ describe("Puppeteer final parity blockers", () => {
 				imageDefault: [],
 				imageOpted: [expect.objectContaining({ tagName: "img", role: "img", ariaName: "Hero" })],
 			});
+		});
+	}, 20_000);
+
+	it("returns the innermost actionable element through nested open shadow roots", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{
+				   const outer=document.createElement("div"); outer.id="element-info-outer";
+				   Object.assign(outer.style,{position:"fixed",left:"360px",top:"120px",width:"140px",height:"50px"});
+				   const outerRoot=outer.attachShadow({mode:"open"});
+				   const inner=document.createElement("div"); inner.id="element-info-inner";
+				   Object.assign(inner.style,{display:"block",width:"100%",height:"100%"}); outerRoot.append(inner);
+				   const innerRoot=inner.attachShadow({mode:"open"});
+				   innerRoot.innerHTML='<button aria-label="Deep shadow action" style="width:100%;height:100%">Inner actionable</button>';
+				   document.body.append(outer);
+				 });
+				 return await t.playwright.elementInfo({x:400,y:140});`,
+			);
+			expect(result).toEqual([
+				expect.objectContaining({ tagName: "button", role: "button", ariaName: "Deep shadow action" }),
+			]);
 		});
 	}, 20_000);
 
@@ -2038,6 +2064,62 @@ describe("Puppeteer final parity blockers", () => {
 			expect(result).toBe(1);
 		});
 	}, 20_000);
+
+	it("holds CUA move keys during movement and releases them after success or failure", async () => {
+		const events: string[] = [];
+		const active = new Set<string>();
+		const activeKeys = () => [...active].join("+") || "none";
+		let failMove = false;
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				keyboard: {
+					press: async (key: string) => {
+						events.push(`key.press:${key}`);
+					},
+					down: async (key: string) => {
+						active.add(key);
+						events.push(`key.down:${key}`);
+					},
+					up: async (key: string) => {
+						events.push(`key.up:${key}`);
+						active.delete(key);
+					},
+				},
+				mouse: {
+					move: async (x: number, y: number) => {
+						events.push(`mouse.move:${x},${y}:${activeKeys()}`);
+						if (failMove) throw new Error("move failed");
+					},
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await adapter.invoke("cua.move", { tabId: "1", keys: ["Shift", "Alt"], x: 10, y: 20 });
+		failMove = true;
+		await expect(adapter.invoke("cua.move", { tabId: "1", keys: ["Control", "Meta"], x: 30, y: 40 })).rejects.toThrow(
+			"move failed",
+		);
+		expect(events).toEqual([
+			"key.down:Shift",
+			"key.down:Alt",
+			"mouse.move:10,20:Shift+Alt",
+			"key.up:Alt",
+			"key.up:Shift",
+			"key.down:Control",
+			"key.down:Meta",
+			"mouse.move:30,40:Control+Meta",
+			"key.up:Meta",
+			"key.up:Control",
+		]);
+		expect([...active]).toEqual([]);
+		await adapter.dispose();
+	});
 
 	it("keeps CUA drag modifiers down through mouse cleanup and releases them after failure", async () => {
 		const events: string[] = [];
