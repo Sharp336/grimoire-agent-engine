@@ -362,6 +362,30 @@ describe("videoGenTool", () => {
 		expect(calls[0].url).toBe("https://api.x.ai/v1/videos/generations");
 		expect(result.isError).toBe(true);
 	});
+	it("reports the surviving job id when the caller cancels after submission", async () => {
+		// The generation keeps running and billing server-side, so a cancel must
+		// surface which job to go look for rather than a bare abort.
+		const controller = new AbortController();
+		const { fetch: fetchMock } = sequencedFetch([
+			() => json({ request_id: "req-cancelled" }),
+			() => {
+				controller.abort();
+				throw new DOMException("The operation was aborted.", "AbortError");
+			},
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-cancel",
+			{ prompt: "x", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4` },
+			undefined,
+			createContext(fetchMock, { xai: true, openrouter: true }),
+			controller.signal,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("req-cancelled");
+		expect(resultText(result)).toContain("still generating");
+	});
 
 	it("sends OpenRouter image-to-video in the documented frame_images shape", async () => {
 		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;

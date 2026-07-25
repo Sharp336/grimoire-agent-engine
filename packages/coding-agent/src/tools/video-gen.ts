@@ -1,6 +1,6 @@
 import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { ModelRegistry } from "../config/model-registry";
 import type { AgentToolUpdateCallback, CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
@@ -8,6 +8,7 @@ import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import videoGenDescription from "../prompts/tools/video-gen.md" with { type: "text" };
 import { resolveImageReferenceUrl } from "./media-input";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
+import { shortenPath } from "./render-utils";
 import { AUTO_VIDEO_PROVIDER_ORDER, isVideoProviderId, type VideoProvider } from "./video-providers";
 
 const DEFAULT_XAI_VIDEO_MODEL = "grok-imagine-video";
@@ -590,173 +591,171 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 	description: prompt.render(videoGenDescription),
 	parameters: videoGenSchema,
 	async execute(_toolCallId: string, params: VideoGenParams, onUpdate, ctx: CustomToolContext, signal?: AbortSignal) {
-		return untilAborted(signal, async () => {
-			const cwd = ctx.sessionManager.getCwd();
-			const sessionId = ctx.sessionManager.getSessionId();
-			const outputPath = resolveToCwd(params.output_path, cwd);
-			const displayPath = formatPathRelativeToCwd(outputPath, cwd);
-			// Whole-job fence. Built like tts.ts rather than via `ptree.combineSignals`
-			// so the poller and the sleeps get a non-optional AbortSignal.
-			const timeoutSignal = AbortSignal.timeout(VIDEO_TIMEOUT);
-			const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-			const fetchImpl = ctx.fetch ?? fetch;
+		// Deliberately NOT wrapped in `untilAborted`: racing the whole call means an
+		// abort discards whatever this returns, including the job id and recovery
+		// URL of a generation that is already billing. Every await below observes
+		// `requestSignal` directly, so cancellation still unwinds promptly — it just
+		// gets to report which job survived it.
+		const cwd = ctx.sessionManager.getCwd();
+		const sessionId = ctx.sessionManager.getSessionId();
+		const outputPath = resolveToCwd(params.output_path, cwd);
+		// `formatPathRelativeToCwd` yields an absolute path when the target sits
+		// outside the workspace, which would leak the home directory into the
+		// transcript; `shortenPath` renders that as `~/…`.
+		const displayPath = shortenPath(formatPathRelativeToCwd(outputPath, cwd));
+		// Whole-job fence. Built like tts.ts rather than via `ptree.combineSignals`
+		// so the poller and the sleeps get a non-optional AbortSignal.
+		const timeoutSignal = AbortSignal.timeout(VIDEO_TIMEOUT);
+		const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+		const fetchImpl = ctx.fetch ?? fetch;
 
-			let imageUrl: string | undefined;
-			if (params.image) imageUrl = await resolveImageReferenceUrl(params.image, cwd);
+		let imageUrl: string | undefined;
+		if (params.image) imageUrl = await resolveImageReferenceUrl(params.image, cwd);
 
-			const failures: string[] = [];
-			let foundCredentials = false;
+		const failures: string[] = [];
+		let foundCredentials = false;
 
-			for (const provider of videoProviderOrder(ctx.model, params.provider, params.model)) {
-				let model = params.model ?? (provider === "xai" ? DEFAULT_XAI_VIDEO_MODEL : DEFAULT_OPENROUTER_VIDEO_MODEL);
-				// Verified against api.x.ai: `grok-imagine-video` answers a 1080p
-				// request with "1080p video resolution is not available for this
-				// model", and `grok-imagine-video-1.5` answers a text-only request
-				// with "Text-to-video is not supported for this model". So 1080p on
-				// xAI is reachable only as image-to-video on 1.5 — pick it when an
-				// image is present, and skip the provider rather than fire a request
-				// that cannot succeed when one is not.
-				if (provider === "xai" && !params.model && params.resolution === "1080p") {
-					if (!imageUrl) {
-						failures.push("xai: 1080p is image-to-video only (supply `image`, or use 720p)");
-						continue;
-					}
-					model = XAI_1080P_VIDEO_MODEL;
-				}
-				let job: VideoJobResult;
-				try {
-					if (provider === "xai") {
-						const resolved = await resolveXaiKey(ctx.modelRegistry, model, sessionId);
-						if (!resolved) continue;
-						foundCredentials = true;
-						job = await generateXaiVideo(
-							resolved.apiKey,
-							resolved.baseUrl,
-							model,
-							params,
-							imageUrl,
-							fetchImpl,
-							requestSignal,
-							onUpdate,
-						);
-					} else {
-						const apiKey = await resolveOpenRouterKey(ctx.modelRegistry, sessionId);
-						if (!apiKey) continue;
-						foundCredentials = true;
-						job = await generateOpenRouterVideo(
-							apiKey,
-							model,
-							params,
-							imageUrl,
-							fetchImpl,
-							requestSignal,
-							onUpdate,
-						);
-					}
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					logger.warn("Video generation provider failed", { provider, model, error: message });
-					// A committed job has already billed. Report it instead of running
-					// a second paid generation on the next provider.
-					if (error instanceof VideoJobCommittedError) {
-						// Neither the fence nor a user cancel stops the generation
-						// server-side, so say the job is still running rather than
-						// implying it was lost — and do not conflate the two causes.
-						let text = `${provider} video generation failed. ${message}`;
-						if (timeoutSignal.aborted) {
-							text = `${provider} job ${error.requestId} is still generating; the tool stopped waiting after ${VIDEO_TIMEOUT / 60_000} minutes. Nothing was re-submitted.`;
-						} else if (requestSignal.aborted) {
-							text = `${provider} job ${error.requestId} is still generating; the tool call was cancelled. Nothing was re-submitted.`;
-						}
-						return { isError: true, content: [{ type: "text" as const, text }] };
-					}
-					failures.push(`${provider}: ${message}`);
+		for (const provider of videoProviderOrder(ctx.model, params.provider, params.model)) {
+			let model = params.model ?? (provider === "xai" ? DEFAULT_XAI_VIDEO_MODEL : DEFAULT_OPENROUTER_VIDEO_MODEL);
+			// Verified against api.x.ai: `grok-imagine-video` answers a 1080p
+			// request with "1080p video resolution is not available for this
+			// model", and `grok-imagine-video-1.5` answers a text-only request
+			// with "Text-to-video is not supported for this model". So 1080p on
+			// xAI is reachable only as image-to-video on 1.5 — pick it when an
+			// image is present, and skip the provider rather than fire a request
+			// that cannot succeed when one is not.
+			if (provider === "xai" && !params.model && params.resolution === "1080p") {
+				if (!imageUrl) {
+					failures.push("xai: 1080p is image-to-video only (supply `image`, or use 720p)");
 					continue;
 				}
-
-				// Provider URLs are short-lived; pull the bytes on the same fence.
-				let downloadFailure: string | undefined;
-				let download: Response | undefined;
-				try {
-					download = await downloadVideo(job, fetchImpl, requestSignal);
-					if (!download.ok) downloadFailure = `HTTP ${download.status}`;
-				} catch (error) {
-					downloadFailure = error instanceof Error ? error.message : String(error);
-				}
-				if (downloadFailure !== undefined || !download) {
-					// The generation already ran and already billed, so this is terminal:
-					// hand back the job id and URL so the bytes can still be fetched by
-					// hand, rather than silently paying for a rerun elsewhere.
-					return {
-						isError: true,
-						content: [
-							{
-								type: "text" as const,
-								text: `${provider} job ${job.requestId} finished but its download failed (${downloadFailure ?? "no response"}). The video is still retrievable at ${job.url}`,
-							},
-						],
-					};
-				}
-				// Buffer the body, then write. `Bun.write(path, response)` would stream
-				// and avoid holding the clip in memory, but on Bun 1.4.0-canary.1 it
-				// never resolves for a fetched Response — reproduced against a real
-				// vidgen.x.ai URL with and without an AbortSignal, while the buffered
-				// form completed the same download in 73 ms. Mocked Responses do not
-				// reproduce it, so keep this path buffered until Bun is fixed.
-				let bytes: Uint8Array;
-				try {
-					bytes = new Uint8Array(await download.arrayBuffer());
-					await Bun.write(outputPath, bytes);
-				} catch (error) {
-					// The video is paid for and still fetchable; a full disk or a bad
-					// output_path must not lose the URL.
-					const message = error instanceof Error ? error.message : String(error);
-					return {
-						isError: true,
-						content: [
-							{
-								type: "text" as const,
-								text: `${provider} job ${job.requestId} downloaded but writing ${displayPath} failed (${message}). The video is still retrievable at ${job.url}`,
-							},
-						],
-					};
-				}
-
-				const parts = [`Saved ${bytes.length} bytes to ${displayPath}`, `provider=${provider}`, `model=${model}`];
-				if (job.durationSeconds !== undefined) parts.push(`duration=${job.durationSeconds}s`);
-				if (job.costUsd !== undefined) parts.push(`cost=$${job.costUsd.toFixed(4)}`);
-				return {
-					content: [{ type: "text" as const, text: `${parts.join(", ")}.` }],
-					details: {
-						provider,
+				model = XAI_1080P_VIDEO_MODEL;
+			}
+			let job: VideoJobResult;
+			try {
+				if (provider === "xai") {
+					const resolved = await resolveXaiKey(ctx.modelRegistry, model, sessionId);
+					if (!resolved) continue;
+					foundCredentials = true;
+					job = await generateXaiVideo(
+						resolved.apiKey,
+						resolved.baseUrl,
 						model,
-						videoPath: outputPath,
-						bytes: bytes.length,
-						requestId: job.requestId,
-						durationSeconds: job.durationSeconds,
-						costUsd: job.costUsd,
-					},
-				};
+						params,
+						imageUrl,
+						fetchImpl,
+						requestSignal,
+						onUpdate,
+					);
+				} else {
+					const apiKey = await resolveOpenRouterKey(ctx.modelRegistry, sessionId);
+					if (!apiKey) continue;
+					foundCredentials = true;
+					job = await generateOpenRouterVideo(apiKey, model, params, imageUrl, fetchImpl, requestSignal, onUpdate);
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn("Video generation provider failed", { provider, model, error: message });
+				// A committed job has already billed. Report it instead of running
+				// a second paid generation on the next provider.
+				if (error instanceof VideoJobCommittedError) {
+					// Neither the fence nor a user cancel stops the generation
+					// server-side, so say the job is still running rather than
+					// implying it was lost — and do not conflate the two causes.
+					let text = `${provider} video generation failed. ${message}`;
+					if (timeoutSignal.aborted) {
+						text = `${provider} job ${error.requestId} is still generating; the tool stopped waiting after ${VIDEO_TIMEOUT / 60_000} minutes. Nothing was re-submitted.`;
+					} else if (requestSignal.aborted) {
+						text = `${provider} job ${error.requestId} is still generating; the tool call was cancelled. Nothing was re-submitted.`;
+					}
+					return { isError: true, content: [{ type: "text" as const, text }] };
+				}
+				failures.push(`${provider}: ${message}`);
+				continue;
 			}
 
-			// Only claim "no credentials" when nothing else went wrong; a provider
-			// skipped for a concrete reason (unsupported request, submit rejected)
-			// must surface that reason instead.
-			if (!foundCredentials && failures.length === 0) {
+			// Provider URLs are short-lived; pull the bytes on the same fence.
+			let downloadFailure: string | undefined;
+			let download: Response | undefined;
+			try {
+				download = await downloadVideo(job, fetchImpl, requestSignal);
+				if (!download.ok) downloadFailure = `HTTP ${download.status}`;
+			} catch (error) {
+				downloadFailure = error instanceof Error ? error.message : String(error);
+			}
+			if (downloadFailure !== undefined || !download) {
+				// The generation already ran and already billed, so this is terminal:
+				// hand back the job id and URL so the bytes can still be fetched by
+				// hand, rather than silently paying for a rerun elsewhere.
 				return {
 					isError: true,
 					content: [
 						{
 							type: "text" as const,
-							text: "No video generation credentials. Run /login → xAI Grok OAuth (SuperGrok or X Premium+), or set XAI_API_KEY or OPENROUTER_API_KEY.",
+							text: `${provider} job ${job.requestId} finished but its download failed (${downloadFailure ?? "no response"}). The video is still retrievable at ${job.url}`,
 						},
 					],
 				};
 			}
+			// Buffer the body, then write. `Bun.write(path, response)` would stream
+			// and avoid holding the clip in memory, but on Bun 1.4.0-canary.1 it
+			// never resolves for a fetched Response — reproduced against a real
+			// vidgen.x.ai URL with and without an AbortSignal, while the buffered
+			// form completed the same download in 73 ms. Mocked Responses do not
+			// reproduce it, so keep this path buffered until Bun is fixed.
+			let bytes: Uint8Array;
+			try {
+				bytes = new Uint8Array(await download.arrayBuffer());
+				await Bun.write(outputPath, bytes);
+			} catch (error) {
+				// The video is paid for and still fetchable; a full disk or a bad
+				// output_path must not lose the URL.
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text" as const,
+							text: `${provider} job ${job.requestId} downloaded but writing ${displayPath} failed (${message}). The video is still retrievable at ${job.url}`,
+						},
+					],
+				};
+			}
+
+			const parts = [`Saved ${bytes.length} bytes to ${displayPath}`, `provider=${provider}`, `model=${model}`];
+			if (job.durationSeconds !== undefined) parts.push(`duration=${job.durationSeconds}s`);
+			if (job.costUsd !== undefined) parts.push(`cost=$${job.costUsd.toFixed(4)}`);
+			return {
+				content: [{ type: "text" as const, text: `${parts.join(", ")}.` }],
+				details: {
+					provider,
+					model,
+					videoPath: outputPath,
+					bytes: bytes.length,
+					requestId: job.requestId,
+					durationSeconds: job.durationSeconds,
+					costUsd: job.costUsd,
+				},
+			};
+		}
+
+		// Only claim "no credentials" when nothing else went wrong; a provider
+		// skipped for a concrete reason (unsupported request, submit rejected)
+		// must surface that reason instead.
+		if (!foundCredentials && failures.length === 0) {
 			return {
 				isError: true,
-				content: [{ type: "text" as const, text: `Video generation failed. ${failures.join("; ")}` }],
+				content: [
+					{
+						type: "text" as const,
+						text: "No video generation credentials. Run /login → xAI Grok OAuth (SuperGrok or X Premium+), or set XAI_API_KEY or OPENROUTER_API_KEY.",
+					},
+				],
 			};
-		});
+		}
+		return {
+			isError: true,
+			content: [{ type: "text" as const, text: `Video generation failed. ${failures.join("; ")}` }],
+		};
 	},
 };
