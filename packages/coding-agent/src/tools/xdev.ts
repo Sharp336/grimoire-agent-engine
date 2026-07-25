@@ -274,6 +274,39 @@ export class XdevRegistry {
 		}));
 	}
 
+	/**
+	 * Mount-notice inventory rows for the given device names, keeping the
+	 * rendered bullet list within {@link DOCS_TOTAL_BUDGET}. Prefers listing
+	 * every name and shortening per-tool summaries when a high external
+	 * description cap would otherwise explode a deferred mount notice that
+	 * rides subsequent turns (docs stay one `read xd://` away).
+	 */
+	mountNoticeEntries(names: Iterable<string>): Array<{ name: string; summary: string }> {
+		const budget = XdevRegistry.DOCS_TOTAL_BUDGET;
+		const rows: Array<{ name: string; summary: string }> = [];
+		let used = 0;
+		for (const name of names) {
+			const tool = this.get(name);
+			const fullSummary = tool
+				? promptCatalogSummary(tool, this.#dynamic.has(name) ? this.#externalDescriptionCap : undefined)
+				: "";
+			// Rendered shape in xdev-mount-notice.md: `- xd://{{name}} — {{summary}}`
+			const prefix = `- ${XD_URL_PREFIX}${name}`;
+			const newline = rows.length > 0 ? 1 : 0;
+			const minCost = newline + prefix.length;
+			if (used + minCost > budget && rows.length > 0) break;
+			const sep = fullSummary.length > 0 ? " — " : "";
+			const room = Math.max(0, budget - used - minCost - sep.length);
+			let summary = fullSummary;
+			if (summary.length > room) {
+				summary = room > 1 ? `${summary.slice(0, room - 1).trimEnd()}…` : "";
+			}
+			used += minCost + (summary.length > 0 ? sep.length + summary.length : 0);
+			rows.push({ name, summary });
+		}
+		return rows;
+	}
+
 	/** `read xd://` listing with one device per line. */
 	listing(): string {
 		const rows = this.entries().map(({ name, summary }) => `${XD_URL_PREFIX}${name.padEnd(14)} ${summary}`);
@@ -382,9 +415,14 @@ export class XdevRegistry {
 			if (!tool || !this.#shouldInline(tool, mode, inlineGlobs)) continue;
 			const descriptionCap = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
-			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || used + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET)
+			const sep = sections.length > 0 ? 2 : 0;
+			if (
+				docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP ||
+				used + sep + docs.length > XdevRegistry.DOCS_TOTAL_BUDGET
+			) {
 				continue;
-			used += docs.length;
+			}
+			used += sep + docs.length;
 			sections.push(docs);
 		}
 		return sections.join("\n\n");

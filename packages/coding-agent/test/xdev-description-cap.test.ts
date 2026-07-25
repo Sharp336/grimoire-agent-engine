@@ -95,4 +95,29 @@ describe("XdevRegistry external description cap", () => {
 		expect(docs).not.toContain("- xd://mcp__large_catalog_tool_149 —");
 		expect(docs).toMatch(/- \d+ more devices omitted — read xd:\/\/ for the complete inventory\./);
 	});
+
+	it("bounds mount-notice inventory rows under the aggregate docs budget", () => {
+		const registry = new XdevRegistry([], 4000);
+		const tools = Array.from({ length: 150 }, (_, index) =>
+			fakeTool(`mcp__large_catalog_tool_${index}`, `Tool ${index}. ${"x".repeat(5000)}`),
+		);
+		registry.reconcile(tools);
+
+		const rows = registry.mountNoticeEntries(tools.map(tool => tool.name));
+		// Render the same bullet shape the mount-notice template uses.
+		const rendered = rows
+			.map(({ name, summary }) => (summary.length > 0 ? `- xd://${name} — ${summary}` : `- xd://${name}`))
+			.join("\n");
+		expect(rendered.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
+		// First tools keep some summary lede; later rows shrink rather than
+		// emitting uncapped 4000-char descriptions for every device.
+		expect(rows[0]?.summary.length ?? 0).toBeGreaterThan(0);
+		expect(rows.some(row => row.summary.length < 4000)).toBe(true);
+		// docsFor stays under the same budget for the same batch.
+		const docs = registry.docsFor(
+			tools.map(tool => tool.name),
+			"inline",
+		);
+		expect(docs.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET);
+	});
 });

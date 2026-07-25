@@ -576,8 +576,11 @@ export class SessionTools {
 		const pending = this.#pendingXdevMountDelta;
 		if (!pending) return undefined;
 		this.#pendingXdevMountDelta = undefined;
-		const summaries = new Map(this.#xdevRegistry?.entries().map(entry => [entry.name, entry.summary]) ?? []);
-		const added = [...pending.added].map(name => ({ name, summary: summaries.get(name) ?? "" }));
+		// Aggregate-budget the inventory rows: a high external description cap
+		// must not turn a large deferred mount batch into a multi-100k notice.
+		const added = this.#xdevRegistry
+			? this.#xdevRegistry.mountNoticeEntries(pending.added)
+			: [...pending.added].map(name => ({ name, summary: "" }));
 		const removed = [...pending.removed].map(name => ({ name }));
 		const docs = this.#xdevRegistry?.docsFor(
 			pending.added,
