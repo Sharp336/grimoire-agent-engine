@@ -5667,6 +5667,17 @@ export function getEnumValues(path: SettingPath): readonly string[] | undefined 
 	return "values" in def ? (def.values as readonly string[]) : undefined;
 }
 
+/**
+ * Top-level description, used by settings that have no panel entry.
+ *
+ * A config-only setting carries its prose here rather than in `ui`, so a
+ * consumer that reads only `ui.description` sees nothing for it at all.
+ */
+export function getDescription(path: SettingPath): string | undefined {
+	const def = SETTINGS_SCHEMA[path] as { description?: unknown };
+	return typeof def.description === "string" ? def.description : undefined;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Derived Types from Schema
 // ═══════════════════════════════════════════════════════════════════════════

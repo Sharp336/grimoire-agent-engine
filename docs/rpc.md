@@ -481,6 +481,12 @@ Withheld entries carry `redacted: true` and omit both `value` and `configured`:
 whether a credential is configured is user state, not schema metadata.
 `default` is omitted when a setting has no default, so the wire has one shape.
 
+Rendering metadata is carried so a client does not have to duplicate the
+schema: `ui.options` for a setting whose choices are a fixed list, the literal
+string `"runtime"` when the choices come from a runtime registry such as the
+theme list, and `ui.ordered` when selection order is meaningful. A setting with
+no panel entry keeps its prose in a top-level `description`.
+
 ```json
 {
   "id": "req_3",
@@ -502,6 +508,27 @@ whether a credential is configured is user state, not schema metadata.
           "description": "Use a color-blind-safe palette",
           "secret": false
         }
+      },
+      {
+        "path": "theme.dark",
+        "type": "string",
+        "default": "titanium",
+        "redacted": true,
+        "ui": {
+          "tab": "appearance",
+          "group": "Theme",
+          "label": "Dark Theme",
+          "description": "Theme used in dark terminals",
+          "secret": false,
+          "options": "runtime"
+        }
+      },
+      {
+        "path": "tui.maxInlineImageColumns",
+        "type": "number",
+        "default": 100,
+        "description": "Maximum width in terminal columns for inline images (default 100). Set to 0 for unlimited (bounded only by terminal width).",
+        "redacted": true
       },
       {
         "path": "auth.broker.token",

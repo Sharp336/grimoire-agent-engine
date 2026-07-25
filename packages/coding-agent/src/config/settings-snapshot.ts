@@ -10,6 +10,7 @@
 import type { Settings } from "./settings";
 import {
 	getDefault,
+	getDescription,
 	getEnumValues,
 	getType,
 	getUi,
@@ -18,6 +19,7 @@ import {
 	SETTINGS_SCHEMA,
 	type SettingPath,
 	type SettingTab,
+	type SubmenuOption,
 } from "./settings-schema";
 
 /**
@@ -52,6 +54,11 @@ export interface SettingSnapshotEntry {
 	configured?: boolean;
 	/** Allowed values for an enum setting. */
 	values?: readonly string[];
+	/**
+	 * Prose for a setting with no panel entry, which keeps its description at
+	 * the top level rather than inside `ui`.
+	 */
+	description?: string;
 	/** Present only for settings the settings panel can display. */
 	ui?: {
 		tab: SettingTab;
@@ -60,6 +67,14 @@ export interface SettingSnapshotEntry {
 		description: string;
 		condition?: string;
 		secret: boolean;
+		/**
+		 * Choice metadata. `"runtime"` is preserved verbatim rather than resolved:
+		 * the choices come from a runtime registry this layer cannot see, and a
+		 * client must be able to tell "populated elsewhere" from "no choices".
+		 */
+		options?: ReadonlyArray<SubmenuOption> | "runtime";
+		/** Selection order is meaningful and the editor supports reordering. */
+		ordered?: boolean;
 	};
 }
 
@@ -83,11 +98,13 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 		const ui = getUi(path);
 		if (tab !== undefined && ui?.tab !== tab) continue;
 		const values = getEnumValues(path);
+		const description = getDescription(path);
 		const entry: SettingSnapshotEntry = {
 			path,
 			type: getType(path),
 			...(getDefault(path) === undefined ? {} : { default: getDefault(path) }),
 			...(values ? { values } : {}),
+			...(description === undefined ? {} : { description }),
 			...(ui
 				? {
 						ui: {
@@ -97,6 +114,8 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 							description: ui.description,
 							...(ui.condition === undefined ? {} : { condition: ui.condition }),
 							secret: ui.secret === true,
+							...(ui.options === undefined ? {} : { options: ui.options }),
+							...(ui.ordered === undefined ? {} : { ordered: ui.ordered }),
 						},
 					}
 				: {}),
