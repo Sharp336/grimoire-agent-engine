@@ -164,16 +164,17 @@ function transcriptForRetentionWindow(
 
 /**
  * Supermemory documents are upserted by `customId`. Each bounded cadence window
- * is therefore appended to one stable remote conversation document instead of
- * creating an unbounded sequence of documents.
+ * therefore receives a stable identity based on the durable transcript, scope,
+ * and first retained turn. A retry or resumed transcript beginning at the same
+ * turn updates that window, while later windows cannot overwrite earlier ones.
  *
  * The persisted SessionManager id survives resume; provider ids and retention
  * cadence deliberately do not participate in the identity.
  */
-function automaticRetentionCustomId(session: AgentSession, containerTag: string): string {
+function automaticRetentionCustomId(session: AgentSession, containerTag: string, firstTurn: number): string {
 	const sessionId = session.sessionManager.getSessionId();
 	const digest = new Bun.CryptoHasher("sha256")
-		.update(`omp-supermemory-retention\u0000${sessionId}\u0000${containerTag}`)
+		.update(`omp-supermemory-retention\u0000${sessionId}\u0000${containerTag}\u0000${firstTurn}`)
 		.digest("hex");
 	return `omp-retention-${digest}`;
 }
@@ -738,7 +739,7 @@ async function retainCurrentSession(
 			scope.client.createDocument({
 				content: transcript.content,
 				containerTag: retention.containerTag,
-				customId: automaticRetentionCustomId(session, retention.containerTag),
+				customId: automaticRetentionCustomId(session, retention.containerTag, retention.lastRetainedTurn),
 				metadata: {
 					source: "omp-conversation",
 					sessionId: session.sessionId,

@@ -259,7 +259,7 @@ describe("supermemoryBackend", () => {
 		expect(create).toHaveBeenCalledTimes(2);
 		expect(create.mock.calls[1]![0]).toMatchObject({ content: expect.stringContaining("User: third") });
 		expect(JSON.stringify(create.mock.calls[1]![0]).includes("User: first")).toBe(false);
-		expect(create.mock.calls[1]![0].customId).toBe(create.mock.calls[0]![0].customId);
+		expect(create.mock.calls[1]![0].customId).not.toBe(create.mock.calls[0]![0].customId);
 
 		const subagent = makeSession(
 			entries,
