@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { loadLegacyPiModule } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 
@@ -126,5 +127,129 @@ export default function(pi) {
 		fs.writeFileSync(lazyPath, `export const value = "after";\n`, "utf-8");
 
 		expect(await ns.readLazy()).toBe("after");
+	});
+
+	it("loads a verified prebuilt entry without duplicating host modules", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "prebuilt.js");
+		const source = `import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+export { ToolAbortError };
+`;
+		fs.writeFileSync(entryPath, source, "utf8");
+		const imports = new Bun.Transpiler({ loader: "js" }).scanImports(source).map(found => {
+			const token = JSON.stringify(found.path);
+			const start = source.indexOf(token);
+			expect(start).toBeGreaterThanOrEqual(0);
+			expect(source.indexOf(token, start + token.length)).toBe(-1);
+			return { kind: found.kind, specifier: found.path, start, end: start + token.length };
+		});
+		const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+		fs.writeFileSync(`${entryPath}.omp-imports.json`, JSON.stringify({ version: 1, sha256, imports }), "utf8");
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { ToolAbortError: typeof ToolAbortError };
+		expect(loaded.ToolAbortError).toBe(ToolAbortError);
+	});
+
+	it("uses the prebuilt fast path exactly once for a valid sidecar", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "fastpath.js");
+		const source = `export const marker = "fast";\n`;
+		fs.writeFileSync(entryPath, source, "utf8");
+		const imports = new Bun.Transpiler({ loader: "js" }).scanImports(source).map(found => {
+			const token = JSON.stringify(found.path);
+			const start = source.indexOf(token);
+			return { kind: found.kind, specifier: found.path, start, end: start + token.length };
+		});
+		const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+		fs.writeFileSync(`${entryPath}.omp-imports.json`, JSON.stringify({ version: 1, sha256, imports }), "utf8");
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { marker: string };
+		expect(loaded.marker).toBe("fast");
+		// Both reads pin the fast path: the sidecar count fails if the sidecar is never
+		// consulted (fast path removed), and the entry count fails if a valid sidecar is
+		// rejected, because the graph fallback reads the entry again in collectExtensionModules.
+		expect(reads.get(fs.realpathSync(`${entryPath}.omp-imports.json`)) ?? 0).toBe(1);
+		expect(reads.get(fs.realpathSync(entryPath)) ?? 0).toBe(1);
+	});
+	it("reads a sidecar-less JS entry from disk only once", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "plain.js");
+		fs.writeFileSync(entryPath, `export const marker = "plain";\n`, "utf8");
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { marker: string };
+		expect(loaded.marker).toBe("plain");
+		// Backward-compatible path: with no sidecar the fast path must bail before opening
+		// the entry, leaving the graph loader as its only reader.
+		expect(reads.get(fs.realpathSync(entryPath)) ?? 0).toBe(1);
+	});
+	it("falls back to graph loading when a prebuilt sidecar is stale", async () => {
+		const cwd = tempDir.absolute();
+		const dependencyPath = path.join(cwd, "dependency.ts");
+		const entryPath = path.join(cwd, "stale.js");
+		fs.writeFileSync(dependencyPath, `export const value = "fallback";\n`, "utf8");
+		fs.writeFileSync(entryPath, `export { value } from "./dependency.ts";\n`, "utf8");
+		fs.writeFileSync(
+			`${entryPath}.omp-imports.json`,
+			JSON.stringify({ version: 1, sha256: "stale", imports: [] }),
+			"utf8",
+		);
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { value: string };
+		expect(loaded.value).toBe("fallback");
+	});
+	it("still loads a fast-path entry on a later load once its sidecar goes stale", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "rebuilt.js");
+		const writeSidecar = (source: string, sha256?: string) => {
+			fs.writeFileSync(
+				`${entryPath}.omp-imports.json`,
+				JSON.stringify({
+					version: 1,
+					sha256: sha256 ?? new Bun.CryptoHasher("sha256").update(source).digest("hex"),
+					imports: [],
+				}),
+				"utf8",
+			);
+		};
+
+		const first = `export const marker = "v1";\n`;
+		fs.writeFileSync(entryPath, first, "utf8");
+		writeSidecar(first);
+		const initial = (await loadLegacyPiModule(entryPath)) as { marker: string };
+		expect(initial.marker).toBe("v1");
+
+		// The first load registers a permanent prebuilt hook. Rebuilding the entry without
+		// refreshing its sidecar evicts the retained source, so that hook must still serve
+		// the rebuilt entry instead of failing the load.
+		const second = `export const marker = "v2";\n`;
+		fs.writeFileSync(entryPath, second, "utf8");
+		writeSidecar(second, "stale");
+		const reloaded = (await loadLegacyPiModule(entryPath)) as { marker: string };
+		expect(reloaded.marker).toBe("v2");
+	});
+	it("rejects a hash-valid sidecar range that does not point at the import", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "misdirected.js");
+		const specifier = "@mariozechner/pi-coding-agent/tools/tool-errors";
+		const token = JSON.stringify(specifier);
+		const source = `const bait = ${token};
+import { ToolAbortError } from ${token};
+export { ToolAbortError };
+`;
+		fs.writeFileSync(entryPath, source, "utf8");
+		const start = source.indexOf(token);
+		const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+		fs.writeFileSync(
+			`${entryPath}.omp-imports.json`,
+			JSON.stringify({
+				version: 1,
+				sha256,
+				imports: [{ kind: "import-statement", specifier, start, end: start + token.length }],
+			}),
+			"utf8",
+		);
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { ToolAbortError: typeof ToolAbortError };
+		expect(loaded.ToolAbortError).toBe(ToolAbortError);
 	});
 });

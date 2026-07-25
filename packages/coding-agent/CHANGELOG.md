@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in prebuilt-extension import sidecar (`.omp-imports.json`) fast path: the legacy extension loader hash-checks a verified sidecar and rewrites only declared host imports, skipping the full Babel graph scan for self-contained ESM bundles, and falls back to the existing loader on any missing, stale, or malformed sidecar.
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed
