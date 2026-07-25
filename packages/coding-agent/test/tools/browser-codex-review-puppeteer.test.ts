@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -173,9 +173,42 @@ describe("Puppeteer Codex log capture", () => {
 	});
 });
 
+describe("Puppeteer Codex logical tabs", () => {
+	it("returns a fresh logical handle on every successful tabs.new call", async () => {
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "https://fixture.test/current",
+				title: async () => "Current fixture",
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: ".",
+			captureScreenshot: async () => "",
+		});
+		const browser = createCodexBrowserFacade(adapter);
+
+		try {
+			const original = await browser.tabs.selected();
+			if (!original) throw new Error("Expected an initial Puppeteer tab");
+			const first = await browser.tabs.new();
+			const second = await browser.tabs.new();
+
+			expect([original.id, first.id, second.id]).toEqual(["1", "2", "3"]);
+			await expect(first.url()).rejects.toThrow("Browser tab id 2 is stale; current tab id is 3");
+			await expect(browser.tabs.get(first.id)).rejects.toThrow(
+				'tabs.get could not find tab id "2". Existing tabs: 3',
+			);
+			expect((await browser.tabs.selected())?.id).toBe(second.id);
+		} finally {
+			await adapter.dispose();
+		}
+	});
+});
+
 describe("Puppeteer Codex download adapter", () => {
 	it("lazily establishes download readiness before exposing the first waiter", async () => {
-		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		const enableStarted = Promise.withResolvers<void>();
 		const releaseEnable = Promise.withResolvers<void>();
 		const session = new DownloadSessionDouble(async (method, params) => {
@@ -226,7 +259,7 @@ describe("Puppeteer Codex download adapter", () => {
 		}
 	});
 	it("arms download listeners before enabling browser download behavior", async () => {
-		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		let session!: DownloadSessionDouble;
 		session = new DownloadSessionDouble(async (method, params) => {
 			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allow") {
@@ -259,7 +292,7 @@ describe("Puppeteer Codex download adapter", () => {
 
 	it("shares one completed download across concurrent waitForEvent waiters", async () => {
 		vi.useFakeTimers();
-		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		const session = new DownloadSessionDouble();
 		const browser = {
 			target: () => ({ createCDPSession: async () => session }),
@@ -569,7 +602,7 @@ describe("Puppeteer Codex download adapter", () => {
 		}
 	});
 	it("ignores browser-wide download events from frames outside the adapter page", async () => {
-		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		const session = new DownloadSessionDouble();
 		const adapter = new PuppeteerCodexBrowserAdapter({
 			currentTabId: "1",
@@ -614,7 +647,7 @@ describe("Puppeteer Codex download adapter", () => {
 
 	it("shares browser-global download ownership while preserving page-scoped events", async () => {
 		vi.useFakeTimers();
-		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		const sessions = [new DownloadSessionDouble(), new DownloadSessionDouble()];
 		let nextSession = 0;
 		const context = {};
@@ -701,7 +734,7 @@ describe("Puppeteer Codex download adapter", () => {
 	});
 
 	it("resets download behavior and disables events after normal disposal and interrupted initialization", async () => {
-		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		const page = {
 			url: () => "https://fixture.test/download",
 			title: async () => "Download fixture",
@@ -1197,7 +1230,7 @@ describe("Puppeteer final parity blockers", () => {
 			dispose: async () => undefined,
 			evaluate: async () => ({ contentType: "application/octet-stream", base64Chunks: oversizedChunks }),
 		};
-		const openSpy = spyOn(fs.promises, "open").mockRejectedValue(new Error("oversized media reached persistence"));
+		const openSpy = spyOn(fs, "open").mockRejectedValue(new Error("oversized media reached persistence"));
 		const adapter = new PuppeteerCodexBrowserAdapter({
 			currentTabId: "1",
 			page: {
@@ -1651,7 +1684,7 @@ describe("Puppeteer final parity blockers", () => {
 	});
 
 	it("does not let deferred download setup block run cleanup and releases late setup", async () => {
-		spyOn(fs.promises, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		const controller = new AbortController();
 		const enableStarted = Promise.withResolvers<void>();
 		const releaseEnable = Promise.withResolvers<void>();
@@ -1932,13 +1965,13 @@ describe("Puppeteer final parity blockers", () => {
 	it("removes temporary and destination media files after a rename completes past the deadline", async () => {
 		const rename = Promise.withResolvers<void>();
 		const removed: string[] = [];
-		spyOn(fs.promises, "open").mockResolvedValue({
+		spyOn(fs, "open").mockResolvedValue({
 			writeFile: async () => undefined,
 			sync: async () => undefined,
 			close: async () => undefined,
 		} as never);
-		spyOn(fs.promises, "rename").mockImplementation(async () => await rename.promise);
-		spyOn(fs.promises, "rm").mockImplementation(async target => {
+		spyOn(fs, "rename").mockImplementation(async () => await rename.promise);
+		spyOn(fs, "rm").mockImplementation(async target => {
 			removed.push(String(target));
 		});
 		const handle: Record<string, unknown> = {
@@ -2190,12 +2223,12 @@ describe("Puppeteer final parity blockers", () => {
 			{ preconnect: globalThis.fetch.preconnect },
 		);
 		spyOn(globalThis, "fetch").mockImplementation(fetchMock);
-		spyOn(fs.promises, "open").mockResolvedValue({
+		spyOn(fs, "open").mockResolvedValue({
 			writeFile: async () => undefined,
 			sync: async () => undefined,
 			close: async () => undefined,
 		} as never);
-		spyOn(fs.promises, "rename").mockResolvedValue(undefined);
+		spyOn(fs, "rename").mockResolvedValue(undefined);
 		for (const fallbackSrc of ["https://fixture.test/fallback.png", null]) {
 			const element = {
 				currentSrc: "https://fixture.test/responsive.webp",

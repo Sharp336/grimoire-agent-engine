@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -1608,8 +1608,8 @@ describe("Codex agent.browser public contract", () => {
 			sync: async () => undefined,
 			close: async () => undefined,
 		};
-		spyOn(fs.promises, "open").mockResolvedValue(fileHandle as never);
-		spyOn(fs.promises, "rename").mockResolvedValue(undefined);
+		spyOn(fs, "open").mockResolvedValue(fileHandle as never);
+		spyOn(fs, "rename").mockResolvedValue(undefined);
 		const adapter = new PuppeteerCodexBrowserAdapter({
 			currentTabId: "1",
 			page,
@@ -1649,9 +1649,9 @@ describe("Codex agent.browser public contract", () => {
 			sync: async () => undefined,
 			close: async () => undefined,
 		};
-		spyOn(fs.promises, "open").mockResolvedValue(fileHandle as never);
-		spyOn(fs.promises, "rename").mockResolvedValue(undefined);
-		const removeSpy = spyOn(fs.promises, "rm").mockResolvedValue(undefined);
+		spyOn(fs, "open").mockResolvedValue(fileHandle as never);
+		spyOn(fs, "rename").mockResolvedValue(undefined);
+		const removeSpy = spyOn(fs, "rm").mockResolvedValue(undefined);
 		const adapter = new PuppeteerCodexBrowserAdapter({
 			currentTabId: "1",
 			page,

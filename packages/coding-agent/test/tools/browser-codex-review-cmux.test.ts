@@ -951,6 +951,66 @@ describe("cmux Codex browser review regressions", () => {
 		expect(writes).toEqual([payload]);
 	});
 
+	it("downloads coordinate media through nested open shadow roots and preserves boundary errors", async () => {
+		const payload = Buffer.from("nested-shadow-media");
+		const requestedUrls: string[] = [];
+		const writes: Uint8Array[] = [];
+		const media = { currentSrc: "https://fixture.test/nested-shadow.png" };
+		const innerShadowRoot = { elementFromPoint: () => media };
+		const innerHost = { shadowRoot: innerShadowRoot };
+		const outerShadowRoot = { elementFromPoint: () => innerHost };
+		const outerHost = { shadowRoot: outerShadowRoot };
+		let topHit: object | null = outerHost;
+		let coordinateEvaluations = 0;
+		const document = { elementFromPoint: () => topHit };
+		const current = await selectedTab(
+			facadeFor({
+				codexCwd: () => "/tmp/codex-media-contract",
+				async codexEvaluate(source: string, args: unknown[]) {
+					if (source.includes("document.elementFromPoint")) {
+						coordinateEvaluations++;
+						return runPageEvaluator(source, args, { document, window: {} });
+					}
+					if (source.includes("__ompCodexMediaTransfers") && args.length === 2) {
+						requestedUrls.push(String(args[0]));
+						return true;
+					}
+					if (source.includes("__ompCodexMediaTransfers") && args.length === 1) {
+						return {
+							url: requestedUrls.at(-1),
+							contentType: "image/png",
+							base64Chunks: [payload.toString("base64")],
+						};
+					}
+					throw new Error("Unexpected page evaluation");
+				},
+				async codexEvaluateCleanup() {
+					return true;
+				},
+				async codexPersistFile(_path: string, data: Uint8Array) {
+					writes.push(data);
+				},
+			}),
+		);
+
+		await expect(current.cua.downloadMedia({ x: Number.NaN, y: 24 })).rejects.toThrow(
+			"cua.downloadMedia x requires a number",
+		);
+		expect(coordinateEvaluations).toBe(0);
+
+		await current.cua.downloadMedia({ x: 12, y: 24, timeoutMs: 250 });
+		expect(requestedUrls).toEqual([media.currentSrc]);
+		expect(writes.map(data => Buffer.from(data))).toEqual([payload]);
+
+		topHit = null;
+		const missing = await caughtError(() => current.cua.downloadMedia({ x: 12, y: 24, timeoutMs: 250 }));
+		expect(missing).toEqual({
+			name: "ToolError",
+			message: "cua.downloadMedia target has no downloadable URL",
+		});
+		expect(requestedUrls).toHaveLength(1);
+	});
+
 	it("rejects unknown-length media before retaining a streaming chunk beyond 32 MiB", async () => {
 		let reads = 0;
 		let cancellations = 0;

@@ -1845,7 +1845,15 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #coordinateDownload(args: Readonly<Record<string, unknown>>): Promise<void> {
 		const deadline = Date.now() + selectorTimeoutArg(args);
 		const url = await this.#tab.codexEvaluate<string>(
-			`(x, y) => { const element = document.elementFromPoint(x, y); return element ? String(element.currentSrc || element.src || element.href || element.getAttribute("src") || element.getAttribute("href") || "") : ""; }`,
+			`(x, y) => {
+				let element = document.elementFromPoint(x, y);
+				while (element?.shadowRoot?.elementFromPoint) {
+					const nested = element.shadowRoot.elementFromPoint(x, y);
+					if (!nested || nested === element) break;
+					element = nested;
+				}
+				return element ? String(element.currentSrc || element.src || element.href || element.getAttribute?.("src") || element.getAttribute?.("href") || "") : "";
+			}`,
 			[numberArg(args, "x"), numberArg(args, "y")],
 			remainingMs(deadline, "cua.downloadMedia"),
 		);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -288,49 +288,49 @@ function filesystemErrorCode(error: unknown): string | undefined {
 }
 
 async function removeEmptyDirectory(directory: string): Promise<void> {
-	await fs.promises.rmdir(directory).catch(error => {
+	await fs.rmdir(directory).catch(error => {
 		const code = filesystemErrorCode(error);
 		if (code !== "ENOENT" && code !== "ENOTEMPTY") throw error;
 	});
 }
 
 async function withDownloadPolicyLock<T>(stateRoot: string, action: () => Promise<T>): Promise<T> {
-	await fs.promises.mkdir(stateRoot, { recursive: true });
+	await fs.mkdir(stateRoot, { recursive: true });
 	const lockPath = path.join(stateRoot, "lock");
 	for (;;) {
 		try {
-			await fs.promises.mkdir(lockPath);
+			await fs.mkdir(lockPath);
 			break;
 		} catch (error) {
 			const code = filesystemErrorCode(error);
 			if (code === "ENOENT") {
-				await fs.promises.mkdir(stateRoot, { recursive: true });
+				await fs.mkdir(stateRoot, { recursive: true });
 				continue;
 			}
 			if (code !== "EEXIST") throw error;
-			const stale = await fs.promises
+			const stale = await fs
 				.stat(lockPath)
 				.then(stat => Date.now() - stat.mtimeMs > DOWNLOAD_POLICY_LOCK_STALE_MS)
 				.catch(() => false);
-			if (stale) await fs.promises.rmdir(lockPath).catch(() => undefined);
+			if (stale) await fs.rmdir(lockPath).catch(() => undefined);
 			await Bun.sleep(DOWNLOAD_POLICY_LOCK_RETRY_MS);
 		}
 	}
 	const heartbeat = setInterval(() => {
 		const now = new Date();
-		void fs.promises.utimes(lockPath, now, now).catch(() => undefined);
+		void fs.utimes(lockPath, now, now).catch(() => undefined);
 	}, DOWNLOAD_POLICY_LOCK_HEARTBEAT_MS);
 	heartbeat.unref();
 	try {
 		return await action();
 	} finally {
 		clearInterval(heartbeat);
-		await fs.promises.rmdir(lockPath).catch(() => undefined);
+		await fs.rmdir(lockPath).catch(() => undefined);
 	}
 }
 
 async function countLiveDownloadPolicyLeases(leaseDirectory: string): Promise<number> {
-	const names = await fs.promises.readdir(leaseDirectory).catch(error => {
+	const names = await fs.readdir(leaseDirectory).catch(error => {
 		if (filesystemErrorCode(error) === "ENOENT") return [];
 		throw error;
 	});
@@ -339,12 +339,12 @@ async function countLiveDownloadPolicyLeases(leaseDirectory: string): Promise<nu
 		if (!name.startsWith("owner-") || !name.endsWith(".lease")) continue;
 		const leasePath = path.join(leaseDirectory, name);
 		try {
-			const stat = await fs.promises.stat(leasePath);
+			const stat = await fs.stat(leasePath);
 			if (Date.now() - stat.mtimeMs <= DOWNLOAD_POLICY_LEASE_STALE_MS) {
 				live++;
 				continue;
 			}
-			await fs.promises.unlink(leasePath).catch(() => undefined);
+			await fs.unlink(leasePath).catch(() => undefined);
 		} catch (error) {
 			if (filesystemErrorCode(error) !== "ENOENT") live++;
 		}
@@ -357,14 +357,14 @@ async function acquireDownloadPolicyLease(downloadDirectory: string): Promise<Do
 	const leaseDirectory = path.join(stateRoot, "leases");
 	const leasePath = path.join(leaseDirectory, `owner-${randomUUID()}.lease`);
 	await withDownloadPolicyLock(stateRoot, async () => {
-		await fs.promises.mkdir(leaseDirectory, { recursive: true });
+		await fs.mkdir(leaseDirectory, { recursive: true });
 		await countLiveDownloadPolicyLeases(leaseDirectory);
-		const lease = await fs.promises.open(leasePath, "wx");
+		const lease = await fs.open(leasePath, "wx");
 		await lease.close();
 	});
 	const heartbeat = setInterval(() => {
 		const now = new Date();
-		void fs.promises.utimes(leasePath, now, now).catch(() => undefined);
+		void fs.utimes(leasePath, now, now).catch(() => undefined);
 	}, DOWNLOAD_POLICY_LEASE_HEARTBEAT_MS);
 	heartbeat.unref();
 	return { downloadDirectory, stateRoot, leasePath, heartbeat };
@@ -375,7 +375,7 @@ async function releaseDownloadPolicyLease(lease: DownloadPolicyLease, reset?: ()
 	let remaining = 0;
 	await withDownloadPolicyLock(lease.stateRoot, async () => {
 		clearInterval(lease.heartbeat);
-		await fs.promises.unlink(lease.leasePath).catch(error => {
+		await fs.unlink(lease.leasePath).catch(error => {
 			if (filesystemErrorCode(error) !== "ENOENT") throw error;
 		});
 		remaining = await countLiveDownloadPolicyLeases(leaseDirectory);
@@ -434,7 +434,7 @@ async function acquireDownloadPolicy(
 						: undefined;
 					coordinator.lease = lease;
 					try {
-						await fs.promises.mkdir(coordinator.directory, { recursive: true });
+						await fs.mkdir(coordinator.directory, { recursive: true });
 						await session.send("Browser.setDownloadBehavior", {
 							behavior: "allow",
 							downloadPath: coordinator.directory,
@@ -678,13 +678,14 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				return await this.#openTabs();
 			case "browser.user.history":
 				throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.USER_HISTORY);
-			case "tab.new":
-				if (this.#state.closed) {
-					this.#state.currentTabId = String(this.#state.nextTabId);
-					this.#state.nextTabId += 1;
-					this.#state.closed = false;
-				}
-				return await this.#summary();
+			case "tab.new": {
+				const nextTabId = String(this.#state.nextTabId);
+				const summary = await this.#summary(nextTabId);
+				this.#state.currentTabId = nextTabId;
+				this.#state.nextTabId += 1;
+				this.#state.closed = false;
+				return summary;
+			}
 			case "tab.selected":
 				return this.#state.closed ? null : await this.#summary();
 			case "tab.list":
@@ -722,7 +723,6 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				return this.#page.url();
 			case "tab.content.export": {
 				const destination = path.join(this.#cwd, `codex-content-${Snowflake.next()}.html`);
-				await fs.promises.mkdir(path.dirname(destination), { recursive: true });
 				await Bun.write(destination, await untilAborted(this.#signal, () => this.#page.content()));
 				return destination;
 			}
@@ -921,8 +921,8 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (this.#state.closed) throw new Error(`Browser tab id ${this.currentTabId} is closed`);
 	}
 
-	async #summary(): Promise<CodexTabSummary> {
-		return { id: this.currentTabId, url: this.#page.url(), title: await this.#page.title() };
+	async #summary(id = this.currentTabId): Promise<CodexTabSummary> {
+		return { id, url: this.#page.url(), title: await this.#page.title() };
 	}
 
 	async #openTabs(): Promise<unknown[]> {
@@ -2903,12 +2903,12 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		this.#signal.addEventListener("abort", abandon, { once: true });
 		const cleanupArtifacts = async (): Promise<void> => {
 			await Promise.all([
-				fs.promises.rm(temporary, { force: true }).catch(() => undefined),
-				fs.promises.rm(destination, { force: true }).catch(() => undefined),
+				fs.rm(temporary, { force: true }).catch(() => undefined),
+				fs.rm(destination, { force: true }).catch(() => undefined),
 			]);
 		};
 		const persistence = (async () => {
-			const output = await fs.promises.open(temporary, "w");
+			const output = await fs.open(temporary, "w");
 			try {
 				for (const chunk of decodedChunks) {
 					this.#operationRemaining(deadline);
@@ -2920,7 +2920,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				await output.sync();
 				await output.close();
 				if (abandoned) throw new Error(`${deadline.label} persistence canceled`);
-				await fs.promises.rename(temporary, destination);
+				await fs.rename(temporary, destination);
 				if (abandoned) {
 					await cleanupArtifacts();
 					throw new Error(`${deadline.label} persistence canceled`);
