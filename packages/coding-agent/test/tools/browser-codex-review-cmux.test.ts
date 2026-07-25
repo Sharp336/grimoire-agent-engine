@@ -1076,12 +1076,15 @@ describe("cmux Codex browser review regressions", () => {
 		});
 	});
 
-	it("downloads media through the page context so cookies and blob URLs remain available", async () => {
+	it("downloads nested media through the page context so cookies and blob URLs remain available", async () => {
 		const payload = Buffer.from("page-authenticated-media");
 		const writes: Buffer[] = [];
 		let transferStarts = 0;
 		let transferStatuses = 0;
 		const hostFetch = spyOn(globalThis, "fetch").mockRejectedValue(new Error("host fetch must not run"));
+		const { document, window } = parseHTML(
+			'<html><body><button id="media"><picture><img src="blob:fixture-media"></picture></button></body></html>',
+		);
 		spyOn(Bun, "write").mockImplementation(async (_destination, data) => {
 			writes.push(Buffer.from(data as Uint8Array));
 			return writes.at(-1)?.byteLength ?? 0;
@@ -1091,7 +1094,7 @@ describe("cmux Codex browser review regressions", () => {
 				codexCwd: () => "/tmp/codex-media-contract",
 				async codexEvaluate(source: string, args: unknown[]) {
 					if (args[1] === "status") return { attached: true, visible: true, enabled: true };
-					if (args[1] === "mediaUrl") return "blob:fixture-media";
+					if (args[1] === "mediaUrl") return runPageEvaluator(source, args, { document, window });
 					if (source.includes("__ompCodexMediaTransfers") && args.length === 2) {
 						transferStarts++;
 						return true;
@@ -1292,13 +1295,21 @@ describe("cmux Codex browser review regressions", () => {
 	it("uses native key input after focusing semantic locators", async () => {
 		const commands: string[] = [];
 		const presses: Array<{ key: string; timeoutMs?: number }> = [];
+		const focuses: string[] = [];
 		const current = await selectedTab(
 			facadeFor({
 				async codexEvaluate(_source: string, args: unknown[]) {
 					const command = String(args[1]);
 					commands.push(command);
 					if (command === "status") return { attached: true, visible: true, enabled: true };
+					if (command === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="press"]';
 					return true;
+				},
+				async codexEvaluateCleanup() {
+					return true;
+				},
+				async focus(selector: string) {
+					focuses.push(selector);
 				},
 				async press(key: string, options?: { timeoutMs?: number }) {
 					presses.push({ key, timeoutMs: options?.timeoutMs });
@@ -1308,7 +1319,8 @@ describe("cmux Codex browser review regressions", () => {
 
 		await current.playwright.getByLabel("Name").press("a");
 
-		expect(commands).toEqual(["status", "focus"]);
+		expect(commands).toEqual(["status", "bindNativeSelector"]);
+		expect(focuses).toEqual(['pierce/[data-omp-codex-action-token="press"]']);
 		expect(presses).toHaveLength(1);
 		expect(presses[0]?.key).toBe("a");
 		expect(presses[0]?.timeoutMs).toBeGreaterThan(0);
@@ -1384,6 +1396,7 @@ describe("cmux Codex browser review regressions", () => {
 		}
 		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
 		const nativeSelectors: string[] = [];
+		const pressed: string[] = [];
 		const resolveNativeSelector = (selector: string): Element | null => {
 			if (!selector.startsWith("pierce/")) return document.querySelector(selector);
 			const css = selector.slice("pierce/".length);
@@ -1417,6 +1430,14 @@ describe("cmux Codex browser review regressions", () => {
 				if (resolveNativeSelector(selector) !== input) throw new Error("Native type selector missed shadow target");
 				input.value += text;
 			},
+			async focus(selector: string) {
+				nativeSelectors.push(selector);
+				if (resolveNativeSelector(selector) !== input)
+					throw new Error("Native focus selector missed shadow target");
+			},
+			async press(key: string) {
+				pressed.push(key);
+			},
 		});
 
 		try {
@@ -1425,10 +1446,12 @@ describe("cmux Codex browser review regressions", () => {
 			await current.playwright.locator("input").type("css-");
 			await current.playwright.getByText("Shadow action", { exact: true }).click();
 			await current.playwright.getByRole("textbox", { name: "Shadow editor", exact: true }).type("typed");
+			await current.playwright.locator("input").press("A");
 
-			expect(nativeSelectors).toHaveLength(4);
+			expect(nativeSelectors).toHaveLength(5);
 			expect(nativeSelectors.every(selector => selector.startsWith("pierce/"))).toBe(true);
 			expect(input.value).toBe("css-typed");
+			expect(pressed).toEqual(["A"]);
 			expect(button.hasAttribute("data-omp-codex-action-token")).toBe(false);
 			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
 		} finally {
@@ -1707,6 +1730,68 @@ describe("cmux Codex browser review regressions", () => {
 		} finally {
 			lateInstall.resolve();
 			await adapter.dispose();
+		}
+	});
+
+	it("blocks DOM CUA click and double-click until file chooser capture is ready", async () => {
+		for (const action of ["click", "double_click"] as const) {
+			const probe = observerProbe(true);
+			let installs = 0;
+			const lateInstall = Promise.withResolvers<void>();
+			let activated = false;
+			const evaluate = (source: string, args: unknown[]) => {
+				if (source.includes("fileEventSequence") && args.length === 1) {
+					installs++;
+					if (installs > 1) {
+						return lateInstall.promise.then(() =>
+							runPageEvaluator(source, args, {
+								document: probe.document,
+								window: {},
+								Element: probe.ElementProbe,
+							}),
+						);
+					}
+				}
+				return runPageEvaluator(source, args, {
+					document: probe.document,
+					window: {},
+					Element: probe.ElementProbe,
+				});
+			};
+			const { adapter, browser } = adapterAndFacadeFor({
+				codexEvaluate: evaluate,
+				codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+				async ref() {
+					const activate = async () => {
+						activated = true;
+						probe.fire(probe.file);
+					};
+					return { click: activate, dblclick: activate };
+				},
+				async codexWait() {
+					await Promise.resolve();
+				},
+			});
+
+			try {
+				await adapter.beginRun();
+				const current = await selectedTab(browser);
+				const chooserPromise = current.playwright.waitForEvent("filechooser", { timeoutMs: 250 });
+				const actionPromise =
+					action === "click"
+						? current.dom_cua.click({ node_id: "e1" })
+						: current.dom_cua.double_click({ node_id: "e1" });
+				await Promise.resolve();
+				expect(activated).toBe(false);
+				lateInstall.resolve();
+				await actionPromise;
+				const chooser = await chooserPromise;
+				if (!("isMultiple" in chooser)) throw new Error("Expected file chooser event");
+				expect(chooser.isMultiple()).toBe(true);
+			} finally {
+				lateInstall.resolve();
+				await adapter.dispose();
+			}
 		}
 	});
 

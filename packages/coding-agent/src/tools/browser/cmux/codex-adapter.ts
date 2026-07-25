@@ -197,7 +197,11 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	if (command === "getAttribute") return element.getAttribute(payload.name);
 	if (command === "innerText") return String(element.innerText ?? "");
 	if (command === "textContent") return element.textContent;
-	if (command === "mediaUrl") return String(element.currentSrc || element.src || element.href || element.getAttribute("src") || element.getAttribute("href") || "");
+	if (command === "mediaUrl") {
+		const direct = element.currentSrc || element.src || element.href || element.getAttribute("src") || element.getAttribute("href");
+		const media = direct ? element : element.querySelector?.("img,video,audio,source");
+		return String(direct || media?.currentSrc || media?.src || media?.href || media?.getAttribute?.("src") || media?.getAttribute?.("href") || "");
+	}
 	const dispatch = (target, type, init = {}) => {
 		const EventConstructor = viewOf(target).Event;
 		return target.dispatchEvent(new EventConstructor(type, { bubbles: true, cancelable: true, ...init }));
@@ -1249,6 +1253,8 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			case "dom_cua.click":
 			case "dom_cua.double_click": {
 				const operationDeadline = Date.now() + selectorTimeoutArg(args);
+				const readiness = this.#fileChooserReadiness;
+				if (readiness) await readiness;
 				const handle = await this.#tab.ref(String(args.nodeId), remainingMs(operationDeadline, operation));
 				if (operation === "dom_cua.click") await handle.click(remainingMs(operationDeadline, operation));
 				else await handle.dblclick(remainingMs(operationDeadline, operation));
@@ -1796,10 +1802,6 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		}
 	}
 
-	#cssSelector(descriptor: CodexLocatorDescriptor): string | undefined {
-		return descriptor.kind === "css" ? descriptor.selector : undefined;
-	}
-
 	async #locatorAction(operation: CodexBrowserOperation, args: Readonly<Record<string, unknown>>): Promise<unknown> {
 		const descriptor = locatorArg(args);
 		const timeoutMs = selectorTimeoutArg(args);
@@ -1835,7 +1837,6 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				remainingMs(deadline, operation),
 			);
 		}
-		const selector = this.#cssSelector(descriptor);
 		if (nativeClick) {
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
 			let tokenBound = false;
@@ -1885,10 +1886,32 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			}
 		}
 		if (operation === "locator.press") {
-			if (selector) await this.#tab.focus(selector, remainingMs(deadline, operation));
-			else await this.#locator<boolean>(descriptor, "focus", {}, remainingMs(deadline, operation));
-			await this.#tab.press(stringArg(args, "value"), { timeoutMs: remainingMs(deadline, operation) });
-			return undefined;
+			const key = stringArg(args, "value");
+			if (this.#containsFrame(descriptor)) {
+				await this.#locator<boolean>(descriptor, "focus", {}, remainingMs(deadline, operation));
+				await this.#tab.press(key, { timeoutMs: remainingMs(deadline, operation) });
+				return undefined;
+			}
+			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
+			let tokenBound = false;
+			try {
+				const nativeSelector = await this.#locator<string>(
+					descriptor,
+					"bindNativeSelector",
+					{ token },
+					remainingMs(deadline, operation),
+				);
+				tokenBound = true;
+				await this.#tab.focus(nativeSelector, remainingMs(deadline, operation));
+				await this.#tab.press(key, { timeoutMs: remainingMs(deadline, operation) });
+				return undefined;
+			} finally {
+				if (tokenBound) {
+					await this.#tab
+						.codexEvaluateCleanup<boolean>(DISPOSE_NATIVE_ACTION_TOKEN_SOURCE, [token], SELECTOR_TIMEOUT_MS)
+						.catch(() => undefined);
+				}
+			}
 		}
 		return await this.#locator<unknown>(
 			descriptor,
