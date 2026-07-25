@@ -205,6 +205,7 @@ import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
 import { ttsTool } from "./tools/tts";
+import { videoGenTool } from "./tools/video-gen";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { buildNamedToolChoice } from "./utils/tool-choice";
@@ -1878,6 +1879,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (imageGenTools.length > 0) {
 					customTools.push(...(imageGenTools as unknown as CustomTool[]));
 				}
+			}
+
+			// Same whitelist rule as image gen (issue #5305): custom tools bypass the
+			// built-in filter via `alwaysInclude`, so an explicit `--tools` list that
+			// omits `generate_video` must be honored here.
+			const videoGenRequested = !options.toolNames || options.toolNames.includes("generate_video");
+			if (settings.get("generate_video.enabled") && videoGenRequested) {
+				customTools.push(videoGenTool as unknown as CustomTool);
 			}
 
 			if (settings.get("speechgen.enabled")) {

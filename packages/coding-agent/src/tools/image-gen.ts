@@ -10,16 +10,7 @@ import {
 	URL_PATHS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import {
-	$env,
-	isEnoent,
-	parseImageMetadata,
-	prompt,
-	ptree,
-	readSseJson,
-	Snowflake,
-	untilAborted,
-} from "@oh-my-pi/pi-utils";
+import { $env, parseImageMetadata, prompt, ptree, readSseJson, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import packageJson from "../../package.json" with { type: "json" };
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
@@ -28,14 +19,13 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { AUTO_IMAGE_PROVIDER_ORDER, type ImageProvider, isImageProviderId } from "./image-providers";
-import { resolveReadPath } from "./path-utils";
+import { type InlineImageData, loadImageFromPath, normalizeDataUrl, toDataUrl } from "./media-input";
 
 const DEFAULT_MODEL = "gemini-3-pro-image-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-image-preview";
 const DEFAULT_ANTIGRAVITY_MODEL = "gemini-3-pro-image";
 const DEFAULT_XAI_IMAGE_MODEL = "grok-imagine-image";
 const IMAGE_TIMEOUT = 3 * 60 * 1000; // 3 minutes
-const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_IMAGE_OUTPUT_FORMAT = "webp";
 const OPENAI_IMAGE_MIME_TYPE = "image/webp";
@@ -352,23 +342,8 @@ interface ImageInput {
 	mime_type?: string;
 }
 
-interface InlineImageData {
-	data: string;
-	mimeType: string;
-}
-
-function normalizeDataUrl(data: string): { data: string; mimeType?: string } {
-	const match = data.match(/^data:([^;]+);base64,(.+)$/);
-	if (!match) return { data };
-	return { data: match[2] ?? "", mimeType: match[1] };
-}
-
 function resolveOpenRouterModel(model: string): string {
 	return model.includes("/") ? model : `google/${model}`;
-}
-
-function toDataUrl(image: InlineImageData): string {
-	return `data:${image.mimeType};base64,${image.data}`;
 }
 
 async function loadImageFromUrl(
@@ -653,27 +628,6 @@ async function findImageApiKey(
 			return findOpenRouterImageCredentials(modelRegistry, sessionId);
 		case "gemini":
 			return findGeminiImageCredentials(modelRegistry, sessionId);
-	}
-}
-
-async function loadImageFromPath(imagePath: string, cwd: string): Promise<InlineImageData> {
-	const resolved = resolveReadPath(imagePath, cwd);
-	try {
-		const buffer = await Bun.file(resolved).bytes();
-		if (buffer.length > MAX_IMAGE_SIZE) {
-			throw new Error(`Image file too large: ${imagePath}`);
-		}
-
-		const metadata = parseImageMetadata(buffer);
-		const mimeType = metadata?.mimeType;
-		if (!mimeType) {
-			throw new Error(`Unsupported image type: ${imagePath}`);
-		}
-
-		return { data: buffer.toBase64(), mimeType };
-	} catch (err) {
-		if (isEnoent(err)) throw new Error(`Image file not found: ${imagePath}`);
-		throw err;
 	}
 }
 
