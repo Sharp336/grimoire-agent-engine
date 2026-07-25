@@ -6,7 +6,7 @@
  */
 import { type } from "arktype";
 import type { FetchImpl, Provider } from "./types";
-export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "unknown";
+export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "acus" | "unknown";
 
 export type UsageStatus = "ok" | "warning" | "exhausted" | "unknown";
 
@@ -155,6 +155,10 @@ export interface UsageHistoryEntry {
 	windowLabel?: string;
 	/** Used fraction (0..1) when resolvable. */
 	usedFraction?: number;
+	/** Absolute used amount for units without a meaningful limit (e.g. ACUs). */
+	used?: number;
+	/** Unit for the recorded amount. */
+	unit?: UsageUnit;
 	status?: UsageStatus;
 	/** Epoch ms the window resets, when known. */
 	resetsAt?: number;
@@ -242,7 +246,9 @@ export interface ClientUsageSummary {
 
 // ─── Zod schemas (wire-shape validation for the broker `/v1/usage` endpoint) ─
 
-export const usageUnitSchema = type("'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'unknown'");
+export const usageUnitSchema = type(
+	"'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'acus' | 'unknown'",
+);
 export const usageStatusSchema = type("'ok' | 'warning' | 'exhausted' | 'unknown'");
 
 export const usageWindowSchema = type({

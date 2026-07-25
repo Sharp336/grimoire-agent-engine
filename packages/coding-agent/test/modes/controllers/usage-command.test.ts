@@ -157,4 +157,171 @@ describe("CommandController /usage", () => {
 		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
 		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
 	});
+
+	it("renders single and multiple Devin used-only ACUs as summed totals, plus neighboring fallback acct count", async () => {
+		const present = vi.fn();
+		const ctx = {
+			session: createUsageSessionDouble(),
+			ui: { terminal: { columns: 100 } },
+			present,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new CommandController(ctx);
+		const now = Date.now();
+
+		// 1. Single Devin account
+		const reportsSingle: UsageReport[] = [
+			{
+				provider: "devin",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "devin:acus:total",
+						label: "Devin ACU consumption",
+						scope: { provider: "devin", accountId: "acct-1" },
+						amount: { unit: "acus", used: 12.5 },
+						status: "ok",
+					},
+					{
+						id: "devin:acus:product:devin",
+						label: "Devin product ACU consumption",
+						scope: { provider: "devin", accountId: "acct-1", tier: "devin" },
+						amount: { unit: "acus", used: 8 },
+						status: "ok",
+					},
+				],
+				metadata: { email: "devin-a@example.com", accountId: "acct-1" },
+			},
+		];
+		await controller.handleUsageCommand(reportsSingle);
+		expect(present).toHaveBeenCalledTimes(1);
+		let output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+		expect(output).toContain("12.5 ACU used");
+		expect(output).toContain("8 ACU used");
+		expect(output).not.toContain("20.5 ACU used");
+		present.mockClear();
+
+		// 2. Multiple Devin accounts plus neighboring fallback case
+		const reportsMultiple: UsageReport[] = [
+			{
+				provider: "devin",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "devin:acus:total",
+						label: "Devin ACU consumption",
+						scope: { provider: "devin", accountId: "acct-1" },
+						amount: { unit: "acus", used: 12.5 },
+						status: "ok",
+					},
+				],
+				metadata: { email: "devin-a@example.com", accountId: "acct-1" },
+			},
+			{
+				provider: "devin",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "devin:acus:total",
+						label: "Devin ACU consumption",
+						scope: { provider: "devin", accountId: "acct-2" },
+						amount: { unit: "acus", used: 3.0 },
+						status: "ok",
+					},
+				],
+				metadata: { email: "devin-b@example.com", accountId: "acct-2" },
+			},
+			{
+				provider: "mock-fallback",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "mock:fallback:limit",
+						label: "Mock Quota",
+						scope: { provider: "mock-fallback", accountId: "acct-3" },
+						amount: { unit: "requests" },
+						status: "ok",
+					},
+				],
+				metadata: { email: "fallback-a@example.com", accountId: "acct-3" },
+			},
+			{
+				provider: "mock-fallback",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "mock:fallback:limit",
+						label: "Mock Quota",
+						scope: { provider: "mock-fallback", accountId: "acct-4" },
+						amount: { unit: "requests" },
+						status: "ok",
+					},
+				],
+				metadata: { email: "fallback-b@example.com", accountId: "acct-4" },
+			},
+		];
+
+		await controller.handleUsageCommand(reportsMultiple);
+		expect(present).toHaveBeenCalledTimes(1);
+		output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+
+		// Assert Devin total sum is formatted as "15.5 ACU used" instead of falling back to "2 accts"
+		expect(output).toContain("15.5 ACU used");
+
+		// Assert fallback provider falls back to "2 accts" since it has no amount values
+		expect(output).toContain("2 accts");
+	});
+
+	it("renders Devin activity metrics for metrics-only and consumption reports", async () => {
+		const present = vi.fn();
+		const ctx = {
+			session: createUsageSessionDouble(),
+			ui: { terminal: { columns: 100 } },
+			present,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new CommandController(ctx);
+		const now = Date.now();
+
+		await controller.handleUsageCommand([
+			{
+				provider: "devin",
+				fetchedAt: now,
+				limits: [],
+				metadata: {
+					metrics: { sessionsCount: 10, searchesCount: 5, prsCreatedCount: 2, prsMergedCount: 1 },
+				},
+			},
+		]);
+
+		let output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+		expect(output).toContain("Devin activity");
+		expect(output).toContain("10 sessions · 5 searches · 2 PRs created · 1 PR merged");
+		expect(output).not.toContain("-- no limits");
+		present.mockClear();
+
+		await controller.handleUsageCommand([
+			{
+				provider: "devin",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "devin:acus:total",
+						label: "Devin ACU consumption",
+						scope: { provider: "devin", shared: true },
+						amount: { unit: "acus", used: 12.5 },
+						status: "ok",
+					},
+				],
+				metadata: { metrics: { sessionsCount: 3, prsMergedCount: 2 } },
+			},
+		]);
+
+		output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+		expect(output).toContain("12.5 ACU used");
+		expect(output).toContain("Devin activity");
+		expect(output).toContain("3 sessions · 2 PRs merged");
+	});
 });

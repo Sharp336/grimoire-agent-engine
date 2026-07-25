@@ -7,18 +7,19 @@
  * credentials produced no usage report are listed too, so the output
  * always covers the full credential pool.
  */
+import type { AuthCredential, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import {
-	type AuthStorage,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
 	type UsageLimit,
 	type UsageReport,
 	type UsageUnit,
-} from "@oh-my-pi/pi-ai";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+} from "@oh-my-pi/pi-ai/usage";
+import type { Provider } from "@oh-my-pi/pi-catalog/types";
+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils/format";
+import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import chalk from "chalk";
-import { ModelRegistry } from "../config/model-registry";
-import { discoverAuthStorage } from "../sdk";
+import { getDevinUsageMetrics } from "../usage/devin-metrics";
 
 const BAR_WIDTH = 28;
 
@@ -33,6 +34,11 @@ export interface UsageCommandArgs {
 	days?: number;
 }
 
+export interface UsageCommandDeps {
+	discoverAuthStorage: () => Promise<AuthStorage>;
+	createBaseUrlResolver: (authStorage: AuthStorage) => (provider: string) => string | undefined;
+}
+
 /** Identity slice of a stored credential, for "every account" coverage. */
 export interface UsageAccountIdentity {
 	provider: string;
@@ -44,6 +50,11 @@ export interface UsageAccountIdentity {
 	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
 	orgId?: string;
 	orgName?: string;
+}
+
+export interface StoredAccount {
+	identity: UsageAccountIdentity;
+	credential?: AuthCredential;
 }
 
 /**
@@ -138,6 +149,7 @@ function collectIdentityStrings(reports: UsageReport[], accounts: UsageAccountId
 		add(meta.projectId);
 		add(meta.orgId);
 		add(meta.orgName);
+		add(meta.principalId);
 		for (const limit of report.limits) {
 			add(limit.scope.accountId);
 			add(limit.scope.projectId);
@@ -199,10 +211,15 @@ const UNIT_SUFFIX: Record<UsageUnit, string> = {
 	requests: " requests",
 	minutes: " min",
 	bytes: " bytes",
+	acus: " ACU",
 	percent: "",
 	usd: "",
 	unknown: "",
 };
+
+function formatHistoryUnitValue(value: number, unit: UsageUnit | undefined): string {
+	return unit ? `${formatUnitValue(value, unit)}${UNIT_SUFFIX[unit]}` : `${formatNumber(value)} units`;
+}
 
 function describeAmount(limit: UsageLimit): string {
 	const amount = limit.amount;
@@ -213,17 +230,10 @@ function describeAmount(limit: UsageLimit): string {
 		parts.push(
 			`${formatUnitValue(amount.used, amount.unit)} / ${formatUnitValue(amount.limit, amount.unit)}${UNIT_SUFFIX[amount.unit]}`,
 		);
+	} else if (absoluteUnit && amount.used !== undefined) {
+		parts.push(`${formatUnitValue(amount.used, amount.unit)}${UNIT_SUFFIX[amount.unit]} used`);
 	} else if (absoluteUnit && amount.remaining !== undefined) {
 		parts.push(`${formatUnitValue(amount.remaining, amount.unit)}${UNIT_SUFFIX[amount.unit]} left`);
-	} else if (
-		absoluteUnit &&
-		amount.used !== undefined &&
-		Number.isFinite(amount.used) &&
-		amount.limit === undefined &&
-		amount.remaining === undefined &&
-		fraction === undefined
-	) {
-		parts.push(`${formatUnitValue(amount.used, amount.unit)}${UNIT_SUFFIX[amount.unit]} used`);
 	}
 	if (fraction !== undefined) {
 		parts.push(`${(fraction * 100).toFixed(1)}% used`);
@@ -563,17 +573,23 @@ export function formatUsageBreakdown(
 			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
 			if (report.limits.length === 0) {
 				lines.push(`      ${chalk.dim("no limits reported")}`);
-				return;
-			}
-			const limitsById = new Map<string, UsageLimit>();
-			for (const limit of report.limits) limitsById.set(limit.id, limit);
-			for (const template of providerLimitTemplates) {
-				const limit = limitsById.get(template.id);
-				if (limit) {
-					lines.push(...formatLimitLine(limit, labelWidth, nowMs));
-				} else {
-					lines.push(formatMissingLimitLine(template, labelWidth));
+			} else {
+				const limitsById = new Map<string, UsageLimit>();
+				for (const limit of report.limits) limitsById.set(limit.id, limit);
+				for (const template of providerLimitTemplates) {
+					const limit = limitsById.get(template.id);
+					if (limit) {
+						lines.push(...formatLimitLine(limit, labelWidth, nowMs));
+					} else {
+						lines.push(formatMissingLimitLine(template, labelWidth));
+					}
 				}
+			}
+
+			const metrics = getDevinUsageMetrics(report);
+			if (metrics.length > 0) {
+				const activity = metrics.map(metric => `${formatNumber(metric.value)} ${metric.label}`).join(" · ");
+				lines.push(`      ${chalk.dim(`activity: ${activity}`)}`);
 			}
 		});
 
@@ -718,10 +734,20 @@ export function formatUsageHistory(
 				const latestEntry = series.entries[series.entries.length - 1];
 				const latestFraction = fractions.length > 0 ? fractions[fractions.length - 1] : undefined;
 				const peakFraction = fractions.length > 0 ? Math.max(...fractions) : undefined;
+				const absoluteValues = series.entries
+					.map(entry => entry.used)
+					.filter((used): used is number => used !== undefined);
+				const latestAbsolute = latestEntry?.used;
+				const peakAbsolute = absoluteValues.length > 0 ? Math.max(...absoluteValues) : undefined;
 				const status = historyStatus(latestFraction, latestEntry?.status);
 				const details: string[] = [];
 				if (latestFraction !== undefined) details.push(`latest ${(latestFraction * 100).toFixed(1)}%`);
 				if (peakFraction !== undefined) details.push(`peak ${(peakFraction * 100).toFixed(1)}%`);
+				if (latestFraction === undefined && latestAbsolute !== undefined) {
+					const unit = latestEntry?.unit;
+					details.push(`latest ${formatHistoryUnitValue(latestAbsolute, unit)}`);
+					if (peakAbsolute !== undefined) details.push(`peak ${formatHistoryUnitValue(peakAbsolute, unit)}`);
+				}
 				details.push(`${series.entries.length} snapshot${series.entries.length === 1 ? "" : "s"}`);
 				lines.push(
 					`      ${STATUS_COLOR[status]("●")} ${series.title.padEnd(labelWidth)}  ${renderHistorySparkline(series.entries, sinceMs, nowMs)}  ${chalk.dim(details.join(" · "))}`,
@@ -733,8 +759,8 @@ export function formatUsageHistory(
 	return lines.join("\n");
 }
 
-function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
-	const accounts: UsageAccountIdentity[] = [];
+function collectStoredAccounts(authStorage: AuthStorage): StoredAccount[] {
+	const accounts: StoredAccount[] = [];
 	const all = authStorage.getAll();
 	for (const provider in all) {
 		const entry = all[provider];
@@ -742,17 +768,26 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
 		for (const credential of credentials) {
 			if (credential.type === "oauth") {
 				accounts.push({
-					provider,
-					type: "oauth",
-					email: credential.email,
-					accountId: credential.accountId,
-					projectId: credential.projectId,
-					enterpriseUrl: credential.enterpriseUrl,
-					orgId: credential.orgId,
-					orgName: credential.orgName,
+					identity: {
+						provider,
+						type: "oauth",
+						email: credential.email,
+						accountId: credential.accountId,
+						projectId: credential.projectId,
+						enterpriseUrl: credential.enterpriseUrl,
+						orgId: credential.orgId,
+						orgName: credential.orgName,
+					},
+					credential,
 				});
 			} else {
-				accounts.push({ provider, type: "api_key" });
+				accounts.push({
+					identity: {
+						provider,
+						type: "api_key",
+					},
+					credential,
+				});
 			}
 		}
 	}
@@ -766,19 +801,25 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
  * keyless servers, inference providers without a usage API) would only ever
  * render as noise, so they are dropped.
  *
- * `hasUsageProvider` is injected (in practice {@link AuthStorage.usageProviderFor})
- * so custom/broker resolvers stay authoritative — no provider list is duplicated
- * here. An explicit `--provider` request bypasses the cull, so
+ * `isCredentialSupported` checks whether the provider has a usage provider
+ * and whether that usage provider supports the specific credential type/value.
+ * An explicit `--provider` request bypasses the cull, so
  * `omp usage --provider xai` can still confirm the stored credential has no
  * usage endpoint.
  */
-export function selectReportableAccounts(
-	accounts: UsageAccountIdentity[],
-	hasUsageProvider: (provider: string) => boolean,
+export async function selectReportableAccounts(
+	accounts: StoredAccount[],
+	isCredentialSupported: (provider: string, credential?: AuthCredential) => Promise<boolean> | boolean,
 	explicitProvider?: string,
-): UsageAccountIdentity[] {
-	if (explicitProvider) return accounts;
-	return accounts.filter(account => hasUsageProvider(account.provider));
+): Promise<UsageAccountIdentity[]> {
+	if (explicitProvider) return accounts.map(a => a.identity);
+	const filtered: UsageAccountIdentity[] = [];
+	for (const account of accounts) {
+		if (await isCredentialSupported(account.identity.provider, account.credential)) {
+			filtered.push(account.identity);
+		}
+	}
+	return filtered;
 }
 
 /** Apply a redaction mask to an optional identity field. */
@@ -786,7 +827,7 @@ function maskIdentity(redaction: Map<string, string>, value: string | undefined)
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
 }
 
-const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName"] as const;
+const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName", "principalId"] as const;
 
 /** Mask identity fields in a raw-stripped report for `--redact --json`. */
 function redactReportForJson(
@@ -813,8 +854,8 @@ function redactReportForJson(
 	return { ...report, metadata, limits };
 }
 
-export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
-	const authStorage = await discoverAuthStorage();
+export async function runUsageCommand(cmd: UsageCommandArgs, deps: UsageCommandDeps): Promise<void> {
+	const authStorage = await deps.discoverAuthStorage();
 	try {
 		if (cmd.action === "invalidate") {
 			const provider = cmd.provider?.toLowerCase();
@@ -857,15 +898,15 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			process.stdout.write(`${formatUsageHistory(entries, sinceMs, nowMs, redaction)}\n`);
 			return;
 		}
-		const modelRegistry = new ModelRegistry(authStorage);
+		const baseUrlResolver = deps.createBaseUrlResolver(authStorage);
 		const reports =
 			(await authStorage.fetchUsageReports({
-				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
+				baseUrlResolver,
 			})) ?? [];
 		const storedAccounts = collectStoredAccounts(authStorage);
-		let accounts = selectReportableAccounts(
+		let accounts = await selectReportableAccounts(
 			storedAccounts,
-			provider => authStorage.usageProviderFor(provider) !== undefined,
+			(provider, credential) => authStorage.isCredentialSupported(provider as Provider, credential),
 			cmd.provider,
 		);
 		let filteredReports = reports;

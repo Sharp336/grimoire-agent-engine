@@ -50,6 +50,7 @@ import { resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { cursorUsageProvider } from "./usage/cursor";
+import { devinUsageProvider } from "./usage/devin";
 import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
@@ -611,6 +612,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	ollamaUsageProvider,
 	ollamaCloudUsageProvider,
 	claudeUsageProvider,
+	devinUsageProvider,
 	zaiUsageProvider,
 	opencodeGoUsageProvider,
 	githubCopilotUsageProvider,
@@ -750,6 +752,11 @@ type UsageRequestDescriptor = {
 	provider: Provider;
 	credential: UsageCredential;
 	baseUrl?: string;
+};
+
+type UsageRequestCollection = {
+	requests: UsageRequestDescriptor[];
+	fallbackRequests: UsageRequestDescriptor[];
 };
 
 type AuthApiKeyOptions = {
@@ -2947,6 +2954,17 @@ export class AuthStorage {
 			signal: timeoutSignal,
 		};
 
+		if (request.credential.type === "api_key") {
+			const configValue = request.credential.apiKey;
+			if (!configValue) return null;
+			const apiKey = await this.#configValueResolver(configValue);
+			if (!apiKey) return null;
+			params = {
+				...params,
+				credential: { ...request.credential, apiKey },
+			};
+		}
+
 		if (
 			request.credential.type === "oauth" &&
 			request.credential.expiresAt !== undefined &&
@@ -3058,7 +3076,6 @@ export class AuthStorage {
 				// fan-out trips 429s every cycle. With ±25% jitter on TTL the refresh
 				// times decorrelate within a few cycles.
 				this.#usageCache.set(cacheKey, { value: report, expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter });
-				this.#recordUsageHistory(request, report);
 				this.#reconcileCodexUsageBlock(request, report);
 				return report;
 			}
@@ -3087,11 +3104,29 @@ export class AuthStorage {
 	 * supports it). The usage cache is latest-snapshot-only — these rows are
 	 * the only place limit utilization is kept over time.
 	 */
+	#buildUsageHistoryAccountKey(request: UsageRequestDescriptor, report: UsageReport): string {
+		if (request.provider !== "devin") return this.#buildUsageCacheIdentity(request.credential);
+
+		const orgId = this.#getUsageReportMetadataValue(report, "orgId");
+		const principalId = this.#getUsageReportMetadataValue(report, "principalId");
+		const identity = orgId
+			? { kind: "org", value: orgId }
+			: principalId
+				? { kind: "principal", value: principalId }
+				: undefined;
+		if (!identity) return this.#buildUsageCacheIdentity(request.credential);
+
+		const fingerprint = createHash("sha256")
+			.update(`${request.provider}:${identity.kind}:${identity.value}`)
+			.digest("base64url");
+		return `${request.provider}:${identity.kind}:${fingerprint}`;
+	}
+
 	#recordUsageHistory(request: UsageRequestDescriptor, report: UsageReport): void {
 		const record = this.#store.recordUsageSnapshots;
 		if (!record || report.limits.length === 0) return;
 		const recordedAt = Number.isFinite(report.fetchedAt) && report.fetchedAt > 0 ? report.fetchedAt : Date.now();
-		const accountKey = this.#buildUsageCacheIdentity(request.credential);
+		const accountKey = this.#buildUsageHistoryAccountKey(request, report);
 		const metadata = report.metadata ?? {};
 		const metaEmail = typeof metadata.email === "string" ? metadata.email : undefined;
 		const metaAccountId = typeof metadata.accountId === "string" ? metadata.accountId : undefined;
@@ -3105,6 +3140,8 @@ export class AuthStorage {
 			label: limit.label,
 			windowLabel: limit.window?.label ?? limit.scope.windowId,
 			usedFraction: resolveUsedFraction(limit),
+			used: limit.amount.used,
+			unit: limit.amount.unit,
 			status: limit.status,
 			resetsAt: limit.window?.resetsAt,
 		}));
@@ -3317,13 +3354,14 @@ export class AuthStorage {
 		return true;
 	}
 
-	#collectUsageRequests(options?: {
+	async #collectUsageRequests(options?: {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
-	}): UsageRequestDescriptor[] {
+	}): Promise<UsageRequestCollection> {
 		const resolver = this.#usageProviderResolver;
-		if (!resolver) return [];
+		if (!resolver) return { requests: [], fallbackRequests: [] };
 
 		const requests: UsageRequestDescriptor[] = [];
+		const fallbackRequests: UsageRequestDescriptor[] = [];
 		const providers = new Set<string>([
 			...this.#data.keys(),
 			...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
@@ -3366,29 +3404,49 @@ export class AuthStorage {
 				continue;
 			}
 
-			if (entries.length === 0) {
-				const runtimeKey = this.#runtimeOverrides.get(providerId);
-				const envKey = getEnvApiKey(providerId);
-				const apiKey = runtimeKey ?? envKey;
-				if (!apiKey) continue;
-				const request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
-				if (providerImpl.supports && !providerImpl.supports(request)) continue;
-				requests.push(request);
-				continue;
-			}
-
+			let hasUsableStoredCredential = false;
 			for (const entry of entries) {
 				const credential = entry.credential;
-				const request =
-					credential.type === "api_key"
-						? this.#buildUsageRequest(provider, { type: "api_key", apiKey: credential.key }, baseUrl)
-						: this.#buildUsageRequestForOauth(provider, credential, baseUrl);
+				let request: UsageRequestDescriptor;
+				if (credential.type === "api_key") {
+					const apiKey = await this.#configValueResolver(credential.key);
+					if (!apiKey) continue;
+					request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+				} else {
+					request = this.#buildUsageRequestForOauth(provider, credential, baseUrl);
+				}
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
 				requests.push(request);
+				hasUsableStoredCredential = true;
 			}
+
+			const runtimeKey = this.#runtimeOverrides.get(providerId);
+			const envKey = getEnvApiKey(providerId);
+			const apiKey = runtimeKey ?? this.#configOverrides.get(providerId) ?? envKey;
+			if (!apiKey) continue;
+			const resolvedApiKey = await this.#configValueResolver(apiKey);
+			if (!resolvedApiKey) continue;
+			const fallbackRequest = this.#buildUsageRequest(
+				provider,
+				{ type: "api_key", apiKey: resolvedApiKey },
+				baseUrl,
+			);
+			if (providerImpl.supports && !providerImpl.supports(fallbackRequest)) continue;
+			if (!hasUsableStoredCredential) {
+				requests.push(fallbackRequest);
+				continue;
+			}
+			if (
+				requests.some(
+					request => this.#buildUsageReportCacheKey(request) === this.#buildUsageReportCacheKey(fallbackRequest),
+				)
+			) {
+				continue;
+			}
+			fallbackRequests.push(fallbackRequest);
 		}
 
-		return requests;
+		return { requests, fallbackRequests };
 	}
 
 	#getUsageReportMetadataValue(report: UsageReport, key: string): string | undefined {
@@ -3442,6 +3500,14 @@ export class AuthStorage {
 					identifier => `${report.provider}:org:${orgId.toLowerCase()}|${identifier.toLowerCase()}`,
 				);
 			}
+		}
+		if (report.provider === "devin") {
+			const orgId = this.#getUsageReportMetadataValue(report, "orgId");
+			if (orgId) return [`devin:org:${orgId.toLowerCase()}`];
+			const principalId = this.#getUsageReportMetadataValue(report, "principalId");
+			if (principalId) return [`devin:principal:${principalId.toLowerCase()}`];
+		}
+		if (report.provider === "openai-codex") {
 			return identifiers.map(identifier => `${report.provider}:${identifier.toLowerCase()}`);
 		}
 		const projectId =
@@ -3791,6 +3857,25 @@ export class AuthStorage {
 		return true;
 	}
 
+	/**
+	 * Check if a credential is supported by the provider's usage provider.
+	 */
+	async isCredentialSupported(provider: Provider, credential?: AuthCredential): Promise<boolean> {
+		const providerImpl = this.usageProviderFor(provider);
+		if (!providerImpl) return false;
+		if (!credential) return true;
+		if (!providerImpl.supports) return true;
+
+		let request: UsageRequestDescriptor;
+		if (credential.type === "api_key") {
+			const resolvedApiKey = await this.#configValueResolver(credential.key);
+			request = this.#buildUsageRequest(provider, { type: "api_key", apiKey: resolvedApiKey ?? "" });
+		} else {
+			request = this.#buildUsageRequestForOauth(provider, credential);
+		}
+		return providerImpl.supports(request);
+	}
+
 	async fetchUsageReports(options?: {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		/** Caller's cancel signal; only rejects this caller, never the shared upstream fetch. */
@@ -3825,7 +3910,7 @@ export class AuthStorage {
 		}
 		if (!this.#usageProviderResolver) return null;
 
-		const requests = this.#collectUsageRequests(options);
+		const { requests, fallbackRequests } = await this.#collectUsageRequests(options);
 		if (requests.length === 0) return [];
 
 		this.#usageLogger?.debug("Usage fetch requested", {
@@ -3856,9 +3941,30 @@ export class AuthStorage {
 			const results = await Promise.all(
 				requests.map(request => this.#fetchUsageCached(request, this.#usageRequestTimeoutMs)),
 			);
-			const reports = results.filter((report): report is UsageReport => report !== null);
-			const deduped = this.#dedupeUsageReports(reports);
-			// no outer cache write — see comment above.
+			const reportPairs = results.flatMap((report, index) => (report ? [{ report, request: requests[index] }] : []));
+			const pendingFallbacks = fallbackRequests.filter(
+				fallback => !reportPairs.some(pair => pair.request.provider === fallback.provider),
+			);
+			if (pendingFallbacks.length > 0) {
+				const fallbackResults = await Promise.all(
+					pendingFallbacks.map(request => this.#fetchUsageCached(request, this.#usageRequestTimeoutMs)),
+				);
+				reportPairs.push(
+					...fallbackResults.flatMap((report, index) =>
+						report ? [{ report, request: pendingFallbacks[index] }] : [],
+					),
+				);
+			}
+			const deduped = this.#dedupeUsageReports(reportPairs.map(pair => pair.report));
+			for (const report of deduped) {
+				const identifiers = new Set(this.#getUsageReportIdentifiers(report));
+				const pair = reportPairs.find(
+					candidate =>
+						candidate.report === report ||
+						this.#getUsageReportIdentifiers(candidate.report).some(identifier => identifiers.has(identifier)),
+				);
+				if (pair) this.#recordUsageHistory(pair.request, report);
+			}
 			const resolved = deduped;
 			this.#usageLogger?.debug("Usage fetch resolved", {
 				reports: resolved.map(report => {
@@ -3943,10 +4049,17 @@ export class AuthStorage {
 
 			const baseUrl = options?.baseUrlResolver?.(row.provider as Provider);
 			const cred = row.credential;
-			const initialRequest: UsageRequestDescriptor =
-				cred.type === "api_key"
-					? this.#buildUsageRequest(row.provider as Provider, { type: "api_key", apiKey: cred.key }, baseUrl)
-					: this.#buildUsageRequestForOauth(row.provider as Provider, cred, baseUrl);
+			let initialRequest: UsageRequestDescriptor;
+			if (cred.type === "api_key") {
+				const resolvedApiKey = await this.#configValueResolver(cred.key);
+				initialRequest = this.#buildUsageRequest(
+					row.provider as Provider,
+					{ type: "api_key", apiKey: resolvedApiKey ?? "" },
+					baseUrl,
+				);
+			} else {
+				initialRequest = this.#buildUsageRequestForOauth(row.provider as Provider, cred, baseUrl);
+			}
 
 			const timeoutSignal = AbortSignal.timeout(timeoutMs);
 			const probeSignal = options?.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
@@ -6554,16 +6667,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			"DELETE FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ?",
 		);
 		this.#insertUsageHistoryStmt = this.#db.prepare(
-			"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, used_value, unit, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		);
 		this.#lastUsageHistoryStmt = this.#db.prepare(
 			"SELECT id, recorded_at FROM usage_history WHERE provider = ? AND account_key = ? AND limit_id = ? ORDER BY recorded_at DESC LIMIT 1",
 		);
 		this.#updateUsageHistoryStmt = this.#db.prepare(
-			"UPDATE usage_history SET recorded_at = ?, email = ?, account_id = ?, label = ?, window_label = ?, used_fraction = ?, status = ?, resets_at = ? WHERE id = ?",
+			"UPDATE usage_history SET recorded_at = ?, email = ?, account_id = ?, label = ?, window_label = ?, used_fraction = ?, used_value = ?, unit = ?, status = ?, resets_at = ? WHERE id = ?",
 		);
 		this.#listUsageHistoryStmt = this.#db.prepare(
-			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
+			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, used_value, unit, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
 		);
 		this.#insertUsageCostStmt = this.#db.prepare(
 			"INSERT INTO usage_cost_history (recorded_at, provider, account_key, cost_usd) VALUES (?, ?, ?, ?)",
@@ -6660,6 +6773,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				label TEXT NOT NULL,
 				window_label TEXT,
 				used_fraction REAL,
+				used_value REAL,
+				unit TEXT,
 				status TEXT,
 				resets_at INTEGER
 			);
@@ -6695,6 +6810,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			CREATE INDEX IF NOT EXISTS idx_client_usage_series ON client_usage(install_id, provider, model, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
 		`);
+		try {
+			this.#db.run("ALTER TABLE usage_history ADD COLUMN used_value REAL");
+		} catch {}
+		try {
+			this.#db.run("ALTER TABLE usage_history ADD COLUMN unit TEXT");
+		} catch {}
 
 		if (!this.#authCredentialsTableExists()) {
 			this.#createAuthCredentialsTable();
@@ -7377,6 +7498,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						entry.label,
 						entry.windowLabel ?? null,
 						entry.usedFraction ?? null,
+						entry.used ?? null,
+						entry.unit ?? null,
 						entry.status ?? null,
 						entry.resetsAt ?? null,
 						last.id,
@@ -7393,6 +7516,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					entry.label,
 					entry.windowLabel ?? null,
 					entry.usedFraction ?? null,
+					entry.used ?? null,
+					entry.unit ?? null,
 					entry.status ?? null,
 					entry.resetsAt ?? null,
 				);
@@ -7415,6 +7540,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				label: string;
 				window_label: string | null;
 				used_fraction: number | null;
+				used_value: number | null;
+				unit: string | null;
 				status: string | null;
 				resets_at: number | null;
 			}>;
@@ -7428,6 +7555,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				label: row.label,
 				windowLabel: row.window_label ?? undefined,
 				usedFraction: row.used_fraction ?? undefined,
+				used: row.used_value ?? undefined,
+				unit: (row.unit ?? undefined) as UsageHistoryEntry["unit"],
 				status: (row.status ?? undefined) as UsageHistoryEntry["status"],
 				resetsAt: row.resets_at ?? undefined,
 			}));

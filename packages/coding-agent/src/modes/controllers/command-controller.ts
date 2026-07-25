@@ -49,6 +49,7 @@ import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
+import { getDevinUsageMetrics } from "../../usage/devin-metrics";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -1647,6 +1648,16 @@ function formatAggregateAmount(limits: UsageLimit[]): string {
 		return `${formatNumber(remainingPct)}% free`;
 	}
 
+	if (
+		limits.length > 0 &&
+		limits.every(
+			limit => limit.amount.unit === "acus" && limit.amount.used !== undefined && limit.amount.limit === undefined,
+		)
+	) {
+		const totalUsed = limits.reduce((sum, limit) => sum + (limit.amount.used ?? 0), 0);
+		return `${formatNumber(totalUsed)} ACU used`;
+	}
+
 	if (limits.length > 0 && limits.every(isUsedOnlyAbsoluteAmount)) return "";
 
 	// Count unique accounts from limit scopes — not limits.length.
@@ -1863,6 +1874,17 @@ export function renderUsageReports(
 			);
 		}
 
+		const devinActivityLines = providerReports.flatMap((report, index) => {
+			const metrics = getDevinUsageMetrics(report);
+			if (metrics.length === 0) return [];
+			const activity = metrics.map(metric => `${formatNumber(metric.value)} ${metric.label}`).join(" · ");
+			return [`    ${formatUnlimitedReportLabel(report, index)}: ${activity}`];
+		});
+		if (devinActivityLines.length > 0) {
+			lines.push(`  ${uiTheme.fg("accent", "Devin activity")}`);
+			for (const line of devinActivityLines) lines.push(uiTheme.fg("dim", line));
+		}
+
 		const resetAccountLines: string[] = [];
 		for (const report of providerReports) {
 			const count = report.resetCredits?.availableCount ?? 0;
@@ -1977,7 +1999,9 @@ export function renderUsageReports(
 		}
 
 		// Render accounts with no rate limits (e.g. business/enterprise plans).
-		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
+		const unlimitedReports = providerReports.filter(
+			report => report.limits.length === 0 && getDevinUsageMetrics(report).length === 0,
+		);
 		for (const report of unlimitedReports) {
 			const label = formatUnlimitedReportLabel(report, 0);
 			const tier = report.metadata?.planType;

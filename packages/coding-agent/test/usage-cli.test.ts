@@ -1,12 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	runUsageCommand,
+	type StoredAccount,
+	selectReportableAccounts,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 
@@ -348,6 +352,66 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("0.40× quota left");
 	});
 
+	it("renders Devin ACU consumption without requiring a quota limit", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports: UsageReport[] = [
+			{
+				provider: "devin",
+				fetchedAt: now,
+				metadata: { orgId: "org-abc123" },
+				limits: [
+					{
+						id: "devin:acus:total",
+						label: "Devin ACU consumption",
+						scope: { provider: "devin", orgId: "org-abc123", shared: true },
+						amount: { unit: "acus", used: 12.5 },
+						status: "ok",
+					},
+				],
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
+		expect(text).toContain("Devin");
+		expect(text).toContain("Devin ACU consumption");
+		expect(text).toContain("12.5 ACU used");
+	});
+
+	it("renders Devin activity metrics with and without ACU consumption", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const metricsOnly: UsageReport = {
+			provider: "devin",
+			fetchedAt: now,
+			limits: [],
+			metadata: {
+				metrics: { sessionsCount: 10, searchesCount: 5, prsCreatedCount: 2, prsMergedCount: 1 },
+			},
+		};
+		const consumptionAndMetrics: UsageReport = {
+			provider: "devin",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "devin:acus:total",
+					label: "Devin ACU consumption",
+					scope: { provider: "devin", shared: true },
+					amount: { unit: "acus", used: 12.5 },
+					status: "ok",
+				},
+			],
+			metadata: { metrics: { sessionsCount: 3, prsMergedCount: 2 } },
+		};
+
+		const metricsOnlyText = stripVTControlCharacters(formatUsageBreakdown([metricsOnly], [], now));
+		expect(metricsOnlyText).toContain("activity: 10 sessions · 5 searches · 2 PRs created · 1 PR merged");
+
+		const consumptionAndMetricsText = stripVTControlCharacters(
+			formatUsageBreakdown([consumptionAndMetrics], [], now),
+		);
+		expect(consumptionAndMetricsText).toContain("12.5 ACU used");
+		expect(consumptionAndMetricsText).toContain("activity: 3 sessions · 2 PRs merged");
+	});
+
 	it("renders Cursor request quotas in the usage breakdown", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const reports: UsageReport[] = [
@@ -474,10 +538,210 @@ describe("formatUsageHistory", () => {
 		expect(text).toContain("3 snapshots");
 	});
 
+	it("renders absolute ACU history with normalized units", () => {
+		const absoluteEntries = [
+			historyEntry(SINCE + HOUR, undefined, {
+				provider: "devin",
+				limitId: "devin:acus:total",
+				label: "Devin ACU consumption",
+				used: 12.5,
+				unit: "acus",
+			}),
+			historyEntry(NOW - HOUR, undefined, {
+				provider: "devin",
+				limitId: "devin:acus:total",
+				label: "Devin ACU consumption",
+				used: 15,
+				unit: "acus",
+			}),
+		];
+
+		const text = stripVTControlCharacters(formatUsageHistory(absoluteEntries, SINCE, NOW));
+		expect(text).toContain("latest 15 ACU");
+		expect(text).toContain("peak 15 ACU");
+		expect(text).not.toContain("latest 15 acus");
+	});
+
 	it("redacts account labels through the provided map", () => {
 		const redaction = buildRedactionMap(["dummy.primary@example.test"]);
 		const text = stripVTControlCharacters(formatUsageHistory(entries, SINCE, NOW, redaction));
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).toContain("du*");
+	});
+});
+
+describe("selectReportableAccounts", () => {
+	it("filters out unsupported credentials based on the isCredentialSupported callback", async () => {
+		const accounts: StoredAccount[] = [
+			{ identity: { provider: "devin", type: "api_key" }, credential: { type: "api_key", key: "cog_test" } },
+			{
+				identity: { provider: "devin", type: "oauth" },
+				credential: { type: "oauth", access: "token", refresh: "refresh", expires: 0 },
+			},
+			{ identity: { provider: "openai-codex", type: "api_key" }, credential: { type: "api_key", key: "sk-test" } },
+		];
+
+		const filtered = await selectReportableAccounts(accounts, (provider, cred) => {
+			if (provider === "devin" && cred?.type === "oauth") return false;
+			return true;
+		});
+
+		expect(filtered).toHaveLength(2);
+		expect(filtered[0]).toMatchObject({ provider: "devin", type: "api_key" });
+		expect(filtered[1]).toMatchObject({ provider: "openai-codex", type: "api_key" });
+	});
+});
+
+describe("runUsageCommand", () => {
+	it("removes all raw api_key and oauth credentials from accountsWithoutUsage in JSON output", async () => {
+		const mockCredentials = {
+			devin: { type: "api_key", key: "cog_secretkey123" },
+			openai: {
+				type: "oauth",
+				access: "access_token_secret",
+				refresh: "refresh_token_secret",
+				email: "user@example.test",
+				expires: 0,
+			},
+		};
+
+		const mockAuthStorage = {
+			getAll: () => mockCredentials,
+			fetchUsageReports: async () => [],
+			isCredentialSupported: () => true,
+			close: () => {},
+		} as unknown as AuthStorage;
+
+		const deps = {
+			discoverAuthStorage: async () => mockAuthStorage,
+			createBaseUrlResolver: () => () => undefined,
+		};
+
+		const originalWrite = process.stdout.write;
+		let output = "";
+		process.stdout.write = (chunk: string | Uint8Array) => {
+			output += String(chunk);
+			return true;
+		};
+
+		try {
+			await runUsageCommand({ action: "view", json: true }, deps);
+		} finally {
+			process.stdout.write = originalWrite;
+		}
+
+		interface AccountIdentityOutput {
+			provider: string;
+			type: string;
+			email?: string;
+			orgId?: string;
+			credential?: unknown;
+			key?: unknown;
+			access?: unknown;
+			refresh?: unknown;
+		}
+
+		const parsed = JSON.parse(output) as { accountsWithoutUsage: AccountIdentityOutput[] };
+		expect(parsed).toHaveProperty("accountsWithoutUsage");
+		expect(parsed.accountsWithoutUsage).toHaveLength(2);
+
+		// Ensure identities are correct but credential info is not present
+		const devinAcc = parsed.accountsWithoutUsage.find(a => a.provider === "devin");
+		expect(devinAcc).toBeDefined();
+		expect(devinAcc!.type).toBe("api_key");
+		expect(devinAcc!.credential).toBeUndefined();
+		expect(devinAcc!.key).toBeUndefined();
+
+		const openaiAcc = parsed.accountsWithoutUsage.find(a => a.provider === "openai");
+		expect(openaiAcc).toBeDefined();
+		expect(openaiAcc!.type).toBe("oauth");
+		expect(openaiAcc!.email).toBe("user@example.test");
+		expect(openaiAcc!.credential).toBeUndefined();
+		expect(openaiAcc!.access).toBeUndefined();
+		expect(openaiAcc!.refresh).toBeUndefined();
+
+		// Ensure no secrets exist anywhere in the JSON output string
+		expect(output).not.toContain("cog_secretkey123");
+		expect(output).not.toContain("access_token_secret");
+		expect(output).not.toContain("refresh_token_secret");
+	});
+
+	it("removes all raw credentials and applies masking to identities with --redact", async () => {
+		const mockCredentials = {
+			devin: { type: "api_key", key: "cog_secretkey123" },
+			openai: {
+				type: "oauth",
+				access: "access_token_secret",
+				refresh: "refresh_token_secret",
+				email: "user@example.test",
+				expires: 0,
+				orgId: "org-discovered-123",
+			},
+		};
+
+		const mockAuthStorage = {
+			getAll: () => mockCredentials,
+			fetchUsageReports: async (): Promise<UsageReport[]> => [
+				{
+					provider: "devin",
+					fetchedAt: Date.now(),
+					limits: [],
+					metadata: { principalId: "service_user:service-secret" },
+				},
+			],
+			isCredentialSupported: () => true,
+			close: () => {},
+		} as unknown as AuthStorage;
+
+		const deps = {
+			discoverAuthStorage: async () => mockAuthStorage,
+			createBaseUrlResolver: () => () => undefined,
+		};
+
+		const originalWrite = process.stdout.write;
+		let output = "";
+		process.stdout.write = (chunk: string | Uint8Array) => {
+			output += String(chunk);
+			return true;
+		};
+
+		try {
+			await runUsageCommand({ action: "view", json: true, redact: true }, deps);
+		} finally {
+			process.stdout.write = originalWrite;
+		}
+
+		interface RedactedAccountIdentityOutput {
+			provider: string;
+			type: string;
+			email?: string;
+			orgId?: string;
+			credential?: unknown;
+			access?: unknown;
+		}
+
+		const parsed = JSON.parse(output) as {
+			reports: Array<{ metadata?: { principalId?: string } }>;
+			accountsWithoutUsage: RedactedAccountIdentityOutput[];
+		};
+		expect(parsed).toHaveProperty("accountsWithoutUsage");
+
+		// Ensure identities are masked
+		const openaiAcc = parsed.accountsWithoutUsage.find(a => a.provider === "openai");
+		expect(openaiAcc).toBeDefined();
+		expect(openaiAcc!.email).not.toBe("user@example.test");
+		expect(openaiAcc!.email).toContain("*");
+		expect(openaiAcc!.orgId).not.toBe("org-discovered-123");
+		expect(openaiAcc!.orgId).toContain("*");
+		const principalId = parsed.reports[0]?.metadata?.principalId;
+		expect(principalId).not.toBe("service_user:service-secret");
+		expect(principalId).toContain("*");
+
+		// Ensure credential info is absent
+		expect(openaiAcc!.credential).toBeUndefined();
+		expect(openaiAcc!.access).toBeUndefined();
+		expect(output).not.toContain("cog_secretkey123");
+		expect(output).not.toContain("access_token_secret");
+		expect(output).not.toContain("service_user:service-secret");
 	});
 });
