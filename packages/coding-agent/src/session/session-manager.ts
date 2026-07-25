@@ -60,7 +60,7 @@ import {
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
 import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
-import { acquireSessionLock, lockPathForSession, type SessionLockHandle } from "./session-lock";
+import { acquireSessionLock, lockPathForSession, SessionLockError, type SessionLockHandle } from "./session-lock";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -1421,16 +1421,30 @@ export class SessionManager {
 		return this.#resetToNewSession(options);
 	}
 
+	/**
+	 * Take exclusive ownership of a session this manager does not already own so
+	 * a deletion cannot unlink another process's live JSONL and artifacts while
+	 * its append writer is still open.
+	 */
+	#lockForeignSessionDeletion(sessionFile: string): SessionLockHandle | undefined {
+		if (!this.#persist || !(this.#storage instanceof FileSessionStorage)) return undefined;
+		try {
+			return acquireSessionLock(sessionFile, { onHeartbeatError: this.#sessionLockErrorHandler });
+		} catch (error) {
+			// A session file that cannot carry a lock cannot have a live lock
+			// owner either, so refusing to delete it would strand the file.
+			if (error instanceof SessionLockError && error.code === "unsupported") return undefined;
+			throw error;
+		}
+	}
+
 	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
 	async dropSession(sessionPath: string): Promise<void> {
 		await this.#drainAndCloseWriter();
 		const resolvedSessionPath = path.resolve(sessionPath);
 		const ownedLock = this.#sessionLock?.handle;
 		const ownsDeletion = ownedLock?.lockPath === lockPathForSession(resolvedSessionPath);
-		const targetLock =
-			!ownsDeletion && this.#persist && this.#storage instanceof FileSessionStorage
-				? acquireSessionLock(resolvedSessionPath, { onHeartbeatError: this.#sessionLockErrorHandler })
-				: undefined;
+		const targetLock = ownsDeletion ? undefined : this.#lockForeignSessionDeletion(resolvedSessionPath);
 		const deletionLock = ownsDeletion ? ownedLock : targetLock;
 		const ownedSessionPath = deletionLock?.record.sessionFile ?? resolvedSessionPath;
 		try {
@@ -1447,8 +1461,10 @@ export class SessionManager {
 				}
 			}
 		} finally {
+			// targetLock is only set when this manager does not already own the
+			// session, so exactly one of these releases applies per call.
+			targetLock?.release();
 			if (ownsDeletion) this.#releaseSessionLock();
-			else targetLock?.release();
 		}
 	}
 

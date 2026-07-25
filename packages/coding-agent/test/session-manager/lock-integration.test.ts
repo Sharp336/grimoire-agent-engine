@@ -205,8 +205,29 @@ describe("SessionManager persistent lock integration", () => {
 
 		await expect(manager.dropSession(otherSession)).rejects.toBeInstanceOf(SessionLockError);
 		expect(fs.existsSync(otherSession)).toBe(true);
+		expect(inspectSessionLock(otherSession).status).toBe("live");
 		await expect(SessionManager.open(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
 		await otherManager.close();
+
+		// Once the owner is gone the same deletion succeeds.
+		await manager.dropSession(otherSession);
+		expect(fs.existsSync(otherSession)).toBe(false);
+		expect(fs.existsSync(lockPathForSession(otherSession))).toBe(false);
+		await manager.close();
+	});
+
+	it("still deletes a session whose lock cannot be guaranteed", async () => {
+		const { cwd, sessions } = fixture();
+		fs.mkdirSync(sessions, { recursive: true });
+		const target = path.join(sessions, "hard-linked.jsonl");
+		fs.writeFileSync(target, "session");
+		fs.linkSync(target, path.join(sessions, "alias.jsonl"));
+
+		// No writer can hold a lock on a multiply-linked file, so refusing the
+		// deletion would strand it instead of protecting a live owner.
+		const manager = SessionManager.create(cwd, sessions);
+		await manager.dropSession(target);
+		expect(fs.existsSync(target)).toBe(false);
 		await manager.close();
 	});
 
