@@ -453,6 +453,77 @@ describe("AgentSession durable consultation side turn", () => {
 		expect(captureSnapshot).toHaveBeenCalledTimes(1);
 		expect(createChild).not.toHaveBeenCalled();
 		expect(await Bun.file(parentFile).exists()).toBe(false);
+
+		showError.mockClear();
+		await expect(controller.submitCurrentThread("restore this draft")).rejects.toThrow(
+			"No active model available for /consult.",
+		);
+		expect(showError).not.toHaveBeenCalled();
+		expect(createChild).not.toHaveBeenCalled();
+	});
+
+	it("persists a no-text consultation failure as a transcript message", async () => {
+		const manager = SessionManager.inMemory();
+		const requestSnapshot = {
+			model: model("captured-model"),
+			providerSessionId: "provider-session",
+			promptCacheKey: "provider-session",
+			systemPrompt: ["system"],
+			tools: [],
+			telemetry: undefined,
+		};
+		const session = {
+			getAgentId: () => "Main",
+			captureReadOnlySideRequestSnapshot: () => requestSnapshot,
+			createCommittedChildSession: vi.fn(async () => ({
+				manager,
+				sessionFile: "/tmp/__consult.no-text.jsonl",
+				parentSessionId: "parent-session",
+				parentLeafId: null,
+				hasCommittedContext: false,
+				messages: [],
+			})),
+			runReadOnlySideTurn: vi.fn(async () => ({
+				replyText: "",
+				assistantMessage: createAssistantMessage(""),
+			})),
+			generateConsultationTitle: vi.fn(),
+		} as unknown as InteractiveModeContext["session"];
+		const { promise: saved, resolve: resolveSaved } = Promise.withResolvers<void>();
+		const controller = new ConsultController({
+			session,
+			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			btwContainer: new Container(),
+			showStatus: vi.fn((message: string) => {
+				if (message.startsWith("Consultation saved as consult:")) resolveSaved();
+			}),
+			showError: vi.fn(),
+			beginConsultComposer: vi.fn(),
+			setActiveConsultThread: vi.fn(),
+		} as unknown as InteractiveModeContext);
+
+		await controller.start("return no text");
+		await saved;
+
+		const entries = manager.getEntries();
+		const thread = controller.getActiveThread();
+		expect(thread).toBeDefined();
+		if (!thread) throw new Error("missing consultation thread");
+		expect(
+			entries.some(
+				entry =>
+					entry.type === "message" &&
+					entry.message.role === "custom" &&
+					entry.message.customType === CONSULTATION_STATUS_MESSAGE_TYPE &&
+					entry.message.content ===
+						"[Consultation failed: Consultation returned no text; tool calls are disabled.]",
+			),
+		).toBe(true);
+		expect(entries.map(entry => entry.type)).not.toContain("custom_message");
+		expect(consultationTurnStates(entries, thread.consultationId).at(-1)?.terminal).toMatchObject({
+			status: "failed",
+			error: "Consultation returned no text; tool calls are disabled.",
+		});
 	});
 
 	it("refuses to advertise durable children for intentionally non-persistent parents", async () => {

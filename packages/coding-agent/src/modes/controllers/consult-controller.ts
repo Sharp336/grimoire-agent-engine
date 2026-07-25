@@ -310,7 +310,7 @@ export class ConsultController {
 	async submitCurrentThread(question: string): Promise<void> {
 		const thread = this.#activeThread;
 		if (thread) await this.appendTurn(thread, question);
-		else await this.startNewThread(question);
+		else await this.startNewThread(question, true);
 	}
 
 	/** Abort, persist the terminal record, flush, and close before another writer can start. */
@@ -326,14 +326,16 @@ export class ConsultController {
 	}
 
 	/** Start a new durable thread even when a prior thread is selected. */
-	async startNewThread(question: string): Promise<void> {
+	async startNewThread(question: string, failWhenUnavailable = false): Promise<void> {
 		if (!question.trim()) {
 			this.ctx.showStatus("Usage: /consult <question>");
 			return;
 		}
 		const requestSnapshot = this.ctx.session.captureReadOnlySideRequestSnapshot();
 		if (!requestSnapshot) {
-			this.ctx.showError("No active model available for /consult.");
+			const message = "No active model available for /consult.";
+			if (failWhenUnavailable) throw new Error(message);
+			this.ctx.showError(message);
 			return;
 		}
 		await this.#serializeSwitch(async () => {
@@ -860,7 +862,13 @@ export class ConsultController {
 			let terminal: ConsultationTurnRecord;
 			if (!answer) {
 				const error = "Consultation returned no text; tool calls are disabled.";
-				threadManager.appendCustomMessageEntry(CONSULTATION_STATUS_MESSAGE_TYPE, error, true);
+				threadManager.appendMessage({
+					role: "custom",
+					customType: CONSULTATION_STATUS_MESSAGE_TYPE,
+					content: `[Consultation failed: ${error}]`,
+					display: true,
+					timestamp: Date.now(),
+				});
 				terminal = { ...running, status: "failed", finishedAt: Date.now(), error };
 			} else {
 				terminal = { ...running, status: "completed", finishedAt: Date.now() };
