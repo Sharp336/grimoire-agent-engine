@@ -34,6 +34,10 @@ describe("createAgentSession with mcp.awaitStartupMs (interactive UI)", () => {
 	let isolatedHome: string;
 	let savedHomeEnv: string | undefined;
 	let savedXdgEnv: string | undefined;
+	// createAgentSession installs an owned manager as the process-global
+	// singleton; dispose disconnects it but does not restore the prior
+	// instance. Capture/restore so later files in the suite stay clean.
+	let previousMCPManager: MCPManager | undefined;
 
 	beforeAll(async () => {
 		registryDir = path.join(os.tmpdir(), `pi-sdk-mcp-await-registry-${Snowflake.next()}`);
@@ -54,6 +58,7 @@ describe("createAgentSession with mcp.awaitStartupMs (interactive UI)", () => {
 	});
 
 	beforeEach(() => {
+		previousMCPManager = MCPManager.instance();
 		tempDir = path.join(os.tmpdir(), `pi-sdk-mcp-await-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		spyOn(os, "homedir").mockReturnValue(isolatedHome);
@@ -83,6 +88,7 @@ describe("createAgentSession with mcp.awaitStartupMs (interactive UI)", () => {
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
+		MCPManager.setInstance(previousMCPManager);
 		mock.restore();
 	});
 
