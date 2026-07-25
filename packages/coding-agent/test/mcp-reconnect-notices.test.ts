@@ -133,6 +133,21 @@ describe("MCPManager reconnect notices", () => {
 		});
 	});
 
+	it("keeps auth-driven reconnects out of crash notices and accounting", async () => {
+		const events: McpConnectionStatusEvent[] = [];
+		manager = new MCPManager(tempDir, null);
+		manager.setOnConnectionStatus(event => events.push(event));
+		manager.setReconnectNoticesEnabled(true);
+		const authChallenge = { wwwAuthenticate: ['Bearer realm="test"'] };
+
+		for (let attempt = 0; attempt < 7; attempt++) {
+			expect(await manager.reconnectServer("missing", { authChallenge })).toBeNull();
+		}
+		expect(events).toEqual([]);
+
+		expect(await manager.reconnectServer("missing")).toBeNull();
+		expect(events.map(event => event.type)).toEqual(["reconnecting", "reconnect-failed"]);
+	});
 	it("scopes enablement to each additive listener without replacing the owner", async () => {
 		const owner: McpConnectionStatusEvent[] = [];
 		const shared: McpConnectionStatusEvent[] = [];

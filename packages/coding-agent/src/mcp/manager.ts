@@ -266,8 +266,8 @@ export class MCPManager {
 		}
 	}
 
-	#emitReconnectFailure(name: string, error: string, manual = false): void {
-		if (!manual) this.#emitReconnectNotice({ type: "reconnect-failed", serverName: name, error });
+	#emitReconnectFailure(name: string, error: string, suppressNotice = false): void {
+		if (!suppressNotice) this.#emitReconnectNotice({ type: "reconnect-failed", serverName: name, error });
 	}
 
 	/**
@@ -861,8 +861,8 @@ export class MCPManager {
 	 * burst limit (see {@link RECONNECT_BURST_LIMIT}) is exceeded.
 	 * @param options.manual - When `true`, resets the crash-burst window so a
 	 *   user-driven retry (e.g. `/mcp reconnect`) is never blocked by an
-	 *   earlier storm. Defaults to `false`; the transport `onClose` callback
-	 *   and the per-tool-call retry path in `tool-bridge` MUST NOT set it.
+	 *   earlier storm. Auth-challenge reconnects are also excluded from crash
+	 *   accounting and notices because they are expected reauthorization.
 	 */
 	async reconnectServer(
 		name: string,
@@ -875,13 +875,15 @@ export class MCPManager {
 		const pending = this.#pendingReconnections.get(name);
 		if (pending) return pending;
 
-		if (this.#tripReconnectBreaker(name)) {
+		const authDriven = options?.authChallenge !== undefined;
+		if (!authDriven && this.#tripReconnectBreaker(name)) {
 			return null;
 		}
 
-		if (!options?.manual) this.#emitReconnectNotice({ type: "reconnecting", serverName: name });
+		const suppressNotices = options?.manual === true || authDriven;
+		if (!suppressNotices) this.#emitReconnectNotice({ type: "reconnecting", serverName: name });
 
-		const attempt = this.#doReconnect(name, options?.authChallenge, options?.manual);
+		const attempt = this.#doReconnect(name, options?.authChallenge, suppressNotices);
 		this.#pendingReconnections.set(name, attempt);
 		return attempt.finally(() => this.#pendingReconnections.delete(name));
 	}
@@ -930,13 +932,13 @@ export class MCPManager {
 	async #doReconnect(
 		name: string,
 		authChallenge?: MCPAuthChallenge,
-		manual = false,
+		suppressNotices = false,
 	): Promise<MCPServerConnection | null> {
 		const oldConnection = this.#connections.get(name);
 		let config = oldConnection?.config ?? this.#serverConfigs.get(name);
 		const source = this.#sources.get(name) ?? oldConnection?._source;
 		if (!config) {
-			this.#emitReconnectFailure(name, "No saved server configuration is available.", manual);
+			this.#emitReconnectFailure(name, "No saved server configuration is available.", suppressNotices);
 			return null;
 		}
 
@@ -946,20 +948,24 @@ export class MCPManager {
 				logger.error("MCP auth challenge cannot be handled; no auth handler is configured", {
 					path: `mcp:${name}`,
 				});
-				this.#emitReconnectFailure(name, error, manual);
+				this.#emitReconnectFailure(name, error, suppressNotices);
 				return null;
 			}
 			try {
 				const refreshedConfig = await this.#authHandler(name, authChallenge);
 				if (!refreshedConfig) {
-					this.#emitReconnectFailure(name, "Authentication did not produce a server configuration.", manual);
+					this.#emitReconnectFailure(
+						name,
+						"Authentication did not produce a server configuration.",
+						suppressNotices,
+					);
 					return null;
 				}
 				config = refreshedConfig;
 				this.#serverConfigs.set(name, config);
 			} catch (error) {
 				logger.error("MCP auth challenge handling failed", { path: `mcp:${name}`, error });
-				this.#emitReconnectFailure(name, error instanceof Error ? error.message : String(error), manual);
+				this.#emitReconnectFailure(name, error instanceof Error ? error.message : String(error), suppressNotices);
 				return null;
 			}
 		}
@@ -995,7 +1001,7 @@ export class MCPManager {
 			try {
 				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
-				if (!manual) this.#emitReconnectNotice({ type: "reconnected", serverName: name });
+				if (!suppressNotices) this.#emitReconnectNotice({ type: "reconnected", serverName: name });
 				return connection;
 			} catch (error) {
 				if (this.#epoch !== reconnectEpoch) {
@@ -1017,7 +1023,7 @@ export class MCPManager {
 					await Bun.sleep(delays[attempt]);
 				} else {
 					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
-					this.#emitReconnectFailure(name, msg, manual);
+					this.#emitReconnectFailure(name, msg, suppressNotices);
 					// Don't remove stale tools — keep them in the registry so they
 					// remain selected. Calls will fail with MCP errors, which
 					// triggers the tool-level reconnect, or the user can run
