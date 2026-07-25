@@ -115,6 +115,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	mempalaceActive: () => {
+		try {
+			return Settings.instance.get("memory.backend") === "mempalace";
+		} catch {
+			return false;
+		}
+	},
 	autolearnActive: () => {
 		try {
 			return Settings.instance.get("autolearn.enabled") === true;
