@@ -422,15 +422,24 @@ function dedupeExactContextFiles<
 export async function loadProjectContextFiles(options: LoadContextFilesOptions = {}): Promise<LoadedContextFile[]> {
 	const resolvedCwd = options.cwd ?? getProjectDir();
 
-	const result = await loadCapability(contextFileCapability.id, { cwd: resolvedCwd });
+	const result = await loadCapability<ContextFile>(contextFileCapability.id, { cwd: resolvedCwd });
+
+	// Restrict to one level *before* expanding imports. Expansion does file I/O
+	// per item and the whole batch is awaited together, so a slow or blocking
+	// `@`-import at the unwanted level would burn the caller's deadline (see
+	// buildGuidedGoalContextPrompt) and starve the level actually asked for.
+	// Filtering here also stops an identical file at the other level from
+	// winning the cross-level dedupe below (which keeps the last entry per
+	// content) only to be dropped afterwards. The system prompt path leaves
+	// this unset to keep both levels.
+	const items = options.level ? result.items.filter(item => item.level === options.level) : result.items;
 
 	// Materialize ContextFile items, expanding any `@path/to/file` includes
 	// in their content. The expansion uses the file's own directory as the
 	// resolution base so relative imports work the same way Claude Code,
 	// Goose, and other tools document.
-	const allFiles = await Promise.all(
-		result.items.map(async item => {
-			const contextFile = item as ContextFile;
+	const files = await Promise.all(
+		items.map(async contextFile => {
 			return {
 				path: contextFile.path,
 				content: await expandAtImports(contextFile.content, contextFile.path),
@@ -439,12 +448,6 @@ export async function loadProjectContextFiles(options: LoadContextFilesOptions =
 			};
 		}),
 	);
-
-	// Restrict to one level before sort + cross-level dedup so an identical file
-	// at the other level cannot win the dedupe (which keeps the last entry per
-	// content) and then be dropped by a downstream level filter. The system
-	// prompt path leaves this unset to keep both levels.
-	const files = options.level ? allFiles.filter(file => file.level === options.level) : allFiles;
 
 	// Sort by depth (descending): higher depth (farther from cwd) comes first,
 	// so files closer to cwd appear later and are more prominent

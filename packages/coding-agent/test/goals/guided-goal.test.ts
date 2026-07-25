@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as core from "@oh-my-pi/pi-agent-core";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import * as capabilityFs from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildGuidedGoalContextPrompt, runGuidedGoalTurn } from "@oh-my-pi/pi-coding-agent/goals/guided-setup";
@@ -303,6 +304,40 @@ describe("guided goal setup", () => {
 			// The block must cite the project file, not the identical user-level one.
 			expect(rendered).toContain(projectDir.join("AGENTS.md"));
 			expect(rendered).not.toContain(userAgentDir);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
+	});
+
+	it("buildGuidedGoalContextPrompt never expands a user-level file's @-import", async () => {
+		// Regression: the level filter used to run AFTER Promise.all(expandAtImports),
+		// so every user-level context file still had its `@`-imports read before being
+		// discarded. A slow/blocking user-level import then burned the 5s deadline and
+		// starved the project-level load. Filtering must happen before expansion.
+		const originalAgentDir = getAgentDir();
+		using userHome = await TempDir.create("@guided-goal-import-user-");
+		const userAgentDir = path.join(userHome.path(), "agent");
+		await fs.mkdir(userAgentDir, { recursive: true });
+		const userImport = path.join(userAgentDir, "user-import.md");
+		await Bun.write(userImport, "USER_IMPORT_PAYLOAD\n");
+		await Bun.write(path.join(userAgentDir, "AGENTS.md"), "User rules: @user-import.md\n");
+		setAgentDir(userAgentDir);
+		try {
+			using projectDir = await TempDir.create("@guided-goal-import-project-");
+			const projectImport = projectDir.join("project-import.md");
+			await Bun.write(projectImport, "PROJECT_IMPORT_PAYLOAD\n");
+			await Bun.write(projectDir.join("AGENTS.md"), "Project rules: @project-import.md\n");
+
+			const readFile = spyOn(capabilityFs, "readFile");
+
+			const rendered = await buildGuidedGoalContextPrompt(projectDir.path());
+
+			const readPaths = readFile.mock.calls.map(call => path.resolve(String(call[0])));
+			// Guard against a vacuous assertion: the project-level import must be read.
+			expect(readPaths).toContain(path.resolve(projectImport));
+			expect(readPaths).not.toContain(path.resolve(userImport));
+			expect(rendered).toContain("PROJECT_IMPORT_PAYLOAD");
+			expect(rendered).not.toContain("USER_IMPORT_PAYLOAD");
 		} finally {
 			setAgentDir(originalAgentDir);
 		}
