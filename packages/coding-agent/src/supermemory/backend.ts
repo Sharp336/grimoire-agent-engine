@@ -622,7 +622,7 @@ async function recallForFirstTurn(
 				q: promptText,
 				containerTag: scope.containerTag,
 				searchMode: scope.config.searchMode,
-				limit: scope.config.recallLimit,
+				limit: Math.max(2, scope.config.recallLimit),
 				threshold: scope.config.threshold,
 				signal: options?.signal,
 			}),
@@ -648,9 +648,10 @@ async function recallForFirstTurn(
 				!recallRequestIsCurrent(state, scope, options)
 			)
 				return undefined;
-			state.lastSearchCount = searchResult.value.results.length;
+			const results = searchResult.value.results.slice(0, scope.config.recallLimit);
+			state.lastSearchCount = results.length;
 			state.lastSearchAt = Date.now();
-			const searchSnippet = formatSearch(searchResult.value.results);
+			const searchSnippet = formatSearch(results);
 			if (searchSnippet) snippets.push(searchSnippet);
 		} else {
 			errors.push(

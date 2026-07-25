@@ -1588,6 +1588,32 @@ describe("supermemoryBackend", () => {
 		await supermemoryBackend.disposeSession?.(session as never);
 	});
 
+	it("clamps automatic recall to the Supermemory API minimum", async () => {
+		const session = makeSession();
+		vi.spyOn(SupermemoryClient.prototype, "profile").mockResolvedValue({ static: [], dynamic: [] });
+		const search = vi.spyOn(SupermemoryClient.prototype, "search").mockResolvedValue({
+			results: [
+				{ id: "first", content: "first memory" },
+				{ id: "second", content: "second memory" },
+			],
+			total: 2,
+		});
+		await supermemoryBackend.start({
+			session: session as never,
+			settings: configuredSettings({ "supermemory.recallLimit": 1 }),
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const recall = await supermemoryBackend.beforeAgentStartPrompt?.(session as never, "first recall");
+
+		expect(search).toHaveBeenCalledWith(expect.objectContaining({ limit: 2 }));
+		expect(recall).toContain("first memory");
+		expect(recall).not.toContain("second memory");
+		await supermemoryBackend.disposeSession?.(session as never);
+	});
+
 	it("freezes the credential and endpoint selected at session start", async () => {
 		setSupermemoryEnv("SUPERMEMORY_API_KEY", "start-secret");
 		setSupermemoryEnv("SUPERMEMORY_BASE_URL", "https://started.memory.test");
