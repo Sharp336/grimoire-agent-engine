@@ -445,9 +445,7 @@ export class Settings {
 		}
 		// Instance-scoped redaction signal: fire on every set() (including no-ops)
 		// to match prior SETTING_HOOKS behavior. Clone/reload notify via #fireAllHooks.
-		if (path === "skills.redaction.mode" || path === "skills.redaction.maxContextShare") {
-			this.#skillsRedactionSignal.fire();
-		}
+		this.#fireSkillsRedactionIfRelevant(path);
 		this.#lastHookedValues.set(path, next);
 		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
@@ -461,6 +459,7 @@ export class Settings {
 		setByPath(this.#overrides, segments, value);
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		this.#fireSkillsRedactionIfRelevant(path);
 	}
 
 	/**
@@ -478,6 +477,18 @@ export class Settings {
 		delete current[segments[segments.length - 1]];
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		this.#fireSkillsRedactionIfRelevant(path);
+	}
+
+	/**
+	 * Fire the instance-scoped skills-redaction signal when `path` is one of the
+	 * redaction settings. Shared by `set`, `override`, and `clearOverride` so a
+	 * runtime override rebuilds the system prompt exactly like a persisted set.
+	 */
+	#fireSkillsRedactionIfRelevant(path: SettingPath): void {
+		if (path === "skills.redaction.mode" || path === "skills.redaction.maxContextShare") {
+			this.#skillsRedactionSignal.fire();
+		}
 	}
 
 	#fireEffectiveSettingChanged(path: SettingPath, value: unknown, prev: unknown): void {

@@ -1539,6 +1539,12 @@ export class AgentSession {
 	 *  it; a refresh whose epoch no longer matches is discarded so only the
 	 *  latest settings win. */
 	#redactionRefreshEpoch = 0;
+	/** True while the serialized redaction refresh is executing its rebuild.
+	 *  Prompt turns await {@link #redactionRefreshChain} before snapshotting the
+	 *  system prompt; this flag makes that await a no-op for any prompt path
+	 *  reached from inside the refresh itself, which would otherwise wait on a
+	 *  chain link that cannot settle until it returns. */
+	#redactionRefreshInFlight = false;
 	/**
 	 * Monotonic generation counter for system prompt builds. Every call that
 	 * starts an async `#rebuildSystemPrompt` (redaction refresh, model switch,
@@ -2326,7 +2332,13 @@ export class AgentSession {
 			// the replacement is genuinely under way.
 			this.#redactionRefreshChain = this.#redactionRefreshChain
 				.catch(() => {})
-				.then(() => (epoch === this.#redactionRefreshEpoch ? this.refreshBaseSystemPrompt(epoch) : undefined))
+				.then(() => {
+					if (epoch !== this.#redactionRefreshEpoch) return undefined;
+					this.#redactionRefreshInFlight = true;
+					return this.refreshBaseSystemPrompt(epoch).finally(() => {
+						this.#redactionRefreshInFlight = false;
+					});
+				})
 				.catch(err => {
 					logger.warn("Skills redaction prompt refresh failed", { error: String(err) });
 				});
@@ -6399,13 +6411,22 @@ export class AgentSession {
 					// build that invalidated this one throws and rolls back
 					// #promptBuildVersion, this result is re-applied so the prompt
 					// reflects the new tool set rather than staying stale.
-					this.#pendingSuccessfulBuild = {
-						buildVersion,
-						result: built,
-						toolSignature: signature,
-						modelKey: buildModelKey,
-						modelContextWindow: buildModelContextWindow,
-					};
+					//
+					// Only the newest discarded build may occupy the buffer: with
+					// three concurrent rebuilds an older build can land after a
+					// newer one, and overwriting the newer buffered entry would
+					// make #applyPendingSuccessfulBuild reject it on the version
+					// check, permanently losing a valid result.
+					const buffered = this.#pendingSuccessfulBuild;
+					if (!buffered || buildVersion > buffered.buildVersion) {
+						this.#pendingSuccessfulBuild = {
+							buildVersion,
+							result: built,
+							toolSignature: signature,
+							modelKey: buildModelKey,
+							modelContextWindow: buildModelContextWindow,
+						};
+					}
 					// Still persist the MCP tool selection — setTools() above
 					// changed the live tool set, and failing to record it means
 					// switching/resuming the session can silently lose the
@@ -7847,6 +7868,18 @@ export class AgentSession {
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
 				}
+			}
+
+			// Drain any queued skills-redaction prompt refresh before snapshotting
+			// the system prompt: the signal handler chains refreshBaseSystemPrompt
+			// fire-and-forget, so a turn started right after a redaction settings
+			// change would otherwise ship the pre-redaction skills block.
+			// The chain terminates in its own catch, so it never rejects; the extra
+			// catch keeps any future rejecting link from poisoning this turn.
+			// Skipped while the refresh itself is running — a prompt path reached
+			// from inside the refresh would await a link that cannot settle.
+			if (!this.#redactionRefreshInFlight) {
+				await this.#redactionRefreshChain.catch(() => {});
 			}
 
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { countTokens } from "@oh-my-pi/pi-agent-core";
 import type { Skill } from "../src/extensibility/skills";
-import { redactSkillDescriptions } from "../src/system-prompt-redaction";
+import { redactSkillDescriptions, renderSkillsBlock } from "../src/system-prompt-redaction";
 
 const MOCK_SKILLS: Skill[] = [
 	{
@@ -238,6 +238,33 @@ describe("redactSkillDescriptions", () => {
 			const phase1Rendered = `<skills>\n${manySkills.map(s => `- ${s.name}: ${s.description}`).join("\n")}\n</skills>`;
 			const resultRendered = `<skills>\n${result.map(s => `- ${s.name}: ${s.description}`).join("\n")}\n</skills>`;
 			expect(countTokens(resultRendered)).toBeLessThan(countTokens(phase1Rendered));
+		});
+
+		it("returns CJK descriptions that already fit byte-identical without split/rejoin", () => {
+			// Trim mode's Phase 1 unconditionally split/rejoined every description.
+			// splitSentences inserts a space after `。`, so a CJK description that
+			// already fits the budget came back as `第一。 第二。` — a mutated object
+			// shipped to the provider with no redaction needed. Trim must match cap
+			// mode and return the originals untouched when the block already fits.
+			const description = "第一。第二。";
+			const cjkSkill: Skill = {
+				name: "cjk-fit",
+				description,
+				filePath: "/path/to/cjk-fit",
+				baseDir: "/path/to",
+				source: "test",
+			};
+			const skills = [cjkSkill];
+			const renderedTokens = countTokens(`<skills>\n- cjk-fit: ${description}\n</skills>`);
+			const result = redactSkillDescriptions(skills, {
+				mode: "trim",
+				maxContextShare: 1,
+				contextWindow: renderedTokens, // exact fit
+			});
+			expect(result).toBe(skills);
+			expect(result[0]).toBe(cjkSkill);
+			expect(result[0].description).toBe("第一。第二。");
+			expect(result[0].description).not.toBe("第一。 第二。");
 		});
 	});
 
@@ -551,5 +578,36 @@ describe("redactSkillDescriptions", () => {
 			const rendered = `<skills>\n${result.map(s => `- ${s.name}: ${s.description}`).join("\n")}\n</skills>`;
 			expect(countTokens(rendered)).toBeLessThanOrEqual(12);
 		});
+	});
+});
+
+describe("renderSkillsBlock", () => {
+	// The `<skills>` skeleton now lives in one shared prompts/system/skills-block.md
+	// partial consumed by both renderSkillsBlock and the budget estimator. These
+	// pin the exact bytes for both render formats: sdk.ts skills-block detection
+	// compares against this string, and the redaction budget is measured from it,
+	// so any drift silently breaks detection and mis-sizes the budget.
+	const entries = [
+		{ name: "alpha", description: "Does a thing. Then another." },
+		{ name: 'has"quote', description: 'desc with "quotes" & <angle> brackets' },
+		{ name: "cjk", description: "第一。第二。" },
+		{ name: "blank", description: "" },
+	];
+
+	it("renders the default `- name: description` shape", () => {
+		expect(renderSkillsBlock(entries)).toBe(
+			'<skills>\n- alpha: Does a thing. Then another.\n- has"quote: desc with "quotes" & <angle> brackets\n- cjk: 第一。第二。\n- blank: \n</skills>',
+		);
+	});
+
+	it("renders the custom `<skill name=…>` shape", () => {
+		expect(renderSkillsBlock(entries, "custom")).toBe(
+			'<skills>\n<skill name="alpha">\nDoes a thing. Then another.\n</skill>\n<skill name="has"quote">\ndesc with "quotes" & <angle> brackets\n</skill>\n<skill name="cjk">\n第一。第二。\n</skill>\n<skill name="blank">\n\n</skill>\n</skills>',
+		);
+	});
+
+	it("emits a bare wrapper for an empty skill list in both formats", () => {
+		expect(renderSkillsBlock([])).toBe("<skills>\n</skills>");
+		expect(renderSkillsBlock([], "custom")).toBe("<skills>\n</skills>");
 	});
 });

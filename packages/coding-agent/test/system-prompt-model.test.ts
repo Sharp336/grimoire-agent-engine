@@ -831,6 +831,35 @@ describe("Settings fireAllHooks skips unchanged redaction values during clone/re
 			unsubscribe();
 		}
 	});
+
+	it("notifies redaction subscribers for runtime overrides and their removal", async () => {
+		// override()/clearOverride() bypass set(), so SDK/task code applying a
+		// runtime redaction override must still rebuild the system prompt.
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		let signalFireCount = 0;
+		const unsubscribe = settings.onSkillsRedactionChanged(() => {
+			signalFireCount++;
+		});
+
+		try {
+			settings.override("skills.redaction.mode", "cap");
+			expect(settings.get("skills.redaction.mode")).toBe("cap");
+			expect(signalFireCount).toBe(1);
+
+			settings.override("skills.redaction.maxContextShare", 0.25);
+			expect(signalFireCount).toBe(2);
+
+			settings.clearOverride("skills.redaction.mode");
+			expect(signalFireCount).toBe(3);
+
+			// Unrelated paths must not wake redaction subscribers.
+			settings.override("compaction.enabled", true);
+			settings.clearOverride("compaction.enabled");
+			expect(signalFireCount).toBe(3);
+		} finally {
+			unsubscribe();
+		}
+	});
 });
 
 describe("AgentSession redaction refresh serialization", () => {
@@ -2508,6 +2537,95 @@ describe("AgentSession discarded tool rebuild re-applied when newer refresh thro
 		// stays at "initial" because the only successful rebuild (tool A)
 		// was discarded and the signature check correctly rejected it.
 		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+	});
+
+	it("keeps the newest discarded build when an older one lands after it", async () => {
+		// Three concurrent rebuilds: tool A (v1), tool B (v2), redaction (v3).
+		// Build 2 lands before build 1, so build 1 must NOT overwrite the newer
+		// buffered entry. When build 3 fails and rolls back to version 2, the
+		// buffered build-2 result is the one that must be re-applied.
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const makeTool = (name: string) => ({
+			name,
+			label: name,
+			description: `${name} description`,
+			parameters: { type: "object" as const, properties: {} },
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		});
+		const mcpToolA = makeTool("mcp__test__a");
+		const mcpToolB = makeTool("mcp__test__b");
+		const toolRegistry = new Map([
+			["mcp__test__a", mcpToolA],
+			["mcp__test__b", mcpToolB],
+		]);
+
+		let rebuildCount = 0;
+		let resolveBuildOne: (() => void) | undefined;
+		let resolveBuildTwo: (() => void) | undefined;
+		let resolveBuildThree: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				const blocker = Promise.withResolvers<void>();
+				if (current === 1) resolveBuildOne = blocker.resolve;
+				else if (current === 2) resolveBuildTwo = blocker.resolve;
+				else if (current === 3) resolveBuildThree = blocker.resolve;
+				else return { systemPrompt: [`result-${current}`] };
+				await blocker.promise;
+				if (current === 3) throw new Error("redaction rebuild failure");
+				return { systemPrompt: [`tool-${current}-result`] };
+			},
+		});
+
+		// Build 1: tool A.
+		const setActivePromiseA = session.setActiveToolsByName(["mcp__test__a"]);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+
+		// Build 2: tool B. Live tool set is now B — the signature the buffered
+		// result must still match when it is re-applied.
+		const setActivePromiseB = session.setActiveToolsByName(["mcp__test__b"]);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(2);
+
+		// Build 3: redaction refresh. Does not change the tool set.
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(3);
+
+		// Build 2 lands first and buffers {version: 2, signature: B}.
+		resolveBuildTwo?.();
+		await setActivePromiseB;
+
+		// Build 1 lands second. It is older, so it must leave the buffer alone.
+		resolveBuildOne?.();
+		await setActivePromiseA;
+
+		// Neither applied — build 3 is still the newest in-flight build.
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// Build 3 throws and rolls the version back to 2, re-applying the
+		// buffered build-2 result. Before the fix, build 1 had clobbered the
+		// buffer and the version check discarded it, stranding the prompt at
+		// "initial" with tool B active.
+		resolveBuildThree?.();
+		await flushMicrotasks();
+		expect(session.agent.state.systemPrompt).toEqual(["tool-2-result"]);
 	});
 });
 

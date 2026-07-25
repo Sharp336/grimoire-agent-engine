@@ -1,5 +1,7 @@
 import { countTokens } from "@oh-my-pi/pi-agent-core";
+import { prompt } from "@oh-my-pi/pi-utils";
 import type { Skill } from "./extensibility/skills";
+import skillsBlockTemplate from "./prompts/system/skills-block.md" with { type: "text" };
 
 export type SkillDescriptionRedactionMode = "off" | "trim" | "cap";
 
@@ -39,48 +41,47 @@ function trimDescriptionToTokenBudget(description: string, tokenBudget: number):
 	return kept.join(" ");
 }
 
+/** One `{ name, description }` row as the skills-block template consumes it. */
+interface SkillsBlockEntry {
+	name: string;
+	description: string;
+}
+
+// Compiled once; `prompt.compile` also memoizes on the template string.
+// Deliberately NOT `prompt.render`, which post-formats and would strip the
+// trailing space an empty description leaves on a `- name: ` line, silently
+// changing the token estimate against the block bytes actually shipped.
+const renderSkillsBlockTemplate = prompt.compile(skillsBlockTemplate);
+
 /**
  * Render the exact `<skills>` block text that the system prompt template
  * emits for the given skills. Exposed so callers (e.g. sdk.ts skills-block
  * detection) can compare against the *generated* block rather than the first
  * literal `<skills>` wrapper in user content.
+ *
+ * Both render shapes live in `prompts/system/skills-block.md`, shared with the
+ * budget estimator below, so a template edit cannot desync detection from the
+ * token accounting.
  */
-export function renderSkillsBlock(skills: readonly Skill[], renderFormat: "default" | "custom" = "default"): string {
-	const lines = ["<skills>"];
-	for (const skill of skills) {
-		if (renderFormat === "custom") {
-			// Matches custom-system-prompt.md: <skill name="{{name}}">\n{{description}}\n</skill>
-			lines.push(`<skill name="${skill.name}">`);
-			lines.push(skill.description);
-			lines.push("</skill>");
-		} else {
-			// Matches system-prompt.md: - {{name}}: {{description}}
-			lines.push(`- ${skill.name}: ${skill.description}`);
-		}
-	}
-	lines.push("</skills>");
-	return lines.join("\n");
+export function renderSkillsBlock(
+	skills: readonly SkillsBlockEntry[],
+	renderFormat: "default" | "custom" = "default",
+): string {
+	const rendered = renderSkillsBlockTemplate({ skills, custom: renderFormat === "custom" });
+	// The template file ends in a newline; the block text itself must not.
+	return rendered.endsWith("\n") ? rendered.slice(0, -1) : rendered;
 }
 
 function estimateRenderedSkillsTokens(
 	entries: readonly { skill: Skill; sentences: string[] }[],
 	renderFormat: "default" | "custom" = "default",
 ): number {
-	const lines = ["<skills>"];
-	for (const { skill, sentences } of entries) {
-		const description = sentences.join(" ");
-		if (renderFormat === "custom") {
-			// Matches custom-system-prompt.md: <skill name="{{name}}">\n{{description}}\n</skill>
-			lines.push(`<skill name="${skill.name}">`);
-			lines.push(description);
-			lines.push("</skill>");
-		} else {
-			// Matches system-prompt.md: - {{name}}: {{description}}
-			lines.push(`- ${skill.name}: ${description}`);
-		}
-	}
-	lines.push("</skills>");
-	return countTokens(lines.join("\n"));
+	return countTokens(
+		renderSkillsBlock(
+			entries.map(({ skill, sentences }) => ({ name: skill.name, description: sentences.join(" ") })),
+			renderFormat,
+		),
+	);
 }
 
 function applyTrimMode(
@@ -92,6 +93,13 @@ function applyTrimMode(
 	if (skills.length === 0) return [];
 
 	const budgetTokens = Math.max(1, Math.floor(contextWindow * maxContextShare));
+	// Bail out before split/rejoin when the rendered block already fits, matching
+	// cap mode. splitSentences normalizes CJK terminators (`。` → `。 `), so
+	// rejoining with spaces would mutate descriptions like `第一。第二。` even
+	// when no redaction is needed.
+	if (countTokens(renderSkillsBlock(skills, renderFormat)) <= budgetTokens) {
+		return skills;
+	}
 	const perSkillTokenBudget = Math.max(1, Math.floor(budgetTokens / skills.length));
 
 	// Phase 1: trim each description to a per-skill token budget. With many
