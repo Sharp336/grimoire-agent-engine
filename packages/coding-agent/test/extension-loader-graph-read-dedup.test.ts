@@ -171,6 +171,17 @@ export { ToolAbortError };
 		expect(reads.get(fs.realpathSync(`${entryPath}.omp-imports.json`)) ?? 0).toBe(1);
 		expect(reads.get(fs.realpathSync(entryPath)) ?? 0).toBe(1);
 	});
+	it("reads a sidecar-less JS entry from disk only once", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "plain.js");
+		fs.writeFileSync(entryPath, `export const marker = "plain";\n`, "utf8");
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { marker: string };
+		expect(loaded.marker).toBe("plain");
+		// Backward-compatible path: with no sidecar the fast path must bail before opening
+		// the entry, leaving the graph loader as its only reader.
+		expect(reads.get(fs.realpathSync(entryPath)) ?? 0).toBe(1);
+	});
 	it("falls back to graph loading when a prebuilt sidecar is stale", async () => {
 		const cwd = tempDir.absolute();
 		const dependencyPath = path.join(cwd, "dependency.ts");
