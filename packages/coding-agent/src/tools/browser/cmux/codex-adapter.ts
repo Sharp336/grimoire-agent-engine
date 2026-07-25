@@ -595,11 +595,13 @@ const CLEANUP_PAGE_OBSERVERS_SOURCE = `(tokenNamespace) => {
 	if (state?.tokenNamespace !== tokenNamespace) return false;
 	state.active = false;
 	if (state.clickListener) document.removeEventListener("click", state.clickListener, true);
-	for (const element of document.querySelectorAll("[data-omp-codex-file-token]")) {
-		if (String(element.getAttribute("data-omp-codex-file-token") || "").startsWith("file-" + tokenNamespace + "-")) element.removeAttribute("data-omp-codex-file-token");
-	}
-	for (const element of document.querySelectorAll("[data-omp-codex-action-token]")) {
-		if (String(element.getAttribute("data-omp-codex-action-token") || "").startsWith(tokenNamespace)) element.removeAttribute("data-omp-codex-action-token");
+	const roots = [document];
+	for (const root of roots) {
+		for (const element of root.querySelectorAll("*")) {
+			if (String(element.getAttribute?.("data-omp-codex-file-token") || "").startsWith("file-" + tokenNamespace + "-")) element.removeAttribute("data-omp-codex-file-token");
+			if (String(element.getAttribute?.("data-omp-codex-action-token") || "").startsWith(tokenNamespace)) element.removeAttribute("data-omp-codex-action-token");
+			if (element.shadowRoot) roots.push(element.shadowRoot);
+		}
 	}
 	const transfers = globalThis.__ompCodexMediaTransfers;
 	if (transfers) for (const [token, transfer] of Object.entries(transfers)) {
@@ -626,8 +628,12 @@ const READ_FILE_EVENT_AFTER_SOURCE = `(baseline) => {
 }`;
 
 const DISPOSE_FILE_TOKEN_SOURCE = `(token) => {
-	for (const element of document.querySelectorAll("[data-omp-codex-file-token]")) {
-		if (element.getAttribute("data-omp-codex-file-token") === token) element.removeAttribute("data-omp-codex-file-token");
+	const roots = [document];
+	for (const root of roots) {
+		for (const element of root.querySelectorAll("*")) {
+			if (element.getAttribute?.("data-omp-codex-file-token") === token) element.removeAttribute("data-omp-codex-file-token");
+			if (element.shadowRoot) roots.push(element.shadowRoot);
+		}
 	}
 	const state = globalThis.__ompCodexBrowserState;
 	if (state) state.fileEvents = state.fileEvents.filter(event => event.token !== token);
@@ -1697,7 +1703,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		const token = stringArg(args, "token");
 		try {
 			await this.#tab.codexUploadFile(
-				`input[data-omp-codex-file-token="${token}"]`,
+				`pierce/input[data-omp-codex-file-token="${token}"]`,
 				stringArrayArg(args, "files"),
 				remainingMs(deadline, "playwright.fileChooser.setFiles"),
 			);

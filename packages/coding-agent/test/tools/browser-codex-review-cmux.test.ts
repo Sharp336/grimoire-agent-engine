@@ -242,7 +242,7 @@ function labelProbe() {
 	return { document, view };
 }
 
-function observerProbe(multiple = false) {
+function observerProbe(multiple = false, inShadowRoot = false) {
 	type ClickEvent = {
 		target: ElementProbe;
 		defaultPrevented: boolean;
@@ -257,6 +257,7 @@ function observerProbe(multiple = false) {
 		readonly kind: "file" | "anchor";
 		readonly multiple: boolean;
 		readonly tagName: "INPUT" | "A";
+		shadowRoot?: { querySelectorAll(selector: string): ElementProbe[] };
 
 		constructor(kind: "file" | "anchor") {
 			this.kind = kind;
@@ -286,6 +287,16 @@ function observerProbe(multiple = false) {
 	file.setAttribute("id", "upload");
 	file.setAttribute("type", "file");
 	const anchor = new ElementProbe("anchor");
+	if (inShadowRoot) {
+		anchor.shadowRoot = {
+			querySelectorAll(selector: string) {
+				if (selector === "*") return [file];
+				return selector.includes("data-omp-codex-file-token") && file.getAttribute("data-omp-codex-file-token")
+					? [file]
+					: [];
+			},
+		};
+	}
 	const elements = [file, anchor];
 	const document = {
 		addEventListener(type: string, listener: (event: ClickEvent) => void, capture = false) {
@@ -298,8 +309,10 @@ function observerProbe(multiple = false) {
 			if (type === "click" && clickListener === listener && clickCapture === capture) clickListener = undefined;
 		},
 		querySelectorAll(selector: string) {
-			if (selector === "#upload") return [file];
-			return elements.filter(element => {
+			if (selector === "*") return inShadowRoot ? [anchor] : elements;
+			if (selector === "#upload") return inShadowRoot ? [] : [file];
+			const visibleElements = inShadowRoot ? [anchor] : elements;
+			return visibleElements.filter(element => {
 				if (selector.includes("data-omp-codex-file-token") && element.getAttribute("data-omp-codex-file-token"))
 					return true;
 				return (
@@ -338,6 +351,7 @@ type ObserverAdapterProbe = {
 function adapterForObserver(
 	probe: ObserverAdapterProbe,
 	codexWait?: (timeoutMs: number) => void | Promise<void>,
+	codexUploadFile?: (selector: string, files: readonly string[], timeoutMs: number) => void | Promise<void>,
 ): CmuxCodexBrowserAdapter {
 	const evaluate = (source: string, args: unknown[]) =>
 		runPageEvaluator(source, args, {
@@ -348,8 +362,9 @@ function adapterForObserver(
 	return new CmuxCodexBrowserAdapter({
 		surfaceId: "surface-observer",
 		codexEvaluate: evaluate,
-		codexEvaluateCleanup: evaluate,
+		codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
 		codexWait,
+		codexUploadFile,
 	} as never);
 }
 
@@ -1482,15 +1497,36 @@ describe("cmux Codex browser review regressions", () => {
 		}
 	});
 
-	it("records a shadow file input from the composed click path", async () => {
-		const probe = observerProbe(true);
-		const adapter = adapterForObserver(probe);
+	it("populates and cleans up a shadow file input through a piercing selector", async () => {
+		const probe = observerProbe(true, true);
+		const uploadSelectors: string[] = [];
+		const adapter = adapterForObserver(
+			probe,
+			async () => {
+				probe.fire(probe.anchor, false, false, true, [probe.file, probe.anchor]);
+			},
+			selector => {
+				uploadSelectors.push(selector);
+			},
+		);
 		await adapter.beginRun();
 
 		try {
-			probe.fire(probe.anchor, false, false, true, [probe.file, probe.anchor]);
-			await Promise.resolve();
-			expect(probe.file.getAttribute("data-omp-codex-file-token")).toMatch(/^file-/);
+			const waiting = adapter.invoke<{ token: string; multiple: boolean }>("playwright.waitForEvent", {
+				tabId: "1",
+				event: "filechooser",
+				timeoutMs: 250,
+			});
+			const chooser = await waiting;
+			await adapter.invoke("playwright.fileChooser.setFiles", {
+				tabId: "1",
+				token: chooser.token,
+				files: ["fixture.txt"],
+				timeoutMs: 250,
+			});
+
+			expect(uploadSelectors).toEqual([expect.stringMatching(/^pierce\/input\[data-omp-codex-file-token=/)]);
+			expect(probe.file.getAttribute("data-omp-codex-file-token")).toBeNull();
 		} finally {
 			await adapter.dispose();
 		}

@@ -2899,7 +2899,10 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					const timer = setTimeout(() => controller.abort(new Error(`${label} media fetch timed out`)), timeoutMs);
 					try {
 						const pageDocument = document as unknown as PageDocumentLike;
-						const response = await fetch(new URL(source, pageDocument.baseURI), { signal: controller.signal });
+						const response = await fetch(new URL(source, pageDocument.baseURI), {
+							credentials: "include",
+							signal: controller.signal,
+						});
 						if (!response.ok) throw new Error(`${label} media fetch failed with HTTP ${response.status}`);
 						const maxBytes = 32 * 1024 * 1024;
 						const contentLengthHeader = response.headers.get("content-length");

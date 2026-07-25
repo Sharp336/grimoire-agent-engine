@@ -1278,6 +1278,51 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("includes browser credentials when fetching protected media", async () => {
+		const originalDocument = Reflect.get(globalThis, "document");
+		const hadDocument = Reflect.has(globalThis, "document");
+		const originalFetch = globalThis.fetch;
+		Reflect.set(globalThis, "document", { baseURI: "https://fixture.test/page" });
+		let credentials: unknown;
+		const element = {
+			getAttribute: (name: string) => (name === "src" ? "https://media.fixture.test/protected.png" : null),
+			querySelector: () => null,
+		};
+		const handle: Record<string, unknown> = {
+			asElement: () => handle,
+			dispose: async () => undefined,
+			evaluate: async (
+				callback: (target: typeof element, timeoutMs: number, label: string) => Promise<unknown>,
+				timeoutMs: number,
+				label: string,
+			) => await callback(element, timeoutMs, label),
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: { url: () => "https://fixture.test/page", evaluateHandle: async () => handle } as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp",
+			captureScreenshot: async () => "",
+		});
+		globalThis.fetch = (async (_input, init) => {
+			credentials = init?.credentials;
+			return { ok: false, status: 401 } as Response;
+		}) as typeof fetch;
+
+		try {
+			await expect(
+				adapter.invoke("cua.downloadMedia", { tabId: "1", x: 1, y: 1, timeoutMs: 1_000 }),
+			).rejects.toThrow("media fetch failed with HTTP 401");
+			expect(credentials).toBe("include");
+		} finally {
+			await adapter.dispose();
+			globalThis.fetch = originalFetch;
+			if (hadDocument) Reflect.set(globalThis, "document", originalDocument);
+			else Reflect.deleteProperty(globalThis, "document");
+		}
+	});
+
 	it("rejects media above 32 MiB before retaining overflowing bytes", async () => {
 		const mediaLimit = 32 * 1024 * 1024;
 		const originalDocument = Reflect.get(globalThis, "document");
