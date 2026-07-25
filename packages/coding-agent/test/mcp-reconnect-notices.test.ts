@@ -133,17 +133,22 @@ describe("MCPManager reconnect notices", () => {
 		});
 	});
 
-	it("adds and removes a listener without replacing the owner", async () => {
+	it("scopes enablement to each additive listener without replacing the owner", async () => {
 		const owner: McpConnectionStatusEvent[] = [];
 		const shared: McpConnectionStatusEvent[] = [];
+		let sharedEnabled = true;
 		manager = new MCPManager(tempDir, null);
 		manager.setOnConnectionStatus(event => owner.push(event));
-		const unsubscribe = manager.addConnectionStatusListener(event => shared.push(event));
 		manager.setReconnectNoticesEnabled(true);
+		const unsubscribe = manager.addConnectionStatusListener(
+			event => shared.push(event),
+			() => sharedEnabled,
+		);
 
 		await manager.reconnectServer("first");
-		unsubscribe();
+		sharedEnabled = false;
 		await manager.reconnectServer("second");
+		unsubscribe();
 		expect(owner).toHaveLength(4);
 		expect(shared).toHaveLength(2);
 	});
@@ -158,25 +163,35 @@ describe("MCPManager reconnect notices", () => {
 		expect(notice).not.toContain("\n");
 		expect(notice).toContain("Use /mcp to retry manually.");
 		expect(notice).not.toContain("/mcp reconnect");
+		const spacedNotice = formatMCPReconnectNotice({
+			type: "reconnect-failed",
+			serverName: "server with spaces",
+			error: "offline",
+		});
+		expect(spacedNotice).toContain("Use /mcp to retry manually.");
+		expect(spacedNotice).not.toContain("/mcp reconnect");
 	});
 
-	it("wires a supplied UI manager without replacing its owner", async () => {
+	it("scopes a supplied manager listener to the session settings and lifetime", async () => {
 		const owner: McpConnectionStatusEvent[] = [];
 		const uiEvents: McpConnectionStatusEvent[] = [];
 		manager = new MCPManager(tempDir, null);
 		manager.setOnConnectionStatus(event => owner.push(event));
+		manager.setReconnectNoticesEnabled(true);
 		const eventBus = new EventBus();
 		const unsubscribe = eventBus.on(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event => {
 			if (isMcpConnectionStatusEvent(event)) uiEvents.push(event);
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
+		const settings = Settings.isolated();
+		settings.set("mcp.reconnectNotices", true);
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "mcp.reconnectNotices": true }),
+			settings,
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			eventBus,
 			mcpManager: manager,
@@ -194,14 +209,21 @@ describe("MCPManager reconnect notices", () => {
 			await manager.reconnectServer("during-session");
 			expect(owner).toHaveLength(2);
 			expect(uiEvents).toHaveLength(2);
+
+			settings.set("mcp.reconnectNotices", false);
+			await manager.reconnectServer("disabled-during-session");
+			expect(owner).toHaveLength(4);
+			expect(uiEvents).toHaveLength(2);
+
+			settings.set("mcp.reconnectNotices", true);
+			await session.dispose();
+			await manager.reconnectServer("after-dispose");
+			expect(owner).toHaveLength(6);
+			expect(uiEvents).toHaveLength(2);
 		} finally {
 			await session.dispose();
 			unsubscribe();
 			authStorage.close();
 		}
-
-		await manager.reconnectServer("after-dispose");
-		expect(owner).toHaveLength(4);
-		expect(uiEvents).toHaveLength(2);
 	});
 });

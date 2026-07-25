@@ -97,10 +97,10 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 
 export function formatMCPReconnectNotice(event: McpReconnectStatusEvent): string {
 	const name = sanitizeMcpServerName(event.serverName);
-	// Keep exact, ordinary names actionable. Control characters cannot be
-	// represented safely in a one-line slash command, so those notices direct
-	// the user to the interactive MCP menu instead.
-	const hasUnsafeCommandChars = /[\r\n\t]/.test(event.serverName);
+	// Keep exact, ordinary names actionable. Whitespace cannot be represented
+	// by the current slash-command parser as one server-name argument, while
+	// control characters are also unsafe in a one-line status message.
+	const hasUnsafeCommandChars = /\s/.test(event.serverName);
 	const recovery = hasUnsafeCommandChars
 		? "Use /mcp to retry manually."
 		: `Run /mcp reconnect ${sanitizeText(event.serverName)} to retry.`;

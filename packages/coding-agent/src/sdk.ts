@@ -1204,6 +1204,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			startupCredentialDisabledEvents.push(event);
 		}
 	});
+	let unsubscribeReconnectStatus: (() => void) | undefined;
 	const settings = await (options.settings ??
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
@@ -1853,9 +1854,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 		if (options.hasUI && mcpManager) {
-			mcpManager.setReconnectNoticesEnabled(settings.get("mcp.reconnectNotices"));
-			const unsubscribeReconnectStatus = mcpManager.addConnectionStatusListener(onMCPStatus);
-			postmortem.register("mcp-reconnect-status-cleanup", unsubscribeReconnectStatus);
+			unsubscribeReconnectStatus = mcpManager.addConnectionStatusListener(onMCPStatus, () =>
+				settings.get("mcp.reconnectNotices"),
+			);
 		}
 		// Only top-level sessions own the global MCPManager. Subagents already
 		// receive the parent's manager via `options.mcpManager`, and reassigning
@@ -3242,6 +3243,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				} finally {
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();
+					unsubscribeReconnectStatus?.();
 				}
 			};
 		}
@@ -3475,6 +3477,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// dispose-wrap took ownership. Idempotent with dispose() — Set.delete is a no-op
 		// for already-removed listeners.
 		unsubscribeCredentialDisabled?.();
+		unsubscribeReconnectStatus?.();
 		try {
 			if (hasSession) {
 				await session.dispose();

@@ -640,9 +640,6 @@ export class SelectorController {
 			case "mcp.notifications":
 				this.ctx.mcpManager?.setNotificationsEnabled(value as boolean);
 				break;
-			case "mcp.reconnectNotices":
-				this.ctx.mcpManager?.setReconnectNoticesEnabled(value as boolean);
-				break;
 
 			// All other settings are handled by the definitions (get/set on SettingsManager)
 			// No additional side effects needed

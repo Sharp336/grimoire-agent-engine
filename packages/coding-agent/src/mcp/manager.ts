@@ -199,7 +199,7 @@ export class MCPManager {
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
 	/** Channels for user-visible reconnect notices (`mcp.reconnectNotices`). */
-	#connectionStatusListeners = new Set<(event: McpConnectionStatusEvent) => void>();
+	#connectionStatusListeners = new Map<(event: McpConnectionStatusEvent) => void, () => boolean>();
 	#reconnectNoticesEnabled = false;
 	#notificationsEnabled = false;
 	#notificationsEpoch = 0;
@@ -243,21 +243,23 @@ export class MCPManager {
 	/** Replace the reconnect-status channel (primarily for direct manager consumers). */
 	setOnConnectionStatus(handler: ((event: McpConnectionStatusEvent) => void) | undefined): void {
 		this.#connectionStatusListeners.clear();
-		if (handler) this.#connectionStatusListeners.add(handler);
+		if (handler) this.addConnectionStatusListener(handler);
 	}
 
 	/** Subscribe without replacing another session's reconnect-status channel. */
-	addConnectionStatusListener(handler: (event: McpConnectionStatusEvent) => void): () => void {
-		this.#connectionStatusListeners.add(handler);
+	addConnectionStatusListener(
+		handler: (event: McpConnectionStatusEvent) => void,
+		enabled: () => boolean = () => this.#reconnectNoticesEnabled,
+	): () => void {
+		this.#connectionStatusListeners.set(handler, enabled);
 		return () => this.#connectionStatusListeners.delete(handler);
 	}
 
-	/** Fire a reconnect notice when enabled; a throwing consumer must never break reconnects. */
+	/** Fire a reconnect notice for each enabled subscriber; consumers cannot break reconnects. */
 	#emitReconnectNotice(event: McpConnectionStatusEvent): void {
-		if (!this.#reconnectNoticesEnabled) return;
-		for (const listener of this.#connectionStatusListeners) {
+		for (const [listener, enabled] of this.#connectionStatusListeners) {
 			try {
-				listener(event);
+				if (enabled()) listener(event);
 			} catch {
 				// notice delivery is best-effort by design
 			}
