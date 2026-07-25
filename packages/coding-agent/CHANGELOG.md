@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Split `session/agent-session.ts` into dedicated `agent-session-types`, `agent-session-permissions`, and `agent-session-queue` modules while preserving the `session/agent-session` import surface. ([#4554](https://github.com/can1357/oh-my-pi/pull/4554))
+
 ## [16.3.6] - 2026-07-04
 
 ### Changed
