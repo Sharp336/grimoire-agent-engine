@@ -105,6 +105,11 @@ async function startServer(): Promise<string> {
 			stream.end();
 			return;
 		}
+		if (scenario.kind === "non-2xx-before-turn") {
+			stream.respond({ ":status": scenario.status, "content-type": "text/plain" });
+			stream.end("upstream unavailable");
+			return;
+		}
 
 		stream.respond({
 			":status": 200,
@@ -263,5 +268,17 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes.at(-1)).toBe("error");
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("aborted");
+	});
+	it("records the real HTTP status instead of the synthetic incomplete-stream error on a pre-turn non-2xx", async () => {
+		scenario = { kind: "non-2xx-before-turn", status: 503 };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).not.toContain("Cursor stream ended before turnEnded");
+		expect(result.errorMessage).toContain("503");
+		expect(result.errorStatus).toBe(503);
 	});
 });
