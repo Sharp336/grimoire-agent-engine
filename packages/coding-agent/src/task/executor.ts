@@ -3089,10 +3089,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			try {
 				({ session } = await awaitAbortable(sessionPromise));
 			} catch (err) {
-				// Abort raced session startup. The session may still resolve later
-				// holding live LSP/MCP child processes — dispose it when it does so
-				// a cancelled subagent cannot leak them.
-				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
+				// Startup may settle after cancellation or reject before producing
+				// an AgentSession. Dispose whichever resource acquired the manager.
+				const cleanup = sessionPromise.then(
+					created => created.session.dispose(),
+					() => sessionManager.close(),
+				);
+				if (abortSignal.aborted) void cleanup.catch(() => {});
+				else await cleanup.catch(() => {});
 				throw err;
 			}
 			sessionCreatedAt = performance.now();

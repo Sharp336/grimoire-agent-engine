@@ -446,6 +446,7 @@ export class SessionManager {
 	readonly #storage: SessionStorage;
 	readonly #blobs: BlobStore;
 	#sessionLock: SharedSessionLock | undefined;
+	readonly #supersededSessionLocks = new Set<SharedSessionLock>();
 	#sessionLockFailure: Error | undefined;
 	readonly #sessionLockErrorHandler = (error: Error): void => {
 		if (!this.#sessionLockFailure) this.#sessionLockFailure = error;
@@ -705,6 +706,38 @@ export class SessionManager {
 		lock.errorHandlers.delete(this.#sessionLockErrorHandler);
 		lock.references = 0;
 		this.#sessionLock = undefined;
+	}
+
+	#releaseSupersededSessionLocks(): void {
+		const errors: Error[] = [];
+		for (const lock of this.#supersededSessionLocks) {
+			try {
+				lock.handle.release();
+				lock.errorHandlers.delete(this.#sessionLockErrorHandler);
+				lock.references = 0;
+				this.#supersededSessionLocks.delete(lock);
+			} catch (error) {
+				errors.push(toError(error));
+			}
+		}
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "Failed to release superseded session locks");
+	}
+
+	#releaseAllSessionLocks(): void {
+		const errors: Error[] = [];
+		try {
+			this.#releaseSessionLock();
+		} catch (error) {
+			errors.push(toError(error));
+		}
+		try {
+			this.#releaseSupersededSessionLocks();
+		} catch (error) {
+			errors.push(toError(error));
+		}
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "Failed to release session locks");
 	}
 
 	async #closeWriterHandle(): Promise<void> {
@@ -1403,9 +1436,14 @@ export class SessionManager {
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
 
-		const resolvedSessionFile = path.resolve(sessionFile);
-		this.#acquireSessionLock(resolvedSessionFile);
+		const requestedSessionFile = path.resolve(sessionFile);
+		this.#acquireSessionLock(requestedSessionFile);
+		// The lock canonicalizes existing symlinks. Pin every subsequent I/O and
+		// artifact path to that same target so retargeting/removing the alias
+		// cannot redirect a live manager.
+		const resolvedSessionFile = this.#sessionLock?.handle.record.sessionFile ?? requestedSessionFile;
 		this.#sessionFile = resolvedSessionFile;
+		this.#sessionDir = path.dirname(resolvedSessionFile);
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
 		try {
@@ -1501,8 +1539,25 @@ export class SessionManager {
 	async dropSession(sessionPath: string): Promise<void> {
 		await this.#drainAndCloseWriter();
 		const resolvedSessionPath = path.resolve(sessionPath);
+		if (
+			this.#sessionLock?.handle.lockPath === lockPathForSession(resolvedSessionPath) &&
+			(this.#sessionLock.state.invalid || this.#sessionLock.handle.released)
+		) {
+			this.#acquireSessionLock(resolvedSessionPath);
+		}
 		const ownedLock = this.#sessionLock?.handle;
-		const ownsDeletion = ownedLock?.lockPath === lockPathForSession(resolvedSessionPath);
+		const ownsDeletion =
+			ownedLock?.lockPath === lockPathForSession(resolvedSessionPath) &&
+			!this.#sessionLock?.state.invalid &&
+			!ownedLock.released;
+		if (ownsDeletion && this.#sessionLock && this.#sessionLock.references > 1) {
+			throw new SessionLockError(
+				"locked",
+				`Session still has ${this.#sessionLock.references} active writer references`,
+				ownedLock.record.sessionFile,
+				ownedLock.lockPath,
+			);
+		}
 		const targetLock = ownsDeletion ? undefined : this.#lockForeignSessionDeletion(resolvedSessionPath);
 		const deletionLock = ownsDeletion ? ownedLock : targetLock;
 		const ownedSessionPath = deletionLock?.record.sessionFile ?? resolvedSessionPath;
@@ -1653,31 +1708,71 @@ export class SessionManager {
 							if (!isEnoent(err)) throw err;
 						}
 					}
+					if (targetLock) this.#releaseSessionLock();
 				} catch (err) {
-					try {
+					const rollbackErrors: Error[] = [];
 					if (artifactsMoved) {
 						try {
 							await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
 						} catch (rollbackErr) {
-							throw new Error(
+							rollbackErrors.push(
+								new Error(
 								`Failed to move artifacts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-							);
+							),
+						);
+					}
 						}
 					}
-
 					if (sessionMoved) {
 						try {
 							await fs.promises.rename(newSessionFile, oldSessionFile);
 						} catch (rollbackErr) {
-							throw new Error(
+							rollbackErrors.push(
+								new Error(
 								`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-							);
+							),
+						);
+					}
 						}
 					}
-					} finally {
+
+					if (rollbackErrors.length === 0) {
+						targetLock?.release();
+						throw err;
+					}
+
+					// A failed JSONL rollback leaves the authoritative journal at the
+					// target. Keep that lock and path rather than releasing ownership
+					// and later recreating a headerless file at the vanished source.
+					if (
+						sessionMoved &&
+						this.#storage.existsSync(newSessionFile) &&
+						targetLock &&
+						targetErrorHandlers &&
+						targetLockState
+					) {
+						const sourceLock = this.#sessionLock;
+						try {
+							this.#releaseSessionLock();
+						} catch (releaseError) {
+							if (sourceLock) this.#supersededSessionLocks.add(sourceLock);
+							rollbackErrors.push(toError(releaseError));
+						}
+						this.#sessionLock = {
+							handle: targetLock,
+							references: 1,
+							errorHandlers: targetErrorHandlers,
+							state: targetLockState,
+						};
+						targetLock = undefined;
+						this.#sessionFile = newSessionFile;
+						this.#sessionDir = nextSessionDir;
+						this.#artifactManager = null;
+						this.#artifactManagerSessionFile = null;
+					} else {
 						targetLock?.release();
 					}
-					throw err;
+					throw this.#latchIndeterminate(toError(err), rollbackErrors);
 				}
 
 				if (sessionFileExisted && sessionPathChanged) {
@@ -1687,7 +1782,6 @@ export class SessionManager {
 				}
 
 				if (targetLock && targetErrorHandlers && targetLockState) {
-					this.#releaseSessionLock();
 					this.#sessionLock = {
 						handle: targetLock,
 						references: 1,
@@ -1846,6 +1940,7 @@ export class SessionManager {
 			const operationError =
 				this.#diskFailure ?? new Error("Authoritative session persistence recovery was requested.");
 			await this.#authoritativelyRewriteCurrentStateLocked(operationError);
+			this.#releaseSupersededSessionLocks();
 			this.#notifyDurableEntries();
 		});
 	}
@@ -1931,7 +2026,7 @@ export class SessionManager {
 			await this.#storage.drain();
 			if (this.#diskFailure) throw this.#diskFailure;
 		} finally {
-			this.#releaseSessionLock();
+			this.#releaseAllSessionLocks();
 		}
 	}
 
@@ -2663,6 +2758,8 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 
+		if (this.#persist) this.#releaseSessionLock();
+
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
@@ -2682,7 +2779,6 @@ export class SessionManager {
 			return undefined;
 		}
 
-		this.#releaseSessionLock();
 		this.#sessionFile = newSessionFile;
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
@@ -2752,34 +2848,41 @@ export class SessionManager {
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 
-		const sourceEntries = structuredClone(await loadEntriesFromFile(sourcePath, storage)) as FileEntry[];
-		migrateToCurrentVersion(sourceEntries);
-		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
+		try {
+			const sourceEntries = structuredClone(await loadEntriesFromFile(sourcePath, storage)) as FileEntry[];
+			migrateToCurrentVersion(sourceEntries);
+			await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 
-		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
-		manager.#resetToNewSession(
-			{
-				parentSession: sourceHeader?.id,
-				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
-			},
-			options?.sessionFile,
-		);
-		manager.#header.title = sourceHeader?.title;
-		manager.#header.titleSource = sourceHeader?.titleSource;
-		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
-		manager.#header.additionalDirectories =
-			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
-		manager.#sessionName = manager.#header.title;
-		manager.#titleSource = manager.#header.titleSource;
-		manager.#titleUpdatedAt = nowIso();
-		manager.#hasTitleSlot = true;
-		manager.#entries = history;
-		manager.#index.rebuild(history);
-		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
-		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		return manager;
+			const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
+			const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+			manager.#resetToNewSession(
+				{
+					parentSession: sourceHeader?.id,
+					providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
+				},
+				options?.sessionFile,
+			);
+			manager.#header.title = sourceHeader?.title;
+			manager.#header.titleSource = sourceHeader?.titleSource;
+			manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(
+				d => d !== path.resolve(cwd),
+			);
+			manager.#header.additionalDirectories =
+				manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
+			manager.#sessionName = manager.#header.title;
+			manager.#titleSource = manager.#header.titleSource;
+			manager.#titleUpdatedAt = nowIso();
+			manager.#hasTitleSlot = true;
+			manager.#entries = history;
+			manager.#index.rebuild(history);
+			manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+			manager.#forceFileCreation = true;
+			await manager.#rewriteAtomically();
+			return manager;
+		} catch (error) {
+			await manager.close().catch(() => undefined);
+			throw error;
+		}
 	}
 
 	/**

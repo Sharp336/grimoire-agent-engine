@@ -693,6 +693,23 @@ describe("runSubprocess yield reminders", () => {
 		expect(close).toHaveBeenCalledTimes(1);
 	});
 
+	it("closes a persisted session manager when agent startup rejects", async () => {
+		using tempDir = TempDir.createSync("@pi-rejected-session-startup-");
+		const close = vi.fn(async () => {});
+		const manager = { close } as unknown as SessionManager;
+		vi.spyOn(SessionManager, "open").mockResolvedValue(manager);
+		vi.spyOn(sdkModule, "createAgentSession").mockRejectedValue(new Error("startup failed"));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-rejected-session-startup",
+			artifactsDir: tempDir.path(),
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(close).toHaveBeenCalledTimes(1);
+	});
+
 	it("surfaces the assistant abort message instead of 'Cancelled by caller' on an internal turn abort", async () => {
 		// No caller signal and no runtime limit: the subagent's own turn ended with
 		// stopReason "aborted" (e.g. a merged request-signal abort). abortReason is

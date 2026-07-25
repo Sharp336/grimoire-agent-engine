@@ -119,6 +119,7 @@ function makeAssistantMessage(text: string, thinking?: string) {
 class FakeAgentSession {
 	sessionManager: SessionManager;
 	sessionId: string;
+	readonly initialSessionFile: string | undefined;
 	agent: { sessionId: string; waitForIdle: () => Promise<void> };
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
@@ -156,6 +157,7 @@ class FakeAgentSession {
 	) {
 		this.sessionManager = sessionManager ?? SessionManager.create(cwd);
 		this.sessionId = this.sessionManager.getSessionId();
+		this.initialSessionFile = this.sessionManager.getSessionFile();
 		this.agent = {
 			sessionId: this.sessionId,
 			waitForIdle: async () => {
@@ -586,6 +588,7 @@ describe("ACP agent", () => {
 		const forkedMessages = forkedSession?.sessionManager.buildSessionContext().messages ?? [];
 		expect(forked.sessionId).not.toBe(first.sessionId);
 		expect(forkedMessages.some(message => message.role === "user" && message.content === "fork me")).toBe(true);
+		expect(forkedSession?.initialSessionFile).not.toBe(firstSession?.sessionManager.getSessionFile());
 
 		await harness.agent.closeSession({ sessionId: forked.sessionId });
 		await expect(harness.agent.setSessionMode({ sessionId: forked.sessionId, modeId: "default" })).rejects.toThrow(

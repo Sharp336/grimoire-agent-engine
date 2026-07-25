@@ -1100,6 +1100,12 @@ export class AcpAgent implements Agent {
 		const sourceClone = source?.session.sessionManager.cloneCurrentSession();
 		let session: AgentSession;
 		try {
+			if (sourceClone) {
+				const forked = await sourceClone.fork();
+				if (!forked) {
+					throw new Error(`ACP session fork failed: ${params.sessionId}`);
+				}
+			}
 			session = await this.#createSession(path.resolve(params.cwd), sourceClone);
 		} catch (error) {
 			await sourceClone?.close();
@@ -1111,10 +1117,10 @@ export class AcpAgent implements Agent {
 				if (!success) {
 					throw new Error(`ACP session fork was cancelled: ${params.sessionId}`);
 				}
-			}
-			const forked = await session.fork();
-			if (!forked) {
-				throw new Error(`ACP session fork failed: ${params.sessionId}`);
+				const forked = await session.fork();
+				if (!forked) {
+					throw new Error(`ACP session fork failed: ${params.sessionId}`);
+				}
 			}
 		} catch (error) {
 			await this.#disposeStandaloneSession(session);

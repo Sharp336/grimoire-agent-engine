@@ -216,6 +216,51 @@ describe("session lock", () => {
 		second.release();
 	});
 
+	it("recovers confirmed-dead records and claims after a backward clock correction", () => {
+		const { session } = fixture();
+		const futureOwner = acquireSessionLock(session, {
+			now: () => 50_000,
+			ownerId: OWNER_A,
+			pid: 42,
+			processStartMarker: "marker-a",
+			processProbe: probe(false),
+		});
+		const replacement = acquireSessionLock(session, {
+			now: () => 1_000,
+			ownerId: OWNER_B,
+			pid: 43,
+			processStartMarker: "marker-b",
+			processProbe: probe(false),
+		});
+		expect(replacement.record.ownerId).toBe(OWNER_B);
+		futureOwner.release();
+		replacement.release();
+
+		const lockPath = lockPathForSession(session);
+		fs.writeFileSync(
+			`${lockPath}.steal`,
+			JSON.stringify({
+				protocolVersion: 1,
+				ownerId: OWNER_A,
+				pid: 42,
+				processStartMarker: "marker-a",
+				hostname: os.hostname(),
+				createdAt: 50_000,
+				sessionFile: futureOwner.record.sessionFile,
+			}),
+		);
+		const afterClaim = acquireSessionLock(session, {
+			now: () => 1_000,
+			ownerId: OWNER_B,
+			pid: 43,
+			processStartMarker: "marker-b",
+			processProbe: probe(false),
+		});
+		expect(afterClaim.record.ownerId).toBe(OWNER_B);
+		expect(fs.existsSync(`${lockPath}.steal`)).toBe(false);
+		afterClaim.release();
+	});
+
 	it("does not leak the replacement lock when stale-claim cleanup fails", () => {
 		const { session } = fixture();
 		const first = acquireSessionLock(session, {

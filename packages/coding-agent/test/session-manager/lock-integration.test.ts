@@ -9,7 +9,7 @@ import {
 	SESSION_LOCK_HEARTBEAT_MS,
 	SessionLockError,
 } from "../../src/session/session-lock";
-import { SessionManager } from "../../src/session/session-manager";
+import { SessionManager, SessionPersistenceIndeterminateError } from "../../src/session/session-manager";
 import { FileSessionStorage } from "../../src/session/session-storage";
 
 describe("SessionManager persistent lock integration", () => {
@@ -85,6 +85,35 @@ describe("SessionManager persistent lock integration", () => {
 		expect(fs.existsSync(lockPath)).toBe(false);
 	});
 
+	it("preserves source state when branching cannot release its lock", async () => {
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		const branchPoint = manager.appendMessage({ role: "user", content: "branch point", timestamp: 1 });
+		manager.appendMessage({ role: "user", content: "source tail", timestamp: 2 });
+		await manager.ensureOnDisk();
+		const sourceFile = manager.getSessionFile();
+		if (!sourceFile) throw new Error("missing source session file");
+		const sourceState = manager.snapshotForReplication();
+		const lockPath = lockPathForSession(sourceFile);
+		const unlinkSync = fs.unlinkSync;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (String(target) === lockPath) {
+				const error = new Error("unlink failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		try {
+			expect(() => manager.createBranchedSession(branchPoint)).toThrow(SessionLockError);
+			expect(manager.getSessionFile()).toBe(sourceFile);
+			expect(manager.snapshotForReplication()).toEqual(sourceState);
+		} finally {
+			unlinkSpy.mockRestore();
+			await manager.close();
+		}
+	});
+
 	it("releases a replacement lock when the previous lock cannot be removed", async () => {
 		const { cwd, sessions } = fixture();
 		const manager = SessionManager.create(cwd, sessions);
@@ -118,7 +147,7 @@ describe("SessionManager persistent lock integration", () => {
 		await manager.close();
 	});
 
-	it("keeps canonical ownership through symlink rewrites and deletion", async () => {
+	it("pins canonical ownership when a symlink alias is removed or retargeted", async () => {
 		const { cwd, sessions } = fixture();
 		const created = SessionManager.create(cwd, sessions);
 		await created.ensureOnDisk();
@@ -129,16 +158,25 @@ describe("SessionManager persistent lock integration", () => {
 		const alias = path.join(sessions, "alias.jsonl");
 		fs.symlinkSync(sessionFile, alias);
 		const manager = await SessionManager.open(alias);
-		await manager.rewriteEntries();
-		expect(fs.lstatSync(alias).isSymbolicLink()).toBe(true);
+		expect(manager.getSessionFile()).toBe(fs.realpathSync(sessionFile));
 		await expect(SessionManager.open(alias)).rejects.toBeInstanceOf(SessionLockError);
 		await expect(SessionManager.open(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
-		const managedSessionFile = manager.getSessionFile();
-		if (!managedSessionFile) throw new Error("missing managed session file");
-		await manager.dropSession(managedSessionFile);
+
+		fs.unlinkSync(alias);
+		const retargeted = path.join(sessions, "retargeted.jsonl");
+		fs.writeFileSync(retargeted, "sentinel");
+		fs.symlinkSync(retargeted, alias);
+		manager.appendMessage({ role: "user", content: "canonical target", timestamp: Date.now() });
+		await manager.flush();
+		expect(fs.readFileSync(retargeted, "utf8")).toBe("sentinel");
+		expect(
+			(await SessionManager.openSnapshot(sessionFile)).getEntries().some(entry => entry.type === "message"),
+		).toBe(true);
+
+		await manager.dropSession(manager.getSessionFile()!);
 		expect(fs.existsSync(sessionFile)).toBe(false);
 		expect(fs.existsSync(lockPathForSession(sessionFile))).toBe(false);
-		expect(() => fs.lstatSync(alias)).toThrow();
+		expect(fs.realpathSync(alias)).toBe(fs.realpathSync(retargeted));
 		await manager.close();
 	});
 
@@ -156,6 +194,27 @@ describe("SessionManager persistent lock integration", () => {
 
 		await detached.close();
 		expect(fs.existsSync(lockPathForSession(sessionFile))).toBe(false);
+		await manager.close();
+	});
+
+	it("refuses deletion while a detached clone shares write ownership", async () => {
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("missing session file");
+		const detached = manager.cloneCurrentSession();
+
+		await expect(manager.dropSession(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
+		expect(fs.existsSync(sessionFile)).toBe(true);
+		detached.appendMessage({ role: "user", content: "still valid", timestamp: Date.now() });
+		await detached.flush();
+		const snapshot = await SessionManager.openSnapshot(sessionFile);
+		expect(snapshot.getEntries().some(entry => entry.type === "message")).toBe(true);
+
+		await detached.close();
+		await manager.dropSession(sessionFile);
+		expect(fs.existsSync(sessionFile)).toBe(false);
 		await manager.close();
 	});
 
@@ -210,7 +269,7 @@ describe("SessionManager persistent lock integration", () => {
 		await manager.close();
 	});
 
-	it("releases target ownership when move rollback fails", async () => {
+	it("keeps target ownership when move rollback leaves the journal there", async () => {
 		const { cwd, sessions } = fixture();
 		const targetCwd = path.join(path.dirname(cwd), "target-cwd");
 		const targetSessions = path.join(path.dirname(sessions), "target-sessions");
@@ -223,6 +282,18 @@ describe("SessionManager persistent lock integration", () => {
 		fs.mkdirSync(oldArtifactsDir);
 		const newFile = path.join(targetSessions, path.basename(oldFile));
 		const newArtifactsDir = newFile.slice(0, -".jsonl".length);
+		const oldLockPath = lockPathForSession(oldFile);
+		const unlinkSync = fs.unlinkSync;
+		let releaseFailed = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (!releaseFailed && String(target) === oldLockPath) {
+				releaseFailed = true;
+				const error = new Error("source lock cleanup failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
 		const rename = fs.promises.rename;
 		const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
 			if (String(source) === oldArtifactsDir && String(target) === newArtifactsDir) {
@@ -238,12 +309,27 @@ describe("SessionManager persistent lock integration", () => {
 			return rename(source, target);
 		});
 		try {
-			await expect(manager.moveTo(targetCwd, targetSessions)).rejects.toThrow("session rollback failed");
-			expect(fs.existsSync(lockPathForSession(newFile))).toBe(false);
+			await expect(manager.moveTo(targetCwd, targetSessions)).rejects.toBeInstanceOf(
+				SessionPersistenceIndeterminateError,
+			);
+			expect(manager.getSessionFile()).toBe(newFile);
+			expect(fs.existsSync(oldFile)).toBe(false);
+			expect(fs.existsSync(newFile)).toBe(true);
+			expect(inspectSessionLock(oldFile).status).toBe("live");
+			expect(inspectSessionLock(newFile).status).toBe("live");
+			expect(() =>
+				manager.appendMessage({ role: "user", content: "must not recreate source", timestamp: Date.now() }),
+			).toThrow(SessionPersistenceIndeterminateError);
+			expect(fs.existsSync(oldFile)).toBe(false);
 		} finally {
 			renameSpy.mockRestore();
-			await manager.close();
+			unlinkSpy.mockRestore();
 		}
+
+		await manager.recoverPersistenceFromCurrentState();
+		expect(fs.existsSync(oldLockPath)).toBe(false);
+		expect(inspectSessionLock(newFile).status).toBe("live");
+		await manager.close();
 	});
 
 	it("keeps current ownership when deleting a different session", async () => {
@@ -339,6 +425,54 @@ describe("SessionManager persistent lock integration", () => {
 		finishDeletion();
 		await dropping;
 		expect(fs.existsSync(lockPathForSession(sessionFile))).toBe(false);
+	});
+
+	it("releases a fork target lock when initial publication fails", async () => {
+		const { cwd, sessions } = fixture();
+		const storage = new FileSessionStorage();
+		const source = SessionManager.create(cwd, sessions, storage);
+		source.appendMessage({ role: "user", content: "fork source", timestamp: Date.now() });
+		await source.ensureOnDisk();
+		const sourceFile = source.getSessionFile();
+		if (!sourceFile) throw new Error("missing source session file");
+		await source.close();
+
+		const targetFile = path.join(sessions, "failed-fork.jsonl");
+		const writeSpy = vi.spyOn(storage, "writeTextAtomic").mockRejectedValueOnce(new Error("publish failed"));
+		await expect(
+			SessionManager.forkFrom(sourceFile, cwd, sessions, storage, { sessionFile: targetFile }),
+		).rejects.toThrow("publish failed");
+		writeSpy.mockRestore();
+
+		expect(fs.existsSync(lockPathForSession(targetFile))).toBe(false);
+	});
+
+	it("refuses deletion after a heartbeat loses ownership", async () => {
+		vi.useFakeTimers();
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		let lockPath: string | undefined;
+		try {
+			await manager.ensureOnDisk();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("missing session file");
+			lockPath = lockPathForSession(sessionFile);
+			const record = inspectSessionLock(sessionFile).record;
+			if (!record) throw new Error("missing session lock record");
+			fs.writeFileSync(lockPath, JSON.stringify({ ...record, ownerId: Bun.randomUUIDv7() }));
+
+			vi.advanceTimersByTime(SESSION_LOCK_HEARTBEAT_MS);
+			await Promise.resolve();
+
+			await expect(manager.dropSession(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
+			expect(fs.existsSync(sessionFile)).toBe(true);
+		} finally {
+			await manager.close().catch(error => {
+				if (!(error instanceof SessionLockError)) throw error;
+			});
+			if (lockPath && fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+			vi.useRealTimers();
+		}
 	});
 
 	it("requires reacquisition after a heartbeat loses ownership", async () => {

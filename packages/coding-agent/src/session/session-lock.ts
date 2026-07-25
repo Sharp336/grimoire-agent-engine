@@ -413,8 +413,12 @@ function inspectWithRuntime(sessionFile: string, rt: SessionLockRuntime): Sessio
 	if (loaded.kind === "missing") return { lockPath, status: "missing", stealable: false };
 	if (loaded.kind === "malformed") return { lockPath, status: "malformed", stealable: false };
 	const record = loaded.record;
-	const heartbeatAgeMs = Math.max(0, rt.now() - record.heartbeatAt);
 	const alive = processAlive(record, rt);
+	const rawHeartbeatAgeMs = rt.now() - record.heartbeatAt;
+	// A definitively dead local owner remains recoverable after a backward clock
+	// correction. Live/unknown owners retain the normal grace period.
+	const heartbeatAgeMs =
+		rawHeartbeatAgeMs < 0 && alive === false ? SESSION_LOCK_STEAL_AFTER_MS : Math.max(0, rawHeartbeatAgeMs);
 	const stale = heartbeatAgeMs >= SESSION_LOCK_STEAL_AFTER_MS && alive === false;
 	const status: SessionLockStatus = stale
 		? "stale"
@@ -524,8 +528,10 @@ function recoverableClaim(
 		const stat = fs.statSync(claimPath);
 		if (!stat.isFile() || stat.size > MAX_LOCK_BYTES) return undefined;
 		const claim = parseClaim(fs.readFileSync(claimPath, "utf8"), sessionFile);
-		if (!claim || rt.now() - claim.createdAt < SESSION_LOCK_STEAL_AFTER_MS) return undefined;
-		if (claim.hostname !== rt.hostname || processAlive(claim, rt) !== false) return undefined;
+		if (!claim || claim.hostname !== rt.hostname) return undefined;
+		const alive = processAlive(claim, rt);
+		const ageMs = rt.now() - claim.createdAt;
+		if (alive !== false || (ageMs >= 0 && ageMs < SESSION_LOCK_STEAL_AFTER_MS)) return undefined;
 		return claim;
 	} catch {
 		return undefined;
