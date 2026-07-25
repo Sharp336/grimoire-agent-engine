@@ -16,17 +16,25 @@
  * left in flight; its tools surface via the background `#onToolsChanged`
  * path if/when it eventually connects.
  */
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import * as mcpClient from "../src/mcp/client";
 import { MCPManager } from "../src/mcp/manager";
-import type { MCPServerConnection, MCPStdioServerConfig } from "../src/mcp/types";
+import type { MCPStdioServerConfig } from "../src/mcp/types";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
 const BUN_EXEC = process.execPath;
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 describe("MCP startup (issue #2100)", () => {
 	let workDir: string;
@@ -76,36 +84,34 @@ describe("MCP startup (issue #2100)", () => {
 		}
 	}, 15_000);
 
-	it("aborts a pending connection when the manager disconnects", async () => {
+	it("terminates a pending server process when the manager disconnects", async () => {
 		const manager = new MCPManager(workDir);
-		const pending = Promise.withResolvers<MCPServerConnection>();
-		let signal: AbortSignal | undefined;
-		const connect = spyOn(mcpClient, "connectToServer").mockImplementation((_name, _config, options) => {
-			signal = options?.signal;
-			signal?.addEventListener(
-				"abort",
-				() => pending.reject(new DOMException("Connection cancelled", "AbortError")),
-				{ once: true },
-			);
-			return pending.promise;
-		});
+		const pidPath = path.join(workDir, "server.pid");
+		const pidFile = Bun.file(pidPath);
+		let serverPid: number | undefined;
 		const config: MCPStdioServerConfig = {
 			type: "stdio",
 			command: BUN_EXEC,
-			args: [FIXTURE_PATH],
+			args: [FIXTURE_PATH, pidPath],
 		};
 
 		try {
-			const result = await manager.connectServers({ pending: config }, {}, undefined, 0);
+			const result = await manager.connectServers({ pending: config }, {}, undefined, 50);
 			expect(result.tools).toEqual([]);
-			expect(signal?.aborted).toBe(false);
+
+			const startedDeadline = Date.now() + 5_000;
+			while (!(await pidFile.exists()) && Date.now() < startedDeadline) await Bun.sleep(10);
+			expect(await pidFile.exists()).toBe(true);
+			serverPid = Number(await pidFile.text());
+			expect(isProcessAlive(serverPid)).toBe(true);
 
 			await manager.disconnectAll();
-			expect(signal?.aborted).toBe(true);
+			const stoppedDeadline = Date.now() + 5_000;
+			while (isProcessAlive(serverPid) && Date.now() < stoppedDeadline) await Bun.sleep(10);
+			expect(isProcessAlive(serverPid)).toBe(false);
 		} finally {
-			pending.reject(new DOMException("Test cleanup", "AbortError"));
-			connect.mockRestore();
 			await manager.disconnectAll();
+			if (serverPid !== undefined && isProcessAlive(serverPid)) process.kill(serverPid, "SIGKILL");
 		}
-	});
+	}, 15_000);
 });

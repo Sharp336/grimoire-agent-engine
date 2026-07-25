@@ -11,6 +11,9 @@
  */
 import * as readline from "node:readline";
 
+const pidFile = process.argv[2];
+if (pidFile) await Bun.write(pidFile, String(process.pid));
+
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", () => {
 	// Intentionally drop every message — server never responds.
