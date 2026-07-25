@@ -1,4 +1,5 @@
 import nomnoml from "nomnoml";
+import { sanitizeText } from "./sanitize-text";
 
 type Point = { x: number; y: number };
 type Label = { text?: string; x?: number; y?: number; width?: number; height?: number };
@@ -169,9 +170,38 @@ function compactConfig(config: NomnomlConfig, direction?: "TB" | "LR"): NomnomlC
 	};
 }
 
+/** Strip controls via {@link sanitizeText}, then collapse tabs to spaces for the fixed-width grid. */
+function sanitizeDiagramText(text: string): string {
+	return sanitizeText(text).replaceAll("\t", " ");
+}
+
+function sanitizeAssociationLabels(assoc: Association): void {
+	if (assoc.startLabel?.text !== undefined) {
+		assoc.startLabel.text = sanitizeDiagramText(assoc.startLabel.text);
+	}
+	if (assoc.endLabel?.text !== undefined) {
+		assoc.endLabel.text = sanitizeDiagramText(assoc.endLabel.text);
+	}
+}
+
+/** Sanitize every user-facing string on the parse tree before measure/draw so both see the same text. */
+function sanitizeLayoutPart(part: LayoutPart): void {
+	if (part.lines) part.lines = part.lines.map(sanitizeDiagramText);
+	for (const node of part.nodes ?? []) sanitizeLayoutNode(node);
+	for (const assoc of part.assocs ?? []) sanitizeAssociationLabels(assoc);
+}
+
+function sanitizeLayoutNode(node: LayoutNode): void {
+	if (typeof node.id === "string") node.id = sanitizeDiagramText(node.id);
+	sanitizeLayoutPart(node);
+	for (const part of node.parts ?? []) sanitizeLayoutPart(part);
+}
+
 function layout(source: string, direction?: "TB" | "LR"): ParsedNomnoml | null {
 	const parsed = nomnomlRuntime.parse(source);
 	parsed.config = compactConfig(parsed.config, direction);
+	// Narrowest entry: scrub labels/lines once before nomnoml measures and we draw.
+	sanitizeLayoutPart(parsed.root);
 	const measurer: Measurer = {
 		setFont: () => {},
 		textWidth: (text: string) => Math.max(1, Bun.stringWidth(text)),

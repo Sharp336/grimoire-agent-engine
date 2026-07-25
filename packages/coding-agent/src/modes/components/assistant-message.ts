@@ -151,7 +151,7 @@ function findTopLevelNomnomlBlocks(text: string): TopLevelNomnomlBlock[] {
 	return blocks;
 }
 
-function splitNomnomlImages(
+export function splitNomnomlImages(
 	text: string,
 	pngByKey: ReadonlyMap<string, string>,
 	placementScope: string,
@@ -164,8 +164,10 @@ function splitNomnomlImages(
 		if (!block) continue;
 		const data = pngByKey.get(block.rasterKey);
 		if (!data) continue;
-		const before = text.slice(lastIndex, block.start).trim();
-		if (before) segments.push({ type: "markdown", text: before });
+		// Keep emptiness guards, but push the original slice so indented code /
+		// hard-break trailing spaces adjacent to the fence stay intact.
+		const before = text.slice(lastIndex, block.start);
+		if (before.trim()) segments.push({ type: "markdown", text: before });
 		segments.push({
 			type: "image",
 			key: nomnomlImageKey(block.rasterKey, placementScope, occurrence, block.start),
@@ -175,9 +177,9 @@ function splitNomnomlImages(
 		});
 		lastIndex = block.end;
 	}
-	const after = text.slice(lastIndex).trim();
-	if (after) segments.push({ type: "markdown", text: after });
-	return segments.length === 0 ? [{ type: "markdown", text: text.trim() }] : segments;
+	const after = text.slice(lastIndex);
+	if (after.trim()) segments.push({ type: "markdown", text: after });
+	return segments.length === 0 ? [{ type: "markdown", text }] : segments;
 }
 
 /**

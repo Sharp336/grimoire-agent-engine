@@ -217,4 +217,13 @@ describe("renderNomnomlAsciiSafe", () => {
 			expect(String(rendered)).not.toContain("```");
 		});
 	}
+
+	it("strips control characters and turns tabs into spaces in node labels", () => {
+		// BEL is stripped by sanitizeText; tab becomes a single space for the grid.
+		// Avoid ESC-[ CSI sequences: the '[' would break nomnoml's bracket DSL.
+		const rendered = stripDiagram(renderNomnomlAsciiSafe("[A\x07B\tC]", 80));
+		expect(rendered).not.toContain("\x07");
+		expect(rendered).not.toContain("\t");
+		expect(rendered).toContain("AB C");
+	});
 });

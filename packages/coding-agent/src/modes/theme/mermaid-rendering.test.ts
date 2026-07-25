@@ -11,7 +11,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../config/settings";
 import { buildSystemPrompt } from "../../system-prompt";
-import { AssistantMessageComponent } from "../components/assistant-message";
+import { AssistantMessageComponent, splitNomnomlImages } from "../components/assistant-message";
 import { type AssistantMessageContext, createAssistantMessageComponent } from "../utils/interactive-context-helpers";
 import * as nomnomlCache from "./nomnoml-cache";
 import {
@@ -735,5 +735,43 @@ describe("AssistantMessageComponent async disposal", () => {
 		expect(toBase64Spy).not.toHaveBeenCalled();
 		expect(requestRender).not.toHaveBeenCalled();
 		expect(budget.keys).toEqual([]);
+	});
+});
+
+describe("splitNomnomlImages whitespace", () => {
+	it("preserves four-space-indented code blocks after nomnoml fence replacement", () => {
+		const source = "[A] -> [B]";
+		const rasterKey = `nomnoml:${Bun.hash(source)}`;
+		const text = "```nomnoml\n[A] -> [B]\n```\n    const kept = true;\n";
+		const segments = splitNomnomlImages(text, new Map([[rasterKey, TINY_PNG]]), "test");
+		expect(segments).toHaveLength(2);
+		expect(segments[0]).toMatchObject({ type: "image", source });
+		expect(segments[1]).toEqual({ type: "markdown", text: "    const kept = true;\n" });
+	});
+
+	it("preserves hard-break trailing spaces before a replaced fence", () => {
+		const source = "[A] -> [B]";
+		const rasterKey = `nomnoml:${Bun.hash(source)}`;
+		const text = "line with hard break  \n```nomnoml\n[A] -> [B]\n```\n";
+		const segments = splitNomnomlImages(text, new Map([[rasterKey, TINY_PNG]]), "test");
+		expect(segments[0]).toEqual({ type: "markdown", text: "line with hard break  \n" });
+		expect(segments[1]).toMatchObject({ type: "image", source });
+	});
+});
+
+describe("Nomnoml source size bound", () => {
+	it("rejects oversized sources before SVG generation", async () => {
+		nomnomlCache.clearNomnomlCache();
+		const huge = `[${"A".repeat(70_000)}]`;
+		const result = await nomnomlCache.resolveNomnomlPng(huge);
+		expect(result).toBeNull();
+		// Cache the rejection so a second call stays a sync cache hit (no generation).
+		expect(await nomnomlCache.resolveNomnomlPng(huge)).toBeNull();
+	});
+
+	it("rejects oversized sources on the ASCII path", () => {
+		nomnomlCache.clearNomnomlCache();
+		const huge = `[${"A".repeat(70_000)}]`;
+		expect(nomnomlCache.resolveNomnomlAscii(huge, 120)).toBeNull();
 	});
 });
