@@ -111,6 +111,8 @@ describe("videoGenTool", () => {
 		});
 		expect(calls[1].url).toBe("https://api.x.ai/v1/videos/req-1");
 		expect(calls[2].url).toBe("https://vidgen.x.ai/out.mp4");
+		// xAI hands back a presigned URL — never attach the bearer token to it.
+		expect(calls[2].headers.get("authorization")).toBeNull();
 
 		expect(result.isError).toBeUndefined();
 		expect(result.details).toMatchObject({
@@ -157,8 +159,11 @@ describe("videoGenTool", () => {
 		writtenPaths.push(outputPath);
 		const { fetch: fetchMock, calls } = sequencedFetch([
 			() => json({ id: "job-1", polling_url: "https://openrouter.ai/api/v1/videos/job-1", status: "pending" }),
-			() => json({ status: "completed", unsigned_urls: ["https://cdn.openrouter.ai/job-1.mp4"] }),
-			() => new Response(new Uint8Array([7, 7])),
+			() => json({ status: "completed", unsigned_urls: ["https://openrouter.ai/api/v1/videos/job-1/content"] }),
+			(_url, init) =>
+				new Headers(init?.headers).get("authorization") === "Bearer test-openrouter-key"
+					? new Response(new Uint8Array([7, 7]))
+					: json({ error: { message: "No cookie auth credentials found", code: 401 } }, 401),
 		]);
 
 		const result = await videoGenTool.execute(
@@ -172,10 +177,15 @@ describe("videoGenTool", () => {
 
 		expect(calls[0].url).toBe("https://openrouter.ai/api/v1/videos");
 		expect(calls[0].body).toMatchObject({ model: "google/veo-3.1-fast", prompt: "a city timelapse" });
+		// `unsigned_urls` are API paths, not presigned links: the download 401s
+		// without the bearer token, so the mock only yields bytes when it is sent.
+		expect(calls[2].headers.get("authorization")).toBe("Bearer test-openrouter-key");
+		expect(result.isError).toBeUndefined();
 		expect(result.details).toMatchObject({
 			provider: "openrouter",
 			model: "google/veo-3.1-fast",
 			requestId: "job-1",
+			bytes: 2,
 		});
 	});
 

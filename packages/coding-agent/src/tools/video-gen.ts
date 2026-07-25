@@ -62,6 +62,14 @@ export interface VideoGenToolDetails {
 interface VideoJobResult {
 	/** Temporary provider-hosted URL the finished video must be pulled from. */
 	url: string;
+	/**
+	 * Headers the download must carry. xAI hands back a presigned `vidgen.x.ai`
+	 * URL that must stay bare — sending credentials to that host is both
+	 * unnecessary and a token leak. OpenRouter's `unsigned_urls` are, per the
+	 * name, NOT presigned: they are API paths that 401 without the bearer token
+	 * (the vendor's own docs sample fetches them unauthenticated and is wrong).
+	 */
+	downloadHeaders?: Record<string, string>;
 	requestId: string;
 	durationSeconds?: number;
 	costUsd?: number;
@@ -355,7 +363,7 @@ async function generateOpenRouterVideo(
 		if (OPENROUTER_DONE_STATUSES[state]) {
 			const url = status.unsigned_urls?.[0];
 			if (!url) throw new Error("OpenRouter reported a finished video with no URL.");
-			return { url, requestId };
+			return { url, requestId, downloadHeaders: { Authorization: `Bearer ${key}` } };
 		}
 		if (state === "failed" || state === "cancelled" || state === "expired") {
 			const message = typeof status.error === "string" ? status.error : status.error?.message;
@@ -460,10 +468,11 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 				}
 
 				// Provider URLs are short-lived; pull the bytes on the same fence.
-				const download = await fetchImpl(job.url, { signal: requestSignal });
+				const download = await fetchImpl(job.url, { headers: job.downloadHeaders, signal: requestSignal });
 				if (!download.ok) {
-					const message = `download failed (${download.status})`;
-					failures.push(`${provider}: ${message}`);
+					// The job already ran and already billed — name it so the caller can
+					// still fetch the result manually instead of paying for a rerun.
+					failures.push(`${provider}: download failed (${download.status}) for job ${job.requestId}`);
 					continue;
 				}
 				const bytes = new Uint8Array(await download.arrayBuffer());
