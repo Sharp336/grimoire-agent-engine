@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -185,8 +186,20 @@ function reportProgress(
 	onUpdate({ content: [{ type: "text", text: `${provider}/${model}: ${status}${pct}` }] });
 }
 
+/**
+ * Best-effort human message from an error response.
+ *
+ * Never throws: callers use the result to decide whether a transient status is
+ * retryable, so a truncated body on a 502 must not abandon an already-paid job
+ * before that decision is reached.
+ */
 async function readErrorMessage(response: Response): Promise<string> {
-	const rawText = await response.text();
+	let rawText: string;
+	try {
+		rawText = await response.text();
+	} catch {
+		return `HTTP ${response.status} (unreadable body)`;
+	}
 	try {
 		const parsed = JSON.parse(rawText) as { error?: { message?: string } | string };
 		if (typeof parsed.error === "string") return parsed.error;
@@ -195,6 +208,16 @@ async function readErrorMessage(response: Response): Promise<string> {
 		// Keep raw text.
 	}
 	return rawText.slice(0, 300);
+}
+
+/**
+ * Strip the home directory out of a filesystem message. `shortenPath` only
+ * rewrites a *leading* home path, while errno messages embed the absolute
+ * target mid-string (`ENOSPC: … open '/Users/me/clip.mp4'`).
+ */
+function redactHome(message: string): string {
+	const home = os.homedir();
+	return home ? message.replaceAll(home, "~") : message;
 }
 /** Consecutive transient poll failures tolerated before abandoning a running job. */
 export const MAX_POLL_FAILURES = 5;
@@ -706,7 +729,7 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 					content: [
 						{
 							type: "text" as const,
-							text: `${provider} job ${job.requestId} downloaded but writing ${displayPath} failed (${message}). The video is still retrievable at ${job.url}`,
+							text: `${provider} job ${job.requestId} downloaded but writing ${displayPath} failed (${redactHome(message)}). The video is still retrievable at ${job.url}`,
 						},
 					],
 				};

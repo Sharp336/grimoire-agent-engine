@@ -524,4 +524,24 @@ describe("VideoJobPoller body handling", () => {
 		expect(await subject.poll("https://example.test/job")).toBeNull();
 		expect(await subject.poll<{ status: string }>("https://example.test/job")).toEqual({ status: "pending" });
 	});
+
+	it("retries a transient status whose error body cannot be read", async () => {
+		// `readErrorMessage` must not reject before the retryable-status branch is
+		// reached, or one truncated 503 abandons a paid job.
+		let attempt = 0;
+		const fetchMock = (async () => {
+			attempt += 1;
+			if (attempt > 1) return json({ status: "pending" });
+			const broken = new ReadableStream({
+				start(controller) {
+					controller.error(new Error("connection reset mid-body"));
+				},
+			});
+			return new Response(broken, { status: 503 });
+		}) as unknown as typeof fetch;
+		const subject = new VideoJobPoller("test", "static-key", () => ({}), fetchMock, new AbortController().signal);
+
+		expect(await subject.poll("https://example.test/job")).toBeNull();
+		expect(await subject.poll<{ status: string }>("https://example.test/job")).toEqual({ status: "pending" });
+	});
 });
