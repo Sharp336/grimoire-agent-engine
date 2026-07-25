@@ -393,6 +393,22 @@ interface PreparedSqliteContent {
 	escapedCodeUnits: number;
 }
 
+/** Decode the four hex digits of a `\uXXXX` escape starting at `start`, or -1 when malformed. */
+function readHex4(source: string, start: number): number {
+	if (start + 4 > source.length) return -1;
+	let value = 0;
+	for (let index = start; index < start + 4; index++) {
+		const digit = source.charCodeAt(index);
+		let nibble: number;
+		if (digit >= 0x30 && digit <= 0x39) nibble = digit - 0x30;
+		else if (digit >= 0x41 && digit <= 0x46) nibble = digit - 0x37;
+		else if (digit >= 0x61 && digit <= 0x66) nibble = digit - 0x57;
+		else return -1;
+		value = value * 16 + nibble;
+	}
+	return value;
+}
+
 /**
  * Parse SQLite write content as JSON5 while preserving lone UTF-16 surrogates.
  *
@@ -440,7 +456,30 @@ function prepareSqliteContent(content: string): PreparedSqliteContent {
 					shielded += placeholder;
 					continue;
 				}
-				shielded += char;
+				const escapeUnit = char === "u" ? readHex4(content, i + 1) : -1;
+				if (escapeUnit < 0xd800 || escapeUnit > 0xdfff) {
+					shielded += char;
+					continue;
+				}
+				const pairedLow =
+					escapeUnit <= 0xdbff && content[i + 5] === "\\" && content[i + 6] === "u"
+						? readHex4(content, i + 7)
+						: -1;
+				if (pairedLow >= 0xdc00 && pairedLow <= 0xdfff) {
+					// Well-formed `\uD83D\uDE00`: JSON5 decodes it to a valid astral
+					// character, so both escapes pass through untouched.
+					shielded += content.slice(i, i + 11);
+					i += 10;
+					continue;
+				}
+				// A lone surrogate spelled with valid JSON5 syntax. The parser would
+				// materialize (or U+FFFD-replace) it before the binding, so shield the
+				// whole escape and restore the literal text it already spells.
+				shielded = shielded.slice(0, -1);
+				const escapePlaceholder = `${nonce}${shieldIndex++}Z`;
+				replacements.set(escapePlaceholder, escapeUnpairedSurrogates(String.fromCharCode(escapeUnit)).text);
+				shielded += escapePlaceholder;
+				i += 4;
 				continue;
 			}
 			if (char === "\\") {
@@ -468,7 +507,9 @@ function prepareSqliteContent(content: string): PreparedSqliteContent {
 			continue;
 		}
 		if (state === "line") {
-			if (char === "\n") state = "top";
+			// JSON5 ends a `//` comment on any line terminator, not just LF:
+			// LF, CR, LS (U+2028), PS (U+2029).
+			if (code === 0x0a || code === 0x0d || code === 0x2028 || code === 0x2029) state = "top";
 			shielded += char;
 			continue;
 		}
@@ -504,21 +545,25 @@ function prepareSqliteContent(content: string): PreparedSqliteContent {
 	}
 
 	let escapedCodeUnits = 0;
+	// One scan per string. Iterating the placeholder map instead rescanned and
+	// split the whole value once per shielded code unit — quadratic in `k`.
+	const placeholderRe = new RegExp(`${nonce}(\\d+)Z`, "g");
+	const restoreText = (text: string): string => {
+		if (!text.includes(nonce)) return text;
+		return text.replace(placeholderRe, (match, index: string) => {
+			const literal = replacements.get(`${nonce}${index}Z`);
+			if (literal === undefined) return match;
+			escapedCodeUnits++;
+			return literal;
+		});
+	};
 	const restore = (value: unknown): unknown => {
-		if (typeof value === "string") {
-			let text = value;
-			for (const [placeholder, literal] of replacements) {
-				if (!text.includes(placeholder)) continue;
-				escapedCodeUnits += text.split(placeholder).length - 1;
-				text = text.split(placeholder).join(literal);
-			}
-			return text;
-		}
+		if (typeof value === "string") return restoreText(value);
 		if (Array.isArray(value)) return value.map(restore);
 		if (isRecord(value)) {
 			const out: Record<string, unknown> = {};
 			for (const [key, item] of Object.entries(value)) {
-				out[restore(key) as string] = restore(item);
+				out[restoreText(key)] = restore(item);
 			}
 			return out;
 		}
@@ -1797,6 +1842,14 @@ export const writeToolRenderer = {
 					const firstNonEmpty = diagLines.findIndex(line => line.trim());
 					if (firstNonEmpty >= 0) body += `\n${diagLines.slice(firstNonEmpty).join("\n")}`;
 				}
+			}
+			if (!isPartial && result.details?.escapedCodeUnits) {
+				const notice = truncateToWidth(
+					replaceTabs(formatEscapedCodeUnitsNotice(result.details.escapedCodeUnits, filePath)),
+					TRUNCATE_LENGTHS.LINE,
+					Ellipsis.Unicode,
+				);
+				body += `${body ? "\n" : ""}${uiTheme.fg("dim", notice)}`;
 			}
 			const bodyLines = body.split("\n");
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();

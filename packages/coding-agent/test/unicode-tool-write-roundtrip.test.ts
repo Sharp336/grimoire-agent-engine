@@ -302,4 +302,75 @@ describe("unicode file-tool persistence", () => {
 		// The lone surrogate landed as its literal escape, never U+FFFD.
 		expect(await decode(members.get("docs/broken.txt"))).toBe(String.raw`x\uD800y`);
 	});
+
+	// JSON5 accepts CR, LS (U+2028) and PS (U+2029) as line terminators, so a `//`
+	// comment closed by any of them still leaves the following property live.
+	for (const [label, terminator] of [
+		["a carriage return", "\r"],
+		["a line separator", "\u2028"],
+		["a paragraph separator", "\u2029"],
+	] as const) {
+		it(`shields surrogates after a JSON5 comment closed by ${label}`, async () => {
+			const dbPath = path.join(tmpDir, `${label.replaceAll(" ", "-")}.db`);
+			const db = new Database(dbPath);
+			db.run("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)");
+			db.close();
+
+			const tool = new WriteTool(createSession(tmpDir));
+			const result = await tool.execute("call-term", {
+				path: `${dbPath}:notes`,
+				content: `{ // note${terminator}body: "v ${LONE_HIGH}" }`,
+			});
+
+			const readDb = new Database(dbPath, { readonly: true });
+			const row = readDb.prepare<{ body: string }, []>("SELECT body FROM notes LIMIT 1").get();
+			readDb.close();
+
+			expect(row?.body).toBe(`v ${String.raw`\uD800`}`);
+			expect(result.details?.escapedCodeUnits).toBe(1);
+		});
+	}
+
+	it("shields a lone surrogate spelled as a JSON5 \\uXXXX escape", async () => {
+		const dbPath = path.join(tmpDir, "escaped-lone.db");
+		const db = new Database(dbPath);
+		db.run("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)");
+		db.close();
+
+		const tool = new WriteTool(createSession(tmpDir));
+		const result = await tool.execute("call-escaped-lone", {
+			path: `${dbPath}:notes`,
+			content: String.raw`{ body: "lone \uD800" }`,
+		});
+
+		const readDb = new Database(dbPath, { readonly: true });
+		const row = readDb.prepare<{ body: string }, []>("SELECT body FROM notes LIMIT 1").get();
+		readDb.close();
+
+		// Persisted as the literal escape it already spelled — never U+FFFD.
+		expect(row?.body).toBe(`lone ${String.raw`\uD800`}`);
+		expect(result.details?.escapedCodeUnits).toBe(1);
+		expect(resultText(result)).toContain("Escaped 1 invalid Unicode code unit(s) before writing");
+	});
+
+	it("leaves a well-formed \\uXXXX surrogate pair intact", async () => {
+		const dbPath = path.join(tmpDir, "escaped-pair.db");
+		const db = new Database(dbPath);
+		db.run("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)");
+		db.close();
+
+		const tool = new WriteTool(createSession(tmpDir));
+		const result = await tool.execute("call-escaped-pair", {
+			path: `${dbPath}:notes`,
+			content: String.raw`{ body: "emoji \uD83D\uDE00" }`,
+		});
+
+		const readDb = new Database(dbPath, { readonly: true });
+		const row = readDb.prepare<{ body: string }, []>("SELECT body FROM notes LIMIT 1").get();
+		readDb.close();
+
+		expect(row?.body).toBe("emoji 😀");
+		expect(result.details?.escapedCodeUnits).toBe(0);
+		expect(resultText(result)).not.toContain("invalid Unicode code unit");
+	});
 });
