@@ -31,6 +31,13 @@ export interface ProviderDescriptor {
 	dynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration. Only providers with this field participate in generate-models.ts. */
 	catalogDiscovery?: CatalogDiscoveryConfig;
+	/**
+	 * Resolve the provider's base URL at runtime, overriding the bundled
+	 * catalog value. Called by ModelRegistry.getProviderBaseUrl before the
+	 * model manager is created — ensures the env-var / self-hosted URL is
+	 * used for the very first request, not only after async discovery.
+	 */
+	resolveBaseUrl?: (bundledBaseUrl: string | undefined) => string | undefined;
 }
 
 /** A provider descriptor that has catalog discovery configured. */
@@ -71,6 +78,13 @@ export interface ProviderCatalogEntry {
 	readonly dynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration for generate-models.ts. */
 	readonly catalogDiscovery?: CatalogDiscoveryConfig;
+	/**
+	 * Resolve the provider's base URL at runtime, overriding the bundled
+	 * catalog value. Called by ModelRegistry.getProviderBaseUrl before the
+	 * model manager is created — ensures the env-var / self-hosted URL is
+	 * used for the very first request, not only after async discovery.
+	 */
+	readonly resolveBaseUrl?: (bundledBaseUrl: string | undefined) => string | undefined;
 	/**
 	 * Built bespoke by the coding-agent runtime (OAuth-token-driven managers);
 	 * excluded from `PROVIDER_DESCRIPTORS` even though models are discoverable.

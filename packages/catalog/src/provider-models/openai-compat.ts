@@ -68,6 +68,7 @@ export interface ModelsDevModel {
 	};
 	modalities?: {
 		input?: string[];
+		output?: string[];
 	};
 	status?: string;
 	provider?: { npm?: string };
@@ -2993,6 +2994,137 @@ export function veniceModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 14.25 LLM Gateway
+// ---------------------------------------------------------------------------
+/**
+ * LLM Gateway proxies models from many providers. Its `/v1/models` response
+ * includes rich per-model metadata — notably `architecture.output_modalities`
+ * and `providers[].tools`. Rather than pattern-matching model IDs (which
+ * breaks when new models ship), filter deterministically on the declared
+ * output modalities: keep models that can produce text output.
+ */
+interface LLMGatewayModelArchitecture {
+	output_modalities?: string[];
+}
+
+interface LLMGatewayProviderEntry {
+	tools?: boolean;
+}
+
+// Name-based exclusion for the models.dev filter, which lacks per-provider tool metadata.
+// The runtime filter (isLLMGatewayChatModel) uses the richer provider metadata instead.
+const LLM_GATEWAY_IMAGE_ONLY_MODEL_ID_PATTERNS = [
+	/(^|\/)gemini-[\w.-]*image/i,
+	/(^|\/)glm-image/i,
+	/(^|\/)qwen-image/i,
+	/(^|\/)dall-?e/i,
+	/(^|\/)flux/i,
+	/(^|\/)imagen/i,
+	/(^|\/)seedream/i,
+	/(^|\/)cogview/i,
+] as const;
+
+function isLLMGatewayChatModel(entry: OpenAICompatibleModelRecord): boolean {
+	const id = (entry as { id?: string }).id ?? "";
+	const arch = entry.architecture as LLMGatewayModelArchitecture | undefined;
+	const outputModalities = arch?.output_modalities;
+	const providers = entry.providers as LLMGatewayProviderEntry[] | undefined;
+
+	// Exclude known image-only models by name pattern (they may report text
+	// in output_modalities but are not genuine chat models).
+	if (LLM_GATEWAY_IMAGE_ONLY_MODEL_ID_PATTERNS.some(p => p.test(id))) {
+		return false;
+	}
+	// Models without text output are not chat models.
+	if (Array.isArray(outputModalities) && !outputModalities.includes("text")) {
+		return false;
+	}
+	// If output_modalities is present and includes text, it's a chat model.
+	// Models that lack native tools (all providers report tools:false) are
+	// kept here and marked supportsTools:false in mapModel — not excluded.
+	if (Array.isArray(outputModalities)) {
+		return outputModalities.includes("text");
+	}
+	// Fallback for models without architecture metadata: check providers.
+	if (Array.isArray(providers)) {
+		return providers.some(p => p.tools === true);
+	}
+	// Last resort: include rather than silently drop a potentially valid model.
+	return true;
+}
+
+export interface LLMGatewayModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function llmGatewayModelManagerOptions(
+	config?: LLMGatewayModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const BUNDLED_DEFAULT_URL = "https://api.llmgateway.io/v1";
+	const envUrl = Bun.env.LLM_GATEWAY_BASE_URL;
+	// Resolve the base URL:
+	//  - Generator (config.baseUrl absent): always use hosted default,
+	//    ignore env var to prevent self-hosted models leaking into the
+	//    committed catalog.
+	//  - Coding-agent with bundled default: env var wins so self-hosted
+	//    gateways work without extra config.
+	//  - Coding-agent with explicit URL: explicit config wins.
+	const baseUrl =
+		config?.baseUrl == null
+			? BUNDLED_DEFAULT_URL
+			: config.baseUrl !== BUNDLED_DEFAULT_URL
+				? config.baseUrl
+				: (envUrl ?? BUNDLED_DEFAULT_URL);
+	const references = createBundledReferenceMap<"openai-completions">("llmgateway");
+	// When the env var overrides the bundled default, patch every bundled
+	// model's baseUrl so the session uses the self-hosted URL from the start
+	// (before async discovery re-fetches the model list).
+	const envOverride = envUrl && config?.baseUrl === BUNDLED_DEFAULT_URL ? envUrl : undefined;
+	const staticModels = envOverride
+		? (getBundledModels("llmgateway") as ModelSpec<"openai-completions">[]).map(m =>
+				m.baseUrl === BUNDLED_DEFAULT_URL ? { ...m, baseUrl: envOverride } : m,
+			)
+		: undefined;
+	return {
+		providerId: "llmgateway",
+		cacheProviderId: `llmgateway:${Bun.hash(baseUrl).toString(36)}`,
+		dynamicModelsAuthoritative: true,
+		...(staticModels ? { staticModels } : undefined),
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "llmgateway",
+				baseUrl,
+				apiKey,
+				filterModel: entry => isLLMGatewayChatModel(entry),
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					const mapped = mapWithBundledReference(entry, defaults, reference);
+					// Propagate tool-capability signal from provider metadata: if the
+					// model has text output but every provider advertises tools: false,
+					// mark the model as non-tool-capable so the coding-agent doesn't
+					// send tool payloads it can't handle.
+					const providers = entry.providers as LLMGatewayProviderEntry[] | undefined;
+					if (Array.isArray(providers) && providers.length > 0 && providers.every(p => p.tools === false)) {
+						return { ...mapped, supportsTools: false };
+					}
+					// When live providers support tools, clear any stale
+					// supportsTools: false carried from the bundled reference.
+					if (Array.isArray(providers) && providers.some(p => p.tools === true)) {
+						const { supportsTools: _, ...rest } = mapped;
+						return rest;
+					}
+					return mapped;
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 14.5 Baseten
 // ---------------------------------------------------------------------------
 
@@ -4961,12 +5093,28 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 		},
 	),
 ];
-
 const filterActiveToolCallModels = (_id: string, m: ModelsDevModel): boolean => {
 	if (m.tool_call !== true) return false;
 	if (m.status === "deprecated") return false;
 	return true;
 };
+
+/**
+ * LLM Gateway models.dev filter: only allow text-output chat models.
+ * Excludes image-generation, TTS, and embedding models that `filterActiveToolCallModels`
+ * misses because models.dev marks them as `tool_call: true`.
+ */
+function filterLLMGatewayModelsDevModel(_id: string, m: ModelsDevModel): boolean {
+	if (m.tool_call !== true) return false;
+	if (m.status === "deprecated") return false;
+	// Exclude image-generation-only models that pass modality checks.
+	if (LLM_GATEWAY_IMAGE_ONLY_MODEL_ID_PATTERNS.some(p => p.test(_id))) return false;
+	const outputModalities = m.modalities?.output;
+	if (Array.isArray(outputModalities) && outputModalities.length > 0 && !outputModalities.includes("text")) {
+		return false;
+	}
+	return true;
+}
 
 const MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX: readonly ModelsDevProviderDescriptor[] = [
 	simpleModelsDevDescriptor("google-vertex", "google-vertex", "google-vertex", GOOGLE_VERTEX_BASE_URL, {
@@ -5060,6 +5208,10 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 			const maxTokens = clampKimiK27CodeMaxTokens(model.id, model.maxTokens);
 			return maxTokens === model.maxTokens ? model : { ...model, maxTokens };
 		},
+	}),
+	// --- LLM Gateway ---
+	openAiCompletionsDescriptor("llmgateway", "llmgateway", "https://api.llmgateway.io/v1", {
+		filterModel: filterLLMGatewayModelsDevModel,
 	}),
 	// --- Ollama Cloud ---
 	simpleModelsDevDescriptor("ollama-cloud", "ollama-cloud", "ollama-chat", "https://ollama.com"),

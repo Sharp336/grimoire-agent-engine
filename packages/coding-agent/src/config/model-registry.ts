@@ -1086,15 +1086,27 @@ export class ModelRegistry {
 	}
 
 	/** Load built-in models, applying provider-level overrides only.
-	 *  Per-model overrides are applied later by #applyModelOverrides. */
+	 *  Per-model overrides are applied later by #applyModelOverrides.
+	 *  Provider descriptors may also resolve env-var base URLs so the
+	 *  self-hosted endpoint is used from the very first request. */
 	#loadBuiltInModels(overrides: Map<string, ProviderOverride>): Model<Api>[] {
 		return getBundledProviders().flatMap(provider => {
 			const models = getBundledModels(provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[];
 			const providerOverride = overrides.get(provider);
+			const descriptor = PROVIDER_DESCRIPTORS.find(d => d.providerId === provider);
 
 			return models.map(m => {
-				if (!providerOverride) return m;
-				const withTransportOverride = this.#applyProviderTransportOverride(m, providerOverride);
+				// Apply env-var base URL override before provider overrides so
+				// the session uses the self-hosted endpoint from the first request.
+				let model = m;
+				if (descriptor?.resolveBaseUrl && model.baseUrl) {
+					const resolved = descriptor.resolveBaseUrl(model.baseUrl);
+					if (resolved && resolved !== model.baseUrl) {
+						model = { ...model, baseUrl: resolved } as Model<Api>;
+					}
+				}
+				if (!providerOverride) return model;
+				const withTransportOverride = this.#applyProviderTransportOverride(model, providerOverride);
 				return buildModel({
 					...withTransportOverride,
 					compat: mergeCompat(m.compatConfig, providerOverride.compat),
@@ -2162,7 +2174,9 @@ export class ModelRegistry {
 	 * Get the base URL associated with a provider, if any model defines one.
 	 */
 	getProviderBaseUrl(provider: string): string | undefined {
-		return this.#models.find(m => m.provider === provider && m.baseUrl)?.baseUrl;
+		const bundledBaseUrl = this.#models.find(m => m.provider === provider && m.baseUrl)?.baseUrl;
+		const descriptor = PROVIDER_DESCRIPTORS.find(d => d.providerId === provider);
+		return descriptor?.resolveBaseUrl ? descriptor.resolveBaseUrl(bundledBaseUrl) : bundledBaseUrl;
 	}
 	/**
 	 * Get provider-level headers without including per-model overrides.

@@ -17,7 +17,7 @@ import type { OAuthController } from "./oauth/types";
 type ChatCompletionsValidation = {
 	kind: "chat-completions";
 	provider: string;
-	baseUrl: string;
+	baseUrl: string | (() => string);
 	model: string;
 };
 
@@ -81,7 +81,10 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 				await validateOpenAICompatibleApiKey({
 					provider: config.validation.provider,
 					apiKey: trimmed,
-					baseUrl: config.validation.baseUrl,
+					baseUrl:
+						typeof config.validation.baseUrl === "function"
+							? config.validation.baseUrl()
+							: config.validation.baseUrl,
 					model: config.validation.model,
 					signal: options.signal,
 					fetch: options.fetch,
