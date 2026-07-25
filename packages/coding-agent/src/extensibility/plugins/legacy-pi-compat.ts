@@ -346,6 +346,7 @@ function clearLegacyPiResolutionCaches(): void {
 	nativeAddonRequireScanCache.clear();
 	nativeAddonLoaderModulePaths.clear();
 	realpathCache.clear();
+	prebuiltExtensionSources.clear();
 }
 
 registerPluginCacheInvalidator(clearLegacyPiResolutionCaches);
@@ -1421,6 +1422,8 @@ function escapeRegExp(value: string): string {
 // the previous load.
 const extensionGraphHookModules = new Map<string, Set<string>>();
 const extensionGraphCacheBustResolvedImportModules = new Map<string, Set<string>>();
+const prebuiltExtensionSources = new Map<string, string>();
+const prebuiltExtensionHookPaths = new Set<string>();
 const commonJsModuleSources = new Map<string, string>();
 const commonJsFallbackModulePaths = new Map<string, string>();
 const extensionSynchronousSpecifierTargets = new Map<string, Map<string, string>>();
@@ -2120,7 +2123,7 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 			}
 		}
 	}
-	if (pendingModules.size === 0 && commonJsPaths.size === 0) {
+	if (pendingModules.size === 0 && pendingCommonJsPaths.size === 0) {
 		return undefined;
 	}
 
@@ -2150,6 +2153,155 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 	};
 }
 
+const PREBUILT_IMPORT_SIDECAR_SUFFIX = ".omp-imports.json";
+const PREBUILT_IMPORT_SIDECAR_VERSION = 1;
+const prebuiltImportScanner = new Bun.Transpiler({ loader: "js" });
+
+interface PrebuiltImportRange {
+	readonly kind: "import-statement" | "dynamic-import";
+	readonly specifier: string;
+	readonly start: number;
+	readonly end: number;
+}
+
+interface PrebuiltImportSidecar {
+	readonly version: typeof PREBUILT_IMPORT_SIDECAR_VERSION;
+	readonly sha256: string;
+	readonly imports: readonly PrebuiltImportRange[];
+}
+
+function parsePrebuiltImportSidecar(value: unknown): PrebuiltImportSidecar | null {
+	if (!isRecord(value) || value.version !== PREBUILT_IMPORT_SIDECAR_VERSION || typeof value.sha256 !== "string") {
+		return null;
+	}
+	if (!Array.isArray(value.imports)) return null;
+	const imports: PrebuiltImportRange[] = [];
+	let previousEnd = -1;
+	for (const entry of value.imports) {
+		if (
+			!isRecord(entry) ||
+			(entry.kind !== "import-statement" && entry.kind !== "dynamic-import") ||
+			typeof entry.specifier !== "string" ||
+			typeof entry.start !== "number" ||
+			!Number.isSafeInteger(entry.start) ||
+			typeof entry.end !== "number" ||
+			!Number.isSafeInteger(entry.end) ||
+			entry.start < previousEnd ||
+			entry.end <= entry.start
+		) {
+			return null;
+		}
+		imports.push({
+			kind: entry.kind,
+			specifier: entry.specifier,
+			start: entry.start,
+			end: entry.end,
+		});
+		previousEnd = entry.end;
+	}
+	return { version: PREBUILT_IMPORT_SIDECAR_VERSION, sha256: value.sha256, imports };
+}
+
+function resolvePrebuiltHostImport(specifier: string): string | null | undefined {
+	const remapped = remapLegacyPiSpecifier(specifier);
+	if (remapped) {
+		try {
+			return toImportSpecifier(resolveCanonicalPiSpecifier(remapped));
+		} catch {
+			return undefined;
+		}
+	}
+	if (TYPEBOX_SHIM_PATH && (specifier === "typebox" || specifier === "@sinclair/typebox")) {
+		return toImportSpecifier(TYPEBOX_SHIM_PATH);
+	}
+	return isBuiltin(specifier) ? null : undefined;
+}
+
+async function preparePrebuiltExtensionEntry(entryRealPath: string): Promise<string | null> {
+	if (!entryRealPath.endsWith(".js") && !entryRealPath.endsWith(".mjs")) return null;
+	let source: string;
+	let sidecar: PrebuiltImportSidecar | null;
+	try {
+		source = await Bun.file(entryRealPath).text();
+		sidecar = parsePrebuiltImportSidecar(
+			JSON.parse(await Bun.file(`${entryRealPath}${PREBUILT_IMPORT_SIDECAR_SUFFIX}`).text()),
+		);
+	} catch {
+		return null;
+	}
+	if (!sidecar) return null;
+	const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+	if (sha256 !== sidecar.sha256) return null;
+
+	const scanned = prebuiltImportScanner.scanImports(source);
+	if (scanned.length !== sidecar.imports.length) return null;
+	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
+	for (let index = 0; index < scanned.length; index++) {
+		const found = scanned[index];
+		const declared = sidecar.imports[index];
+		if (
+			!found ||
+			!declared ||
+			found.kind !== declared.kind ||
+			found.path !== declared.specifier ||
+			source.slice(declared.start, declared.end) !== JSON.stringify(declared.specifier)
+		) {
+			return null;
+		}
+		if (declared.kind === "dynamic-import") {
+			if (!isBuiltin(declared.specifier)) return null;
+			continue;
+		}
+		const replacement = resolvePrebuiltHostImport(declared.specifier);
+		if (replacement === undefined) return null;
+		if (replacement !== null && replacement !== declared.specifier) {
+			replacements.push({
+				kind: "import",
+				specifier: declared.specifier,
+				start: declared.start,
+				end: declared.end,
+				replacement,
+			});
+		}
+	}
+	const rewritten = applySpecifierReplacements(source, replacements);
+	if (
+		prebuiltImportScanner.scanImports(rewritten).some(found => {
+			if (found.kind === "dynamic-import") return !isBuiltin(found.path);
+			return (
+				found.kind !== "import-statement" ||
+				(!isBuiltin(found.path) && !found.path.startsWith("file:") && !isBundledVirtualSpecifier(found.path))
+			);
+		})
+	) {
+		return null;
+	}
+	return rewritten;
+}
+
+function installPrebuiltExtensionHook(entryRealPath: string, source: string): { clear(): void } {
+	prebuiltExtensionSources.set(entryRealPath, source);
+	if (!prebuiltExtensionHookPaths.has(entryRealPath)) {
+		prebuiltExtensionHookPaths.add(entryRealPath);
+		const filter = new RegExp(`^${escapeRegExp(entryRealPath)}(?:\\?mtime=\\d+)?$`);
+		const hookId = Bun.hash(`${entryRealPath}\0prebuilt`).toString(36);
+		Bun.plugin({
+			name: `omp:legacy-pi-prebuilt:${hookId}`,
+			setup(build) {
+				build.onLoad({ filter, namespace: "file" }, args => {
+					const queryIndex = args.path.indexOf("?mtime=");
+					const sourcePath = queryIndex >= 0 ? args.path.slice(0, queryIndex) : args.path;
+					const contents = prebuiltExtensionSources.get(sourcePath);
+					if (contents === undefined) return undefined;
+					prebuiltExtensionSources.delete(sourcePath);
+					return { contents, loader: getLoader(sourcePath) };
+				});
+			},
+		});
+	}
+	return { clear: () => prebuiltExtensionSources.delete(entryRealPath) };
+}
+
 /**
  * Load a legacy Pi extension module from its real on-disk location.
  *
@@ -2167,7 +2319,11 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
 	await ensureLegacyPiOverridesReady();
-	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
+	const prebuiltSource = await preparePrebuiltExtensionEntry(entryRealPath);
+	const pendingSources =
+		prebuiltSource === null
+			? await ensureExtensionGraphHook(entryRealPath)
+			: installPrebuiltExtensionHook(entryRealPath, prebuiltSource);
 	try {
 		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
 		// On POSIX, use the raw filesystem path so Bun keys the `?mtime`

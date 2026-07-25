@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { loadLegacyPiModule } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 
@@ -126,5 +127,66 @@ export default function(pi) {
 		fs.writeFileSync(lazyPath, `export const value = "after";\n`, "utf-8");
 
 		expect(await ns.readLazy()).toBe("after");
+	});
+
+	it("loads a verified prebuilt entry without duplicating host modules", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "prebuilt.js");
+		const source = `import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+export { ToolAbortError };
+`;
+		fs.writeFileSync(entryPath, source, "utf8");
+		const imports = new Bun.Transpiler({ loader: "js" }).scanImports(source).map(found => {
+			const token = JSON.stringify(found.path);
+			const start = source.indexOf(token);
+			expect(start).toBeGreaterThanOrEqual(0);
+			expect(source.indexOf(token, start + token.length)).toBe(-1);
+			return { kind: found.kind, specifier: found.path, start, end: start + token.length };
+		});
+		const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+		fs.writeFileSync(`${entryPath}.omp-imports.json`, JSON.stringify({ version: 1, sha256, imports }), "utf8");
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { ToolAbortError: typeof ToolAbortError };
+		expect(loaded.ToolAbortError).toBe(ToolAbortError);
+	});
+	it("falls back to graph loading when a prebuilt sidecar is stale", async () => {
+		const cwd = tempDir.absolute();
+		const dependencyPath = path.join(cwd, "dependency.ts");
+		const entryPath = path.join(cwd, "stale.js");
+		fs.writeFileSync(dependencyPath, `export const value = "fallback";\n`, "utf8");
+		fs.writeFileSync(entryPath, `export { value } from "./dependency.ts";\n`, "utf8");
+		fs.writeFileSync(
+			`${entryPath}.omp-imports.json`,
+			JSON.stringify({ version: 1, sha256: "stale", imports: [] }),
+			"utf8",
+		);
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { value: string };
+		expect(loaded.value).toBe("fallback");
+	});
+	it("rejects a hash-valid sidecar range that does not point at the import", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "misdirected.js");
+		const specifier = "@mariozechner/pi-coding-agent/tools/tool-errors";
+		const token = JSON.stringify(specifier);
+		const source = `const bait = ${token};
+import { ToolAbortError } from ${token};
+export { ToolAbortError };
+`;
+		fs.writeFileSync(entryPath, source, "utf8");
+		const start = source.indexOf(token);
+		const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+		fs.writeFileSync(
+			`${entryPath}.omp-imports.json`,
+			JSON.stringify({
+				version: 1,
+				sha256,
+				imports: [{ kind: "import-statement", specifier, start, end: start + token.length }],
+			}),
+			"utf8",
+		);
+
+		const loaded = (await loadLegacyPiModule(entryPath)) as { ToolAbortError: typeof ToolAbortError };
+		expect(loaded.ToolAbortError).toBe(ToolAbortError);
 	});
 });
