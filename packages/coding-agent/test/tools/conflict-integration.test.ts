@@ -756,6 +756,53 @@ describe("write resolves conflicts via conflict://N", () => {
 			writeSpy.mockRestore();
 		}
 	});
+
+	it("counts echo-trimmed lines only for files whose write committed", async () => {
+		const echoFile = [
+			"function f() {",
+			"<<<<<<< HEAD",
+			"\tours();",
+			"=======",
+			"\ttheirs();",
+			">>>>>>> feature/x",
+			"\tdone();",
+			"}",
+			"",
+		].join("\n");
+		const fileA = path.join(tempDir, "echo-bulk-a.ts");
+		const fileB = path.join(tempDir, "echo-bulk-b.ts");
+		await Bun.write(fileA, echoFile);
+		await Bun.write(fileB, echoFile);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+		await read.execute("read-echo-bulk-a", { path: "echo-bulk-a.ts:conflicts" });
+		await read.execute("read-echo-bulk-b", { path: "echo-bulk-b.ts:conflicts" });
+
+		const bunWrite = Bun.write.bind(Bun);
+		const writeSpy = spyOn(Bun, "write").mockImplementation(((destination, data) => {
+			if (typeof destination === "string" && destination === fileB) {
+				return Promise.reject(Object.assign(new Error("simulated write failure"), { code: "EACCES" }));
+			}
+			return bunWrite(destination as Parameters<typeof Bun.write>[0], data as Parameters<typeof Bun.write>[1]);
+		}) as typeof Bun.write);
+
+		try {
+			// Both files would trim the same 2 echoed trailing lines, but only one
+			// write survives, so the note must report 2 — not the pre-commit 4.
+			const result = await write.execute("write-echo-bulk", {
+				path: "conflict://*",
+				content: "\tours();\n\ttheirs();\n\tdone();\n}\n",
+			});
+			const text = getText(result);
+
+			expect(result.isError).toBe(true);
+			expect(text).toContain("dropped 2 content line(s)");
+			expect(await Bun.file(fileB).text()).toBe(echoFile);
+		} finally {
+			writeSpy.mockRestore();
+		}
+	});
 	it("`write conflict://*` errors when no conflicts are registered", async () => {
 		const session = createTestSession(tempDir);
 		const write = await getTool(session, "write");

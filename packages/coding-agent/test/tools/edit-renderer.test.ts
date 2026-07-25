@@ -467,6 +467,58 @@ describe("editToolRenderer", () => {
 		expect(rendered).not.toContain("No changes would be made");
 		for (const path of paths) expect(rendered).toContain(path);
 	});
+	it("reports escaped code units on a single-file success result", async () => {
+		const uiTheme = await getUiTheme();
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Updated notes.txt" }],
+				details: { diff: "+1│broken", op: "update", path: "notes.txt", escapedCodeUnits: 2 },
+			},
+			{ expanded: false, isPartial: false, renderContext: { editMode: "hashline" } },
+			uiTheme,
+		);
+
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(rendered).toContain("Escaped 2 invalid Unicode code unit(s) before writing notes.txt.");
+	});
+
+	it("reports escaped code units per card in a multi-file success result", async () => {
+		const uiTheme = await getUiTheme();
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Updated 2 files" }],
+				details: {
+					diff: "",
+					perFileResults: [
+						{ path: "a.txt", diff: "+1│a", op: "update" as const, escapedCodeUnits: 1 },
+						{ path: "b.txt", diff: "+1│b", op: "update" as const },
+					],
+				},
+			},
+			{ expanded: false, isPartial: false, renderContext: { editMode: "hashline" } },
+			uiTheme,
+		);
+
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(rendered).toContain("Escaped 1 invalid Unicode code unit(s) before writing a.txt.");
+		// The clean file's card stays silent — the count is per file, not shared.
+		expect(rendered.match(/Escaped \d+ invalid Unicode/g)).toHaveLength(1);
+	});
+
+	it("keeps a move result framed when it escaped code units instead of collapsing to an inline row", async () => {
+		const uiTheme = await getUiTheme();
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Moved a.txt to b.txt" }],
+				details: { diff: "", op: "update", path: "b.txt", move: "b.txt", sourcePath: "a.txt", escapedCodeUnits: 3 },
+			},
+			{ expanded: false, isPartial: false, renderContext: { editMode: "hashline" } },
+			uiTheme,
+		);
+
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(rendered).toContain("Escaped 3 invalid Unicode code unit(s) before writing b.txt.");
+	});
 
 	it("renders a move-only result as source → destination with no diff body", async () => {
 		const uiTheme = await getUiTheme();

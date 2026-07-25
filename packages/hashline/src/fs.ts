@@ -79,7 +79,13 @@ export abstract class Filesystem {
 	/** Persist `content` at `path`. Returns the actual final text that was written. */
 	abstract writeText(path: string, content: string): Promise<WriteResult>;
 
-	/** Delete the file at `path`. Default: not supported. */
+	/**
+	 * Delete the file at `path`. Default: not supported.
+	 *
+	 * Once the file is physically gone, the implementation MUST NOT perform
+	 * abortable follow-up work: the patcher invalidates the snapshot on return,
+	 * and a late rejection would strand a deleted file behind a live snapshot.
+	 */
 	async delete(path: string): Promise<void> {
 		throw new Error(`Filesystem does not support delete: ${path}`);
 	}
@@ -87,6 +93,11 @@ export abstract class Filesystem {
 	/**
 	 * Move/rename `from` to `to`. A content-bearing move must return the
 	 * logical text and escape count accepted by the destination adapter.
+	 *
+	 * Once the bytes have physically moved, the implementation MUST NOT perform
+	 * abortable follow-up work: the patcher relocates snapshot ownership on
+	 * return, so a late rejection would leave the file at its new path with the
+	 * snapshot still keyed to the old one.
 	 */
 	async move(from: string, to: string, content: string): Promise<WriteResult>;
 	async move(from: string, to: string, content?: undefined): Promise<undefined>;

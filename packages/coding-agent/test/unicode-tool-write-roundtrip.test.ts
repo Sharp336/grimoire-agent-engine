@@ -373,4 +373,56 @@ describe("unicode file-tool persistence", () => {
 		expect(result.details?.escapedCodeUnits).toBe(0);
 		expect(resultText(result)).not.toContain("invalid Unicode code unit");
 	});
+
+	// A surrogate pair is a pair whatever each half was spelled as: shielding
+	// must decide on the decoded code unit, never on the source form.
+	const HIGH_EMOJI = "\ud83d";
+	const LOW_EMOJI = "\ude00";
+	for (const [label, body] of [
+		["raw high with escaped low", `${HIGH_EMOJI}${String.raw`\uDE00`}`],
+		["escaped high with raw low", `${String.raw`\uD83D`}${LOW_EMOJI}`],
+	] as const) {
+		it(`leaves a mixed-form surrogate pair intact — ${label}`, async () => {
+			const dbPath = path.join(tmpDir, `mixed-${label.replace(/\s+/g, "-")}.db`);
+			const db = new Database(dbPath);
+			db.run("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)");
+			db.close();
+
+			const tool = new WriteTool(createSession(tmpDir));
+			const result = await tool.execute("call-mixed-pair", {
+				path: `${dbPath}:notes`,
+				content: `{ body: "mixed ${body}" }`,
+			});
+
+			const readDb = new Database(dbPath, { readonly: true });
+			const row = readDb.prepare<{ body: string }, []>("SELECT body FROM notes LIMIT 1").get();
+			readDb.close();
+
+			expect(row?.body).toBe("mixed 😀");
+			expect(result.details?.escapedCodeUnits).toBe(0);
+			expect(resultText(result)).not.toContain("invalid Unicode code unit");
+		});
+	}
+
+	it("counts an escaped high surrogate beside a raw high surrogate as two lone units", async () => {
+		const dbPath = path.join(tmpDir, "mixed-two-highs.db");
+		const db = new Database(dbPath);
+		db.run("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)");
+		db.close();
+
+		const tool = new WriteTool(createSession(tmpDir));
+		const result = await tool.execute("call-mixed-lone", {
+			path: `${dbPath}:notes`,
+			content: `{ body: "lone ${String.raw`\uD83D`}${HIGH_EMOJI}" }`,
+		});
+
+		const readDb = new Database(dbPath, { readonly: true });
+		const row = readDb.prepare<{ body: string }, []>("SELECT body FROM notes LIMIT 1").get();
+		readDb.close();
+
+		// Neither high surrogate pairs with anything, so both persist as literal escapes.
+		expect(row?.body).toBe(`lone ${String.raw`\uD83D\uD83D`}`);
+		expect(result.details?.escapedCodeUnits).toBe(2);
+		expect(resultText(result)).toContain("Escaped 2 invalid Unicode code unit(s) before writing");
+	});
 });

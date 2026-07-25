@@ -453,6 +453,8 @@ export class Patcher {
 			const destCanonical = this.fs.canonicalPath(moveDest);
 			// Write the destination first; only a successful move may relocate
 			// snapshot ownership and delete the source (owned by the adapter).
+			// `move` guarantees no abortable step runs after the bytes land, so
+			// the relocate below is reached whenever the file actually moved.
 			const write = await this.fs.move(section.path, moveDest, persisted);
 			this.snapshots.relocate(canonicalPath, destCanonical);
 			const canonicalAfter = normalizeToLF(stripBom(write.text).text);

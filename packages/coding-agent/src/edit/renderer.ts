@@ -41,6 +41,7 @@ import type { EditMode } from "../utils/edit-mode";
 import type { DiffError, DiffResult } from "./diff";
 import { type ApplyPatchEntry, expandApplyPatchToEntries, expandApplyPatchToPreviewEntries } from "./modes/apply-patch";
 import type { Operation } from "./modes/patch";
+import { formatEscapedCodeUnitsNotice } from "./read-file";
 import type { PerFileDiffPreview } from "./streaming";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -857,11 +858,17 @@ function renderSingleFileResult(
 			(result.content?.find(c => c.type === "text")?.text ?? "")
 		: "";
 
+	// Lone surrogates rewritten to literal `\uXXXX` change what landed on disk,
+	// so the count is reported on every success path (single file, and each card
+	// of a multi-file result, which renders through here with its per-file
+	// details). Errors already surface their own text.
+	const escapedCodeUnits = isError ? 0 : (details?.escapedCodeUnits ?? 0);
+
 	// Delete and move-only results carry no diff to box. Per design these render
 	// as an inline status row (eraser / move glyph) rather than an empty framed
-	// container. Errors, no-ops, creates, move-with-edits, and anything with
-	// diagnostics keep the framed block below.
-	if (!isError && !details?.diff && !details?.diagnostics && (op === "delete" || rename)) {
+	// container. Errors, no-ops, creates, move-with-edits, an escape notice, and
+	// anything with diagnostics keep the framed block below.
+	if (!isError && !details?.diff && !details?.diagnostics && escapedCodeUnits === 0 && (op === "delete" || rename)) {
 		const linkPath = details && "path" in details ? details.path : undefined;
 		return renderInlineEditRow(uiTheme, { op, rename, rawPath, linkPath, pending: false });
 	}
@@ -926,6 +933,12 @@ function renderSingleFileResult(
 			body += formatDiagnostics(details.diagnostics, expanded, uiTheme, (fp: string) =>
 				uiTheme.getLangIcon(getLanguageFromPath(fp)),
 			);
+		}
+		if (escapedCodeUnits > 0) {
+			const noticeTarget = rename ?? linkPath ?? rawPath;
+			const notice = formatEscapedCodeUnitsNotice(escapedCodeUnits, noticeTarget ? shortenPath(noticeTarget) : "");
+			if (body.length > 0) body += "\n";
+			body += uiTheme.fg("warning", truncateToWidth(replaceTabs(notice), Math.max(1, width - 2)));
 		}
 
 		// Diff lines self-wrap with a continuation gutter; pre-wrap to the frame's

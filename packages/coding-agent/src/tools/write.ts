@@ -410,6 +410,22 @@ function readHex4(source: string, start: number): number {
 }
 
 /**
+ * Decode the next string-token unit at `start`: a raw code unit, a `\uXXXX`
+ * escape, or a permissive `\X` escape. Callers pair on the decoded `code`, so
+ * a surrogate is classified identically however it was spelled.
+ */
+function readStringUnit(source: string, start: number): { code: number; length: number } {
+	if (source[start] !== "\\") return { code: source.charCodeAt(start), length: 1 };
+	if (source[start + 1] === "u") {
+		const escapeUnit = readHex4(source, start + 2);
+		if (escapeUnit >= 0) return { code: escapeUnit, length: 6 };
+	}
+	// JSON5 permissive escape: `\X` yields X itself (or a mapped control
+	// character, never a surrogate), so the escaped character carries the unit.
+	return { code: source.charCodeAt(start + 1), length: 2 };
+}
+
+/**
  * Parse SQLite write content as JSON5 while preserving lone UTF-16 surrogates.
  *
  * `Bun.JSON5.parse` decodes lone surrogates in string tokens to U+FFFD, so the
@@ -430,80 +446,45 @@ function prepareSqliteContent(content: string): PreparedSqliteContent {
 	let shieldIndex = 0;
 	let state: "top" | "string" | "line" | "block" = "top";
 	let quote = "";
-	let escaped = false;
 	for (let i = 0; i < content.length; i++) {
 		const char = content[i] ?? "";
 		const code = content.charCodeAt(i);
-		const nextCode = content.charCodeAt(i + 1);
-		const isHighSurrogate = code >= 0xd800 && code <= 0xdbff;
-		const hasFollowingLow = nextCode >= 0xdc00 && nextCode <= 0xdfff;
-		const isLoneSurrogate = (isHighSurrogate && !hasFollowingLow) || (code >= 0xdc00 && code <= 0xdfff);
 		if (state === "string") {
-			if (escaped) {
-				escaped = false;
-				if (isHighSurrogate && hasFollowingLow) {
-					shielded += content.slice(i, i + 2);
-					i++;
-					continue;
-				}
-				if (isLoneSurrogate) {
-					// JSON5 consumes the preceding backslash as a permissive
-					// escape prefix. Remove it with the code unit and shield the
-					// semantic character the parser would otherwise replace.
-					shielded = shielded.slice(0, -1);
-					const placeholder = `${nonce}${shieldIndex++}Z`;
-					replacements.set(placeholder, escapeUnpairedSurrogates(char).text);
-					shielded += placeholder;
-					continue;
-				}
-				const escapeUnit = char === "u" ? readHex4(content, i + 1) : -1;
-				if (escapeUnit < 0xd800 || escapeUnit > 0xdfff) {
-					shielded += char;
-					continue;
-				}
-				const pairedLow =
-					escapeUnit <= 0xdbff && content[i + 5] === "\\" && content[i + 6] === "u"
-						? readHex4(content, i + 7)
-						: -1;
-				if (pairedLow >= 0xdc00 && pairedLow <= 0xdfff) {
-					// Well-formed `\uD83D\uDE00`: JSON5 decodes it to a valid astral
-					// character, so both escapes pass through untouched.
-					shielded += content.slice(i, i + 11);
-					i += 10;
-					continue;
-				}
-				// A lone surrogate spelled with valid JSON5 syntax. The parser would
-				// materialize (or U+FFFD-replace) it before the binding, so shield the
-				// whole escape and restore the literal text it already spells.
-				shielded = shielded.slice(0, -1);
-				const escapePlaceholder = `${nonce}${shieldIndex++}Z`;
-				replacements.set(escapePlaceholder, escapeUnpairedSurrogates(String.fromCharCode(escapeUnit)).text);
-				shielded += escapePlaceholder;
-				i += 4;
-				continue;
-			}
-			if (char === "\\") {
-				shielded += char;
-				escaped = true;
-				continue;
-			}
 			if (char === quote) {
 				shielded += char;
 				state = "top";
 				continue;
 			}
-			if (isHighSurrogate && hasFollowingLow) {
-				shielded += content.slice(i, i + 2);
-				i++;
+			// One unit at a time, escape prefix included, so pairing never depends
+			// on whether a side arrived raw or as `\uXXXX`.
+			const unit = readStringUnit(content, i);
+			const isHigh = unit.code >= 0xd800 && unit.code <= 0xdbff;
+			const isLow = unit.code >= 0xdc00 && unit.code <= 0xdfff;
+			if (!isHigh && !isLow) {
+				shielded += content.slice(i, i + unit.length);
+				i += unit.length - 1;
 				continue;
 			}
-			if (!isLoneSurrogate) {
-				shielded += char;
-				continue;
+			if (isHigh) {
+				const low = readStringUnit(content, i + unit.length);
+				if (low.code >= 0xdc00 && low.code <= 0xdfff) {
+					// A genuine pair, whatever mix of forms spelled it. JSON5 pairs
+					// only within one form (it U+FFFD-replaces each half of a
+					// raw/escaped mix), so emit the decoded pair as raw code units
+					// — the same astral character, spelled the way the parser
+					// already handles, and never counted as an escape.
+					shielded += String.fromCharCode(unit.code, low.code);
+					i += unit.length + low.length - 1;
+					continue;
+				}
 			}
+			// A lone surrogate, raw or escaped, counted exactly once. The parser
+			// would materialize (or U+FFFD-replace) it before the binding, so
+			// shield the whole unit and restore the literal text it spells.
 			const placeholder = `${nonce}${shieldIndex++}Z`;
-			replacements.set(placeholder, escapeUnpairedSurrogates(char).text);
+			replacements.set(placeholder, escapeUnpairedSurrogates(String.fromCharCode(unit.code)).text);
 			shielded += placeholder;
+			i += unit.length - 1;
 			continue;
 		}
 		if (state === "line") {
@@ -541,7 +522,9 @@ function prepareSqliteContent(content: string): PreparedSqliteContent {
 	}
 
 	if (replacements.size === 0) {
-		return { value: Bun.JSON5.parse(content), escapedCodeUnits: 0 };
+		// `shielded` is byte-identical to `content` unless the scan normalized a
+		// mixed-form surrogate pair, which the parser only handles as raw units.
+		return { value: Bun.JSON5.parse(shielded), escapedCodeUnits: 0 };
 	}
 
 	let escapedCodeUnits = 0;
@@ -1172,6 +1155,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const resolvedEntries: ConflictEntry[] = [];
 			const staleEntries: ConflictEntry[] = [];
 			let failure: string | undefined;
+			// Per-file until the write commits: a file that fails to splice or
+			// persist must not inflate the trimmed-line note the user is shown.
+			let fileEchoTrimmed = 0;
 			try {
 				text = await Bun.file(absolutePath).text();
 			} catch (error) {
@@ -1187,7 +1173,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					const expanded = expandContentTokens(contentFor(entry), entry);
 					const splice = spliceConflict(text, entry, expanded);
 					text = splice.text;
-					totalEchoTrimmed += splice.trimmedLeading + splice.trimmedTrailing;
+					fileEchoTrimmed += splice.trimmedLeading + splice.trimmedTrailing;
 					resolvedEntries.push(entry);
 				} catch (error) {
 					// A locate-miss for a region an earlier entry already spliced
@@ -1226,6 +1212,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					escaped: prepared.escapedCodeUnits,
 				});
 				totalResolvedIds += resolvedEntries.length;
+				totalEchoTrimmed += fileEchoTrimmed;
 			} catch (error) {
 				failedFiles.push({
 					displayPath: sample.displayPath,

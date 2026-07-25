@@ -159,11 +159,12 @@ export class HashlineFilesystem extends Filesystem {
 			throw error;
 		}
 		if (this.session.enableLsp ?? true) {
-			await notifyWorkspaceWatchedFiles(
-				this.session.cwd,
-				[{ filePath: absolutePath, type: FileChangeType.Deleted }],
-				this.#signal,
-			);
+			// Same ordering guarantee as `move`: the file is already gone and the
+			// caller invalidates its snapshot next, so no abortable step may sit
+			// between the physical removal and that bookkeeping.
+			await notifyWorkspaceWatchedFiles(this.session.cwd, [
+				{ filePath: absolutePath, type: FileChangeType.Deleted },
+			]);
 		}
 		invalidateFsScanAfterWrite(absolutePath);
 	}
@@ -187,14 +188,16 @@ export class HashlineFilesystem extends Filesystem {
 			await fs.rename(fromAbsolute, toAbsolute);
 		}
 		if (this.session.enableLsp ?? true) {
-			await notifyWorkspaceWatchedFiles(
-				this.session.cwd,
-				[
-					{ filePath: fromAbsolute, type: FileChangeType.Deleted },
-					{ filePath: toAbsolute, type: FileChangeType.Created },
-				],
-				this.#signal,
-			);
+			// The bytes have already moved and the caller relocates snapshot
+			// ownership the instant this resolves, so nothing after the physical
+			// move may abort: an AbortError here would strand the file at its new
+			// path with the snapshot still keyed to the old one, and the next read
+			// would tag against a stale snapshot. The notification is bounded by
+			// its own internal timeout, so dropping the signal cannot hang.
+			await notifyWorkspaceWatchedFiles(this.session.cwd, [
+				{ filePath: fromAbsolute, type: FileChangeType.Deleted },
+				{ filePath: toAbsolute, type: FileChangeType.Created },
+			]);
 		}
 		invalidateFsScanAfterWrite(fromAbsolute);
 		invalidateFsScanAfterWrite(toAbsolute);
