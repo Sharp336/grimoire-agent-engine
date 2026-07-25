@@ -52,6 +52,7 @@ interface AppKeybindings {
 	"app.tree.unfoldOrDown": true;
 	"app.plan.toggle": true;
 	"app.history.search": true;
+	"app.stt.pushToTalk": true;
 	"app.stt.toggle": true;
 }
 
@@ -218,9 +219,13 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+r",
 		description: "Search history",
 	},
+	"app.stt.pushToTalk": {
+		defaultKeys: "space",
+		description: "Hold to record speech-to-text",
+	},
 	"app.stt.toggle": {
 		defaultKeys: [],
-		description: "Toggle speech-to-text (default gesture: hold Space)",
+		description: "Toggle speech-to-text recording",
 	},
 } as const satisfies KeybindingDefinitions;
 

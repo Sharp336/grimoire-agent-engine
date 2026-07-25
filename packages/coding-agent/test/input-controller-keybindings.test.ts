@@ -62,6 +62,7 @@ async function createContext() {
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
 		"app.clipboard.pasteImage": ["ctrl+v"],
+		"app.stt.pushToTalk": [],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -244,6 +245,7 @@ describe("InputController keybinding setup", () => {
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.reset", ["ctrl+l"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.selectTemporary", ["ctrl+y"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.select", ["alt+m"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.stt.pushToTalk", []);
 		expect(editor.onDisplayReset).toBeDefined();
 		expect(editor.onSelectModelTemporary).toBeDefined();
 		expect(editor.onSelectModel).toBeDefined();
