@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -728,21 +728,33 @@ describe("write resolves conflicts via conflict://N", () => {
 		const write = await getTool(session, "write");
 		await read.execute("read-unicode-bulk-a", { path: "unicode-bulk-a.ts:conflicts" });
 		await read.execute("read-unicode-bulk-b", { path: "unicode-bulk-b.ts:conflicts" });
-		await fs.chmod(fileB, 0o444);
 
-		const result = await write.execute("write-unicode-bulk", {
-			path: "conflict://*",
-			content: `resolved \ud800\n`,
-		});
-		const details = result.details as { escapedCodeUnits?: number } | undefined;
-		const text = getText(result);
+		// Deterministic sink failure: chmod 0444 is a no-op for root / privileged CI.
+		const bunWrite = Bun.write.bind(Bun);
+		const writeSpy = spyOn(Bun, "write").mockImplementation(((destination, data) => {
+			if (typeof destination === "string" && destination === fileB) {
+				return Promise.reject(Object.assign(new Error("simulated write failure"), { code: "EACCES" }));
+			}
+			return bunWrite(destination as Parameters<typeof Bun.write>[0], data as Parameters<typeof Bun.write>[1]);
+		}) as typeof Bun.write);
 
-		expect(result.isError).toBe(true);
-		expect(await Bun.file(fileA).text()).toBe(`line 1\nresolved ${String.raw`\uD800`}\nline N\n`);
-		expect(await Bun.file(fileB).text()).toBe(TWO_WAY);
-		expect(details?.escapedCodeUnits).toBe(1);
-		expect(text.match(/Escaped 1 invalid Unicode/g)).toHaveLength(1);
-		expect(text).toContain("registered entries left intact for retry");
+		try {
+			const result = await write.execute("write-unicode-bulk", {
+				path: "conflict://*",
+				content: `resolved \ud800\n`,
+			});
+			const details = result.details as { escapedCodeUnits?: number } | undefined;
+			const text = getText(result);
+
+			expect(result.isError).toBe(true);
+			expect(await Bun.file(fileA).text()).toBe(`line 1\nresolved ${String.raw`\uD800`}\nline N\n`);
+			expect(await Bun.file(fileB).text()).toBe(TWO_WAY);
+			expect(details?.escapedCodeUnits).toBe(1);
+			expect(text.match(/Escaped 1 invalid Unicode/g)).toHaveLength(1);
+			expect(text).toContain("registered entries left intact for retry");
+		} finally {
+			writeSpy.mockRestore();
+		}
 	});
 	it("`write conflict://*` errors when no conflicts are registered", async () => {
 		const session = createTestSession(tempDir);

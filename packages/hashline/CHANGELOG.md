@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Made `escapedCodeUnits` a required field on `WriteResult`.
+- Changed `Filesystem.move` from `Promise<void>` to an overloaded content-bearing `Promise<WriteResult>`.
+
 ## [17.0.8] - 2026-07-22
 
 ### Changed

@@ -759,7 +759,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					exists: true,
 				};
 			} catch (error) {
-				if (!isEnoent(error)) throw error;
+				if (!isArchivePathNotFound(error)) throw error;
 			}
 		}
 
@@ -1279,7 +1279,24 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (handler?.write) {
 					if (scheme !== "xd") {
 						enforcePlanModeWrite(this.session, path, { op: "update" });
-						emitWriteProgress(onUpdate, toPersistedEdit(cleanContent).content, path);
+						const prepared = toPersistedEdit(cleanContent);
+						emitWriteProgress(onUpdate, prepared.content, path);
+						await internalRouter.write(path, prepared.content, {
+							cwd: this.session.cwd,
+							signal,
+						});
+						let resultText = `Successfully wrote ${prepared.content.length} bytes to ${path}`;
+						if (stripped) {
+							resultText += "\nNote: auto-stripped hashline display prefixes from content before writing.";
+						}
+						return finalizeEscapeReport(
+							{
+								content: [{ type: "text", text: resultText }],
+								details: {},
+							},
+							prepared.escapedCodeUnits,
+							path,
+						);
 					}
 					let xdResult: AgentToolResult<WriteToolDetails> | undefined;
 					await internalRouter.write(path, cleanContent, {
