@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { getFolderStats } from "../api";
-import { formatCost, formatDurationMs, formatInteger, formatPercent } from "../data/formatters";
+import { formatDurationMs, formatInteger, formatPercent, useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildFolderRows, type FolderRowView } from "../data/view-models";
 import { useTranslation } from "../i18n";
@@ -15,6 +15,7 @@ export interface ProjectsRouteProps {
 
 export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRouteProps) {
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 
 	const {
 		data: foldersData,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { getModelList, getRecentErrors } from "../api";
-import { formatCost, formatInteger, formatRelativeTime } from "../data/formatters";
+import { formatInteger, formatRelativeTime, useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { useTranslation } from "../i18n";
 import type { MessageStats, TimeRange } from "../types";
@@ -17,6 +17,7 @@ export interface ErrorsRouteProps {
 
 export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: ErrorsRouteProps) {
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const [page, setPage] = useState(1);
 	const [modelFilter, setModelFilter] = useState<string | null>(null);
 

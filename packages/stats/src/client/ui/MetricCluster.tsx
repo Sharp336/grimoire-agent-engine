@@ -1,15 +1,14 @@
 import {
 	formatCompact,
-	formatCost,
 	formatDurationMs,
 	formatInteger,
 	formatPercent,
 	formatTokensPerSecond,
+	useFormatCost,
 } from "../data/formatters";
 import { sumConversationTokens } from "../data/view-models";
 import { useLocale, useTranslation } from "../i18n";
 import type { AggregatedStats } from "../types";
-import { useExchangeRate } from "../useExchangeRate";
 
 export interface MetricClusterProps {
 	stats: AggregatedStats;
@@ -19,8 +18,7 @@ export function MetricCluster({ stats }: MetricClusterProps) {
 	const { t } = useTranslation();
 	const { locale } = useLocale();
 	const conversationTokens = sumConversationTokens(stats);
-	// Subscribe to exchange rate updates so CNY formatting stays current
-	useExchangeRate();
+	const formatCost = useFormatCost();
 
 	return (
 		<div className="stats-metric-cluster">

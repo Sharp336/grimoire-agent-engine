@@ -4,7 +4,7 @@ import { Line } from "react-chartjs-2";
 import { getOverviewStats, getRecentRequests } from "../api";
 import { AgentTokenShare } from "../components/AgentTokenShare";
 import { CHART_THEMES } from "../components/chart-shared";
-import { formatCost, formatDurationMs, formatInteger, formatRelativeTime } from "../data/formatters";
+import { formatDurationMs, formatInteger, formatRelativeTime, useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { useTranslation } from "../i18n";
 import type { MessageStats, TimeRange } from "../types";
@@ -20,6 +20,7 @@ export interface OverviewRouteProps {
 
 export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }: OverviewRouteProps) {
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const {
 		data: overview,
 		error: overviewError,

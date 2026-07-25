@@ -1,7 +1,8 @@
 import { formatDistanceToNow } from "date-fns";
 import { zhCN } from "date-fns/locale";
+import { useMemo } from "react";
 import type { Locale } from "../i18n";
-import { getExchangeRate } from "../useExchangeRate";
+import { getExchangeRate, useExchangeRate } from "../useExchangeRate";
 
 export function formatInteger(value: number): string {
 	return value.toLocaleString();
@@ -53,4 +54,27 @@ export function formatBytes(value: number): string {
 	if (value >= 1e6) return `${(value / 1e6).toFixed(1)} MB`;
 	if (value >= 1e3) return `${(value / 1e3).toFixed(1)} KB`;
 	return `${value} B`;
+}
+
+/**
+ * React hook that returns a formatCost function subscribed to exchange-rate changes.
+ * Use this in React components instead of calling formatCost directly to ensure
+ * CNY costs update when the exchange rate is refreshed.
+ */
+export function useFormatCost(): (value: number, digits?: number, locale?: "en" | "zh") => string {
+	const rate = useExchangeRate();
+	return useMemo(() => {
+		return (value: number, digits?: number, locale: "en" | "zh" = "en") => {
+			const isCny = locale === "zh";
+			const actualRate = isCny ? rate : 1;
+			const converted = value * actualRate;
+			const symbol = isCny ? "¥" : "$";
+			if (converted === 0) return `${symbol}0`;
+			const fractionDigits = digits !== undefined ? digits : converted > 0 && converted < 0.01 ? 4 : 2;
+			return `${symbol}${converted.toLocaleString(undefined, {
+				minimumFractionDigits: fractionDigits,
+				maximumFractionDigits: fractionDigits,
+			})}`;
+		};
+	}, [rate]);
 }

@@ -2,8 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getUi, SETTINGS_SCHEMA, TAB_GROUPS, TAB_METADATA } from "../src/config/settings-schema";
 import { i18n } from "../src/i18n";
-import { invalidateSettingDefsCache } from "../src/modes/components/settings-defs";
+import { interceptGroupLabel, interceptTabLabel } from "../src/i18n/interceptor";
+import {
+	getAllSettingDefs,
+	getSettingsForTab,
+	invalidateSettingDefsCache,
+} from "../src/modes/components/settings-defs";
 
 describe("settings i18n integration", () => {
 	let tempDir: string;
@@ -28,7 +34,6 @@ describe("settings i18n integration", () => {
 	});
 
 	test("i18n.language setting exists in schema", async () => {
-		const { SETTINGS_SCHEMA } = await import("../src/config/settings-schema");
 		const setting = (SETTINGS_SCHEMA as Record<string, unknown>)["i18n.language"];
 		expect(setting).toBeDefined();
 		expect((setting as { type: string }).type).toBe("string");
@@ -36,7 +41,6 @@ describe("settings i18n integration", () => {
 	});
 
 	test("i18n.language setting has correct UI metadata", async () => {
-		const { getUi } = await import("../src/config/settings-schema");
 		const ui = getUi("i18n.language");
 		expect(ui).toBeDefined();
 		expect(ui?.tab).toBe("interaction");
@@ -46,7 +50,6 @@ describe("settings i18n integration", () => {
 	});
 
 	test("TAB_METADATA has all required tabs", async () => {
-		const { TAB_METADATA } = await import("../src/config/settings-schema");
 		const requiredTabs = [
 			"appearance",
 			"model",
@@ -66,7 +69,6 @@ describe("settings i18n integration", () => {
 	});
 
 	test("TAB_GROUPS has General group in interaction tab", async () => {
-		const { TAB_GROUPS } = await import("../src/config/settings-schema");
 		expect(TAB_GROUPS.interaction).toContain("General");
 	});
 
@@ -83,8 +85,6 @@ describe("settings i18n integration", () => {
 		i18n.reset(tempDir);
 		await i18n.init();
 
-		const { interceptTabLabel } = await import("../src/i18n/interceptor");
-
 		expect(interceptTabLabel("appearance", "Appearance")).toBe("外观");
 		expect(interceptTabLabel("model", "Model")).toBe("模型");
 		expect(interceptTabLabel("interaction", "Interaction")).toBe("交互");
@@ -96,8 +96,6 @@ describe("settings i18n integration", () => {
 
 		i18n.reset(tempDir);
 		await i18n.init();
-
-		const { interceptTabLabel } = await import("../src/i18n/interceptor");
 
 		// Use a tab key that doesn't exist in any embedded translation
 		// All real tabs (appearance, context, files, shell, etc.) have embedded zh translations
@@ -115,8 +113,6 @@ describe("settings i18n integration", () => {
 		i18n.reset(tempDir);
 		await i18n.init();
 
-		const { interceptGroupLabel } = await import("../src/i18n/interceptor");
-
 		expect(interceptGroupLabel("interaction", "General")).toBe("常规");
 		expect(interceptGroupLabel("interaction", "Input")).toBe("输入");
 		expect(interceptGroupLabel("appearance", "Theme")).toBe("主题");
@@ -127,8 +123,6 @@ describe("settings i18n integration", () => {
 
 		i18n.reset(tempDir);
 		await i18n.init();
-
-		const { interceptGroupLabel } = await import("../src/i18n/interceptor");
 
 		expect(interceptGroupLabel("interaction", "Misc")).toBe("Misc");
 		expect(interceptGroupLabel("interaction", "Experimental")).toBe("Experimental");
@@ -144,7 +138,6 @@ describe("settings i18n integration", () => {
 		i18n.reset(tempDir);
 		await i18n.init();
 
-		const { getAllSettingDefs } = await import("../src/modes/components/settings-defs");
 		const defs = getAllSettingDefs();
 		const themeDarkDef = defs.find(d => d.path === "theme.dark");
 
@@ -161,7 +154,6 @@ describe("settings i18n integration", () => {
 
 		// Must import and call the cache invalidation function since the previous test
 		// cached Chinese translations at module level
-		const { getAllSettingDefs, invalidateSettingDefsCache } = await import("../src/modes/components/settings-defs");
 		invalidateSettingDefsCache();
 
 		const defs = getAllSettingDefs();
@@ -179,7 +171,6 @@ describe("settings i18n integration", () => {
 		i18n.reset(tempDir);
 		await i18n.init();
 
-		const { getSettingsForTab } = await import("../src/modes/components/settings-defs");
 		const interactionSettings = getSettingsForTab("interaction");
 		const langSetting = interactionSettings.find(s => s.path === "i18n.language");
 

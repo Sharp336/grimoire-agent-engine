@@ -1,7 +1,7 @@
-import { buildDocsIndexPayload } from "./generate-docs-index";
-import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { buildDocsIndexPayload } from "./generate-docs-index";
+import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
 export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze(["fastembed", "onnxruntime-node"]);

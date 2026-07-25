@@ -18,7 +18,7 @@ import {
 	TrendEmpty,
 } from "../components/models-table-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
-import { formatCost } from "../data/formatters";
+import { useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildModelPerformanceLookup } from "../data/view-models";
 import { useTranslation } from "../i18n";
@@ -252,6 +252,7 @@ function ModelsTable({
 }) {
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const meta = rangeMeta(timeRange, t);
 
 	const performanceSeriesByKey = useMemo(

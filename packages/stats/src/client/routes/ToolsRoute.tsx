@@ -3,7 +3,7 @@ import { Line } from "react-chartjs-2";
 import { getToolDashboardStats } from "../api";
 import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
-import { formatCompact, formatCost, formatInteger, formatPercent, formatRelativeTime } from "../data/formatters";
+import { formatCompact, formatInteger, formatPercent, formatRelativeTime, useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildToolRows, type ToolRowView } from "../data/view-models";
 import { useTranslation } from "../i18n";
@@ -50,6 +50,7 @@ export function ToolsRoute({ active, range, refreshTrigger }: ToolsRouteProps) {
 
 function ToolsSummaryPanel({ byTool }: { byTool: ToolUsageStats[] }) {
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const totals = useMemo(() => {
 		let calls = 0;
 		let errors = 0;
@@ -253,6 +254,7 @@ function errorPillVariant(errorRate: number): "danger" | "warning" | "success" {
 
 function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const rows = useMemo(() => buildToolRows(byTool), [byTool]);
 
 	const columns = useMemo(
@@ -381,6 +383,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 
 function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const [tool, setTool] = useState<string | null>(null);
 
 	const tools = useMemo(() => [...new Set(byToolModel.map(row => row.tool))].sort(), [byToolModel]);

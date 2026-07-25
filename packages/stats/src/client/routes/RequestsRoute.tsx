@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
 import { getModelList, getRecentRequests } from "../api";
 import {
-	formatCost,
 	formatDurationMs,
 	formatInteger,
 	formatRelativeTime,
 	formatTokensPerSecond,
+	useFormatCost,
 } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { useTranslation } from "../i18n";
@@ -23,6 +23,7 @@ export interface RequestsRouteProps {
 
 export function RequestsRoute({ active, refreshTrigger, onRequestClick }: RequestsRouteProps) {
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const [page, setPage] = useState(1);
 	const [modelFilter, setModelFilter] = useState<string | null>(null);
 

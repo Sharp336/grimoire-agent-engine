@@ -1,7 +1,7 @@
 import { Clock, Coins, Gauge, Hash, Star, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { getRequestDetails } from "../api";
-import { formatCost, formatDurationMs, formatInteger } from "../data/formatters";
+import { formatDurationMs, formatInteger, useFormatCost } from "../data/formatters";
 import { useTranslation } from "../i18n";
 import type { RequestDetails } from "../types";
 import { JsonBlock } from "./JsonBlock";
@@ -15,6 +15,7 @@ export interface RequestDrawerProps {
 
 export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const [details, setDetails] = useState<RequestDetails | null>(null);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<Error | null>(null);

@@ -12,11 +12,11 @@ import {
 } from "../components/chart-shared";
 import {
 	formatCompact,
-	formatCost,
 	formatInteger,
 	formatPercent,
 	formatRelativeTime,
 	formatTokensPerSecond,
+	useFormatCost,
 } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import type {
@@ -68,6 +68,7 @@ export function ProvidersRoute({ active, range, refreshTrigger }: ProvidersRoute
 // ---------------------------------------------------------------------------
 
 function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) {
+	const formatCost = useFormatCost();
 	const grandTotal = useMemo(() => providers.reduce((sum, p) => sum + p.totalTokens, 0), [providers]);
 
 	const columns: DataTableColumn<ProviderAggregate>[] = [
@@ -119,6 +120,7 @@ function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) 
 // ---------------------------------------------------------------------------
 
 function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
+	const formatCost = useFormatCost();
 	const [metric, setMetric] = useState<"tokens" | "cost">("tokens");
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];

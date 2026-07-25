@@ -13,13 +13,13 @@ import {
 	MODEL_COLORS,
 	styleDatasets,
 } from "../components/chart-shared";
-import { formatCost } from "../data/formatters";
+import { formatCost, useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildCostSummary } from "../data/view-models";
 import { useLocale, useTranslation } from "../i18n";
 import type { CostTimeSeriesPoint, TimeRange } from "../types";
 import { AsyncBoundary, Panel, SegmentedControl } from "../ui";
-import { useExchangeRate } from "../useExchangeRate";
+
 import { useSystemTheme } from "../useSystemTheme";
 
 export interface CostsRouteProps {
@@ -54,7 +54,7 @@ export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
 
 function CostOverviewPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 	const { t, locale } = useTranslation();
-	useExchangeRate();
+	const formatCost = useFormatCost();
 	const summary = useMemo(() => buildCostSummary(costSeries), [costSeries]);
 
 	const cards = [
@@ -92,7 +92,7 @@ const BAR_LABEL_COLORS = {
 } as const;
 
 // Inline Chart.js plugin to draw cost value above bars
-function makeBarLabelPlugin(color: string, locale: string): Plugin<"bar"> {
+function makeBarLabelPlugin(color: string, locale: "en" | "zh"): Plugin<"bar"> {
 	return {
 		id: "costBarLabels",
 		afterDatasetsDraw(chart) {
@@ -125,7 +125,7 @@ function makeBarLabelPlugin(color: string, locale: string): Plugin<"bar"> {
 function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 	const { t } = useTranslation();
 	const { locale } = useLocale();
-	useExchangeRate();
+	const formatCost = useFormatCost();
 	const [byModel, setByModel] = useState(false);
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
