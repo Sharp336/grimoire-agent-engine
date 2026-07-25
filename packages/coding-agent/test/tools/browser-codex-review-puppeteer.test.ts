@@ -266,6 +266,63 @@ describe("Puppeteer Codex download adapter", () => {
 			await adapter.dispose();
 		}
 	});
+	it("rejects blocked trigger actions when download setup misses the event deadline", async () => {
+		vi.useFakeTimers();
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
+		const createStarted = Promise.withResolvers<void>();
+		const releaseSession = Promise.withResolvers<DownloadSessionDouble>();
+		const session = new DownloadSessionDouble();
+		let clickCount = 0;
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "https://fixture.test/download",
+				title: async () => "Download fixture",
+				mouse: { click: async () => void clickCount++ },
+			} as never,
+			browser: {
+				target: () => ({
+					createCDPSession: async () => {
+						createStarted.resolve();
+						return await releaseSession.promise;
+					},
+				}),
+			} as never,
+			signal: new AbortController().signal,
+			cwd: ".",
+			captureScreenshot: async () => "",
+		});
+		let clicking: Promise<void> | undefined;
+		let clickOutcome: { status: "fulfilled" } | { status: "rejected"; message: string } | undefined;
+
+		try {
+			const tab = await createCodexBrowserFacade(adapter).tabs.selected();
+			if (!tab) throw new Error("Expected selected Puppeteer tab");
+			const waiting = tab.playwright.waitForEvent("download", { timeoutMs: 10 });
+			clicking = tab.cua.click({ x: 10, y: 20 });
+			void clicking.then(
+				() => {
+					clickOutcome = { status: "fulfilled" };
+				},
+				error => {
+					clickOutcome = { status: "rejected", message: error instanceof Error ? error.message : String(error) };
+				},
+			);
+			await createStarted.promise;
+			vi.advanceTimersByTime(10);
+			await flushMicrotasks();
+			await expect(waiting).rejects.toThrow("playwright.waitForEvent timed out after 10ms");
+			expect(clickOutcome).toEqual({
+				status: "rejected",
+				message: "playwright.waitForEvent timed out after 10ms",
+			});
+			expect(clickCount).toBe(0);
+		} finally {
+			await adapter.dispose();
+			releaseSession.resolve(session);
+			await clicking?.catch(() => undefined);
+		}
+	});
 	it("arms download listeners before enabling browser download behavior", async () => {
 		spyOn(fs, "mkdir").mockResolvedValue(undefined);
 		let session!: DownloadSessionDouble;

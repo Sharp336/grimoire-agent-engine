@@ -611,7 +611,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	#domSnapshotGeneration = 0;
 	#downloadSession: CDPSession | undefined;
 	#downloadSessionPromise: Promise<CDPSession> | undefined;
-	#downloadReadiness: Promise<void> | undefined;
+	readonly #downloadReadiness = new Set<Promise<void>>();
 	#downloadWillBeginHandler: ((event: DownloadWillBeginEvent) => void) | undefined;
 	#downloadProgressHandler: ((event: DownloadProgressEvent) => void) | undefined;
 	#downloadPolicyOwnership: DownloadPolicyOwnership | undefined;
@@ -675,8 +675,9 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (this.#disposed) throw new Error("Browser adapter run has ended");
 		this.#assertTab(operation, args);
 		throwIfAborted(this.#signal);
-		const downloadReadiness = this.#downloadReadiness;
-		if (downloadReadiness && operation !== "playwright.waitForEvent") await downloadReadiness;
+		if (operation !== "playwright.waitForEvent" && this.#downloadReadiness.size > 0) {
+			await Promise.all([...this.#downloadReadiness]);
+		}
 		const result = await this.#dispatch(operation, args);
 		throwIfAborted(this.#signal);
 		return result as T;
@@ -1588,37 +1589,42 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	async #waitForDownload(timeoutMs: number): Promise<{ token: string }> {
 		const pendingDownload = Promise.withResolvers<DownloadRecord>();
+		const readinessResult = Promise.withResolvers<void>();
 		let settled = false;
-		const timer = setTimeout(
-			() =>
-				finish(() => pendingDownload.reject(new Error(`playwright.waitForEvent timed out after ${timeoutMs}ms`))),
-			timeoutMs,
-		);
-		timer.unref();
-		const aborted = () => finish(() => pendingDownload.reject(this.#signal.reason));
-		const waiter: DownloadWaiter = {
-			resolve: value => finish(() => pendingDownload.resolve(value)),
-			reject: reason => finish(() => pendingDownload.reject(reason)),
-		};
-		const finish = (settle: () => void) => {
+		let waiter!: DownloadWaiter;
+		const finish = (settle: () => void, readinessFailure?: { reason: unknown }) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
 			this.#signal.removeEventListener("abort", aborted);
 			this.#downloadWaiters.delete(waiter);
+			if (readinessFailure) readinessResult.reject(readinessFailure.reason);
 			settle();
+		};
+		const timer = setTimeout(() => {
+			const error = new Error(`playwright.waitForEvent timed out after ${timeoutMs}ms`);
+			finish(() => pendingDownload.reject(error), { reason: error });
+		}, timeoutMs);
+		timer.unref();
+		const aborted = () => {
+			const reason = this.#signal.reason;
+			finish(() => pendingDownload.reject(reason), { reason });
+		};
+		waiter = {
+			resolve: value => finish(() => pendingDownload.resolve(value)),
+			reject: reason => finish(() => pendingDownload.reject(reason), { reason }),
 		};
 		this.#signal.addEventListener("abort", aborted, { once: true });
 		this.#downloadWaiters.add(waiter);
 		if (this.#signal.aborted) aborted();
-		const readiness = this.#ensureDownloadSession().then(() => undefined);
-		this.#downloadReadiness = readiness;
-		void readiness
-			.finally(() => {
-				if (this.#downloadReadiness === readiness) this.#downloadReadiness = undefined;
-			})
-			.catch(() => undefined);
-		void readiness.catch(error => waiter.reject(error));
+		const setup = this.#ensureDownloadSession();
+		const readiness = readinessResult.promise;
+		this.#downloadReadiness.add(readiness);
+		void readiness.finally(() => this.#downloadReadiness.delete(readiness)).catch(() => undefined);
+		void setup.then(
+			() => readinessResult.resolve(),
+			error => waiter.reject(error),
+		);
 		const download = await pendingDownload.promise;
 		const token = `download-${Snowflake.next()}`;
 		this.#downloads.set(token, download);
