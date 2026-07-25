@@ -655,6 +655,17 @@ export class SessionManager {
 		return this.#sessionLock;
 	}
 
+	#adoptRetainedSessionLock(source: SessionManager, sessionFile: string): boolean {
+		const lock = source.#sessionLock;
+		if (!lock || lock.handle.lockPath !== lockPathForSession(sessionFile)) return false;
+		if (this.#sessionLock === lock) return true;
+		this.#releaseSessionLock();
+		lock.references++;
+		lock.errorHandlers.add(this.#sessionLockErrorHandler);
+		this.#sessionLock = lock;
+		return true;
+	}
+
 	#releaseSessionLock(): void {
 		const lock = this.#sessionLock;
 		if (!lock) return;
@@ -1328,9 +1339,14 @@ export class SessionManager {
 		return clone;
 	}
 
-	restoreState(snapshot: SessionManagerStateSnapshot): void {
-		if (snapshot.onDisk && snapshot.sessionFile) this.#acquireSessionLock(snapshot.sessionFile);
-		else this.#releaseSessionLock();
+	restoreState(snapshot: SessionManagerStateSnapshot, lockSource?: SessionManager): void {
+		if (snapshot.onDisk && snapshot.sessionFile) {
+			if (!lockSource || !this.#adoptRetainedSessionLock(lockSource, snapshot.sessionFile)) {
+				this.#acquireSessionLock(snapshot.sessionFile);
+			}
+		} else {
+			this.#releaseSessionLock();
+		}
 		this.#closeWriterEventually();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();

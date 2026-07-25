@@ -7659,7 +7659,7 @@ export class AgentSession {
 			}
 			return true;
 		} catch (error) {
-			this.sessionManager.restoreState(previousSessionState);
+			this.sessionManager.restoreState(previousSessionState, bashTransition.detachedManager);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
