@@ -20,7 +20,8 @@ type Scenario =
 	| { kind: "connect-error-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
-	| { kind: "hang-after-turn" };
+	| { kind: "hang-after-turn" }
+	| { kind: "non-2xx-before-turn"; status: number };
 
 let server: http2.Http2Server | undefined;
 let activeBaseUrl: string | undefined;

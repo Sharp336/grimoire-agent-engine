@@ -5,6 +5,7 @@ import { createConnectTransport } from "@connectrpc/connect-node";
 import type { AgentServerMessage } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import { ClientHeartbeatSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import type { BidiRequestId } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/bidi_pb";
+import * as AIError from "../../error";
 import { createProxiedAgent, getProxyForProvider, shouldBypassProxy } from "../../utils/proxy";
 import { buildCursorHeaders } from "./headers";
 import {
@@ -119,6 +120,10 @@ export async function createCursorHttp1Bridge(opts: {
 	let pollUsed = false;
 	let sawDecodedServerMessage = false;
 	let heartbeatTimer: NodeJS.Timeout | undefined;
+	// Bridge-owned controller so dispose/fatal/success close cancels the receive
+	// stream even when the caller signal is still open.
+	const bridgeAbort = new AbortController();
+	const receiveSignal = opts.signal ? AbortSignal.any([opts.signal, bridgeAbort.signal]) : bridgeAbort.signal;
 
 	// Per-wait notification: resolves when a new message is enqueued or on close.
 	let waitResolve: (() => void) | undefined;
@@ -143,6 +148,12 @@ export async function createCursorHttp1Bridge(opts: {
 		if (state.kind === "closed" || state.kind === "closing") return;
 		state = { kind: "closing", reason, error: reason === "fatal" ? error : undefined };
 		activeH1Bridges.delete(bridge);
+		// Cancel the receive stream on every close path. The SSE/poll catch
+		// ignores abort once state is no longer open, so a success close does
+		// not surface a spurious fatal error on the message stream.
+		if (!bridgeAbort.signal.aborted) {
+			bridgeAbort.abort(error ?? new Error(`Bridge closing: ${reason}`));
+		}
 		agent?.destroy();
 
 		if (heartbeatTimer) {
@@ -227,7 +238,7 @@ export async function createCursorHttp1Bridge(opts: {
 
 	// Start SSE consumption and append the initial request.
 	const sseIterable = agentClient.runSSE(create(BidiRequestIdSchema, { requestId: opts.requestId }), {
-		signal: opts.signal,
+		signal: receiveSignal,
 	});
 
 	// Append initial request bytes at seqno 0n.
@@ -301,7 +312,7 @@ export async function createCursorHttp1Bridge(opts: {
 					void startPollFallback(
 						agentClient,
 						bidiRequestId,
-						opts,
+						{ signal: receiveSignal },
 						enqueueMessage,
 						closeBridge,
 						() => state.kind === "open",
@@ -321,7 +332,7 @@ export async function createCursorHttp1Bridge(opts: {
 				void startPollFallback(
 					agentClient,
 					bidiRequestId,
-					opts,
+					{ signal: receiveSignal },
 					enqueueMessage,
 					closeBridge,
 					() => state.kind === "open",
@@ -329,8 +340,10 @@ export async function createCursorHttp1Bridge(opts: {
 				return;
 			}
 			// Fatal inbound failure: seal both directions and propagate the
-			// error so the outer retry supervisor can classify it.
-			const fatal = error instanceof Error ? error : new Error(String(error));
+			// error so the outer retry supervisor can classify it. Auth Connect
+			// codes become CursorCredentialError so credential rotation triggers.
+			const fatal =
+				connectAuthToCursorCredentialError(error) ?? (error instanceof Error ? error : new Error(String(error)));
 			void closeBridge("fatal", fatal);
 		}
 	})();
@@ -341,6 +354,18 @@ export async function createCursorHttp1Bridge(opts: {
 	};
 	activeH1Bridges.add(bridge);
 	return bridge;
+}
+
+/** Map Connect auth codes to CursorCredentialError for credential rotation. */
+function connectAuthToCursorCredentialError(error: unknown): AIError.CursorCredentialError | undefined {
+	if (!(error instanceof ConnectError)) return undefined;
+	if (error.code === Code.Unauthenticated) {
+		return new AIError.CursorCredentialError(error.message, 401);
+	}
+	if (error.code === Code.PermissionDenied) {
+		return new AIError.CursorCredentialError(error.message, 403);
+	}
+	return undefined;
 }
 
 function isRecoverableSSEError(error: unknown): boolean {
@@ -357,7 +382,7 @@ async function startPollFallback(
 	bidiRequestId: BidiRequestId,
 	opts: { signal?: AbortSignal },
 	enqueueMessage: (msg: AgentServerMessage) => void,
-	closeBridge: (reason: "success" | "fatal" | "abort" | "dispose") => Promise<void>,
+	closeBridge: (reason: "success" | "fatal" | "abort" | "dispose", error?: Error) => Promise<void>,
 	isOpen: () => boolean,
 ): Promise<void> {
 	const pollRequest = create(BidiPollRequestSchema, {
@@ -408,7 +433,7 @@ async function startPollFallback(
 		}
 		// Stream ended without eof: still close successfully.
 		await closeBridge("success");
-	} catch {
-		await closeBridge("fatal");
+	} catch (error) {
+		await closeBridge("fatal", error instanceof Error ? error : new Error(String(error)));
 	}
 }

@@ -3,6 +3,7 @@ import type { Interceptor, Transport } from "@connectrpc/connect";
 import { Code, ConnectError, createClient } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-node";
 import { type GetServerConfigResponse, Http2Config } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/server_config_pb";
+import * as AIError from "../../error";
 import { createProxiedAgent, getProxyForProvider, shouldBypassProxy } from "../../utils/proxy";
 import { buildCursorHeaders } from "./headers";
 import { CursorServerConfigService, GetServerConfigRequestSchema } from "./transport-descriptors";
@@ -90,7 +91,7 @@ export async function resolveCursorTransportMode(
 				if (isAuthError(error)) {
 					// Auth failure: evict the cache entry. Do NOT cache neutral.
 					configCache.delete(key);
-					throw error;
+					throw connectAuthToCursorCredentialError(error) ?? error;
 				}
 				// Ordinary failure: cache neutral result.
 				const neutral: ServerConfigResult = { http2Config: Http2Config.UNSPECIFIED };
@@ -207,6 +208,18 @@ function raceFetchWithSignal(
 		},
 	);
 	return result;
+}
+
+/** Map Connect auth codes to CursorCredentialError for credential rotation. */
+function connectAuthToCursorCredentialError(error: unknown): AIError.CursorCredentialError | undefined {
+	if (!(error instanceof ConnectError)) return undefined;
+	if (error.code === Code.Unauthenticated) {
+		return new AIError.CursorCredentialError(error.message, 401);
+	}
+	if (error.code === Code.PermissionDenied) {
+		return new AIError.CursorCredentialError(error.message, 403);
+	}
+	return undefined;
 }
 
 function isAuthError(error: unknown): boolean {

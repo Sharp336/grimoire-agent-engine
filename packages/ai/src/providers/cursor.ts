@@ -479,17 +479,18 @@ async function waitCursorRetry(
 		return;
 	}
 	if (signal?.aborted) throw signal.reason ?? new AIError.AbortError();
-	await new Promise<void>((resolve, reject) => {
-		const onAbort = (): void => {
-			clearTimeout(timer);
-			reject(signal?.reason ?? new AIError.AbortError());
-		};
-		const timer = setTimeout(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, delayMs);
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	const onAbort = (): void => {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+		reject(signal?.reason ?? new AIError.AbortError());
+	};
+	const timer = setTimeout(() => {
+		signal?.removeEventListener("abort", onAbort);
+		resolve();
+	}, delayMs);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	await promise;
 }
 
 /** Map a Connect end-stream error code to an HTTP-equivalent auth status. */
@@ -845,11 +846,12 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 					activeRequest.on("response", headers => {
 						const httpStatus = Number(headers[":status"]);
-						if ((httpStatus === 401 || httpStatus === 403) && !endStreamError) {
-							endStreamError = new AIError.CursorCredentialError(
-								`Cursor HTTP ${httpStatus}`,
-								httpStatus as 401 | 403,
-							);
+						if (!endStreamError && Number.isFinite(httpStatus) && (httpStatus < 200 || httpStatus >= 300)) {
+							if (httpStatus === 401 || httpStatus === 403) {
+								endStreamError = new AIError.CursorCredentialError(`Cursor HTTP ${httpStatus}`, httpStatus);
+							} else {
+								endStreamError = new AIError.ProviderHttpError(`Cursor HTTP ${httpStatus}`, httpStatus);
+							}
 							activeRequest.close();
 						}
 						debugResponseLogPromise = debugSession?.openResponseLog(
