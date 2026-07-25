@@ -706,14 +706,13 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 					normalized,
 					lockPath,
 				);
-			const current = inspectWithRuntime(normalized, rt);
-			if (current.status === "malformed" || !current.record || !sameOwner(current.record, record)) {
+			const current = readRecord(lockPath, normalized);
+			if (current.kind !== "record" || !sameOwner(current.record, record)) {
 				throw new SessionLockError(
 					"not-owner",
 					`Session lock ownership was lost for ${normalized}`,
 					normalized,
 					lockPath,
-					current,
 				);
 			}
 			const next: SessionLockRecord = { ...record, heartbeatAt: rt.now() };
@@ -776,12 +775,3 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 export function lockPathForSession(sessionFile: string): string {
 	return lockPathFor(sessionFile);
 }
-
-export const __internalsForTesting = {
-	parseClaim,
-	defaultProcessStartMarker,
-	defaultProcessProbe,
-	claimPathFor,
-	writeClaim,
-	recoverClaim,
-};

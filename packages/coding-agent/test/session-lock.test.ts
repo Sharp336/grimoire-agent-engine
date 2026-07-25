@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-	__internalsForTesting,
 	acquireSessionLock,
 	inspectSessionLock,
 	lockPathForSession,
@@ -309,7 +308,7 @@ describe("session lock", () => {
 			processStartMarker: "marker",
 			processProbe: probe(false),
 		});
-		const claimPath = __internalsForTesting.claimPathFor(lockPathForSession(session));
+		const claimPath = `${lockPathForSession(session)}.steal`;
 		const claim = {
 			protocolVersion: 1,
 			ownerId: OWNER_B,
@@ -319,16 +318,23 @@ describe("session lock", () => {
 			createdAt: 20_000,
 			sessionFile: lockPathForSession(session).slice(0, -".lock".length),
 		};
-		expect(__internalsForTesting.writeClaim(claimPath, claim as never)).toBe(true);
-		expect(__internalsForTesting.parseClaim(fs.readFileSync(claimPath, "utf8"), session)).not.toBeNull();
+		fs.writeFileSync(claimPath, JSON.stringify(claim), { flag: "wx", mode: 0o600 });
 		expect(() => old.heartbeat()).toThrow(SessionLockError);
 		fs.unlinkSync(claimPath);
 		old.release();
 	});
 
-	it("recovers only dead local orphan claims, never live or unknown claims", () => {
+	it("recovers only dead local orphan claims, never foreign claims", () => {
 		const { session } = fixture();
-		const claimPath = __internalsForTesting.claimPathFor(lockPathForSession(session));
+		const claimPath = `${lockPathForSession(session)}.steal`;
+		const lock = acquireSessionLock(session, {
+			now: () => 20_001,
+			ownerId: OWNER_A,
+			pid: 42,
+			processStartMarker: "marker-a",
+			processProbe: probe(false),
+			hostname: "local",
+		});
 		const claim = {
 			protocolVersion: 1,
 			ownerId: OWNER_B,
@@ -338,18 +344,16 @@ describe("session lock", () => {
 			createdAt: 0,
 			sessionFile: lockPathForSession(session).slice(0, -".lock".length),
 		};
-		const rt = {
-			now: () => 20_001,
-			hostname: "local",
-			processProbe: probe(false),
-		} as never;
-		__internalsForTesting.writeClaim(claimPath, claim as never);
-		__internalsForTesting.recoverClaim(claimPath, session, rt);
+
+		fs.writeFileSync(claimPath, JSON.stringify(claim), { flag: "wx", mode: 0o600 });
+		lock.heartbeat();
 		expect(fs.existsSync(claimPath)).toBe(false);
-		__internalsForTesting.writeClaim(claimPath, { ...claim, hostname: "foreign" } as never);
-		__internalsForTesting.recoverClaim(claimPath, session, rt);
+
+		fs.writeFileSync(claimPath, JSON.stringify({ ...claim, hostname: "foreign" }), { flag: "wx", mode: 0o600 });
+		expect(() => lock.heartbeat()).toThrow(SessionLockError);
 		expect(fs.existsSync(claimPath)).toBe(true);
 		fs.unlinkSync(claimPath);
+		lock.release();
 	});
 
 	it("treats start-marker mismatch and unknown probes as non-stealable", () => {
@@ -372,11 +376,22 @@ describe("session lock", () => {
 		lock.release();
 	});
 
-	it("identifies the current process instance", () => {
-		const marker = __internalsForTesting.defaultProcessStartMarker(process.pid);
-		expect(marker).not.toBeNull();
-		if (!marker) throw new Error("missing process start marker");
-		expect(__internalsForTesting.defaultProcessProbe.isAlive(process.pid, marker)).toBe(true);
+	it("does not probe process liveness during an owner heartbeat", () => {
+		const { session } = fixture();
+		let probeCalls = 0;
+		const lock = acquireSessionLock(session, {
+			processStartMarker: "marker",
+			processProbe: {
+				processStartMarker: () => "marker",
+				isAlive: () => {
+					probeCalls++;
+					return true;
+				},
+			},
+		});
+		lock.heartbeat();
+		expect(probeCalls).toBe(0);
+		lock.release();
 	});
 
 	it("accepts Bun's UUIDv7 owner ids", () => {
