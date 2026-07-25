@@ -580,8 +580,13 @@ fn build_searcher_for_params(params: SearchParams) -> Searcher {
 		} else {
 			0
 		},
+		passthru: false,
+		invert_match: false,
 		multi_line: params.multiline,
-		..pi_grep_core::SearcherSpec::default()
+		max_count: None,
+		null_data: false,
+		text: false,
+		force_convert_binary: false,
 	};
 	pi_grep_core::build_searcher(&spec, pi_grep_core::BinaryMode::Automatic)
 }
@@ -958,9 +963,13 @@ fn build_regex_matcher(
 	let build = |line_terminated: bool| {
 		let spec = pi_grep_core::MatcherSpec {
 			case_insensitive: ignore_case,
+			case_smart: false,
+			word: false,
+			whole_line: false,
+			fixed_strings: false,
 			multi_line: multiline,
+			dot_matches_new_line: false,
 			line_terminator: line_terminated.then_some(b'\n'),
-			..pi_grep_core::MatcherSpec::default()
 		};
 		pi_grep_core::build_matcher(std::slice::from_ref(&pattern), &spec)
 	};
