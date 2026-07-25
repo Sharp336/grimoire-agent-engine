@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Split `tools/gh.ts` into dedicated `gh-pr`, `gh-run`, `gh-search`, and `gh-shared` modules while preserving the `tools/gh` import surface. ([#4552](https://github.com/can1357/oh-my-pi/pull/4552))
+
 ## [16.3.6] - 2026-07-04
 
 ### Changed
