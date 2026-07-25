@@ -312,7 +312,7 @@ const DISARM_NATIVE_FILE_ACTIVATION_SOURCE = `() => {
 	return true;
 }`;
 
-const ELEMENT_INFO_SOURCE = `(x, y) => {
+const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 	const textOf = element => String(element.innerText ?? element.textContent ?? "").replace(/\\s+/g, " ").trim();
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const canonicalState = element => typeof globalThis.__ompCodexAriaState === "function" ? globalThis.__ompCodexAriaState(element) : null;
@@ -390,7 +390,7 @@ const ELEMENT_INFO_SOURCE = `(x, y) => {
 	};
 	let element = deepestElementFromPoint(document, x, y);
 	if (element && accessibilityHidden(element)) return [];
-	while (element && !interactable(element)) element = composedParent(element);
+	if (!includeNonInteractable) while (element && !interactable(element)) element = composedParent(element);
 	if (!element) return [];
 	const text = textOf(element);
 	const ariaName = accessibleName(element);
@@ -563,7 +563,10 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 				});
 			}
 			const target = event.target instanceof Element ? event.target : null;
-			const input = target?.closest('input[type="file"]');
+			const composedTarget = typeof event.composedPath === "function"
+				? event.composedPath().find(candidate => candidate instanceof Element && candidate.closest?.('input[type="file"]'))
+				: null;
+			const input = composedTarget?.closest('input[type="file"]') ?? target?.closest('input[type="file"]');
 			if (!input) return;
 			const nativeActivation = state.nativeActivationTarget === input;
 			if (nativeActivation) state.nativeActivationTarget = null;
@@ -1496,7 +1499,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #elementInfo(args: Readonly<Record<string, unknown>>): Promise<CodexElementInfo[]> {
 		const value = await this.#tab.codexEvaluate<unknown>(
 			ELEMENT_INFO_SOURCE,
-			[numberArg(args, "x"), numberArg(args, "y")],
+			[numberArg(args, "x"), numberArg(args, "y"), args.includeNonInteractable === true],
 			SELECTOR_TIMEOUT_MS,
 		);
 		if (Array.isArray(value)) return value as CodexElementInfo[];

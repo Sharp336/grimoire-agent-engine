@@ -243,7 +243,13 @@ function labelProbe() {
 }
 
 function observerProbe(multiple = false) {
-	type ClickEvent = { target: ElementProbe; defaultPrevented: boolean; isTrusted: boolean; preventDefault(): void };
+	type ClickEvent = {
+		target: ElementProbe;
+		defaultPrevented: boolean;
+		isTrusted: boolean;
+		composedPath?: () => ElementProbe[];
+		preventDefault(): void;
+	};
 	let clickListener: ((event: ClickEvent) => void) | undefined;
 	let clickCapture = false;
 	class ElementProbe {
@@ -303,11 +309,18 @@ function observerProbe(multiple = false) {
 			});
 		},
 	};
-	const fire = (target: ElementProbe, cancelled = false, stopped = false, isTrusted = true) => {
+	const fire = (
+		target: ElementProbe,
+		cancelled = false,
+		stopped = false,
+		isTrusted = true,
+		composedPath?: ElementProbe[],
+	) => {
 		const event: ClickEvent = {
 			target,
 			defaultPrevented: cancelled,
 			isTrusted,
+			composedPath: composedPath ? () => composedPath : undefined,
 			preventDefault() {
 				this.defaultPrevented = true;
 			},
@@ -1469,6 +1482,20 @@ describe("cmux Codex browser review regressions", () => {
 		}
 	});
 
+	it("records a shadow file input from the composed click path", async () => {
+		const probe = observerProbe(true);
+		const adapter = adapterForObserver(probe);
+		await adapter.beginRun();
+
+		try {
+			probe.fire(probe.anchor, false, false, true, [probe.file, probe.anchor]);
+			await Promise.resolve();
+			expect(probe.file.getAttribute("data-omp-codex-file-token")).toMatch(/^file-/);
+		} finally {
+			await adapter.dispose();
+		}
+	});
+
 	it("records native adapter file activation without accepting arbitrary untrusted page events", async () => {
 		const probe = observerProbe(true);
 		const commands: string[] = [];
@@ -1483,6 +1510,7 @@ describe("cmux Codex browser review regressions", () => {
 				Element: probe.ElementProbe,
 			});
 		};
+
 		const { adapter, browser } = adapterAndFacadeFor({
 			codexEvaluate: evaluate,
 			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
@@ -2297,7 +2325,7 @@ describe("cmux Codex browser review regressions", () => {
 		expect(events).toEqual([]);
 	});
 
-	it("keeps elementInfo interactable-only even when metadata is requested", async () => {
+	it("includes non-interactable elements in elementInfo when requested", async () => {
 		const view = { getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }) };
 		for (const [tagName, attributes] of [
 			["H1", { role: "heading" }],
@@ -2325,7 +2353,9 @@ describe("cmux Codex browser review regressions", () => {
 				}),
 			);
 			expect(await current.playwright.elementInfo({ x: 1, y: 1 })).toEqual([]);
-			expect(await current.playwright.elementInfo({ x: 1, y: 1, includeNonInteractable: true })).toEqual([]);
+			expect(await current.playwright.elementInfo({ x: 1, y: 1, includeNonInteractable: true })).toEqual([
+				expect.objectContaining({ tagName: tagName.toLowerCase() }),
+			]);
 		}
 	});
 
