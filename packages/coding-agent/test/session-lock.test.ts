@@ -373,10 +373,11 @@ describe("session lock", () => {
 		expect(fs.existsSync(lockPathForSession(session))).toBe(false);
 	});
 
-	it("serializes a heartbeat against an explicit stale-steal claim", () => {
+	it("skips a heartbeat while another mutation claim is live", () => {
 		const { session } = fixture();
-		const old = acquireSessionLock(session, {
-			now: () => 0,
+		let now = 0;
+		const lock = acquireSessionLock(session, {
+			now: () => now,
 			ownerId: OWNER_A,
 			pid: 42,
 			processStartMarker: "marker",
@@ -393,9 +394,13 @@ describe("session lock", () => {
 			sessionFile: lockPathForSession(session).slice(0, -".lock".length),
 		};
 		fs.writeFileSync(claimPath, JSON.stringify(claim), { flag: "wx", mode: 0o600 });
-		expect(() => old.heartbeat()).toThrow(SessionLockError);
+		now = 1;
+		expect(() => lock.heartbeat()).not.toThrow();
+		expect(inspectSessionLock(session).record?.heartbeatAt).toBe(0);
 		fs.unlinkSync(claimPath);
-		old.release();
+		lock.heartbeat();
+		expect(inspectSessionLock(session).record?.heartbeatAt).toBe(1);
+		lock.release();
 	});
 
 	it("recovers only dead local orphan claims, never foreign claims", () => {
@@ -424,7 +429,7 @@ describe("session lock", () => {
 		expect(fs.existsSync(claimPath)).toBe(false);
 
 		fs.writeFileSync(claimPath, JSON.stringify({ ...claim, hostname: "foreign" }), { flag: "wx", mode: 0o600 });
-		expect(() => lock.heartbeat()).toThrow(SessionLockError);
+		expect(() => lock.heartbeat()).not.toThrow();
 		expect(fs.existsSync(claimPath)).toBe(true);
 		fs.unlinkSync(claimPath);
 		lock.release();

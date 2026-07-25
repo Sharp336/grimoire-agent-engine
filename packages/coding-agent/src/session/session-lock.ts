@@ -756,13 +756,16 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		try {
 			recoverClaim(claimPath, normalized, rt);
 			claimed = writeClaim(claimPath, claim());
-			if (!claimed)
+			if (!claimed) {
+				const current = readRecord(lockPath, normalized);
+				if (current.kind === "record" && sameOwner(current.record, record)) return;
 				throw new SessionLockError(
-					"locked",
-					"Session lock mutation is claimed by another owner",
+					"not-owner",
+					`Session lock ownership was lost for ${normalized}`,
 					normalized,
 					lockPath,
 				);
+			}
 			const current = readRecord(lockPath, normalized);
 			if (current.kind !== "record" || !sameOwner(current.record, record)) {
 				throw new SessionLockError(
