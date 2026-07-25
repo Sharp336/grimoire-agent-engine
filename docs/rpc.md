@@ -189,6 +189,7 @@ that omits a command:
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
+- `{ id?, type: "get_settings", tab?: SettingTab }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
 - `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
 - `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
@@ -456,6 +457,59 @@ The corresponding `get_state` result reports the same computed state:
 {
   "fastModeEnabled": false,
   "fastModeActive": true
+}
+```
+
+### `get_settings` payload
+
+Describes the settings schema. Pass `tab` to scope the result to one settings
+tab; an unknown tab fails with code `invalid_tab` rather than returning an
+empty list. The unscoped response is roughly 90 KB, inside the v1 frame limit.
+
+Metadata is returned for every setting because `SETTINGS_SCHEMA` is compiled-in
+public information. **A configured value is disclosed only when the schema
+marks that setting `rpcReadable`.** That annotation is the only grant, and it
+is never inferred from a setting's name or type, so a newly added setting is
+withheld until someone opts it in deliberately. `secret` is an independent
+deny applied on top: a setting marked both is still withheld.
+
+Initial coverage is deliberately narrow: only the appearance tab's boolean and
+enum settings are marked `rpcReadable`, so every other setting currently
+returns as redacted. Coverage widens by annotating settings in later changes.
+
+Withheld entries carry `redacted: true` and omit both `value` and `configured`:
+whether a credential is configured is user state, not schema metadata.
+`default` is omitted when a setting has no default, so the wire has one shape.
+
+```json
+{
+  "id": "req_3",
+  "type": "response",
+  "command": "get_settings",
+  "success": true,
+  "data": {
+    "settings": [
+      {
+        "path": "colorBlindMode",
+        "type": "boolean",
+        "default": false,
+        "value": true,
+        "configured": true,
+        "ui": {
+          "tab": "appearance",
+          "group": "Display",
+          "label": "Color Blind Mode",
+          "description": "Use a color-blind-safe palette",
+          "secret": false
+        }
+      },
+      {
+        "path": "auth.broker.token",
+        "type": "string",
+        "redacted": true
+      }
+    ]
+  }
 }
 ```
 

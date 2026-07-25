@@ -10,6 +10,8 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
+import type { SettingTab } from "../../config/settings-schema";
+import type { SettingsSnapshot } from "../../config/settings-snapshot";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type {
@@ -1036,6 +1038,18 @@ export class RpcClient {
 		return () => {
 			if (this.#hostUriHandler === handler) this.#hostUriHandler = undefined;
 		};
+	}
+
+	/**
+	 * Describe the settings schema, optionally scoped to one settings tab.
+	 *
+	 * Metadata is returned for every setting; a configured value is included
+	 * only for settings the schema explicitly marks readable over RPC, and the
+	 * rest carry `redacted: true` with no value and no configured status.
+	 */
+	async getSettings(tab?: SettingTab): Promise<SettingsSnapshot> {
+		const response = await this.#send(tab === undefined ? { type: "get_settings" } : { type: "get_settings", tab });
+		return this.#getData(response);
 	}
 
 	/**

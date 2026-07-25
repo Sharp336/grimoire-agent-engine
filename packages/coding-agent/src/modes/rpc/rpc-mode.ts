@@ -49,6 +49,7 @@ import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./h
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { getRpcCapabilityManifest, validateRpcCommand } from "./rpc-command-registry";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
+import { handleGetSettings } from "./rpc-get-settings";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { type RpcOperationHandle, RpcOperationManager } from "./rpc-operations";
@@ -1476,6 +1477,9 @@ export async function runRpcMode(
 				const models = session.getAvailableModels();
 				return success(id, "get_available_models", { models });
 			}
+
+			case "get_settings":
+				return handleGetSettings(session.settings, id, command.tab);
 
 			// =================================================================
 			// Thinking
