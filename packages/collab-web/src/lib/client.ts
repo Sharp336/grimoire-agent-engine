@@ -122,6 +122,8 @@ export class GuestClient {
 	#uiRequestQueue: CollabUiRequest[] = [];
 	#notices: readonly Notice[] = [];
 	#snapshot: GuestSnapshot;
+	/** True after {@link #commit} until the next {@link getSnapshot} materializes. */
+	#snapshotDirty = false;
 
 	/** @throws Error when the link does not parse. */
 	constructor(link: string, displayName: string) {
@@ -167,8 +169,16 @@ export class GuestClient {
 		};
 	}
 
-	/** Cached stable reference; replaced (with fresh collection refs) per applied frame. */
+	/**
+	 * Cached stable reference for `useSyncExternalStore`. Rebuilt only when
+	 * {@link #commit} has marked the cache dirty since the previous read; the
+	 * entries array is re-copied only when `#entriesVersion` advanced.
+	 */
 	getSnapshot(): GuestSnapshot {
+		if (this.#snapshotDirty) {
+			this.#snapshot = this.#buildSnapshot();
+			this.#snapshotDirty = false;
+		}
 		return this.#snapshot;
 	}
 
@@ -316,8 +326,10 @@ export class GuestClient {
 			case "snapshot-chunk": {
 				// Stream transcript fragments into the live snapshot. The host
 				// always closes the train with `final: true`; that flip is what
-				// moves the guest from "waiting" to "live".
-				this.#mutableEntries.push(...frame.entries);
+				// moves the guest from "waiting" to "live". Chunks are capped by
+				// bytes, not entry count — append one-by-one so a large chunk
+				// cannot blow the engine's argument limit via `push(...entries)`.
+				for (const entry of frame.entries) this.#mutableEntries.push(entry);
 				this.#entriesVersion++;
 				if (frame.final) {
 					this.#clearSnapshotProgressTimer();
@@ -525,7 +537,9 @@ export class GuestClient {
 	}
 
 	#commit(): void {
-		this.#snapshot = this.#buildSnapshot();
+		// Defer materialization to getSnapshot so a burst of frames between
+		// renders collapses to one entries copy (when entries changed at all).
+		this.#snapshotDirty = true;
 		for (const listener of this.#listeners) listener();
 	}
 }

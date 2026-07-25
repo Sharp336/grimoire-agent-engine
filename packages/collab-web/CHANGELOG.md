@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Avoid O(n²) per-entry array copies in guest snapshot commits by keeping a mutable entries accumulator and rebuilding the readonly snapshot only when entries change ([#4252](https://github.com/can1357/oh-my-pi/issues/4252))
+- Avoid O(n²) per-entry array copies in the guest client by accumulating into a mutable entries buffer and materializing the readonly snapshot lazily on `getSnapshot` (so a burst of frames collapses to one copy) ([#4252](https://github.com/can1357/oh-my-pi/issues/4252))
 
 
 ## [16.3.0] - 2026-07-02
