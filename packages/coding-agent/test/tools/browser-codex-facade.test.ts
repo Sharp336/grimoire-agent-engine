@@ -136,10 +136,7 @@ async function withCmuxTool(test: (tool: BrowserTool, name: string, calls: RpcCa
 							value: "<main><button id='target'>Target</button><input aria-label='Name'></main>",
 						};
 					}
-					if (
-						typeof params.script === "string" &&
-						params.script.includes("const deepestElementFromPoint")
-					) {
+					if (typeof params.script === "string" && params.script.includes("const deepestElementFromPoint")) {
 						return {
 							value: {
 								tagName: "button",
