@@ -5,7 +5,8 @@ import type { ProviderDefinition } from "./types";
 /**
  * LLM Gateway login (API-key paste). DevPass keys are LLM Gateway keys and use
  * the same endpoint. `/v1/models` is public (returns 200 for any key), so it
- * cannot validate auth — ping chat completions with a cheap model instead.
+ * cannot validate credentials — they surface on the first real request instead
+ * (same approach as Vercel AI Gateway / Cloudflare AI Gateway).
  */
 export const loginLLMGateway = createApiKeyLogin({
 	providerLabel: "LLM Gateway",
@@ -13,12 +14,7 @@ export const loginLLMGateway = createApiKeyLogin({
 	instructions: "Create or copy your LLM Gateway / DevPass API key from the dashboard",
 	promptMessage: "Paste your LLM Gateway API key",
 	placeholder: "llmgtwy_...",
-	validation: {
-		kind: "chat-completions",
-		provider: "LLM Gateway",
-		baseUrl: "https://api.llmgateway.io/v1",
-		model: "gpt-4o-mini",
-	},
+	validation: null,
 });
 
 export const llmGatewayProvider = {

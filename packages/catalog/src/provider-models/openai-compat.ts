@@ -2089,6 +2089,9 @@ export function kiloModelManagerOptions(config?: KiloModelManagerConfig): ModelM
 // 10.7 LLM Gateway (DevPass)
 // ---------------------------------------------------------------------------
 
+// Pseudo router ids from /v1/models (audited 2026-07-25); payload has no type/category field.
+const LLMGATEWAY_PSEUDO_MODEL_IDS = ["custom", "auto"] as const;
+
 export interface LLMGatewayModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -2100,6 +2103,7 @@ export function llmGatewayModelManagerOptions(
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? "https://api.llmgateway.io/v1";
+	const references = createBundledReferenceMap<"openai-completions">("llmgateway");
 	return {
 		providerId: "llmgateway",
 		dynamicModelsAuthoritative: true,
@@ -2120,8 +2124,7 @@ export function llmGatewayModelManagerOptions(
 					const textOutputOnly =
 						outputModalities.length === 0 || outputModalities.every(modality => modality === "text");
 					return (
-						entry.id !== "custom" &&
-						entry.id !== "auto" &&
+						!LLMGATEWAY_PSEUDO_MODEL_IDS.some(id => id === entry.id) &&
 						textOutputOnly &&
 						providers.some(p => isRecord(p) && p.tools === true)
 					);
@@ -2131,17 +2134,19 @@ export function llmGatewayModelManagerOptions(
 					const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
 					const providers = Array.isArray(entry.providers) ? entry.providers : [];
 					const reasoning = providers.some(p => isRecord(p) && p.reasoning === true);
-					const toolsSupported = providers.some(p => isRecord(p) && p.tools === true);
+					const reference = references.get(defaults.id);
+					const fallbackCost = reference?.cost ?? defaults.cost;
+					const prompt = toNumber(pricing?.prompt);
+					const completion = toNumber(pricing?.completion);
 					return {
 						...defaults,
 						name: toModelName(entry.name, defaults.name),
 						reasoning: reasoning || defaults.reasoning,
 						input: toInputCapabilities(architecture?.input_modalities),
-						...(toolsSupported ? {} : { supportsTools: false }),
 						// LLM Gateway pricing is per-token; catalog cost is $/million tokens.
 						cost: {
-							input: (toNumber(pricing?.prompt) ?? 0) * 1_000_000,
-							output: (toNumber(pricing?.completion) ?? 0) * 1_000_000,
+							input: prompt !== undefined ? prompt * 1_000_000 : fallbackCost.input,
+							output: completion !== undefined ? completion * 1_000_000 : fallbackCost.output,
 							cacheRead: (toNumber(pricing?.input_cache_read) ?? 0) * 1_000_000,
 							cacheWrite: (toNumber(pricing?.input_cache_write) ?? 0) * 1_000_000,
 						},
