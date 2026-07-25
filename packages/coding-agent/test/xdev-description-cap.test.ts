@@ -93,5 +93,6 @@ describe("XdevRegistry external description cap", () => {
 		expect(docs).toContain("## Additional devices (docs on demand)");
 		expect(docs).toContain("- xd://mcp__large_catalog_tool_0 —");
 		expect(docs).not.toContain("- xd://mcp__large_catalog_tool_149 —");
+		expect(docs).toMatch(/- \d+ more devices omitted — read xd:\/\/ for the complete inventory\./);
 	});
 });

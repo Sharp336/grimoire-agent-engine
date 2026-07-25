@@ -317,38 +317,56 @@ export class XdevRegistry {
 		const sections: string[] = [];
 		const overflow: Tool[] = [];
 		const inlineGlobs = compileInlineGlobs(inlinePatterns);
+		const tools = this.list();
+		const heading = "## Additional devices (docs on demand)";
+		const footer = `Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`;
+		const omittedLine = (count: number): string =>
+			`- ${count} more devices omitted — read ${XD_URL_PREFIX} for the complete inventory.`;
+		const catalogLength = (lineChars: number, lineCount: number, omitted: number): number =>
+			heading.length +
+			lineChars +
+			(omitted > 0 ? omittedLine(omitted).length : 0) +
+			footer.length +
+			2 +
+			lineCount +
+			(omitted > 0 ? 1 : 0);
+		// Always reserve enough room to point at the complete inventory if the
+		// detailed sections or catalog rows exhaust the remaining budget.
+		const catalogReserve = catalogLength(0, 0, tools.length) + 2;
+		const inlineBudget = XdevRegistry.DOCS_TOTAL_BUDGET - catalogReserve;
 		let used = 0;
-		const fits = (section: string): boolean =>
-			used + (sections.length > 0 ? 2 : 0) + section.length <= XdevRegistry.DOCS_TOTAL_BUDGET;
+		const fits = (length: number, budget = XdevRegistry.DOCS_TOTAL_BUDGET): boolean =>
+			used + (sections.length > 0 ? 2 : 0) + length <= budget;
 		const append = (section: string): void => {
 			used += (sections.length > 0 ? 2 : 0) + section.length;
 			sections.push(section);
 		};
-		for (const tool of this.list()) {
+		for (const tool of tools) {
 			if (!this.#shouldInline(tool, mode, inlineGlobs)) {
 				overflow.push(tool);
 				continue;
 			}
 			const descriptionCap = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 			const docs = renderDocs(tool, "##", descriptionCap);
-			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || !fits(docs)) {
+			if (docs.length > XdevRegistry.DOCS_PER_DEVICE_CAP || !fits(docs.length, inlineBudget)) {
 				overflow.push(tool);
 				continue;
 			}
 			append(docs);
 		}
 		if (overflow.length > 0) {
-			const heading = "## Additional devices (docs on demand)";
-			const footer = `Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`;
 			const lines: string[] = [];
+			let lineChars = 0;
 			for (const tool of overflow) {
 				const maxLength = this.#dynamic.has(tool.name) ? this.#externalDescriptionCap : undefined;
 				const line = `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxLength)}`;
-				const catalog = [heading, ...lines, line, "", footer].join("\n");
-				if (!fits(catalog)) break;
+				const omitted = overflow.length - lines.length - 1;
+				if (!fits(catalogLength(lineChars + line.length, lines.length + 1, omitted))) break;
 				lines.push(line);
+				lineChars += line.length;
 			}
-			if (lines.length > 0) append([heading, ...lines, "", footer].join("\n"));
+			const omitted = overflow.length - lines.length;
+			append([heading, ...lines, ...(omitted > 0 ? [omittedLine(omitted)] : []), "", footer].join("\n"));
 		}
 		return sections.join("\n\n");
 	}
