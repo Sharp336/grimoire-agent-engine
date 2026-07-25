@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { getTranscriptDbPath, logger } from "@oh-my-pi/pi-utils";
+import { escapeLikePattern } from "./history-storage";
 import { type FileEntry, type LabelEntry, SESSION_TAG_PREFIX, type SessionHeader } from "./session-entries";
 import { loadEntriesFromFile } from "./session-loader";
 
@@ -48,12 +49,6 @@ type PreparedChunk = {
 
 const TOOL_USE_CONTENT_CAP = 4096;
 const TOOL_RESULT_CONTENT_CAP = 16_384;
-
-// Identical to HistoryStorage's module-private helper; not exported there and this
-// slice cannot edit history-storage.ts, so the one-liner is duplicated in place.
-function escapeLikePattern(text: string): string {
-	return text.replace(/[\\%_]/g, "\\$&");
-}
 
 function assertNever(value: never): never {
 	throw new Error(`Unexpected value: ${String(value)}`);

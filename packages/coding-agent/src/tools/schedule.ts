@@ -66,22 +66,17 @@ function validateCreateInput(params: ScheduleToolInput): {
 	if (!promptText) {
 		throw new ToolError("prompt is required when creating a schedule.");
 	}
-	const hasDelay = params.delayMs !== undefined;
-	const hasAt = params.atIso !== undefined;
-	if (hasDelay === hasAt) {
-		throw new ToolError("Exactly one of delayMs or atIso must be supplied.");
-	}
-	if (hasDelay && (params.delayMs === undefined || !Number.isInteger(params.delayMs) || params.delayMs < 0)) {
-		throw new ToolError("delayMs must be a non-negative integer.");
-	}
-	if (hasAt && (params.atIso === undefined || params.atIso.trim().length === 0)) {
-		throw new ToolError("atIso must be a non-empty ISO-8601 timestamp.");
-	}
-	return {
+	const input = {
 		delayMs: params.delayMs,
 		atIso: params.atIso,
 		prompt: promptText,
 	};
+	// Reuse the fold's due-time rules so the tool cannot drift from them; the
+	// resolved time is discarded because create/persist resolve against their own
+	// clock, but every rejection surfaces here as a ToolError.
+	const due = resolveScheduleDueAtMs(input, Date.now());
+	if ("error" in due) throw new ToolError(due.error);
+	return input;
 }
 
 function validateCancelInput(params: ScheduleToolInput): string {

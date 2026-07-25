@@ -63,7 +63,7 @@ function assertNever(value: never, message: string): never {
 	throw new MissionWorkspaceError(`${message}: ${JSON.stringify(value)}`);
 }
 
-function toLocalBranchRef(branchName: string): string {
+export function toLocalBranchRef(branchName: string): string {
 	return branchName.startsWith(LOCAL_BRANCH_PREFIX) ? branchName : `${LOCAL_BRANCH_PREFIX}${branchName}`;
 }
 
@@ -108,7 +108,8 @@ function findWorktreeEntry(entries: readonly GitWorktreeEntry[], targetPath: str
 	return entries.find(entry => samePath(entry.path, targetPath));
 }
 
-function isCleanSummary(summary: GitStatusSummary | null): boolean {
+/** A checkout with no staged, unstaged or untracked change. */
+export function isCleanSummary(summary: GitStatusSummary | null): boolean {
 	return summary !== null && summary.staged === 0 && summary.unstaged === 0 && summary.untracked === 0;
 }
 
@@ -423,20 +424,7 @@ export class MissionWorkspaceManager {
 	}
 
 	async release(descriptor: MissionWorkspaceDescriptor): Promise<void> {
-		await git.withRepoLock(descriptor.repoRoot, async () => {
-			switch (descriptor.kind) {
-				case "feature": {
-					await this.#removeFeatureWorkspace(descriptor);
-					return;
-				}
-				case "validator": {
-					await this.#removeValidatorWorkspace(descriptor);
-					return;
-				}
-				default:
-					assertNever(descriptor, "Unknown workspace descriptor kind");
-			}
-		});
+		await git.withRepoLock(descriptor.repoRoot, () => this.#removeWorkspace(descriptor));
 	}
 
 	async releaseIfEmpty(descriptor: MissionWorkspaceDescriptor): Promise<boolean> {
@@ -552,28 +540,24 @@ export class MissionWorkspaceManager {
 		return { kind: "ready", descriptor: { ...descriptor, phase: "ready" } };
 	}
 
-	async #removeFeatureWorkspace(descriptor: MissionFeatureWorkspaceDescriptor): Promise<void> {
+	/**
+	 * Non-forcible removal for either workspace kind. `{ force: false }` makes git
+	 * refuse a worktree holding uncommitted work, and a path that is not a registered
+	 * worktree is never deleted — unowned state is preserved, never reclaimed. Only a
+	 * feature owns a branch; a validator worktree is detached at a recorded head.
+	 */
+	async #removeWorkspace(descriptor: MissionWorkspaceDescriptor): Promise<void> {
 		const entries = await git.worktree.list(descriptor.repoRoot);
 		const entry = findWorktreeEntry(entries, descriptor.path);
 		if (entry) {
 			await git.worktree.remove(descriptor.repoRoot, descriptor.path, { force: false });
 		} else if (await pathExists(descriptor.path)) {
 			throw new MissionWorkspaceError(
-				`Refusing to remove unowned path at ${descriptor.path} during feature release`,
+				`Refusing to remove unowned path at ${descriptor.path} during ${descriptor.kind} release`,
 			);
 		}
-		await git.branch.tryDelete(descriptor.repoRoot, descriptor.branch);
-	}
-
-	async #removeValidatorWorkspace(descriptor: MissionValidatorWorkspaceDescriptor): Promise<void> {
-		const entries = await git.worktree.list(descriptor.repoRoot);
-		const entry = findWorktreeEntry(entries, descriptor.path);
-		if (entry) {
-			await git.worktree.remove(descriptor.repoRoot, descriptor.path, { force: false });
-		} else if (await pathExists(descriptor.path)) {
-			throw new MissionWorkspaceError(
-				`Refusing to remove unowned path at ${descriptor.path} during validator release`,
-			);
+		if (descriptor.kind === "feature") {
+			await git.branch.tryDelete(descriptor.repoRoot, descriptor.branch);
 		}
 	}
 

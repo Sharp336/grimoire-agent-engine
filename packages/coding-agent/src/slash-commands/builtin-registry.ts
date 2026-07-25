@@ -178,6 +178,21 @@ async function runMissionVerb(mission: MissionRuntime, args: string): Promise<st
 	}
 }
 
+/**
+ * `/session tag|untag|tags` semantics, owned in one place so the ACP and TUI hosts
+ * cannot drift. Returns the text to surface; each host decides how to display it.
+ */
+function runSessionTagVerb(manager: SessionManager, verb: "tag" | "untag" | "tags", rest: string): string {
+	if (verb === "tags") {
+		const tags = manager.sessionTags();
+		return tags.length > 0 ? `Tags: ${tags.join(", ")}` : "No tags on this session.";
+	}
+	const name = rest.trim();
+	if (!name) return `Usage: /session ${verb} <name>`;
+	manager.appendSessionTag(name, verb === "tag");
+	return `${verb === "tag" ? "Tagged" : "Untagged"} session: ${name}`;
+}
+
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
 
 function shortDetail(value: string, limit = AUTOCOMPLETE_DETAIL_LIMIT): string {
@@ -1234,16 +1249,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				await handleSessionPinCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			if (verb === "tag" || verb === "untag") {
-				const name = rest.trim();
-				if (!name) return usage(`Usage: /session ${verb} <name>`, runtime);
-				runtime.sessionManager.appendSessionTag(name, verb === "tag");
-				await runtime.output(`${verb === "tag" ? "Tagged" : "Untagged"} session: ${name}`);
-				return commandConsumed();
-			}
-			if (verb === "tags" && !rest) {
-				const tags = runtime.sessionManager.sessionTags();
-				await runtime.output(tags.length > 0 ? `Tags: ${tags.join(", ")}` : "No tags on this session.");
+			if (verb === "tag" || verb === "untag" || (verb === "tags" && !rest)) {
+				await runtime.output(runSessionTagVerb(runtime.sessionManager, verb, rest));
 				return commandConsumed();
 			}
 			if (verb === "map" && !rest) {
@@ -1282,20 +1289,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			if (verb === "tag" || verb === "untag") {
-				const name = rest.trim();
-				if (name) {
-					runtime.ctx.sessionManager.appendSessionTag(name, verb === "tag");
-					runtime.ctx.showStatus(`${verb === "tag" ? "Tagged" : "Untagged"} session: ${name}`);
-				} else {
-					runtime.ctx.showStatus(`Usage: /session ${verb} <name>`);
-				}
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (verb === "tags" && !rest) {
-				const tags = runtime.ctx.sessionManager.sessionTags();
-				runtime.ctx.showStatus(tags.length > 0 ? `Tags: ${tags.join(", ")}` : "No tags on this session.");
+			if (verb === "tag" || verb === "untag" || (verb === "tags" && !rest)) {
+				runtime.ctx.showStatus(runSessionTagVerb(runtime.ctx.sessionManager, verb, rest));
 				runtime.ctx.editor.setText("");
 				return;
 			}

@@ -14,7 +14,7 @@ import {
 import { getTranscriptDbPath } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
-import type { SessionInfo } from "../../session/session-listing";
+import { type SessionInfo, sessionDisplayName } from "../../session/session-listing";
 import { TranscriptIndex } from "../../session/transcript-index";
 import { shortenPath } from "../../tools/render-utils";
 import { DynamicBorder } from "./dynamic-border";
@@ -59,31 +59,6 @@ export function sessionLineageKind(parentRef: string): SessionLineageKind {
 		return "handoff";
 	}
 	return "fork";
-}
-
-function sanitizeSessionName(value: string | undefined): string | undefined {
-	if (!value) return undefined;
-	const firstLine = value.split(/\r?\n/)[0] ?? "";
-	const stripped = firstLine.replace(/[\x00-\x1F\x7F]/g, "");
-	const trimmed = stripped.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
-}
-
-/**
- * Mirrors session-listing's private sessionDisplayName — that helper is not
- * exported and this slice cannot edit session-listing.ts.
- */
-export function sessionDisplayName(info: SessionInfo): string {
-	const title = sanitizeSessionName(info.title);
-	if (title) return title;
-	const first =
-		info.firstMessage && info.firstMessage !== "(no messages)" ? sanitizeSessionName(info.firstMessage) : undefined;
-	if (first) return first;
-	const created = info.created.getTime();
-	const ts = Number.isFinite(created) ? created : info.modified.getTime();
-	const date = new Date(ts);
-	const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-	return `Untitled · ${time}`;
 }
 
 function compareSessionRecency(a: SessionInfo, b: SessionInfo): number {

@@ -1265,17 +1265,7 @@ export class AgentSession {
 					this.sessionManager.appendModeChange(mode, { goal: state.goal });
 				}
 			},
-			sendHiddenMessage: async message => {
-				await this.sendCustomMessage(
-					{
-						customType: message.customType,
-						content: message.content,
-						display: false,
-						attribution: "agent",
-					},
-					{ deliverAs: message.deliverAs },
-				);
-			},
+			sendHiddenMessage: message => this.#sendHiddenMessage(message),
 		});
 		this.#missionRuntime = new MissionRuntime({
 			ownerSessionId: () => this.sessionManager.getSessionId(),
@@ -1283,17 +1273,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			emitUpdated: state => this.#emitSessionEvent({ type: "mission_updated", mission: state }),
 			emitProgress: event => this.#emitSessionEvent({ type: "mission_progress", event }),
-			sendHiddenMessage: async message => {
-				await this.sendCustomMessage(
-					{
-						customType: message.customType,
-						content: message.content,
-						display: false,
-						attribution: "agent",
-					},
-					{ deliverAs: message.deliverAs },
-				);
-			},
+			sendHiddenMessage: message => this.#sendHiddenMessage(message),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
 			// UI and bridge stay private: the delegate is produced as a closure, never stored
@@ -4334,6 +4314,29 @@ export class AgentSession {
 	}
 
 	/**
+	 * Deliver an agent-authored message that never renders in the transcript —
+	 * the shared seam behind GoalRuntime, MissionRuntime and session schedules.
+	 * `triggerTurn` is forwarded as given; `sendCustomMessage` reads it as
+	 * `?? false`, so an absent flag behaves exactly like omitting the option.
+	 */
+	async #sendHiddenMessage(message: {
+		customType: string;
+		content: string;
+		deliverAs?: "steer" | "followUp" | "nextTurn";
+		triggerTurn?: boolean;
+	}): Promise<void> {
+		await this.sendCustomMessage(
+			{
+				customType: message.customType,
+				content: message.content,
+				display: false,
+				attribution: "agent",
+			},
+			{ deliverAs: message.deliverAs, triggerTurn: message.triggerTurn },
+		);
+	}
+
+	/**
 	 * (Re)arm persisted one-shot wakes for the active branch. Called at construction and
 	 * after any branch swap, since `newSession`/`switchSession` replace the entry set the
 	 * pending fold derives from.
@@ -4344,17 +4347,7 @@ export class AgentSession {
 			getEntries: () => this.sessionManager.getBranch(),
 			appendCustomEntry: (customType, data) => this.sessionManager.appendCustomEntry(customType, data),
 			flush: () => this.sessionManager.flush(),
-			sendHiddenMessage: async message => {
-				await this.sendCustomMessage(
-					{
-						customType: message.customType,
-						content: message.content,
-						display: false,
-						attribution: "agent",
-					},
-					{ deliverAs: message.deliverAs, triggerTurn: message.triggerTurn },
-				);
-			},
+			sendHiddenMessage: message => this.#sendHiddenMessage(message),
 		});
 	}
 

@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionEntry } from "../session/session-entries";
 import type {
 	MissionFeature,
@@ -52,10 +53,6 @@ const FEATURE_STATUSES = [
 ] as const satisfies readonly MissionFeatureStatus[];
 
 const VALIDATOR_ROLES = ["scrutiny", "user-testing"] as const satisfies readonly MissionValidatorRole[];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isNonEmptyString(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0;
@@ -332,7 +329,13 @@ function handoffIsSuccessfulImplementation(handoff: MissionHandoff): handoff is 
 	return !handoff.issues.some(issue => issue.severity === "blocking");
 }
 
-function expectedIntegrationNewHead(handoff: MissionWorkerHandoff, expectedOldHead: string): string {
+/**
+ * The integration head a successful implementation handoff must advance to: the
+ * last commit it reported (oldest-first), or the unchanged base for a no-op. The
+ * runtime writes the pending marker with this; the fold rejects any marker that
+ * disagrees, so both sides must derive it here.
+ */
+export function expectedIntegrationNewHead(handoff: MissionWorkerHandoff, expectedOldHead: string): string {
 	if (handoff.commits.length === 0) {
 		return expectedOldHead;
 	}

@@ -48,12 +48,6 @@ function isOwnerExecutable(mode: number): boolean {
 	return (mode & OWNER_EXECUTE) !== 0;
 }
 
-function basenameWithoutExtension(fileName: string): string {
-	const dot = fileName.lastIndexOf(".");
-	if (dot <= 0) return fileName;
-	return fileName.slice(0, dot);
-}
-
 function formatPreviewText(text: string): string {
 	const normalized = replaceTabs(text);
 	const lines = normalized.split("\n");
@@ -186,7 +180,7 @@ export async function loadToolboxTool(
 	source?: ToolboxSource,
 	options?: { describeTimeoutMs?: number },
 ): Promise<LoadToolResult> {
-	const defaultName = basenameWithoutExtension(path.basename(resolvedPath));
+	const defaultName = path.parse(resolvedPath).name;
 
 	let outcome: SpawnOutcome;
 	try {
@@ -251,7 +245,7 @@ async function scanToolboxDir(dir: string, level: "user" | "project"): Promise<C
 		if (!stats.isFile()) continue;
 		if (!isOwnerExecutable(stats.mode)) continue;
 
-		const name = basenameWithoutExtension(entry.name);
+		const name = path.parse(entry.name).name;
 		items.push({
 			name,
 			path: filePath,

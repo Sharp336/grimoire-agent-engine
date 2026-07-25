@@ -48,6 +48,7 @@ import {
 	assertMissionStateInvariants,
 	canAcceptPendingHandoff,
 	cancelUnsatisfiableFeatures,
+	expectedIntegrationNewHead,
 	isMissionTerminal,
 	loadMissionState,
 	nextMissionFeature,
@@ -75,7 +76,7 @@ import {
 	type MissionWorkerHandoff,
 	type MissionWorkspaceDescriptor,
 } from "./types";
-import { MissionWorkspaceManager } from "./workspace";
+import { isCleanSummary, MissionWorkspaceManager, toLocalBranchRef } from "./workspace";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Constants
@@ -94,8 +95,6 @@ export const MISSION_HEARTBEAT_INTERVAL_MS = 15_000;
 
 /** Idle TTL for id-scoped cold revivers registered for mission workers. */
 export const MISSION_WORKER_IDLE_TTL_MS = 30 * 60 * 1000;
-
-const LOCAL_BRANCH_PREFIX = "refs/heads/";
 
 const RESULT_ENUM = ["passed", "failed", "not_run"] as const;
 
@@ -299,14 +298,6 @@ function assertNever(value: never, message: string): never {
 /** Attach the base fields to a progress draft. The union spread is exact by construction. */
 function withProgressBase(draft: MissionProgressDraft, base: MissionProgressEventBase): MissionProgressEvent {
 	return { ...base, ...draft } as MissionProgressEvent;
-}
-
-function toLocalBranchRef(branchName: string): string {
-	return branchName.startsWith(LOCAL_BRANCH_PREFIX) ? branchName : `${LOCAL_BRANCH_PREFIX}${branchName}`;
-}
-
-function isCleanCheckout(summary: { staged: number; unstaged: number; untracked: number } | null): boolean {
-	return summary !== null && summary.staged === 0 && summary.unstaged === 0 && summary.untracked === 0;
 }
 
 /** Truncate untrusted evidence: tabs replaced, capped by the shared preview limits. */
@@ -1159,7 +1150,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 			const parentBranch = await git.branch.current(repoRoot);
 			const summary = await git.status.summary(repoRoot);
 			const headSha = await git.ref.resolve(repoRoot, "HEAD");
-			return { parentBranch, clean: isCleanCheckout(summary), headSha };
+			return { parentBranch, clean: isCleanSummary(summary), headSha };
 		});
 		if (!preflight.parentBranch || !preflight.clean || !preflight.headSha) {
 			logger.info("Mission acceptance preflight refused", {
@@ -1191,7 +1182,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 				const branch = await git.branch.current(repoRoot);
 				const summary = await git.status.summary(repoRoot);
 				const headSha = await git.ref.resolve(repoRoot, "HEAD");
-				if (branch !== repository.parentBranch || !isCleanCheckout(summary) || headSha === null) {
+				if (branch !== repository.parentBranch || !isCleanSummary(summary) || headSha === null) {
 					return "repository_dirty";
 				}
 				const current = await git.ref.resolve(repoRoot, integrationRef);
@@ -1775,8 +1766,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 			throw new MissionRuntimeError(`Feature "${feature.id}" has no feature workspace to integrate.`);
 		}
 		const expectedOldHead = workspace.baseSha;
-		const newHead =
-			handoff.commits.length === 0 ? expectedOldHead : (handoff.commits[handoff.commits.length - 1] as string);
+		const newHead = expectedIntegrationNewHead(handoff, expectedOldHead);
 
 		// Phase one: the intent is durable before the CAS.
 		await this.#withTransitionTail(() =>
@@ -2178,7 +2168,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 			const summary = await git.status.summary(repoRoot);
 			return {
 				branch,
-				clean: isCleanCheckout(summary),
+				clean: isCleanSummary(summary),
 				parentHead: await git.ref.resolve(repoRoot, "HEAD"),
 				integrationHead: await git.ref.resolve(repoRoot, integrationRef),
 			};
@@ -2223,7 +2213,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 				const summary = await git.status.summary(repoRoot);
 				if (
 					branch !== repository.parentBranch ||
-					!isCleanCheckout(summary) ||
+					!isCleanSummary(summary) ||
 					(await git.ref.resolve(repoRoot, "HEAD")) !== parentHead ||
 					(await git.ref.resolve(repoRoot, integrationRef)) !== integrationHead
 				) {
@@ -2235,7 +2225,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 				const afterSummary = await git.status.summary(repoRoot);
 				return (
 					afterBranch === repository.parentBranch &&
-					isCleanCheckout(afterSummary) &&
+					isCleanSummary(afterSummary) &&
 					(await git.ref.resolve(repoRoot, "HEAD")) === integrationHead &&
 					(await git.ref.resolve(repoRoot, integrationRef)) === integrationHead
 				);
@@ -2283,7 +2273,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 			const summary = await git.status.summary(repoRoot);
 			const parentHead = await git.ref.resolve(repoRoot, "HEAD");
 			const integrationHead = await git.ref.resolve(repoRoot, integrationRef);
-			return { branch, clean: isCleanCheckout(summary), parentHead, integrationHead };
+			return { branch, clean: isCleanSummary(summary), parentHead, integrationHead };
 		});
 		const parentHead = observed.parentHead;
 		const integrationHead = observed.integrationHead;
