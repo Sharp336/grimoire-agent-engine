@@ -1541,16 +1541,11 @@ describe("AgentSession message pipeline", () => {
 	it("waits for memory startup when an immediate prompt follows createAgentSession", async () => {
 		const api = "test-memory-startup-ready";
 		const contexts: Context[] = [];
-		let releaseStartup!: () => void;
-		let notifyStartupStarted!: () => void;
-		const startupStarted = new Promise<void>(resolve => {
-			notifyStartupStarted = resolve;
-		});
+		const startupStarted = Promise.withResolvers<void>();
+		const startupRelease = Promise.withResolvers<void>();
 		const start = vi.fn(() => {
-			notifyStartupStarted();
-			return new Promise<void>(resolve => {
-				releaseStartup = resolve;
-			});
+			startupStarted.resolve();
+			return startupRelease.promise;
 		});
 		const promptLifecycle: string[] = [];
 		const beforeAgentStartPrompt = vi.fn<NonNullable<MemoryBackend["beforeAgentStartPrompt"]>>(async () => {
@@ -1617,11 +1612,11 @@ describe("AgentSession message pipeline", () => {
 		});
 		try {
 			const send = session.sendUserMessage("first prompt");
-			await startupStarted;
+			await startupStarted.promise;
 			expect(start).toHaveBeenCalledTimes(1);
 			expect(beforeAgentStartPrompt).not.toHaveBeenCalled();
 
-			releaseStartup();
+			startupRelease.resolve();
 			await send;
 
 			expect(beforeAgentStartPrompt).toHaveBeenCalledWith(
