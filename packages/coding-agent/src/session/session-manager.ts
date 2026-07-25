@@ -1424,11 +1424,26 @@ export class SessionManager {
 	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
 	async dropSession(sessionPath: string): Promise<void> {
 		await this.#drainAndCloseWriter();
-		this.#releaseSessionLock();
+		const resolvedSessionPath = path.resolve(sessionPath);
+		const ownedSessionPath =
+			this.#sessionLock?.handle.lockPath === lockPathForSession(resolvedSessionPath)
+				? this.#sessionLock.handle.record.sessionFile
+				: resolvedSessionPath;
 		try {
-			await this.#storage.deleteSessionWithArtifacts(sessionPath);
-		} catch (err) {
-			if (!isEnoent(err)) throw err;
+			try {
+				await this.#storage.deleteSessionWithArtifacts(ownedSessionPath);
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+			}
+			if (ownedSessionPath !== resolvedSessionPath) {
+				try {
+					await this.#storage.deleteSessionWithArtifacts(resolvedSessionPath);
+				} catch (err) {
+					if (!isEnoent(err)) throw err;
+				}
+			}
+		} finally {
+			this.#releaseSessionLock();
 		}
 	}
 

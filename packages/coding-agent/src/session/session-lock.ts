@@ -164,6 +164,7 @@ function defaultProcessStartMarker(pid: number): string | null {
 				stdin: "ignore",
 				stdout: "pipe",
 				stderr: "ignore",
+				timeout: 3_000,
 			});
 			if (!processInfo.success) return null;
 			const value = processInfo.stdout.toString().trim();
@@ -218,9 +219,13 @@ const defaultProcessProbe: SessionLockProcessProbe = {
 function normalizeSessionFile(sessionFile: string): string {
 	const resolved = path.resolve(sessionFile);
 	try {
-		return path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved));
+		return fs.realpathSync(resolved);
 	} catch {
-		return resolved;
+		try {
+			return path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved));
+		} catch {
+			return resolved;
+		}
 	}
 }
 
@@ -455,33 +460,27 @@ function writeFullyAndSync(fd: number, data: Buffer): void {
 }
 
 function writeExclusive(lockPath: string, record: SessionLockRecord): boolean {
-	const data = serializedRecord(record);
+	const tempPath = `${lockPath}.${record.ownerId}.tmp`;
 	let fd: number | undefined;
-	let created = false;
 	try {
-		fd = fs.openSync(lockPath, "wx", 0o600);
-		created = true;
-		writeFullyAndSync(fd, data);
+		fd = fs.openSync(tempPath, "wx", 0o600);
+		writeFullyAndSync(fd, serializedRecord(record));
 		fs.closeSync(fd);
 		fd = undefined;
-		return true;
-	} catch (error) {
-		if (!created && errorCode(error) === "EEXIST") return false;
-		if (fd !== undefined) {
-			try {
-				fs.closeSync(fd);
-			} catch {
-				// Preserve the original write failure.
-			}
+		try {
+			fs.linkSync(tempPath, lockPath);
+			return true;
+		} catch (error) {
+			if (errorCode(error) === "EEXIST") return false;
+			throw error;
 		}
-		if (created) {
-			try {
-				fs.unlinkSync(lockPath);
-			} catch {
-				// Preserve the original write failure.
-			}
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+		try {
+			fs.unlinkSync(tempPath);
+		} catch {
+			// The temp was already cleaned or is an orphan left by a killed writer.
 		}
-		throw error;
 	}
 }
 

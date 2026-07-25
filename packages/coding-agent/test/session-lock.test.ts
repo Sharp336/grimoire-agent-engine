@@ -271,25 +271,21 @@ describe("session lock", () => {
 		).toBe("malformed");
 	});
 
-	it("keeps the lock path stable when an opened symlink is atomically replaced", () => {
+	it("uses canonical real paths for symlink aliases and preserves 0600 claims", () => {
 		const { dir, session } = fixture();
 		fs.writeFileSync(session, "session");
 		const alias = path.join(dir, "alias.jsonl");
 		fs.symlinkSync(session, alias);
-		const aliasLockPath = lockPathForSession(alias);
+		expect(lockPathForSession(alias)).toBe(lockPathForSession(session));
 		const lock = acquireSessionLock(alias, {
 			ownerId: OWNER_A,
 			pid: 42,
 			processStartMarker: "marker",
 			processProbe: probe(true),
 		});
-		expect(fs.statSync(aliasLockPath).mode & 0o777).toBe(0o600);
-
-		fs.unlinkSync(alias);
-		fs.writeFileSync(alias, "rewritten session");
-		expect(lockPathForSession(alias)).toBe(aliasLockPath);
+		expect(fs.statSync(lockPathForSession(session)).mode & 0o777).toBe(0o600);
 		expect(() =>
-			acquireSessionLock(alias, {
+			acquireSessionLock(session, {
 				ownerId: OWNER_B,
 				pid: 43,
 				processStartMarker: "marker-b",

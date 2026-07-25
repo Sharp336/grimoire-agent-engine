@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { exportFromFile } from "../../src/export/html";
 import { inspectSessionLock, lockPathForSession, SessionLockError } from "../../src/session/session-lock";
 import { SessionManager } from "../../src/session/session-manager";
+import { FileSessionStorage } from "../../src/session/session-storage";
 
 describe("SessionManager persistent lock integration", () => {
 	const dirs: string[] = [];
@@ -79,7 +80,7 @@ describe("SessionManager persistent lock integration", () => {
 		expect(fs.existsSync(lockPath)).toBe(false);
 	});
 
-	it("keeps ownership through an atomic rewrite of an opened symlink", async () => {
+	it("keeps canonical ownership through symlink rewrites and deletion", async () => {
 		const { cwd, sessions } = fixture();
 		const created = SessionManager.create(cwd, sessions);
 		await created.ensureOnDisk();
@@ -87,11 +88,19 @@ describe("SessionManager persistent lock integration", () => {
 		if (!sessionFile) throw new Error("missing session file");
 		await created.close();
 
-		const alias = path.join(path.dirname(sessionFile), "alias.jsonl");
+		const alias = path.join(sessions, "alias.jsonl");
 		fs.symlinkSync(sessionFile, alias);
 		const manager = await SessionManager.open(alias);
-		await manager.setSessionName("rewritten");
+		await manager.rewriteEntries();
+		expect(fs.lstatSync(alias).isSymbolicLink()).toBe(true);
 		await expect(SessionManager.open(alias)).rejects.toBeInstanceOf(SessionLockError);
+		await expect(SessionManager.open(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
+		const managedSessionFile = manager.getSessionFile();
+		if (!managedSessionFile) throw new Error("missing managed session file");
+		await manager.dropSession(managedSessionFile);
+		expect(fs.existsSync(sessionFile)).toBe(false);
+		expect(fs.existsSync(lockPathForSession(sessionFile))).toBe(false);
+		expect(() => fs.lstatSync(alias)).toThrow();
 		await manager.close();
 	});
 
@@ -164,5 +173,35 @@ describe("SessionManager persistent lock integration", () => {
 			renameSpy.mockRestore();
 			await manager.close();
 		}
+	});
+
+	it("holds ownership until session deletion finishes", async () => {
+		const { cwd, sessions } = fixture();
+		let deletionStarted: (() => void) | undefined;
+		let finishDeletion: (() => void) | undefined;
+		const started = new Promise<void>(resolve => {
+			deletionStarted = resolve;
+		});
+		const finish = new Promise<void>(resolve => {
+			finishDeletion = resolve;
+		});
+		class DelayedDeleteStorage extends FileSessionStorage {
+			override async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+				deletionStarted?.();
+				await finish;
+				await super.deleteSessionWithArtifacts(sessionPath);
+			}
+		}
+		const manager = SessionManager.create(cwd, sessions, new DelayedDeleteStorage());
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("missing session file");
+
+		const dropping = manager.dropSession(sessionFile);
+		await started;
+		await expect(SessionManager.open(sessionFile)).rejects.toBeInstanceOf(SessionLockError);
+		finishDeletion?.();
+		await dropping;
+		expect(fs.existsSync(lockPathForSession(sessionFile))).toBe(false);
 	});
 });

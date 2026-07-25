@@ -100,6 +100,15 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 	}
 });
 
+function atomicWriteTarget(fpath: string): string {
+	const resolved = path.resolve(fpath);
+	try {
+		return fs.realpathSync(resolved);
+	} catch {
+		return resolved;
+	}
+}
+
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	#closed = false;
@@ -199,6 +208,7 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	writeTextSync(fpath: string, content: string): void {
+		fpath = atomicWriteTarget(fpath);
 		const dir = path.dirname(fpath);
 		this.ensureDirSync(dir);
 		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
@@ -283,6 +293,7 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		fpath = atomicWriteTarget(fpath);
 		const dir = path.resolve(fpath, "..");
 		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
 		await fs.promises.mkdir(dir, { recursive: true });
