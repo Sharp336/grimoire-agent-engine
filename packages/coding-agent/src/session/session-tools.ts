@@ -92,6 +92,9 @@ export class SessionTools {
 	#xdevRegistry: XdevRegistry | undefined;
 	#mountedXdevToolNames: Set<string>;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
+	/** Serializes {@link applyXdevExternalDescriptionCap}; generation discards stale rebuilds. */
+	#xdevCapApplyChain: Promise<void> = Promise.resolve();
+	#xdevCapApplyGen = 0;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
@@ -149,6 +152,27 @@ export class SessionTools {
 	/** Updates the description cap used by the session-owned xd:// registry. */
 	setXdevExternalDescriptionCap(cap: number): void {
 		this.#xdevRegistry?.setExternalDescriptionCap(cap);
+	}
+
+	/**
+	 * Apply a new external description cap and rebuild the base prompt.
+	 * Concurrent calls are serialized and superseded so a slow rebuild from an
+	 * earlier selection cannot overwrite a later one (settings UI can fire
+	 * multiple changes before the first rebuild finishes).
+	 */
+	async applyXdevExternalDescriptionCap(cap: number): Promise<void> {
+		this.setXdevExternalDescriptionCap(cap);
+		const gen = ++this.#xdevCapApplyGen;
+		const run = this.#xdevCapApplyChain.then(async () => {
+			if (gen !== this.#xdevCapApplyGen) return;
+			await this.refreshBaseSystemPrompt();
+		});
+		// Keep the chain unbroken if a rebuild throws.
+		this.#xdevCapApplyChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		await run;
 	}
 
 	/** Skills currently rendered into the system prompt. */

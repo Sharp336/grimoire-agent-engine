@@ -4004,8 +4004,7 @@ export class AgentSession {
 
 	/** Applies a new external xd:// description cap and rebuilds the active prompt. */
 	async applyXdevExternalDescriptionCap(cap: number): Promise<void> {
-		this.#tools.setXdevExternalDescriptionCap(cap);
-		await this.#tools.refreshBaseSystemPrompt();
+		return this.#tools.applyXdevExternalDescriptionCap(cap);
 	}
 
 	/** Rebuilds the stable base prompt for the current tools and model. */

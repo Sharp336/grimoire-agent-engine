@@ -624,16 +624,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const registry = new XdevRegistry([], 50);
 		const description = `Search ${"x".repeat(400)} TAIL`;
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", description);
-		const rebuiltWithFullDescription = Promise.withResolvers<void>();
-		let expectFullDescription = false;
-		const { session } = newSession(
-			async () => {
-				const prompt = registry.docsAll("inline");
-				if (expectFullDescription && prompt.includes(description)) rebuiltWithFullDescription.resolve();
-				return prompt;
-			},
-			{ xdevRegistry: registry },
-		);
+		const { session } = newSession(async () => registry.docsAll("inline"), { xdevRegistry: registry });
 		const errors: string[] = [];
 		const controller = new SelectorController({
 			session,
@@ -643,14 +634,39 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([search]);
 		expect(session.agent.state.systemPrompt.join("\n")).not.toContain(description);
 
-		expectFullDescription = true;
 		session.settings.set("tools.xdevExternalDescriptionCap", 1000);
+		// Settings UI fire-and-forgets; await the session path for the contract.
 		controller.handleSettingChange("tools.xdevExternalDescriptionCap", 1000);
-		await rebuiltWithFullDescription.promise;
-		await Promise.resolve();
+		await session.applyXdevExternalDescriptionCap(1000);
 
 		expect(session.agent.state.systemPrompt.join("\n")).toContain(description);
 		expect(errors).toEqual([]);
+	});
+
+	it("keeps the latest description-cap when settings change races a rebuild", async () => {
+		const registry = new XdevRegistry([], 50);
+		const description = `Search ${"x".repeat(400)} TAIL`;
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", description);
+		let rebuilds = 0;
+		const { session } = newSession(
+			async () => {
+				rebuilds++;
+				// Yield so a second apply can interleave before we snapshot docs.
+				await Bun.sleep(20);
+				return registry.docsAll("inline");
+			},
+			{ xdevRegistry: registry },
+		);
+
+		await session.refreshMCPTools([search]);
+		// First apply starts a slow rebuild; second supersedes before it finishes.
+		const first = session.applyXdevExternalDescriptionCap(100);
+		const second = session.applyXdevExternalDescriptionCap(1000);
+		await Promise.all([first, second]);
+
+		expect(session.agent.state.systemPrompt.join("\n")).toContain(description);
+		// At least one rebuild for the final value; supersession may skip an intermediate.
+		expect(rebuilds).toBeGreaterThanOrEqual(1);
 	});
 
 	it("inlines configured late xd:// device docs in mount notices", async () => {

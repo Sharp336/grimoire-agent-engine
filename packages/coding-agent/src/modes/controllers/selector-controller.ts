@@ -446,6 +446,8 @@ export class SelectorController {
 				});
 				break;
 			case "tools.xdevExternalDescriptionCap":
+				// Fire-and-forget is intentional for settings UI snappiness; the
+				// session serializes concurrent applies so the latest value wins.
 				void this.ctx.session.applyXdevExternalDescriptionCap(Number(value)).catch(err => {
 					this.ctx.showError(`Failed to apply xd:// description cap: ${err}`);
 				});
