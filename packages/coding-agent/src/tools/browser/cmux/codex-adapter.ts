@@ -183,7 +183,7 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		const token = String(payload.token || "");
 		if (!/^[A-Za-z0-9-]+$/.test(token)) throw new Error("Invalid native action token");
 		element.setAttribute("data-omp-codex-action-token", token);
-		return '[data-omp-codex-action-token="' + token + '"]';
+		return 'pierce/[data-omp-codex-action-token="' + token + '"]';
 	}
 	if (command === "armNativeFileActivation") {
 		const isFileInput = String(element.tagName || "").toLowerCase() === "input" && String(element.type || element.getAttribute("type") || "").toLowerCase() === "file";

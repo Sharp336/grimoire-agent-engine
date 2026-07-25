@@ -2650,4 +2650,77 @@ describe("Puppeteer final parity blockers", () => {
 		}
 		expect(requested).toEqual(["https://fixture.test/deep-shadow.png"]);
 	});
+	it("holds chord modifiers while pressing the final CUA key", async () => {
+		const events: string[] = [];
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				keyboard: {
+					down: async (key: string) => void events.push(`down:${key}`),
+					press: async (key: string) => void events.push(`press:${key}`),
+					up: async (key: string) => void events.push(`up:${key}`),
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await adapter.invoke("cua.keypress", { tabId: "1", keys: ["Control", "L"] });
+		await adapter.invoke("dom_cua.keypress", { tabId: "1", keys: ["Shift", "Tab"] });
+		await adapter.dispose();
+
+		expect(events).toEqual(["down:Control", "press:L", "up:Control", "down:Shift", "press:Tab", "up:Shift"]);
+	});
+
+	it("holds pointer keypress modifiers through click, double-click, and scroll", async () => {
+		const events: string[] = [];
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				keyboard: {
+					down: async (key: string) => void events.push(`down:${key}`),
+					up: async (key: string) => void events.push(`up:${key}`),
+				},
+				mouse: {
+					click: async (_x: number, _y: number, options?: { count?: number }) =>
+						void events.push(options?.count === 2 ? "double-click" : "click"),
+					move: async () => void events.push("move"),
+					wheel: async () => void events.push("wheel"),
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await adapter.invoke("cua.click", { tabId: "1", x: 1, y: 2, keypress: ["Control"] });
+		await adapter.invoke("cua.double_click", { tabId: "1", x: 3, y: 4, keypress: ["Alt"] });
+		await adapter.invoke("cua.scroll", {
+			tabId: "1",
+			x: 5,
+			y: 6,
+			scrollX: 0,
+			scrollY: 10,
+			keypress: ["Shift"],
+		});
+		await adapter.dispose();
+
+		expect(events).toEqual([
+			"down:Control",
+			"click",
+			"up:Control",
+			"down:Alt",
+			"double-click",
+			"up:Alt",
+			"down:Shift",
+			"move",
+			"wheel",
+			"up:Shift",
+		]);
+	});
 });

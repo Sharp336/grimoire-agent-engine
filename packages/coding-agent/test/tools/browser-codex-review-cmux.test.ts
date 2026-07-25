@@ -1368,6 +1368,71 @@ describe("cmux Codex browser review regressions", () => {
 		}
 	});
 
+	it("keeps semantic locators inside open shadow roots actionable through native click and type", async () => {
+		const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
+		const host = document.getElementById("host");
+		if (!host) throw new Error("Expected shadow host");
+		const shadowRoot = host.attachShadow({ mode: "open" });
+		shadowRoot.innerHTML = '<button>Shadow action</button><input aria-label="Shadow editor">';
+		const button = shadowRoot.querySelector("button");
+		const input = shadowRoot.querySelector("input");
+		if (!button || !input) throw new Error("Expected shadow controls");
+		for (const element of [button, input]) {
+			Reflect.set(element, "getBoundingClientRect", () => ({ x: 0, y: 0, width: 100, height: 20 }));
+			Reflect.set(element, "scrollIntoView", () => undefined);
+		}
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
+		const nativeSelectors: string[] = [];
+		const resolveNativeSelector = (selector: string): Element | null => {
+			if (!selector.startsWith("pierce/")) return document.querySelector(selector);
+			const css = selector.slice("pierce/".length);
+			const visit = (root: Pick<typeof document, "querySelector" | "querySelectorAll">): Element | null => {
+				const direct = root.querySelector(css);
+				if (direct) return direct;
+				for (const element of root.querySelectorAll("*")) {
+					if (element.shadowRoot) {
+						const nested = visit(element.shadowRoot);
+						if (nested) return nested;
+					}
+				}
+				return null;
+			};
+			return visit(document);
+		};
+		const evaluate = (source: string, args: unknown[]) => runPageEvaluator(source, args, { document, window });
+		const { adapter, browser } = adapterAndFacadeFor({
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async codexWait() {
+				throw new Error("Shadow controls should be immediately actionable");
+			},
+			async click(selector: string) {
+				nativeSelectors.push(selector);
+				if (resolveNativeSelector(selector) !== button)
+					throw new Error("Native click selector missed shadow target");
+			},
+			async type(selector: string, text: string) {
+				nativeSelectors.push(selector);
+				if (resolveNativeSelector(selector) !== input) throw new Error("Native type selector missed shadow target");
+				input.value += text;
+			},
+		});
+
+		try {
+			const current = await selectedTab(browser);
+			await current.playwright.getByText("Shadow action", { exact: true }).click();
+			await current.playwright.getByRole("textbox", { name: "Shadow editor", exact: true }).type("typed");
+
+			expect(nativeSelectors).toHaveLength(2);
+			expect(nativeSelectors.every(selector => selector.startsWith("pierce/"))).toBe(true);
+			expect(input.value).toBe("typed");
+			expect(button.hasAttribute("data-omp-codex-action-token")).toBe(false);
+			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
+		} finally {
+			await adapter.dispose();
+		}
+	});
+
 	it("propagates native overlay rejection without synthetic locator activation", async () => {
 		const commands: string[] = [];
 		const nativeTimeouts: number[] = [];

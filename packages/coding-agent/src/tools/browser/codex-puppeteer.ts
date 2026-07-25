@@ -898,14 +898,16 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			case "cua.get_visible_screenshot":
 				return { data: await this.#screenshot({ tabId: this.currentTabId }) };
 			case "cua.click":
-				await this.#pressKeys(args.keypress);
-				await this.#page.mouse.click(numberArg(args, "x"), numberArg(args, "y"), {
-					button: this.#mouseButton(args.button),
+				await this.#withHeldKeys(args.keypress, async () => {
+					await this.#page.mouse.click(numberArg(args, "x"), numberArg(args, "y"), {
+						button: this.#mouseButton(args.button),
+					});
 				});
 				return undefined;
 			case "cua.double_click":
-				await this.#pressKeys(args.keypress);
-				await this.#page.mouse.click(numberArg(args, "x"), numberArg(args, "y"), { count: 2 });
+				await this.#withHeldKeys(args.keypress, async () => {
+					await this.#page.mouse.click(numberArg(args, "x"), numberArg(args, "y"), { count: 2 });
+				});
 				return undefined;
 			case "cua.drag":
 				await this.#coordinateDrag(args);
@@ -917,9 +919,10 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				await this.#coordinateMove(args);
 				return undefined;
 			case "cua.scroll":
-				await this.#pressKeys(args.keypress);
-				await this.#page.mouse.move(numberArg(args, "x"), numberArg(args, "y"));
-				await this.#page.mouse.wheel({ deltaX: numberArg(args, "scrollX"), deltaY: numberArg(args, "scrollY") });
+				await this.#withHeldKeys(args.keypress, async () => {
+					await this.#page.mouse.move(numberArg(args, "x"), numberArg(args, "y"));
+					await this.#page.mouse.wheel({ deltaX: numberArg(args, "scrollX"), deltaY: numberArg(args, "scrollY") });
+				});
 				return undefined;
 			case "cua.type":
 				await this.#typeIntoActiveElement(stringArg(args, "text"), "cua.type");
@@ -2720,8 +2723,12 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async #pressKeys(rawKeys: unknown): Promise<void> {
-		if (!Array.isArray(rawKeys)) return;
-		for (const key of rawKeys) await this.#page.keyboard.press(key as KeyInput);
+		const keys = Array.isArray(rawKeys) ? (rawKeys as string[]) : [];
+		const finalKey = keys.at(-1);
+		if (!finalKey) return;
+		await this.#withHeldKeys(keys.slice(0, -1), async () => {
+			await this.#page.keyboard.press(finalKey as KeyInput);
+		});
 	}
 
 	async #typeIntoActiveElement(text: string, label: "cua.type" | "dom_cua.type"): Promise<void> {
