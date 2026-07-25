@@ -213,6 +213,8 @@ export class MCPManager {
 	 * crash-storm circuit breaker (see {@link RECONNECT_BURST_LIMIT}).
 	 */
 	#reconnectHistory = new Map<string, number[]>();
+	/** Auth-refresh retries use a separate silent breaker from transport crashes. */
+	#authReconnectHistory = new Map<string, number[]>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
 
@@ -800,6 +802,7 @@ export class MCPManager {
 		this.#serverConfigs.delete(name);
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
+		this.#authReconnectHistory.delete(name);
 
 		const connection = this.#connections.get(name);
 
@@ -849,6 +852,7 @@ export class MCPManager {
 		this.#tools = [];
 		this.#subscribedResources.clear();
 		this.#reconnectHistory.clear();
+		this.#authReconnectHistory.clear();
 	}
 
 	/**
@@ -870,15 +874,15 @@ export class MCPManager {
 	): Promise<MCPServerConnection | null> {
 		if (options?.manual) {
 			this.#reconnectHistory.delete(name);
+			this.#authReconnectHistory.delete(name);
 		}
 
 		const pending = this.#pendingReconnections.get(name);
 		if (pending) return pending;
 
 		const authDriven = options?.authChallenge !== undefined;
-		if (!authDriven && this.#tripReconnectBreaker(name)) {
-			return null;
-		}
+		const breakerTripped = authDriven ? this.#tripAuthReconnectBreaker(name) : this.#tripReconnectBreaker(name);
+		if (breakerTripped) return null;
 
 		const suppressNotices = options?.manual === true || authDriven;
 		if (!suppressNotices) this.#emitReconnectNotice({ type: "reconnecting", serverName: name });
@@ -889,23 +893,36 @@ export class MCPManager {
 	}
 
 	/**
-	 * Record a reconnect attempt against the per-server crash window and report
-	 * whether the circuit breaker is now open. Sliding window: entries older
-	 * than {@link RECONNECT_BURST_WINDOW_MS} are pruned before the new
-	 * timestamp is appended, so a single transient failure ages out cheaply
-	 * but repeated rapid crashes accumulate until the limit is hit.
+	 * Record one attempt in a sliding per-server window and return the number
+	 * still inside {@link RECONNECT_BURST_WINDOW_MS}.
 	 */
-	#tripReconnectBreaker(name: string): boolean {
+	#recordReconnectAttempt(history: Map<string, number[]>, name: string): number {
 		const now = Date.now();
-		const previous = this.#reconnectHistory.get(name) ?? [];
-		const recent = previous.filter(ts => now - ts < RECONNECT_BURST_WINDOW_MS);
+		const recent = (history.get(name) ?? []).filter(ts => now - ts < RECONNECT_BURST_WINDOW_MS);
 		recent.push(now);
-		this.#reconnectHistory.set(name, recent);
+		history.set(name, recent);
+		return recent.length;
+	}
 
-		if (recent.length > RECONNECT_BURST_LIMIT) {
+	#tripAuthReconnectBreaker(name: string): boolean {
+		const attempts = this.#recordReconnectAttempt(this.#authReconnectHistory, name);
+		if (attempts <= RECONNECT_BURST_LIMIT) return false;
+		logger.error("MCP authentication retried too many times; suspending automatic reauthorization", {
+			path: `mcp:${name}`,
+			attempts,
+			windowMs: RECONNECT_BURST_WINDOW_MS,
+		});
+		return true;
+	}
+
+	/** Trip the user-visible transport crash breaker and tear down stale state. */
+	#tripReconnectBreaker(name: string): boolean {
+		const crashes = this.#recordReconnectAttempt(this.#reconnectHistory, name);
+
+		if (crashes > RECONNECT_BURST_LIMIT) {
 			logger.error("MCP server crashed too many times; suspending automatic reconnects", {
 				path: `mcp:${name}`,
-				crashes: recent.length,
+				crashes,
 				windowMs: RECONNECT_BURST_WINDOW_MS,
 			});
 			// Tear down the stale connection so `getConnectionStatus()` no
@@ -923,7 +940,7 @@ export class MCPManager {
 			}
 			this.#pendingConnections.delete(name);
 			this.#pendingToolLoads.delete(name);
-			this.#emitReconnectNotice({ type: "reconnect-suspended", serverName: name, crashes: recent.length });
+			this.#emitReconnectNotice({ type: "reconnect-suspended", serverName: name, crashes });
 			return true;
 		}
 		return false;

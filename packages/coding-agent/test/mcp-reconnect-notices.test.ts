@@ -133,16 +133,31 @@ describe("MCPManager reconnect notices", () => {
 		});
 	});
 
-	it("keeps auth-driven reconnects out of crash notices and accounting", async () => {
+	it("silently bounds auth-driven reconnects without consuming the transport breaker", async () => {
 		const events: McpConnectionStatusEvent[] = [];
 		manager = new MCPManager(tempDir, null);
 		manager.setOnConnectionStatus(event => events.push(event));
 		manager.setReconnectNoticesEnabled(true);
+		await manager.connectServers(
+			{
+				auth: {
+					type: "stdio",
+					command: path.join(tempDir, "missing-auth-mcp"),
+				},
+			},
+			{},
+		);
+		let authAttempts = 0;
+		manager.setAuthHandler(async () => {
+			authAttempts++;
+			throw new Error("simulated authentication failure");
+		});
 		const authChallenge = { wwwAuthenticate: ['Bearer realm="test"'] };
 
 		for (let attempt = 0; attempt < 7; attempt++) {
-			expect(await manager.reconnectServer("missing", { authChallenge })).toBeNull();
+			expect(await manager.reconnectServer("auth", { authChallenge })).toBeNull();
 		}
+		expect(authAttempts).toBe(5);
 		expect(events).toEqual([]);
 
 		expect(await manager.reconnectServer("missing")).toBeNull();
