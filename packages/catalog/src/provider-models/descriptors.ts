@@ -26,6 +26,7 @@ import {
 	kiloModelManagerOptions,
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
+	llmgatewayModelManagerOptions,
 	lmStudioModelManagerOptions,
 	metaModelManagerOptions,
 	mistralModelManagerOptions,
@@ -230,6 +231,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["LITELLM_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => litellmModelManagerOptions(config),
 		catalogDiscovery: { label: "LiteLLM", allowUnauthenticated: true },
+	},
+	{
+		id: "llmgateway",
+		defaultModel: "claude-opus-4-8",
+		envVars: ["LLM_GATEWAY_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => llmgatewayModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "LLM Gateway", allowUnauthenticated: true },
 	},
 	{
 		id: "lm-studio",

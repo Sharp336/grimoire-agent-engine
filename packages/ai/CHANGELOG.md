@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `llmgateway` provider registry definition with API-key login validated against LLM Gateway chat completions.
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed

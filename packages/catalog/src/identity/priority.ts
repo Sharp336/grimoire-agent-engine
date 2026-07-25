@@ -37,6 +37,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"kilo",
 	"vercel-ai-gateway",
 	"cloudflare-ai-gateway",
+	"llmgateway",
 	"nanogpt",
 	"github-copilot",
 ] as const;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `llmgateway` provider with dynamic model discovery from the LLM Gateway `/v1/models` catalog (pricing, context windows, vision, and reasoning metadata), plus `LLM_GATEWAY_BASE_URL` support for self-hosted deployments.
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed

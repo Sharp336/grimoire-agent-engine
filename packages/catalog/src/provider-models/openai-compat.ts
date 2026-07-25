@@ -4102,6 +4102,74 @@ export function nanoGptModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 23.5 LLM Gateway
+// ---------------------------------------------------------------------------
+
+export interface LlmGatewayModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const LLM_GATEWAY_DEFAULT_BASE_URL = "https://api.llmgateway.io/v1";
+
+export function llmgatewayModelManagerOptions(
+	config?: LlmGatewayModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	// LLM Gateway is open source and self-hostable; LLM_GATEWAY_BASE_URL points
+	// discovery and requests at a self-hosted deployment (hosted endpoint if unset).
+	const baseUrl = config?.baseUrl ?? Bun.env.LLM_GATEWAY_BASE_URL ?? LLM_GATEWAY_DEFAULT_BASE_URL;
+	return {
+		providerId: "llmgateway",
+		dynamicModelsAuthoritative: true,
+		cacheProviderId: `llmgateway:${Bun.hash(baseUrl).toString(36)}`,
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "llmgateway",
+				baseUrl,
+				apiKey,
+				filterModel: (entry: OpenAICompatibleModelRecord) => {
+					// Gateway pseudo-entries (`auto` routing, `custom` BYO endpoint) are
+					// not concrete chat models; they report `family: "llmgateway"`.
+					if (entry.family === "llmgateway") {
+						return false;
+					}
+					// Drop non-chat SKUs (image/video generation, embeddings, TTS, OCR).
+					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+					const outputs = Array.isArray(architecture?.output_modalities) ? architecture.output_modalities : [];
+					if (outputs.length > 0 && !outputs.includes("text")) {
+						return false;
+					}
+					const mappings = Array.isArray(entry.providers) ? entry.providers : [];
+					return mappings.some(mapping => isRecord(mapping) && mapping.tools === true);
+				},
+				mapModel: (entry, defaults) => {
+					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+					const inputs = Array.isArray(architecture?.input_modalities) ? architecture.input_modalities : [];
+					const mappings = Array.isArray(entry.providers) ? entry.providers : [];
+					// Per-token USD strings (e.g. "0.15e-6"), same convention as OpenRouter.
+					const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+					return {
+						...defaults,
+						reasoning: mappings.some(mapping => isRecord(mapping) && mapping.reasoning === true),
+						input: inputs.includes("image") ? ["text", "image"] : ["text"],
+						cost: {
+							input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
+							output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
+							cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
+							cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
+						},
+						contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 24. GitHub Copilot
 // ---------------------------------------------------------------------------
 
