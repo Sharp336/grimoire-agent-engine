@@ -1658,6 +1658,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"i18n.exchangeRate": {
+		type: "number",
+		default: undefined,
+		ui: {
+			tab: "interaction",
+			group: "General",
+			label: "Exchange Rate (USD→CNY)",
+			description: "Manual exchange rate for CNY cost display. Leave empty to auto-fetch.",
+		},
+	},
+
 	// Conversation flow
 	steeringMode: {
 		type: "enum",

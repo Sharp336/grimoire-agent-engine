@@ -10,6 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { settings } from "../config/settings";
 import { getLanguage } from "./index";
 
 const CACHE_DIR = path.join(os.homedir(), ".omp", "cache");
@@ -78,26 +79,46 @@ async function saveCache(rate: number): Promise<void> {
 }
 
 /**
+ * Get user-configured exchange rate, if set.
+ */
+function getUserConfiguredRate(): number | undefined {
+	return settings.get("i18n.exchangeRate");
+}
+
+/**
  * Async fetch latest rate from API and update cache.
  * Updates currentRate on success.
  */
 export async function refreshExchangeRate(): Promise<number> {
+	const userRate = getUserConfiguredRate();
+	if (userRate !== undefined && userRate > 0) {
+		currentRate = userRate;
+		return userRate;
+	}
+
 	try {
 		const rate = await fetchRate();
 		currentRate = rate;
 		await saveCache(rate);
 		return rate;
 	} catch (error) {
-		logger.warn("Failed to fetch exchange rate, using current rate", { error });
+		logger.warn("Failed to fetch exchange rate, using fallback", { error });
+		logger.warn("Set i18n.exchangeRate in settings to use a manual rate and avoid network calls");
 		return currentRate;
 	}
 }
 
 /**
  * 获取 USD→CNY 汇率（异步版本，向后兼容）。
- * 优先使用缓存（24h 有效），失败时回退硬编码值。
+ * 优先使用用户配置，其次缓存（24h 有效），失败时回退硬编码值。
  */
 export async function getExchangeRate(): Promise<number> {
+	const userRate = getUserConfiguredRate();
+	if (userRate !== undefined && userRate > 0) {
+		currentRate = userRate;
+		return userRate;
+	}
+
 	const cached = await loadCachedRate();
 	if (cached !== null) {
 		currentRate = cached;
@@ -111,6 +132,7 @@ export async function getExchangeRate(): Promise<number> {
 		return rate;
 	} catch (error) {
 		logger.warn("Failed to fetch exchange rate, using fallback", { error });
+		logger.warn("Set i18n.exchangeRate in settings to use a manual rate and avoid network calls");
 		return FALLBACK_RATE;
 	}
 }
@@ -119,6 +141,11 @@ export async function getExchangeRate(): Promise<number> {
  * Sync exchange rate. Returns current cached value.
  */
 export function getExchangeRateSync(): number {
+	const userRate = getUserConfiguredRate();
+	if (userRate !== undefined && userRate > 0) {
+		currentRate = userRate;
+		return userRate;
+	}
 	ensureCacheInitialized();
 	return currentRate;
 }
