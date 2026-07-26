@@ -8,6 +8,7 @@ import { startServer } from "./server";
 
 export {
 	getDashboardStats,
+	getSkillDashboardStats,
 	getToolDashboardStats,
 	getTotalMessageCount,
 	type SyncOptions,
@@ -32,6 +33,10 @@ export type {
 	ModelPerformancePoint,
 	ModelStats,
 	ModelTimeSeriesPoint,
+	SkillDashboardStats,
+	SkillModelStats,
+	SkillTimeSeriesPoint,
+	SkillUsageStats,
 	TimeSeriesPoint,
 	ToolDashboardStats,
 	ToolModelStats,

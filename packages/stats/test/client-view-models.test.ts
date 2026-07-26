@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { buildAgentTokenShare, buildModelPerformanceLookup } from "../src/client/data/view-models";
-import type { AgentTypeStats, ModelPerformancePoint } from "../src/shared-types";
+import {
+	averageCostPerInvocation,
+	buildAgentTokenShare,
+	buildModelPerformanceLookup,
+	buildSkillRows,
+} from "../src/client/data/view-models";
+import type { AgentTypeStats, ModelPerformancePoint, SkillUsageStats } from "../src/shared-types";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -74,5 +79,33 @@ describe("buildAgentTokenShare", () => {
 		const empty = buildAgentTokenShare([]);
 		expect(empty.totalTokens).toBe(0);
 		expect(empty.segments).toEqual([]);
+	});
+});
+
+describe("buildSkillRows", () => {
+	const base: SkillUsageStats = {
+		skill: "review",
+		calls: 2,
+		errors: 0,
+		argsChars: 0,
+		resultChars: 0,
+		totalTokensShare: 0,
+		outputTokensShare: 0,
+		costShare: 0.009,
+		lastUsed: 0,
+	};
+
+	it("derives average cost per invocation", () => {
+		const rows = buildSkillRows([base]);
+		expect(averageCostPerInvocation(base.costShare, base.calls)).toBe(0.0045);
+		expect(rows[0]?.avgCostPerInvocation).toBe(0.0045);
+	});
+
+	it("returns zero for zero-call rows", () => {
+		const zeroCalls = { ...base, calls: 0 };
+		const rows = buildSkillRows([zeroCalls]);
+		expect(averageCostPerInvocation(zeroCalls.costShare, zeroCalls.calls)).toBe(0);
+		expect(rows[0]?.avgCostPerInvocation).toBe(0);
+		expect(Number.isFinite(rows[0]?.avgCostPerInvocation ?? Number.NaN)).toBe(true);
 	});
 });

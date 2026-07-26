@@ -143,6 +143,8 @@ export interface ToolCallStats {
 	folder: string;
 	/** Tool name */
 	toolName: string;
+	/** Canonical skill name for a read of a skill:// URL, or null */
+	skillName: string | null;
 	/** Model that emitted the call */
 	model: string;
 	/** Provider name */

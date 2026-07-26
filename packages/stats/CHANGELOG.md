@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed provider usage window stats silently showing no data during SQLite contention by installing a five-second busy timeout on read-only agent database connections ([#7300](https://github.com/can1357/oh-my-pi/issues/7300)).
+### Added
+
+- Added a Skills dashboard section for canonical `skill://` read invocation analytics, with range-aware totals, per-model breakdowns, time-series views, additive attributed costs, and average cost per invocation.
 
 ## [17.1.2] - 2026-07-24
 

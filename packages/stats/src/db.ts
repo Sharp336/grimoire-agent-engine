@@ -21,6 +21,9 @@ import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
 	ProviderTimeSeriesPoint,
+	SkillModelStats,
+	SkillTimeSeriesPoint,
+	SkillUsageStats,
 	TimeSeriesPoint,
 	ToolCallStats,
 	ToolModelStats,
@@ -62,7 +65,7 @@ const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
 const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
 const FORK_DEDUPE_KEY = "fork_dedupe_v1";
-const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v1";
+const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v2";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -159,6 +162,7 @@ export async function initDb(): Promise<Database> {
 			tool_call_id TEXT NOT NULL,
 			folder TEXT NOT NULL,
 			tool_name TEXT NOT NULL,
+			skill_name TEXT,
 			model TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			timestamp INTEGER NOT NULL,
@@ -178,6 +182,12 @@ export async function initDb(): Promise<Database> {
 			value TEXT NOT NULL
 		);
 	`);
+
+	const toolCallColumns = db.prepare("PRAGMA table_info(tool_calls)").all() as { name: string }[];
+	if (!toolCallColumns.some(column => column.name === "skill_name")) {
+		db.run("ALTER TABLE tool_calls ADD COLUMN skill_name TEXT");
+	}
+	db.run("CREATE INDEX IF NOT EXISTS idx_tool_calls_skill_timestamp ON tool_calls(skill_name, timestamp)");
 
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
@@ -1512,10 +1522,10 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 
 	const stmt = db.prepare(`
 		INSERT OR IGNORE INTO tool_calls (
-			session_file, entry_id, tool_call_id, folder, tool_name,
+			session_file, entry_id, tool_call_id, folder, tool_name, skill_name,
 			model, provider, timestamp, agent_type, calls_in_turn, args_chars
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM tool_calls
 			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
@@ -1531,6 +1541,7 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 				c.toolCallId,
 				c.folder,
 				c.toolName,
+				c.skillName,
 				c.model,
 				c.provider,
 				c.timestamp,
@@ -1696,6 +1707,107 @@ export function getToolTimeSeries(
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		tool: row.tool_name,
+		calls: row.calls,
+		errors: row.errors,
+	}));
+}
+
+interface SkillAggregateRow {
+	skill_name: string;
+	model?: string;
+	provider?: string;
+	calls: number;
+	errors: number;
+	args_chars: number | null;
+	result_chars: number | null;
+	total_tokens_share: number | null;
+	output_tokens_share: number | null;
+	cost_share: number | null;
+	last_used: number;
+}
+
+function rowToSkillUsage(row: SkillAggregateRow): SkillUsageStats {
+	return {
+		skill: row.skill_name,
+		calls: row.calls,
+		errors: row.errors,
+		argsChars: row.args_chars ?? 0,
+		resultChars: row.result_chars ?? 0,
+		totalTokensShare: row.total_tokens_share ?? 0,
+		outputTokensShare: row.output_tokens_share ?? 0,
+		costShare: row.cost_share ?? 0,
+		lastUsed: row.last_used,
+	};
+}
+
+/** Get skill usage aggregated by canonical skill name. */
+export function getSkillStats(cutoff?: number): SkillUsageStats[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		SELECT t.skill_name, ${TOOL_AGGREGATE_COLUMNS}
+		FROM tool_calls t
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
+		WHERE t.skill_name IS NOT NULL ${hasCutoff ? "AND t.timestamp >= ?" : ""}
+		GROUP BY t.skill_name
+		ORDER BY calls DESC
+	`);
+
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as SkillAggregateRow[];
+	return rows.map(rowToSkillUsage);
+}
+
+/** Get skill usage aggregated by canonical skill name, model, and provider. */
+export function getSkillStatsByModel(cutoff?: number): SkillModelStats[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		SELECT t.skill_name, t.model, t.provider, ${TOOL_AGGREGATE_COLUMNS}
+		FROM tool_calls t
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
+		WHERE t.skill_name IS NOT NULL ${hasCutoff ? "AND t.timestamp >= ?" : ""}
+		GROUP BY t.skill_name, t.model, t.provider
+		ORDER BY calls DESC
+	`);
+
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as SkillAggregateRow[];
+	return rows.map(row => ({
+		...rowToSkillUsage(row),
+		model: row.model ?? "",
+		provider: row.provider ?? "",
+	}));
+}
+
+/** Get canonical skill invocations as a bucketed time series. */
+export function getSkillTimeSeries(
+	days = 14,
+	cutoff?: number | null,
+	bucketMs = 24 * 60 * 60 * 1000,
+): SkillTimeSeriesPoint[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== null;
+	const seriesCutoff = hasCutoff ? (cutoff ?? Date.now() - days * 24 * 60 * 60 * 1000) : 0;
+
+	const stmt = db.prepare(`
+		SELECT
+			(timestamp / ?) * ? as bucket,
+			skill_name,
+			COUNT(*) as calls,
+			SUM(CASE WHEN is_error = 1 THEN 1 ELSE 0 END) as errors
+		FROM tool_calls
+		WHERE skill_name IS NOT NULL ${hasCutoff ? "AND timestamp >= ?" : ""}
+		GROUP BY bucket, skill_name
+		ORDER BY bucket ASC
+	`);
+
+	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const rows = rowsRaw as Array<{ bucket: number; skill_name: string; calls: number; errors: number }>;
+	return rows.map(row => ({
+		timestamp: row.bucket,
+		skill: row.skill_name,
 		calls: row.calls,
 		errors: row.errors,
 	}));

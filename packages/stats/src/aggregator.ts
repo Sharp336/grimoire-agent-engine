@@ -17,6 +17,9 @@ import {
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
+	getSkillStats,
+	getSkillStatsByModel,
+	getSkillTimeSeries,
 	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
@@ -46,6 +49,7 @@ import type {
 	MessageStats,
 	ProviderDashboardStats,
 	RequestDetails,
+	SkillDashboardStats,
 	ToolDashboardStats,
 } from "./types";
 import { computeUsageWindowStats, fetchUsageSnapshots } from "./usage-windows";
@@ -540,6 +544,16 @@ export async function getToolDashboardStats(range?: string | null): Promise<Tool
 	};
 }
 
+/** Get the skills dashboard payload using the active range configuration. */
+export async function getSkillDashboardStats(range?: string | null): Promise<SkillDashboardStats> {
+	await initDb();
+	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
+	return {
+		bySkill: getSkillStats(cutoff ?? undefined),
+		bySkillModel: getSkillStatsByModel(cutoff ?? undefined),
+		series: getSkillTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
+	};
+}
 /**
  * Get the providers dashboard payload: per-provider totals, peak-burn-hours
  * histogram, provider token time series, and subscription-window analytics

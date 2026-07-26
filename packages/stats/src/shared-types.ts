@@ -323,6 +323,54 @@ export interface ToolDashboardStats {
 }
 
 /**
+ * Aggregated usage for a single skill over the active range.
+ * Token/cost fields use the same additive per-tool-call attribution as
+ * {@link ToolUsageStats}; payload fields retain the existing character-count
+ * semantics of the underlying tool-call rows.
+ */
+export interface SkillUsageStats {
+	/** Canonical skill name from a skill:// read URL. */
+	skill: string;
+	/** Number of skill invocations. */
+	calls: number;
+	/** Invocations whose result came back with `isError`. */
+	errors: number;
+	/** Raw serialized argument characters for attributed read calls. */
+	argsChars: number;
+	/** Raw result text characters fed back into context for attributed read calls. */
+	resultChars: number;
+	/** Total provider tokens attributed per invocation share. */
+	totalTokensShare: number;
+	/** Output tokens attributed per invocation share. */
+	outputTokensShare: number;
+	/** Cost (USD) attributed per invocation share. */
+	costShare: number;
+	/** Unix ms of the most recent invocation in range. */
+	lastUsed: number;
+}
+
+/** Per-(skill, model) breakdown with the same attribution as {@link SkillUsageStats}. */
+export interface SkillModelStats extends SkillUsageStats {
+	model: string;
+	provider: string;
+}
+
+/** Skill-invocation time-series point (one bucket per skill). */
+export interface SkillTimeSeriesPoint {
+	timestamp: number;
+	skill: string;
+	calls: number;
+	errors: number;
+}
+
+/** Complete skills dashboard payload. */
+export interface SkillDashboardStats {
+	bySkill: SkillUsageStats[];
+	bySkillModel: SkillModelStats[];
+	series: SkillTimeSeriesPoint[];
+}
+
+/**
  * Aggregated request/token/cost totals for one provider over the active range.
  */
 export interface ProviderAggregate {

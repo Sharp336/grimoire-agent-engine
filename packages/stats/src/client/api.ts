@@ -8,6 +8,7 @@ import type {
 	OverviewStats,
 	ProviderDashboardStats,
 	RequestDetails,
+	SkillDashboardStats,
 	TimeRange,
 	ToolDashboardStats,
 } from "./types";
@@ -106,6 +107,13 @@ export async function getToolDashboardStats(
 	signal?: AbortSignal,
 ): Promise<ToolDashboardStats> {
 	return fetchJson<ToolDashboardStats>(`${API_BASE}/stats/tools?range=${encodeURIComponent(range)}`, { signal });
+}
+
+export async function getSkillDashboardStats(
+	range: TimeRange = "24h",
+	signal?: AbortSignal,
+): Promise<SkillDashboardStats> {
+	return fetchJson<SkillDashboardStats>(`${API_BASE}/stats/skills?range=${encodeURIComponent(range)}`, { signal });
 }
 
 export async function getProviderDashboardStats(

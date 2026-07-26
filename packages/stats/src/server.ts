@@ -14,6 +14,7 @@ import {
 	getRecentErrors,
 	getRecentRequests,
 	getRequestDetails,
+	getSkillDashboardStats,
 	getToolDashboardStats,
 	getTotalMessageCount,
 	syncAllSessions,
@@ -220,6 +221,11 @@ export async function handleApi(req: Request): Promise<Response> {
 
 	if (path === "/api/stats/tools") {
 		const stats = await getToolDashboardStats(range);
+		return Response.json(stats);
+	}
+
+	if (path === "/api/stats/skills") {
+		const stats = await getSkillDashboardStats(range);
 		return Response.json(stats);
 	}
 

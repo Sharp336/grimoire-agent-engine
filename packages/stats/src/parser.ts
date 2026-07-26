@@ -59,6 +59,48 @@ function extractFolderFromPath(sessionPath: string): string {
 	// Convert --work--pi-- to /work/pi
 	return projectDir.replace(/^--/, "/").replace(/--/g, "/");
 }
+/**
+ * Strip the selector suffix accepted by the read tool from an internal URL.
+ * This mirrors the coding-agent splitter locally so stats does not depend on
+ * its private utility.
+ */
+const INTERNAL_URL_SELECTOR_PART_RE =
+	/^(?:raw|conflicts|L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?(?:,L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?)*|-\d+(?:[-+]\d+)?)$/i;
+
+function stripSkillUrlSelector(rawPath: string): string {
+	let cleanPath = rawPath;
+	const schemeEnd = "skill://".length;
+	while (true) {
+		const colon = cleanPath.lastIndexOf(":");
+		if (colon < schemeEnd) break;
+		const tail = cleanPath.slice(colon + 1);
+		if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
+		cleanPath = cleanPath.slice(0, colon);
+	}
+	return cleanPath;
+}
+
+function extractSkillName(tool: ToolCall): string | null {
+	if (tool.name !== "read" || typeof tool.arguments?.path !== "string") return null;
+	const rawPath = tool.arguments.path;
+	if (!rawPath.startsWith("skill://")) return null;
+	const cleanPath = stripSkillUrlSelector(rawPath);
+	const authorityStart = "skill://".length;
+	const slash = cleanPath.indexOf("/", authorityStart);
+	const query = cleanPath.indexOf("?", authorityStart);
+	const hash = cleanPath.indexOf("#", authorityStart);
+	let authorityEnd = cleanPath.length;
+	if (slash !== -1 && slash < authorityEnd) authorityEnd = slash;
+	if (query !== -1 && query < authorityEnd) authorityEnd = query;
+	if (hash !== -1 && hash < authorityEnd) authorityEnd = hash;
+	const rawName = cleanPath.slice(authorityStart, authorityEnd);
+	if (rawName.length === 0) return null;
+	try {
+		return decodeURIComponent(rawName);
+	} catch {
+		return rawName;
+	}
+}
 
 /**
  * Check if an entry is an assistant message.
@@ -267,6 +309,7 @@ function extractToolCalls(
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
+			skillName: extractSkillName(block),
 		};
 	});
 }
