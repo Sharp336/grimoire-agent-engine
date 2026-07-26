@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { withFileLock } from "@oh-my-pi/pi-coding-agent/config/file-lock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
@@ -855,6 +856,145 @@ describe("Puppeteer Codex download adapter", () => {
 		expect(finalDefaultCalls[0]?.params).toEqual({ behavior: "default", eventsEnabled: false });
 	});
 
+	it("keeps shared download setup alive when only its first caller aborts", async () => {
+		const endpoint = `ws://fixture.test/devtools/browser/${crypto.randomUUID()}`;
+		const identity = new Bun.CryptoHasher("sha256").update(endpoint).digest("hex");
+		const downloadDirectory = path.join(os.tmpdir(), "oh-my-pi-codex-downloads", identity);
+		const stateRoot = `${downloadDirectory}.policy`;
+		const lockEntered = Promise.withResolvers<void>();
+		const releaseLock = Promise.withResolvers<void>();
+		const blocker = withFileLock(stateRoot, async () => {
+			lockEntered.resolve();
+			await releaseLock.promise;
+		});
+		await lockEntered.promise;
+
+		const sessions: DownloadSessionDouble[] = [];
+		const allowConfigured = Promise.withResolvers<void>();
+		const browser = {
+			wsEndpoint: () => endpoint,
+			target: () => ({
+				createCDPSession: async () => {
+					let session!: DownloadSessionDouble;
+					session = new DownloadSessionDouble(async (method, params) => {
+						if (session.detachCount > 0) throw new Error("shared setup session detached early");
+						if (method === "Browser.setDownloadBehavior" && params?.behavior === "allowAndName") {
+							allowConfigured.resolve();
+						}
+					});
+					sessions.push(session);
+					return session;
+				},
+			}),
+		} as never;
+		const firstController = new AbortController();
+		const secondController = new AbortController();
+		const makeAdapter = (controller: AbortController) =>
+			new PuppeteerCodexBrowserAdapter({
+				currentTabId: "1",
+				page: { url: () => "about:blank", title: async () => "Shared setup" } as never,
+				browser,
+				signal: controller.signal,
+				cwd: "/tmp/browser-contract",
+				captureScreenshot: async () => "",
+			});
+		const first = makeAdapter(firstController);
+		const second = makeAdapter(secondController);
+		try {
+			const firstTab = await createCodexBrowserFacade(first).tabs.selected();
+			const secondTab = await createCodexBrowserFacade(second).tabs.selected();
+			if (!firstTab || !secondTab) throw new Error("Expected selected tabs");
+			const firstWait = firstTab.playwright.waitForEvent("download", { timeoutMs: 1_000 });
+			const secondWait = secondTab.playwright.waitForEvent("download", { timeoutMs: 1_000 });
+			while (sessions.length < 2) await flushMicrotasks();
+			await Promise.all(sessions.map(session => session.downloadListenerRegistered.promise));
+			await flushMicrotasks();
+
+			const firstReason = new Error("first adapter stopped");
+			firstController.abort(firstReason);
+			await expect(firstWait).rejects.toThrow(firstReason.message);
+			expect(
+				await Promise.race([
+					secondWait.then(
+						() => "settled",
+						() => "settled",
+					),
+					Bun.sleep(20).then(() => "pending"),
+				]),
+			).toBe("pending");
+
+			releaseLock.resolve();
+			await blocker;
+			expect(
+				await Promise.race([allowConfigured.promise.then(() => "configured"), Bun.sleep(500).then(() => "stuck")]),
+			).toBe("configured");
+			for (const session of sessions) {
+				session.emit("Browser.downloadWillBegin", { guid: "shared-download", suggestedFilename: "shared.txt" });
+			}
+			const download = await secondWait;
+			expect("path" in download).toBe(true);
+		} finally {
+			releaseLock.resolve();
+			await blocker.catch(() => undefined);
+			await Promise.all([first.dispose(), second.dispose()]);
+			await fs.rm(stateRoot, { recursive: true, force: true });
+			await fs.rm(downloadDirectory, { recursive: true, force: true });
+		}
+	}, 10_000);
+
+	it("stops the lease heartbeat when bounded release locking fails", async () => {
+		vi.useFakeTimers();
+		const endpoint = `ws://fixture.test/devtools/browser/${crypto.randomUUID()}`;
+		const identity = new Bun.CryptoHasher("sha256").update(endpoint).digest("hex");
+		const downloadDirectory = path.join(os.tmpdir(), "oh-my-pi-codex-downloads", identity);
+		const stateRoot = `${downloadDirectory}.policy`;
+		const allowConfigured = Promise.withResolvers<void>();
+		const session = new DownloadSessionDouble(async (method, params) => {
+			if (method === "Browser.setDownloadBehavior" && params?.behavior === "allowAndName") allowConfigured.resolve();
+		});
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: { url: () => "about:blank", title: async () => "Lease heartbeat" } as never,
+			browser: {
+				wsEndpoint: () => endpoint,
+				target: () => ({ createCDPSession: async () => session }),
+			} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+		const tab = await createCodexBrowserFacade(adapter).tabs.selected();
+		if (!tab) throw new Error("Expected selected tab");
+		const waiting = tab.playwright.waitForEvent("download", { timeoutMs: 60_000 }).catch(() => undefined);
+		await allowConfigured.promise;
+		const leaseDirectory = path.join(stateRoot, "leases");
+		const leaseName = (await fs.readdir(leaseDirectory)).find(name => name.endsWith(".lease"));
+		if (!leaseName) throw new Error("Expected policy lease");
+		const leasePath = path.join(leaseDirectory, leaseName);
+		const lockEntered = Promise.withResolvers<void>();
+		const releaseLock = Promise.withResolvers<void>();
+		const blocker = withFileLock(stateRoot, async () => {
+			lockEntered.resolve();
+			await releaseLock.promise;
+		});
+		await lockEntered.promise;
+		const utimes = spyOn(fs, "utimes");
+		spyOn(Bun, "sleep").mockResolvedValue(undefined);
+		try {
+			await adapter.dispose();
+			utimes.mockClear();
+			vi.advanceTimersByTime(10_000);
+			await flushMicrotasks();
+			expect(utimes.mock.calls.filter(([target]) => String(target) === leasePath)).toHaveLength(0);
+		} finally {
+			releaseLock.resolve();
+			await blocker.catch(() => undefined);
+			await waiting;
+			await fs.rm(stateRoot, { recursive: true, force: true });
+			await fs.rm(downloadDirectory, { recursive: true, force: true });
+		}
+	}, 20_000);
+
 	it("derives a stable SHA-256 download-policy identity from the browser endpoint", async () => {
 		const allowConfigured = Promise.withResolvers<void>();
 		const session = new DownloadSessionDouble(async (method, params) => {
@@ -1627,6 +1767,31 @@ describe("Puppeteer final parity blockers", () => {
 			"locator.innerText resolved to 2 elements; use first() or nth()",
 		);
 		expect(disposals).toBe(4);
+		await adapter.dispose();
+	});
+
+	it("rejects innerText reads from non-HTMLElement targets", async () => {
+		const svg = { textContent: "Vector" };
+		const handle = {
+			evaluate: async (reader: (element: unknown) => unknown) => reader(svg),
+			dispose: async () => undefined,
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: { url: () => "https://fixture.test/current", $$: async () => [handle] } as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await expect(
+			adapter.invoke("locator.innerText", {
+				tabId: "1",
+				locator: { kind: "css", selector: "svg" },
+				timeoutMs: 100,
+			}),
+		).rejects.toThrow("locator.innerText requires an HTMLElement");
 		await adapter.dispose();
 	});
 

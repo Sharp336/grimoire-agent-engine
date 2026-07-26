@@ -1,18 +1,18 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 
 export interface FileLockOptions {
 	staleMs?: number;
 	retries?: number;
 	retryDelayMs?: number;
+	heartbeatMs?: number;
+	signal?: AbortSignal;
 }
 
-const DEFAULT_OPTIONS: Required<FileLockOptions> = {
-	staleMs: 10_000,
-	retries: 50,
-	retryDelayMs: 100,
-};
+const DEFAULT_STALE_MS = 10_000;
+const DEFAULT_RETRIES = 50;
+const DEFAULT_RETRY_DELAY_MS = 100;
 
 interface LockInfo {
 	pid: number;
@@ -38,6 +38,21 @@ async function readLockInfo(lockPath: string): Promise<LockInfo | null> {
 	}
 }
 
+function getHeartbeatPath(lockPath: string, token: string): string {
+	return `${lockPath}/heartbeat-${token}`;
+}
+
+async function startLockHeartbeat(lockPath: string, token: string, heartbeatMs: number): Promise<() => void> {
+	const heartbeatPath = getHeartbeatPath(lockPath, token);
+	await Bun.write(heartbeatPath, "");
+	const heartbeat = setInterval(() => {
+		const now = new Date();
+		void fs.utimes(heartbeatPath, now, now).catch(() => undefined);
+	}, heartbeatMs);
+	heartbeat.unref();
+	return () => clearInterval(heartbeat);
+}
+
 function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -51,8 +66,14 @@ async function isLockStale(lockPath: string, staleMs: number): Promise<boolean> 
 	const info = await readLockInfo(lockPath);
 	if (info) {
 		if (!isProcessAlive(info.pid)) return true;
-		if (Date.now() - info.timestamp > staleMs) return true;
-		return false;
+		let heartbeatAt = info.timestamp;
+		try {
+			const stat = await fs.stat(getHeartbeatPath(lockPath, info.token));
+			heartbeatAt = Math.max(heartbeatAt, stat.mtimeMs);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		return Date.now() - heartbeatAt > staleMs;
 	}
 
 	// No info file. Either the lock holder is between mkdir and writeLockInfo
@@ -115,26 +136,43 @@ async function lockExists(lockPath: string): Promise<boolean> {
 }
 
 async function acquireLock(filePath: string, options: FileLockOptions = {}): Promise<() => Promise<void>> {
-	const opts = { ...DEFAULT_OPTIONS, ...options };
+	const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
+	const retries = options.retries ?? DEFAULT_RETRIES;
+	const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+	const heartbeatMs = options.heartbeatMs ?? Math.max(1, Math.floor(staleMs / 3));
 	const lockPath = getLockPath(filePath);
 
-	for (let attempt = 0; attempt < opts.retries; attempt++) {
+	for (let attempt = 0; attempt < retries; attempt++) {
+		options.signal?.throwIfAborted();
 		const token = await tryAcquireLock(lockPath);
 		if (token !== null) {
-			return () => releaseLock(lockPath, token);
+			let stopHeartbeat: (() => void) | undefined;
+			try {
+				options.signal?.throwIfAborted();
+				stopHeartbeat = await startLockHeartbeat(lockPath, token, heartbeatMs);
+				options.signal?.throwIfAborted();
+				return async () => {
+					stopHeartbeat?.();
+					await releaseLock(lockPath, token);
+				};
+			} catch (error) {
+				stopHeartbeat?.();
+				await releaseLock(lockPath, token);
+				throw error;
+			}
 		}
 
-		if ((await lockExists(lockPath)) && (await isLockStale(lockPath, opts.staleMs))) {
+		if ((await lockExists(lockPath)) && (await isLockStale(lockPath, staleMs))) {
 			// Reaping a stale lock — no token because we didn't acquire it. The
 			// rightful owner is presumed dead; rm without ownership check.
 			await releaseLock(lockPath);
 			continue;
 		}
 
-		await Bun.sleep(opts.retryDelayMs);
+		await untilAborted(options.signal, () => Bun.sleep(retryDelayMs));
 	}
 
-	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
+	throw new Error(`Failed to acquire lock for ${filePath} after ${retries} attempts`);
 }
 
 export async function withFileLock<T>(
@@ -144,6 +182,7 @@ export async function withFileLock<T>(
 ): Promise<T> {
 	const release = await acquireLock(filePath, options);
 	try {
+		options.signal?.throwIfAborted();
 		return await fn();
 	} finally {
 		await release();

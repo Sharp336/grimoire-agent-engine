@@ -14,6 +14,7 @@ import type {
 	MouseButton,
 	Page,
 } from "puppeteer-core";
+import { withFileLock } from "../../config/file-lock";
 import { resolveToCwd } from "../path-utils";
 import { throwIfAborted } from "../tool-errors";
 import { captureAriaSnapshot, getAriaElementState, queryAriaLocatorHandle } from "./aria/aria-snapshot";
@@ -28,6 +29,7 @@ import {
 	type CodexTextPattern,
 	type CodexVisibleDom,
 } from "./codex-facade";
+import { decodeBoundedMediaChunks } from "./media-decode";
 
 interface RuntimeRemoteObject {
 	type: string;
@@ -201,9 +203,6 @@ interface DownloadedMedia {
 	contentType: string | null;
 }
 
-const MAX_DECODED_MEDIA_BYTES = 32 * 1024 * 1024;
-const CANONICAL_BASE64_CHUNK = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-
 function deepestElementAtPointInDocument(x: number, y: number): Element | null {
 	let hit = document.elementFromPoint(x, y);
 	while (hit?.shadowRoot) {
@@ -212,26 +211,6 @@ function deepestElementAtPointInDocument(x: number, y: number): Element | null {
 		hit = nested;
 	}
 	return hit;
-}
-
-function decodeBoundedMediaChunks(base64Chunks: readonly string[]): Buffer[] {
-	let byteLength = 0;
-	for (const chunk of base64Chunks) {
-		if (!CANONICAL_BASE64_CHUNK.test(chunk))
-			throw new Error("downloadMedia page transfer returned invalid base64 data");
-		const padding = chunk.endsWith("==") ? 2 : chunk.endsWith("=") ? 1 : 0;
-		byteLength += (chunk.length / 4) * 3 - padding;
-		if (byteLength > MAX_DECODED_MEDIA_BYTES) {
-			throw new Error("downloadMedia response exceeds the 32 MiB limit");
-		}
-	}
-	return base64Chunks.map(chunk => {
-		const decoded = Buffer.from(chunk, "base64");
-		if (decoded.toString("base64") !== chunk) {
-			throw new Error("downloadMedia page transfer returned invalid base64 data");
-		}
-		return decoded;
-	});
 }
 
 interface DownloadRecord {
@@ -280,6 +259,8 @@ interface DownloadPolicyCoordinator {
 	readonly requiresLease: boolean;
 	refs: number;
 	setup?: Promise<void>;
+	setupController?: AbortController;
+	setupSession?: CDPSession;
 	release?: Promise<void>;
 	lease?: DownloadPolicyLease;
 }
@@ -292,9 +273,9 @@ interface DownloadPolicyOwnership {
 const downloadPolicyCoordinators = new WeakMap<Browser, DownloadPolicyCoordinator>();
 const DOWNLOAD_POLICY_LEASE_HEARTBEAT_MS = 10_000;
 const DOWNLOAD_POLICY_LEASE_STALE_MS = 60_000;
-const DOWNLOAD_POLICY_LOCK_HEARTBEAT_MS = 5_000;
 const DOWNLOAD_POLICY_LOCK_STALE_MS = 30_000;
 const DOWNLOAD_POLICY_LOCK_RETRY_MS = 10;
+const DOWNLOAD_POLICY_LOCK_RETRIES = 3_000;
 
 function filesystemErrorCode(error: unknown): string | undefined {
 	if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
@@ -308,39 +289,19 @@ async function removeEmptyDirectory(directory: string): Promise<void> {
 	});
 }
 
-async function withDownloadPolicyLock<T>(stateRoot: string, action: () => Promise<T>): Promise<T> {
+async function withDownloadPolicyLock<T>(
+	stateRoot: string,
+	action: () => Promise<T>,
+	signal?: AbortSignal,
+): Promise<T> {
 	await fs.mkdir(stateRoot, { recursive: true });
-	const lockPath = path.join(stateRoot, "lock");
-	for (;;) {
-		try {
-			await fs.mkdir(lockPath);
-			break;
-		} catch (error) {
-			const code = filesystemErrorCode(error);
-			if (code === "ENOENT") {
-				await fs.mkdir(stateRoot, { recursive: true });
-				continue;
-			}
-			if (code !== "EEXIST") throw error;
-			const stale = await fs
-				.stat(lockPath)
-				.then(stat => Date.now() - stat.mtimeMs > DOWNLOAD_POLICY_LOCK_STALE_MS)
-				.catch(() => false);
-			if (stale) await fs.rmdir(lockPath).catch(() => undefined);
-			await Bun.sleep(DOWNLOAD_POLICY_LOCK_RETRY_MS);
-		}
-	}
-	const heartbeat = setInterval(() => {
-		const now = new Date();
-		void fs.utimes(lockPath, now, now).catch(() => undefined);
-	}, DOWNLOAD_POLICY_LOCK_HEARTBEAT_MS);
-	heartbeat.unref();
-	try {
-		return await action();
-	} finally {
-		clearInterval(heartbeat);
-		await fs.rmdir(lockPath).catch(() => undefined);
-	}
+	return await withFileLock(stateRoot, action, {
+		heartbeatMs: 5_000,
+		retries: DOWNLOAD_POLICY_LOCK_RETRIES,
+		retryDelayMs: DOWNLOAD_POLICY_LOCK_RETRY_MS,
+		signal,
+		staleMs: DOWNLOAD_POLICY_LOCK_STALE_MS,
+	});
 }
 
 async function countLiveDownloadPolicyLeases(leaseDirectory: string): Promise<number> {
@@ -366,16 +327,23 @@ async function countLiveDownloadPolicyLeases(leaseDirectory: string): Promise<nu
 	return live;
 }
 
-async function acquireDownloadPolicyLease(downloadDirectory: string): Promise<DownloadPolicyLease> {
+async function acquireDownloadPolicyLease(
+	downloadDirectory: string,
+	signal?: AbortSignal,
+): Promise<DownloadPolicyLease> {
 	const stateRoot = `${downloadDirectory}.policy`;
 	const leaseDirectory = path.join(stateRoot, "leases");
 	const leasePath = path.join(leaseDirectory, `owner-${crypto.randomUUID()}.lease`);
-	await withDownloadPolicyLock(stateRoot, async () => {
-		await fs.mkdir(leaseDirectory, { recursive: true });
-		await countLiveDownloadPolicyLeases(leaseDirectory);
-		const lease = await fs.open(leasePath, "wx");
-		await lease.close();
-	});
+	await withDownloadPolicyLock(
+		stateRoot,
+		async () => {
+			await fs.mkdir(leaseDirectory, { recursive: true });
+			await countLiveDownloadPolicyLeases(leaseDirectory);
+			const lease = await fs.open(leasePath, "wx");
+			await lease.close();
+		},
+		signal,
+	);
 	const heartbeat = setInterval(() => {
 		const now = new Date();
 		void fs.utimes(leasePath, now, now).catch(() => undefined);
@@ -387,8 +355,8 @@ async function acquireDownloadPolicyLease(downloadDirectory: string): Promise<Do
 async function releaseDownloadPolicyLease(lease: DownloadPolicyLease, reset?: () => Promise<void>): Promise<void> {
 	const leaseDirectory = path.dirname(lease.leasePath);
 	let remaining = 0;
+	clearInterval(lease.heartbeat);
 	await withDownloadPolicyLock(lease.stateRoot, async () => {
-		clearInterval(lease.heartbeat);
 		await fs.unlink(lease.leasePath).catch(error => {
 			if (filesystemErrorCode(error) !== "ENOENT") throw error;
 		});
@@ -432,6 +400,7 @@ async function acquireDownloadPolicy(
 	browser: Browser,
 	cwd: string,
 	session: CDPSession,
+	signal?: AbortSignal,
 ): Promise<DownloadPolicyOwnership> {
 	for (;;) {
 		const coordinator = getDownloadPolicyCoordinator(browser, cwd);
@@ -442,18 +411,24 @@ async function acquireDownloadPolicy(
 		coordinator.refs++;
 		try {
 			if (!coordinator.setup) {
-				coordinator.setup = (async () => {
+				const setupController = new AbortController();
+				coordinator.setupController = setupController;
+				coordinator.setupSession = session;
+				const setup = (async () => {
 					const lease = coordinator.requiresLease
-						? await acquireDownloadPolicyLease(coordinator.directory)
+						? await acquireDownloadPolicyLease(coordinator.directory, setupController.signal)
 						: undefined;
 					coordinator.lease = lease;
 					try {
+						setupController.signal.throwIfAborted();
 						await fs.mkdir(coordinator.directory, { recursive: true });
+						setupController.signal.throwIfAborted();
 						await session.send("Browser.setDownloadBehavior", {
 							behavior: "allowAndName",
 							downloadPath: coordinator.directory,
 							eventsEnabled: true,
 						});
+						setupController.signal.throwIfAborted();
 					} catch (error) {
 						coordinator.lease = undefined;
 						const reset = async () => {
@@ -466,13 +441,34 @@ async function acquireDownloadPolicy(
 						throw error;
 					}
 				})();
+				coordinator.setup = setup;
+				void setup
+					.finally(() => {
+						if (coordinator.setup === setup) {
+							coordinator.setupController = undefined;
+							coordinator.setupSession = undefined;
+						}
+					})
+					.catch(() => undefined);
 			}
-			await coordinator.setup;
+			await untilAborted(signal, () => coordinator.setup!);
 			return { coordinator, released: false };
 		} catch (error) {
 			coordinator.refs--;
-			if (coordinator.refs === 0 && downloadPolicyCoordinators.get(browser) === coordinator) {
-				downloadPolicyCoordinators.delete(browser);
+			if (coordinator.refs === 0) {
+				coordinator.setupController?.abort(error);
+				const setup = coordinator.setup;
+				if (setup) {
+					void setup
+						.finally(() => {
+							if (coordinator.refs === 0 && downloadPolicyCoordinators.get(browser) === coordinator) {
+								downloadPolicyCoordinators.delete(browser);
+							}
+						})
+						.catch(() => undefined);
+				} else if (downloadPolicyCoordinators.get(browser) === coordinator) {
+					downloadPolicyCoordinators.delete(browser);
+				}
 			}
 			throw error;
 		}
@@ -856,8 +852,9 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					"locator.innerText",
 					async handle =>
 						await handle.evaluate(element => {
-							const readable = element as unknown as { innerText: string };
-							return readable.innerText;
+							const value = (element as unknown as { innerText?: unknown }).innerText;
+							if (typeof value !== "string") throw new Error("locator.innerText requires an HTMLElement");
+							return value;
 						}),
 				);
 			case "locator.textContent":
@@ -1719,6 +1716,13 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (began) session.off("Browser.downloadWillBegin", began);
 		if (progressed) session.off("Browser.downloadProgress", progressed);
 		if (ownership) await releaseDownloadPolicy(ownership, session).catch(() => undefined);
+		const coordinator = downloadPolicyCoordinators.get(this.#browser);
+		const pendingSharedSetup = !ownership && coordinator?.setupSession === session ? coordinator.setup : undefined;
+		if (pendingSharedSetup) {
+			const detach = async () => await session.detach().catch(() => undefined);
+			void pendingSharedSetup.then(detach, detach);
+			return;
+		}
 		await session.detach().catch(() => undefined);
 	}
 
@@ -1766,7 +1770,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			};
 			session.on("Browser.downloadWillBegin", began);
 			session.on("Browser.downloadProgress", progressed);
-			ownership = await acquireDownloadPolicy(this.#browser, this.#cwd, session);
+			ownership = await acquireDownloadPolicy(this.#browser, this.#cwd, session, this.#signal);
 			if (this.#disposed) throw new Error("Puppeteer adapter was disposed");
 			this.#downloadWillBeginHandler = began;
 			this.#downloadProgressHandler = progressed;
@@ -3012,7 +3016,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		)) as DownloadedMedia | null;
 		if (!media) throw new Error(`${deadline.label} requires an element with a media source`);
 		this.#operationRemaining(deadline);
-		const decodedChunks = decodeBoundedMediaChunks(media.base64Chunks);
+		const { chunks: decodedChunks } = decodeBoundedMediaChunks(media.base64Chunks);
 		this.#operationRemaining(deadline);
 		const destination = path.join(
 			this.#cwd,
