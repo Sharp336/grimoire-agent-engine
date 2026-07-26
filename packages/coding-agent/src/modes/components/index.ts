@@ -25,6 +25,7 @@ export * from "./oauth-selector";
 export * from "./queue-mode-selector";
 export * from "./read-tool-group";
 export * from "./segment-track";
+export * from "./session-map";
 export * from "./session-selector";
 export * from "./settings-selector";
 export * from "./show-images-selector";

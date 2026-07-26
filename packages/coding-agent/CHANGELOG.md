@@ -9,6 +9,7 @@
 - Added `/qa`, an evidence-first verification pass that inventories the affected surface, exercises real checks, and reports findings with reproductions — making no edits unless asked afterwards.
 - Added a full-transcript search index. `/session search <question>` builds a lazy SQLite/FTS5 index over past session transcripts on first use and spawns a bundled `session-search` agent that answers with `{sessionId, entryId, quote}` citations. Once the index exists, the `/resume` picker also matches on full transcript content instead of only the first 4 KB of each session.
 - Added session tags: `/session tag`, `/session untag`, and `/session tags`.
+- Added `/session map`, an interactive lineage tree of session forks and handoffs with tags, project scope switching, and direct resume selection; ACP and RPC render the same map as plain text.
 
 ### Fixed
 
