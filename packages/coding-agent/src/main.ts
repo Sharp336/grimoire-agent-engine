@@ -40,6 +40,7 @@ import {
 	resolveModelScope,
 	type ScopedModel,
 } from "./config/model-resolver";
+import { formatModelRoleAlias } from "./config/model-roles";
 import { ModelsConfigFile } from "./config/models-config";
 import { getDefault, type SettingPath, Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
@@ -890,6 +891,10 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
+	// Role whose candidates the weighted draw picks from in createAgentSession,
+	// or undefined when nothing was deferred. Read by the prewalk and plan-yolo
+	// blocks below, which resolve their hand-off alias before that draw runs.
+	let deferredPoolRole: string | undefined;
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -922,6 +927,9 @@ export async function buildSessionOptions(
 		if (matchedAfterMissingRolePattern || weightedPoolPattern) {
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
+			if (weightedPoolPattern) {
+				deferredPoolRole = resolved.configuredRole;
+			}
 			if (weightedPoolPattern && resolved.model && !resolved.error && resolved.configuredRole !== "default") {
 				// --prewalk and --plan-yolo expand their role alias below, and that
 				// expansion reads modelRoles.default. The ordered path retargets it to
@@ -1005,6 +1013,35 @@ export async function buildSessionOptions(
 		if (!options.model && !deferredDefaultRole) options.model = scopedModels[0].model;
 	}
 
+	/**
+	 * Alias a hand-off target should be re-resolved from once the weighted draw
+	 * has picked the session model, or undefined when the target does not depend
+	 * on that pick.
+	 *
+	 * `--prewalk-into` and `--plan-yolo-into` expand their alias here, before the
+	 * draw runs, and role expansion takes the first candidate, so an alias
+	 * naming the drawn role or the default role is pinned to candidate 1. The
+	 * draw retargets modelRoles.default to the model it picked, so the default
+	 * alias stands in for the drawn role too. Under ordered selection both
+	 * aliases resolve to the same model anyway, because this block already
+	 * retargeted the default role to what `--model <role>` selected.
+	 */
+	const poolBoundHandoffAlias = (target: string): string | undefined => {
+		if (!deferredPoolRole) return undefined;
+		const aliasRole = resolveCliModel({
+			cliModel: target,
+			modelRegistry,
+			settings: activeSettings,
+			preferences: modelMatchPreferences,
+		}).configuredRole;
+		if (aliasRole === "default") return target;
+		if (aliasRole !== deferredPoolRole) return undefined;
+		// Only the role name is swapped; an explicit `:level` suffix on the alias
+		// still applies to whatever the draw picked.
+		const suffixIndex = target.lastIndexOf(":");
+		return `${formatModelRoleAlias("default")}${suffixIndex > 0 ? target.slice(suffixIndex) : ""}`;
+	};
+
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
 		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
 	}
@@ -1014,7 +1051,8 @@ export async function buildSessionOptions(
 			? true
 			: activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
-		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
+		const prewalkTarget = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
+		const rolePattern = expandRoleAlias(prewalkTarget, activeSettings);
 		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
@@ -1024,16 +1062,19 @@ export async function buildSessionOptions(
 		// no configured auth, warn and leave prewalk unarmed rather than aborting
 		// startup and locking the user out of the app (issue #6064).
 		if (resolved.error || !resolved.model) {
-			const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
 			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
+				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${prewalkTarget}" not found`}`)}\n`,
 			);
 		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
 			process.stderr.write(
 				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
 			);
 		} else {
-			options.prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			options.prewalk = {
+				target: resolved.model,
+				thinkingLevel: resolved.thinkingLevel,
+				pattern: poolBoundHandoffAlias(prewalkTarget),
+			};
 		}
 	}
 
@@ -1041,18 +1082,23 @@ export async function buildSessionOptions(
 		throw new Error("--plan-yolo-into requires --plan-yolo");
 	}
 	if (parsed.planYolo) {
-		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
+		const planYoloTarget = parsed.planYoloInto ?? "@smol";
+		const rolePattern = expandRoleAlias(planYoloTarget, activeSettings);
 		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
 		if (resolved.error || !resolved.model) {
-			throw new Error(resolved.error ?? `Model "${parsed.planYoloInto ?? "@smol"}" not found`);
+			throw new Error(resolved.error ?? `Model "${planYoloTarget}" not found`);
 		}
 		if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
 			throw new Error(`No API key for ${resolved.model.provider}/${resolved.model.id}`);
 		}
-		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+		options.planYolo = {
+			target: resolved.model,
+			thinkingLevel: resolved.thinkingLevel,
+			pattern: poolBoundHandoffAlias(planYoloTarget),
+		};
 	}
 
 	// Thinking level

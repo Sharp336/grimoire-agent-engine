@@ -1413,6 +1413,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// object. It sits just below options.thinkingLevel, so an explicit
 	// `--thinking` still wins, and above the persisted session level.
 	let pooledExplicitThinkingLevel: ConfiguredThinkingLevel | undefined;
+	// Hand-off targets are locals because a weighted draw can rebind or disarm
+	// them below, and createAgentSession must not write into the caller's
+	// options object.
+	let prewalk = options.prewalk;
+	let planYolo = options.planYolo;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
 		logger.time("restoreSessionModel", () => {
 			let failedSessionModel: string | undefined;
@@ -1664,7 +1669,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
-			prewalkArmed: options.prewalk !== undefined,
+			prewalkArmed: prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
@@ -2118,12 +2123,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const poolSeed = hashPoolSeed(`pool:${sessionManager.getSessionId?.() ?? ""}`);
 				const poolWeights = getPoolWeights(settings);
 				const poolHealthGate = isPoolHealthGateEnabled(settings);
-				// Candidates resolve against getAll() so the drawn selector matches what
-				// the loop below resolves. getAll() keeps disabled providers and
+				// Candidates resolve against the authenticated catalog first and fall
+				// back to the full one, the same order resolveCliModel uses, so a bare
+				// ambiguous id (`gpt-4o-mini`, carried by several providers) names a
+				// provider the session can actually call. Ranking it by usage and
+				// provider order alone can name a provider with no credentials, and the
+				// resolved selector is what the loop below starts on.
+				//
+				// The catalog fallback still keeps disabled providers, and
 				// hasConfiguredAuth does not filter them either, so the draw has to.
 				// Otherwise a logged-in but disabled provider can win the draw and start
 				// the session, which no other selection path allows.
 				const poolDisabledProviders = new Set(settings.get("disabledProviders"));
+				const authedModels = modelRegistry.getAvailable();
 				for (const deferredPattern of deferredModelPatterns) {
 					for (const selector of deferredPattern.split(",")) {
 						const trimmedSelector = selector.trim();
@@ -2135,9 +2147,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							preferences: matchPreferences,
 						}).configuredPatterns;
 						if (!configuredPatterns || configuredPatterns.length < 2) continue;
-						const poolModels = configuredPatterns.map(
-							poolPattern => parseModelPattern(poolPattern, availableModels, matchPreferences).model,
-						);
+						const poolResolutions = configuredPatterns.map(poolPattern => {
+							const authed = parseModelPattern(poolPattern, authedModels, matchPreferences);
+							return authed.model ? authed : parseModelPattern(poolPattern, availableModels, matchPreferences);
+						});
+						const poolModels = poolResolutions.map(resolution => resolution.model);
+						// The drawn candidate has to be the one the preflight measures and the
+						// one that starts, so each resolved pattern is carried forward fully
+						// qualified. A pattern nothing resolves stays raw.
+						const poolPatterns = configuredPatterns.map((poolPattern, index) => {
+							const poolModel = poolModels[index];
+							return poolModel
+								? formatModelSelectorValue(
+										formatModelStringWithRouting(poolModel),
+										poolResolutions[index].thinkingLevel,
+									)
+								: poolPattern;
+						});
 						const poolCandidates: PoolCandidate[] = configuredPatterns.map((poolPattern, index) => {
 							const poolModel = poolModels[index];
 							return poolModel
@@ -2187,7 +2213,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						// and reserve policy read the same first candidate ordered selection
 						// would give them.
 						const pooledPatterns = reorderPoolCandidates(
-							configuredPatterns,
+							poolPatterns,
 							pickedIndex,
 							poolHealth
 								? index => !poolEligible(poolCandidates[index], index) || isPoolUsageSpent(poolHealth[index])
@@ -2418,6 +2444,50 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// defers that resolution to here, so apply the same retarget.
 				if (!authFallbackUsed && !retryFallback && pooledRolePatterns.has(pattern)) {
 					settings.overrideModelRoles({ default: formatModelStringWithRouting(selectedModel) });
+					// `--prewalk-into @default` and `--plan-yolo-into @default` expand
+					// their alias in main.ts, before this draw runs, so they were pinned
+					// to the role's first candidate. Re-resolving the recorded alias
+					// against the role just retargeted binds the hand-off to the model
+					// the session actually started on.
+					if (prewalk?.pattern) {
+						const rebound = resolveCliModel({
+							cliModel: prewalk.pattern,
+							modelRegistry,
+							settings,
+							preferences: matchPreferences,
+						});
+						// Prewalk is an optional optimization: a target that cannot be
+						// resolved or has no credentials warns and leaves prewalk unarmed
+						// rather than aborting startup, matching main.ts (issue #6064).
+						const prewalkError =
+							rebound.error ??
+							(!rebound.model
+								? `model "${prewalk.pattern}" not found`
+								: !modelRegistry.hasConfiguredAuth(rebound.model)
+									? `no API key for ${rebound.model.provider}/${rebound.model.id}`
+									: undefined);
+						if (prewalkError || !rebound.model) {
+							logger.warn(`Prewalk disabled: ${prewalkError}`);
+							prewalk = undefined;
+						} else {
+							prewalk = { ...prewalk, target: rebound.model, thinkingLevel: rebound.thinkingLevel };
+						}
+					}
+					if (planYolo?.pattern) {
+						const rebound = resolveCliModel({
+							cliModel: planYolo.pattern,
+							modelRegistry,
+							settings,
+							preferences: matchPreferences,
+						});
+						if (rebound.error || !rebound.model) {
+							throw new Error(rebound.error ?? `Model "${planYolo.pattern}" not found`);
+						}
+						if (!modelRegistry.hasConfiguredAuth(rebound.model)) {
+							throw new Error(`No API key for ${rebound.model.provider}/${rebound.model.id}`);
+						}
+						planYolo = { ...planYolo, target: rebound.model, thinkingLevel: rebound.thinkingLevel };
+					}
 				}
 				initialRetryFallback =
 					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
@@ -3241,8 +3311,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			initialRetryFallback,
-			prewalk: options.prewalk,
-			planYolo: options.planYolo,
+			prewalk,
+			planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,

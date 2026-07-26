@@ -842,6 +842,165 @@ describe("createAgentSession model pool selection", () => {
 		}
 	});
 
+	test("a bare candidate id resolves to a provider the session has credentials for", async () => {
+		// A bare id carried by several providers is ranked by usage order and then
+		// modelProviderOrder, never by auth, so both candidates can resolve to a
+		// provider with no credentials. Nothing is drawable then, the raw patterns
+		// reach the startup loop, and that loop does not auth-check a primary, so
+		// the session starts on a provider it cannot call and the usage preflight
+		// measures the wrong one.
+		const authStorage = await AuthStorage.create(path.join(tempDir, "bare-id-auth.db"));
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "bare-id-models.yml"));
+		const settings = Settings.isolated({
+			"retry.poolSelection": "weighted",
+			modelProviderOrder: ["aimlapi", "openai"],
+		});
+		// aimlapi carries both ids and has no credentials here, and it outranks
+		// openai, so an auth-blind resolution picks it for both candidates.
+		settings.setModelRole("task", "gpt-4o-mini,gpt-4o");
+		const sessionManager = SessionManager.inMemory();
+		vi.spyOn(sessionManager, "getSessionId").mockReturnValue("pool-session-past-cut");
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			hasUI: false,
+			modelPattern: "task",
+		});
+		try {
+			// This session id lands past the halfway cut, so it draws the second
+			// candidate, and the model it draws is the model that starts.
+			expect(session.model?.provider).toBe("openai");
+			expect(session.model?.id).toBe("gpt-4o");
+			expect(settings.getModelRole("default")).toBe("openai/gpt-4o");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("a weighted draw rebinds the prewalk and plan-yolo hand-off to the drawn model", async () => {
+		// `--prewalk-into @default` expands its alias in main.ts, before the draw
+		// runs, and role expansion takes the first candidate. Once the draw picks
+		// candidate 2, prewalk would switch the session to a model it never
+		// started on at the first edit.
+		const first = getBundledModel("openai", "gpt-4o-mini");
+		const second = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!first || !second) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const authStorage = await AuthStorage.create(path.join(tempDir, "rebind-auth.db"));
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey(first.provider, "first-test-key");
+		authStorage.setRuntimeApiKey(second.provider, "second-test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "rebind-models.yml"));
+		const roleValue = `${first.provider}/${first.id},${second.provider}/${second.id}`;
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			throw new Error(`buildSessionOptions unexpectedly exited with ${code}`);
+		});
+		try {
+			for (const handoffAlias of ["@default", "@task"]) {
+				const settings = Settings.isolated({ "retry.poolSelection": "weighted" });
+				settings.setModelRole("task", roleValue);
+				const cliOptions = await buildCliSessionOptions(
+					parseArgs([
+						"--model",
+						"task",
+						"--prewalk-into",
+						handoffAlias,
+						"--plan-yolo",
+						"--plan-yolo-into",
+						handoffAlias,
+					]),
+					[],
+					SessionManager.inMemory(),
+					modelRegistry,
+					settings,
+				);
+				// The CLI still resolves the alias eagerly, which is what the session
+				// falls back on when nothing was drawn.
+				expect(cliOptions.prewalk?.target.id).toBe(first.id);
+				expect(cliOptions.planYolo?.target.id).toBe(first.id);
+
+				const sessionManager = SessionManager.inMemory();
+				vi.spyOn(sessionManager, "getSessionId").mockReturnValue("pool-session-past-cut");
+				const { session } = await createAgentSession({
+					...cliOptions,
+					cwd: tempDir,
+					agentDir: tempDir,
+					authStorage,
+					modelRegistry,
+					sessionManager,
+					settings,
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+					skipPythonPreflight: true,
+					hasUI: false,
+				});
+				try {
+					expect(session.model?.id).toBe(second.id);
+					expect(session.getPrewalkState()?.target.id).toBe(second.id);
+					// Both aliases address the drawn candidate list, so both are recorded
+					// for the session to re-resolve. `@task` is recorded as the default
+					// alias because the draw retargets exactly that role.
+					expect(cliOptions.prewalk?.pattern).toBe("@default");
+					expect(cliOptions.planYolo?.pattern).toBe("@default");
+				} finally {
+					await session.dispose();
+				}
+			}
+		} finally {
+			exitSpy.mockRestore();
+		}
+	});
+
+	test("a hand-off alias that stops resolving disarms prewalk and refuses plan-yolo", async () => {
+		// The re-resolution keeps main.ts's asymmetry: prewalk is an optional
+		// optimization and warns off, plan-yolo was asked for explicitly and fails
+		// the session (issue #6064).
+		const stale = getBundledModel("openai", "gpt-4o-mini");
+		if (!stale) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const unresolvable = "no-such-provider/no-such-model";
+		const disarmed = await createAgentSession({
+			...(await buildSessionOptions("pool-session-past-cut", "rebind-unresolvable")),
+			settings: poolSettings({ "retry.poolSelection": "weighted" }),
+			prewalk: { target: stale, pattern: unresolvable },
+		});
+		try {
+			expect(disarmed.session.model?.id).toBe("runtime-reasoning-model");
+			expect(disarmed.session.getPrewalkState()).toBeUndefined();
+		} finally {
+			await disarmed.session.dispose();
+		}
+
+		await expect(
+			createAgentSession({
+				...(await buildSessionOptions("pool-session-past-cut", "rebind-refused")),
+				settings: poolSettings({ "retry.poolSelection": "weighted" }),
+				planYolo: { target: stale, pattern: unresolvable },
+			}),
+		).rejects.toThrow(unresolvable);
+	});
+
 	test("--api-key keeps eager CLI resolution instead of deferring to the draw", async () => {
 		// The runtime key is provider-scoped and is registered against the model
 		// the CLI resolves. Deferring would let the draw move the session to the
