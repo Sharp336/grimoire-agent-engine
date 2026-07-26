@@ -869,9 +869,13 @@ export class MissionRuntime implements MissionRuntimeContract {
 				resumed = await this.#resumePublication(state);
 				break;
 			case "validator_workspace_dirty":
-				throw new MissionRuntimeError(
-					"A dirty validator checkout cannot be resumed. Clean the checkout, then use /mission restart.",
-				);
+				if (!input?.restartWorker) {
+					throw new MissionRuntimeError(
+						"A dirty validator checkout cannot be resumed. Clean the checkout, then restart the mission.",
+					);
+				}
+				resumed = await this.#resumeValidatorWorkspaceDirty(state);
+				break;
 			default:
 				return assertNever(reason, "Unknown mission pause reason");
 		}
@@ -1987,6 +1991,28 @@ export class MissionRuntime implements MissionRuntimeContract {
 				{ progress: { type: "resumed" }, mode: "mission" },
 			),
 		);
+	}
+
+	async #resumeValidatorWorkspaceDirty(state: MissionState): Promise<MissionState> {
+		const validators = state.features.filter(
+			feature => feature.kind === "validation" && feature.workspace?.kind === "validator",
+		);
+		if (validators.length === 0) {
+			throw new MissionRuntimeError("Paused mission has no validator workspace to recover.");
+		}
+		for (const validator of validators) {
+			const workspace = validator.workspace;
+			if (workspace?.kind !== "validator") continue;
+			const released = await this.#guardExternal(() => this.#workspaces.releaseIfEmpty(workspace));
+			if (!released) {
+				throw new MissionRuntimeError(
+					`Validator workspace for "${validator.id}" is still dirty at ${workspace.path}.`,
+				);
+			}
+		}
+		const resumed = await this.#resumeSimple(state);
+		await this.#maybeFinishMission(resumed);
+		return this.#requireState();
 	}
 
 	async #resumeRetryBudget(
