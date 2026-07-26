@@ -8,6 +8,7 @@ import type {
 	CDPSession,
 	ElementHandle,
 	FileChooser,
+	Frame,
 	JSHandle,
 	KeyInput,
 	MouseButton,
@@ -159,6 +160,7 @@ interface PageScrollableElement {
 interface PageEditableElement {
 	contains(node: unknown): boolean;
 	contentDocument?: PageDocumentLike | null;
+	ownerDocument: PageDocumentLike;
 	disabled?: boolean;
 	getAttribute(name: string): string | null;
 	isContentEditable: boolean;
@@ -174,6 +176,7 @@ interface PageEditableElement {
 interface PageDocumentLike {
 	activeElement: PageEditableElement | null;
 	baseURI: string;
+	defaultView?: { getSelection(): PageSelectionLike | null } | null;
 }
 
 interface PageRangeLike {
@@ -201,7 +204,7 @@ interface DownloadedMedia {
 const MAX_DECODED_MEDIA_BYTES = 32 * 1024 * 1024;
 const CANONICAL_BASE64_CHUNK = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-function deepestElementAtPoint(x: number, y: number): Element | null {
+function deepestElementAtPointInDocument(x: number, y: number): Element | null {
 	let hit = document.elementFromPoint(x, y);
 	while (hit?.shadowRoot) {
 		const nested = hit.shadowRoot.elementFromPoint(x, y);
@@ -1301,13 +1304,51 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		}
 	}
 
-	async #elementScreenshot(args: Readonly<Record<string, unknown>>): Promise<string> {
-		const handle = await this.#page.evaluateHandle(deepestElementAtPoint, numberArg(args, "x"), numberArg(args, "y"));
-		const element = handle.asElement();
-		if (!element) {
-			await handle.dispose();
-			throw new Error("playwright.elementScreenshot found no element at the point");
+	async #elementHandleAtPoint(x: number, y: number, deadline?: OperationDeadline): Promise<ElementHandle | null> {
+		const run = async <T>(operation: () => Promise<T>): Promise<T> =>
+			deadline ? await this.#runBeforeDeadline(deadline, operation) : await operation();
+		const dispose = async (handle: JSHandle): Promise<void> => {
+			if (deadline) await this.#disposeHandlesBeforeDeadline([handle], deadline);
+			else await handle.dispose();
+		};
+		let context: Page | Frame = this.#page;
+		let localX = x;
+		let localY = y;
+		let rawHandle: JSHandle = await run(() =>
+			context.evaluateHandle(deepestElementAtPointInDocument, localX, localY),
+		);
+		while (true) {
+			const element = rawHandle.asElement() as ElementHandle | null;
+			if (!element) {
+				await dispose(rawHandle);
+				return null;
+			}
+			if (typeof (element as { contentFrame?: unknown }).contentFrame !== "function") return element;
+			const childFrame = await run(() => element.contentFrame());
+			if (!childFrame) return element;
+			const offset = await run(() =>
+				element.evaluate(frame => {
+					const frameElement = frame as Element & { clientLeft: number; clientTop: number };
+					const rect = frameElement.getBoundingClientRect();
+					return { x: rect.left + frameElement.clientLeft, y: rect.top + frameElement.clientTop };
+				}),
+			);
+			localX -= offset.x;
+			localY -= offset.y;
+			let nextHandle: JSHandle;
+			try {
+				nextHandle = await run(() => childFrame.evaluateHandle(deepestElementAtPointInDocument, localX, localY));
+			} finally {
+				await dispose(element);
+			}
+			context = childFrame;
+			rawHandle = nextHandle;
 		}
+	}
+
+	async #elementScreenshot(args: Readonly<Record<string, unknown>>): Promise<string> {
+		const element = await this.#elementHandleAtPoint(numberArg(args, "x"), numberArg(args, "y"));
+		if (!element) throw new Error("playwright.elementScreenshot found no element at the point");
 		try {
 			const bytes = await element.screenshot({ type: "png" });
 			return Buffer.from(bytes).toString("base64");
@@ -2761,8 +2802,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			const value = contentEditable ? (target.textContent ?? "") : control.value;
 			if (!contentEditable)
 				return { value, start: control.selectionStart ?? value.length, end: control.selectionEnd ?? value.length };
-			const pageGlobal = globalThis as unknown as { getSelection(): PageSelectionLike | null };
-			const selection = pageGlobal.getSelection();
+			const selection = target.ownerDocument.defaultView?.getSelection() ?? null;
 			if (!selection || selection.rangeCount === 0 || !target.contains(selection.anchorNode))
 				return { value, start: value.length, end: value.length };
 			const range = selection.getRangeAt(0);
@@ -2886,14 +2926,8 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
 			"cua.downloadMedia",
 		);
-		const rawHandle = await this.#runBeforeDeadline(deadline, () =>
-			this.#page.evaluateHandle(deepestElementAtPoint, numberArg(args, "x"), numberArg(args, "y")),
-		);
-		const element = rawHandle.asElement() as ElementHandle | null;
-		if (!element) {
-			await this.#disposeHandlesBeforeDeadline([rawHandle], deadline);
-			throw new Error("cua.downloadMedia found no element at the point");
-		}
+		const element = await this.#elementHandleAtPoint(numberArg(args, "x"), numberArg(args, "y"), deadline);
+		if (!element) throw new Error("cua.downloadMedia found no element at the point");
 		try {
 			await this.#downloadHandleMedia(element, deadline);
 		} finally {

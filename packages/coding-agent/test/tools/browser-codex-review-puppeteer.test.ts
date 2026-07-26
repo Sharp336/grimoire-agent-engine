@@ -1205,6 +1205,26 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("uses the active frame selection when typing into focused contenteditable text", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(async()=>{
+				   const frame=document.createElement("iframe"); frame.id="selection-frame"; frame.srcdoc="<div id='editor' contenteditable='true'>abcdef</div>";
+				   const {promise,resolve}=Promise.withResolvers(); frame.addEventListener("load",resolve,{once:true}); document.body.append(frame); await promise;
+				   const editor=frame.contentDocument.querySelector("#editor"); editor.focus();
+				   const range=frame.contentDocument.createRange(); range.setStart(editor.firstChild,2); range.setEnd(editor.firstChild,4);
+				   const selection=frame.contentWindow.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+				 });
+				 await t.cua.type({text:"XY"});
+				 return {value:await page.evaluate(()=>document.querySelector("#selection-frame").contentDocument.querySelector("#editor").textContent)};`,
+			);
+			expect(result).toEqual({ value: "abXYef" });
+		});
+	}, 20_000);
+
 	it("rejects case-normalized aria-readonly in locator, CUA, and DOM-CUA editing", async () => {
 		await withPuppeteerTool(async (tool, name) => {
 			const result = await runBrowserCode(
@@ -1336,6 +1356,26 @@ describe("Puppeteer final parity blockers", () => {
 				 const image=await t.playwright.elementScreenshot({x:400,y:220});
 				 const encoded=image.toBase64();
 				 const bytes=Uint8Array.from(atob(encoded),character=>character.charCodeAt(0)); const view=new DataView(bytes.buffer);
+				 return {width:view.getUint32(16),height:view.getUint32(20)};`,
+			);
+			expect(result).toEqual({ width: 50, height: 25 });
+		});
+	}, 20_000);
+
+	it("screenshots the deepest element inside a same-origin frame at coordinates", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(async()=>{
+				   const frame=document.createElement("iframe");
+				   Object.assign(frame.style,{position:"fixed",left:"360px",top:"260px",width:"140px",height:"60px",border:"0"});
+				   frame.srcdoc='<button style="position:absolute;left:30px;top:20px;width:40px;height:20px;padding:0;border:0">Framed</button>';
+				   const {promise,resolve}=Promise.withResolvers(); frame.addEventListener("load",resolve,{once:true}); document.body.append(frame); await promise;
+				 });
+				 const image=await t.playwright.elementScreenshot({x:400,y:290});
+				 const bytes=Uint8Array.from(atob(image.toBase64()),character=>character.charCodeAt(0)); const view=new DataView(bytes.buffer);
 				 return {width:view.getUint32(16),height:view.getUint32(20)};`,
 			);
 			expect(result).toEqual({ width: 50, height: 25 });

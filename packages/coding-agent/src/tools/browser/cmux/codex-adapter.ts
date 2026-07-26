@@ -326,7 +326,7 @@ const DISPOSE_NATIVE_ACTION_TOKEN_SOURCE = `(token) => {
 	const roots = [document];
 	for (const root of roots) {
 		for (const element of root.querySelectorAll("*")) {
-			if (element.getAttribute?.("data-omp-codex-action-token") === token) element.removeAttribute("data-omp-codex-action-token");
+			if (String(element.getAttribute?.("data-omp-codex-action-token") || "").startsWith(token)) element.removeAttribute("data-omp-codex-action-token");
 			if (element.shadowRoot) roots.push(element.shadowRoot);
 			if (element.contentDocument) roots.push(element.contentDocument);
 		}
@@ -545,11 +545,21 @@ const VISIBLE_DOM_SOURCE = `() => {
 }`;
 
 const PREPARE_ACTIVE_NATIVE_TYPE_SOURCE = `(token, label) => {
+	if (!/^[A-Za-z0-9-]+$/.test(token)) throw new Error("Invalid native action token");
 	let target = document.activeElement;
+	const frameSelectors = [];
 	while (target) {
-		const nestedTarget = target.shadowRoot?.activeElement ?? target.contentDocument?.activeElement;
-		if (!nestedTarget) break;
-		target = nestedTarget;
+		const shadowTarget = target.shadowRoot?.activeElement;
+		if (shadowTarget) {
+			target = shadowTarget;
+			continue;
+		}
+		const frameTarget = target.contentDocument?.activeElement;
+		if (!frameTarget) break;
+		const frameToken = token + "-frame-" + frameSelectors.length;
+		target.setAttribute("data-omp-codex-action-token", frameToken);
+		frameSelectors.push('[data-omp-codex-action-token="' + frameToken + '"]');
+		target = frameTarget;
 	}
 	if (!target || typeof target !== "object") throw new Error(label + " requires an editable active element");
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
@@ -568,9 +578,8 @@ const PREPARE_ACTIVE_NATIVE_TYPE_SOURCE = `(token, label) => {
 	if (!editableInput && !(tag === "textarea" && !disabled(target) && !readOnly) && !(target.isContentEditable === true && !readOnly)) {
 		throw new Error(label + " requires an editable active element");
 	}
-	if (!/^[A-Za-z0-9-]+$/.test(token)) throw new Error("Invalid native action token");
 	target.setAttribute("data-omp-codex-action-token", token);
-	return '[data-omp-codex-action-token="' + token + '"]';
+	return { selector: '[data-omp-codex-action-token="' + token + '"]', frameSelectors };
 }`;
 
 const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
@@ -1336,12 +1345,21 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				const operationDeadline = Date.now() + selectorTimeoutArg(args);
 				const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
 				try {
-					const selector = await this.#tab.codexEvaluate<string>(
+					const prepared = await this.#tab.codexEvaluate<unknown>(
 						PREPARE_ACTIVE_NATIVE_TYPE_SOURCE,
 						[token, operation],
 						remainingMs(operationDeadline, operation),
 					);
-					await this.#tab.type(selector, stringArg(args, "text"), remainingMs(operationDeadline, operation));
+					const selector =
+						typeof prepared === "string" ? prepared : isRecord(prepared) ? prepared.selector : undefined;
+					const frameSelectors =
+						isRecord(prepared) && Array.isArray(prepared.frameSelectors)
+							? prepared.frameSelectors.filter((value): value is string => typeof value === "string")
+							: [];
+					if (typeof selector !== "string") throw new ToolError(`${operation} returned an invalid native target`);
+					await this.#withNativeFrameSelectors(frameSelectors, operationDeadline, operation, async () => {
+						await this.#tab.type(selector, stringArg(args, "text"), remainingMs(operationDeadline, operation));
+					});
 					return undefined as T;
 				} finally {
 					await this.#tab

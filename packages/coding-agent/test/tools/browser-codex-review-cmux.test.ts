@@ -2575,11 +2575,27 @@ describe("cmux Codex browser review regressions", () => {
 		Object.defineProperty(innerShadow, "activeElement", { configurable: true, value: input });
 		const nativeCalls: Array<{ selector: string; text: string }> = [];
 		const tokenPresentDuringType: boolean[] = [];
+		const frameCalls: string[] = [];
+		let selectedFrame = false;
 		const evaluate = (source: string, args: unknown[]) => runPageEvaluator(source, args, { document, window });
 		const { adapter, browser } = adapterAndFacadeFor({
 			codexEvaluate: evaluate,
 			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async codexRequest(method: string, params: Readonly<Record<string, unknown>>) {
+				expect(method).toBe("browser.frame.select");
+				expect(params.selector).toMatch(/^\[data-omp-codex-action-token=/);
+				frameCalls.push(method);
+				selectedFrame = true;
+				return {};
+			},
+			async codexCleanupRequest(method: string) {
+				expect(method).toBe("browser.frame.main");
+				frameCalls.push(method);
+				selectedFrame = false;
+				return {};
+			},
 			async type(selector: string, text: string) {
+				expect(selectedFrame).toBe(true);
 				nativeCalls.push({ selector, text });
 				tokenPresentDuringType.push(input.matches(selector));
 				input.value += text;
@@ -2594,6 +2610,12 @@ describe("cmux Codex browser review regressions", () => {
 			expect(input.value).toBe("frame text");
 			expect(nativeCalls).toHaveLength(2);
 			expect(tokenPresentDuringType).toEqual([true, true]);
+			expect(frameCalls).toEqual([
+				"browser.frame.select",
+				"browser.frame.main",
+				"browser.frame.select",
+				"browser.frame.main",
+			]);
 			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
 		} finally {
 			await adapter.dispose();
