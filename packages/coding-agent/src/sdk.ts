@@ -3130,6 +3130,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
 			toolRegistry,
+			memoryEnabled: !restrictToolNames,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
 			createMemoryTools: restrictToolNames

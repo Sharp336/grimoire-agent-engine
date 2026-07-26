@@ -10,6 +10,10 @@ import type { MemoryBackend, MemoryBackendStartOptions } from "../memory-backend
 import type { MnemopiSessionState } from "../mnemopi/state";
 
 /** Capabilities borrowed from the owning AgentSession. */
+export interface PreparedMemoryBackendTransition {
+	previousBackend: MemoryBackend;
+}
+
 export interface SessionMemoryHost {
 	agent: Agent;
 	settings: Settings;
@@ -32,6 +36,7 @@ export interface SessionMemoryHost {
 /** Owns memory backend transitions and transcript-scoped memory state. */
 export class SessionMemory {
 	readonly #host: SessionMemoryHost;
+	readonly #memoryEnabled: boolean;
 	readonly #memoryAgentDir: string | undefined;
 	readonly #memoryTaskDepth: number;
 	readonly #createMemoryTools: (() => Promise<AgentTool[]>) | undefined;
@@ -42,6 +47,7 @@ export class SessionMemory {
 	constructor(
 		host: SessionMemoryHost,
 		options: {
+			memoryEnabled?: boolean;
 			memoryAgentDir?: string;
 			memoryTaskDepth?: number;
 			createMemoryTools?: () => Promise<AgentTool[]>;
@@ -50,6 +56,7 @@ export class SessionMemory {
 		this.#host = host;
 		this.#memoryAgentDir = options.memoryAgentDir;
 		this.#memoryTaskDepth = options.memoryTaskDepth ?? 0;
+		this.#memoryEnabled = (options.memoryEnabled ?? true) && this.#memoryTaskDepth === 0;
 		this.#createMemoryTools = options.createMemoryTools;
 	}
 
@@ -114,13 +121,18 @@ export class SessionMemory {
 		return true;
 	}
 
-	/** Resets transcript-scoped memory counters and removes a promoted prompt. */
-	async resetContextForNewTranscript(): Promise<void> {
+	/** Applies a deferred backend selection, then resets transcript-scoped memory state. */
+	async resetContextForNewTranscript(prepared?: PreparedMemoryBackendTransition): Promise<void> {
+		let backend = this.#host.getMemoryBackend();
+		if (this.#memoryEnabled && (prepared || (backend && backend.id !== this.#host.settings.get("memory.backend")))) {
+			await this.applyMemoryBackend();
+			backend = this.#host.getMemoryBackend();
+		}
+		this.rekeyForCurrentSessionId();
 		const hadPromotedMemoryPrompt = this.#baseSystemPromptBeforeMemoryPromotion !== undefined;
 		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
 		let resetBackend = false;
-		const backend = this.#host.getMemoryBackend();
 		try {
 			resetBackend = (await backend?.resetSession?.(this.#host.memoryBackendSession())) === true;
 		} catch (error) {
@@ -179,49 +191,93 @@ export class SessionMemory {
 		}
 	}
 
+	async #runBackendTransition<T>(operation: () => Promise<T>): Promise<T> {
+		const transition = this.#memoryBackendTransition.then(operation);
+		this.#memoryBackendTransition = transition.then(
+			() => undefined,
+			() => undefined,
+		);
+		return await transition;
+	}
+
+	async #startMemoryBackend(backend: MemoryBackend): Promise<void> {
+		this.#host.setMemoryBackend(backend);
+		await backend.start({
+			session: this.#host.memoryBackendSession(),
+			settings: this.#host.settings,
+			modelRegistry: this.#host.modelRegistry,
+			agentDir: this.#memoryAgentDir!,
+			taskDepth: this.#memoryTaskDepth,
+		});
+	}
+
+	async #finishBackendTransition(): Promise<void> {
+		if (this.#host.isDisposed()) return;
+		await this.#refreshMemoryTools();
+		if (this.#host.isDisposed()) return;
+		await this.#host.refreshBaseSystemPrompt();
+	}
+
+	async #handleBackendTransitionError(error: unknown): Promise<never> {
+		await this.#disposeMemoryBackendState(false);
+		if (!this.#host.isDisposed()) {
+			await this.#replaceMemoryTools([]).catch(refreshError => {
+				logger.warn("Failed to remove memory tools after backend apply error", {
+					error: String(refreshError),
+				});
+			});
+		}
+		throw error;
+	}
+
+	/** Dispose a changed backend while the old transcript is still active. */
+	async prepareBackendForNewTranscript(): Promise<PreparedMemoryBackendTransition | undefined> {
+		if (!this.#memoryEnabled || this.#host.isDisposed()) return undefined;
+		return await this.#runBackendTransition(async () => {
+			const previousBackend = this.#host.getMemoryBackend();
+			if (!previousBackend || previousBackend.id === this.#host.settings.get("memory.backend")) return undefined;
+			await this.#disposeMemoryBackendState();
+			return { previousBackend };
+		});
+	}
+
+	/** Restore the prior backend when the transcript mutation itself fails. */
+	async restoreBackendAfterFailedTranscriptTransition(
+		prepared: PreparedMemoryBackendTransition | undefined,
+	): Promise<void> {
+		if (!prepared || this.#host.isDisposed()) return;
+		await this.#runBackendTransition(async () => {
+			try {
+				await this.#disposeMemoryBackendState(false);
+				if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
+					await this.#startMemoryBackend(prepared.previousBackend);
+				}
+				await this.#finishBackendTransition();
+			} catch (error) {
+				await this.#handleBackendTransitionError(error);
+			}
+		});
+	}
+
 	/**
 	 * Apply the selected memory backend to runtime state, tools, and prompt.
 	 * Concurrent settings changes run in order and settle before the next turn.
 	 */
 	async applyMemoryBackend(): Promise<void> {
-		if (this.#host.isDisposed()) return;
-		const transition = this.#memoryBackendTransition.then(() => this.#applyMemoryBackend());
-		this.#memoryBackendTransition = transition.then(
-			() => undefined,
-			() => undefined,
-		);
-		await transition;
+		if (!this.#memoryEnabled || this.#host.isDisposed()) return;
+		await this.#runBackendTransition(() => this.#applyMemoryBackend());
 	}
 
 	async #applyMemoryBackend(): Promise<void> {
 		if (this.#host.isDisposed()) return;
 		try {
 			await this.#disposeMemoryBackendState();
-			if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
-				const backend = await resolveMemoryBackend(this.#host.settings);
-				this.#host.setMemoryBackend(backend);
-				await backend.start({
-					session: this.#host.memoryBackendSession(),
-					settings: this.#host.settings,
-					modelRegistry: this.#host.modelRegistry,
-					agentDir: this.#memoryAgentDir,
-					taskDepth: this.#memoryTaskDepth,
-				});
+			if (this.#memoryEnabled && this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
+				await this.#startMemoryBackend(await resolveMemoryBackend(this.#host.settings));
 			}
-			if (this.#host.isDisposed()) return;
-			await this.#refreshMemoryTools();
-			if (this.#host.isDisposed()) return;
-			await this.#host.refreshBaseSystemPrompt();
+			await this.#finishBackendTransition();
 		} catch (error) {
-			await this.#disposeMemoryBackendState(false);
-			if (!this.#host.isDisposed()) {
-				await this.#replaceMemoryTools([]).catch(refreshError => {
-					logger.warn("Failed to remove memory tools after backend apply error", {
-						error: String(refreshError),
-					});
-				});
-			}
-			throw error;
+			await this.#handleBackendTransitionError(error);
 		}
 	}
 

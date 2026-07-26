@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend/resolve";
+import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -48,6 +50,7 @@ describe("AgentSession memory backend lifecycle", () => {
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
+		vi.restoreAllMocks();
 		authStorage.close();
 		tempDir.removeSync();
 	});
@@ -158,6 +161,92 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getMemoryBackend()?.id).toBe("off");
 		expect(getMnemopiSessionState(current)).toBeUndefined();
 		expect(current.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	async function expectBackendLifecycleOrdering(
+		prepareTransition: (current: AgentSession) => Promise<() => Promise<unknown>>,
+	): Promise<void> {
+		const events: string[] = [];
+		const previousBackend: MemoryBackend = {
+			id: "mnemopi",
+			async start({ session: activeSession }) {
+				events.push(`start:${activeSession.sessionId}`);
+			},
+			async disposeSession(activeSession) {
+				events.push(`dispose:${activeSession.sessionId}`);
+			},
+			async buildDeveloperInstructions() {
+				return undefined;
+			},
+			async clear() {},
+			async enqueue() {},
+		};
+		const selectedBackend: MemoryBackend = {
+			id: "off",
+			async start({ session: activeSession }) {
+				events.push(`start:${activeSession.sessionId}`);
+			},
+			async buildDeveloperInstructions() {
+				return undefined;
+			},
+			async clear() {},
+			async enqueue() {},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockImplementation(async currentSettings =>
+			currentSettings.get("memory.backend") === "mnemopi" ? previousBackend : selectedBackend,
+		);
+		const current = createSession(async () => []);
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+		const runTransition = await prepareTransition(current);
+		const previousSessionId = current.sessionId;
+		events.length = 0;
+
+		settings.override("memory.backend", "off");
+		await runTransition();
+
+		expect(current.sessionId).not.toBe(previousSessionId);
+		expect(events).toEqual([`dispose:${previousSessionId}`, `start:${current.sessionId}`]);
+	}
+
+	it("disposes a deferred backend before replacing a new-session transcript", async () => {
+		await expectBackendLifecycleOrdering(async current => async () => current.newSession());
+	});
+
+	it("disposes a deferred backend before replacing a fork transcript", async () => {
+		await expectBackendLifecycleOrdering(async current => {
+			await current.sendUserMessage("persist before fork");
+			return async () => current.fork();
+		});
+	});
+
+	it("disposes a deferred backend before replacing a resumed transcript", async () => {
+		await expectBackendLifecycleOrdering(async current => {
+			const targetManager = SessionManager.create(tempDir.path(), tempDir.join("target-sessions"));
+			await targetManager.flush();
+			const targetSessionFile = targetManager.getSessionFile();
+			await targetManager.close();
+			if (!targetSessionFile) throw new Error("Expected a target session file");
+			return async () => current.switchSession(targetSessionFile);
+		});
+	});
+
+	it("restores the active backend when a new-session transition fails", async () => {
+		const current = createSession(async () =>
+			current.getMemoryBackend()?.id === "mnemopi" ? [createTool("retain"), createTool("memory_edit")] : [],
+		);
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+		const previousSessionId = current.sessionId;
+		vi.spyOn(current.sessionManager, "newSession").mockRejectedValue(new Error("session transition failed"));
+
+		settings.override("memory.backend", "off");
+		await expect(current.newSession()).rejects.toThrow("session transition failed");
+
+		expect(current.sessionId).toBe(previousSessionId);
+		expect(current.getMemoryBackend()?.id).toBe("mnemopi");
+		expect(getMnemopiSessionState(current)).toBeDefined();
+		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "retain", "memory_edit"]));
 	});
 
 	it("cancels a displaced local startup generation", async () => {

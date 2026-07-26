@@ -306,7 +306,7 @@ import {
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
-import { SessionMemory, type SessionMemoryHost } from "./session-memory";
+import { type PreparedMemoryBackendTransition, SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
@@ -1297,6 +1297,7 @@ export class AgentSession {
 			replaceMemoryTools: tools => this.#tools.replaceMemoryTools(tools),
 		};
 		this.#memory = new SessionMemory(memoryHost, {
+			memoryEnabled: config.memoryEnabled,
 			memoryAgentDir: config.memoryAgentDir,
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
@@ -4567,11 +4568,18 @@ export class AgentSession {
 		return this.#memory.applyMemoryBackend();
 	}
 
-	async #resetMemoryContextForNewTranscript(): Promise<void> {
-		if (this.#memoryBackend && this.#memoryBackend.id !== this.settings.get("memory.backend")) {
-			await this.#memory.applyMemoryBackend();
-		}
-		await this.#memory.resetContextForNewTranscript();
+	#prepareMemoryBackendForNewTranscript(): Promise<PreparedMemoryBackendTransition | undefined> {
+		return this.#memory.prepareBackendForNewTranscript();
+	}
+
+	#resetMemoryContextForNewTranscript(prepared?: PreparedMemoryBackendTransition): Promise<void> {
+		return this.#memory.resetContextForNewTranscript(prepared);
+	}
+
+	#restoreMemoryBackendAfterFailedTranscriptTransition(
+		prepared: PreparedMemoryBackendTransition | undefined,
+	): Promise<void> {
+		return this.#memory.restoreBackendAfterFailedTranscriptTransition(prepared);
 	}
 
 	/** Replaces connected MCP tools and enables them immediately. */
@@ -6758,6 +6766,7 @@ export class AgentSession {
 			this.#cancelOwnAsyncJobs();
 			this.#closeAllProviderSessions("new session");
 			await this.#bash.flushPending();
+			const preparedMemoryBackend = await this.#prepareMemoryBackendForNewTranscript();
 			const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 			let sessionTransitioned = false;
 			try {
@@ -6783,6 +6792,9 @@ export class AgentSession {
 				});
 				this.#bash.markSessionTransition(bashTransition);
 				sessionTransitioned = true;
+			} catch (error) {
+				await this.#restoreMemoryBackendAfterFailedTranscriptTransition(preparedMemoryBackend);
+				throw error;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
@@ -6793,8 +6805,7 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
-			this.#memory.rekeyForCurrentSessionId();
-			await this.#resetMemoryContextForNewTranscript();
+			await this.#resetMemoryContextForNewTranscript(preparedMemoryBackend);
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 
@@ -6857,6 +6868,7 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
 		await this.sessionManager.flush();
+		const preparedMemoryBackend = await this.#prepareMemoryBackendForNewTranscript();
 		const bashTransition = this.#bash.beginSessionTransition();
 
 		// Fork the session (creates new session file with same entries)
@@ -6864,10 +6876,12 @@ export class AgentSession {
 		try {
 			forkResult = await this.sessionManager.fork();
 		} catch (error) {
+			await this.#restoreMemoryBackendAfterFailedTranscriptTransition(preparedMemoryBackend);
 			this.#bash.finishSessionTransition(bashTransition, false);
 			throw error;
 		}
 		if (!forkResult) {
+			await this.#restoreMemoryBackendAfterFailedTranscriptTransition(preparedMemoryBackend);
 			this.#bash.finishSessionTransition(bashTransition, false);
 			return false;
 		}
@@ -6897,8 +6911,7 @@ export class AgentSession {
 		this.#freshProviderSessionId = undefined;
 		this.#adoptInheritedProviderPromptCacheKey();
 		this.#syncAgentSessionId();
-		this.#memory.rekeyForCurrentSessionId();
-		await this.#resetMemoryContextForNewTranscript();
+		await this.#resetMemoryContextForNewTranscript(preparedMemoryBackend);
 
 		// Emit session_switch event with reason "fork" to hooks
 		if (this.#extensionRunner) {
@@ -7816,6 +7829,9 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
+		const preparedMemoryBackend = switchingToDifferentSession
+			? await this.#prepareMemoryBackendForNewTranscript()
+			: undefined;
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -7869,7 +7885,6 @@ export class AgentSession {
 				this.#adoptInheritedProviderPromptCacheKey();
 			}
 			this.#syncAgentSessionId();
-			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
 			const didReloadConversationChange =
@@ -7971,7 +7986,7 @@ export class AgentSession {
 			);
 
 			if (switchingToDifferentSession) {
-				await this.#resetMemoryContextForNewTranscript();
+				await this.#resetMemoryContextForNewTranscript(preparedMemoryBackend);
 			}
 			if (switchingToDifferentSession) {
 				this.#clearSessionScopedToolState();
@@ -8002,6 +8017,7 @@ export class AgentSession {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId);
+			await this.#restoreMemoryBackendAfterFailedTranscriptTransition(preparedMemoryBackend);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
 			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
@@ -8083,6 +8099,7 @@ export class AgentSession {
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
 		await this.#drainAutolearnCapture();
+		const preparedMemoryBackend = await this.#prepareMemoryBackendForNewTranscript();
 
 		let sessionTransitioned = false;
 		try {
@@ -8093,6 +8110,9 @@ export class AgentSession {
 			}
 			this.#bash.markSessionTransition(bashTransition);
 			sessionTransitioned = true;
+		} catch (error) {
+			await this.#restoreMemoryBackendAfterFailedTranscriptTransition(preparedMemoryBackend);
+			throw error;
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 		}
@@ -8102,8 +8122,7 @@ export class AgentSession {
 		this.#freshProviderSessionId = undefined;
 		this.#clearInheritedProviderPromptCacheKey();
 		this.#syncAgentSessionId();
-		this.#memory.rekeyForCurrentSessionId();
-		await this.#resetMemoryContextForNewTranscript();
+		await this.#resetMemoryContextForNewTranscript(preparedMemoryBackend);
 
 		// Reload messages from entries (works for both file and in-memory mode)
 		const sessionContext = this.buildDisplaySessionContext();
@@ -8184,12 +8203,16 @@ export class AgentSession {
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
 		await this.#drainAutolearnCapture();
+		const preparedMemoryBackend = await this.#prepareMemoryBackendForNewTranscript();
 
 		let sessionTransitioned = false;
 		try {
 			this.sessionManager.createBranchedSession(leafId);
 			this.#bash.markSessionTransition(bashTransition);
 			sessionTransitioned = true;
+		} catch (error) {
+			await this.#restoreMemoryBackendAfterFailedTranscriptTransition(preparedMemoryBackend);
+			throw error;
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 		}
@@ -8206,8 +8229,7 @@ export class AgentSession {
 		this.#todo.syncFromBranch();
 		this.#freshProviderSessionId = undefined;
 		this.#syncAgentSessionId();
-		this.#memory.rekeyForCurrentSessionId();
-		await this.#resetMemoryContextForNewTranscript();
+		await this.#resetMemoryContextForNewTranscript(preparedMemoryBackend);
 
 		const sessionContext = this.buildDisplaySessionContext();
 

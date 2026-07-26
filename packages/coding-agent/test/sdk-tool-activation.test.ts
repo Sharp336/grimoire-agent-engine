@@ -476,6 +476,9 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			await session.prompt("restricted turn");
+			await session.applyMemoryBackend();
+			await session.newSession();
+			await session.prompt("restricted turn after new session");
 			expect(start).not.toHaveBeenCalled();
 			expect(session.getMemoryBackend()?.id).toBe("off");
 		} finally {
