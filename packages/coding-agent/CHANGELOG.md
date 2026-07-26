@@ -122,7 +122,7 @@
 - Added a selectable voice setting for `/live` realtime sessions ([#6566](https://github.com/can1357/oh-my-pi/issues/6566)).
 ### Fixed
 
-- Native compaction now keeps implicit role and largest-context fallbacks on the active provider, preventing a provider-native request from silently becoming another provider's generic summary. Explicit compaction models and soft compaction retain their existing fallback behavior.
+- Native compaction preserves provider-native success and non-authentication failure semantics while retaining authenticated cross-provider fallback when the native provider rejects credentials.
 
 ## [17.1.4] - 2026-07-26
 

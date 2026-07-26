@@ -37,13 +37,7 @@ describe("issue #986 compaction auth fallback", () => {
 			throw new Error("Expected bundled test models to exist");
 		}
 
-		const settings = Settings.isolated({
-			"compaction.keepRecentTokens": 1,
-			"compaction.strategy": "context-full",
-			// This suite covers the portable summarizer's auth fallback. Native
-			// compaction keeps its implicit candidate chain provider-isolated.
-			"compaction.remoteEnabled": false,
-		});
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
 		if (options?.fallbackModelRole) {
 			settings.setModelRole(options.fallbackModelRole, `${fallbackModel.provider}/${fallbackModel.id}`);
 		}
@@ -87,7 +81,7 @@ describe("issue #986 compaction auth fallback", () => {
 		return { currentModel, fallbackModel };
 	}
 
-	it("falls back to an authenticated role model when the current provider returns auth_unavailable", async () => {
+	it("falls back across providers when native compaction returns auth_unavailable", async () => {
 		const { currentModel, fallbackModel } = await createSession({ fallbackModelRole: "smol" });
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			if (model.provider === currentModel.provider && model.id === currentModel.id) {
