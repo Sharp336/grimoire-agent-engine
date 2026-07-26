@@ -1390,7 +1390,7 @@ describe("cmux Codex browser review regressions", () => {
 		});
 	});
 
-	it("downloads nested media through the page context so cookies and blob URLs remain available", async () => {
+	it("downloads nested media through locator and DOM-ref page contexts", async () => {
 		const payload = Buffer.from("page-authenticated-media");
 		const writes: Buffer[] = [];
 		let transferStarts = 0;
@@ -1399,6 +1399,10 @@ describe("cmux Codex browser review regressions", () => {
 		const { document, window } = parseHTML(
 			'<html><body><button id="media"><picture><img src="blob:fixture-media"></picture></button></body></html>',
 		);
+		const mediaButton = document.getElementById("media");
+		if (!mediaButton) throw new Error("Expected media wrapper");
+		Reflect.set(mediaButton, "getBoundingClientRect", () => ({ x: 0, y: 0, width: 100, height: 20 }));
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
 		spyOn(Bun, "write").mockImplementation(async (_destination, data) => {
 			writes.push(Buffer.from(data as Uint8Array));
 			return writes.at(-1)?.byteLength ?? 0;
@@ -1406,9 +1410,17 @@ describe("cmux Codex browser review regressions", () => {
 		const current = await selectedTab(
 			facadeFor({
 				codexCwd: () => "/tmp/codex-media-contract",
+				async ariaSnapshot() {
+					return "";
+				},
+				async codexEvaluateCleanup(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window });
+				},
 				async codexEvaluate(source: string, args: unknown[]) {
 					if (args[1] === "status") return { attached: true, visible: true, enabled: true };
 					if (args[1] === "mediaUrl") return runPageEvaluator(source, args, { document, window });
+					if (args[1] === "dom_cua.downloadMedia" || args.length === 0)
+						return runPageEvaluator(source, args, { document, window });
 					if (source.includes("__ompCodexMediaTransfers") && args.length === 2) {
 						transferStarts++;
 						return true;
@@ -1430,11 +1442,15 @@ describe("cmux Codex browser review regressions", () => {
 		);
 
 		await current.playwright.locator("#media").downloadMedia({ timeoutMs: 250 });
+		const snapshot = await current.dom_cua.get_visible_dom();
+		const node = snapshot.nodes.find(candidate => candidate.text === "");
+		if (!node) throw new Error("Expected media wrapper DOM node");
+		await current.dom_cua.downloadMedia({ node_id: node.node_id, timeoutMs: 250 });
 
 		expect(hostFetch).not.toHaveBeenCalled();
-		expect(transferStarts).toBe(1);
-		expect(transferStatuses).toBe(1);
-		expect(writes).toEqual([payload]);
+		expect(transferStarts).toBe(2);
+		expect(transferStatuses).toBe(2);
+		expect(writes).toEqual([payload, payload]);
 	});
 
 	it("downloads coordinate media through nested open shadow roots and preserves boundary errors", async () => {

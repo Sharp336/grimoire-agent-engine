@@ -222,7 +222,7 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	if (command === "textContent") return element.textContent;
 	if (command === "mediaUrl") {
 		const direct = element.currentSrc || element.src || element.href || element.getAttribute("src") || element.getAttribute("href");
-		const media = direct ? element : element.querySelector?.("img,video,audio,source");
+		const media = direct ? element : element.querySelector?.("img,video,audio,source,a[href]");
 		return String(direct || media?.currentSrc || media?.src || media?.href || media?.getAttribute?.("src") || media?.getAttribute?.("href") || "");
 	}
 	const dispatch = (target, type, init = {}) => {
@@ -664,7 +664,9 @@ const DOM_REF_OPERATION_SOURCE = `(nodeId, operation, payload) => {
 		return true;
 	}
 	if (operation === "dom_cua.downloadMedia") {
-		return String(target.currentSrc || target.src || target.getAttribute?.("href") || "");
+		const direct = target.currentSrc || target.src || target.href || target.getAttribute?.("src") || target.getAttribute?.("href");
+		const media = direct ? target : target.querySelector?.("img,video,audio,source,a[href]");
+		return String(direct || media?.currentSrc || media?.src || media?.href || media?.getAttribute?.("src") || media?.getAttribute?.("href") || "");
 	}
 	throw new Error("Unsupported DOM CUA ref operation: " + operation);
 }`;
