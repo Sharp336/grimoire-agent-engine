@@ -1,0 +1,728 @@
+import { describe, expect, spyOn, test } from "bun:test";
+import * as path from "node:path";
+import {
+	buildRestartCommand,
+	consumeRestartAdvisorEnabled,
+	consumeRestartComputerEnabled,
+	consumeRestartExtensionFlagValues,
+	consumeRestartExtensionPackageRoots,
+	RESTART_ADVISOR_ENABLED_ENV,
+	RESTART_API_KEY_ENV,
+	RESTART_API_KEY_PROVIDER_ENV,
+	RESTART_COMPUTER_ENABLED_ENV,
+	RESTART_EXTENSION_FLAG_VALUES_ENV,
+	RESTART_EXTENSION_PACKAGE_ROOTS_ENV,
+	type RestartCommandEnvironment,
+	type RestartExtensionFlagValue,
+	type RestartSpawn,
+	type RestartSpawnInput,
+	resolveRestartBaseCommand,
+	restoreRestartExtensionFlagValues,
+	selectRestartExtensionPackageRoots,
+	spawnRestartProcess,
+} from "@oh-my-pi/pi-coding-agent/cli/restart";
+
+const packageRoot = "/repo/packages/coding-agent";
+
+function baseOptions() {
+	return {
+		sessionId: "sess-1",
+		cwd: "/repo/project",
+		sessionDir: "/repo/project/.sessions",
+		activeProfile: "work",
+		approvalMode: "write" as const,
+	};
+}
+
+function valuesForFlag(cmd: string[], flag: string): string[] {
+	const values: string[] = [];
+	for (let index = 0; index < cmd.length - 1; index++) {
+		if (cmd[index] === flag) values.push(cmd[index + 1] as string);
+	}
+	return values;
+}
+
+describe("restart command construction", () => {
+	test("builds a compiled binary restart command", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => "/ignored/cli.ts",
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		expect(buildRestartCommand(baseOptions(), env)).toEqual({
+			cmd: [
+				"/opt/omp/omp",
+				"--profile",
+				"work",
+				"--cwd",
+				"/repo/project",
+				"--approval-mode",
+				"write",
+				"--session-dir",
+				"/repo/project/.sessions",
+				"--resume",
+				"sess-1",
+			],
+			cwd: "/repo/project",
+		});
+	});
+
+	test("keeps normal POSIX executable paths unchanged", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			platform: "linux",
+			packageRoot,
+		};
+
+		expect(resolveRestartBaseCommand(env)).toEqual({ cmd: ["/opt/omp/omp"] });
+	});
+
+	test("strips extended-length drive executable paths before spawning", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "\\\\?\\C:\\Program Files\\Bun\\bun.exe",
+			platform: "win32",
+			packageRoot,
+		};
+
+		expect(resolveRestartBaseCommand(env)).toEqual({ cmd: ["C:\\Program Files\\Bun\\bun.exe"] });
+	});
+
+	test("strips extended-length UNC executable paths before spawning", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "\\\\?\\UNC\\server\\share\\bun.exe",
+			platform: "win32",
+			packageRoot,
+		};
+
+		expect(resolveRestartBaseCommand(env)).toEqual({ cmd: ["\\\\server\\share\\bun.exe"] });
+	});
+
+	test("builds a host-entry restart command without changing session cwd", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => false,
+			workerHostEntry: () => "/repo/packages/coding-agent/src/cli.ts",
+			execPath: "/usr/bin/bun",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(baseOptions(), env);
+
+		expect(command.cmd.slice(0, 2)).toEqual(["/usr/bin/bun", "/repo/packages/coding-agent/src/cli.ts"]);
+		expect(command.cwd).toBe("/repo/project");
+	});
+
+	test("builds a source fallback restart command without changing session cwd", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => false,
+			workerHostEntry: () => null,
+			execPath: "/usr/bin/bun",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(baseOptions(), env);
+
+		expect(command.cmd.slice(0, 2)).toEqual(["/usr/bin/bun", "/repo/packages/coding-agent/src/cli.ts"]);
+		expect(command.cwd).toBe("/repo/project");
+	});
+
+	test("omits profile arguments when no active profile exists", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{
+				sessionId: "sess-1",
+				cwd: "/repo/project",
+				approvalMode: "write",
+				sessionDir: "/repo/project/.sessions",
+			},
+			env,
+		);
+
+		expect(command.cmd).toEqual([
+			"/opt/omp/omp",
+			"--cwd",
+			"/repo/project",
+			"--approval-mode",
+			"write",
+			"--session-dir",
+			"/repo/project/.sessions",
+			"--resume",
+			"sess-1",
+		]);
+		expect(command.cmd).not.toContain("--profile");
+		expect(command.cmd).not.toContain("work");
+		expect(command.cwd).toBe("/repo/project");
+	});
+
+	test("preserves custom session dirs across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), sessionDir: "/tmp/omp-sessions" }, env);
+
+		expect(valuesForFlag(command.cmd, "--session-dir")).toEqual(["/tmp/omp-sessions"]);
+		expect(command.cmd.indexOf("--session-dir")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cwd).toBe("/repo/project");
+	});
+
+	test("preserves disabled extension discovery across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), disableExtensions: true }, env);
+
+		expect(command.cmd).toContain("--no-extensions");
+		expect(command.cmd.indexOf("--no-extensions")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--no-extensions")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves env-only CLI toggles across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), noPty: true, noTitle: true }, env);
+
+		expect(command.cmd).toContain("--no-pty");
+		expect(command.cmd).toContain("--no-title");
+		expect(command.cmd.indexOf("--no-pty")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--no-title")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+	});
+
+	test("preserves custom config files across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), configFiles: ["./dev.yml", "/tmp/override.yml"] }, env);
+
+		expect(valuesForFlag(command.cmd, "--config")).toEqual(["./dev.yml", "/tmp/override.yml"]);
+		expect(command.cmd.indexOf("--config")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--config")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("overrides inherited PI_CONFIG_FILES with resolved launch paths", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const configEnvFiles = ["/project-a/omp.yml", "/shared/override.yml"];
+
+		const command = buildRestartCommand({ ...baseOptions(), configEnvFiles }, env);
+
+		expect(command.env?.PI_CONFIG_FILES).toBe(configEnvFiles.join(path.delimiter));
+	});
+
+	test("preserves explicit extension and plugin roots across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				extensionPaths: ["./ext-one", "pkg-two"],
+				hookPaths: ["./hook-one"],
+				extensionPackageRoots: ["/project-a/ext-one", "/project-a/hook-one"],
+				pluginDirs: ["./plugin-one", "./plugin-two"],
+			},
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--extension")).toEqual(["./ext-one", "pkg-two"]);
+		expect(valuesForFlag(command.cmd, "--hook")).toEqual(["./hook-one"]);
+		expect(valuesForFlag(command.cmd, "--plugin-dir")).toEqual(["./plugin-one", "./plugin-two"]);
+		expect(command.env).toEqual({
+			[RESTART_EXTENSION_PACKAGE_ROOTS_ENV]: JSON.stringify(["/project-a/ext-one", "/project-a/hook-one"]),
+		});
+		expect(command.cmd.indexOf("--extension")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--hook")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cmd.indexOf("--plugin-dir")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("hands off CLI API keys via child env instead of argv", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), apiKey: "sk-runtime", apiKeyProvider: "openai" }, env);
+
+		expect(command.cmd).not.toContain("--api-key");
+		expect(command.cmd).not.toContain("sk-runtime");
+		expect(command.env).toEqual({
+			[RESTART_API_KEY_ENV]: "sk-runtime",
+			[RESTART_API_KEY_PROVIDER_ENV]: "openai",
+		});
+	});
+
+	test("hands off extension CLI flag values via child env instead of argv", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const extensionFlagValues: RestartExtensionFlagValue[] = [
+			["spawn-peer", "reviewer"],
+			["headless", true],
+		];
+
+		const command = buildRestartCommand({ ...baseOptions(), extensionFlagValues }, env);
+
+		expect(command.cmd).not.toContain("--spawn-peer");
+		expect(command.cmd).not.toContain("--headless");
+		expect(command.env).toEqual({
+			[RESTART_EXTENSION_FLAG_VALUES_ENV]: JSON.stringify(extensionFlagValues),
+		});
+	});
+
+	test("hands off empty extension CLI flag snapshots as restart markers", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), extensionFlagValues: [] }, env);
+
+		expect(command.env).toEqual({
+			[RESTART_EXTENSION_FLAG_VALUES_ENV]: "[]",
+		});
+	});
+
+	test("hands off live advisor state via child env", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const enabledCommand = buildRestartCommand({ ...baseOptions(), advisor: true }, env);
+		const disabledCommand = buildRestartCommand({ ...baseOptions(), advisor: false }, env);
+
+		expect(enabledCommand.cmd).toContain("--advisor");
+		expect(enabledCommand.env).toEqual({
+			[RESTART_ADVISOR_ENABLED_ENV]: "1",
+		});
+		expect(disabledCommand.cmd).not.toContain("--advisor");
+		expect(disabledCommand.env).toEqual({
+			[RESTART_ADVISOR_ENABLED_ENV]: "0",
+		});
+	});
+
+	test("hands off live computer-use state via child env", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const enabledCommand = buildRestartCommand({ ...baseOptions(), computer: true }, env);
+		const disabledCommand = buildRestartCommand({ ...baseOptions(), computer: false }, env);
+
+		expect(enabledCommand.env).toEqual({
+			[RESTART_COMPUTER_ENABLED_ENV]: "1",
+		});
+		expect(disabledCommand.env).toEqual({
+			[RESTART_COMPUTER_ENABLED_ENV]: "0",
+		});
+	});
+
+	test("carries autoApprove flag in command", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const enabledCommand = buildRestartCommand({ ...baseOptions(), autoApprove: true }, env);
+		const disabledCommand = buildRestartCommand({ ...baseOptions(), autoApprove: false }, env);
+
+		expect(enabledCommand.cmd).toContain("--auto-approve");
+		expect(disabledCommand.cmd).not.toContain("--auto-approve");
+	});
+
+	test("ignores malformed restart extension flag env payloads", () => {
+		const env = { [RESTART_EXTENSION_FLAG_VALUES_ENV]: "not-json" };
+
+		expect(consumeRestartExtensionFlagValues(env)).toBeUndefined();
+		expect(env[RESTART_EXTENSION_FLAG_VALUES_ENV]).toBeUndefined();
+	});
+
+	test("consumes empty restart extension flag snapshots as restart markers", () => {
+		const env = { [RESTART_EXTENSION_FLAG_VALUES_ENV]: "[]" };
+
+		expect(consumeRestartExtensionFlagValues(env)).toEqual([]);
+		expect(env[RESTART_EXTENSION_FLAG_VALUES_ENV]).toBeUndefined();
+	});
+
+	test("preserves carried extension package roots across picker-cwd restarts", () => {
+		const env = {
+			[RESTART_EXTENSION_PACKAGE_ROOTS_ENV]: JSON.stringify(["/project-a/ext", "/project-a/hook"]),
+		};
+
+		const carriedRoots = consumeRestartExtensionPackageRoots(env);
+
+		expect(carriedRoots).toEqual(["/project-a/ext", "/project-a/hook"]);
+		expect(selectRestartExtensionPackageRoots(carriedRoots, ["/project-b/ext"], ["/project-b/hook"])).toEqual([
+			"/project-a/ext",
+			"/project-a/hook",
+		]);
+		expect(env[RESTART_EXTENSION_PACKAGE_ROOTS_ENV]).toBeUndefined();
+		expect(selectRestartExtensionPackageRoots(undefined, ["./ext"], ["./hook"])).toEqual(["./ext", "./hook"]);
+	});
+
+	test("consumes restart advisor env toggles", () => {
+		const enabledEnv = { [RESTART_ADVISOR_ENABLED_ENV]: "1" };
+		const disabledEnv = { [RESTART_ADVISOR_ENABLED_ENV]: "0" };
+		const invalidEnv = { [RESTART_ADVISOR_ENABLED_ENV]: "yes" };
+
+		expect(consumeRestartAdvisorEnabled(enabledEnv)).toBe(true);
+		expect(consumeRestartAdvisorEnabled(disabledEnv)).toBe(false);
+		expect(consumeRestartAdvisorEnabled(invalidEnv)).toBeUndefined();
+		expect(enabledEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
+		expect(disabledEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
+		expect(invalidEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
+	});
+
+	test("consumes restart computer-use env toggles", () => {
+		const enabledEnv = { [RESTART_COMPUTER_ENABLED_ENV]: "1" };
+		const disabledEnv = { [RESTART_COMPUTER_ENABLED_ENV]: "0" };
+		const invalidEnv = { [RESTART_COMPUTER_ENABLED_ENV]: "yes" };
+
+		expect(consumeRestartComputerEnabled(enabledEnv)).toBe(true);
+		expect(consumeRestartComputerEnabled(disabledEnv)).toBe(false);
+		expect(consumeRestartComputerEnabled(invalidEnv)).toBeUndefined();
+		expect(enabledEnv[RESTART_COMPUTER_ENABLED_ENV]).toBeUndefined();
+		expect(disabledEnv[RESTART_COMPUTER_ENABLED_ENV]).toBeUndefined();
+		expect(invalidEnv[RESTART_COMPUTER_ENABLED_ENV]).toBeUndefined();
+	});
+
+	test("restores only registered extension flag values", () => {
+		const recorded = new Map<string, boolean | string>();
+		const registeredFlags: Record<string, true> = { "spawn-peer": true, headless: true };
+		const sink = {
+			getFlags: () => ({ has: (name: string) => registeredFlags[name] === true }),
+			setFlagValue: (name: string, value: boolean | string) => {
+				recorded.set(name, value);
+			},
+		};
+
+		restoreRestartExtensionFlagValues(sink, [
+			["spawn-peer", "reviewer"],
+			["missing", "dropped"],
+			["headless", true],
+		]);
+
+		expect([...recorded.entries()]).toEqual([
+			["spawn-peer", "reviewer"],
+			["headless", true],
+		]);
+	});
+
+	test("preserves disabled context flags across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{ ...baseOptions(), disableLsp: true, disableRules: true, disableSkills: true },
+			env,
+		);
+
+		expect(command.cmd).toContain("--no-lsp");
+		expect(command.cmd).toContain("--no-skills");
+		expect(command.cmd).toContain("--no-rules");
+		expect(command.cmd.indexOf("--no-lsp")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--no-skills")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cmd.indexOf("--no-rules")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves CLI system prompts across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				systemPrompt: "Use this exact prompt",
+				appendSystemPrompt: "Append this guidance",
+			},
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--system-prompt")).toEqual(["Use this exact prompt"]);
+		expect(valuesForFlag(command.cmd, "--append-system-prompt")).toEqual(["Append this guidance"]);
+		expect(command.cmd.indexOf("--system-prompt")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--append-system-prompt")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves provider session ids across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				providerSessionId: "provider-session-1",
+				providerPromptCacheKey: "cache-shard-1",
+			},
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--provider-session-id")).toEqual(["provider-session-1"]);
+		expect(valuesForFlag(command.cmd, "--prompt-cache-key")).toEqual(["cache-shard-1"]);
+		expect(command.cmd.indexOf("--provider-session-id")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--provider-session-id")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves skill filters across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), skillPatterns: ["git-*", "review"] }, env);
+		const disabledCommand = buildRestartCommand(
+			{ ...baseOptions(), disableSkills: true, skillPatterns: ["git-*"] },
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--skills")).toEqual(["git-*,review"]);
+		expect(command.cmd.indexOf("--skills")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--skills")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(disabledCommand.cmd).toContain("--no-skills");
+		expect(valuesForFlag(disabledCommand.cmd, "--skills")).toEqual(["git-*"]);
+	});
+
+	test("preserves CLI-only model and UI overrides across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				provider: "openai",
+				model: "gpt-5",
+				modelPatterns: ["sonnet", "gpt-5"],
+				smolModel: "haiku",
+				slowModel: "opus",
+				planModel: "planner",
+				thinking: "auto",
+				hideThinking: true,
+				advisor: true,
+			},
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--provider")).toEqual(["openai"]);
+		expect(valuesForFlag(command.cmd, "--model")).toEqual(["gpt-5"]);
+		expect(valuesForFlag(command.cmd, "--models")).toEqual(["sonnet,gpt-5"]);
+		expect(valuesForFlag(command.cmd, "--smol")).toEqual(["haiku"]);
+		expect(valuesForFlag(command.cmd, "--slow")).toEqual(["opus"]);
+		expect(valuesForFlag(command.cmd, "--plan")).toEqual(["planner"]);
+		expect(valuesForFlag(command.cmd, "--thinking")).toEqual(["auto"]);
+		expect(command.cmd).toContain("--hide-thinking");
+		expect(command.cmd).toContain("--advisor");
+		expect(command.cmd.indexOf("--provider")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--model")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--models")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--hide-thinking")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cmd.indexOf("--advisor")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves prewalk and plan-yolo overrides across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				prewalk: true,
+				prewalkInto: "@smol",
+				planYolo: true,
+				planYoloInto: "@slow",
+			},
+			env,
+		);
+		const disabledCommand = buildRestartCommand({ ...baseOptions(), noPrewalk: true }, env);
+
+		expect(command.cmd).toContain("--prewalk");
+		expect(valuesForFlag(command.cmd, "--prewalk-into")).toEqual(["@smol"]);
+		expect(command.cmd).toContain("--plan-yolo");
+		expect(valuesForFlag(command.cmd, "--plan-yolo-into")).toEqual(["@slow"]);
+		expect(command.cmd.indexOf("--prewalk")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cmd.indexOf("--plan-yolo")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(disabledCommand.cmd).toContain("--no-prewalk");
+	});
+
+	test("preserves a positive remaining max-time budget across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const now = 1_700_000_000_000;
+		const nowSpy = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			const command = buildRestartCommand({ ...baseOptions(), maxTimeDeadline: now + 125_001 }, env);
+
+			expect(valuesForFlag(command.cmd, "--max-time")).toEqual(["126"]);
+			expect(command.cmd.indexOf("--max-time")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	test("clamps elapsed max-time deadlines to one second across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const now = 1_700_000_000_000;
+		const nowSpy = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			const command = buildRestartCommand({ ...baseOptions(), maxTimeDeadline: now }, env);
+
+			expect(valuesForFlag(command.cmd, "--max-time")).toEqual(["1"]);
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	test("preserves disabled tools across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), toolRestriction: { kind: "none" } }, env);
+
+		expect(command.cmd).toContain("--no-tools");
+		expect(command.cmd.indexOf("--no-tools")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd).not.toContain("--tools");
+	});
+
+	test("preserves a tool allowlist across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{ ...baseOptions(), toolRestriction: { kind: "allowlist", toolNames: ["read", "grep"] } },
+			env,
+		);
+
+		expect(command.cmd).toContain("--tools");
+		expect(command.cmd[command.cmd.indexOf("--tools") + 1]).toBe("read,grep");
+		expect(command.cmd.indexOf("--tools")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd).not.toContain("--no-tools");
+	});
+});
+
+describe("restart process spawning", () => {
+	test("spawns with inherited stdio and returns the child exit code", async () => {
+		let recorded: RestartSpawnInput | undefined;
+		const spawn: RestartSpawn = options => {
+			recorded = options;
+			return { exited: Promise.resolve(7) };
+		};
+
+		const exitCode = await spawnRestartProcess(
+			{ cmd: ["/opt/omp/omp", "--resume", "sess-1"], cwd: "/repo/project" },
+			{ spawn },
+		);
+
+		expect(exitCode).toBe(7);
+		expect(recorded).toEqual({
+			cmd: ["/opt/omp/omp", "--resume", "sess-1"],
+			cwd: "/repo/project",
+			stdin: "inherit",
+			stdout: "inherit",
+			stderr: "inherit",
+		});
+	});
+
+	test("passes restart env overrides to the child process", async () => {
+		let recorded: RestartSpawnInput | undefined;
+		const spawn: RestartSpawn = options => {
+			recorded = options;
+			return { exited: Promise.resolve(0) };
+		};
+
+		await spawnRestartProcess(
+			{ cmd: ["/opt/omp/omp", "--resume", "sess-1"], cwd: "/repo/project", env: { [RESTART_API_KEY_ENV]: "sk" } },
+			{ spawn },
+		);
+
+		expect(recorded?.cmd).toEqual(["/opt/omp/omp", "--resume", "sess-1"]);
+		expect(recorded?.env?.[RESTART_API_KEY_ENV]).toBe("sk");
+	});
+});

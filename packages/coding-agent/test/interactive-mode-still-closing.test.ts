@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import * as restartProcess from "@oh-my-pi/pi-coding-agent/cli/restart";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -20,6 +21,7 @@ describe("InteractiveMode long shutdown status", () => {
 	let authStorage: AuthStorage;
 	let mode: InteractiveMode;
 	let session: AgentSession;
+	let sessionManager: SessionManager;
 	let tempDir: TempDir;
 
 	beforeAll(() => {
@@ -34,9 +36,10 @@ describe("InteractiveMode long shutdown status", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled model");
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.join("sessions"));
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [], messages: [] } }),
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager,
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
@@ -81,5 +84,54 @@ describe("InteractiveMode long shutdown status", () => {
 		vi.advanceTimersByTime(10_000);
 		await flushMicrotasks();
 		expect(statuses).toHaveLength(2);
+	});
+
+	it("marks the session disposing and admits only one restart while persistence waits", async () => {
+		const ensureStarted = Promise.withResolvers<void>();
+		const releaseEnsure = Promise.withResolvers<void>();
+		vi.spyOn(sessionManager, "getSessionFile").mockReturnValue(tempDir.join("session.jsonl"));
+		const ensureOnDisk = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(async () => {
+			ensureStarted.resolve();
+			await releaseEnsure.promise;
+		});
+		vi.spyOn(postmortem, "cleanup").mockResolvedValue(undefined);
+		const spawnRestart = vi.spyOn(restartProcess, "spawnRestartProcess").mockResolvedValue(0);
+
+		const firstRestart = mode.restart();
+		await ensureStarted.promise;
+
+		expect(session.isDisposed).toBe(true);
+		await mode.restart();
+		expect(ensureOnDisk).toHaveBeenCalledTimes(1);
+		expect(spawnRestart).not.toHaveBeenCalled();
+
+		releaseEnsure.resolve();
+		await firstRestart;
+
+		expect(spawnRestart).toHaveBeenCalledTimes(1);
+	});
+
+	it("clears the restart guard when command construction fails before teardown", async () => {
+		vi.spyOn(sessionManager, "getSessionFile").mockReturnValue(tempDir.join("session.jsonl"));
+		vi.spyOn(sessionManager, "ensureOnDisk").mockResolvedValue(undefined);
+		vi.spyOn(postmortem, "cleanup").mockResolvedValue(undefined);
+		const warning = vi.spyOn(mode, "showWarning");
+		const buildCommand = vi
+			.spyOn(restartProcess, "buildRestartCommand")
+			.mockImplementationOnce(() => {
+				throw new Error("invalid restart command");
+			})
+			.mockReturnValue({ cmd: ["omp"], cwd: tempDir.path() });
+		const spawnRestart = vi.spyOn(restartProcess, "spawnRestartProcess").mockResolvedValue(0);
+
+		await mode.restart();
+
+		expect(warning).toHaveBeenCalledWith("Restart failed: invalid restart command");
+		expect(session.isDisposed).toBe(false);
+
+		await mode.restart();
+
+		expect(buildCommand).toHaveBeenCalledTimes(2);
+		expect(spawnRestart).toHaveBeenCalledTimes(1);
 	});
 });

@@ -8,12 +8,16 @@ interface MarketplaceAutoUpdateOptions {
 	clearPluginRootsCache: () => void;
 }
 
-export function scheduleMarketplaceAutoUpdate(options: MarketplaceAutoUpdateOptions): void {
+/**
+ * Start the startup update without blocking launch and return the settled work so a restart can
+ * keep its replacement from concurrently touching the marketplace registries.
+ */
+export function scheduleMarketplaceAutoUpdate(options: MarketplaceAutoUpdateOptions): Promise<void> {
 	if (options.autoUpdate === "off") {
-		return;
+		return Promise.resolve();
 	}
 
-	void runMarketplaceAutoUpdate(options);
+	return runMarketplaceAutoUpdate(options);
 }
 
 async function runMarketplaceAutoUpdate(options: MarketplaceAutoUpdateOptions): Promise<void> {

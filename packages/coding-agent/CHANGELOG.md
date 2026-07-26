@@ -76,6 +76,9 @@
 - Fixed spilled tool-output artifact descriptors leaking on error/abort paths. `OutputSink.dump()` was the only path that closed the spill `Bun.FileSink`, but the bash and Python executors re-throw on failure and their `finally` blocks never closed the sink, so a large-output command that errored leaked the artifact descriptor until an unrelated read (e.g. a `SKILL.md` load) hit `EMFILE`. `OutputSink` now exposes an idempotent `dispose()` that closes the sink exactly once, wired into every executor's `finally` ([#6463](https://github.com/can1357/oh-my-pi/issues/6463)).
 - Fixed the first submitted prompt stalling while the local tiny-title worker started: the interactive submit handler now paints the pending user row before starting title generation, and startup prewarms an idle, unref'd worker so the first submit reuses a live subprocess instead of paying spawn latency ahead of the first frame ([#6462](https://github.com/can1357/oh-my-pi/issues/6462)).
 - Fixed legacy Pi extensions failing validation when importing the upstream `keyText` keybinding helper ([#6470](https://github.com/can1357/oh-my-pi/issues/6470)).
+### Fixed
+
+- Fixed `/restart` dropping undelivered async results, reinterpreting literal prompts, rereading literal prompt paths, and racing marketplace updates.
 
 ## [17.1.0] - 2026-07-24
 
@@ -1548,6 +1551,21 @@
 - Fixed the DuckDuckGo web_search provider returning empty results for non-encyclopedic queries by switching from the Instant Answer API to parsing the HTML frontend, and added clear error handling for bot-challenge throttling.
 - Fixed Windows --extension paths with spaces or \\?\ prefixes being truncated or incorrectly passed to Bun import/spawn APIs.
 - Fixed /mcp reauth compatibility with Cloudflare by aligning OAuth prompt behavior with the reference MCP SDK and updating the client label to oh-my-pi.
+### Added
+
+- Added `/restart` to restart OMP from the TUI and resume the current session in the same terminal.
+
+### Fixed
+
+- Fixed `/restart` dropping launch-only auth, prompt, skill, context, config, and extension state (`--api-key`, `--system-prompt`, `--append-system-prompt`, `--skills`, `--no-lsp`, `--no-skills`, `--no-rules`, `--no-extensions`, `--config`, `--extension`, `--hook`, `--plugin-dir`, and extension-registered CLI flags), so restarted TUI sessions preserve runtime API keys, custom system prompts, skill filters, disabled context sources, custom config overlays, extension/plugin roots, and extension flag values.
+- Fixed `/restart` dropping launch-only model, thinking, and advisor overrides (`--models`, `--smol`, `--slow`, `--plan`, `--thinking`, `--hide-thinking`, and `--advisor`).
+- Fixed `/restart` allowing process teardown while async background jobs were still running, which could cancel pending job work and deliveries.
+- Fixed `/restart` allowing process teardown while async background jobs or detached subagents were still running, which could cancel pending work and deliveries.
+- Fixed `/restart` API-key handoffs for resumed/forked sessions by skipping fresh-launch model validation until the restored session model is available.
+- Fixed `/restart` capturing built-in launch flags from the extension-aware parse so extension-registered flags that shadow built-ins do not replay stale built-in values.
+- Fixed `/restart` replaying relative launch path flags such as `--config` against a moved session cwd instead of the original launch cwd.
+- Fixed `/restart` dropping `--max-time`; restarted sessions now replay only the remaining wall-clock budget instead of resetting the original duration.
+- Fixed the bash interceptor blocking `echo` / `printf` redirects to `/dev/null`, `/dev/tty`, `/dev/stdout`, and `/dev/stderr` device sinks while still directing real file writes to the write tool. ([#3763](https://github.com/can1357/oh-my-pi/issues/3763))
 
 ## [16.2.5] - 2026-06-28
 

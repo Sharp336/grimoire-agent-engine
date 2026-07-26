@@ -311,22 +311,36 @@ export function discoverTitleSystemPromptFile(cwd?: string): string | undefined 
 	return undefined;
 }
 
-/** Resolve input as file path or literal string */
-export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
+/** How a custom prompt was classified during startup resolution. */
+export type PromptInputResolution =
+	| { source: "file"; input: string; value: string }
+	| { source: "literal"; input: string; value: string };
+
+/** Resolve input as file path or literal string, retaining the initial source classification. */
+export async function resolvePromptInputWithSource(
+	input: string | undefined,
+	description: string,
+): Promise<PromptInputResolution | undefined> {
 	if (!input) {
 		return undefined;
-	} else if (input.includes("\n")) {
-		return input;
+	}
+	if (input.includes("\n")) {
+		return { source: "literal", input, value: input };
 	}
 
 	try {
-		return await Bun.file(input).text();
+		return { source: "file", input, value: await Bun.file(input).text() };
 	} catch (error) {
 		if (!hasFsCode(error, "ENAMETOOLONG") && !isEnoent(error)) {
 			logger.warn(`Could not read ${description} file`, { path: input, error: String(error) });
 		}
-		return input;
+		return { source: "literal", input, value: input };
 	}
+}
+
+/** Resolve input as file path or literal string. */
+export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
+	return (await resolvePromptInputWithSource(input, description))?.value;
 }
 
 export interface LoadContextFilesOptions {

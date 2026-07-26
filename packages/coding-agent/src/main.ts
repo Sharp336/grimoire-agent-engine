@@ -6,6 +6,7 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -27,6 +28,21 @@ import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import {
+	consumeRestartAdvisorEnabled,
+	consumeRestartComputerEnabled,
+	consumeRestartExtensionFlagValues,
+	consumeRestartExtensionPackageRoots,
+	consumeRestartLiteralPrompts,
+	RESTART_API_KEY_ENV,
+	RESTART_API_KEY_PROVIDER_ENV,
+	type RestartExtensionFlagValue,
+	type RestartLaunchFlags,
+	type RestartLiteralPrompts,
+	type RestartToolRestriction,
+	restoreRestartExtensionFlagValues,
+	selectRestartExtensionPackageRoots,
+} from "./cli/restart";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
@@ -35,6 +51,7 @@ import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
 	getModelMatchPreferences,
+	parseModelString,
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
@@ -54,6 +71,7 @@ import { formatExtensionLoadNotifications } from "./extensibility/extensions/loa
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { resolvePath } from "./extensibility/utils";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
@@ -78,10 +96,15 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import {
+	discoverTitleSystemPromptFile,
+	type PromptInputResolution,
+	resolvePromptInput,
+	resolvePromptInputWithSource,
+} from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
-import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
+import { type ConfiguredThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
 import {
 	getChangelogPath,
@@ -397,12 +420,266 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			enableMCP: false,
 			titleSystemPrompt,
 		});
-		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
-			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
-		}
+		applyRuntimeApiKeyForRestoredSession(args.parsedArgs, args.baseOptions, nextSession, args.authStorage);
 		applyExtensionFlags(nextSession.extensionRunner, args.rawArgs);
 		return nextSession;
 	};
+}
+
+function buildRestartToolRestriction(parsed: Pick<Args, "noTools" | "tools">): RestartToolRestriction | undefined {
+	if (parsed.tools && parsed.tools.length > 0) return { kind: "allowlist", toolNames: parsed.tools };
+	if (parsed.noTools || parsed.tools) return { kind: "none" };
+	return undefined;
+}
+
+function resolveRestartLaunchPath(value: string, cwd: string): string {
+	return resolvePath(value, cwd);
+}
+
+function resolveRestartLaunchPaths(values: readonly string[] | undefined, cwd: string): string[] | undefined {
+	return values?.map(value => resolveRestartLaunchPath(value, cwd));
+}
+
+function resolveRestartConfigEnvFiles(value: string | undefined, cwd: string): string[] | undefined {
+	const configFiles = value?.split(path.delimiter).filter(Boolean);
+	return configFiles && configFiles.length > 0 ? resolveRestartLaunchPaths(configFiles, cwd) : undefined;
+}
+
+/** Initial prompt-source classifications retained for a restart. */
+export interface RestartPromptSources {
+	systemPrompt?: PromptInputResolution;
+	appendSystemPrompt?: PromptInputResolution;
+}
+
+function buildRestartPromptLaunchFlags(
+	sources: RestartPromptSources | undefined,
+	launchCwd: string,
+	parsed: Pick<Args, "systemPrompt" | "appendSystemPrompt">,
+): Pick<
+	RestartLaunchFlags,
+	"systemPrompt" | "appendSystemPrompt" | "restartLiteralSystemPrompt" | "restartLiteralAppendSystemPrompt"
+> {
+	if (!sources) {
+		return {
+			systemPrompt: parsed.systemPrompt,
+			appendSystemPrompt: parsed.appendSystemPrompt,
+		};
+	}
+	const systemPrompt = sources.systemPrompt;
+	const appendSystemPrompt = sources.appendSystemPrompt;
+	return {
+		systemPrompt:
+			systemPrompt?.source === "file" ? resolveRestartLaunchPath(systemPrompt.input, launchCwd) : undefined,
+		appendSystemPrompt:
+			appendSystemPrompt?.source === "file"
+				? resolveRestartLaunchPath(appendSystemPrompt.input, launchCwd)
+				: undefined,
+		restartLiteralSystemPrompt: systemPrompt?.source === "literal" ? systemPrompt.input : undefined,
+		restartLiteralAppendSystemPrompt: appendSystemPrompt?.source === "literal" ? appendSystemPrompt.input : undefined,
+	};
+}
+
+/** Return parsed restart launch args with the current session thinking selector overriding stale launch input. */
+export function applyLiveThinkingToRestartLaunchArgs<T extends Pick<Args, "thinking">>(
+	initialArgs: T,
+	liveThinking: ConfiguredThinkingLevel | undefined,
+): T {
+	if (liveThinking === undefined) return initialArgs;
+	return { ...initialArgs, thinking: liveThinking };
+}
+
+/** Build restart launch state, resolving config/plugin paths from launch cwd and extension roots from session cwd. */
+export function buildRestartLaunchFlags(
+	parsed: Pick<
+		Args,
+		| "apiKey"
+		| "advisor"
+		| "appendSystemPrompt"
+		| "autoApprove"
+		| "config"
+		| "extensions"
+		| "hideThinking"
+		| "model"
+		| "hooks"
+		| "models"
+		| "noExtensions"
+		| "noLsp"
+		| "noPty"
+		| "noPrewalk"
+		| "noRules"
+		| "noSkills"
+		| "noTitle"
+		| "pluginDirs"
+		| "plan"
+		| "planYolo"
+		| "planYoloInto"
+		| "prewalk"
+		| "prewalkInto"
+		| "provider"
+		| "providerSessionId"
+		| "providerPromptCacheKey"
+		| "skills"
+		| "slow"
+		| "smol"
+		| "thinking"
+		| "systemPrompt"
+	>,
+	launchCwd: string,
+	extensionFlagValues?: readonly RestartExtensionFlagValue[],
+	maxTimeDeadline?: number,
+	apiKeyProvider?: string,
+	sessionStartCwd: string = launchCwd,
+	restartApiKey?: string,
+	restartExtensionPackageRoots?: readonly string[],
+	restartConfigFilesEnv?: string,
+	restartPromptSources?: RestartPromptSources,
+): RestartLaunchFlags {
+	const extensionPackageRootInputs = selectRestartExtensionPackageRoots(
+		restartExtensionPackageRoots,
+		parsed.extensions,
+		parsed.hooks,
+	);
+	const extensionPackageRoots =
+		restartExtensionPackageRoots !== undefined
+			? extensionPackageRootInputs
+			: extensionPackageRootInputs.length > 0
+				? resolveRestartLaunchPaths(extensionPackageRootInputs, launchCwd)
+				: undefined;
+	const restartPromptLaunchFlags = buildRestartPromptLaunchFlags(restartPromptSources, sessionStartCwd, parsed);
+	return {
+		apiKey: parsed.apiKey ?? restartApiKey,
+		apiKeyProvider,
+		advisor: Boolean(parsed.advisor),
+		autoApprove: Boolean(parsed.autoApprove),
+		disableExtensions: Boolean(parsed.noExtensions),
+		disableLsp: Boolean(parsed.noLsp),
+		noPty: Boolean(parsed.noPty),
+		disableRules: Boolean(parsed.noRules),
+		disableSkills: Boolean(parsed.noSkills),
+		noTitle: Boolean(parsed.noTitle),
+		configFiles: resolveRestartLaunchPaths(parsed.config, launchCwd),
+		configEnvFiles: resolveRestartConfigEnvFiles(restartConfigFilesEnv, launchCwd),
+		extensionPackageRoots,
+		extensionPaths: resolveRestartLaunchPaths(parsed.extensions, sessionStartCwd),
+		hookPaths: resolveRestartLaunchPaths(parsed.hooks, sessionStartCwd),
+		pluginDirs: resolveRestartLaunchPaths(parsed.pluginDirs, launchCwd),
+		model: parsed.model,
+		modelPatterns: parsed.models,
+		planModel: parsed.plan,
+		noPrewalk: Boolean(parsed.noPrewalk),
+		planYolo: Boolean(parsed.planYolo),
+		planYoloInto: parsed.planYoloInto,
+		prewalk: Boolean(parsed.prewalk),
+		prewalkInto: parsed.prewalkInto,
+		providerSessionId: parsed.providerSessionId,
+		providerPromptCacheKey: parsed.providerPromptCacheKey,
+		provider: parsed.provider,
+		thinking: parsed.thinking,
+		extensionFlagValues,
+		maxTimeDeadline,
+		skillPatterns: parsed.skills,
+		slowModel: parsed.slow,
+		smolModel: parsed.smol,
+		hideThinking: Boolean(parsed.hideThinking),
+		...restartPromptLaunchFlags,
+	};
+}
+
+type RuntimeApiKeySessionOptions = { model?: { provider: string }; modelPattern?: string | string[] };
+type RestorableModelSource = Pick<SessionManager, "getRestorableModelStrings">;
+
+/** Return whether a runtime API key lacks both a launch model and a restorable provider. */
+export function requiresLaunchModelForRuntimeApiKey(
+	parsed: Pick<Args, "apiKey" | "continue" | "resume" | "fork">,
+	sessionOptions: Pick<CreateAgentSessionOptions, "model" | "modelPattern">,
+	sessionManager?: RestorableModelSource,
+	restartApiKeyProvider?: string,
+): boolean {
+	if (!parsed.apiKey) return false;
+	if (sessionOptions.model || sessionOptions.modelPattern || restartApiKeyProvider) return false;
+	if (parsed.continue || parsed.resume || parsed.fork) {
+		return getPersistedSessionModelProvider(sessionManager) === undefined;
+	}
+	return true;
+}
+
+/** Return the provider for the first persisted model that session restore will try. */
+export function getPersistedSessionModelProvider(
+	sessionManager: RestorableModelSource | undefined,
+): string | undefined {
+	if (!sessionManager) return undefined;
+	for (const modelString of sessionManager.getRestorableModelStrings()) {
+		const parsedModel = parseModelString(modelString);
+		if (parsedModel) return parsedModel.provider;
+	}
+	return undefined;
+}
+
+/** Return the provider a runtime API key should be installed for before session restore. */
+export function getRuntimeApiKeyProviderBeforeSessionRestore(
+	parsed: Pick<Args, "apiKey" | "continue" | "resume" | "fork">,
+	sessionOptions: RuntimeApiKeySessionOptions,
+	sessionManager: RestorableModelSource | undefined,
+	restartApiKeyProvider?: string,
+): string | undefined {
+	if (!parsed.apiKey) return undefined;
+	if (restartApiKeyProvider) return restartApiKeyProvider;
+	if (sessionOptions.model) return sessionOptions.model.provider;
+	if (sessionOptions.modelPattern || !(parsed.continue || parsed.resume || parsed.fork)) return undefined;
+	return getPersistedSessionModelProvider(sessionManager);
+}
+
+/** Install a runtime API key before createSession can restore a persisted model. */
+export function applyRuntimeApiKeyBeforeSessionRestore(
+	parsed: Pick<Args, "apiKey" | "continue" | "resume" | "fork">,
+	sessionOptions: RuntimeApiKeySessionOptions,
+	sessionManager: RestorableModelSource | undefined,
+	authStorage: Pick<AuthStorage, "setRuntimeApiKey">,
+	restartApiKeyProvider?: string,
+): string | undefined {
+	const provider = getRuntimeApiKeyProviderBeforeSessionRestore(
+		parsed,
+		sessionOptions,
+		sessionManager,
+		restartApiKeyProvider,
+	);
+	if (!parsed.apiKey || !provider) return undefined;
+	authStorage.setRuntimeApiKey(provider, parsed.apiKey);
+	return provider;
+}
+
+/** Apply a runtime API key when the provider was only known after createSession. */
+export function applyRuntimeApiKeyForRestoredSession(
+	parsed: Pick<Args, "apiKey">,
+	sessionOptions: RuntimeApiKeySessionOptions,
+	session: { model?: { provider: string } },
+	authStorage: Pick<AuthStorage, "setRuntimeApiKey">,
+	restartApiKeyProvider?: string,
+): string | undefined {
+	if (!parsed.apiKey || sessionOptions.model) return undefined;
+	const provider = restartApiKeyProvider ?? session.model?.provider;
+	if (!provider) return undefined;
+	authStorage.setRuntimeApiKey(provider, parsed.apiKey);
+	return provider;
+}
+
+interface RestartApiKeyHandoff {
+	apiKey?: string;
+	provider?: string;
+}
+
+function applyRestartApiKeyHandoff(
+	parsed: Args,
+	env: Record<string, string | undefined> = process.env,
+): RestartApiKeyHandoff | undefined {
+	const apiKey = env[RESTART_API_KEY_ENV];
+	const apiKeyProvider = env[RESTART_API_KEY_PROVIDER_ENV];
+	delete env[RESTART_API_KEY_ENV];
+	delete env[RESTART_API_KEY_PROVIDER_ENV];
+	if (!apiKey) return undefined;
+	const injectedApiKey = parsed.apiKey ? undefined : apiKey;
+	if (injectedApiKey) parsed.apiKey = injectedApiKey;
+	return { apiKey: injectedApiKey, provider: apiKeyProvider };
 }
 
 async function runInteractiveMode(
@@ -422,6 +699,9 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
+	restartToolRestriction?: RestartToolRestriction,
+	restartLaunchFlags?: RestartLaunchFlags,
+	startupMarketplaceUpdate?: Promise<void>,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -431,6 +711,9 @@ async function runInteractiveMode(
 		lspServers,
 		mcpManager,
 		eventBus,
+		restartToolRestriction,
+		restartLaunchFlags,
+		startupMarketplaceUpdate,
 	);
 
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
@@ -824,6 +1107,37 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
+/** Resolve initial custom prompts while preserving whether each was literal or file-backed. */
+export async function resolveStartupPromptInputs({
+	systemPromptSource,
+	appendSystemPromptSource,
+	restartLiteralPrompts,
+}: {
+	systemPromptSource?: string;
+	appendSystemPromptSource?: string;
+	restartLiteralPrompts?: RestartLiteralPrompts;
+}): Promise<RestartPromptSources> {
+	const [systemPrompt, appendSystemPrompt] = await Promise.all([
+		restartLiteralPrompts?.systemPrompt === undefined
+			? resolvePromptInputWithSource(systemPromptSource, "system prompt")
+			: Promise.resolve({
+					source: "literal" as const,
+					input: restartLiteralPrompts.systemPrompt,
+					value: restartLiteralPrompts.systemPrompt,
+				}),
+		restartLiteralPrompts?.appendSystemPrompt === undefined
+			? resolvePromptInputWithSource(appendSystemPromptSource, "append system prompt")
+			: Promise.resolve({
+					source: "literal" as const,
+					input: restartLiteralPrompts.appendSystemPrompt,
+					value: restartLiteralPrompts.appendSystemPrompt,
+				}),
+	]);
+	return { systemPrompt, appendSystemPrompt };
+}
+const restartPromptSources = new WeakMap<CreateAgentSessionOptions, RestartPromptSources>();
+const restartLiteralPromptInputs = new WeakMap<Args, RestartLiteralPrompts>();
+
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
 export async function buildSessionOptions(
 	parsed: Args,
@@ -845,15 +1159,30 @@ export async function buildSessionOptions(
 		options.deadline = Date.now() + parsed.maxTime * 1000;
 	}
 
-	// Auto-discover SYSTEM.md if no CLI system prompt provided
-	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
-	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
+	const restartLiteralPrompts = restartLiteralPromptInputs.get(parsed);
+	const restartSystemPrompt = restartLiteralPrompts?.systemPrompt;
+	const restartAppendSystemPrompt = restartLiteralPrompts?.appendSystemPrompt;
+	// Auto-discover prompt files only when no CLI or restart-literal prompt was provided.
+	const discoveredSystemPromptSource =
+		parsed.systemPrompt === undefined && restartSystemPrompt === undefined ? discoverSystemPromptFile() : undefined;
+	const systemPromptSource = parsed.systemPrompt ?? discoveredSystemPromptSource;
+	const discoveredAppendPromptSource =
+		parsed.appendSystemPrompt === undefined && restartAppendSystemPrompt === undefined
+			? discoverAppendSystemPromptFile()
+			: undefined;
+	const appendPromptSource = parsed.appendSystemPrompt ?? discoveredAppendPromptSource;
 	const titleSystemPromptSource = discoverTitleSystemPromptFile();
-	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt] = await Promise.all([
-		resolvePromptInput(systemPromptSource, "system prompt"),
-		resolvePromptInput(appendPromptSource, "append system prompt"),
+	const [resolvedPromptInputs, titleSystemPrompt] = await Promise.all([
+		resolveStartupPromptInputs({
+			systemPromptSource,
+			appendSystemPromptSource: appendPromptSource,
+			restartLiteralPrompts,
+		}),
 		resolvePromptInput(titleSystemPromptSource, "title system prompt"),
 	]);
+	const { systemPrompt: systemPromptInput, appendSystemPrompt: appendPromptInput } = resolvedPromptInputs;
+	const resolvedSystemPrompt = systemPromptInput?.value;
+	const resolvedAppendPrompt = appendPromptInput?.value;
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
@@ -1074,6 +1403,7 @@ export async function buildSessionOptions(
 		options.additionalExtensionPaths = [];
 	}
 
+	restartPromptSources.set(options, { systemPrompt: systemPromptInput, appendSystemPrompt: appendPromptInput });
 	return options;
 }
 
@@ -1100,6 +1430,14 @@ export async function runRootCommand(
 	await logger.time("initTheme:initial", initTheme);
 
 	const parsedArgs = parsed;
+	const restartApiKeyHandoff = applyRestartApiKeyHandoff(parsedArgs);
+	const restartApiKeyProvider = restartApiKeyHandoff?.provider;
+	const restartExtensionFlagValues = consumeRestartExtensionFlagValues();
+	const restartExtensionPackageRoots = consumeRestartExtensionPackageRoots();
+	const restartAdvisorEnabled = consumeRestartAdvisorEnabled();
+	const restartComputerEnabled = consumeRestartComputerEnabled();
+	const restartLiteralPrompts = consumeRestartLiteralPrompts();
+	if (restartLiteralPrompts) restartLiteralPromptInputs.set(parsedArgs, restartLiteralPrompts);
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
 	const notifs: (InteractiveModeNotify | null)[] = [];
@@ -1152,13 +1490,19 @@ export async function runRootCommand(
 	// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
 	// `--no-extensions` short-circuits both the factory load and the sub-discovery.
 	if (!parsedArgs.noExtensions) {
-		const cliExtensions = [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
+		const cliExtensions = selectRestartExtensionPackageRoots(
+			restartExtensionPackageRoots,
+			parsedArgs.extensions,
+			parsedArgs.hooks,
+		);
 		if (cliExtensions.length > 0) {
 			injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir());
 		}
 	}
 
 	let cwd = getProjectDir();
+	const launchConfigCwd = cwd;
+	const restartConfigFilesEnv = process.env.PI_CONFIG_FILES;
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
 	if (parsedArgs.approvalMode) {
@@ -1220,6 +1564,12 @@ export async function runRootCommand(
 	// Apply --advisor CLI flag (ephemeral, not persisted)
 	if (parsedArgs.advisor) {
 		settingsInstance.override("advisor.enabled", true);
+	}
+	if (restartAdvisorEnabled !== undefined) {
+		settingsInstance.override("advisor.enabled", restartAdvisorEnabled);
+	}
+	if (restartComputerEnabled !== undefined) {
+		settingsInstance.override("computer.enabled", restartComputerEnabled);
 	}
 
 	await logger.time(
@@ -1363,7 +1713,7 @@ export async function runRootCommand(
 		await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
 	}
 
-	scheduleMarketplaceAutoUpdate({
+	const marketplaceAutoUpdate = scheduleMarketplaceAutoUpdate({
 		autoUpdate: settingsInstance.get("marketplace.autoUpdate"),
 		resolveActiveProjectRegistryPath,
 		clearPluginRootsCache: clearPluginRootsAndCaches,
@@ -1378,6 +1728,7 @@ export async function runRootCommand(
 		modelRegistry,
 		settingsInstance,
 	);
+	const restartPromptSourceSnapshot = restartPromptSources.get(sessionOptions);
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
@@ -1393,16 +1744,24 @@ export async function runRootCommand(
 	}
 
 	// Handle CLI --api-key as runtime override (not persisted)
+	let runtimeApiKeyProvider = restartApiKeyProvider;
+	let runtimeApiKeyInstalledBeforeSessionRestore = false;
 	if (parsedArgs.apiKey) {
-		if (!sessionOptions.model && !sessionOptions.modelPattern) {
+		if (requiresLaunchModelForRuntimeApiKey(parsedArgs, sessionOptions, sessionManager, restartApiKeyProvider)) {
 			process.stderr.write(
 				`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
 			);
 			process.exit(1);
 		}
-		if (sessionOptions.model) {
-			authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
-		}
+		const installedProvider = applyRuntimeApiKeyBeforeSessionRestore(
+			parsedArgs,
+			sessionOptions,
+			sessionManager,
+			authStorage,
+			restartApiKeyProvider,
+		);
+		runtimeApiKeyInstalledBeforeSessionRestore = installedProvider !== undefined;
+		runtimeApiKeyProvider = installedProvider ?? runtimeApiKeyProvider;
 	}
 
 	const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
@@ -1450,7 +1809,14 @@ export async function runRootCommand(
 				extensionsResult.runtime.flagValues.set(name, value);
 			},
 		};
-		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
+		const parsedWithExtensionFlags = restartExtensionFlagValues
+			? null
+			: applyExtensionFlags(extensionFlagSink, rawArgs);
+		const initialArgs = parsedWithExtensionFlags ?? parsedArgs;
+		const currentExtensionFlagValues =
+			restartExtensionFlagValues ??
+			(parsedWithExtensionFlags ? [...parsedWithExtensionFlags.unknownFlags.entries()] : undefined);
+		restoreRestartExtensionFlagValues(extensionFlagSink, restartExtensionFlagValues);
 		normalizeContinueSessionArgs(initialArgs, rawArgs);
 		for (const message of formatExtensionLoadNotifications(extensionsResult.errors)) {
 			if (isInteractive) {
@@ -1516,8 +1882,15 @@ export async function runRootCommand(
 			}),
 			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 		);
-		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
-			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
+		if (!runtimeApiKeyInstalledBeforeSessionRestore) {
+			const restoredProvider = applyRuntimeApiKeyForRestoredSession(
+				parsedArgs,
+				sessionOptions,
+				session,
+				authStorage,
+				restartApiKeyProvider,
+			);
+			runtimeApiKeyProvider = restoredProvider ?? runtimeApiKeyProvider;
 		}
 
 		if (modelFallbackMessage) {
@@ -1590,6 +1963,20 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				parsedArgs.join,
+				buildRestartToolRestriction(initialArgs),
+				buildRestartLaunchFlags(
+					applyLiveThinkingToRestartLaunchArgs(initialArgs, session.configuredThinkingLevel()),
+					launchConfigCwd,
+					currentExtensionFlagValues,
+					sessionOptions.deadline,
+					runtimeApiKeyProvider,
+					cwd,
+					restartApiKeyHandoff?.apiKey,
+					restartExtensionPackageRoots,
+					restartConfigFilesEnv,
+					restartPromptSourceSnapshot,
+				),
+				marketplaceAutoUpdate,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
