@@ -31,6 +31,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { InitialRetryFallbackState } from "./agent-session-types";
 import { isEmptyErrorTurn } from "./messages";
+import { validateModelPools } from "./model-pool";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -166,6 +167,7 @@ export class TurnRecovery {
 			};
 		}
 		this.#validateRetryFallbackChains();
+		this.#validateModelPools();
 	}
 
 	/** Current automatic retry attempt. */
@@ -934,6 +936,12 @@ export class TurnRecovery {
 
 	#validateRetryFallbackChains(): void {
 		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message =>
+			this.#host.configWarnings.push(message),
+		);
+	}
+
+	#validateModelPools(): void {
+		validateModelPools(this.#host.settings, this.#host.modelRegistry, message =>
 			this.#host.configWarnings.push(message),
 		);
 	}
