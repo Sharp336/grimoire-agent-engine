@@ -1,8 +1,10 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionEntry } from "../session/session-entries";
 import type {
 	MissionFeature,
 	MissionFeatureStatus,
 	MissionHandoff,
+	MissionHandoffDecision,
 	MissionIntegrationPending,
 	MissionPauseReason,
 	MissionPlan,
@@ -53,10 +55,6 @@ const FEATURE_STATUSES = [
 
 const VALIDATOR_ROLES = ["scrutiny", "user-testing"] as const satisfies readonly MissionValidatorRole[];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isNonEmptyString(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0;
 }
@@ -73,15 +71,19 @@ const PAUSE_REASONS = [
 	"validator_workspace_dirty",
 ] as const satisfies readonly MissionPauseReason[];
 
-const HANDOFF_RESOLVE_DECISIONS = ["accept", "retry_same", "retry_fresh", "cancel_feature", "pause"] as const;
+const HANDOFF_RESOLVE_DECISIONS = [
+	"accept",
+	"retry_same",
+	"retry_fresh",
+	"cancel_feature",
+	"pause",
+] as const satisfies readonly MissionHandoffDecision[];
 
 function isMissionPauseReason(value: unknown): value is MissionPauseReason {
 	return typeof value === "string" && (PAUSE_REASONS as readonly string[]).includes(value);
 }
 
-function isHandoffResolveDecision(
-	value: unknown,
-): value is "accept" | "retry_same" | "retry_fresh" | "cancel_feature" | "pause" {
+function isHandoffResolveDecision(value: unknown): value is MissionHandoffDecision {
 	return typeof value === "string" && (HANDOFF_RESOLVE_DECISIONS as readonly string[]).includes(value);
 }
 
@@ -91,6 +93,11 @@ function assertNever(value: never, message: string): never {
 
 function formatIdList(ids: Iterable<string>): string {
 	return [...ids].join(", ");
+}
+
+/** user-testing needs something to drive: at least one runbook command or one declared service. */
+export function runbookSupportsUserTesting(runbook: MissionPlan["runbook"]): boolean {
+	return runbook.userTests.length > 0 || runbook.services.length > 0;
 }
 
 /** Reject empty goals/milestones/features/expectedBehavior/validators and all structural plan rules. */
@@ -118,6 +125,7 @@ export function validateMissionPlan(plan: MissionPlan): MissionPlanValidationRes
 	const milestoneIndex = new Map<string, number>();
 	const featureById = new Map<string, MissionPlan["features"][number]>();
 	const membershipCount = new Map<string, number>();
+	const supportsUserTesting = runbookSupportsUserTesting(plan.runbook);
 
 	for (let i = 0; i < plan.milestones.length; i++) {
 		const milestone = plan.milestones[i]!;
@@ -158,14 +166,10 @@ export function validateMissionPlan(plan: MissionPlan): MissionPlanValidationRes
 					errors.push(`Milestone "${milestone.id}" has duplicate validator role "${role}"`);
 				}
 				seenRoles.add(role);
-				if (role === "user-testing") {
-					const hasUserTestCommand = plan.runbook.userTests.length > 0;
-					const hasService = plan.runbook.services.length > 0;
-					if (!hasUserTestCommand && !hasService) {
-						errors.push(
-							`Milestone "${milestone.id}" requests user-testing but runbook has no userTests command or service`,
-						);
-					}
+				if (role === "user-testing" && !supportsUserTesting) {
+					errors.push(
+						`Milestone "${milestone.id}" requests user-testing but runbook has no userTests command or service`,
+					);
 				}
 			}
 		}
@@ -894,8 +898,7 @@ export function canAcceptPendingHandoff(handoff: MissionHandoff): boolean {
 
 /** Milestone default validators: scrutiny + user-testing when the runbook supports it, else scrutiny alone. */
 export function defaultMilestoneValidators(runbook: MissionPlan["runbook"]): MissionValidatorRole[] {
-	const supportsUserTesting = runbook.userTests.length > 0 || runbook.services.length > 0;
-	if (supportsUserTesting) {
+	if (runbookSupportsUserTesting(runbook)) {
 		return ["scrutiny", "user-testing"];
 	}
 	return ["scrutiny"];

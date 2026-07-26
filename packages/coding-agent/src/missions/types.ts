@@ -144,6 +144,9 @@ export interface MissionValidatorHandoff {
 
 export type MissionHandoff = MissionWorkerHandoff | MissionValidatorHandoff;
 
+/** Closed set of decisions a host may apply to a pending handoff. */
+export type MissionHandoffDecision = "accept" | "retry_same" | "retry_fresh" | "cancel_feature" | "pause";
+
 export interface MissionMilestone extends MissionMilestoneSpec {
 	kind: "planned" | "publish";
 	generation?: number;
@@ -229,7 +232,7 @@ export type MissionProgressEvent =
 	| (MissionProgressEventBase & {
 			type: "handoff_resolved";
 			featureId: string;
-			decision: "accept" | "retry_same" | "retry_fresh" | "cancel_feature" | "pause";
+			decision: MissionHandoffDecision;
 	  })
 	| (MissionProgressEventBase & { type: "milestone_validation_triggered"; milestoneId: string })
 	| (MissionProgressEventBase & { type: "publish_validation_triggered"; generation: number })
@@ -252,10 +255,7 @@ export interface MissionRuntimeContract {
 	setPlan(plan: MissionPlan): Promise<MissionState>;
 	accept(): Promise<MissionState>;
 	runNext(signal?: AbortSignal): Promise<MissionHandoff | null>;
-	resolveHandoff(input: {
-		decision: "accept" | "retry_same" | "retry_fresh" | "cancel_feature" | "pause";
-		messageToWorker?: string;
-	}): Promise<MissionState>;
+	resolveHandoff(input: { decision: MissionHandoffDecision; messageToWorker?: string }): Promise<MissionState>;
 	revisePending(input: { addFeatures: MissionRemediationFeatureSpec[] }): Promise<MissionState>;
 	pause(reason: MissionPauseReason): Promise<MissionState>;
 	resume(input?: { restartWorker?: boolean; messageToWorker?: string }): Promise<MissionState>;
