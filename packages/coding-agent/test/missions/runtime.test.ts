@@ -65,7 +65,11 @@ function validatorFailure(): MissionHandoff {
 	};
 }
 
-function runtime(initial: MissionState | null = null, failPersistence = false): MissionRuntime {
+function runtime(
+	initial: MissionState | null = null,
+	failPersistence = false,
+	released: string[] = [],
+): MissionRuntime {
 	const entries: SessionEntry[] = initial
 		? [
 				{
@@ -109,7 +113,13 @@ function runtime(initial: MissionState | null = null, failPersistence = false): 
 		isGoalModeActive: () => false,
 		isVibeModeActive: () => false,
 		registerPersistedReviver: () => undefined,
-		agentLifecycle: () => ({}) as AgentLifecycleManager,
+		agentLifecycle: () =>
+			({
+				release: async (workerSessionId: string) => {
+					released.push(workerSessionId);
+					return true;
+				},
+			}) as AgentLifecycleManager,
 		now: () => 1,
 	};
 	return new MissionRuntime(host);
@@ -255,6 +265,35 @@ describe("MissionRuntime", () => {
 
 		expect(release).toHaveBeenCalledWith(workspace);
 		expect(resumed).toMatchObject({ status: "running", pauseReason: undefined });
+	});
+
+	test("a fresh restart after a user pause releases and replaces the active worker", async () => {
+		const released: string[] = [];
+		const active = {
+			...implementation("feature"),
+			status: "in_progress" as const,
+			currentWorkerSessionId: "worker",
+			workerSessionIds: ["worker"],
+		};
+		const mission = runtime(
+			state({
+				status: "paused",
+				pauseReason: "user_requested",
+				features: [active],
+			}),
+			false,
+			released,
+		);
+		await mission.restore();
+
+		const resumed = await mission.resume({ restartWorker: true, messageToWorker: "try cleanly" });
+
+		expect(released).toEqual(["worker"]);
+		expect(resumed.features[0]).toMatchObject({
+			status: "pending",
+			currentWorkerSessionId: undefined,
+			nextRunIntent: { mode: "fresh", messageToWorker: "try cleanly" },
+		});
 	});
 
 	test("keeps prior state authoritative when persistence fails", async () => {

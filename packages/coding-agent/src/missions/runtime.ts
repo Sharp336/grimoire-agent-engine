@@ -1975,15 +1975,35 @@ export class MissionRuntime implements MissionRuntimeContract {
 
 	// ── resume branches ─────────────────────────────────────────────────────
 
-	async #resumeSimple(state: MissionState, input?: { messageToWorker?: string }): Promise<MissionState> {
+	async #resumeSimple(
+		state: MissionState,
+		input?: { restartWorker?: boolean; messageToWorker?: string },
+	): Promise<MissionState> {
 		const status = state.pendingHandoff ? "orchestrator_turn" : "running";
-		const features = input?.messageToWorker
-			? state.features.map(feature =>
-					feature.status === "pending" && feature.nextRunIntent
-						? { ...feature, nextRunIntent: { ...feature.nextRunIntent, messageToWorker: input.messageToWorker } }
-						: feature,
-				)
-			: state.features;
+		let features = state.features;
+		const active =
+			!state.pendingHandoff && input?.restartWorker
+				? state.features.find(feature => feature.status === "in_progress")
+				: undefined;
+		if (active) {
+			await this.#releaseWorkerId(active.currentWorkerSessionId);
+			features = state.features.map(feature =>
+				feature.id === active.id
+					? {
+							...feature,
+							status: "pending",
+							currentWorkerSessionId: undefined,
+							nextRunIntent: { mode: "fresh", messageToWorker: input?.messageToWorker },
+						}
+					: feature,
+			);
+		} else if (input?.messageToWorker) {
+			features = state.features.map(feature =>
+				feature.status === "pending" && feature.nextRunIntent
+					? { ...feature, nextRunIntent: { ...feature.nextRunIntent, messageToWorker: input.messageToWorker } }
+					: feature,
+			);
+		}
 		this.#pauseRequested = false;
 		return this.#withTransitionTail(() =>
 			this.#commit(
