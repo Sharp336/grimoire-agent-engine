@@ -74,6 +74,7 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
+import { getPoolSelectionMode } from "./session/model-pool";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
@@ -902,9 +903,47 @@ export async function buildSessionOptions(
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
 		const matchedAfterMissingRolePattern = (resolved.configuredPatternIndex ?? 0) > 0;
-		if (matchedAfterMissingRolePattern) {
+		// Weighted selection draws over the role's whole candidate list, and that
+		// draw lives in createAgentSession's deferred-pattern block. Resolving the
+		// model here would pin every session to the first candidate, so hand the
+		// pattern over instead. Only reachable with retry.poolSelection weighted
+		// and a role that lists two or more candidates.
+		//
+		// --api-key opts out. The key is provider-scoped and is registered
+		// against the model resolved here. Deferring would either leave the draw
+		// with no configured auth to draw from, so it picks nothing and the
+		// session starts on the first pattern anyway, or let the draw move the
+		// session to the other provider and register the key against a provider
+		// it was never meant for.
+		const weightedPoolPattern =
+			getPoolSelectionMode(activeSettings) === "weighted" &&
+			(resolved.configuredPatterns?.length ?? 0) > 1 &&
+			!parsed.apiKey;
+		if (matchedAfterMissingRolePattern || weightedPoolPattern) {
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
+			if (weightedPoolPattern && resolved.model && !resolved.error && resolved.configuredRole !== "default") {
+				// --prewalk and --plan-yolo expand their role alias below, and that
+				// expansion reads modelRoles.default. The ordered path retargets it to
+				// the model `--model <role>` resolved to, so deferring without this
+				// would build those options against the un-retargeted default: prewalk
+				// silently arms on the wrong model, and plan-yolo throws "No API key"
+				// when the stale default has no credentials. The deferred draw
+				// overwrites this again in createAgentSession, so it only feeds
+				// CLI-side option building.
+				//
+				// Skipped when the deferred role is default itself (`--model default`,
+				// `--model @default`, `--model *`). The override would rewrite
+				// modelRoles.default to one selector, and the deferred block
+				// re-resolves that same role name, so it would see a single candidate
+				// and never draw. Prewalk and plan-yolo stay correct without it: their
+				// alias expansion reads the untouched multi-candidate default and
+				// resolves its first available candidate, the same model the override
+				// would have written.
+				activeSettings.overrideModelRoles({
+					default: resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+				});
+			}
 		} else if (resolved.error) {
 			if (!parsed.provider && ((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))) {
 				// Model not found in built-in registry — defer resolution to after extensions load
