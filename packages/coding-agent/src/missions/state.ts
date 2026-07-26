@@ -208,6 +208,10 @@ export function validateMissionPlan(plan: MissionPlan): MissionPlanValidationRes
 		}
 	}
 
+	if (errors.length > 0) {
+		return { valid: false, errors };
+	}
+
 	for (const milestone of plan.milestones) {
 		for (const featureId of milestone.featureIds) {
 			if (!featureIds.has(featureId)) {
@@ -360,10 +364,10 @@ function collectProgressEvents(entries: readonly SessionEntry[], missionId: stri
 		if (entry.type !== "custom" || entry.customType !== MISSION_PROGRESS_CUSTOM_TYPE) {
 			continue;
 		}
-		const parsed = parseMissionProgressEvent(entry.data);
-		if (parsed.missionId === missionId) {
-			events.push(parsed);
+		if (!isRecord(entry.data) || entry.data.missionId !== missionId) {
+			continue;
 		}
+		events.push(parseMissionProgressEvent(entry.data));
 	}
 	return events;
 }
@@ -517,6 +521,11 @@ function validatePublishCheck(
 							`Generation 0 validated publish check requires completed planned validator ${milestone.id}/${role}`,
 						);
 					}
+					if (validator.validatedHead !== publishCheck.integrationHead) {
+						throw new MissionStateError(
+							`Generation 0 validator "${validator.id}" validatedHead must equal publishCheck.integrationHead`,
+						);
+					}
 				}
 			}
 		}
@@ -595,6 +604,9 @@ function validateIntegrationPending(state: MissionState, marker: MissionIntegrat
 	}
 	if (feature.workspace?.kind !== "feature") {
 		throw new MissionStateError("Integration-pending marker requires a feature workspace");
+	}
+	if (feature.workspace.phase !== "ready") {
+		throw new MissionStateError("Integration-pending marker requires a ready feature workspace");
 	}
 	if (
 		marker.expectedOldHead !== feature.workspace.baseSha ||
@@ -710,6 +722,16 @@ export function assertMissionStateInvariants(
 		}
 	}
 
+	if (state.status === "paused" && !state.pauseReason) {
+		throw new MissionStateError("Paused mission state requires a pauseReason");
+	}
+	if (
+		state.status === "completed" &&
+		state.features.some(feature => feature.status === "pending" || feature.status === "in_progress")
+	) {
+		throw new MissionStateError("Completed mission state must not retain unfinished features");
+	}
+
 	validateProgressSequences(progressEvents.filter(event => event.missionId === state.id));
 
 	if (state.integrationPending) {
@@ -751,16 +773,47 @@ function parseMissionState(data: unknown): MissionState {
 		if (!isRecord(feature) || typeof feature.id !== "string" || typeof feature.kind !== "string") {
 			throw new MissionStateError("mission-state feature entries must include id and kind");
 		}
-		if (typeof feature.status !== "string" || !(FEATURE_STATUSES as readonly string[]).includes(feature.status)) {
+		if (typeof feature.status !== "string" || !FEATURE_STATUSES.includes(feature.status as MissionFeatureStatus)) {
 			throw new MissionStateError(`mission-state feature "${feature.id}" has invalid status`);
 		}
 		if (feature.kind !== "implementation" && feature.kind !== "validation") {
 			throw new MissionStateError(`mission-state feature "${feature.id}" has invalid kind`);
 		}
+		if (
+			!Array.isArray(feature.preconditions) ||
+			!Array.isArray(feature.expectedBehavior) ||
+			!Array.isArray(feature.workerSessionIds)
+		) {
+			throw new MissionStateError(`mission-state feature "${feature.id}" has invalid array fields`);
+		}
 	}
 
 	// Structural checks above + assertMissionStateInvariants cover semantic rules.
-	return data as unknown as MissionState;
+	if (!isMissionStateShape(data)) {
+		throw new MissionStateError("mission-state has an invalid shape");
+	}
+	return data;
+}
+
+function isMissionStateShape(data: unknown): data is MissionState {
+	if (!isRecord(data)) {
+		return false;
+	}
+	return (
+		data.version === 1 &&
+		typeof data.id === "string" &&
+		typeof data.ownerSessionId === "string" &&
+		typeof data.revision === "number" &&
+		typeof data.goal === "string" &&
+		typeof data.autoAccept === "boolean" &&
+		typeof data.status === "string" &&
+		(MISSION_STATUSES as readonly string[]).includes(data.status) &&
+		isRecord(data.runbook) &&
+		Array.isArray(data.milestones) &&
+		Array.isArray(data.features) &&
+		typeof data.createdAt === "number" &&
+		typeof data.updatedAt === "number"
+	);
 }
 
 /**
@@ -807,7 +860,7 @@ export function loadMissionState(entries: readonly SessionEntry[]): MissionState
 }
 
 /**
- * Transitively cancel pending implementation features whose implementation precondition was cancelled.
+ * Transitively cancel pending implementation features whose precondition was cancelled.
  * Validation features are left for selection (their preconditions may be completed or cancelled).
  */
 export function cancelUnsatisfiableFeatures(state: MissionState): MissionState {
@@ -823,7 +876,7 @@ export function cancelUnsatisfiableFeatures(state: MissionState): MissionState {
 			}
 			const blocked = feature.preconditions.some(preconditionId => {
 				const precondition = byId.get(preconditionId);
-				return precondition?.kind === "implementation" && precondition.status === "cancelled";
+				return precondition?.status === "cancelled";
 			});
 			if (!blocked) {
 				continue;
@@ -890,7 +943,7 @@ export function canAcceptPendingHandoff(handoff: MissionHandoff): boolean {
 		case "implementation":
 			return handoff.outcome === "success" && !handoff.issues.some(issue => issue.severity === "blocking");
 		case "validation":
-			return handoff.verdict === "pass";
+			return handoff.verdict === "pass" && !handoff.issues.some(issue => issue.severity === "blocking");
 		default:
 			return assertNever(handoff, "Unknown handoff kind");
 	}
