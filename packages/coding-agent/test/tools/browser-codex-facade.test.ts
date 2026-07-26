@@ -1755,4 +1755,34 @@ describe("Codex agent.browser public contract", () => {
 		expect(observerInstallCount).toBeGreaterThanOrEqual(2);
 		expect(logs.length).toBeLessThanOrEqual(1_000);
 	});
+	it("uses exact and glob semantics for Playwright URL string patterns", async () => {
+		const calls: Array<{ operation: CodexBrowserOperation; args: Readonly<Record<string, unknown>> }> = [];
+		const adapter: CodexBrowserAdapter = {
+			currentTabId: "1",
+			async invoke<T>(operation: CodexBrowserOperation, args: Readonly<Record<string, unknown>>): Promise<T> {
+				calls.push({ operation, args });
+				if (operation === "tab.selected") return { id: "1", url: "https://site.test/start", title: "Start" } as T;
+				return undefined as T;
+			},
+		};
+		const current = await createCodexBrowserFacade(adapter).tabs.selected();
+		if (!current) throw new Error("Expected selected URL contract tab");
+
+		await current.playwright.waitForURL("https://site.test/dashboard");
+		await current.playwright.waitForURL("**/dashboard");
+		await current.playwright.expectNavigation(() => "done", { url: "**/dashboard" });
+
+		const patterns = calls
+			.filter(call => ["playwright.waitForURL", "playwright.expectNavigation.ready"].includes(call.operation))
+			.map(call => call.args.url as { kind: string; source: string; flags: string });
+		expect(patterns).toHaveLength(3);
+		const matches = (index: number, url: string) =>
+			new RegExp(patterns[index]!.source, patterns[index]!.flags).test(url);
+		expect(matches(0, "https://site.test/dashboard")).toBe(true);
+		expect(matches(0, "https://site.test/dashboard-old")).toBe(false);
+		for (const index of [1, 2]) {
+			expect(matches(index, "https://site.test/dashboard")).toBe(true);
+			expect(matches(index, "https://site.test/dashboard-old")).toBe(false);
+		}
+	});
 });

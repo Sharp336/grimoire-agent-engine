@@ -519,6 +519,44 @@ function requireTabId(value: unknown): string {
 	return value;
 }
 
+function urlGlobFragment(value: string): string {
+	let source = "";
+	for (let index = 0; index < value.length; index++) {
+		const character = value[index]!;
+		if (character === "\\" && index + 1 < value.length) {
+			const literal = value[++index]!;
+			source += `\\${literal}`;
+			continue;
+		}
+		if (character === "*") {
+			let count = 1;
+			while (value[index + count] === "*") count++;
+			source += count > 1 ? ".*" : "[^/]*";
+			index += count - 1;
+			continue;
+		}
+		if (character === "{") {
+			const close = value.indexOf("}", index + 1);
+			if (close > index + 1) {
+				const alternatives = value.slice(index + 1, close).split(",");
+				if (alternatives.length > 1) {
+					source += `(?:${alternatives.map(urlGlobFragment).join("|")})`;
+					index = close;
+					continue;
+				}
+			}
+		}
+		source += "\\^$+?.()|{}[]".includes(character) ? `\\${character}` : character;
+	}
+	return source;
+}
+
+function urlPattern(value: unknown, label: string): CodexTextPattern {
+	if (typeof value === "string") return { kind: "regexp", source: `^${urlGlobFragment(value)}$`, flags: "" };
+	if (value instanceof RegExp) return { kind: "regexp", source: value.source, flags: value.flags };
+	throw new Error(`${label} requires text or a RegExp`);
+}
+
 function textPattern(value: unknown, label: string, exact?: unknown): CodexTextPattern {
 	if (exact !== undefined && typeof exact !== "boolean") throw new Error(`${label} exact must be a boolean`);
 	if (typeof value === "string") return { kind: "string", value, exact: exact === true || undefined };
@@ -1061,7 +1099,7 @@ export class CodexPlaywright {
 
 	async waitForURL(url: string | RegExp, options: CodexWaitOptions = {}): Promise<void> {
 		const value = requireObject(options, "playwright.waitForURL");
-		const pattern = textPattern(url, "playwright.waitForURL");
+		const pattern = urlPattern(url, "playwright.waitForURL");
 		await this.#adapter.invoke<void>("playwright.waitForURL", {
 			tabId: this.#tabId,
 			url: pattern,
@@ -1096,7 +1134,7 @@ export class CodexPlaywright {
 		const navigationArgs = {
 			tabId: this.#tabId,
 			navigationId,
-			url: value.url === undefined ? undefined : textPattern(value.url, "playwright.expectNavigation url"),
+			url: value.url === undefined ? undefined : urlPattern(value.url, "playwright.expectNavigation url"),
 			waitUntil: loadState(value.waitUntil, "playwright.expectNavigation"),
 			timeoutMs: navigationTimeout(value.timeoutMs, "playwright.expectNavigation"),
 		};

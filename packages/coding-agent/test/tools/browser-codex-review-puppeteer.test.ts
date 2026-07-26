@@ -1257,6 +1257,20 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("forces checked state on disabled controls without waiting for enabled actionability", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{ const input=document.createElement("input"); input.id="disabled-check"; input.type="checkbox"; input.disabled=true; document.body.append(input); });
+				 await t.playwright.locator("#disabled-check").setChecked(true,{force:true,timeoutMs:200});
+				 return {checked:await page.evaluate(()=>document.querySelector("#disabled-check").checked)};`,
+			);
+			expect(result).toEqual({ checked: true });
+		});
+	}, 20_000);
+
 	it("keeps DOM node ids bound to the snapshotted element and rejects replacement nodes", async () => {
 		await withPuppeteerTool(async (tool, name) => {
 			const result = await runBrowserCode(
@@ -1334,6 +1348,26 @@ describe("Puppeteer final parity blockers", () => {
 			);
 			expect(result).toEqual([
 				expect.objectContaining({ tagName: "button", role: "button", ariaName: "Deep shadow action" }),
+			]);
+		});
+	}, 20_000);
+
+	it("inspects the deepest actionable element inside a same-origin frame", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(async()=>{
+				   const frame=document.createElement("iframe");
+				   Object.assign(frame.style,{position:"fixed",left:"520px",top:"120px",width:"140px",height:"60px",border:"0"});
+				   frame.srcdoc='<button aria-label="Framed action" style="position:absolute;left:30px;top:20px;width:40px;height:20px">Go</button>';
+				   const {promise,resolve}=Promise.withResolvers(); frame.addEventListener("load",resolve,{once:true}); document.body.append(frame); await promise;
+				 });
+				 return await t.playwright.elementInfo({x:560,y:150});`,
+			);
+			expect(result).toEqual([
+				expect.objectContaining({ tagName: "button", role: "button", ariaName: "Framed action" }),
 			]);
 		});
 	}, 20_000);

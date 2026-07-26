@@ -1163,64 +1163,64 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async #elementInfo(args: Readonly<Record<string, unknown>>): Promise<unknown> {
-		const rawHandle = await this.#page.evaluateHandle(
-			(x, y, includeNonInteractable) => {
-				let hit = document.elementFromPoint(x, y);
-				while (hit?.shadowRoot) {
-					const nested = hit.shadowRoot.elementFromPoint(x, y);
-					if (!nested || nested === hit) break;
-					hit = nested;
-				}
-				if (!hit || includeNonInteractable) return hit;
-				const interactiveRoles: Record<string, true> = {
-					button: true,
-					checkbox: true,
-					combobox: true,
-					link: true,
-					listbox: true,
-					menuitem: true,
-					menuitemcheckbox: true,
-					menuitemradio: true,
-					option: true,
-					radio: true,
-					searchbox: true,
-					slider: true,
-					spinbutton: true,
-					switch: true,
-					tab: true,
-					textbox: true,
-					treeitem: true,
-				};
-				for (let current: Element | null = hit; current; ) {
-					const tagName = current.tagName.toLowerCase();
-					const inputType = (current.getAttribute("type") ?? "text").toLowerCase();
-					const explicitRole = (current.getAttribute("role") ?? "").trim().split(/\s+/)[0] ?? "";
-					const htmlCurrent = current as unknown as { isContentEditable?: boolean; tabIndex?: number };
-					const nativelyInteractable =
-						(tagName === "input" && inputType !== "hidden") ||
-						tagName === "button" ||
-						tagName === "select" ||
-						tagName === "textarea" ||
-						tagName === "option" ||
-						((tagName === "a" || tagName === "area") && current.hasAttribute("href")) ||
-						current.hasAttribute("tabindex") ||
-						(htmlCurrent.tabIndex ?? -1) >= 0 ||
-						htmlCurrent.isContentEditable === true;
-					if (nativelyInteractable || interactiveRoles[explicitRole] === true) return current;
-					const pageCurrent = current as Element & { assignedSlot?: Element | null };
-					const root = current.getRootNode() as unknown as { host?: Element };
-					current = pageCurrent.assignedSlot ?? current.parentElement ?? root.host ?? null;
-				}
-				return hit;
-			},
-			numberArg(args, "x"),
-			numberArg(args, "y"),
-			args.includeNonInteractable === true,
-		);
-		const element = rawHandle.asElement() as ElementHandle | null;
-		if (!element) {
-			await rawHandle.dispose();
-			return [];
+		let element = await this.#elementHandleAtPoint(numberArg(args, "x"), numberArg(args, "y"));
+		if (!element) return [];
+		if (args.includeNonInteractable !== true) {
+			let interactiveHandle: JSHandle;
+			try {
+				interactiveHandle = await element.evaluateHandle(hit => {
+					const interactiveRoles: Record<string, true> = {
+						button: true,
+						checkbox: true,
+						combobox: true,
+						link: true,
+						listbox: true,
+						menuitem: true,
+						menuitemcheckbox: true,
+						menuitemradio: true,
+						option: true,
+						radio: true,
+						searchbox: true,
+						slider: true,
+						spinbutton: true,
+						switch: true,
+						tab: true,
+						textbox: true,
+						treeitem: true,
+					};
+					for (let current: Element | null = hit; current; ) {
+						const tagName = current.tagName.toLowerCase();
+						const inputType = (current.getAttribute("type") ?? "text").toLowerCase();
+						const explicitRole = (current.getAttribute("role") ?? "").trim().split(/\s+/)[0] ?? "";
+						const htmlCurrent = current as unknown as { isContentEditable?: boolean; tabIndex?: number };
+						const nativelyInteractable =
+							(tagName === "input" && inputType !== "hidden") ||
+							tagName === "button" ||
+							tagName === "select" ||
+							tagName === "textarea" ||
+							tagName === "option" ||
+							((tagName === "a" || tagName === "area") && current.hasAttribute("href")) ||
+							current.hasAttribute("tabindex") ||
+							(htmlCurrent.tabIndex ?? -1) >= 0 ||
+							htmlCurrent.isContentEditable === true;
+						if (nativelyInteractable || interactiveRoles[explicitRole] === true) return current;
+						const pageCurrent = current as Element & { assignedSlot?: Element | null };
+						const root = current.getRootNode() as unknown as { host?: Element };
+						current = pageCurrent.assignedSlot ?? current.parentElement ?? root.host ?? null;
+					}
+					return null;
+				});
+			} catch (error) {
+				await element.dispose();
+				throw error;
+			}
+			const interactive = interactiveHandle.asElement() as ElementHandle | null;
+			await element.dispose();
+			if (!interactive) {
+				await interactiveHandle.dispose();
+				return [];
+			}
+			element = interactive;
 		}
 		try {
 			const [metadata, aria] = await Promise.all([
@@ -2432,7 +2432,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				});
 				if (actual !== desired) throw new Error(`locator.setChecked could not set checked=${desired}`);
 			},
-			{ visible: !force, enabled: true },
+			{ visible: !force, enabled: !force },
 		);
 	}
 
