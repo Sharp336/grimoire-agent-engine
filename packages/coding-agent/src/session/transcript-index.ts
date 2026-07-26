@@ -83,13 +83,22 @@ function extractChunks(
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
 		const message = entry.message;
-		if (!isLlmMessage(message)) continue;
-
 		const createdAt = entryCreatedAtMs(entry.timestamp, fileMtimeMs);
 		const push = (kind: PreparedChunk["kind"], role: string, content: string): void => {
 			if (content.length === 0) return;
 			chunks.push({ filePath, sessionId, entryId: entry.id, kind, role, content, createdAt });
 		};
+		if (message.role === "bashExecution") {
+			push("tool_use", message.role, capContent(message.command, TOOL_USE_CONTENT_CAP));
+			push("tool_result", message.role, capContent(message.output, TOOL_RESULT_CONTENT_CAP));
+			continue;
+		}
+		if (message.role === "pythonExecution") {
+			push("tool_use", message.role, capContent(message.code, TOOL_USE_CONTENT_CAP));
+			push("tool_result", message.role, capContent(message.output, TOOL_RESULT_CONTENT_CAP));
+			continue;
+		}
+		if (!isLlmMessage(message)) continue;
 
 		switch (message.role) {
 			case "user":
@@ -173,9 +182,11 @@ function extractSessionTags(entries: FileEntry[]): string[] {
 	return tags;
 }
 
-function listJsonlFiles(sessionDir: string): string[] {
+async function listJsonlFiles(sessionDir: string): Promise<string[]> {
 	try {
-		return Array.from(new Bun.Glob("*.jsonl").scanSync(sessionDir)).map(name => path.join(sessionDir, name));
+		const files: string[] = [];
+		for await (const name of new Bun.Glob("*.jsonl").scan(sessionDir)) files.push(path.join(sessionDir, name));
+		return files;
 	} catch {
 		return [];
 	}
@@ -194,6 +205,9 @@ export class TranscriptIndex {
 	#tagsForStmt: Statement;
 	#sessionIdsByTagStmt: Statement;
 	#searchStmt: Statement;
+	#searchInDirStmt: Statement;
+	#indexedFilesInDirStmt: Statement;
+	#deleteIndexedFileStmt: Statement;
 	#substringStmts = new Map<number, Statement>();
 	#closed = false;
 
@@ -257,6 +271,11 @@ ON CONFLICT(path) DO UPDATE SET
 		this.#searchStmt = this.#db.prepare(
 			"SELECT c.id, c.file_path, c.session_id, c.entry_id, c.kind, c.role, c.content, c.created_at FROM chunks_fts f JOIN chunks c ON c.id = f.rowid WHERE chunks_fts MATCH ? ORDER BY c.created_at DESC, c.id DESC LIMIT ?",
 		);
+		this.#searchInDirStmt = this.#db.prepare(
+			"SELECT c.id, c.file_path, c.session_id, c.entry_id, c.kind, c.role, c.content, c.created_at FROM chunks_fts f JOIN chunks c ON c.id = f.rowid WHERE chunks_fts MATCH ? AND c.file_path LIKE ? ESCAPE '\\' ORDER BY c.created_at DESC, c.id DESC LIMIT ?",
+		);
+		this.#indexedFilesInDirStmt = this.#db.prepare("SELECT path FROM indexed_files WHERE path LIKE ? ESCAPE '\\'");
+		this.#deleteIndexedFileStmt = this.#db.prepare("DELETE FROM indexed_files WHERE path = ?");
 	}
 
 	static open(dbPath: string = getTranscriptDbPath()): TranscriptIndex {
@@ -282,14 +301,15 @@ ON CONFLICT(path) DO UPDATE SET
 
 		for (const sessionDir of opts.sessionDirs) {
 			opts.signal?.throwIfAborted();
-			const jsonlFiles = listJsonlFiles(sessionDir);
+			const jsonlFiles = await listJsonlFiles(sessionDir);
+			this.#purgeMissingFiles(sessionDir, new Set(jsonlFiles));
 			for (const filePath of jsonlFiles) {
 				opts.signal?.throwIfAborted();
 				files += 1;
 
 				let stat: fs.Stats;
 				try {
-					stat = fs.statSync(filePath);
+					stat = await fs.promises.stat(filePath);
 				} catch (error) {
 					logger.warn("TranscriptIndex reindex skipped file", { path: filePath, error: String(error) });
 					continue;
@@ -363,8 +383,9 @@ ON CONFLICT(path) DO UPDATE SET
 		return { files, indexedFiles };
 	}
 
-	search(query: string, opts?: { limit?: number }): TranscriptHit[] {
+	search(query: string, opts?: { limit?: number; sessionDir?: string }): TranscriptHit[] {
 		const safeLimit = this.#normalizeLimit(opts?.limit ?? 100);
+		const sessionDir = opts?.sessionDir;
 		if (safeLimit === 0) return [];
 
 		const tokens = this.#tokenize(query);
@@ -373,47 +394,59 @@ ON CONFLICT(path) DO UPDATE SET
 		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
 		let ftsRows: ChunkRow[] = [];
 		try {
-			ftsRows = this.#searchStmt.all(ftsQuery, safeLimit) as ChunkRow[];
+			ftsRows = sessionDir
+				? (this.#searchInDirStmt.all(ftsQuery, this.#sessionDirPattern(sessionDir), safeLimit) as ChunkRow[])
+				: (this.#searchStmt.all(ftsQuery, safeLimit) as ChunkRow[]);
 		} catch (error) {
 			logger.debug("TranscriptIndex FTS query failed, using substring only", { error: String(error) });
 		}
 
-		let subRows: ChunkRow[] = [];
+		if (ftsRows.length > 0) return ftsRows.map(row => this.#toHit(row));
+
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit);
+			return this.#searchSubstring(tokens, safeLimit, sessionDir).map(row => this.#toHit(row));
 		} catch (error) {
 			logger.error("TranscriptIndex substring search failed", { error: String(error) });
+			return [];
 		}
-
-		if (ftsRows.length === 0) {
-			return subRows.map(row => this.#toHit(row));
-		}
-
-		const rowsById = new Map<number, ChunkRow>();
-		for (const row of ftsRows) {
-			rowsById.set(row.id, row);
-		}
-		for (const row of subRows) {
-			if (!rowsById.has(row.id)) rowsById.set(row.id, row);
-		}
-
-		return [...rowsById.values()]
-			.sort((a, b) => b.created_at - a.created_at || b.id - a.id)
-			.slice(0, safeLimit)
-			.map(row => this.#toHit(row));
 	}
 
-	matchingSessionIds(query: string, limit?: number): string[] {
-		const seen = new Set<string>();
-		const ids: string[] = [];
-		for (const hit of this.search(query, { limit: limit ?? 500 })) {
-			if (seen.has(hit.sessionId)) continue;
-			seen.add(hit.sessionId);
-			ids.push(hit.sessionId);
+	matchingSessionIds(query: string, opts?: { limit?: number; sessionDir?: string }): string[] {
+		const safeLimit = this.#normalizeLimit(opts?.limit ?? 500);
+		if (safeLimit === 0) return [];
+		const tokens = this.#tokenize(query);
+		if (tokens.length === 0) return [];
+		const sessionDir = opts?.sessionDir;
+		const scopeClause = sessionDir ? " AND c.file_path LIKE ? ESCAPE '\\'" : "";
+		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
+		const ftsStmt = this.#db.prepare(
+			`SELECT c.session_id FROM chunks_fts f JOIN chunks c ON c.id = f.rowid WHERE chunks_fts MATCH ?${scopeClause} GROUP BY c.session_id ORDER BY MAX(c.created_at) DESC, MAX(c.id) DESC LIMIT ?`,
+		);
+		try {
+			const params: Array<string | number> = [ftsQuery];
+			if (sessionDir) params.push(this.#sessionDirPattern(sessionDir));
+			params.push(safeLimit);
+			const rows = ftsStmt.all(...params) as Array<{ session_id: string }>;
+			if (rows.length > 0) return rows.map(row => row.session_id);
+		} catch (error) {
+			logger.debug("TranscriptIndex FTS session lookup failed, using substring only", { error: String(error) });
+		} finally {
+			ftsStmt.finalize();
 		}
-		return ids;
-	}
 
+		const whereClause = Array(tokens.length).fill("content LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
+		const substringStmt = this.#db.prepare(
+			`SELECT session_id FROM chunks WHERE ${whereClause}${sessionDir ? " AND file_path LIKE ? ESCAPE '\\'" : ""} GROUP BY session_id ORDER BY MAX(created_at) DESC, MAX(id) DESC LIMIT ?`,
+		);
+		try {
+			const params: Array<string | number> = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+			if (sessionDir) params.push(this.#sessionDirPattern(sessionDir));
+			params.push(safeLimit);
+			return (substringStmt.all(...params) as Array<{ session_id: string }>).map(row => row.session_id);
+		} finally {
+			substringStmt.finalize();
+		}
+	}
 	tagsFor(sessionId: string): string[] {
 		const rows = this.#tagsForStmt.all(sessionId) as Array<{ tag: string }>;
 		return rows.map(row => row.tag);
@@ -438,6 +471,9 @@ ON CONFLICT(path) DO UPDATE SET
 		this.#tagsForStmt.finalize();
 		this.#sessionIdsByTagStmt.finalize();
 		this.#searchStmt.finalize();
+		this.#searchInDirStmt.finalize();
+		this.#indexedFilesInDirStmt.finalize();
+		this.#deleteIndexedFileStmt.finalize();
 		this.#db.close();
 		if (TranscriptIndex.#instance === this) {
 			TranscriptIndex.#instance = undefined;
@@ -462,22 +498,43 @@ ON CONFLICT(path) DO UPDATE SET
 			.filter(tok => tok.length > 0);
 	}
 
-	#searchSubstring(tokens: string[], limit: number): ChunkRow[] {
-		const stmt = this.#getSubstringStmt(tokens.length);
+	#searchSubstring(tokens: string[], limit: number, sessionDir?: string): ChunkRow[] {
+		const stmt = this.#getSubstringStmt(tokens.length, Boolean(sessionDir));
 		const params: unknown[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+		if (sessionDir) params.push(this.#sessionDirPattern(sessionDir));
 		params.push(limit);
 		return stmt.all(...(params as [string, ...unknown[]])) as ChunkRow[];
 	}
 
-	#getSubstringStmt(tokenCount: number): Statement {
-		let stmt = this.#substringStmts.get(tokenCount);
+	#getSubstringStmt(tokenCount: number, scoped: boolean): Statement {
+		const key = tokenCount * 2 + Number(scoped);
+		let stmt = this.#substringStmts.get(key);
 		if (stmt) return stmt;
 		const whereClause = Array(tokenCount).fill("content LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
+		const scopeClause = scoped ? " AND file_path LIKE ? ESCAPE '\\'" : "";
 		stmt = this.#db.prepare(
-			`SELECT id, file_path, session_id, entry_id, kind, role, content, created_at FROM chunks WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
+			`SELECT id, file_path, session_id, entry_id, kind, role, content, created_at FROM chunks WHERE ${whereClause}${scopeClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
 		);
-		this.#substringStmts.set(tokenCount, stmt);
+		this.#substringStmts.set(key, stmt);
 		return stmt;
+	}
+
+	#sessionDirPattern(sessionDir: string): string {
+		return `${escapeLikePattern(path.resolve(sessionDir))}${path.sep}%`;
+	}
+
+	#purgeMissingFiles(sessionDir: string, presentFiles: ReadonlySet<string>): void {
+		const pattern = this.#sessionDirPattern(sessionDir);
+		const indexed = this.#indexedFilesInDirStmt.all(pattern) as Array<{ path: string }>;
+		const missing = indexed.map(row => row.path).filter(filePath => !presentFiles.has(filePath));
+		if (missing.length === 0) return;
+		this.#db.transaction(() => {
+			for (const filePath of missing) {
+				this.#deleteChunksStmt.run(filePath);
+				this.#deleteTagsStmt.run(filePath);
+				this.#deleteIndexedFileStmt.run(filePath);
+			}
+		})();
 	}
 
 	#toHit(row: ChunkRow): TranscriptHit {

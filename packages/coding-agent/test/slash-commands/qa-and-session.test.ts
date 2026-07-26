@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
-import { getTranscriptDbPath } from "@oh-my-pi/pi-utils";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TranscriptIndex } from "@oh-my-pi/pi-coding-agent/session/transcript-index";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { getTranscriptDbPath } from "@oh-my-pi/pi-utils";
 
 /** Escape hatch for deliberate test fakes that are not structurally comparable to their target types. */
 function cast<T>(value: unknown): T {
@@ -137,6 +137,17 @@ describe("/session tag subcommands", () => {
 		expect(sessionManager.sessionTags()).toEqual([]);
 	});
 
+	it("sanitizes tags before storing and echoing them", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const harness = createAcpRuntime({ sessionManager });
+
+		expect(await executeAcpBuiltinSlashCommand("/session tag safe\u001b[31m tag\nname", harness.runtime)).toEqual({
+			consumed: true,
+		});
+		expect(harness.output).toHaveBeenCalledWith("Tagged session: safe tag name");
+		expect(sessionManager.sessionTags()).toEqual(["safe tag name"]);
+	});
+
 	it("tag with no name is consumed and reports usage without appending an empty tag", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const harness = createAcpRuntime({ sessionManager });
@@ -154,6 +165,25 @@ describe("/session tag subcommands", () => {
 describe("/session search", () => {
 	afterEach(() => {
 		spyOn(TranscriptIndex, "open").mockRestore();
+	});
+
+	it("returns an executable search prompt and reindexes the effective session directory in both hosts", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const reindex = vi.fn(async () => ({ files: 0, indexedFiles: 0 }));
+		const openSpy = spyOn(TranscriptIndex, "open").mockReturnValue(cast<TranscriptIndex>({ reindex }));
+		const acp = createAcpRuntime({ sessionManager });
+		const tui = createTuiRuntime({ sessionManager });
+
+		const acpPrompt = promptTextOf(
+			await executeAcpBuiltinSlashCommand("/session search previous decision", acp.runtime),
+		);
+		const tuiPrompt = await executeBuiltinSlashCommand("/session search previous decision", tui.runtime);
+		if (typeof tuiPrompt !== "string") throw new Error("expected TUI session search prompt");
+		expect(acpPrompt).toBe(tuiPrompt);
+		expect(acpPrompt).toContain("previous decision");
+		expect(reindex).toHaveBeenCalledTimes(2);
+		expect(reindex).toHaveBeenCalledWith({ sessionDirs: [sessionManager.getSessionDir()] });
+		expect(openSpy).toHaveBeenCalledTimes(2);
 	});
 
 	it("with no question reports usage and does not create the transcript database", async () => {

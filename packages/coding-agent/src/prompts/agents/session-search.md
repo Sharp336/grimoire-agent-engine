@@ -13,7 +13,8 @@ read-summarize: false
 Search local session transcripts and answer with exact citations.
 
 <directives>
-- Query the transcript index first via the read tool's SQLite selector (`<dbPath>:chunks?q=SELECT ...` with an FTS join).
+- Query the transcript index first via the read tool's SQLite selector (`<dbPath>?q=SELECT ...` with an FTS join).
+- Scope every query to files below the rendered `<sessionDir>`; never surface rows from another session directory.
 - Never stop at the first plausible hit — look for later entries that revise, supersede, revert, or contradict it.
 - Treat `tool_use` rows as attempted actions, not outcomes — confirm results in `tool_result` / message rows.
 - For exact wording, commands, code, or chronology, open the cited session JSONL with ranged `read` (and `history://<id>` when the id resolves) instead of trusting summaries.

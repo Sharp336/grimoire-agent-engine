@@ -29,6 +29,7 @@ import {
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
+import { sanitizeStatusText } from "../modes/shared";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
@@ -38,9 +39,9 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
-import { SessionManager } from "../session/session-manager";
-import { TranscriptIndex } from "../session/transcript-index";
+import type { SessionManager } from "../session/session-manager";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { TranscriptIndex } from "../session/transcript-index";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
@@ -124,8 +125,7 @@ const SESSION_USAGE = "Usage: /session [info|delete|pin [account]|search <questi
  * moment, so a user who never searches pays nothing and the `/resume` selector keeps
  * falling back to prompt-history matches alone.
  */
-async function renderSessionSearchPrompt(question: string, cwd: string): Promise<string> {
-	const sessionDir = SessionManager.getDefaultSessionDir(cwd);
+async function renderSessionSearchPrompt(question: string, sessionDir: string): Promise<string> {
 	await TranscriptIndex.open().reindex({ sessionDirs: [sessionDir] });
 	return prompt.render(sessionSearchCommandMd, { question, dbPath: getTranscriptDbPath(), sessionDir });
 }
@@ -136,7 +136,7 @@ function runSessionTagVerb(manager: SessionManager, verb: string, rest: string):
 		const tags = manager.sessionTags();
 		return tags.length > 0 ? `Tags: ${tags.join(", ")}` : "No tags on this session.";
 	}
-	const name = rest.trim();
+	const name = sanitizeStatusText(rest);
 	if (!name) return `Usage: /session ${verb} <name>`;
 	manager.appendSessionTag(name, verb === "tag");
 	return `${verb === "tag" ? "Tagged" : "Untagged"} session: ${name}`;
@@ -1203,7 +1203,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (verb === "search") {
 				if (!rest.trim()) return usage("Usage: /session search <question>", runtime);
-				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.cwd) };
+				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.sessionManager.getSessionDir()) };
 			}
 			return usage(SESSION_USAGE, runtime);
 		},
@@ -1235,7 +1235,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					runtime.ctx.showStatus("Usage: /session search <question>");
 					return;
 				}
-				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.ctx.sessionManager.getCwd()) };
+				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.ctx.sessionManager.getSessionDir()) };
 			}
 			if (!verb || (verb === "info" && !rest)) {
 				await runtime.ctx.handleSessionCommand();

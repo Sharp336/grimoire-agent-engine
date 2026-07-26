@@ -392,4 +392,80 @@ describe("TranscriptIndex", () => {
 		expect(index.sessionIdsByTag("alpha")).toEqual([]);
 		expect(index.sessionIdsByTag("beta")).toEqual(["sess-tags"]);
 	});
+
+	it("purges chunks and tags for deleted session files", async () => {
+		const index = freshIndex();
+		const sessionDir = tempDir!.join("sessions");
+		const filePath = writeJsonl(sessionDir, "deleted.jsonl", [
+			sessionHeader("sess-deleted"),
+			messageEntry("m1", null, { role: "user", content: "purge-me-token" }),
+		]);
+		expect(await index.reindex({ sessionDirs: [sessionDir] })).toEqual({ files: 1, indexedFiles: 1 });
+		expect(index.search("purge-me-token")).toHaveLength(1);
+		fs.unlinkSync(filePath);
+		expect(await index.reindex({ sessionDirs: [sessionDir] })).toEqual({ files: 0, indexedFiles: 0 });
+		expect(index.search("purge-me-token")).toEqual([]);
+		expect(tableCounts(dbPath)).toEqual({ chunks: 0, fts: 0 });
+	});
+
+	it("encloses scoped searches and session ranking to the requested directory", async () => {
+		const index = freshIndex();
+		const firstDir = tempDir!.join("first");
+		const secondDir = tempDir!.join("second");
+		writeJsonl(firstDir, "first.jsonl", [
+			sessionHeader("sess-first"),
+			messageEntry("m1", null, { role: "user", content: "shared-scope-token" }),
+		]);
+		writeJsonl(secondDir, "second.jsonl", [
+			sessionHeader("sess-second"),
+			messageEntry("m1", null, { role: "user", content: "shared-scope-token" }),
+		]);
+		await index.reindex({ sessionDirs: [firstDir, secondDir] });
+		expect(index.search("shared-scope-token", { sessionDir: firstDir }).map(hit => hit.sessionId)).toEqual([
+			"sess-first",
+		]);
+		expect(index.matchingSessionIds("shared-scope-token", { sessionDir: secondDir })).toEqual(["sess-second"]);
+	});
+
+	it("indexes bash and Python execution source and output", async () => {
+		const index = freshIndex();
+		const sessionDir = tempDir!.join("sessions");
+		writeJsonl(sessionDir, "execution.jsonl", [
+			sessionHeader("sess-execution"),
+			messageEntry("bash", null, {
+				role: "bashExecution",
+				command: "bash-command-token",
+				output: "bash-output-token",
+			}),
+			messageEntry("python", "bash", {
+				role: "pythonExecution",
+				code: "python-code-token",
+				output: "python-output-token",
+			}),
+		]);
+		await index.reindex({ sessionDirs: [sessionDir] });
+		expect(index.search("bash-command-token")[0]?.kind).toBe("tool_use");
+		expect(index.search("bash-output-token")[0]?.kind).toBe("tool_result");
+		expect(index.search("python-code-token")[0]?.kind).toBe("tool_use");
+		expect(index.search("python-output-token")[0]?.kind).toBe("tool_result");
+	});
+
+	it("deduplicates session ids before applying the ranking limit", async () => {
+		const index = freshIndex();
+		const sessionDir = tempDir!.join("sessions");
+		writeJsonl(sessionDir, "chatty.jsonl", [
+			sessionHeader("sess-chatty"),
+			...Array.from({ length: 5 }, (_, i) =>
+				messageEntry(`m${i}`, null, { role: "user", content: "rank-limit-token" }),
+			),
+		]);
+		writeJsonl(sessionDir, "other.jsonl", [
+			sessionHeader("sess-other"),
+			messageEntry("m1", null, { role: "user", content: "rank-limit-token" }),
+		]);
+		await index.reindex({ sessionDirs: [sessionDir] });
+		expect(index.matchingSessionIds("rank-limit-token", { limit: 2 })).toEqual(
+			expect.arrayContaining(["sess-other", "sess-chatty"]),
+		);
+	});
 });
