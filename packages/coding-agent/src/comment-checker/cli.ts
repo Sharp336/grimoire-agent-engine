@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -144,13 +143,6 @@ function appendOutput(output: OutputAccumulator, chunk: string, maxOutputBytes: 
 	output.truncated = true;
 }
 
-function replaceOutput(output: OutputAccumulator, text: string, maxOutputBytes: number): void {
-	output.text = "";
-	output.bytes = 0;
-	output.truncated = false;
-	appendOutput(output, text, maxOutputBytes);
-}
-
 function truncateUtf8Prefix(text: string, maxBytes: number): string {
 	let bytes = 0;
 	let endIndex = 0;
@@ -168,7 +160,7 @@ function formatOutput(output: OutputAccumulator, streamName: "stdout" | "stderr"
 	return `${output.text}\n[${streamName} truncated after ${maxOutputBytes} bytes]`;
 }
 
-export function spawnProcess(
+export async function spawnProcess(
 	command: string,
 	args: string[],
 	stdin: string,
@@ -177,53 +169,73 @@ export function spawnProcess(
 ): Promise<ProcessResult> {
 	const outputByteLimit = Number.isFinite(maxOutputBytes) && maxOutputBytes > 0 ? Math.floor(maxOutputBytes) : 0;
 	const timeoutLimit = Number.isFinite(processTimeoutMs) && processTimeoutMs > 0 ? Math.floor(processTimeoutMs) : 0;
-	const proc = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
-	const stdout: OutputAccumulator = { text: "", bytes: 0, truncated: false };
-	const stderr: OutputAccumulator = { text: "", bytes: 0, truncated: false };
-	let timedOut = false;
-	let killTimer: ReturnType<typeof setTimeout> | undefined;
-	const { promise, resolve } = Promise.withResolvers<ProcessResult>();
 
-	const timeoutTimer =
+	let proc: ReturnType<typeof Bun.spawn>;
+	try {
+		proc = Bun.spawn([command, ...args], {
+			stdin: Buffer.from(stdin, "utf-8"),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+	} catch (err) {
+		const errorMessage = err instanceof Error ? err.message : String(err);
+		return {
+			exitCode: null,
+			stdout: "",
+			stderr: errorMessage,
+		};
+	}
+
+	let timedOut = false;
+	let killTimer: Timer | undefined;
+
+	const timeoutTimer: Timer | undefined =
 		timeoutLimit > 0
 			? setTimeout(() => {
 					timedOut = true;
-					replaceOutput(stderr, `comment-checker process timed out after ${timeoutLimit} ms`, outputByteLimit);
 					proc.kill("SIGTERM");
 					killTimer = setTimeout(() => {
 						proc.kill("SIGKILL");
 					}, 1_000);
-					killTimer.unref();
+					killTimer.unref?.();
 				}, timeoutLimit)
 			: undefined;
-	timeoutTimer?.unref();
+	timeoutTimer?.unref?.();
 
-	const finish = (exitCode: number | null): void => {
-		clearTimeout(timeoutTimer);
-		clearTimeout(killTimer);
-		resolve({
-			exitCode: timedOut ? null : exitCode,
-			stdout: formatOutput(stdout, "stdout", outputByteLimit),
-			stderr: formatOutput(stderr, "stderr", outputByteLimit),
-		});
+	const readStream = async (stream: ReadableStream<Uint8Array> | null, name: "stdout" | "stderr"): Promise<string> => {
+		if (!stream) return "";
+		const reader = stream.getReader();
+		const decoder = new TextDecoder();
+		const output: OutputAccumulator = { text: "", bytes: 0, truncated: false };
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (value) {
+				appendOutput(output, decoder.decode(value, { stream: true }), outputByteLimit);
+			}
+		}
+		appendOutput(output, decoder.decode(), outputByteLimit);
+		return formatOutput(output, name, outputByteLimit);
 	};
 
-	proc.stdout.setEncoding("utf-8");
-	proc.stderr.setEncoding("utf-8");
-	proc.stdout.on("data", (chunk: string) => {
-		appendOutput(stdout, chunk, outputByteLimit);
-	});
-	proc.stderr.on("data", (chunk: string) => {
-		appendOutput(stderr, chunk, outputByteLimit);
-	});
-	proc.once("error", error => {
-		appendOutput(stderr, error.message, outputByteLimit);
-		finish(null);
-	});
-	proc.once("close", exitCode => {
-		finish(exitCode);
-	});
-	proc.stdin.end(stdin);
+	const [stdoutText, stderrText, exitCode] = await Promise.all([
+		readStream(proc.stdout as ReadableStream<Uint8Array> | null, "stdout"),
+		readStream(proc.stderr as ReadableStream<Uint8Array> | null, "stderr"),
+		proc.exited,
+	]);
 
-	return promise;
+	if (timeoutTimer) clearTimeout(timeoutTimer);
+	if (killTimer) clearTimeout(killTimer);
+
+	let finalStderr = stderrText;
+	if (timedOut) {
+		const timeoutMsg = `comment-checker process timed out after ${timeoutLimit} ms`;
+		finalStderr = finalStderr ? `${finalStderr}\n${timeoutMsg}` : timeoutMsg;
+	}
+
+	return {
+		exitCode: timedOut ? null : exitCode,
+		stdout: stdoutText,
+		stderr: finalStderr,
+	};
 }

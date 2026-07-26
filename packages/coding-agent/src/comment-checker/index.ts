@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import type {
 	ExtensionContext,
@@ -6,6 +7,7 @@ import type {
 	ToolResultEvent,
 	ToolResultEventResult,
 } from "../extensibility/extensions";
+import selfHealPrompt from "../prompts/comment-checker-self-heal.md" with { type: "text" };
 import { type CommentCheckerRunResult, resolveCommentCheckerBinary, runCommentChecker } from "./cli";
 import {
 	type CommentCheckerHookInput,
@@ -37,6 +39,15 @@ class SelfHealStore {
 
 	clear(): void {
 		this.#records.clear();
+	}
+
+	clearFiles(filePaths: string[]): void {
+		const filesSet = new Set(filePaths);
+		for (const [id, record] of this.#records) {
+			if (filesSet.has(record.filePath)) {
+				this.#records.delete(id);
+			}
+		}
 	}
 
 	record(warning: { filePath: string; message: string; sourceToolName: string }): WarningRecord {
@@ -82,6 +93,7 @@ function getSessionId(ctx: ExtensionContext): string {
 export type CommentCheckerHandlerDeps = {
 	run?: (input: CommentCheckerHookInput) => Promise<CommentCheckerRunResult>;
 	onWarning?: (warning: { filePath: string; message: string; sourceToolName: string }) => void;
+	onClearWarnings?: (filePaths: string[]) => void;
 };
 
 function syncUi(ctx: ExtensionContext, state: CommentCheckerUiState): void {
@@ -124,6 +136,12 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 			}
 		}
 
+		const warnedFilePaths = new Set(warnings.map(w => w.filePath));
+		const cleanFiles = checkedFiles.filter(p => !warnedFilePaths.has(p));
+		if (cleanFiles.length > 0) {
+			deps.onClearWarnings?.(cleanFiles);
+		}
+
 		for (const warning of warnings) {
 			deps.onWarning?.(warning);
 		}
@@ -153,14 +171,26 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 
 	api.on("session_start", async (_event, ctx) => {
 		store.clear();
+		if (!Settings.instance.get("commentChecker.enabled")) {
+			return;
+		}
 		if (!resolveCommentCheckerBinary()) {
 			setState(ctx, { status: "missing", checkedFiles: [], warnings: [] });
+			logger.warn("omp-comment-checker enabled in settings, but binary is not accessible on host system.");
 			return;
 		}
 		setState(ctx, { status: "idle", checkedFiles: [], warnings: [] });
 	});
 
 	api.on("tool_result", async (event, ctx) => {
+		if (!Settings.instance.get("commentChecker.enabled")) {
+			return undefined;
+		}
+		if (!resolveCommentCheckerBinary()) {
+			setState(ctx, { status: "missing", checkedFiles: [], warnings: [] });
+			logger.warn("omp-comment-checker enabled in settings, but binary is not accessible on host system.");
+			return undefined;
+		}
 		const handler = createCommentCheckerToolResultHandler({
 			run: input => runCommentChecker(input, { customPrompt: Settings.instance.get("commentChecker.prompt") }),
 			onWarning: warning => {
@@ -173,18 +203,24 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 					id: record.id,
 				});
 			},
+			onClearWarnings: cleanFiles => {
+				store.clearFiles(cleanFiles);
+			},
 		});
 		return handler(event, ctx);
 	});
 
 	api.on("session_compact", async () => {
+		if (!Settings.instance.get("commentChecker.enabled")) return;
+		if (!resolveCommentCheckerBinary()) return;
 		const unfired = store.unfired();
 		if (unfired.length === 0) return;
 		const summary = unfired.map(w => `• ${w.filePath}: ${w.message}`).join("\n");
+		const content = selfHealPrompt.replace("{{count}}", String(unfired.length)).replace("{{summary}}", summary);
 		api.sendMessage(
 			{
 				customType: OMP_WARNING_ENTRY_TYPE,
-				content: `omp-comment-checker self-heal: ${unfired.length} warning(s) still need addressing:\n${summary}`,
+				content,
 				display: true,
 			},
 			{ triggerTurn: false },
@@ -195,9 +231,13 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 	api.registerCommand("comment-checker", {
 		description: "Show omp-comment-checker status and pending warnings.",
 		handler: async (_args, ctx) => {
+			if (!Settings.instance.get("commentChecker.enabled")) {
+				ctx.ui.notify("omp-comment-checker is currently disabled in settings.", "info");
+				return;
+			}
 			if (!resolveCommentCheckerBinary()) {
 				setState(ctx, { status: "missing", checkedFiles: [], warnings: [] });
-				ctx.ui.notify("omp-comment-checker binary missing; reinstall @code-yeongyu/comment-checker.", "warning");
+				ctx.ui.notify("omp-comment-checker binary missing; install @code-yeongyu/comment-checker.", "warning");
 				return;
 			}
 			const unfired = store.unfired();

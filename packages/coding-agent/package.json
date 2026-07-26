@@ -93,7 +93,6 @@
     "zod": "catalog:"
   },
   "optionalDependencies": {
-    "@code-yeongyu/comment-checker": "catalog:",
     "@huggingface/transformers": "catalog:",
     "sherpa-onnx-node": "1.13.2"
   },

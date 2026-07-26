@@ -23,7 +23,6 @@
       "@biomejs/biome": "^2.5.3",
       "@bufbuild/protobuf": "^2.12.1",
       "@bufbuild/protoc-gen-es": "^2.12.1",
-      "@code-yeongyu/comment-checker": "^0.8.0",
       "@huggingface/transformers": "^4.2.0",
       "@mozilla/readability": "^0.6.0",
       "@napi-rs/cli": "3.7.2",

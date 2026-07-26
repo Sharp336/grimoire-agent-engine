@@ -1,3 +1,5 @@
+import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+
 export const COMMENT_CHECKER_WIDGET_KEY = "omp-comment-checker";
 
 export type CommentCheckerUiStatus = "idle" | "loading" | "missing" | "clean" | "warning" | "error";
@@ -21,9 +23,7 @@ export type WidgetSetter = (
 ) => void;
 
 function formatPreview(message: string): string {
-	const trimmed = message.trim();
-	if (trimmed.length <= 80) return trimmed;
-	return `${trimmed.slice(0, 77).trimEnd()}…`;
+	return truncateToWidth(replaceTabs(message.trim()), TRUNCATE_LENGTHS.CONTENT);
 }
 
 export function getCommentCheckerWidgetLines(state: CommentCheckerUiState): string[] | undefined {
@@ -35,7 +35,8 @@ export function getCommentCheckerWidgetLines(state: CommentCheckerUiState): stri
 	const lines: string[] = [header, summary];
 	for (const warning of state.warnings.slice(0, maxLines)) {
 		const preview = formatPreview(warning.message);
-		lines.push(`  • ${warning.filePath} — ${preview}`);
+		const displayPath = replaceTabs(shortenPath(warning.filePath));
+		lines.push(`  • ${displayPath} — ${preview}`);
 	}
 	if (state.warnings.length > maxLines) {
 		lines.push(`  … (${state.warnings.length - maxLines} more)`);
@@ -48,7 +49,7 @@ export function formatFooterStatus(state: CommentCheckerUiState): string | undef
 	if (state.status !== "warning") return undefined;
 	if (state.warnings.length === 0) return undefined;
 	const maxFiles = 3;
-	const fileList = state.warnings.slice(0, maxFiles).map(warning => warning.filePath);
+	const fileList = state.warnings.slice(0, maxFiles).map(warning => replaceTabs(shortenPath(warning.filePath)));
 	const suffix = state.warnings.length > maxFiles ? " …" : "";
 	return `⚠ comment-checker: ${state.warnings.length} warning(s) in ${fileList.join(", ")}${suffix}`;
 }

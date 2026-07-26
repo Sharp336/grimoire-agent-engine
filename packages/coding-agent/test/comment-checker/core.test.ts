@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { createCommentCheckerToolResultHandler } from "../../src/comment-checker/index";
+import { runCommentChecker, spawnProcess } from "../../src/comment-checker/cli";
 import {
 	extractCommentCheckRequests,
 	extractFromOmpEditDetails,
@@ -7,6 +7,10 @@ import {
 	type ToolResultLike,
 	toHookInput,
 } from "../../src/comment-checker/core";
+import { createCommentCheckerToolResultHandler } from "../../src/comment-checker/index";
+import type { ExtensionContext, ToolResultEvent } from "../../src/extensibility/extensions";
+import type { ExtensionUIContext } from "../../src/extensibility/extensions/types";
+import type { ReadonlySessionManager } from "../../src/session/session-manager";
 
 describe("extractCommentCheckRequests", () => {
 	it("maps a write tool result to a Write hook input", () => {
@@ -212,6 +216,64 @@ describe("extractCommentCheckRequests", () => {
 		expect(requests).toEqual([]);
 	});
 
+	it("extracts top-level single-file edit details in extractFromOmpEditDetails", () => {
+		const details = {
+			path: "src/single.ts",
+			oldText: "const value = 1;\n",
+			newText: "const value = 2;\n",
+		};
+
+		const results = extractFromOmpEditDetails(details);
+
+		expect(results).toEqual([
+			{
+				filePath: "src/single.ts",
+				movePath: undefined,
+				oldText: "const value = 1;\n",
+				newText: "const value = 2;\n",
+				success: true,
+				op: "edit",
+			},
+		]);
+	});
+
+	it("handles partial batch errors by returning successful file requests", () => {
+		const event: ToolResultLike = {
+			toolName: "edit",
+			input: {},
+			details: {
+				perFileResults: [
+					{
+						path: "src/success.ts",
+						oldText: "const a = 1;\n",
+						newText: "const a = 2;\n",
+					},
+					{
+						path: "src/failed.ts",
+						isError: true,
+					},
+				],
+			},
+			content: [{ type: "text", text: "Error editing src/failed.ts" }],
+			isError: true,
+		};
+
+		const requests = extractCommentCheckRequests(event);
+
+		expect(requests).toEqual([
+			{
+				sourceToolName: "edit",
+				toolName: "Edit",
+				filePath: "src/success.ts",
+				toolInput: {
+					file_path: "src/success.ts",
+					old_string: "const a = 1;\n",
+					new_string: "const a = 2;\n",
+				},
+			},
+		]);
+	});
+
 	it("extracts per-file results from omp edit details", () => {
 		const details = {
 			perFileResults: [
@@ -395,39 +457,53 @@ describe("isToolFailureOutput", () => {
 	});
 });
 
-describe("createCommentCheckerToolResultHandler UI status update", () => {
-	it("updates ctx.ui.setStatus when warnings are found", async () => {
+describe("createCommentCheckerToolResultHandler UI status update and warning clearing", () => {
+	it("updates ctx.ui.setStatus when warnings are found and clears resolved warnings", async () => {
 		const setStatusCalls: Array<{ key: string; text?: string }> = [];
 		const setWidgetCalls: Array<{ key: string; lines?: string[] }> = [];
+		const clearedFiles: string[][] = [];
 
-		const mockCtx = {
-			sessionManager: { getSessionId: () => "sess-1", getHeader: () => null },
-			cwd: "/root",
-			ui: {
-				setStatus: (key: string, text?: string) => {
-					setStatusCalls.push({ key, text });
-				},
-				setWidget: (key: string, lines?: string[]) => {
-					setWidgetCalls.push({ key, lines });
-				},
+		const mockSessionManager = {
+			getSessionId: () => "sess-1",
+			getHeader: () => null,
+		} as unknown as ReadonlySessionManager;
+
+		const mockUI = {
+			setStatus: (key: string, text?: string) => {
+				setStatusCalls.push({ key, text });
 			},
-		};
+			setWidget: (key: string, lines?: string[]) => {
+				setWidgetCalls.push({ key, lines });
+			},
+		} as unknown as ExtensionUIContext;
+
+		const mockCtx: ExtensionContext = {
+			sessionManager: mockSessionManager,
+			cwd: "/root",
+			ui: mockUI,
+		} as unknown as ExtensionContext;
 
 		const handler = createCommentCheckerToolResultHandler({
 			run: async () => ({
 				status: "warning",
 				message: "Avoid vague comments",
 			}),
+			onClearWarnings: cleanFiles => {
+				clearedFiles.push(cleanFiles);
+			},
 		});
 
-		const result = await handler(
-			{
-				toolName: "write",
-				input: { filePath: "src/foo.ts", content: "// TODO fix\nconst x = 1;" },
-				content: [{ type: "text", text: "wrote src/foo.ts" }],
-			} as any,
-			mockCtx as any,
-		);
+		const event: ToolResultEvent = {
+			type: "tool_result",
+			toolCallId: "call_1",
+			toolName: "write",
+			input: { filePath: "src/foo.ts", content: "// TODO fix\nconst x = 1;" },
+			content: [{ type: "text", text: "wrote src/foo.ts" }],
+			isError: false,
+			details: undefined,
+		};
+
+		const result = await handler(event, mockCtx);
 
 		expect(result).toBeDefined();
 		expect(setStatusCalls.length).toBe(1);
@@ -435,5 +511,50 @@ describe("createCommentCheckerToolResultHandler UI status update", () => {
 			key: "omp-comment-checker",
 			text: "⚠ comment-checker: 1 warning(s) in src/foo.ts",
 		});
+
+		const cleanHandler = createCommentCheckerToolResultHandler({
+			run: async () => ({
+				status: "pass",
+				message: "",
+			}),
+			onClearWarnings: cleanFiles => {
+				clearedFiles.push(cleanFiles);
+			},
+		});
+
+		await cleanHandler(event, mockCtx);
+		expect(clearedFiles).toEqual([["src/foo.ts"]]);
+	});
+});
+
+describe("runCommentChecker and spawnProcess executor seam", () => {
+	it("executes comment checker via controllable executor mock", async () => {
+		const result = await runCommentChecker(
+			{
+				session_id: "test",
+				tool_name: "Write",
+				transcript_path: "",
+				cwd: "/workspace",
+				hook_event_name: "PostToolUse",
+				tool_input: { file_path: "foo.ts", content: "code" },
+			},
+			{
+				binaryPath: "/bin/comment-checker",
+				executor: async (_cmd, _args, _stdin) => ({
+					exitCode: 2,
+					stdout: "",
+					stderr: "comment warning",
+				}),
+			},
+		);
+
+		expect(result.status).toBe("warning");
+		expect(result.message).toBe("comment warning");
+	});
+
+	it("executes process using spawnProcess helper", async () => {
+		const res = await spawnProcess("echo", ["hello"], "");
+		expect(res.exitCode).toBe(0);
+		expect(res.stdout.trim()).toBe("hello");
 	});
 });
