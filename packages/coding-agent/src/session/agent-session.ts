@@ -35,6 +35,8 @@ import {
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
+	type BeforeToolCallContext,
+	type BeforeToolCallResult,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -1222,6 +1224,9 @@ export class AgentSession {
 		});
 		// Tool-result hook owns synchronous post-tool actions that must affect the current loop.
 		this.agent.afterToolCall = ctx => this.#afterToolCall(ctx);
+		// Pre-call hook owns the loop-guard veto gate (blocks no-progress / wandering
+		// calls before they execute) and must run before any tool dispatch.
+		this.agent.beforeToolCall = (ctx, signal) => this.#beforeToolCall(ctx, signal);
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
@@ -2986,7 +2991,16 @@ export class AgentSession {
 		}
 	}
 
+	#beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): BeforeToolCallResult | undefined {
+		// The loop-guard veto gate runs first — if it blocks, the tool never executes.
+		const loopResult = this.#loopGuards.beforeToolCall(ctx, signal);
+		if (loopResult?.block) return loopResult;
+		return undefined;
+	}
+
 	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+		// Feed the outcome into the loop-guard tracker (no-progress streak advances).
+		this.#loopGuards.afterToolCall(ctx);
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,

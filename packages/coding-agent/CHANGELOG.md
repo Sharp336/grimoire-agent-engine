@@ -4,6 +4,9 @@
 
 ### Added
 
+- The tool-call loop guard now vetoes stuck no-progress loops before the tool executes: `beforeToolCall` consults the guard's `check()` and returns `{ block: true }` when identical args AND identical results repeat past `model.toolCallLoopGuard.noProgressThreshold` (default 5). The tool never runs, saving tokens and avoiding the wasted call. A breaker (`breakerVetoStreak`, default 3 consecutive vetoes) ends the turn gracefully — session stays pending, no hard failure.
+- Added a wandering detector for prone tools (`web.fetch`, `http.request`, `browser.*`): warns at `model.toolCallLoopGuard.wanderingThreshold` (default 6 distinct argument sets) and escalates to a veto at `wanderingEscalation` (default 12). Bulk reads over distinct files are not prone. A dedicated `tool-call-wandering-redirect` prompt steers the model toward web search or yielding.
+- Added settings: `model.toolCallLoopGuard.noProgressThreshold`, `.wanderingThreshold`, `.wanderingEscalation`, `.breakerVetoStreak`, `.proneTools`.
 - `omp usage` now surfaces auto-disabled credentials as red `✗` tombstone rows (identity, how long ago, the shortened upstream cause — e.g. `Refresh token expired` — and a re-login hint), including a provider section when no active credential remains. User-driven tombstones (`replaced by newer credential`, `deleted by user`) and API-key rows stay hidden. Requires a broker with `GET /v1/credentials/disabled`; older brokers degrade to no tombstone rows.
 - `omp usage` warns about Anthropic's ~30-day OAuth grant lifetime: accounts whose interactive login (`authorizedAt`) is within a week of the deadline get a yellow `⚠ re-login within <time>` line, and past-deadline accounts a red one. Grants die server-side exactly ~30 days after login regardless of refresh rotation, so this is the only warning before the broker auto-disables the row.
 

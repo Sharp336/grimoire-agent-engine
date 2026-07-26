@@ -94,6 +94,8 @@ describe("AgentSession tool-call loop guard", () => {
 			"todo.enabled": false,
 			"model.toolCallLoopGuard.enabled": true,
 			"model.toolCallLoopGuard.threshold": 5,
+			"model.toolCallLoopGuard.noProgressThreshold": 0,
+			"model.toolCallLoopGuard.wanderingThreshold": 0,
 			"model.toolCallLoopGuard.exemptTools": ["hub"],
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);

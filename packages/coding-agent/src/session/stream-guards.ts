@@ -1,14 +1,29 @@
 import * as fs from "node:fs";
-import type { Agent, AgentEvent, AgentMessage, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
+import type {
+	AfterToolCallContext,
+	AfterToolCallResult,
+	Agent,
+	AgentEvent,
+	AgentMessage,
+	AgentTurnEndContext,
+	BeforeToolCallContext,
+	BeforeToolCallResult,
+} from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import { GeminiHeaderRunDetector, isGeminiThinkingModel } from "@oh-my-pi/pi-ai/utils/thinking-loop";
-import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
+import {
+	type RepeatedToolCallDetection,
+	type ToolCallLoopDetection,
+	ToolCallLoopGuard,
+	type WanderingToolCallDetection,
+} from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
 import toolCallLoopRedirectTemplate from "../prompts/system/tool-call-loop-redirect.md" with { type: "text" };
+import toolCallWanderingRedirectTemplate from "../prompts/system/tool-call-wandering-redirect.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -19,6 +34,8 @@ import type { SessionManager } from "./session-manager";
 const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
 const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
 const TOOL_CALL_LOOP_REDIRECT_TYPE = "tool-call-loop-redirect";
+const TOOL_CALL_WANDERING_REDIRECT_TYPE = "tool-call-wandering-redirect";
+const TOOL_CALL_LOOP_BREAKER_REASON = "tool-call loop breaker: ended turn gracefully";
 
 /** Capabilities borrowed by the session's streaming and loop guards. */
 export interface StreamGuardsHost {
@@ -267,25 +284,143 @@ export class StreamingEditGuard {
 	}
 }
 
-/** Detects cross-turn tool loops and Gemini reasoning-header runaways. */
+/**
+ * Detects cross-turn tool loops and Gemini reasoning-header runaways.
+ *
+ * Wires three atomic-agent loop-detection layers to the agent's
+ * `beforeToolCall` / `afterToolCall` hooks:
+ *
+ * - **Pre-call veto** (`beforeToolCall`): consults `guard.check()` before a tool
+ *   runs. `critical` returns `{ block: true }` so the tool never executes and
+ *   the runtime emits a synthetic error result. `breaker` aborts the turn
+ *   gracefully (session stays pending).
+ * - **Outcome recording** (`afterToolCall`): feeds the executed result into the
+ *   tracker so the no-progress streak (args + result hash) advances.
+ * - **Post-turn redirect** (`recordTurn`): emits the advisory
+ *   `repeated_tool_call` / `wandering_tool_call` redirect into the next prompt.
+ */
 export class LoopGuards {
 	readonly #host: StreamGuardsHost;
 	#geminiHeaderDetector: GeminiHeaderRunDetector | undefined;
 	#toolCallLoopGuard: ToolCallLoopGuard | undefined;
 	#toolCallLoopGuardSettingsKey: string | undefined;
+	/** Set when the breaker fires this turn — suppresses further vetoes. */
+	#breakerTriggered = false;
+	/**
+	 * Tool-call IDs vetoed by `beforeToolCall` this turn. `afterToolCall` checks
+	 * membership to skip recording a real outcome (the veto path already recorded
+	 * `{ vetoed: true }`), avoiding double-counting. Deterministic — no
+	 * string-matching on result content. Cleared in `recordTurn`.
+	 */
+	#vetoedCallIds = new Set<string>();
 
 	constructor(host: StreamGuardsHost) {
 		this.#host = host;
 	}
 
+	/**
+	 * Pre-call veto gate. Called from `Agent.beforeToolCall` before each tool
+	 * executes. Returns `{ block: true, reason }` on `critical` to prevent the
+	 * call from running (the loop emits a synthetic error result). Returns
+	 * normally on `breaker` after aborting the turn — the caller still sees
+	 * `block: false` because the abort path handles result emission.
+	 */
+	beforeToolCall(ctx: BeforeToolCallContext, _signal?: AbortSignal): BeforeToolCallResult | undefined {
+		if (this.#breakerTriggered) return undefined;
+		const guard = this.#activeToolCallLoopGuard();
+		if (!guard) return undefined;
+
+		const verdict = guard.check({ toolName: ctx.toolCall.name, args: ctx.args });
+		if (verdict.kind === "allow") {
+			guard.recordCall(ctx.toolCall.name, ctx.args);
+			return undefined;
+		}
+
+		// All non-allow verdicts still record the call so a later sibling in the
+		// same batch observes it (and so recordOutcome can pair with the record).
+		guard.recordCall(ctx.toolCall.name, ctx.args);
+
+		if (verdict.kind === "breaker") {
+			this.#breakerTriggered = true;
+			logger.warn("tool-call loop breaker fired; ending turn gracefully", { reason: verdict.reason });
+			this.#host.emitNotice("warning", verdict.reason, "loop-guard");
+			// Record a vetoed outcome so the streak isn't inflated.
+			guard.recordOutcome(ctx.toolCall.name, ctx.args, { vetoed: true });
+			// Abort the turn — the agent-loop synthesizes a graceful end.
+			this.#host.agent.abort(TOOL_CALL_LOOP_BREAKER_REASON);
+			return undefined;
+		}
+
+		if (verdict.kind === "critical") {
+			logger.warn("tool-call loop veto (critical)", {
+				toolName: verdict.toolName,
+				count: verdict.count,
+			});
+			// Record a vetoed outcome so the no-progress streak isn't inflated.
+			guard.recordOutcome(ctx.toolCall.name, ctx.args, { vetoed: true });
+			// Track the vetoed call ID so afterToolCall skips recording a real
+			// outcome (the tool never ran — the block threw ToolCallBlockedError).
+			this.#vetoedCallIds.add(ctx.toolCall.id);
+			return {
+				block: true,
+				reason: `tool-call loop guard: ${verdict.toolName} has made no progress ${verdict.count} consecutive times. Change arguments, switch tools, or summarize and yield.`,
+			};
+		}
+
+		if (verdict.kind === "wandering") {
+			logger.warn("tool-call wandering detected", {
+				toolName: verdict.toolName,
+				spread: verdict.spread,
+			});
+			// Wandering is advisory — let the call run, but the model will see a
+			// redirect next turn via recordTurn if it crosses the threshold.
+			return undefined;
+		}
+
+		return undefined;
+	}
+
+	/**
+	 * Post-call outcome recorder. Called from `Agent.afterToolCall` after each
+	 * tool finishes. Feeds the result into the no-progress tracker. Skips
+	 * vetoed calls (tracked via `#vetoedCallIds`) since the veto path already
+	 * recorded `{ vetoed: true }`.
+	 */
+	afterToolCall(ctx: AfterToolCallContext, _signal?: AbortSignal): AfterToolCallResult | undefined {
+		const guard = this.#activeToolCallLoopGuard();
+		if (!guard) return undefined;
+		// If beforeToolCall vetoed (block), the tool didn't run — don't record a
+		// real outcome. The veto path already recorded { vetoed: true }.
+		if (this.#vetoedCallIds.has(ctx.toolCall.id)) {
+			this.#vetoedCallIds.delete(ctx.toolCall.id);
+			return undefined;
+		}
+		guard.recordOutcome(ctx.toolCall.name, ctx.args, {
+			result: { content: ctx.result.content, details: ctx.result.details, isError: ctx.isError },
+		});
+		return undefined;
+	}
+
 	/** Records a completed turn and injects a redirect when calls repeat. */
 	recordTurn(messages: AgentMessage[], context: AgentTurnEndContext | undefined): void {
-		if (context?.message.role !== "assistant") return;
-		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
+		// Reset turn-scoped flags for the next turn.
+		this.#breakerTriggered = false;
+		this.#vetoedCallIds.clear();
+		const guard = this.#activeToolCallLoopGuard();
+
+		if (context?.message.role !== "assistant") {
+			// Still reset wandering/live-tracking state for the next turn.
+			if (guard) guard.resetForTurn();
+			return;
+		}
+		// recordTurn reads #liveTrackingActive to decide whether to re-increment
+		// counters — so resetForTurn (which clears it) MUST run AFTER, not before.
+		const detection = guard?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
 		});
-		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
+		if (guard) guard.resetForTurn();
+		if (detection) this.#injectLoopRedirect(messages, detection);
 	}
 
 	/** Feeds a streamed assistant event to the Gemini header-runaway detector. */
@@ -313,15 +448,38 @@ export class LoopGuards {
 		const exemptTools = this.#host.settings
 			.get("model.toolCallLoopGuard.exemptTools")
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
-		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
+		const noProgressThreshold = this.#host.settings.get("model.toolCallLoopGuard.noProgressThreshold");
+		const wanderingThreshold = this.#host.settings.get("model.toolCallLoopGuard.wanderingThreshold");
+		const wanderingEscalation = this.#host.settings.get("model.toolCallLoopGuard.wanderingEscalation");
+		const breakerVetoStreak = this.#host.settings.get("model.toolCallLoopGuard.breakerVetoStreak");
+		const proneTools = this.#host.settings
+			.get("model.toolCallLoopGuard.proneTools")
+			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
+		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}:${noProgressThreshold}:${wanderingThreshold}:${wanderingEscalation}:${breakerVetoStreak}:${JSON.stringify(proneTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
-			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
+			this.#toolCallLoopGuard = new ToolCallLoopGuard({
+				threshold,
+				exemptTools,
+				noProgressThreshold,
+				wanderingThreshold,
+				wanderingEscalation,
+				breakerVetoStreak,
+				proneTools,
+			});
 			this.#toolCallLoopGuardSettingsKey = settingsKey;
 		}
 		return this.#toolCallLoopGuard;
 	}
 
-	#injectToolCallLoopRedirect(messages: AgentMessage[], detection: RepeatedToolCallDetection): void {
+	#injectLoopRedirect(messages: AgentMessage[], detection: ToolCallLoopDetection): void {
+		if (detection.kind === "repeated_tool_call") {
+			this.#injectRepeatedRedirect(messages, detection);
+			return;
+		}
+		this.#injectWanderingRedirect(messages, detection);
+	}
+
+	#injectRepeatedRedirect(messages: AgentMessage[], detection: RepeatedToolCallDetection): void {
 		const content = prompt.render(toolCallLoopRedirectTemplate, {
 			tool_name: detection.toolName,
 			count: detection.count,
@@ -348,6 +506,41 @@ export class LoopGuards {
 		if (this.#host.agent.state.messages !== messages) this.#host.agent.appendMessage(redirectMessage);
 		this.#host.sessionManager.appendCustomMessageEntry(
 			TOOL_CALL_LOOP_REDIRECT_TYPE,
+			content,
+			false,
+			details,
+			"agent",
+		);
+	}
+
+	#injectWanderingRedirect(messages: AgentMessage[], detection: WanderingToolCallDetection): void {
+		const content = prompt.render(toolCallWanderingRedirectTemplate, {
+			tool_name: detection.toolName,
+			spread: detection.spread,
+			arguments_summary: detection.argumentsSummary,
+		});
+		const details = {
+			toolName: detection.toolName,
+			spread: detection.spread,
+			argumentsSummary: detection.argumentsSummary,
+		};
+		logger.warn("cross-turn tool-call wandering detected", {
+			toolName: detection.toolName,
+			spread: detection.spread,
+		});
+		const redirectMessage: CustomMessage = {
+			role: "custom",
+			customType: TOOL_CALL_WANDERING_REDIRECT_TYPE,
+			content,
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		messages.push(redirectMessage);
+		if (this.#host.agent.state.messages !== messages) this.#host.agent.appendMessage(redirectMessage);
+		this.#host.sessionManager.appendCustomMessageEntry(
+			TOOL_CALL_WANDERING_REDIRECT_TYPE,
 			content,
 			false,
 			details,
