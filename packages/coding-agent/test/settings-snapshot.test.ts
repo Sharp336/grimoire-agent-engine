@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { Settings } from "../src/config/settings";
-import { getUi, isRpcReadable, SETTING_TABS, SETTINGS_SCHEMA, type SettingPath } from "../src/config/settings-schema";
+import {
+	getUi,
+	SETTING_TABS,
+	SETTINGS_SCHEMA,
+	type SettingPath,
+	TAB_GROUPS,
+	TAB_METADATA,
+} from "../src/config/settings-schema";
 import { buildSettingsSnapshot, isSettingTab } from "../src/config/settings-snapshot";
 
 const paths = Object.keys(SETTINGS_SCHEMA) as SettingPath[];
@@ -52,22 +59,29 @@ describe("settings snapshot", () => {
 			expect(entry).not.toHaveProperty("value");
 			expect(entry.redacted).toBe(true);
 		}
+		const canonicalCredential = snapshot.settings.find(entry => entry.path === "mnemopi.embeddingApiKey");
+		expect(canonicalCredential?.ui?.secret).toBe(true);
 	});
 
-	it("withholds a value the moment its allowlist opt-in is absent", () => {
-		const snapshot = buildSettingsSnapshot(Settings.isolated());
-		for (const entry of snapshot.settings) {
-			const allowed = isRpcReadable(entry.path as SettingPath);
-			expect("value" in entry).toBe(allowed && getUi(entry.path as SettingPath)?.secret !== true);
-		}
-	});
-
-	it("returns the configured value for an allowlisted setting", () => {
+	it("emits the exact non-secret wire shape for a configured setting", () => {
 		const settings = Settings.isolated({ colorBlindMode: true });
 		const entry = buildSettingsSnapshot(settings).settings.find(item => item.path === "colorBlindMode");
-		expect(entry?.value).toBe(true);
-		expect(entry?.configured).toBe(true);
-		expect(entry?.type).toBe("boolean");
+		expect(entry).toEqual({
+			path: "colorBlindMode",
+			type: "boolean",
+			default: false,
+			value: true,
+			configured: true,
+			ui: {
+				tab: "appearance",
+				group: "Theme",
+				label: "Color-Blind Mode",
+				description: "Use blue instead of green for diff additions",
+				renderable: true,
+				control: "boolean",
+				visible: true,
+			},
+		});
 	});
 
 	it("carries schema metadata for redacted settings but no user state", () => {
@@ -80,6 +94,23 @@ describe("settings snapshot", () => {
 		expect(entry).not.toHaveProperty("value");
 		expect(entry).not.toHaveProperty("configured");
 		expect(JSON.stringify(entry)).not.toContain("super-secret-broker-token");
+	});
+
+	it("keeps the credential veto when a credential is also allowlisted", () => {
+		const definition = SETTINGS_SCHEMA["auth.broker.token"] as (typeof SETTINGS_SCHEMA)["auth.broker.token"] & {
+			rpcReadable?: true;
+		};
+		definition.rpcReadable = true;
+		try {
+			const settings = Settings.isolated({ "auth.broker.token": "credential-must-stay-redacted" });
+			const entry = buildSettingsSnapshot(settings).settings.find(item => item.path === "auth.broker.token");
+			expect(entry?.redacted).toBe(true);
+			expect(entry).not.toHaveProperty("value");
+			expect(entry).not.toHaveProperty("configured");
+			expect(JSON.stringify(entry)).not.toContain("credential-must-stay-redacted");
+		} finally {
+			delete definition.rpcReadable;
+		}
 	});
 
 	it("omits configured status from every redacted entry", () => {
@@ -162,16 +193,110 @@ describe("settings snapshot", () => {
 		const byPath = new Map(buildSettingsSnapshot(Settings.isolated()).settings.map(e => [e.path, e]));
 		// Static choices, including their labels.
 		expect(byPath.get("symbolPreset")?.ui?.options).toEqual(getUi("symbolPreset")?.options);
+		expect(byPath.get("symbolPreset")?.ui).not.toHaveProperty("secret");
 		// A runtime-populated submenu must stay distinguishable from "no choices".
-		expect(byPath.get("theme.dark")?.ui?.options).toBe("runtime");
+		expect(byPath.get("theme.dark")).toEqual({
+			path: "theme.dark",
+			type: "string",
+			default: "titanium",
+			redacted: true,
+			ui: {
+				tab: "appearance",
+				group: "Theme",
+				label: "Dark Theme",
+				description: "Theme used when the terminal has a dark background",
+				renderable: true,
+				control: "submenu",
+				visible: true,
+				options: "runtime",
+			},
+		});
 		// Ordered selection semantics.
 		expect(byPath.get("providers.webSearchOrder")?.ui?.ordered).toBe(true);
 		// A config-only setting keeps its top-level prose.
 		expect(byPath.get("tui.maxInlineImageColumns")?.description).toContain("inline images");
 	});
 
+	it("uses the panel's canonical number and array renderability", () => {
+		const entries = buildSettingsSnapshot(Settings.isolated()).settings;
+		const threshold = entries.find(entry => entry.path === "model.toolCallLoopGuard.threshold");
+		const exemptTools = entries.find(entry => entry.path === "model.toolCallLoopGuard.exemptTools");
+		const immuneTurns = entries.find(entry => entry.path === "advisor.immuneTurns");
+		const webSearchOrder = entries.find(entry => entry.path === "providers.webSearchOrder");
+		expect(threshold?.ui).toEqual({
+			tab: "model",
+			group: "Thinking",
+			label: "Tool-Call Loop Threshold",
+			description: "Consecutive identical tool calls required before the corrective steer is injected",
+			renderable: false,
+			control: null,
+			visible: false,
+		});
+		expect(exemptTools?.ui).toEqual({
+			tab: "model",
+			group: "Thinking",
+			label: "Tool-Call Loop Exempt Tools",
+			description: "Tool names that may repeat consecutively without triggering the cross-turn loop guard",
+			renderable: false,
+			control: null,
+			visible: false,
+		});
+		expect(immuneTurns?.ui?.renderable).toBe(true);
+		expect(webSearchOrder?.ui?.renderable).toBe(true);
+		expect(entries.find(entry => entry.path === "providers.maxInFlightRequests")?.ui?.control).toBe("providerLimits");
+		expect(entries.find(entry => entry.path === "retry.fallbackChains")?.ui?.control).toBe("text");
+	});
+
+	it("serializes evaluated visibility instead of private condition names", () => {
+		const inactive = buildSettingsSnapshot(Settings.isolated()).settings.find(
+			entry => entry.path === "mnemopi.dbPath",
+		);
+		const active = buildSettingsSnapshot(Settings.isolated({ "memory.backend": "mnemopi" })).settings.find(
+			entry => entry.path === "mnemopi.dbPath",
+		);
+		const ui = {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi DB Path",
+			description: "Optional SQLite DB path. Defaults to the agent memories directory.",
+			renderable: true,
+			control: "text",
+		} as const;
+		expect(inactive).toEqual({
+			path: "mnemopi.dbPath",
+			type: "string",
+			redacted: true,
+			ui: { ...ui, visible: false },
+		});
+		expect(active).toEqual({
+			path: "mnemopi.dbPath",
+			type: "string",
+			redacted: true,
+			ui: { ...ui, visible: true },
+		});
+	});
+
+	it("preserves canonical tab and section ordering", () => {
+		const snapshot = buildSettingsSnapshot(Settings.isolated());
+		expect(snapshot.tabs.map(tab => tab.id)).toEqual(SETTING_TABS);
+		for (const tab of snapshot.tabs) {
+			expect(tab).toEqual({
+				id: tab.id,
+				...TAB_METADATA[tab.id],
+				groups: TAB_GROUPS[tab.id],
+			});
+		}
+		expect(snapshot.tabs.find(tab => tab.id === "appearance")?.groups).toEqual([
+			"Theme",
+			"Status Line",
+			"Display",
+			"Images",
+		]);
+	});
+
 	it("scopes to a tab and exposes enum choices", () => {
 		const snapshot = buildSettingsSnapshot(Settings.isolated(), "appearance");
+		expect(snapshot.tabs).toEqual([{ id: "appearance", ...TAB_METADATA.appearance, groups: TAB_GROUPS.appearance }]);
 		expect(snapshot.settings.length).toBeGreaterThan(0);
 		for (const entry of snapshot.settings) expect(entry.ui?.tab).toBe("appearance");
 		const preset = snapshot.settings.find(entry => entry.path === "symbolPreset");
