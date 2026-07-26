@@ -28,6 +28,7 @@ import {
 } from "../extensibility/plugins/marketplace";
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
+import { renderSessionMapText } from "../modes/components/session-map";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { sanitizeStatusText } from "../modes/shared";
 import { theme } from "../modes/theme/theme";
@@ -39,7 +40,7 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
-import type { SessionManager } from "../session/session-manager";
+import { SessionManager } from "../session/session-manager";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { TranscriptIndex } from "../session/transcript-index";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
@@ -115,7 +116,7 @@ async function applyComputerUseToggle(session: AgentSession, enable: boolean): P
 	return `Computer use ${enable ? "enabled" : "disabled"} for this session.`;
 }
 
-const SESSION_USAGE = "Usage: /session [info|delete|pin [account]|search <question>|tag <name>|untag <name>|tags]";
+const SESSION_USAGE = "Usage: /session [info|delete|pin [account]|search <question>|tag <name>|untag <name>|tags|map]";
 
 /**
  * Reindex this project's transcripts, then render the prompt that dispatches the bundled
@@ -1147,7 +1148,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "session",
 		description: "Session management commands",
 		acpDescription: "Show or configure the current session",
-		acpInputHint: "[info|delete|pin [account]|search <question>|tag <name>|untag <name>|tags]",
+		acpInputHint: "[info|delete|pin [account]|search <question>|tag <name>|untag <name>|tags|map]",
 		subcommands: [
 			{ name: "info", description: "Show session info and stats" },
 			{ name: "delete", description: "Delete current session and return to selector" },
@@ -1159,6 +1160,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "tag", description: "Add a tag to this session", usage: "<name>" },
 			{ name: "untag", description: "Remove a tag from this session", usage: "<name>" },
 			{ name: "tags", description: "List this session's tags" },
+			{ name: "map", description: "Show the session lineage map" },
 			{ name: "search", description: "Search past session transcripts", usage: "<question>" },
 		],
 		allowArgs: true,
@@ -1205,6 +1207,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				if (!rest.trim()) return usage("Usage: /session search <question>", runtime);
 				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.sessionManager.getSessionDir()) };
 			}
+			if (verb === "map" && !rest) {
+				const sessions = await SessionManager.list(runtime.cwd, runtime.sessionManager.getSessionDir());
+				await runtime.output(renderSessionMapText(sessions));
+				return commandConsumed();
+			}
 			return usage(SESSION_USAGE, runtime);
 		},
 		handleTui: async (command, runtime) => {
@@ -1236,6 +1243,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					return;
 				}
 				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.ctx.sessionManager.getSessionDir()) };
+			}
+			if (verb === "map" && !rest) {
+				runtime.ctx.editor.setText("");
+				await runtime.ctx.showSessionMap();
+				return;
 			}
 			if (!verb || (verb === "info" && !rest)) {
 				await runtime.ctx.handleSessionCommand();
