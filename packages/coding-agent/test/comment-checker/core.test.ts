@@ -612,6 +612,62 @@ describe("createCommentCheckerToolResultHandler UI status update and warning cle
 		expect(clearedFiles).toEqual([["/root/src/foo.ts"], ["/root/src/foo.ts"]]);
 	});
 
+	it("preserves isError=true when warnings are appended to a failed tool result", async () => {
+		const mockSessionManager = {
+			getSessionId: () => "sess-1",
+			getHeader: () => null,
+		} as unknown as ReadonlySessionManager;
+
+		const mockUI = {
+			setStatus: () => {},
+			setWidget: () => {},
+		} as unknown as ExtensionUIContext;
+
+		const mockCtx: ExtensionContext = {
+			sessionManager: mockSessionManager,
+			cwd: "/root",
+			ui: mockUI,
+		} as unknown as ExtensionContext;
+
+		const handler = createCommentCheckerToolResultHandler({
+			run: async () => ({
+				status: "warning",
+				message: "Avoid vague comments",
+			}),
+		});
+
+		const event: ToolResultEvent = {
+			type: "tool_result",
+			toolCallId: "call_1",
+			toolName: "edit",
+			input: {},
+			details: {
+				perFileResults: [
+					{
+						path: "src/foo.ts",
+						oldText: "const x = 1;\n",
+						newText: "// TODO fix\nconst x = 1;\n",
+					},
+					{
+						path: "src/failed.ts",
+						isError: true,
+					},
+				],
+			},
+			content: [{ type: "text", text: "partial failure" }],
+			isError: true,
+		};
+
+		const result = await handler(event, mockCtx);
+
+		expect(result).toBeDefined();
+		expect(result?.isError).toBe(true);
+		expect(result?.content).toEqual([
+			{ type: "text", text: "partial failure" },
+			{ type: "text", text: "\n\nAvoid vague comments" },
+		]);
+	});
+
 	it("normalizes relative and absolute file paths so edit rechecks clear warnings recorded from write", async () => {
 		let recordedWarning: { filePath: string; message: string; sourceToolName: string } | undefined;
 		let clearedFiles: string[] = [];

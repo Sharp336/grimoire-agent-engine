@@ -159,7 +159,10 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 			...(event.content ?? []),
 			...warnings.map(warning => ({ type: "text" as const, text: `\n\n${warning.message}` })),
 		];
-		return { content: appended };
+		return {
+			content: appended,
+			isError: event.isError,
+		};
 	};
 }
 
