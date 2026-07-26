@@ -415,6 +415,13 @@ retry:
   maxDelayMs: 300000
   modelFallback: true
   fallbackRevertPolicy: cooldown-expiry
+  # Check remaining subscription quota before starting on a model.
+  usageAwareFallback: false
+  usageReservePct: 10
+  usageReservePolicy: confirm
+  # Spread a role's candidates instead of always taking the first one.
+  poolSelection: ordered
+  poolWeights: {}
   fallbackChains:
     # Any role without an explicit chain inherits the "default" chain.
     default:
@@ -451,8 +458,58 @@ retry:
 | `retry.modelFallback` | boolean | `true` | Fall back to another model when one is unavailable. |
 | `retry.fallbackChains` | record | `{}` | Maps roles, model selectors, or `provider/*` wildcards to ordered fallback selectors. Keys containing `/` are model-oriented and win over roles: `provider/model-id` matches that exact model, `provider/*` matches every model of the provider. A `provider/*` *entry* keeps the failing model's id and swaps the provider. The `default` chain covers every assigned role without its own chain. Unknown models/providers or malformed chains are reported as config warnings at startup. |
 | `retry.fallbackRevertPolicy` | enum | `cooldown-expiry` | `cooldown-expiry` returns to the primary model once its suppression window ends; `never` stays on the fallback until switched manually. |
+| `retry.usageAwareFallback` | boolean | `false` | Check a model's remaining subscription quota before starting on it, and move to the next candidate when the quota is spent. Providers that report no usage are treated as healthy. |
+| `retry.usageReservePct` | number | `10` | Percentage of quota to hold back. At `10`, a model with 8% remaining counts as `reserve` rather than healthy. |
+| `retry.usageReservePolicy` | enum | `confirm` | What to do when the model is inside the reserve margin. `confirm` asks before spending it in an interactive session, `auto` moves to the next candidate silently, `fail-closed` refuses to start. For background agents, `confirm` behaves as `auto` because they never prompt; `fail-closed` refuses their spawns too once `retry.poolSelection` is `weighted`. |
+| `retry.poolSelection` | enum | `ordered` | `ordered` starts on the first resolvable candidate of a role. `weighted` draws one candidate per subagent spawn, and per session when the session's model comes from `--model <role>`, so parallel work spreads across the role's candidates. |
+| `retry.poolWeights` | record | `{}` | Draw weights for `weighted` selection. Keys are `provider/model-id` selectors or `provider/*` wildcards, values are non-negative numbers. A candidate with no entry weighs 1. Weight `0` removes a candidate from the draw but keeps it as an ordered fallback, so a draw never starts on it. Unknown keys and negative values are reported as config warnings at startup. |
 
 When the active model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default`. It skips models whose selectors are still cooling down and switches for the rest of the turn. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
+
+#### Model pools
+
+A comma-separated `modelRoles` value is a pool. With `retry.poolSelection: ordered` (the default) every session and every subagent spawn starts on the first entry, so a second subscription only gets used once the first one breaks. `weighted` draws one entry instead.
+
+The draw runs for every subagent spawn, and for the session itself when the session's model comes from `--model <role>` (`omp --model task`). It does not run for the interactive startup path that reuses the remembered default model: that session keeps the model it last used, and the usage-aware fallback reacts to depletion at request time as it already does. A resumed session keeps its persisted model too. `--api-key` also pins the session to the model the CLI resolves: the key belongs to one provider, so letting the draw move the session to another provider would register it against the wrong one.
+
+```yaml
+modelRoles:
+  default: anthropic/claude-opus-5
+  # Two coding-plan subscriptions.
+  task: anthropic/claude-opus-5,openai-codex/gpt-5.5-codex
+
+retry:
+  poolSelection: weighted
+  # Optional. Unlisted candidates weigh 1, so this is a 2:1 split.
+  poolWeights:
+    anthropic/claude-opus-5: 2
+    openai-codex/gpt-5.5-codex: 1
+  # Optional. Skip a candidate whose subscription quota is spent.
+  usageAwareFallback: true
+  usageReservePct: 10
+  fallbackChains:
+    # Disaster fallback. Chain entries never join the draw.
+    default:
+      - google/gemini-3-pro
+```
+
+Spawn four `task` subagents with that config and they no longer all land on Claude. Each spawn draws from the id of the task call it belongs to combined with its own spawn name, so the picks are fixed per spawn and a revived subagent redraws the same model. The task call id has to be in there: spawn names come from the model, so a project that always spawns `Explorer`/`Analyzer`/`Writer`/`Checker` would otherwise get the same split on every run forever. A session draws from its session id, so `omp --model task` on the same session id picks the same model every time.
+
+The draw is stateless, so the split is probabilistic rather than exact. Within one task call, four parallel spawns at equal weights land 2-2 about 3 times in 8, 3-1 about 4 times in 8, and all four on the same model about 1 time in 8. The next task call draws again. A shared counter would give an exact split, but it would need cross-process coordination and would break the per-spawn reproducibility.
+
+`poolWeights` keys must be bare `provider/model-id` selectors or `provider/*` wildcards. Fuzzy patterns, thinking-level suffixes such as `anthropic/claude-opus-5:max`, and id-prefix wildcards such as `openrouter/google/*` are not matched. Any key the weight lookup cannot match is reported as a config warning at startup rather than silently weighing 1, and so is any `weighted` role listing a pattern that resolves to no model at all. A value that is not a non-negative finite number is reported too and then ignored, so `{"anthropic/claude-opus-5": "2", "anthropic/*": 5}` weighs Opus at the wildcard's 5 rather than letting the quoted string shadow it. Role entries are checked the same fuzzy way the draw resolves them, so `anthropic/opus` is fine. A model whose provider you have not logged into or have listed in `disabledProviders` is not a warning either: the draw skips it and the other candidates absorb its share.
+
+Role entries that resolve to the same model count once in the draw. `anthropic/claude-opus-5,anthropic/claude-opus-5:max,openai-codex/gpt-5.5-codex` is an even split between the two models, not a 2:1 split toward Claude. The duplicate still rides along as an ordered fallback.
+
+With `retry.usageAwareFallback: true`, candidates reporting `depleted` or `reserve` are dropped before the draw. A candidate whose usage cannot be measured reports `unknown` and draws at full weight, matching how the rest of the fallback code fails open. That means a static API key provider with no usage endpoint absorbs its whole share even when it is out of quota. Give it an explicit weight, including `0`, if that is not what you want. The draw never prompts. Candidates measured as spent also move to the back of the spawn's fallback chain, so a later transport failure does not retry a model this spawn already knows is out of quota.
+
+None of that runs under `ordered`, which is the default. Turning `usageAwareFallback` on does not change how subagents spawn until `poolSelection` is `weighted` as well.
+
+When nothing is drawable, because every candidate is spent or because the only healthy one weighs `0`, the draw is skipped and the configured order stands untouched. `weighted` then behaves exactly like `ordered` and the usual preflight, confirm and reserve-policy handling takes over.
+
+`usageReservePolicy: fail-closed` also applies to subagent spawns under `weighted`, including a spawn whose agent resolves to a single model. The spawn fails rather than spending the reserve. The check follows the draw, so a draw that routes around a depleted candidate still runs; with no draw it targets the configured first candidate, matching the startup preflight: fail-closed means refuse, not route around.
+
+At session startup the draw runs before the reserve preflight too, so `weighted` changes what the preflight sees. With `fail-closed`, `omp --model task` where the first candidate is depleted starts on the drawn healthy candidate instead of refusing; the same config under `ordered` still refuses. With `confirm`, the draw moves the session off a reserve candidate without asking. The preflight then applies as usual to whatever the draw picked, and when there was no draw it sees the configured order, so `weighted` refuses in exactly the cases `ordered` does.
 
 ### Tools and approvals
 

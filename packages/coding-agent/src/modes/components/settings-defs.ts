@@ -137,6 +137,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	poolSelectionWeighted: () => {
+		try {
+			return Settings.instance.get("retry.poolSelection") === "weighted";
+		} catch {
+			return false;
+		}
+	},
 	planModeEnabled: () => {
 		try {
 			return Settings.instance.get("plan.enabled");

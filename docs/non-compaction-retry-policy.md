@@ -171,6 +171,11 @@ Defined in settings schema under retry group:
 - `retry.modelFallback` (default `true`; gates retry model-fallback switching)
 - `retry.fallbackChains`
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
+- `retry.usageAwareFallback` (default `false`; checks remaining subscription quota before starting on a model)
+- `retry.usageReservePct` (default `10`; percentage of quota held back before a model counts as `reserve`)
+- `retry.usageReservePolicy` (`"confirm"` by default; `"auto"` falls back silently, `"fail-closed"` refuses to start)
+- `retry.poolSelection` (`"ordered"` by default; `"weighted"` draws one candidate from a role's comma-separated list per subagent spawn, and per session when the session model comes from `--model <role>`)
+- `retry.poolWeights` (default `{}`; per-selector or `provider/*` draw weights for `"weighted"` selection, `0` means fallback only)
 
 Programmatic toggles in session:
 

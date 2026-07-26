@@ -7,7 +7,7 @@
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ModelUsageHealthState, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -44,6 +44,19 @@ import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import {
+	fetchPoolCandidateHealth,
+	getPoolReserveFraction,
+	getPoolSelectionMode,
+	getPoolWeight,
+	getPoolWeights,
+	hashPoolSeed,
+	isPoolHealthGateEnabled,
+	isPoolUsageSpent,
+	type PoolCandidate,
+	reorderPoolCandidates,
+	selectPoolCandidate,
+} from "../session/model-pool";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
@@ -175,6 +188,151 @@ function resolveSubagentDefaultRetryFallbackChain(settings: Settings): string[] 
 		return undefined;
 	}
 	return fallbackChain;
+}
+
+/**
+ * A spawn refused before it started, because the configuration said to refuse.
+ * The subagent's error text is the message alone; a stack trace would only show
+ * this file's internals for what is an ordinary configured outcome.
+ */
+class SubagentSpawnRefusedError extends Error {}
+
+/** Error text recorded on a failed subagent run. */
+function formatSubagentError(err: unknown): string {
+	if (err instanceof SubagentSpawnRefusedError) return err.message;
+	return err instanceof Error ? err.stack || err.message : String(err);
+}
+
+/**
+ * Refuse to start a spawn on a candidate whose quota is spent, mirroring the
+ * startup preflight's fail-closed throw. `startIndex` is the drawn candidate,
+ * or the configured first one when nothing was drawable, which is the candidate
+ * the spawn then actually starts on.
+ */
+function assertSubagentReservePolicy(args: {
+	selectors: string[];
+	health: ModelUsageHealthState[];
+	startIndex: number;
+}): void {
+	const { selectors, health, startIndex } = args;
+	if (selectors.length > 1 && health.every(state => isPoolUsageSpent(state))) {
+		throw new SubagentSpawnRefusedError(
+			`Usage depleted or in reserve for every candidate in the pool (${selectors.join(", ")}); reserve policy is fail-closed.`,
+		);
+	}
+	const state = health[startIndex];
+	if (state === "depleted") {
+		throw new SubagentSpawnRefusedError(
+			`Usage depleted for ${selectors[startIndex]}; reserve policy is fail-closed.`,
+		);
+	}
+	if (state === "reserve") {
+		throw new SubagentSpawnRefusedError(
+			`Usage reserve reached for ${selectors[startIndex]}; reserve policy is fail-closed.`,
+		);
+	}
+}
+
+/**
+ * Reorder a spawn's candidates before the model is resolved, so a burst of
+ * spawns spreads across the role's candidates instead of piling onto the first
+ * one.
+ *
+ * Runs only under `retry.poolSelection: weighted`. Ordered selection is the
+ * default, and it leaves this whole path alone: no usage-health lookups, no
+ * reorder, no new refusals, exactly the spawn behavior of a build without this
+ * feature.
+ *
+ * Returns undefined when the configured order should stand: a single
+ * candidate, or nothing drawable after filtering (the shipped fallback
+ * machinery then handles the degraded case exactly as today). Never prompts;
+ * spawns are background work.
+ *
+ * Throws only under `retry.usageReservePolicy: fail-closed`. The check follows
+ * the draw, so a draw that routes around a spent candidate is not a fail-closed
+ * condition. When nothing was drawable the configured first candidate is what
+ * the spawn starts on, so that is what gets checked, matching the startup
+ * preflight, which refuses rather than routes around.
+ */
+async function resolveSubagentPoolOrder(args: {
+	candidates: SubagentRetryFallbackCandidate[];
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+	id: string;
+	parentToolCallId: string | undefined;
+	signal: AbortSignal;
+}): Promise<SubagentRetryFallbackCandidate[] | undefined> {
+	const { candidates, settings, modelRegistry, id, parentToolCallId, signal } = args;
+	if (candidates.length === 0) return undefined;
+	if (getPoolSelectionMode(settings) !== "weighted") return undefined;
+	const healthGate = isPoolHealthGateEnabled(settings);
+	const failClosed = healthGate && settings.get("retry.usageReservePolicy") === "fail-closed";
+	// One candidate has nothing to spread. fail-closed still has to run: refusing
+	// to spend reserve quota does not depend on having somewhere else to go,
+	// which is how the startup preflight already behaves.
+	if (candidates.length < 2 && !failClosed) return undefined;
+
+	const poolCandidates: PoolCandidate[] = candidates.map(candidate => ({
+		selector: `${candidate.model.provider}/${candidate.model.id}`,
+		provider: candidate.model.provider,
+		id: candidate.model.id,
+		baseUrl: candidate.model.baseUrl,
+	}));
+	const eligible = (_candidate: PoolCandidate, index: number): boolean =>
+		modelRegistry.hasConfiguredAuth(candidates[index].model);
+	const health = healthGate
+		? await fetchPoolCandidateHealth(poolCandidates, modelRegistry.authStorage, {
+				reserveFraction: getPoolReserveFraction(settings),
+				// No sessionId: the parent session id does not reach here, and `id` is
+				// the spawn's agent label ("Explorer"), which would never match a
+				// stored session credential and only costs a cache miss.
+				signal,
+				eligible,
+			})
+		: undefined;
+	const healthFor = health ? (_candidate: PoolCandidate, index: number) => health[index] : undefined;
+	const weights = getPoolWeights(settings);
+	const pickedIndex = selectPoolCandidate(poolCandidates, {
+		// Salted with the parent task call id, which is shared by every spawn in
+		// one task tool call and differs across calls. The spawn id alone is the
+		// model-supplied name, so a project that keeps calling its agents
+		// Explorer/Analyzer/Writer/Checker would draw the identical split forever,
+		// which is the pile-up this feature exists to fix. Both inputs are stable
+		// across revive, and revive rebuilds the session from its captured options
+		// without re-running this resolution anyway.
+		seed: hashPoolSeed(`pool:${parentToolCallId ?? ""}:${id}`),
+		weightFor: candidate => getPoolWeight(candidate.selector, candidate.provider, weights),
+		healthFor,
+		eligible,
+	});
+	if (failClosed && health) {
+		assertSubagentReservePolicy({
+			selectors: poolCandidates.map(candidate => candidate.selector),
+			health,
+			// The draw moves the starting candidate, so the check follows it. With
+			// no draw the configured order stands untouched, so the spawn starts on
+			// the configured first candidate and that is what gets checked.
+			startIndex: pickedIndex ?? 0,
+		});
+	}
+	// No draw means the configured order stands untouched, with no promotion and
+	// no spent demotion, so the spawn starts where ordered selection would.
+	if (pickedIndex === undefined) return undefined;
+	// The remainder of this list becomes the subagent's retry fallback chain, so
+	// candidates this spawn just measured as spent go behind the healthy ones.
+	//
+	// Ineligible candidates are demoted with them, mirroring the sdk.ts draw.
+	// Spawn candidates come out of getAvailable(), whose predicate is stricter
+	// than hasConfiguredAuth, so today nothing is ineligible here. Keeping the
+	// check means an unqueried candidate (health "unknown" because it was never
+	// asked) can never be promoted ahead of a measured-spent one if candidate
+	// sourcing ever widens.
+	const reordered = reorderPoolCandidates(
+		candidates,
+		pickedIndex,
+		health ? index => !eligible(poolCandidates[index], index) || isPoolUsageSpent(health[index]) : undefined,
+	);
+	return reordered === candidates ? undefined : reordered;
 }
 
 function installSubagentRetryFallbackChain(args: {
@@ -2002,7 +2160,7 @@ async function driveSessionToYield(
 		} else {
 			exitCode = 1;
 			if (!abortSignal.aborted) {
-				error = err instanceof Error ? err.stack || err.message : String(err);
+				error = formatSubagentError(err);
 			}
 		}
 	} finally {
@@ -2600,6 +2758,34 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				configuredModelPatterns.length === 1
 					? resolveSubagentDefaultRetryFallbackChain(subagentSettings)
 					: undefined;
+			// Candidates are resolved up front so pool selection can reorder them
+			// before the model is picked. Without a reorder both `pooledCandidates`
+			// and `pooledModelPatterns` stay as they are today.
+			const retryFallbackCandidates = resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, settings);
+			// awaitAbortable evaluates its argument first and only then checks the
+			// signal, so an already-aborted spawn would leave this promise in flight
+			// with nobody to receive its SubagentSpawnRefusedError. Checking here
+			// means the promise is never created in that case.
+			checkAbort();
+			const poolOrder = await awaitAbortable(
+				resolveSubagentPoolOrder({
+					candidates: retryFallbackCandidates,
+					settings: subagentSettings,
+					modelRegistry,
+					id,
+					parentToolCallId: options.parentToolCallId,
+					signal: abortSignal,
+				}),
+			);
+			const pooledCandidates = poolOrder ?? retryFallbackCandidates;
+			const pooledModelPatterns = poolOrder ? poolOrder.map(candidate => candidate.selector) : modelPatterns;
+			if (poolOrder) {
+				logger.debug("Model pool reordered subagent candidates", {
+					id,
+					requested: modelPatterns,
+					order: pooledModelPatterns,
+				});
+			}
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
@@ -2608,7 +2794,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				warning: modelResolutionWarning,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
+					pooledModelPatterns,
 					options.parentActiveModelPattern,
 					modelRegistry,
 					settings,
@@ -2632,7 +2818,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, settings),
+				candidates: pooledCandidates,
 				defaultFallbackChain: defaultRetryFallbackChain,
 				model,
 				authFallbackUsed,
@@ -3002,7 +3188,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		} catch (err) {
 			exitCode = 1;
 			if (!abortSignal.aborted) {
-				error = err instanceof Error ? err.stack || err.message : String(err);
+				error = formatSubagentError(err);
 			}
 		} finally {
 			if (abortSignal.aborted) {

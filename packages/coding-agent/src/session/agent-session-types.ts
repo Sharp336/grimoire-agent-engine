@@ -64,6 +64,13 @@ export type { ShakeMode, ShakeResult } from "./shake-types";
 export interface Prewalk {
 	target: Model;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/**
+	 * Role alias `target` was resolved from, when that alias addresses a role a
+	 * weighted pool draw picks over. Session startup re-resolves it after the
+	 * draw so the hand-off follows the model the session started on; `target`
+	 * stands on its own when this is absent.
+	 */
+	pattern?: string;
 }
 
 /**
@@ -73,6 +80,8 @@ export interface Prewalk {
 export interface PlanYolo {
 	target: Model;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Role alias `target` was resolved from. See {@link Prewalk.pattern}. */
+	pattern?: string;
 }
 
 /** Details shown when confirming a usage-reserve-triggered model fallback. */

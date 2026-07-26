@@ -136,6 +136,19 @@ import {
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
+import {
+	fetchPoolCandidateHealth,
+	getPoolReserveFraction,
+	getPoolSelectionMode,
+	getPoolWeight,
+	getPoolWeights,
+	hashPoolSeed,
+	isPoolHealthGateEnabled,
+	isPoolUsageSpent,
+	type PoolCandidate,
+	reorderPoolCandidates,
+	selectPoolCandidate,
+} from "./session/model-pool";
 import { clampProviderContextImages } from "./session/provider-image-budget";
 import {
 	expandDefaultRetryFallbackChains,
@@ -1393,6 +1406,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
+	// Explicit `:level` suffix carried by a weighted pool draw. Ordered
+	// `--model <role>` resolves in main.ts, which puts that suffix on
+	// options.thinkingLevel; the weighted draw resolves further down, so it
+	// records the suffix here instead of writing into the caller's options
+	// object. It sits just below options.thinkingLevel, so an explicit
+	// `--thinking` still wins, and above the persisted session level.
+	let pooledExplicitThinkingLevel: ConfiguredThinkingLevel | undefined;
+	// Hand-off targets are locals because a weighted draw can rebind or disarm
+	// them below, and createAgentSession must not write into the caller's
+	// options object.
+	let prewalk = options.prewalk;
+	let planYolo = options.planYolo;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
 		logger.time("restoreSessionModel", () => {
 			let failedSessionModel: string | undefined;
@@ -1443,7 +1468,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// role reclaim so the final model's own defaults aren't masked by an earlier
 	// fallback model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
-		let level = options.thinkingLevel;
+		let level = options.thinkingLevel ?? pooledExplicitThinkingLevel;
 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
 			level =
 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
@@ -1644,7 +1669,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
-			prewalkArmed: options.prewalk !== undefined,
+			prewalkArmed: prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
@@ -2084,6 +2109,121 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				);
 			}
 			const availableModels = modelRegistry.getAll();
+			// Weighted pools spread a role's comma-separated candidates across
+			// sessions instead of always starting on the first one. Nothing runs
+			// unless retry.poolSelection is "weighted", so the default path is
+			// unchanged. The draw only reorders the candidate list; the
+			// first-with-auth loop and usage preflight below are untouched.
+			const poolOrderBySelector = new Map<string, string[]>();
+			// Patterns that came out of a weighted pool draw. `--model <role>` on
+			// such a role is deferred to here instead of resolving at the CLI, so
+			// this block owns the modelRoles.default retarget the CLI path does.
+			const pooledRolePatterns = new Set<string>();
+			if (getPoolSelectionMode(settings) === "weighted") {
+				const poolSeed = hashPoolSeed(`pool:${sessionManager.getSessionId?.() ?? ""}`);
+				const poolWeights = getPoolWeights(settings);
+				const poolHealthGate = isPoolHealthGateEnabled(settings);
+				// Candidates resolve against the authenticated catalog first and fall
+				// back to the full one, the same order resolveCliModel uses, so a bare
+				// ambiguous id (`gpt-4o-mini`, carried by several providers) names a
+				// provider the session can actually call. Ranking it by usage and
+				// provider order alone can name a provider with no credentials, and the
+				// resolved selector is what the loop below starts on.
+				//
+				// The catalog fallback still keeps disabled providers, and
+				// hasConfiguredAuth does not filter them either, so the draw has to.
+				// Otherwise a logged-in but disabled provider can win the draw and start
+				// the session, which no other selection path allows.
+				const poolDisabledProviders = new Set(settings.get("disabledProviders"));
+				const authedModels = modelRegistry.getAvailable();
+				for (const deferredPattern of deferredModelPatterns) {
+					for (const selector of deferredPattern.split(",")) {
+						const trimmedSelector = selector.trim();
+						if (!trimmedSelector || poolOrderBySelector.has(trimmedSelector)) continue;
+						const configuredPatterns = resolveCliModel({
+							cliModel: trimmedSelector,
+							modelRegistry,
+							settings,
+							preferences: matchPreferences,
+						}).configuredPatterns;
+						if (!configuredPatterns || configuredPatterns.length < 2) continue;
+						const poolResolutions = configuredPatterns.map(poolPattern => {
+							const authed = parseModelPattern(poolPattern, authedModels, matchPreferences);
+							return authed.model ? authed : parseModelPattern(poolPattern, availableModels, matchPreferences);
+						});
+						const poolModels = poolResolutions.map(resolution => resolution.model);
+						// The drawn candidate has to be the one the preflight measures and the
+						// one that starts, so each resolved pattern is carried forward fully
+						// qualified. A pattern nothing resolves stays raw.
+						const poolPatterns = configuredPatterns.map((poolPattern, index) => {
+							const poolModel = poolModels[index];
+							return poolModel
+								? formatModelSelectorValue(
+										formatModelStringWithRouting(poolModel),
+										poolResolutions[index].thinkingLevel,
+									)
+								: poolPattern;
+						});
+						const poolCandidates: PoolCandidate[] = configuredPatterns.map((poolPattern, index) => {
+							const poolModel = poolModels[index];
+							return poolModel
+								? {
+										selector: `${poolModel.provider}/${poolModel.id}`,
+										provider: poolModel.provider,
+										id: poolModel.id,
+										baseUrl: poolModel.baseUrl,
+									}
+								: { selector: poolPattern, provider: "", id: "" };
+						});
+						const poolEligible = (_candidate: PoolCandidate, index: number): boolean => {
+							const poolModel = poolModels[index];
+							return (
+								poolModel !== undefined &&
+								!poolDisabledProviders.has(poolModel.provider) &&
+								modelRegistry.hasConfiguredAuth(poolModel)
+							);
+						};
+						const poolHealth = poolHealthGate
+							? await fetchPoolCandidateHealth(poolCandidates, modelRegistry.authStorage, {
+									reserveFraction: getPoolReserveFraction(settings),
+									sessionId: sessionManager.getSessionId?.(),
+									eligible: poolEligible,
+								})
+							: undefined;
+						const pickedIndex = selectPoolCandidate(poolCandidates, {
+							seed: poolSeed,
+							weightFor: candidate => getPoolWeight(candidate.selector, candidate.provider, poolWeights),
+							healthFor: poolHealth ? (_candidate, index) => poolHealth[index] : undefined,
+							eligible: poolEligible,
+						});
+						// Health was fetched for exactly these candidates, so the tail is
+						// ordered by it too. The tail can become the retry fallback chain
+						// installed for modelPatternFallbackRole, and the chain walk does
+						// not consult usage health, so a measured-spent candidate must not
+						// sit ahead of a healthy one.
+						//
+						// Ineligible candidates (no credentials, disabled provider) are
+						// demoted alongside the spent ones. fetchPoolCandidateHealth reports
+						// them as "unknown" because it never queries them, so without this
+						// they would look healthy and sit in the chain ahead of a
+						// usable-but-reserve candidate the session could still fall back on.
+						//
+						// Nothing moves at all when the draw picked nothing:
+						// reorderPoolCandidates keeps the configured order so the preflight
+						// and reserve policy read the same first candidate ordered selection
+						// would give them.
+						const pooledPatterns = reorderPoolCandidates(
+							poolPatterns,
+							pickedIndex,
+							poolHealth
+								? index => !poolEligible(poolCandidates[index], index) || isPoolUsageSpent(poolHealth[index])
+								: undefined,
+						);
+						poolOrderBySelector.set(trimmedSelector, pooledPatterns);
+						for (const pooledPattern of pooledPatterns) pooledRolePatterns.add(pooledPattern);
+					}
+				}
+			}
 			const expandedModelPatterns = deferredModelPatterns.flatMap(pattern =>
 				pattern.split(",").flatMap(selector => {
 					const trimmedSelector = selector.trim();
@@ -2095,10 +2235,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						preferences: matchPreferences,
 					});
 					if (resolved.configuredPatterns && resolved.configuredPatterns.length > 0) {
+						const pooledPatterns = poolOrderBySelector.get(trimmedSelector) ?? resolved.configuredPatterns;
 						const primaryPatterns: Array<{
 							pattern: string;
 							retryFallback: InitialRetryFallbackState | undefined;
-						}> = resolved.configuredPatterns.map(pattern => ({
+						}> = pooledPatterns.map(pattern => ({
 							pattern,
 							retryFallback: undefined,
 						}));
@@ -2113,7 +2254,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							getModelRole: role => settings.getModelRole(role),
 							modelLookup: modelRegistry,
 						};
-						const originalSelector = resolved.configuredPatterns[0];
+						const originalSelector = pooledPatterns[0];
 						const originalModel = parseModelPattern(originalSelector, availableModels, matchPreferences).model;
 						const chainKey = resolveRetryFallbackChainKey(
 							fallbackContext,
@@ -2297,11 +2438,81 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}
 				}
 				model = selectedModel;
+				// `--model <role>` normally retargets modelRoles.default to the model
+				// it resolved to, so consumers that fall through to the default role
+				// (memories, subagent snapshots) follow the CLI. Weighted selection
+				// defers that resolution to here, so apply the same retarget.
+				if (!authFallbackUsed && !retryFallback && pooledRolePatterns.has(pattern)) {
+					settings.overrideModelRoles({ default: formatModelStringWithRouting(selectedModel) });
+					// `--prewalk-into @default` and `--plan-yolo-into @default` expand
+					// their alias in main.ts, before this draw runs, so they were pinned
+					// to the role's first candidate. Re-resolving the recorded alias
+					// against the role just retargeted binds the hand-off to the model
+					// the session actually started on.
+					if (prewalk?.pattern) {
+						const rebound = resolveCliModel({
+							cliModel: prewalk.pattern,
+							modelRegistry,
+							settings,
+							preferences: matchPreferences,
+						});
+						// Prewalk is an optional optimization: a target that cannot be
+						// resolved or has no credentials warns and leaves prewalk unarmed
+						// rather than aborting startup, matching main.ts (issue #6064).
+						const prewalkError =
+							rebound.error ??
+							(!rebound.model
+								? `model "${prewalk.pattern}" not found`
+								: !modelRegistry.hasConfiguredAuth(rebound.model)
+									? `no API key for ${rebound.model.provider}/${rebound.model.id}`
+									: undefined);
+						if (prewalkError || !rebound.model) {
+							logger.warn(`Prewalk disabled: ${prewalkError}`);
+							prewalk = undefined;
+						} else {
+							prewalk = { ...prewalk, target: rebound.model, thinkingLevel: rebound.thinkingLevel };
+						}
+					}
+					if (planYolo?.pattern) {
+						const rebound = resolveCliModel({
+							cliModel: planYolo.pattern,
+							modelRegistry,
+							settings,
+							preferences: matchPreferences,
+						});
+						if (rebound.error || !rebound.model) {
+							throw new Error(rebound.error ?? `Model "${planYolo.pattern}" not found`);
+						}
+						if (!modelRegistry.hasConfiguredAuth(rebound.model)) {
+							throw new Error(`No API key for ${rebound.model.provider}/${rebound.model.id}`);
+						}
+						planYolo = { ...planYolo, target: rebound.model, thinkingLevel: rebound.thinkingLevel };
+					}
+				}
 				initialRetryFallback =
 					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
 				modelFallbackMessage = undefined;
 				if (selectedExplicitThinkingLevel) {
 					restoredSessionThinkingLevel = selectedThinkingLevel;
+				}
+				// Ordered `--model <role>` resolves in main.ts, which assigns the role's
+				// explicit `:level` to options.thinkingLevel, the highest precedence
+				// tier. The weighted draw defers that resolution to here, where the
+				// suffix would only reach restoredSessionThinkingLevel, a tier a
+				// persisted thinking-level entry outranks. Without this, resuming such a
+				// session under weighted selection starts at a different level than
+				// ordered selection would for the same drawn model. The value goes to a
+				// local rather than options.thinkingLevel, because createAgentSession is
+				// a public entry point and an embedder may reuse one options object
+				// across sessions; pickInitialThinkingLevel reads the local just below
+				// options.thinkingLevel, so an explicit `--thinking` still wins.
+				if (
+					!authFallbackUsed &&
+					!retryFallback &&
+					selectedExplicitThinkingLevel &&
+					pooledRolePatterns.has(pattern)
+				) {
+					pooledExplicitThinkingLevel = selectedThinkingLevel;
 				}
 				thinkingLevel = pickInitialThinkingLevel(selectedModel);
 				autoThinking = thinkingLevel === AUTO_THINKING;
@@ -3100,8 +3311,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			initialRetryFallback,
-			prewalk: options.prewalk,
-			planYolo: options.planYolo,
+			prewalk,
+			planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,
