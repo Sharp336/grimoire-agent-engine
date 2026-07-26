@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
-import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getProjectDir, getTranscriptDbPath, prompt, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
@@ -29,14 +29,19 @@ import {
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
+import { sanitizeStatusText } from "../modes/shared";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
+import qaMd from "../prompts/qa.md" with { type: "text" };
+import sessionSearchCommandMd from "../prompts/session-search-command.md" with { type: "text" };
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
+import type { SessionManager } from "../session/session-manager";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { TranscriptIndex } from "../session/transcript-index";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
@@ -108,6 +113,33 @@ async function applyComputerUseToggle(session: AgentSession, enable: boolean): P
 	}
 	session.settings.override("computer.enabled", enable);
 	return `Computer use ${enable ? "enabled" : "disabled"} for this session.`;
+}
+
+const SESSION_USAGE = "Usage: /session [info|delete|pin [account]|search <question>|tag <name>|untag <name>|tags]";
+
+/**
+ * Reindex this project's transcripts, then render the prompt that dispatches the bundled
+ * `session-search` agent.
+ *
+ * The first invocation is what creates the database — that is deliberately the opt-in
+ * moment, so a user who never searches pays nothing and the `/resume` selector keeps
+ * falling back to prompt-history matches alone.
+ */
+async function renderSessionSearchPrompt(question: string, sessionDir: string): Promise<string> {
+	await TranscriptIndex.open().reindex({ sessionDirs: [sessionDir] });
+	return prompt.render(sessionSearchCommandMd, { question, dbPath: getTranscriptDbPath(), sessionDir });
+}
+
+/** `/session tag|untag|tags` semantics, owned in one place so the ACP and TUI hosts cannot drift. */
+function runSessionTagVerb(manager: SessionManager, verb: string, rest: string): string {
+	if (verb === "tags") {
+		const tags = manager.sessionTags();
+		return tags.length > 0 ? `Tags: ${tags.join(", ")}` : "No tags on this session.";
+	}
+	const name = sanitizeStatusText(rest);
+	if (!name) return `Usage: /session ${verb} <name>`;
+	manager.appendSessionTag(name, verb === "tag");
+	return `${verb === "tag" ? "Tagged" : "Untagged"} session: ${name}`;
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -1115,7 +1147,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "session",
 		description: "Session management commands",
 		acpDescription: "Show or configure the current session",
-		acpInputHint: "[info|delete|pin [account]]",
+		acpInputHint: "[info|delete|pin [account]|search <question>|tag <name>|untag <name>|tags]",
 		subcommands: [
 			{ name: "info", description: "Show session info and stats" },
 			{ name: "delete", description: "Delete current session and return to selector" },
@@ -1124,6 +1156,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				description: "Pin the current provider to a stored OAuth account",
 				usage: "[account]",
 			},
+			{ name: "tag", description: "Add a tag to this session", usage: "<name>" },
+			{ name: "untag", description: "Remove a tag from this session", usage: "<name>" },
+			{ name: "tags", description: "List this session's tags" },
+			{ name: "search", description: "Search past session transcripts", usage: "<question>" },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -1161,7 +1197,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				await handleSessionPinCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /session [info|delete|pin [account]]", runtime);
+			if (verb === "tag" || verb === "untag" || (verb === "tags" && !rest)) {
+				await runtime.output(runSessionTagVerb(runtime.sessionManager, verb, rest));
+				return commandConsumed();
+			}
+			if (verb === "search") {
+				if (!rest.trim()) return usage("Usage: /session search <question>", runtime);
+				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.sessionManager.getSessionDir()) };
+			}
+			return usage(SESSION_USAGE, runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -1180,10 +1224,23 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
+			if (verb === "tag" || verb === "untag" || (verb === "tags" && !rest)) {
+				runtime.ctx.editor.setText("");
+				runtime.ctx.showStatus(runSessionTagVerb(runtime.ctx.sessionManager, verb, rest));
+				return;
+			}
+			if (verb === "search") {
+				runtime.ctx.editor.setText("");
+				if (!rest.trim()) {
+					runtime.ctx.showStatus("Usage: /session search <question>");
+					return;
+				}
+				return { prompt: await renderSessionSearchPrompt(rest.trim(), runtime.ctx.sessionManager.getSessionDir()) };
+			}
 			if (!verb || (verb === "info" && !rest)) {
 				await runtime.ctx.handleSessionCommand();
 			} else {
-				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
+				runtime.ctx.showStatus(SESSION_USAGE);
 			}
 			runtime.ctx.editor.setText("");
 		},
@@ -2544,6 +2601,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
+		},
+	},
+	{
+		name: "qa",
+		description: "Verify recent work and report findings with evidence (no edits)",
+		acpDescription: "Run an evidence-first QA pass",
+		inlineHint: "[what to verify]",
+		allowArgs: true,
+		handle: (command, runtime) => {
+			void runtime;
+			return { prompt: prompt.render(qaMd, { request: command.args.trim() }) };
+		},
+		handleTui: (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			return { prompt: prompt.render(qaMd, { request: command.args.trim() }) };
 		},
 	},
 	{
