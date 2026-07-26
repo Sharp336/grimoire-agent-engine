@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
-import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getProjectDir, prompt, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
@@ -32,6 +32,7 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
+import qaMd from "../prompts/qa.md" with { type: "text" };
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
@@ -2544,6 +2545,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
+		},
+	},
+	{
+		name: "qa",
+		description: "Verify recent work and report findings with evidence (no edits)",
+		acpDescription: "Run an evidence-first QA pass",
+		inlineHint: "[what to verify]",
+		allowArgs: true,
+		handle: (command, runtime) => {
+			void runtime;
+			return { prompt: prompt.render(qaMd, { request: command.args.trim() }) };
+		},
+		handleTui: (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			return { prompt: prompt.render(qaMd, { request: command.args.trim() }) };
 		},
 	},
 	{
