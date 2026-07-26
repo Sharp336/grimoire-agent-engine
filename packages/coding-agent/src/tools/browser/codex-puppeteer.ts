@@ -2932,7 +2932,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	async #pressKeys(rawKeys: unknown): Promise<void> {
 		const keys = Array.isArray(rawKeys) ? (rawKeys as string[]) : [];
-		const finalKey = keys.at(-1);
+		const finalKey = this.#normalizePortableKey(keys.at(-1));
 		if (!finalKey) return;
 		await this.#withHeldKeys(keys.slice(0, -1), async () => {
 			await this.#page.keyboard.press(finalKey as KeyInput);
@@ -3027,9 +3027,14 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	#normalizeLocatorModifier(modifier: string, label: string): string {
-		if (modifier === "ControlOrMeta") return process.platform === "darwin" ? "Meta" : "Control";
-		if (modifier === "Alt" || modifier === "Control" || modifier === "Meta" || modifier === "Shift") return modifier;
+		const normalized = this.#normalizePortableKey(modifier);
+		if (normalized === "Alt" || normalized === "Control" || normalized === "Meta" || normalized === "Shift")
+			return normalized;
 		throw new Error(`${label} modifier must be Alt, Control, ControlOrMeta, Meta, or Shift`);
+	}
+
+	#normalizePortableKey(key: string | undefined): string | undefined {
+		return key === "ControlOrMeta" ? (process.platform === "darwin" ? "Meta" : "Control") : key;
 	}
 
 	async #withHeldKeys(rawKeys: unknown, action: () => Promise<void>): Promise<void> {
@@ -3062,7 +3067,9 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		this.#signal.addEventListener("abort", aborted, { once: true });
 		try {
 			throwIfAborted(this.#signal);
-			for (const key of keys) {
+			for (const rawKey of keys) {
+				const key = this.#normalizePortableKey(rawKey);
+				if (!key) continue;
 				pressed.push(key);
 				await this.#page.keyboard.down(key as KeyInput);
 				throwIfAborted(this.#signal);

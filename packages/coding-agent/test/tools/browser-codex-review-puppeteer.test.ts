@@ -2942,8 +2942,9 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
-	it("holds CUA move keys during movement and releases them after success or failure", async () => {
+	it("normalizes portable ControlOrMeta while holding CUA move keys", async () => {
 		const events: string[] = [];
+		const portableModifier = process.platform === "darwin" ? "Meta" : "Control";
 		const active = new Set<string>();
 		const activeKeys = () => [...active].join("+") || "none";
 		let failMove = false;
@@ -2977,17 +2978,17 @@ describe("Puppeteer final parity blockers", () => {
 			captureScreenshot: async () => "",
 		});
 
-		await adapter.invoke("cua.move", { tabId: "1", keys: ["Shift", "Alt"], x: 10, y: 20 });
+		await adapter.invoke("cua.move", { tabId: "1", keys: ["ControlOrMeta", "Alt"], x: 10, y: 20 });
 		failMove = true;
 		await expect(adapter.invoke("cua.move", { tabId: "1", keys: ["Control", "Meta"], x: 30, y: 40 })).rejects.toThrow(
 			"move failed",
 		);
 		expect(events).toEqual([
-			"key.down:Shift",
+			`key.down:${portableModifier}`,
 			"key.down:Alt",
-			"mouse.move:10,20:Shift+Alt",
+			`mouse.move:10,20:${portableModifier}+Alt`,
 			"key.up:Alt",
-			"key.up:Shift",
+			`key.up:${portableModifier}`,
 			"key.down:Control",
 			"key.down:Meta",
 			"mouse.move:30,40:Control+Meta",
@@ -2998,8 +2999,9 @@ describe("Puppeteer final parity blockers", () => {
 		await adapter.dispose();
 	});
 
-	it("keeps CUA drag modifiers down through mouse cleanup and releases them after failure", async () => {
+	it("normalizes portable ControlOrMeta through CUA drag cleanup", async () => {
 		const events: string[] = [];
+		const portableModifier = process.platform === "darwin" ? "Meta" : "Control";
 		const active = new Set<string>();
 		const activeKeys = () => [...active].join("+") || "none";
 		let moves = 0;
@@ -3036,7 +3038,7 @@ describe("Puppeteer final parity blockers", () => {
 		await expect(
 			adapter.invoke("cua.drag", {
 				tabId: "1",
-				keys: ["Shift", "Alt"],
+				keys: ["ControlOrMeta", "Alt"],
 				path: [
 					{ x: 1, y: 2 },
 					{ x: 3, y: 4 },
@@ -3044,14 +3046,14 @@ describe("Puppeteer final parity blockers", () => {
 			}),
 		).rejects.toThrow("drag move failed");
 		expect(events).toEqual([
-			"key.down:Shift",
+			`key.down:${portableModifier}`,
 			"key.down:Alt",
-			"mouse.move:1,2:Shift+Alt",
-			"mouse.down:Shift+Alt",
-			"mouse.move:3,4:Shift+Alt",
-			"mouse.up:Shift+Alt",
+			`mouse.move:1,2:${portableModifier}+Alt`,
+			`mouse.down:${portableModifier}+Alt`,
+			`mouse.move:3,4:${portableModifier}+Alt`,
+			`mouse.up:${portableModifier}+Alt`,
 			"key.up:Alt",
-			"key.up:Shift",
+			`key.up:${portableModifier}`,
 		]);
 		expect([...active]).toEqual([]);
 		await adapter.dispose();
@@ -3546,8 +3548,9 @@ describe("Puppeteer final parity blockers", () => {
 		expect(allEvents).toEqual([[], []]);
 	});
 
-	it("holds chord modifiers while pressing the final CUA key", async () => {
+	it("normalizes portable ControlOrMeta while pressing final CUA and DOM-CUA keys", async () => {
 		const events: string[] = [];
+		const portableModifier = process.platform === "darwin" ? "Meta" : "Control";
 		const adapter = new PuppeteerCodexBrowserAdapter({
 			currentTabId: "1",
 			page: {
@@ -3564,15 +3567,23 @@ describe("Puppeteer final parity blockers", () => {
 			captureScreenshot: async () => "",
 		});
 
-		await adapter.invoke("cua.keypress", { tabId: "1", keys: ["Control", "L"] });
-		await adapter.invoke("dom_cua.keypress", { tabId: "1", keys: ["Shift", "Tab"] });
+		await adapter.invoke("cua.keypress", { tabId: "1", keys: ["ControlOrMeta", "L"] });
+		await adapter.invoke("dom_cua.keypress", { tabId: "1", keys: ["ControlOrMeta", "Tab"] });
 		await adapter.dispose();
 
-		expect(events).toEqual(["down:Control", "press:L", "up:Control", "down:Shift", "press:Tab", "up:Shift"]);
+		expect(events).toEqual([
+			`down:${portableModifier}`,
+			"press:L",
+			`up:${portableModifier}`,
+			`down:${portableModifier}`,
+			"press:Tab",
+			`up:${portableModifier}`,
+		]);
 	});
 
-	it("holds pointer keypress modifiers through click, double-click, and scroll", async () => {
+	it("normalizes portable ControlOrMeta through pointer click, double-click, and scroll", async () => {
 		const events: string[] = [];
+		const portableModifier = process.platform === "darwin" ? "Meta" : "Control";
 		const adapter = new PuppeteerCodexBrowserAdapter({
 			currentTabId: "1",
 			page: {
@@ -3594,29 +3605,29 @@ describe("Puppeteer final parity blockers", () => {
 			captureScreenshot: async () => "",
 		});
 
-		await adapter.invoke("cua.click", { tabId: "1", x: 1, y: 2, keypress: ["Control"] });
-		await adapter.invoke("cua.double_click", { tabId: "1", x: 3, y: 4, keypress: ["Alt"] });
+		await adapter.invoke("cua.click", { tabId: "1", x: 1, y: 2, keypress: ["ControlOrMeta"] });
+		await adapter.invoke("cua.double_click", { tabId: "1", x: 3, y: 4, keypress: ["ControlOrMeta"] });
 		await adapter.invoke("cua.scroll", {
 			tabId: "1",
 			x: 5,
 			y: 6,
 			scrollX: 0,
 			scrollY: 10,
-			keypress: ["Shift"],
+			keypress: ["ControlOrMeta"],
 		});
 		await adapter.dispose();
 
 		expect(events).toEqual([
-			"down:Control",
+			`down:${portableModifier}`,
 			"click",
-			"up:Control",
-			"down:Alt",
+			`up:${portableModifier}`,
+			`down:${portableModifier}`,
 			"double-click",
-			"up:Alt",
-			"down:Shift",
+			`up:${portableModifier}`,
+			`down:${portableModifier}`,
 			"move",
 			"wheel",
-			"up:Shift",
+			`up:${portableModifier}`,
 		]);
 	});
 });
