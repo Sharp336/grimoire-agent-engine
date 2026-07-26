@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { DEFAULT_PRUNE_CONFIG, pruneToolOutputMessages } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { PruneConfig, PruneMessagesConfig } from "@oh-my-pi/pi-agent-core/compaction/pruning";
+import { DEFAULT_PRUNE_CONFIG, pruneToolOutputMessages } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { AssistantMessage, TextContent, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 
 function usage(): Usage {
