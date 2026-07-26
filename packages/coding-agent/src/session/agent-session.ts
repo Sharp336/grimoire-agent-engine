@@ -4568,7 +4568,7 @@ export class AgentSession {
 	}
 
 	async #resetMemoryContextForNewTranscript(): Promise<void> {
-		if (this.#memoryBackend?.id !== this.settings.get("memory.backend")) {
+		if (this.#memoryBackend && this.#memoryBackend.id !== this.settings.get("memory.backend")) {
 			await this.#memory.applyMemoryBackend();
 		}
 		await this.#memory.resetContextForNewTranscript();
