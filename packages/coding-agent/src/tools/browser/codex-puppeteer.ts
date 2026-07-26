@@ -2480,19 +2480,27 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const generation = ++this.#domSnapshotGeneration;
 		await this.#disposeHandlesBeforeDeadline(previous, deadline);
 		if (this.#disposed) throw new Error("Puppeteer adapter was disposed");
-		const collectionPromise = this.#page.evaluateHandle(() => {
+		const collect = () => {
 			interface PageRoot {
+				defaultView?: {
+					frameElement?: PageElement | null;
+					getComputedStyle?(element: PageElement): { display: string; opacity: string; visibility: string };
+				};
 				querySelectorAll(selector: string): ArrayLike<PageElement>;
 			}
 			interface PageElement {
 				getAttribute(name: string): string | null;
-				getBoundingClientRect(): { width: number; height: number };
+				clientLeft?: number;
+				clientTop?: number;
+				contentDocument?: PageRoot | null;
+				getBoundingClientRect(): { x: number; y: number; width: number; height: number };
 				getRootNode(): PageRoot;
 				hasAttribute(name: string): boolean;
 				isContentEditable?: boolean;
 				parentElement: PageElement | null;
 				shadowRoot: PageRoot | null;
 				tabIndex?: number;
+				ownerDocument: PageRoot;
 				tagName: string;
 			}
 			const root = globalThis as unknown as {
@@ -2574,18 +2582,27 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			const roots: PageRoot[] = [pageDocument];
 			const elements: PageElement[] = [];
 			for (const currentRoot of roots) {
-				elements.push(...Array.from(currentRoot.querySelectorAll(selector)));
-				for (const candidate of Array.from(currentRoot.querySelectorAll("*"))) {
+				let selected: PageElement[];
+				let candidates: PageElement[];
+				try {
+					selected = Array.from(currentRoot.querySelectorAll(selector));
+					candidates = Array.from(currentRoot.querySelectorAll("*"));
+				} catch {
+					continue;
+				}
+				elements.push(...selected);
+				for (const candidate of candidates) {
 					if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
 				}
 			}
 			const composedParent = (element: PageElement): PageElement | null => {
 				const elementRoot = element.getRootNode() as PageRoot & { host?: PageElement };
-				return element.parentElement ?? elementRoot.host ?? null;
+				return element.parentElement ?? elementRoot.host ?? elementRoot.defaultView?.frameElement ?? null;
 			};
 			return elements.filter((element: PageElement) => {
 				for (let current: PageElement | null = element; current; current = composedParent(current)) {
-					const style = root.getComputedStyle(current);
+					const style =
+						current.ownerDocument.defaultView?.getComputedStyle?.(current) ?? root.getComputedStyle(current);
 					if (
 						current.hasAttribute("hidden") ||
 						current.hasAttribute("inert") ||
@@ -2612,54 +2629,74 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					focusable.isContentEditable === true
 				);
 			});
-		});
-		const collection = await this.#runBeforeDeadline(
+		};
+		const contexts = typeof this.#page.frames === "function" ? this.#page.frames() : [this.#page];
+		const collectionPromise = Promise.all(contexts.map(context => context.evaluateHandle(collect)));
+		const collections = await this.#runBeforeDeadline(
 			deadline,
 			() => collectionPromise,
 			() => {
 				void collectionPromise.then(
-					value => value.dispose().catch(() => undefined),
+					values => Promise.all(values.map(value => value.dispose().catch(() => undefined))),
 					() => undefined,
 				);
 			},
 		);
 		const handles: ElementHandle[] = [];
 		try {
-			const propertiesPromise = collection.getProperties();
-			const properties = await this.#runBeforeDeadline(
-				deadline,
-				() => propertiesPromise,
-				() => {
-					void propertiesPromise.then(
-						values => Promise.all([...values.values()].map(value => value.dispose().catch(() => undefined))),
-						() => undefined,
-					);
-				},
-			);
-			for (const property of properties.values()) {
-				const element = property.asElement();
-				if (element) handles.push(element as ElementHandle);
-				else await this.#disposeHandlesBeforeDeadline([property], deadline);
+			for (const collection of collections) {
+				const propertiesPromise = collection.getProperties();
+				const properties = await this.#runBeforeDeadline(
+					deadline,
+					() => propertiesPromise,
+					() => {
+						void propertiesPromise.then(
+							values => Promise.all([...values.values()].map(value => value.dispose().catch(() => undefined))),
+							() => undefined,
+						);
+					},
+				);
+				for (const property of properties.values()) {
+					const element = property.asElement();
+					if (element) handles.push(element as ElementHandle);
+					else await this.#disposeHandlesBeforeDeadline([property], deadline);
+				}
 			}
 			const nodes = await this.#runBeforeDeadline(deadline, () =>
 				Promise.all(
 					handles.map(async handle => {
 						const [node, aria] = await Promise.all([
 							handle.evaluate(element => {
+								type FrameElement = {
+									clientLeft?: number;
+									clientTop?: number;
+									getBoundingClientRect(): { x: number; y: number; width: number; height: number };
+									ownerDocument: { defaultView?: { frameElement?: FrameElement | null } };
+								};
 								const pageElement = element as unknown as {
 									getBoundingClientRect(): { x: number; y: number; width: number; height: number };
 									innerText?: string;
+									ownerDocument: { defaultView?: { frameElement?: FrameElement | null } };
 									tagName: string;
 									textContent: string | null;
 								};
 								const rect = pageElement.getBoundingClientRect();
+								let x = rect.x;
+								let y = rect.y;
+								let frame = pageElement.ownerDocument.defaultView?.frameElement ?? null;
+								while (frame) {
+									const frameRect = frame.getBoundingClientRect();
+									x += frameRect.x + (frame.clientLeft ?? 0);
+									y += frameRect.y + (frame.clientTop ?? 0);
+									frame = frame.ownerDocument.defaultView?.frameElement ?? null;
+								}
 								return {
 									tag: pageElement.tagName.toLowerCase(),
 									fallbackText: String(pageElement.innerText ?? pageElement.textContent ?? "")
 										.replace(/\s+/g, " ")
 										.trim(),
-									x: rect.x,
-									y: rect.y,
+									x,
+									y,
 									width: rect.width,
 									height: rect.height,
 								};
@@ -2693,7 +2730,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			await this.#disposeHandlesBeforeDeadline(handles, deadline);
 			throw error;
 		} finally {
-			await this.#disposeHandlesBeforeDeadline([collection], deadline);
+			await this.#disposeHandlesBeforeDeadline(collections, deadline);
 		}
 	}
 
@@ -2702,7 +2739,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const handle = this.#domNodes.get(nodeId);
 		if (!handle) throw new Error(`Unknown DOM CUA node_id ${nodeId}; call get_visible_dom() again`);
 		const connected = await this.#runBeforeDeadline(deadline, () =>
-			handle.evaluate(element => element.isConnected && element.ownerDocument === document),
+			handle.evaluate(element => element.isConnected),
 		).catch(error => {
 			throwIfAborted(this.#signal);
 			if (error instanceof Error && error.message.includes("timed out")) throw error;
@@ -2756,10 +2793,10 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const connected = await this.#runBeforeDeadline(deadline, () =>
 			handle.evaluate(
 				(element, deltaX, deltaY) => {
-					if (!element.isConnected || element.ownerDocument !== document) return false;
+					if (!element.isConnected) return false;
 					const scrollable = element as unknown as PageScrollableElement;
 					scrollable.scrollBy({ left: deltaX, top: deltaY });
-					return element.isConnected && element.ownerDocument === document;
+					return element.isConnected;
 				},
 				numberArg(args, "x"),
 				numberArg(args, "y"),

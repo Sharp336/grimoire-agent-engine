@@ -1020,6 +1020,93 @@ describe("cmux Codex browser review regressions", () => {
 		]);
 	});
 
+	it("descends into same-origin frames for elementInfo and visible DOM coordinates", async () => {
+		const computedStyle = () => ({ display: "block", visibility: "visible" });
+		const localPoints: Array<[number, number]> = [];
+		let frame: Record<string, unknown>;
+		const frameView: Record<string, unknown> = { getComputedStyle: computedStyle };
+		const frameDocument: Record<string, unknown> = {
+			defaultView: frameView,
+			getElementById: () => null,
+			querySelectorAll: () => [],
+		};
+		const button = {
+			_ariaRef: { ref: "e9" },
+			children: [],
+			getAttribute: () => null,
+			getBoundingClientRect: () => ({ x: 10, y: 20, width: 80, height: 30 }),
+			getRootNode: () => frameDocument,
+			hasAttribute: () => false,
+			innerText: "Frame Action",
+			isContentEditable: false,
+			outerHTML: "<button>Frame Action</button>",
+			ownerDocument: frameDocument,
+			parentElement: null,
+			tabIndex: 0,
+			tagName: "BUTTON",
+			textContent: "Frame Action",
+		};
+		Reflect.set(frameDocument, "elementFromPoint", (x: number, y: number) => {
+			localPoints.push([x, y]);
+			return button;
+		});
+		Reflect.set(frameDocument, "querySelectorAll", (selector: string) => (selector === "*" ? [button] : []));
+		const topView = { getComputedStyle: computedStyle };
+		const document: Record<string, unknown> = {
+			defaultView: topView,
+			elementFromPoint: () => frame,
+			getElementById: () => null,
+			querySelectorAll: (selector: string) => (selector === "*" ? [frame] : []),
+		};
+		frame = {
+			clientLeft: 2,
+			clientTop: 3,
+			contentDocument: frameDocument,
+			getAttribute: () => null,
+			getBoundingClientRect: () => ({ x: 100, y: 50, width: 200, height: 100 }),
+			getRootNode: () => document,
+			hasAttribute: () => false,
+			ownerDocument: document,
+			parentElement: null,
+			querySelectorAll: () => [],
+			tagName: "IFRAME",
+		};
+		Reflect.set(frameView, "frameElement", frame);
+		let clickedRef = "";
+		const current = await selectedTab(
+			facadeFor({
+				async ariaSnapshot() {
+					return '- button "Frame Action" [ref=e9] [box=112,73,80,30]';
+				},
+				async codexEvaluate(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window: topView });
+				},
+				async codexEvaluateCleanup() {
+					return true;
+				},
+				async ref(id: string) {
+					clickedRef = id;
+					return { click: async () => undefined };
+				},
+			}),
+		);
+
+		expect(await current.playwright.elementInfo({ x: 120, y: 80 })).toEqual([
+			expect.objectContaining({
+				tagName: "button",
+				visibleText: "Frame Action",
+				boundingBox: { x: 112, y: 73, width: 80, height: 30 },
+			}),
+		]);
+		expect(localPoints).toEqual([[18, 27]]);
+		const snapshot = await current.dom_cua.get_visible_dom();
+		expect(snapshot.nodes).toEqual([
+			expect.objectContaining({ node_id: "e9", text: "Frame Action", x: 112, y: 73, width: 80, height: 30 }),
+		]);
+		await current.dom_cua.click({ node_id: "e9" });
+		expect(clickedRef).toBe("e9");
+	});
+
 	it("awaits asynchronous cmux media publication without calling renameSync", async () => {
 		const rename = Promise.withResolvers<void>();
 		const asyncRename = spyOn(fs.promises, "rename").mockImplementation(async () => await rename.promise);

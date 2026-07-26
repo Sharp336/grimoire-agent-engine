@@ -349,7 +349,10 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const canonicalState = element => typeof globalThis.__ompCodexAriaState === "function" ? globalThis.__ompCodexAriaState(element) : null;
 	const viewOf = element => element?.ownerDocument?.defaultView || window;
-	const composedParent = element => element?.assignedSlot ?? element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
+	const composedParent = element => {
+		const root = element?.getRootNode?.();
+		return element?.assignedSlot ?? element?.parentElement ?? root?.host ?? root?.defaultView?.frameElement ?? null;
+	};
 	const accessibilityHidden = element => {
 		if (canonicalState(element)?.hidden === true) return true;
 		for (let current = element; current; current = composedParent(current)) {
@@ -411,16 +414,35 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 		String(element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim() ||
 		associatedLabelText(element) ||
 		String(element.getAttribute("alt") || element.getAttribute("title") || valueName(element) || textOf(element) || descendantAlternative(element)).replace(/\\s+/g, " ").trim();
-	const deepestElementFromPoint = (root, pointX, pointY) => {
-		let hit = root?.elementFromPoint?.(pointX, pointY) ?? null;
-		while (hit?.shadowRoot?.elementFromPoint) {
-			const nested = hit.shadowRoot.elementFromPoint(pointX, pointY);
-			if (!nested || nested === hit) break;
-			hit = nested;
+	const deepestElementFromPoint = (pointX, pointY) => {
+		let root = document;
+		let localX = pointX;
+		let localY = pointY;
+		let offsetX = 0;
+		let offsetY = 0;
+		for (;;) {
+			let hit = root?.elementFromPoint?.(localX, localY) ?? null;
+			while (hit?.shadowRoot?.elementFromPoint) {
+				const nested = hit.shadowRoot.elementFromPoint(localX, localY);
+				if (!nested || nested === hit) break;
+				hit = nested;
+			}
+			if (!hit) return { element: null, offsetX, offsetY };
+			let frameDocument = null;
+			try { frameDocument = hit.contentDocument; } catch {}
+			if (!frameDocument?.elementFromPoint) return { element: hit, offsetX, offsetY };
+			const rect = hit.getBoundingClientRect();
+			const frameX = rect.x + Number(hit.clientLeft || 0);
+			const frameY = rect.y + Number(hit.clientTop || 0);
+			offsetX += frameX;
+			offsetY += frameY;
+			localX -= frameX;
+			localY -= frameY;
+			root = frameDocument;
 		}
-		return hit;
 	};
-	let element = deepestElementFromPoint(document, x, y);
+	const target = deepestElementFromPoint(x, y);
+	let element = target.element;
 	if (element && accessibilityHidden(element)) return [];
 	if (!includeNonInteractable) while (element && !interactable(element)) element = composedParent(element);
 	if (!element) return [];
@@ -439,7 +461,7 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 		visibleText: text || null,
 		ariaName: ariaName || null,
 		testId,
-		boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+		boundingBox: { x: rect.x + target.offsetX, y: rect.y + target.offsetY, width: rect.width, height: rect.height },
 		preview: element.outerHTML.slice(0, 1000),
 		selector: { primary, candidates },
 	}];
@@ -450,7 +472,10 @@ const VISIBLE_DOM_SOURCE = `() => {
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const canonicalState = element => typeof globalThis.__ompCodexAriaState === "function" ? globalThis.__ompCodexAriaState(element) : null;
 	const viewOf = element => element?.ownerDocument?.defaultView || window;
-	const composedParent = element => element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
+	const composedParent = element => {
+		const root = element?.getRootNode?.();
+		return element?.assignedSlot ?? element?.parentElement ?? root?.host ?? root?.defaultView?.frameElement ?? null;
+	};
 	const accessibilityHidden = element => {
 		if (canonicalState(element)?.hidden === true) return true;
 		for (let current = element; current; current = composedParent(current)) {
@@ -512,11 +537,27 @@ const VISIBLE_DOM_SOURCE = `() => {
 		String(element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim() ||
 		associatedLabelText(element) ||
 		String(element.getAttribute("alt") || element.getAttribute("title") || valueName(element) || textOf(element) || descendantAlternative(element)).replace(/\\s+/g, " ").trim();
+	const topPageRect = element => {
+		const rect = element.getBoundingClientRect();
+		let x = rect.x;
+		let y = rect.y;
+		let frame = element.ownerDocument?.defaultView?.frameElement ?? null;
+		while (frame) {
+			const frameRect = frame.getBoundingClientRect();
+			x += frameRect.x + Number(frame.clientLeft || 0);
+			y += frameRect.y + Number(frame.clientTop || 0);
+			frame = frame.ownerDocument?.defaultView?.frameElement ?? null;
+		}
+		return { x, y, width: rect.width, height: rect.height };
+	};
 	const allElements = root => {
 		const elements = [];
 		for (const element of root.querySelectorAll("*")) {
 			elements.push(element);
 			if (element.shadowRoot) elements.push(...allElements(element.shadowRoot));
+			try {
+				if (element.contentDocument) elements.push(...allElements(element.contentDocument));
+			} catch {}
 		}
 		return elements;
 	};
@@ -526,7 +567,7 @@ const VISIBLE_DOM_SOURCE = `() => {
 		const node_id = element._ariaRef?.ref;
 		if (typeof node_id !== "string" || !/^e\\d+$/.test(node_id) || !interactable(element) || accessibilityHidden(element)) continue;
 		const role = implicitRole(element);
-		const rect = element.getBoundingClientRect();
+		const rect = topPageRect(element);
 		const style = viewOf(element).getComputedStyle?.(element);
 		if ((style && (style.display === "none" || style.visibility === "hidden")) || rect.width <= 0 || rect.height <= 0) continue;
 		refs[node_id] = element;

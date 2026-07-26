@@ -1252,6 +1252,40 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("discovers and activates same-origin iframe controls with top-page coordinates", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 const expected=await page.evaluate(()=>{
+				   const frame=document.querySelector("#only-frame");
+				   Object.assign(frame.style,{position:"fixed",left:"300px",top:"200px",width:"180px",height:"100px"});
+				   const button=frame.contentDocument.querySelector("#frame-button");
+				   Object.assign(button.style,{position:"fixed",left:"10px",top:"15px",width:"80px",height:"30px"});
+				   globalThis.__frameDomClicks=0; button.addEventListener("click",()=>globalThis.__frameDomClicks++);
+				   const frameRect=frame.getBoundingClientRect(); const buttonRect=button.getBoundingClientRect();
+				   return {x:frameRect.x+frame.clientLeft+buttonRect.x,y:frameRect.y+frame.clientTop+buttonRect.y,width:buttonRect.width,height:buttonRect.height};
+				 });
+				 const snapshot=await t.dom_cua.get_visible_dom();
+				 const node=snapshot.nodes.find(item=>item.text==="Frame target");
+				 if (!node) return {node:null,expected,clicks:0};
+				 await t.dom_cua.click({node_id:node.node_id,timeoutMs:200});
+				 return {node:{x:node.x,y:node.y,width:node.width,height:node.height},expected,clicks:await page.evaluate(()=>globalThis.__frameDomClicks)};`,
+				10,
+			);
+			expect(result).toEqual({
+				node: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), width: 80, height: 30 }),
+				expected: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), width: 80, height: 30 }),
+				clicks: 1,
+			});
+			if (!result || typeof result !== "object" || !("node" in result) || !("expected" in result)) {
+				throw new Error("Expected iframe DOM coordinates");
+			}
+			expect(result.node).toEqual(result.expected);
+		});
+	}, 20_000);
+
 	it("treats disabled shadow hosts as disabling nested controls and click actionability", async () => {
 		await withPuppeteerTool(async (tool, name) => {
 			const result = await runBrowserCode(
