@@ -17,6 +17,7 @@ import type {
 	SessionEntry,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
+	SkillInvocationStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
@@ -337,6 +338,43 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 	};
 }
 
+/**
+ * Extract authoritative executed-skill targets from a `read` result.
+ * `displayReadTargets` is presentation metadata and is intentionally ignored.
+ */
+function extractResultSkillInvocations(sessionFile: string, entry: SessionMessageEntry): SkillInvocationStats[] {
+	const msg = entry.message as ToolResultMessage;
+	if (
+		msg.role !== "toolResult" ||
+		msg.toolName !== "read" ||
+		typeof msg.toolCallId !== "string" ||
+		msg.toolCallId.length === 0
+	)
+		return [];
+	const details = msg.details;
+	if (!details || typeof details !== "object" || !("skillTargets" in details)) return [];
+	const skillTargets = details.skillTargets;
+	if (!Array.isArray(skillTargets)) return [];
+
+	const invocations: SkillInvocationStats[] = [];
+	for (const candidate of skillTargets) {
+		if (!candidate || typeof candidate !== "object") continue;
+		if (!("target" in candidate) || !("skill" in candidate)) continue;
+		const target = candidate.target;
+		const skillName = candidate.skill;
+		if (typeof skillName !== "string" || skillName.length === 0) continue;
+		if (typeof target !== "string" || target.length === 0) continue;
+		invocations.push({
+			sessionFile,
+			toolCallId: msg.toolCallId,
+			targetIndex: invocations.length,
+			target,
+			skillName,
+		});
+	}
+	return invocations;
+}
+
 const LF = 0x0a;
 const CR = 0x0d;
 const jsonLineDecoder = new TextDecoder();
@@ -408,6 +446,8 @@ export interface ParseSessionResult {
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
+	skillInvocations: SkillInvocationStats[];
+	resultSkillInvocations: SkillInvocationStats[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
 }
@@ -416,8 +456,18 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	try {
 		bytes = await Bun.file(sessionPath).bytes();
 	} catch (err) {
-		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+		if (isEnoent(err)) {
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				skillInvocations: [],
+				resultSkillInvocations: [],
+				toolResults: [],
+				newOffset: fromOffset,
+			};
+		}
 		throw err;
 	}
 
@@ -427,6 +477,8 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
+	const skillInvocations: SkillInvocationStats[] = [];
+	const resultSkillInvocations: SkillInvocationStats[] = [];
 	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
@@ -452,12 +504,25 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
 			if (link) toolResults.push(link);
+			resultSkillInvocations.push(...extractResultSkillInvocations(sessionPath, entry));
 			continue;
 		}
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			const calls = extractToolCalls(sessionPath, folder, entry, agentType);
+			toolCalls.push(...calls);
+			for (const call of calls) {
+				if (call.skillName !== null) {
+					skillInvocations.push({
+						sessionFile: sessionPath,
+						toolCallId: call.toolCallId,
+						targetIndex: 0,
+						target: null,
+						skillName: call.skillName,
+					});
+				}
+			}
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;
 			if (parentId) {
@@ -479,8 +544,16 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 			}
 		}
 	}
-
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+	return {
+		stats,
+		userStats,
+		userLinks,
+		toolCalls,
+		skillInvocations,
+		resultSkillInvocations,
+		toolResults,
+		newOffset: start + read,
+	};
 }
 
 /**

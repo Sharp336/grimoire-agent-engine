@@ -63,6 +63,51 @@ describe("multi-path tools tolerate missing entries", () => {
 		expect(details?.missingPaths).toEqual(["tests/"]);
 	});
 
+	it("records executed skill targets in delimiter order, including failed reads", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-skills-delimited", {
+			path: "README.md;skill://review:raw;skill://lint;skill://review",
+		});
+		const details = result.details as { skillTargets?: Array<{ skill: string; target: string }> } | undefined;
+
+		expect(details?.skillTargets).toEqual([
+			{ skill: "review", target: "skill://review:raw" },
+			{ skill: "lint", target: "skill://lint" },
+			{ skill: "review", target: "skill://review" },
+		]);
+	});
+
+	it("attaches one canonical target to a direct skill read", async () => {
+		const skillDir = path.join(tempDir, "review-guide");
+		const skillFile = path.join(skillDir, "SKILL.md");
+		await fs.mkdir(skillDir, { recursive: true });
+		await Bun.write(skillFile, "# Review guide\n");
+
+		const tools = await createTools(
+			createTestSession(tempDir, {
+				skills: [
+					{
+						name: "review:guide",
+						description: "Review guide",
+						filePath: skillFile,
+						baseDir: skillDir,
+						source: "test",
+					},
+				],
+			}),
+		);
+		const tool = tools.find(entry => entry.name === "read");
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-direct-skill", { path: "skill://review%3Aguide:raw" });
+		const details = result.details as { skillTargets?: Array<{ skill: string; target: string }> } | undefined;
+
+		expect(details?.skillTargets).toEqual([{ skill: "review:guide", target: "skill://review%3Aguide:raw" }]);
+	});
+
 	it("search errors only when every path is missing", async () => {
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "grep");

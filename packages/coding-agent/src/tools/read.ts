@@ -750,7 +750,29 @@ export interface ReadToolDetails {
 	conflictCount?: number;
 	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
 	displayReadTargets?: string[];
+	skillTargets?: Array<{ skill: string; target: string }>;
 }
+type SkillTarget = { skill: string; target: string };
+
+/**
+ * Classify an executed skill URL without interpreting its selector ourselves.
+ * The internal URL splitter removes read selectors, while the shared parser
+ * preserves the decoded authority as the canonical skill name.
+ */
+function classifySkillTarget(target: string): SkillTarget | undefined {
+	const { path } = splitInternalUrlSel(target);
+	let parsed: InternalUrl;
+	try {
+		parsed = parseInternalUrl(path);
+	} catch {
+		return undefined;
+	}
+	if (parsed.protocol.toLowerCase() !== "skill:" || parsed.rawHost.length === 0) {
+		return undefined;
+	}
+	return { skill: parsed.rawHost, target };
+}
+
 type ReadParams = ReadToolInput;
 
 /** Parsed representation of a path-embedded selector. */
@@ -968,6 +990,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
 		const displayReadTargets: string[] = [];
+		const skillTargets: SkillTarget[] = [];
 		let pendingText = notice;
 		const flushText = () => {
 			if (pendingText.length === 0) return;
@@ -979,6 +1002,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		};
 
 		for (const part of parts) {
+			const skillTarget = classifySkillTarget(part);
+			if (skillTarget) skillTargets.push(skillTarget);
 			try {
 				const result = await this.execute("read-delimited-part", { path: part }, signal);
 				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
@@ -1001,7 +1026,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		flushText();
 
-		return toolResult<ReadToolDetails>({ notes, displayReadTargets }).content(content).done();
+		const details: ReadToolDetails = { notes, displayReadTargets };
+		if (skillTargets.length > 0) details.skillTargets = skillTargets;
+		return toolResult<ReadToolDetails>(details).content(content).done();
 	}
 
 	/**
@@ -2308,6 +2335,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let promotedSelector: string | undefined;
 		if (internalRouter.canResolve(readPath)) {
 			const internalTarget = splitInternalUrlSel(readPath);
+			const skillTarget = classifySkillTarget(readPath);
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
@@ -2330,10 +2358,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// cannot shadow the URL's selector semantics during filesystem routing.
 					promotedSelector = internalTarget.sel;
 				} else {
-					return this.#handleInternalUrl(internalTarget.path, parsed, signal);
+					return this.#handleInternalUrl(internalTarget.path, parsed, signal, skillTarget);
 				}
 			} else {
-				return this.#handleInternalUrl(internalTarget.path, parsed, signal);
+				return this.#handleInternalUrl(internalTarget.path, parsed, signal, skillTarget);
 			}
 		}
 
@@ -3257,6 +3285,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		url: string,
 		parsedSel: ParsedSelector,
 		signal?: AbortSignal,
+		skillTarget?: SkillTarget,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const internalRouter = InternalUrlRouter.instance();
 
@@ -3314,6 +3343,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			},
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
+		if (skillTarget) details.skillTargets = [skillTarget];
 
 		// If extraction was used, return directly (no pagination)
 		if (hasExtraction) {

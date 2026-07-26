@@ -158,6 +158,19 @@ export interface ToolCallStats {
 	/** Serialized argument characters */
 	argsChars: number;
 }
+/**
+ * One executed skill target linked to a persisted tool call.
+ *
+ * Assistant tool-call parsing emits a provisional index-0 row with no target;
+ * an executed `read` result may replace it with authoritative target details.
+ */
+export interface SkillInvocationStats {
+	sessionFile: string;
+	toolCallId: string;
+	targetIndex: number;
+	target: string | null;
+	skillName: string;
+}
 
 /**
  * Result linkage emitted when the parser sees a `toolResult` message entry.

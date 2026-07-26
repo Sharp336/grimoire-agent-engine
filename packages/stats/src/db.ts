@@ -21,6 +21,7 @@ import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
 	ProviderTimeSeriesPoint,
+	SkillInvocationStats,
 	SkillModelStats,
 	SkillTimeSeriesPoint,
 	SkillUsageStats,
@@ -66,6 +67,7 @@ const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
 const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
 const FORK_DEDUPE_KEY = "fork_dedupe_v1";
 const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v2";
+const SKILL_INVOCATIONS_BACKFILL_KEY = "skill_invocations_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -177,6 +179,19 @@ export async function initDb(): Promise<Database> {
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp ON tool_calls(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_timestamp ON tool_calls(tool_name, timestamp);
 
+		CREATE TABLE IF NOT EXISTS skill_invocations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_file TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			target_index INTEGER NOT NULL,
+			target TEXT,
+			skill_name TEXT NOT NULL,
+			UNIQUE(session_file, tool_call_id, target_index)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_skill_invocations_skill ON skill_invocations(skill_name);
+		CREATE INDEX IF NOT EXISTS idx_skill_invocations_call ON skill_invocations(session_file, tool_call_id);
+
 		CREATE TABLE IF NOT EXISTS meta (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
@@ -271,6 +286,7 @@ export async function initDb(): Promise<Database> {
 	}
 	backfillUserMessages(db);
 	backfillToolCalls(db);
+	backfillSkillInvocations(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
@@ -1097,12 +1113,12 @@ function backfillUserMessages(database: Database): void {
 }
 
 /**
- * One-shot wipe of `tool_calls` + `file_offsets` when the `tool_calls` table
- * is introduced (or its schema version bumps), so the next sync re-parses
- * every session and ingests historical tool calls. `messages` and
- * `user_messages` re-inserts are idempotent, so the offset reset is safe.
- * Same sentinel protocol as {@link backfillUserMessages}: the PENDING value
- * written here prevents re-wiping on subsequent inits.
+ * One-shot reset of `file_offsets` when the `tool_calls` table is introduced
+ * (or its schema version bumps), so the next sync re-parses every session and
+ * ingests historical tool calls. Existing tool-call rows are intentionally
+ * retained so historical calls without replayable session files remain
+ * visible. Same sentinel protocol as {@link backfillUserMessages}: the
+ * PENDING value written here prevents repeating the reset on later inits.
  */
 function backfillToolCalls(database: Database): void {
 	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(TOOL_CALLS_BACKFILL_KEY) as
@@ -1110,11 +1126,38 @@ function backfillToolCalls(database: Database): void {
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
 
-	database.run("DELETE FROM tool_calls");
 	database.run("DELETE FROM file_offsets");
 	database
 		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(TOOL_CALLS_BACKFILL_KEY, BACKFILL_PENDING);
+}
+
+/**
+ * Seed one provisional child invocation for every legacy scalar skill
+ * attribution. The transaction makes the offset reset and sentinel write
+ * crash-safe; `INSERT OR IGNORE` makes retries idempotent.
+ */
+function backfillSkillInvocations(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(SKILL_INVOCATIONS_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	const apply = database.transaction(() => {
+		database.run(`
+			INSERT OR IGNORE INTO skill_invocations (
+				session_file, tool_call_id, target_index, target, skill_name
+			)
+			SELECT session_file, tool_call_id, 0, NULL, skill_name
+			FROM tool_calls
+			WHERE skill_name IS NOT NULL
+		`);
+		database.run("DELETE FROM file_offsets");
+		database
+			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(SKILL_INVOCATIONS_BACKFILL_KEY, BACKFILL_PENDING);
+	});
+	apply();
 }
 
 /**
@@ -1240,6 +1283,7 @@ export function markSessionBackfillsComplete(): void {
 		for (const key of [
 			USER_MESSAGES_BACKFILL_KEY,
 			TOOL_CALLS_BACKFILL_KEY,
+			SKILL_INVOCATIONS_BACKFILL_KEY,
 			USER_MESSAGE_LINKS_REPAIR_KEY,
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 		]) {
@@ -1521,7 +1565,7 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 	if (!db || calls.length === 0) return 0;
 
 	const stmt = db.prepare(`
-		INSERT OR IGNORE INTO tool_calls (
+		INSERT INTO tool_calls (
 			session_file, entry_id, tool_call_id, folder, tool_name, skill_name,
 			model, provider, timestamp, agent_type, calls_in_turn, args_chars
 		)
@@ -1530,6 +1574,9 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 			SELECT 1 FROM tool_calls
 			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
 		)
+		ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
+			skill_name = excluded.skill_name
+		WHERE tool_calls.skill_name IS NULL AND excluded.skill_name IS NOT NULL
 	`);
 
 	let inserted = 0;
@@ -1562,6 +1609,46 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 	return inserted;
 }
 
+/**
+ * Persist executed skill targets only when their parent tool call survived
+ * fork de-duplication. A later authoritative result updates the provisional
+ * child row at the same target index.
+ */
+export function upsertSkillInvocations(invocations: SkillInvocationStats[]): number {
+	if (!db || invocations.length === 0) return 0;
+
+	const stmt = db.prepare(`
+		INSERT INTO skill_invocations (
+			session_file, tool_call_id, target_index, target, skill_name
+		)
+		SELECT ?, ?, ?, ?, ?
+		WHERE EXISTS (
+			SELECT 1 FROM tool_calls
+			WHERE session_file = ? AND tool_call_id = ?
+		)
+		ON CONFLICT(session_file, tool_call_id, target_index) DO UPDATE SET
+			target = excluded.target,
+			skill_name = excluded.skill_name
+	`);
+
+	let changed = 0;
+	const apply = db.transaction(() => {
+		for (const invocation of invocations) {
+			const result = stmt.run(
+				invocation.sessionFile,
+				invocation.toolCallId,
+				invocation.targetIndex,
+				invocation.target,
+				invocation.skillName,
+				invocation.sessionFile,
+				invocation.toolCallId,
+			);
+			changed += result.changes;
+		}
+	});
+	apply();
+	return changed;
+}
 /**
  * Attach result size / error flag to persisted tool-call rows. Results can
  * land in a later incremental sync pass than the call that produced them, so
@@ -1746,11 +1833,27 @@ export function getSkillStats(cutoff?: number): SkillUsageStats[] {
 
 	const hasCutoff = cutoff !== undefined && cutoff > 0;
 	const stmt = db.prepare(`
-		SELECT t.skill_name, ${TOOL_AGGREGATE_COLUMNS}
-		FROM tool_calls t
+		WITH target_counts AS (
+			SELECT session_file, tool_call_id, COUNT(*) AS target_count
+			FROM skill_invocations
+			GROUP BY session_file, tool_call_id
+		)
+		SELECT
+			si.skill_name,
+			COUNT(*) as calls,
+			SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) as errors,
+			SUM(t.args_chars * 1.0 / tc.target_count) as args_chars,
+			SUM(COALESCE(t.result_chars, 0) * 1.0 / tc.target_count) as result_chars,
+			SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as total_tokens_share,
+			SUM(COALESCE(m.output_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as output_tokens_share,
+			SUM(COALESCE(m.cost_total, 0) / t.calls_in_turn / tc.target_count) as cost_share,
+			MAX(t.timestamp) as last_used
+		FROM skill_invocations si
+		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
+		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id
 		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
-		WHERE t.skill_name IS NOT NULL ${hasCutoff ? "AND t.timestamp >= ?" : ""}
-		GROUP BY t.skill_name
+		WHERE ${hasCutoff ? "t.timestamp >= ?" : "1 = 1"}
+		GROUP BY si.skill_name
 		ORDER BY calls DESC
 	`);
 
@@ -1764,11 +1867,29 @@ export function getSkillStatsByModel(cutoff?: number): SkillModelStats[] {
 
 	const hasCutoff = cutoff !== undefined && cutoff > 0;
 	const stmt = db.prepare(`
-		SELECT t.skill_name, t.model, t.provider, ${TOOL_AGGREGATE_COLUMNS}
-		FROM tool_calls t
+		WITH target_counts AS (
+			SELECT session_file, tool_call_id, COUNT(*) AS target_count
+			FROM skill_invocations
+			GROUP BY session_file, tool_call_id
+		)
+		SELECT
+			si.skill_name,
+			t.model,
+			t.provider,
+			COUNT(*) as calls,
+			SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) as errors,
+			SUM(t.args_chars * 1.0 / tc.target_count) as args_chars,
+			SUM(COALESCE(t.result_chars, 0) * 1.0 / tc.target_count) as result_chars,
+			SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as total_tokens_share,
+			SUM(COALESCE(m.output_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as output_tokens_share,
+			SUM(COALESCE(m.cost_total, 0) / t.calls_in_turn / tc.target_count) as cost_share,
+			MAX(t.timestamp) as last_used
+		FROM skill_invocations si
+		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
+		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id
 		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
-		WHERE t.skill_name IS NOT NULL ${hasCutoff ? "AND t.timestamp >= ?" : ""}
-		GROUP BY t.skill_name, t.model, t.provider
+		WHERE ${hasCutoff ? "t.timestamp >= ?" : "1 = 1"}
+		GROUP BY si.skill_name, t.model, t.provider
 		ORDER BY calls DESC
 	`);
 
@@ -1779,7 +1900,6 @@ export function getSkillStatsByModel(cutoff?: number): SkillModelStats[] {
 		provider: row.provider ?? "",
 	}));
 }
-
 /** Get canonical skill invocations as a bucketed time series. */
 export function getSkillTimeSeries(
 	days = 14,
@@ -1792,14 +1912,21 @@ export function getSkillTimeSeries(
 	const seriesCutoff = hasCutoff ? (cutoff ?? Date.now() - days * 24 * 60 * 60 * 1000) : 0;
 
 	const stmt = db.prepare(`
+		WITH target_counts AS (
+			SELECT session_file, tool_call_id, COUNT(*) AS target_count
+			FROM skill_invocations
+			GROUP BY session_file, tool_call_id
+		)
 		SELECT
-			(timestamp / ?) * ? as bucket,
-			skill_name,
+			(t.timestamp / ?) * ? as bucket,
+			si.skill_name,
 			COUNT(*) as calls,
-			SUM(CASE WHEN is_error = 1 THEN 1 ELSE 0 END) as errors
-		FROM tool_calls
-		WHERE skill_name IS NOT NULL ${hasCutoff ? "AND timestamp >= ?" : ""}
-		GROUP BY bucket, skill_name
+			SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) as errors
+		FROM skill_invocations si
+		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
+		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id
+		WHERE ${hasCutoff ? "t.timestamp >= ?" : "1 = 1"}
+		GROUP BY bucket, si.skill_name
 		ORDER BY bucket ASC
 	`);
 
