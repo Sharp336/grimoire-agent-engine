@@ -33,7 +33,7 @@ export class MissionStateError extends Error {
 	override readonly name = "MissionStateError";
 }
 
-const MISSION_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+export const MISSION_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 const MISSION_STATUSES = [
 	"planning",
@@ -336,7 +336,7 @@ function handoffIsSuccessfulImplementation(handoff: MissionHandoff): handoff is 
 	return !handoff.issues.some(issue => issue.severity === "blocking");
 }
 
-function expectedIntegrationNewHead(handoff: MissionWorkerHandoff, expectedOldHead: string): string {
+export function expectedIntegrationNewHead(handoff: MissionWorkerHandoff, expectedOldHead: string): string {
 	if (handoff.commits.length === 0) {
 		return expectedOldHead;
 	}

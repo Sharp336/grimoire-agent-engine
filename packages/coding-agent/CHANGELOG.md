@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added crash-recoverable mission workspaces: feature workers receive isolated branches and validators detached checkouts, with ownership checks, reconciliation after interrupted setup, and CAS-protected integration advancement.
 - Added fixed-workspace mission child sessions with owner-scoped revival and parent-mediated approvals.
@@ -28,6 +30,7 @@
 ## [17.1.2] - 2026-07-24
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added in-process moreutils-style shell builtins to the bash tool's embedded shell: `ts` (timestamp lines; `-i`/`-s` elapsed modes, `-m` monotonic clock, `-r` relative rewriting of RFC3339/syslog timestamps, `%.S`/`%.s`/`%.T` subsecond extensions), `sponge` (soak stdin fully before atomically writing the target, so `foo file | ... | sponge file` works; `-a` appends), `ifne` (run a command only when stdin is non-empty; `-n` inverts and passes non-empty stdin through), `isutf8` (streaming UTF-8 validation with line/char/byte diagnostics; `-q`, `-l`, `-i`), `combine` (boolean `and`/`not`/`or`/`xor` on the lines of two files, `-` for stdin), and `errno` (errno name/number/description lookup with `-l` list and `-s` search; unix only). Like the uutils-backed builtins, they run in-process against the command's own stdio, resolve paths against the shell working directory, honor cancellation, and are disabled by `PI_DISABLE_UUTILS_BUILTINS`.
 - The bash tool prompt now lists the available shell builtins (`mkdir` through `jq`, `rm`/`mv`/`ln`, and the moreutils set) so the model relies on them without existence checks; the line is dropped when `PI_DISABLE_UUTILS_BUILTINS` disables the builtins and omits unix-only `errno` on Windows.
@@ -59,6 +62,7 @@
 ## [17.1.1] - 2026-07-24
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the `/session pin` subcommand and account picker to pin provider OAuth accounts for the current session
 - Added the disabled-by-default `computer` essential tool with configurable enablement, backend, display, and maximum width/height settings. Native desktop execution runs through a `DesktopSession` worker; observation uses read approval, input uses exec approval, and provider checks always prompt and fail closed.
@@ -87,6 +91,7 @@
 - Replaced the `providers.webSearch` and `providers.image` single-preference configuration options with `providers.webSearchOrder` and `providers.imageOrder` priority lists. Existing configurations migrate automatically on startup.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added dynamic multi-root workspace context support, allowing users to manage multiple workspace directories mid-session via `/add-dir`, `/remove-dir`, and `/dirs` slash commands, or seed them at launch using the `--add-dir` CLI flag.
 - Added `/live`, a Codex-authenticated real-time voice interface that streams microphone audio over WebRTC and routes coding tasks through the active agent session.
@@ -137,6 +142,7 @@
 ## [17.0.9] - 2026-07-23
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added per-call `model` selection to the `task` tool, including per-item batch selectors, fallback chains, and explicit reasoning suffixes.
 - Added Firecrawl keyless mode: explicitly selecting `firecrawl` as the web-search provider now works without `FIRECRAWL_API_KEY` by calling the Firecrawl REST API without an `Authorization` header; the automatic provider chain remains credential-gated (#4332).
@@ -170,6 +176,7 @@
 ## [17.0.8] - 2026-07-22
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `/tree` re-answer option for past `ask` tool results, allowing users to re-open the picker with original questions and branch the new answer as a sibling while keeping the original branch reachable.
 - Added configurable Hindsight client request deadlines via `hindsight.requestTimeoutMs`, `reflectTimeoutMs`, `recallTimeoutMs`, and `retainTimeoutMs` settings (and matching `HINDSIGHT_*_TIMEOUT_MS` environment variables).
@@ -236,6 +243,7 @@
 - Fixed failed plan-mode exits leaving the session on the restored execution model while plan mode remained active and silently changing ambient `xd://` tool presentation; rollback now restores the plan model, thinking level, and exact top-level-versus-mounted tool partition so exit can be retried safely ([#6013](https://github.com/can1357/oh-my-pi/pull/6013)).
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added native Warp CLI-agent events for rich session status, tool approvals, and completion notifications ([#5592](https://github.com/can1357/oh-my-pi/pull/5592) by [@metaphorics](https://github.com/metaphorics)).
 - Added Codex (ChatGPT subscription) support to `generate_image`. The tool now resolves a connected `openai-codex` OAuth credential and drives OpenAI's hosted `image_generation` tool through the ChatGPT backend (`chatgpt.com/backend-api/codex/responses`, `chatgpt-account-id` header) **independent of the active chat model** — so image generation works on a ChatGPT/Codex subscription with no metered `OPENAI_API_KEY`, even when the active model is Claude/Gemini/etc. A new `providers.image: "openai-codex"` option forces it; `auto` now auto-detects a connected subscription (priority: active GPT image tool > Codex subscription > Antigravity > xAI > OpenRouter > Gemini), and the `openai` preference falls back to it when no `OPENAI_API_KEY`/active GPT model is present.
@@ -355,6 +363,7 @@
 ## [17.0.5] - 2026-07-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for Codex (ChatGPT subscription) in `generate_image` via the `providers.image: "openai-codex"` option, including automatic subscription detection and fallback logic.
 - Added an optional `provider` parameter to `generate_image` to override the global image provider setting for a single request.
@@ -453,6 +462,7 @@
 ## [17.0.2] - 2026-07-17
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added native Warp CLI-agent events for rich session status, tool approvals, and completion notifications.
 - Added support for ChatGPT/Codex subscriptions in the `generate_image` tool, allowing image generation without a metered `OPENAI_API_KEY` even when using other active models.
@@ -602,6 +612,7 @@
 - Fixed prewalk repeatedly continuing after a bash-only task such as `commit` had already completed ([#5551](https://github.com/can1357/oh-my-pi/issues/5551)).
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Fixed the Codex `config.toml` MCP importer dropping `cwd` and leaving relative `command` values unrooted, which broke the bundled Codex Computer Use server (`ENOENT` on spawn); relative `command`/`cwd` now resolve against the Codex config directory like the claude-plugins/omp-plugins providers ([#5561](https://github.com/can1357/oh-my-pi/issues/5561)).
 - Fixed streamed replace-mode edits with `ssh://` paths terminating the active prompt before normal tool dispatch ([#5552](https://github.com/can1357/oh-my-pi/issues/5552)).
@@ -635,6 +646,7 @@
 - Removed the `tools.essentialOverride` setting, the `mcp_tool_selection` session message type, and the `xdev` `--tools` token.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `xd://` virtual tool devices (controlled by the `tools.xdev` setting, default on), allowing mounted tools to be discovered via `read xd://`, documented via `read xd://<tool>`, and executed via `write xd://<tool>`.
 - Added the `edit.enforceSeenLines` setting (default off) to gate the hashline seen-line guard. When enabled, edits anchored on lines that a prior `read` or `grep` never displayed are rejected.
@@ -676,6 +688,7 @@
 - Removed the separate `selector` parameters from `read` and `grep`; line ranges and read modes must now be appended to `path`.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `generate_image.enabled` setting (Settings › Tools › Generate Image) to allow toggling the image generation tool.
 
@@ -747,6 +760,7 @@
 - Replaced the `--reasoning-slide-*` flag family with a unified `--prewalk` mechanism (`--prewalk`, `--prewalk-into <model>`, and `--no-prewalk`) to manage model handoffs during execution.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a new `--prewalk` execution flow (with `--prewalk-into <model>` and `--no-prewalk` overrides) that starts tasks on a strong model for planning and todo initialization before handing off to a faster, cheaper model for implementation.
  - Added a status line annotation for the active prewalk phase (armed or active).
@@ -786,6 +800,7 @@
 ## [16.4.8] - 2026-07-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added invocation-specific schemas to task subagents and unified task/eval agent execution, including host-enforced read-only plan-mode agents ([#5279](https://github.com/can1357/oh-my-pi/issues/5279))
 
@@ -812,6 +827,7 @@
 ## [16.4.8] - 2026-07-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a predicate form to the browser run's `wait()` helper: `wait(fn, { timeout?, interval? })` polls the function (sync or async) until truthy and resolves with that value, failing with a named timeout error (deadline clamped under the cell budget so it always beats the opaque whole-cell timeout) instead of Bun's `sleep expects a number` or a whole-cell stall from in-page polling Promises; both `wait` forms now register in the stall diagnosis of cell timeouts
 - Added `--reasoning-slide-model` and `--reasoning-slide-turns` to switch a running agent from its initial model after a fixed number of completed assistant turns
@@ -839,6 +855,7 @@
 ## [16.4.7] - 2026-07-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Enabled Home and End keyboard navigation in the model browser
 - Added a `c` hotkey in the plan-review overlay that copies the current reviewed plan markdown to the system clipboard, including in-overlay edits.
@@ -857,6 +874,7 @@
 ## [16.4.6] - 2026-07-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `invalidate` action to the usage command to clear cached usage reports
 - Added model-oriented keys and wildcard entries to `retry.fallbackChains`: a `provider/model-id` key attaches a fallback chain to that exact model, a `provider/*` key covers every current or future model of a provider, and a `provider/*` chain entry keeps the failing model's id while swapping the provider (`google-antigravity/x` → `google/x`) — so fallbacks survive role and model reassignments without config edits. Keys resolve by specificity: exact model, then provider wildcard, then role, then `default`.
@@ -890,6 +908,7 @@
 - Reworked the task tool wire schema: moved the top-level agent field into individual task items, renamed assignment to task and id to name, and removed the role and description fields. UI labels are now automatically generated from the task text.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Introduced a fullscreen, mouse-supported Model Hub (via /model) featuring a sidebar of scopes, metadata-aligned model tables, inline role/thinking assignment strips, custom role creation, quick-switch cycle editing, and manual provider refreshing.
 - Added a /pause command to freeze all active agents (main, subagents, and advisor) at their next safe step, allowing manual repository edits mid-run before resuming.
@@ -932,6 +951,7 @@
 ## [16.4.3] - 2026-07-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added /vibe mode, allowing the model to act as a director driving persistent background worker sessions (fast and good tiers) with dedicated session tools (vibe_spawn, vibe_send, vibe_wait, vibe_kill, vibe_list) and a live TUI "TV wall" showing active worker activity, tool traces, and streamed output.
 - Added multiple credential-free web search providers (Google, Bing, Yahoo, Startpage, Ecosia, Mojeek) with stealth-browser escalation, bot challenge detection, and recency filters, alongside a parallel public ("Public Web") provider that aggregates and deduplicates results across all engines.
@@ -998,6 +1018,7 @@
 - Changed the public `selectLaunchAdapter()` result from `DapResolvedAdapter | null` to `LaunchAdapterSelection`; callers must handle `adapter`, `unavailable`, and `none` outcomes.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a native, first-class max thinking tier for supported models, including a new thinkingBudgets.max configuration setting, support in CLI flags (--thinking, :max model suffixes), and terminal theme customization (thinkingMax border color and icons).
 
@@ -1053,6 +1074,7 @@
 ## [16.3.12] - 2026-07-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Typing `#<number>` (e.g. `#3164`) in the prompt now offers PR and Issue autocomplete candidates that rewrite to the `pr://`/`issue://` internal URL, resolved from the current repo's git remote via the existing `read` tool → InternalUrlRouter → `gh` pipeline. Naming the type (`pr #3164` / `issue #3164`) constrains the candidates to that kind, and embedded hashes like `owner/repo#N`, `foo#N`, or URL fragments are left untouched ([#3218](https://github.com/can1357/oh-my-pi/issues/3218))
 
@@ -1133,6 +1155,7 @@
 ## [16.3.9] - 2026-07-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `--file` flag to the `say` command to read input text directly from files.
 - Enabled streaming text synthesis in the `say` command for gapless, long-form audio generation.
@@ -1157,6 +1180,7 @@
 ## [16.3.7] - 2026-07-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for reading full memory rows (working or episodic) via `read memory://<id>` under the mnemopi backend, returning a YAML-frontmatter header with metadata to prevent blind overwrites during edits.
 - Updated the URI grammar to support `memory://root[/…]` for file-backed summaries and `memory://<memory-id>` for specific mnemopi IDs.
@@ -1331,6 +1355,7 @@
 - Changed the `grep`, `glob`, and `ast_grep` tools to take a single optional `path` argument instead of a `paths` array. `path` accepts one path or a semicolon-delimited list (`src; tests`); omitting it searches the workspace root (`.`). Multi-path search, delimited expansion, and internal-URL scopes are unchanged. (`ast_edit` continues to take `paths`.)
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `speech.enhanced` setting to rewrite assistant output into natural spoken prose
 - Added `speech.enhanced` setting: assistant output is rewritten into natural spoken prose by the tiny/smol model before synthesis — code blocks become one-clause descriptions, links speak their label or site name, numbers and symbols read naturally, lists become flowing sentences. Blocks are rewritten fence-aware and coalesced (bounded to two concurrent completions); any failed or timed-out rewrite falls back to the mechanical cleanup so speech never blocks on the model.
@@ -1350,6 +1375,7 @@
 ## [16.3.0] - 2026-07-02
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `providers.anthropic.serverSideFallback` configuration option to opt into Anthropic's server-side-fallback beta chain, allowing Claude requests to automatically retry on alternative models when blocked by classifiers.
 - Added `task.softRequestBudgetNotice` configuration option to enable subagent soft-budget wrap-up steering notices while keeping the graceful abort guard active.
@@ -1462,6 +1488,7 @@
 - Renamed the built-in quick_task subagent to sonic; update any task spawns or configurations referencing quick_task by name.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the llama3.2:3b local model option for memory and auto-thinking tasks, utilizing a quantized ONNX model.
 - Added a built-in Tester subagent designed to write high-signal tests for behavior, invariants, and edge cases while avoiding redundant or low-value tests.
@@ -1488,6 +1515,7 @@
 ## [16.2.8] - 2026-06-30
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added built-in Go coding rules including `go-add-cleanup`, `go-bench-loop`, `go-exp-promoted`, `go-ioutil`, `go-join-hostport`, `go-new-expr`, `go-rand-v2`, and `go-range-int`
 
@@ -1582,6 +1610,7 @@
 ## [16.2.3] - 2026-06-28
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for multiple configurable advisors via WATCHDOG.yml/WATCHDOG.yaml files, allowing per-advisor models, tool subsets, and instructions.
 - Added /advisor configure, a full-screen, mouse-driven TUI to easily manage the advisor roster, configure models, toggle tool permissions, and edit instructions.
@@ -1631,6 +1660,7 @@
 ## [16.2.2] - 2026-06-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a new `tiny` model role for consolidated online task handling.
 - Added a `textVerbosity` setting to control OpenAI and Codex response detail.
@@ -1654,6 +1684,7 @@
 ## [16.2.1] - 2026-06-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Included project context files (AGENTS.md, etc.) in the advisor's system prompt to ensure adherence to user-defined project rules
 - Added project context files (AGENTS.md and the like) to the advisor's system prompt, so the read-only reviewer judges against the user's standing project rules the same way the main agent does.
@@ -1670,6 +1701,7 @@
 - Renamed the `search` tool to `grep` and the `find` tool to `glob`. Existing user settings are automatically migrated to the new configuration keys.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `ssh://host/path` support to `read`, `search`, and `write` tools for single text files and directory listings on pre-configured POSIX SSH hosts.
 - Added an interactive `/move` overlay with path autocompletion and directory creation prompts, starting a fresh session in the target directory while leaving the previous session resumable.
@@ -1736,6 +1768,7 @@
 ## [16.1.23] - 2026-06-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `compaction.midTurnEnabled` for mid-turn threshold auto-compaction before the next tool-loop provider request. ([#3525](https://github.com/can1357/oh-my-pi/issues/3525))
 - Added `grep -q`/`--quiet`/`--silent` and `-x`/`--line-regexp` to the in-process `grep` builtin used by the bash tool. `-q` suppresses all stdout and exits 0 on the first match (short-circuiting, with match status taking precedence over read errors per GNU); `-x` anchors each pattern to whole lines. Unblocks shell conditionals such as `grep -qx "$applet" <(strings bin)`.
@@ -1805,6 +1838,7 @@
 ## [16.1.18] - 2026-06-25
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added --list flag to view stored OAuth accounts for a provider
 - Added --account flag to select a specific OAuth account by index for token retrieval
@@ -1859,6 +1893,7 @@
 - Changed the `eval` tool to take a single cell per call (`{ language, code, title?, timeout?, reset? }`) instead of a `cells` array. State still persists per language across separate eval calls, tool calls, and `task` subagents, so each call is one logical step that reuses everything earlier calls defined — the array only encouraged re-importing/re-declaring the same setup in every batch. The schema, field descriptions, examples, system `eval.md`/`workflowz` helper docs, and the `[i/n]` cell-counter (now hidden for single cells) were updated to match; the renderer, ACP start-text, copy-targets, and collab-web tool view still parse legacy multi-cell transcripts.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `isolated`, `apply`, and `merge` options to eval `agent()` across every workflow runtime (Python, JavaScript, Ruby, Julia) so `workflowz`-driven fan-outs can request the same copy-on-write worktree isolation the `task` tool offers (strict opt-in via `isolated: true`, matching the `task` tool; `apply: false` keeps captured patches/branches without merging back; `merge: false` forces patch mode). Extracted the task-isolation lifecycle into `task/isolation-runner.ts` so the eval bridge and `TaskTool` share one implementation ([#3196](https://github.com/can1357/oh-my-pi/issues/3196))
 
@@ -1902,6 +1937,7 @@
 ## [16.1.15] - 2026-06-22
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `share.store` setting (`blob` "Encrypted Blob" | `gist` "GitHub Gist", default `blob`) controlling where `/share` uploads the encrypted session blob — the share server (`blob`) or a secret GitHub gist with share-server fallback (`gist`).
 
@@ -1923,6 +1959,7 @@
 ## [16.1.14] - 2026-06-22
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a Ruby eval backend (`language: "rb"`): a persistent subprocess Ruby kernel that shares the standard agent tool bridge and evaluation model, supporting IRB-style auto-display of results in a persistent session
 - Added a Julia eval backend (`language: "jl"`): a persistent subprocess Julia kernel that shares the standard agent tool bridge and evaluation model, supporting Julia REPL-style auto-display of results in a persistent session
@@ -1964,6 +2001,7 @@
 ## [16.1.11] - 2026-06-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `tab.waitForSelector` for more robust element-wait behavior
 - Added `tab.waitForNavigation` to monitor and await page transitions
@@ -1995,6 +2033,7 @@
 ## [16.1.10] - 2026-06-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `tab.ariaSnapshot(selector?)` to the browser tool for Playwright-format ARIA-tree YAML
 - Added `tab.ref("e5")` and support for `aria-ref=e5` selectors in all `tab` action methods
@@ -2010,6 +2049,7 @@
 ## [16.1.9] - 2026-06-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added LLM request JSON export functionality to `/dump`
 
@@ -2035,6 +2075,7 @@
 ## [16.1.8] - 2026-06-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added "Prose Only Thinking" setting to opt-out of rendering code blocks within AI thinking traces
 - Replaced code blocks in AI thinking traces with an ellipsis when "Prose Only Thinking" is enabled
@@ -2087,6 +2128,7 @@
 ## [16.1.6] - 2026-06-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Enabled inline prompts with `/loop` commands (e.g., `/loop 10 fix the bug`)
 - Added support for compound duration formats in `/loop` (e.g., `1h30m`)
@@ -2143,6 +2185,7 @@
 ## [16.1.2] - 2026-06-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a welcome-screen tip for the `/advisor` runtime. Tips ending in a `[NEW]` marker now render a bold rainbow `NEW!` tag (it shimmers across the welcome intro's animation frames, then settles into a still rainbow) and are weighted to surface more often in the random tip rotation.
 
@@ -2178,6 +2221,7 @@
 ## [16.1.0] - 2026-06-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a prompt-cache miss marker: a slim `⊘ cache miss · <n> tokens` divider above an assistant turn whose request lost the provider prompt cache. Detected from per-turn usage — the previous turn cached a meaningful prefix but this request read none of it back and reprocessed the prompt (e.g. after a thinking-level / service-tier / model change, tool or system-prompt change, or a history rewrite). Reports the reprocessed token count. Toggle with the `display.cacheMissMarker` setting (Appearance → Display, on by default).
 
@@ -2200,6 +2244,7 @@
 ## [16.0.11] - 2026-06-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `__advisor.jsonl` transcript persistence for advisor model usage attribution and visibility in the Agent Hub
 - Added defensive reservation against naming a task `__advisor` to prevent filesystem collisions with internal transcripts
@@ -2235,6 +2280,7 @@
 ## [16.0.10] - 2026-06-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Updated the `pi` option of the `tools.format` setting to use the new compact sigil-delimited owned tool-calling dialect (`§`/`«…»`/`¤`/`‡‡`) that uses ~46% fewer tokens than the legacy format on typical calls.
 - Integrated terminal QR codes directly into `/collab` and `/collab view` to display both deep links and scannable codes, and added a `collab.webUrl` setting for separately hosted collab web clients.
@@ -2258,6 +2304,7 @@
 ## [16.0.9] - 2026-06-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `--print-thoughts` flag for single-shot print mode that includes sanitized thinking blocks in the text output; default print output stays the final answer only. When thinking is hidden by the `hideThinkingBlock` setting, `--print-thoughts` un-hides it for the print run so the flag is not a silent no-op (an explicit `--hide-thinking` still wins).
 
@@ -2306,6 +2353,7 @@
 ## [16.0.6] - 2026-06-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `model.loopGuard.enabled` (default `true`) and `model.loopGuard.checkAssistantContent` (default `true`) settings to configure thinking and assistant prose loop detection.
 - Added explicit ArkType schema descriptions to parameters across all agent tools to improve model tool-calling instructions and parameter guidance
@@ -2359,6 +2407,7 @@
 ## [16.0.5] - 2026-06-17
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `tui.tight` setting (default `false`) to enable tight layout by removing the 1-character horizontal padding from terminal output.
 - Added a `providers.antigravityEndpoint` setting (`auto`, `production`, `sandbox`) to control google-antigravity routing for chat, search, image, and discovery calls
@@ -2408,6 +2457,7 @@
 ## [16.0.3] - 2026-06-16
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for LaTeX color commands (`\textcolor`, `\colorbox`, and `\fcolorbox`) in user-visible terminal prose and final chat to colorize output
 
@@ -2453,6 +2503,7 @@
 ## [16.0.2] - 2026-06-16
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the `UMANS_WEBSEARCH_PROVIDER` environment variable to CLI help for Umans gateway web search backend selection.
 
@@ -2487,6 +2538,7 @@
 - **Key detection functions removed from `@mariozechner/pi-tui`**: All `isXxx()` key detection functions (`isEnter()`, `isEscape()`, `isCtrlC()`, etc.) have been removed. Use `matchesKey(data, keyId)` instead (e.g., `matchesKey(data, "enter")`, `matchesKey(data, "ctrl+c")`). This affects hooks and custom tools that use `ctx.ui.custom()` with keyboard input handling. ([#405](https://github.com/badlogic/pi-mono/pull/405))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added GitHub Copilot user-global discovery to the `github` provider: it now loads user-global instructions from `~/.copilot/copilot-instructions.md`, honors the `COPILOT_HOME` relocation override, reads each directory listed in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` for an `AGENTS.md` and `.github/instructions/**/*.instructions.md` (matching Copilot CLI), scans the project `.github/instructions/` tree recursively, and surfaces VS Code Copilot prompt files (`*.prompt.md`) from `.github/prompts/` as slash commands. Previously only the project `.github/` tree was scanned, so Copilot CLI users' cross-repo config was silently ignored. Closes #1913, #1915, #1916.
 - Added web search provider exclusions so `web_search` can skip configured providers without disabling them for model use ([#2608](https://github.com/can1357/oh-my-pi/issues/2608)).
@@ -2592,6 +2644,7 @@
 - Changed `/dump` transcript output to render messages with the selected model's native dialect turn and thinking envelopes instead of markdown role headings.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `advisor.syncBacklog` setting (`off`, `1`, `3`, `5`) to pause turn completion until advisor review backlog drops below the threshold, with a maximum 30-second wait
 - Added advisor backlog synchronization at turn end when enabled so the main session stays aligned with the advisor's pending review turns
@@ -2627,6 +2680,7 @@
 ## [15.13.3] - 2026-06-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Unexpected stop detection: optional tiny/smol classifier that continues the turn when the assistant says it will act but emits no tool calls.
 - Settings `features.unexpectedStopDetection` and `providers.unexpectedStopModel`.
@@ -2649,6 +2703,7 @@
 ## [15.13.2] - 2026-06-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added tool examples data to exported RPC session tool metadata, so tool dumps and other clients can receive model-call examples
 - Added `supportsTools` to model definitions and overrides so custom model configs can declare whether a model supports native tool calls
@@ -2674,6 +2729,7 @@
 ## [15.13.1] - 2026-06-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added isolated profile support via `--profile <name>` / `OMP_PROFILE` and shell alias bootstrap via `--alias <command>`, including launch/ACP bootstrap handling, extension-flag-safe parsing, profile-scoped user config discovery, and symlinked extension-directory discovery.
 - Fixed paste and image placeholders crashing when the editor renders before theme initialization.
@@ -2712,6 +2768,7 @@
 - Renamed the `tts.enabled` setting to `speechgen.enabled` (same boolean, default off; no alias). It still gates the on-demand `tts` speech-generation tool, now labelled "Speech Generation" in the settings panel.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `paste.largeMenuThreshold` setting (0/100/250/500/1000, default 100) to control when large pasted content triggers the large-paste menu or stays as a normal `[Paste]` marker
 - Added a large-paste editor menu for pasted text over the threshold that lets users choose to wrap the paste in a fenced code block, wrap it in `<pasted_text>` XML tags, or save it as `local://attachment-N` for on-demand reading
@@ -2803,6 +2860,7 @@
 - Removed the `writeLine` and `writeLineSync` methods from the public `SessionStorageWriter` contract, requiring custom `SessionStorage` backends to switch to the `append` API
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added package-level exports for `SessionContext`, session entry types, session listing/loader helpers, and migration APIs via `session/session-context`, `session/session-entries`, `session/session-listing`, `session/session-loader`, and `session/session-migrations`
 - Added asynchronous session-write `append(...)`-based persistence API in session storage implementations so callers can stream writes without sync line-appending methods
@@ -2843,6 +2901,7 @@
 - Removed the top-level `--list-models` flag path and migrated model listing to the new `omp models` command
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `omp models` command to list and manage models with `ls`, `find`, `canonical`, and `refresh` actions
 - Added `--json` output plus `-e/--extension`, `--no-extensions`, and `--config` controls to `omp models` listings
@@ -2894,6 +2953,7 @@
 ## [15.12.1] - 2026-06-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the `compaction.dropUseless` setting (default on): tool results flagged contextually useless are elided by the per-turn cache-aware prune pass and the pre-compaction threshold prune, replaced with `[Uneventful result elided]`. Built-in tools flag their uneventful outcomes — zero-match/zero-result `search`/`find`/`ast_grep`/`recall` (warnings included; the follow-up call has already corrected course), empty LSP lookups, `job` polls where everything is still running (plus nothing-to-wait-for and unknown-id polls), `irc` wait timeouts and empty inbox drains, and zero-result `github` searches / run-watch give-ups
 
@@ -2904,6 +2964,7 @@
 ## [15.12.0] - 2026-06-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/collab view` command to create a read-only spectator join link
 - Added read-only hints and status text for guest-only participation in collab sessions
@@ -2938,6 +2999,7 @@
 ## [15.11.8] - 2026-06-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Updated collab link handling to accept compact `roomId#key` links and relay hosts without explicit scheme when joining or starting sessions
 - Added `/collab stop` and `/collab status` options to control and inspect active shared sessions
@@ -2966,6 +3028,7 @@
 ## [15.11.7] - 2026-06-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added mouse support to the setup wizard, including hover, wheel scrolling, and click-to-select for provider sign-in, web-search provider, glyph, and theme option lists
 - Added pointer support for the providers tab bar so tabs can be selected by click and wheel scrolling works inside the active panel
@@ -3006,6 +3069,7 @@
 ## [15.11.5] - 2026-06-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `codexResets.autoRedeem`, `codexResets.minBlockedMinutes`, and `codexResets.keepCredits` settings so Codex users can opt in to automatic spending of saved rate-limit resets
 - Added automatic Codex reset redemption flow so a blocked weekly usage-limit request can be retried immediately after consuming a saved reset when auto-redeem is enabled
@@ -3047,6 +3111,7 @@
 ## [15.11.4] - 2026-06-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added mouse-driven interaction to `/settings`, including tab and setting row hover highlighting, wheel scrolling, and left-click activation for entries and submenus
 - Added fullscreen `/settings` mouse-event handling so scrolling and clicks work in an alternate-screen overlay
@@ -3109,6 +3174,7 @@
 ## [15.11.2] - 2026-06-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the Expert Elixir language server (`expert`, invoked as `expert --stdio`) to the built-in LSP server list, auto-detected for Mix projects (`mix.exs`/`mix.lock`). When both are installed, `elixir-ls` remains the primary navigation server (Expert is ordered after it).
 - Added `magicKeywords.enabled` and per-keyword `magicKeywords.ultrathink`, `magicKeywords.orchestrate`, and `magicKeywords.workflow` settings to disable hidden magic-keyword notices and ultrathink auto-thinking escalation ([#1796](https://github.com/can1357/oh-my-pi/issues/1796)).
@@ -3134,6 +3200,7 @@
 ## [15.11.1] - 2026-06-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the `statusLine.transparent` appearance setting (default off): when enabled, the status line skips the theme's `statusLineBg` fill and powerline end caps so the bar inherits the terminal's default background — useful in Ghostty and other terminals whose theme background does not match the theme's hardcoded status-line color ([#2306](https://github.com/can1357/oh-my-pi/issues/2306))
 
@@ -3174,6 +3241,7 @@
 - Replaced the standalone session-observer overlay with the Agent Hub: `app.session.observe` (`ctrl+s`) now opens the hub, whose chat view absorbed the observer's transcript renderer
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Snapcompact compaction now passes the session model so frames render in the provider-optimal shape (unscii `8x8r-bw` for Anthropic-family/unknown APIs, `8x8r-sent` for Google, Lanczos-stretched `6x6u-sent` with `detail: "original"` for OpenAI), per the snapcompact 200k-token evals
 - Added per-turn supersede pruning of stale `read` results: when a file is re-read, older copies of the same path/selector are pruned from context at cache-favorable moments (small suffix, idle gap, or alongside overflow pruning). Gated by the new `compaction.supersedeReads` setting (default on)
@@ -3221,6 +3289,7 @@
 ## [15.10.12] - 2026-06-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added RPC subagent subscription frames, snapshots, and transcript catch-up APIs for desktop clients embedding `omp --mode rpc`.
 - Added opt-in `shellMinimizer.sourceOutlineLevel` and `shellMinimizer.legacyFilters` settings so shell minimization can tune source outlining and selectively fall back to conservative legacy routing.
@@ -3265,6 +3334,7 @@
 ## [15.10.11] - 2026-06-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `supportsReasoningParams`, `alwaysSendMaxTokens`, `strictResponsesPairing`, and a recursive `whenThinking` overlay (alongside `streamIdleTimeoutMs`/`supportsLongPromptCacheRetention`/`requiresToolResultId`/`replayUnsignedThinking`) to the OpenAI/Anthropic `compat` schema so custom model entries can configure those provider-specific capabilities
 - Custom model `thinking` config now uses the catalog's explicit vocabulary: `efforts` (ordered list) plus optional `defaultLevel`, `effortMap`, and `supportsDisplay` overrides; the legacy `minLevel`/`maxLevel`/`levels` range shape is still accepted and normalized at parse time. Wire facts (`effortMap`/`supportsDisplay`) are backfilled from model identity when not set, so existing claude-proxy configs keep the 5-tier adaptive scale and summarized display without changes.
@@ -3382,6 +3452,7 @@
 ## [15.10.10] - 2026-06-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a read-only `view` op to the `todo` tool that echoes the current list without mutating state, so the agent can recover exact task text instead of guessing it from memory.
 
@@ -3420,6 +3491,7 @@
 ## [15.10.8] - 2026-06-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added an optional `fetch` option to `CustomToolContext` so custom tools can use a caller-provided HTTP implementation
 - Added optional `fetch` overrides to `ModelRegistry` construction and MCP/web search/tool network calls, enabling callers to inject custom HTTP clients instead of relying on global `fetch`
@@ -3440,6 +3512,7 @@
 ## [15.10.6] - 2026-06-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `/plan-review` command that manually (re-)opens the plan-review overlay while plan mode is active. Since there is no fixed plan filename, it reviews the newest `local://<slug>-plan.md` the agent wrote — useful for pulling the review back up after dismissing it, or reviewing a plan the agent wrote without calling `resolve`.
 
@@ -3462,6 +3535,7 @@
 ## [15.10.5] - 2026-06-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Homebrew and mise package-manager update paths to the self-update command so installations launched from those tools are updated through their native workflows
 - Added detection of Homebrew and mise install locations so self-update chooses the manager-specific updater when the active `omp` binary comes from a package-manager-managed path
@@ -3514,6 +3588,7 @@
 ## [15.10.4] - 2026-06-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - macOS release binaries are now signed with a Developer ID Application identity (hardened runtime + secure timestamp + JIT/library-validation entitlements) and notarized in CI when the `APPLE_*` signing secrets are configured; releases auto-fall back to ad-hoc signing until then. This makes the shipped binaries Gatekeeper-acceptable, unblocking an official Homebrew submission ([#776](https://github.com/can1357/oh-my-pi/issues/776)). See `docs/macos-signing-notarization.md`.
 - Added a Homebrew install path: `brew install can1357/tap/omp`. The [can1357/homebrew-tap](https://github.com/can1357/homebrew-tap) formula installs the prebuilt release binary, and a `release_brew` CI job regenerates it (version + per-asset sha256) from each published release via `scripts/ci-update-brew-formula.ts` ([#776](https://github.com/can1357/oh-my-pi/issues/776)).
@@ -3534,6 +3609,7 @@
 ## [15.10.3] - 2026-06-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added clickable file path hyperlinks to read tool outputs (read-call rows, grouped summaries, and inline previews) using resolved or absolute file targets with selector-based line anchors for quick navigation
 - Added a resolved-span echo to `replace block`/`delete block` edits: a successful block op now prints `replace block N → resolved lines A-B (K lines)` between the section header and the diff preview, so the model can confirm tree-sitter matched the construct it intended (e.g. catch a decorator left outside the block) instead of inferring the span from the diff after the fact.
@@ -3578,6 +3654,7 @@
 ## [15.10.2] - 2026-06-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `raw-sse.txt` to debug report bundles, exporting recent raw provider SSE diagnostics when captured
 - Added `/model` visibility for auto-selected role defaults: inferred `pi/smol`/`pi/slow`/designer choices now show as compact `[ROLE auto]` badges, while explicitly configured roles keep the existing solid badges and thinking labels.
@@ -3646,6 +3723,7 @@
 ## [15.10.1] - 2026-06-07
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `display.smoothStreaming` setting (default `true`) to let users enable or disable smooth assistant-stream text reveal
 - Added `/tan <work>` slash command to fork the current conversation into a background agent so tangential work can continue asynchronously while your main session stays active
@@ -3721,6 +3799,7 @@
 - Replaced the `providers.parallelFetch` boolean setting with the `providers.fetch` enum (`auto` / `native` / `trafilatura` / `lynx` / `parallel` / `jina`) that selects the URL reader-backend priority for the `read`/`fetch` tool, mirroring `providers.image`/`providers.webSearch`. Existing configs are migrated automatically: the legacy key is dropped and the new `auto` default applies.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a GitHub Actions read handler to the `read`/web-fetch GitHub scraper. Fetching `github.com/{owner}/{repo}/actions/runs/{id}` renders the run metadata plus a per-job breakdown (steps listed for any job that did not succeed), and `…/actions/runs/{id}/job/{id}` (also the API-style `…/jobs/{id}`) renders a single job's metadata, step table, and full plain-text logs. Logs are fetched via the `actions/jobs/{id}/logs` redirect using `GITHUB_TOKEN`/`GH_TOKEN` when present, with the per-line ISO timestamp prefix and leading BOM stripped; the section degrades to an explicit notice when logs are unavailable (no token, private repo, or expired/unfinalized run).
 
@@ -3747,6 +3826,7 @@
 ## [15.9.69] - 2026-06-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added anonymous fallback for Perplexity web search, allowing `web_search` and explicit Perplexity provider usage when no Perplexity credentials are configured
 - Added `gallery` CLI command to render built-in tool renderer output across streaming, in-progress, success, and failure states
@@ -3778,6 +3858,7 @@
 ## [15.9.67] - 2026-06-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `timeout-pause` and `timeout-resume` eval bridge status events emitted around `agent()`/`llm()` operations
 - Added a `/copy` picker: `/copy` now opens a fullscreen, outlined tree of recent assistant messages with their code blocks nested beneath (like `/tree`). Navigate with ↑↓, and Enter copies the highlighted node — a whole message, an individual code block, "All N blocks", or a bash/eval command interleaved with the assistant turn that issued it. A live preview pane shows the selected target, wrapping prose and syntax-highlighting code/commands.
@@ -3812,6 +3893,7 @@
 ## [15.9.5] - 2026-06-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a persistent error banner pinned above the editor when an assistant turn ends on a provider error (e.g. Anthropic's "Output blocked by content filtering policy"). The transcript `Error: …` line scrolls away as the conversation grows, so terminal turns that ended on a stream error could pass unnoticed; the banner stays in the fixed region above the input and is cleared when the next turn starts.
 - Added bold, underlined, clickable `[Image #N]` placeholders in the draft editor and sent user-message bubbles, backed by extension-bearing blob-store sidecar files so terminal `file://` links open in image viewers.
@@ -3857,6 +3939,7 @@
 ## [15.9.2] - 2026-06-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added an encrypted local auth-broker snapshot cache for `discoverAuthStorage`, with `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS` and `OMP_AUTH_BROKER_SNAPSHOT_CACHE`, so fresh cached broker credentials can boot without a blocking `/v1/snapshot` fetch and survive broker-down startup windows.
 - Added `dry-balance` CLI command to perform a dry-run OAuth account balancing check across configurable random session IDs, with sample and concurrency options, JSON output, and success/failure summary reporting
@@ -3880,6 +3963,7 @@
 ## [15.9.1] - 2026-06-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added deferred session-title generation so greetings no longer become the session title. A first user message that is only a greeting / acknowledgement / filler ("hi", "thanks", "ok", a bare number, emoji-only, etc.) is now detected deterministically and skips titling entirely — no title model is invoked. Title generation then retries on each subsequent user message while the session stays unnamed, so the title is deduced from the first message that actually describes work. A capable online title model may additionally answer `none` to decline a non-greeting taskless message (normalized to "no title").
 
@@ -3922,6 +4006,7 @@
 - Replaced the public `SessionStorage` `readTextPrefix(path, maxBytes)` and `readTextSuffix(path, maxBytes)` methods with `readTextSlices(path, prefixBytes, suffixBytes): Promise<[string, string]>`; custom session storage backends must implement the new combined slice API.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added env-driven OpenTelemetry trace export. When `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set, `omp` registers a global OTLP/proto trace exporter and switches on the agent loop's telemetry, so the `invoke_agent` / `chat` / `execute_tool` spans actually reach a collector instead of a no-op tracer. Honors the standard `OTEL_*` env contract (endpoint, headers, `OTEL_SERVICE_NAME`, `OTEL_SDK_DISABLED` and `OTEL_TRACES_EXPORTER=none` parsed case-insensitively) and the `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` capture toggle; it is a no-op when no endpoint is configured. Only the `http/protobuf` transport is supported — a `grpc` or `http/json` `OTEL_EXPORTER_OTLP*_PROTOCOL` declines rather than misrouting spans. This makes the existing telemetry usable from headless hosts that run `omp` as a spawned child process, where an in-process `TracerProvider` registered by the parent can't reach the child. Uses the `@opentelemetry/exporter-trace-otlp-proto` 2.x line, which exports cleanly under Bun.
 ## Fixed
@@ -3969,6 +4054,7 @@
 ## [15.8.2] - 2026-06-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a bundled TypeScript rule that warns against leaving `@deprecated` compatibility shims behind instead of finishing a refactor.
 
@@ -3994,6 +4080,7 @@
 ## [15.8.0] - 2026-06-02
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added an all-projects scope to the session picker (`pi --resume` / `/resume`). Press `Tab` to toggle between the current folder's sessions and every session across all projects; the all-projects list is loaded lazily and shows each session's directory. When the current folder has no sessions the picker now opens straight into all-projects scope instead of printing "No sessions found".
 - Migrated the Kagi web search provider to Kagi's V1 Search API (`POST /api/v1/search`), replacing the sunset V0 endpoint while keeping the `kagi` provider id, `KAGI_API_KEY` credential, and `/login kagi` flow unchanged ([#1272](https://github.com/can1357/oh-my-pi/pull/1272) by [@thismat](https://github.com/thismat))
@@ -4030,6 +4117,7 @@
 ## [15.7.6] - 2026-06-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `ask` option descriptions so agents can keep short labels and render explanatory text as separate muted rows in the selector.
 - Added an extension API for rendering supplemental UI below visible assistant thinking blocks.
@@ -4066,6 +4154,7 @@
 ## [15.7.3] - 2026-05-31
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for decimal and `k`/`m` suffix turn-budget directives, enabling budgets like `+1.5k` and `+2m` in eval message parsing
 - Changed eval budget resolution to honor a user `+Nk` directive over an active Goal Mode limit while falling back to Goal Mode when no per-turn ceiling is set
@@ -4118,6 +4207,7 @@
 ## [15.7.2] - 2026-05-31
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `providers.autoThinkingModel` setting so users can choose the `auto` thinking classifier backend (online smol or local tiny-memory model)
 - Added an `auto` thinking level that classifies each real user turn and resolves to a concrete low-through-xhigh effort, with online smol classification by default and an opt-in local on-device classifier.
@@ -4139,6 +4229,7 @@
 ## [15.7.0] - 2026-05-31
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `Web search` setup tab that lets users choose the preferred `providers.webSearch` provider during onboarding
 - Added manual authorization-code/redirect URL prompts for OAuth providers that require non-callback login in the setup wizard
@@ -4174,6 +4265,7 @@
 ## [15.6.0] - 2026-05-30
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added prompt-mode autocomplete for supported internal URL schemes (`skill://`, `rule://`, `agent://`, `artifact://`, `local://`, `memory://`, and `omp://`) so typing those tokens now suggests existing resources as completion candidates
 - Added fuzzy matching and ranked suggestion ordering for internal URL completion, including rule and skill descriptions, with accepted completion replacing just the typed token and inserting the chosen URL followed by a space
@@ -4235,6 +4327,7 @@
 ## [15.5.14] - 2026-05-29
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added progress status output for `llm()` calls in `eval`, including the resolved model, tier, and returned character count
 - Added an `llm(prompt, opts)` helper to both `eval` runtimes (JavaScript and Python) for oneshot, stateless LLM calls. `opts.model` selects a tier — `"smol"` (`pi/smol`), `"default"` (the session's active model, falling back to `pi/default`), or `"slow"` (`pi/slow`, with high reasoning effort on reasoning-capable models). Pass `system` for a system prompt and a plain JSON-Schema `schema` to force a structured response (the helper returns the parsed object instead of the completion string). Calls carry no conversation history and expose no agent-visible tools; they route host-side through the existing tool bridge under the reserved name `__llm__` (`packages/coding-agent/src/eval/llm-bridge.ts`).
@@ -4269,6 +4362,7 @@
 ## [15.5.12] - 2026-05-29
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the `omp-plugins` discovery provider, which scans every extension package directory configured via `extensions:` (in `~/.omp/agent/settings.json` or `<cwd>/.omp/settings.json`) or `--extension`/`-e` on the CLI for `skills/`, `hooks/pre|post/`, `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json`. Prior to this, only the extension's TypeScript factory module ran; every sibling capability the docs (https://omp.sh/docs/extension-authoring) advertised was silently ignored ([#1496](https://github.com/can1357/oh-my-pi/issues/1496)).
 - Added the top-level `omp install <target>` subcommand documented at https://omp.sh/docs/extension-authoring. Local paths route to `omp plugin link` (so the directory is symlinked into the plugin set), and npm/marketplace specs route to `omp plugin install`. Before this, `install` was not a registered subcommand and the CLI runner silently forwarded `install ./my-extension` to `launch` as an initial LLM prompt ([#1496](https://github.com/can1357/oh-my-pi/issues/1496)).
@@ -4282,6 +4376,7 @@
 ## [15.5.11] - 2026-05-29
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `SqlSessionStorage`, a `bun:sql`-backed implementation of `SessionStorage` that persists session JSONL into PostgreSQL, MySQL/MariaDB, or SQLite. Pass a connected `Bun.SQL` instance (the constructor accepts `postgres://`, `mysql://`, or `sqlite:` URLs) to `SqlSessionStorage.create({ client, table?, adapter?, createTable? })` and hand the returned storage to any `SessionManager` factory. The dialect is auto-detected from `client.options.adapter` and used to pick the correct DDL plus upsert-with-append syntax (`ON CONFLICT … DO UPDATE` for PG/SQLite, `ON DUPLICATE KEY UPDATE` for MySQL), so the agent's append-only persist pattern works in a single round-trip per line. Same in-memory mirror and `drain()` semantics as the Redis backend; blobs and tool artifacts still live on disk via `ArtifactManager`/`BlobStore`.
 - Added `RedisSessionStorage`, a `bun:redis`-backed implementation of the `SessionStorage` interface that lets API consumers route session JSONL through Redis instead of local disk. Pass a connected `Bun.RedisClient` (or any compatible adapter) to `RedisSessionStorage.create({ client, prefix? })` and hand the returned storage to `SessionManager.create(cwd, sessionDir, storage)` (or any other static factory that accepts a storage argument). An in-memory mirror is loaded on creation so the interface's synchronous methods (`existsSync`, `statSync`, `listFilesSync`, …) keep their contracts; `drain()` waits for queued background writes. Tool artifacts and image blobs still live on disk via `ArtifactManager`/`BlobStore` — Redis only owns the session JSONL keyspace under the configured prefix.
@@ -4299,6 +4394,7 @@
 ## [15.5.10] - 2026-05-28
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/drop-images` slash command that strips every `ImageContent` block from the current session's branch — `user`/`developer`/`custom`/`hookMessage`/`toolResult` content arrays plus `toolResult.details.images` and `fileMention.files[].image` — rewrites the session JSONL, rebuilds the agent's in-memory message list, tears down Codex Responses provider sessions, and rebuilds the TUI chat container so the change is visible immediately. ACP clients receive the same handler (returns `"Dropped N images …"` / `"No images found …"` through `runtime.output`). Stripping content that would leave a `toolResult` or `user` message with zero blocks inserts a single `[image removed]` placeholder so providers do not reject empty content arrays.
 
@@ -4313,6 +4409,7 @@
 - Changed hashline edit parsing to require wrapped hunk headers such as `@@ A..B @@` (including `@@ BOF @@` and `@@ EOF @@`), with empty `@@ A..B @@` blocks deleting the anchored range and legacy inline payload forms treated as malformed
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `vault.enabled` setting (Tools → Obsidian Vault, default `false`) gating the `vault://` internal URL. When disabled, `VaultProtocolHandler.resolve` / `write`, `resolveVaultUrlToPath`, and `hasObsidian()` all refuse — the latter hides the `vault://` entry from the system prompt's Handlebars `{{#if hasObsidian}}` block. Tests can opt in via `vi.spyOn(vaultProtocol, "isVaultEnabled").mockReturnValue(true)`.
 - Added support for `vault://` URLs in path resolution utilities, including plan mode and internal selector parsing so `read` and edit paths can target Obsidian vault files directly
@@ -4360,6 +4457,7 @@
 ## [15.5.7] - 2026-05-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `providers.openrouterVariant` setting (Settings → Providers → "OpenRouter Routing") to default OpenRouter requests to a routing-variant suffix (`:nitro`, `:floor`, `:online`, `:exacto`). Selectors that already name a variant (e.g. `openrouter/anthropic/claude-haiku:nitro`) keep precedence.
 - `generate_image` supports xAI Grok Imagine via `providers.image=xai`. Supports `grok-imagine-image` (default) and `grok-imagine-image-quality` at aspect ratios `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`. Uses the xAI Grok OAuth credential when available, otherwise `XAI_API_KEY`.
@@ -4373,6 +4471,7 @@
 ## [15.5.6] - 2026-05-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Support for multi-range line selectors on URLs (e.g., `:5-10,20-30`) to fetch and display multiple non-contiguous sections
 - Support for combining `:raw` mode with line range selectors on URLs (e.g., `:raw:1-120` or `:1-120:raw`)
@@ -4405,6 +4504,7 @@
 - Removed the package root `hashline` export so imports from the top-level entrypoint can no longer access `hashline` helpers directly
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `read.summarize.minTotalLines` setting (default 100) to set the minimum file length that triggers read summarization
 - Added `<file>:<lines>` support to `search` `paths`, allowing file-scoped constraints such as `:N-M`, `:N+K`, and comma-separated ranges
@@ -4458,6 +4558,7 @@
 ## [15.5.0] - 2026-05-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added per-tool approval declarations so each built-in, custom, or extension tool can declare its capability tier and approval prompt details.
 - Added `OMP_MCP_TIMEOUT_MS` environment variable to override MCP client request timeout for every server (in milliseconds); set to `0` to disable client-side timeouts. Invalid (negative or non-numeric) values are ignored with a warning and fall back to the per-server timeout or default 30s ([#1415](https://github.com/can1357/oh-my-pi/pull/1415)).
@@ -4502,6 +4603,7 @@
 - Hashline payload semantics are now strictly inline-first: the first payload line is whatever follows the sigil on the op line itself, and subsequent lines append after it. A newline immediately after `↑`/`↓`/`:` is no longer a free separator — it produces a blank first payload line. Use `LINE↓content` for a one-line insert, `LINE↓firstline\nsecondline` for two lines; bare `LINE↓` / `LINE↑` / `LINE:` (no inline payload) still insert/replace with one blank line as before.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `irc.timeoutMs` setting to configure IRC message timeout duration with a default of 120 seconds
 - Added timeout enforcement for IRC send operations to prevent indefinite hangs when recipients are unresponsive
@@ -4571,6 +4673,7 @@
 - Replaced the hashline patch format from `§`, `«`, `»`, `≔`, and `..` to `¶`, `↑`, `↓`, `→` with range separators written as `A-B`, requiring users to migrate hashline edit inputs
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `codex` and `gemini` to the web search provider settings so users can configure OpenAI and Gemini web search directly from provider selection
 - Added OpenAI (`codex`) and Gemini web search options with updated setup descriptions for `omp /login openai-codex` and Gemini OAuth login
@@ -4598,6 +4701,7 @@
 ## [15.3.2] - 2026-05-25
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added inline `|TEXT` payload support to `»` and `«` hashline insert operations, allowing single-line inserts on the op line and still supporting additional payload lines
 - Added support for using inline payloads with BOF/EOF inserts so `|TEXT` is treated as inserted content at file boundaries
@@ -4612,6 +4716,7 @@
 ## [15.3.0] - 2026-05-25
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `OMP_NO_WEBP` environment variable to disable WebP encoding in image resize, fixing HTTP 400 errors when attaching browser snapshots to vision models running on local llama.cpp (which uses STB library that lacks WebP support)
 - Fixed loop mode submitting the next prompt while a background async-job delivery turn (idle flush) was still pending, which could cause the job result to be silently dropped and make the session appear to keep firing while work was ongoing ([#1294](https://github.com/can1357/oh-my-pi/issues/1294))
@@ -4630,6 +4735,7 @@
 - Replaced the legacy `@@` header and `+`/`<`/`=`/`-` hashline syntax with the new `§PATH` header and `«`/`»`/`≔` operation format, so existing hashline scripts and prompts using old symbols must be updated
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added one-anchor `≔ANCHOR` shorthand equivalent to `≔ANCHOR..ANCHOR` for single-line replace/delete
 
@@ -4652,6 +4758,7 @@
 - Changed PR and task-isolation worktree directory layout to hash-based `~/.omp/wt/<identifier>-<path-hash>` style paths, replacing the previous nested encoded-repo layout
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `omp worktree` command (alias `wt`) to list and manage agent-managed worktrees under `~/.omp/wt`
 - Added `omp worktree clear` to remove orphaned worktree directories, with `--all` to include live PR-checkouts, `--dry-run` for preview, and `--json` reporting
@@ -4725,6 +4832,7 @@
 - Fixed the status-line fast-mode indicator (`⚡`) rendering for scoped service tiers (`openai-only`, `claude-only`) even when the active model's provider didn't realize them — e.g. `serviceTier: "openai-only"` would still show the indicator next to a Claude model the wire request couldn't apply fast mode to. The indicator now consults a new `AgentSession.isFastModeActive()` predicate that runs the configured tier through `resolveServiceTier(tier, model.provider)` and only lights up when the result is `"priority"` for the current model. `isFastModeEnabled()` keeps its scope-aware semantics so `/fast on|off|toggle` and `/fast status` continue to reflect the user's configured intent.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added scoped service tier values to the `serviceTier` setting: `priority (OpenAI only)` and `priority (Claude only)`. They let you opt into premium processing on one provider family without paying premium costs on the other when switching models mid-session. `/fast on` continues to set the unscoped `"priority"` (active everywhere supported); `/fast status` and `isFastModeEnabled()` now report `on` for any scoped value too.
 
@@ -4766,6 +4874,7 @@
 - Replaced the `eval` tool's LARK-grammar `input` string with a structured `cells` array. Each cell is `{ language: "py" | "js", code, title?, timeout?, reset? }`. Removed the implicit/sniffed language path, the `*** Cell` / `*** End` / `*** Abort` markers, and the per-cell `t:<duration>` unit suffixes — `timeout` is now seconds (1-600).
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `providers.<name>.transport: "pi-native"` to `models.yml`. When set, every model under that provider routes its streaming dispatch through the auth-gateway's `POST /v1/pi/stream` endpoint instead of the per-provider SDK. The provider's `baseUrl` must point at a compatible `omp auth-gateway` and `apiKey` must carry the gateway bearer. The slot's `models.json` still resolves locally for pricing/capabilities/thinking config; only the wire dispatch is redirected. Use case: containerized omp installs (robomp slots, swarm extension) where the slot must stay credential-free and a sidecar gateway holds the real provider tokens. Also surfaced as `transport` on `ProviderConfigInput` for extension-registered providers.
 - Added optional backend push for the auto-QA grievance database (`dev.autoqaPush.enabled`, `dev.autoqaPush.endpoint`, `dev.autoqaPush.token`; env overrides `PI_AUTO_QA_PUSH`, `PI_AUTO_QA_PUSH_URL`, `PI_AUTO_QA_PUSH_TOKEN`). When enabled, every `report_tool_issue` call schedules a background flush that `POST`s pending rows to the configured endpoint and deletes them on HTTP 2xx. Each push carries a stable per-install UUID (`installId`) generated on first use and persisted at `~/.omp/install-id` via `getInstallId()` (new export from `@oh-my-pi/pi-utils`), so the receiver can dedup retries across host renames and `autoqa.db` wipes. Single-flight, 5s request timeout, 30s in-memory cooldown after failure, and a row-id watermark so rows inserted during an in-flight push survive and ship next time. Tool execution remains non-blocking and never throws.
@@ -4820,6 +4929,7 @@
 - Changed the extension and hook runtime API by moving schema typing from direct TypeBox imports to `TSchema` from `@oh-my-pi/pi-ai`, requiring callers who use TypeScript imports of `Type` to migrate via provided injected modules
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a cancellable handoff progress indicator in `/handoff` that displays while handoff generation runs and can be aborted with `Esc`
 - Added `apiKey` as a supported provider override field in model config, allowing API-key-only overrides to provide fallback credentials for built-in models
@@ -4872,6 +4982,7 @@
 ## [15.0.2] - 2026-05-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the `set_host_uri_schemes` RPC command so hosts can register and replace writable/read-only internal URI schemes with scheme metadata (`writable`, `immutable`) at runtime
 - Enabled the `write` tool to dispatch `write(url, content)` to registered internal URL handlers, allowing edits to non-filesystem resources via host-managed URI schemes
@@ -4908,6 +5019,7 @@
 - Removed the dedicated `exit_plan_mode` tool and its prompt, requiring plan-mode completion to use the existing `resolve` tool path instead
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added optional `extra` metadata object to the `resolve` tool so callers can pass context-specific payloads, including plan approval titles
 - Added `hide: true` frontmatter option for skill `SKILL.md` files. Hidden skills are still loaded and remain reachable via `skill://<name>` URLs and (when enabled) `/skill:<name>` slash commands, but are omitted from the rendered system prompt's `<skills>` listing so the model won't auto-discover them. Use for skills the user opts into explicitly rather than ones the model should pick up from descriptions.
@@ -4952,6 +5064,7 @@
 - Renamed ACP custom extension methods from `omp/*` to `_omp/*` to comply with the ACP spec's `_`-prefix requirement for non-spec methods; existing callers must update method names
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added markdown rendering for `read` results when content type is `text/markdown`, so GitHub internal-URL outputs are shown as formatted markdown instead of plain code blocks
 - Added `pr://<N>/diff`, `pr://<N>/diff/<i>`, and `pr://<N>/diff/all` internal-URL shapes covering changed-file listings, per-file slices, and the full unified diff. They share one `pr-diff` SQLite cache row with the same TTL knobs as `pr://<N>` views (`github.cache.softTtlSec` / `github.cache.hardTtlSec` / `github.cache.enabled`). Single PR views now advertise the diff entry point via a `Diff: pr://<owner>/<repo>/<N>/diff` note. Cache schema bumped to `user_version = 3`; older rows are dropped on first open to add credential-scoped keys and relax the `kind` CHECK constraint.
@@ -5030,6 +5143,7 @@
 ## [14.9.9] - 2026-05-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added new `task.isolation.mode` values `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone`, and `rcopy` for native PAL-backed task isolation backends
 - Added automatic PAL-backed isolation backend selection so `task.isolation.mode` uses the host's best-available backend
@@ -5053,6 +5167,7 @@
 - Changed the `eval` tool input format to a single-line `*** Cell <lang>:"<title>" [t:<duration>] [rst]` header per cell, replacing the `*** Begin <LANG>` / `*** End <LANG>` envelope and the standalone `*** Title:` / `*** Timeout:` / `*** Reset` directives. The lark grammar enforces a fixed attribute order; the runtime parser remains lenient (alias keys, bare positional tokens, single-quoted titles).
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `:conflicts` read selector (`read <path>:conflicts`) to return a one-line index of all unresolved merge conflicts with stable `#N` IDs for quick inspection
 - Added bulk conflict resolution with `write({ path: "conflict://*", content })` to resolve all currently registered conflicts across files in one call, expanding `@ours`/`@theirs`/`@base`/`@both` per conflict and returning per-file counts
@@ -5088,6 +5203,7 @@
 - Replaced the Jupyter kernel gateway + WebSocket protocol behind the Python `eval` backend with a subprocess-backed runner that speaks NDJSON over stdin/stdout; removed the `jupyter_kernel_gateway`/`ipykernel` pip dependencies, the `python.sharedGateway` setting, the `omp jupyter` CLI command, and the `PI_PYTHON_GATEWAY_URL` / `PI_PYTHON_GATEWAY_TOKEN` environment variables
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Python `tool.<name>(args)` support to `executePython` sessions so evaluated Python code can invoke session tools through the prelude `tool` proxy
 - Added per-execution Python tool bridge session registration and loopback endpoint wiring so Python tool calls resolve to host tools and return tool results
@@ -5122,6 +5238,7 @@
 - Removed the `jobs://` internal URL protocol; inspect background jobs via the `job` tool's `list: true` operation instead
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `since` and `until` date-range filters to `search_issues`, `search_prs`, `search_commits`, and `search_repos`, accepting relative durations (`m`/`h`/`d`/`w`/`mo`/`y`), ISO dates, and ISO datetimes
 - Added `dateField` support for date filtering (`created` or `updated`) so search results can be constrained by creation, update, pushed (for repos), or committer date (for commits)
@@ -5165,6 +5282,7 @@
 - Removed the `sectionSeparator` re-export from `config/prompt-templates`, so existing imports from `@oh-my-pi/pi-coding-agent/config/prompt-templates` now need to resolve `sectionSeparator` from its utility package
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for the `*** Abort` recovery marker in eval and hashline parsing to terminate processing safely when stream corruption is detected
 - Added support for wrapping hashline edits in `*** Begin Patch` and `*** End Patch` markers so patch input with these envelopes is parsed and applied
@@ -5206,6 +5324,7 @@
 ## [14.9.2] - 2026-05-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `agentsMdFiles` to `WorkspaceTree` so AGENTS.md discovery results are returned with the workspace scan output
 
@@ -5245,6 +5364,7 @@
 - Fixed legacy Pi plugin extensions failing to load on Windows when their entry path contains a drive letter ([#990](https://github.com/can1357/oh-my-pi/pull/990) by [@jiwangyihao](https://github.com/jiwangyihao)).
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a debug-panel raw SSE stream viewer so stuck model/tool-call streams can be inspected live from the TUI.
 - Added `get_login_providers` RPC command to list registered OAuth providers with their current authentication status (`id`, `name`, `available`, `authenticated`)
@@ -5255,6 +5375,7 @@
 ## [14.8.0] - 2026-05-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added hashline stale-anchor recovery by replaying edits against a session-scoped `read`/`search` snapshot and 3-way-merging them onto the current file when anchors no longer match
 
@@ -5288,6 +5409,7 @@
 ## [14.7.5] - 2026-05-07
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added optional `/loop` limits: `/loop 10` stops after 10 auto-iterations, while duration forms such as `/loop 10m` and `/loop 10min` stop after the time limit.
 
@@ -5340,6 +5462,7 @@
 ## [14.7.1] - 2026-05-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `pr_create` operation to the GitHub tool to create pull requests with title/body (or `fill`), base/head branch, draft, reviewer, assignee, and label options and return a summarized result including the new PR URL
 - Added `read.summarize.prose` setting to keep Markdown and plain-text reads out of the structural summarizer by default.
@@ -5358,6 +5481,7 @@
 - Removed the top-level `sel` parameter from the `read` tool schema, requiring callers to migrate to `path`-embedded selectors (for example `path:50-100`, `path:raw`, or `https://...:L1-L40`)
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a separate `projectPrompt` artifact containing per-session project context (workstation, context files, AGENTS.md rules, workspace tree, and append prompt) so dynamic context is decoupled from the static system prompt
 - Added `Project prompt` token accounting to context-usage breakdowns and charts
@@ -5391,12 +5515,14 @@
 ## [14.6.6] - 2026-05-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Ctrl+D draft persistence: pressing Ctrl+D with text in the editor now exits the app and saves the unsent text as a per-session draft. Resuming the same session (e.g. via `--resume`) restores the draft into the editor (one-shot, removed after restore).
 
 ## [14.6.4] - 2026-05-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `hindsight.mentalModelsEnabled`, `hindsight.mentalModelAutoSeed`, `hindsight.mentalModelRefreshIntervalMs`, and `hindsight.mentalModelMaxRenderChars` settings to control curated Hindsight mental-model activation, seeding, refresh cadence, and prompt render budget
 - Added `<mental_models>` injection to developer instructions, loading bank-level curated summaries as stable background context
@@ -5426,6 +5552,7 @@
 - Renamed hashline separator configuration from `PI_HASHLINE_SEP` to `PI_HL_SEP` and changed the default payload separator from `\\` to `>`
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added inline hashline edit syntax so `< ANCHOR${sep}TEXT` prepended text to an anchored line and `+ ANCHOR${sep}TEXT` appended text to it without requiring a multi-line payload block
 - Added a `memory.backend` setting (off, local, hindsight) under a new Memory settings tab to control which memory subsystem is active
@@ -5472,6 +5599,7 @@
 ## [14.6.2] - 2026-05-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `statusLine.sessionAccent` to disable session-name accent coloring for the editor border and status line gap ([#918](https://github.com/can1357/oh-my-pi/issues/918))
 
@@ -5509,6 +5637,7 @@
 - Changed `search`, `find`, `ast_grep`, and `ast_edit` to accept `paths: string[]` instead of comma- or whitespace-delimited path strings.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `update_notes` tool with `body` (replace) and `append_idea` (append a bullet under an `## Ideas` section). Notes are injected into the system prompt every iteration and replace the file-based `autoresearch.md` / `.program.md` / `.ideas.md` ecosystem.
 
@@ -5550,6 +5679,7 @@
 - Changed the `eval` tool wire format to a single `input` string composed of markdown fenced code blocks (with per-fence language, timeout, title, and reset metadata in the info string) instead of top-level `cells`, `language`, `timeout`, and `reset` fields
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a JavaScript backend to the `eval` tool with an in-process VM runtime and JS helper bridge (`read`, `write`, `glob`, etc.)
 - Added `eval.py` and `eval.js` settings so Python and JavaScript `eval` backends can be enabled or disabled independently
@@ -5579,6 +5709,7 @@
 - Removed the legacy browser action verbs (`goto`, `observe`, `click`, `type`, `fill`, `press`, `scroll`, `drag`, `wait_for_selector`, `extract_readable`, and `screenshot`) in favor of invoking those workflows through `run`
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `browser` tool `open`/`run`/`close` flow with a `run` action that executes async JavaScript and provides `page`, `browser`, `tab`, `display`, `assert`, and `wait` in scope
 - Added named tabs on `open` with default name `main` so browser state can be reused across `run` calls and subagents
@@ -5623,6 +5754,7 @@
 - Stopped reading the `branch` parameter for `github` `pr_checkout`. The local branch is now always `pr-<number>`; the `branch` schema field is still accepted by `pr_push`, `repo_view`, and `run_watch`
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `checkouts` summary entries to `pr_checkout` results, including each checkout's branch, worktree path, remote, and reuse status
 - Added combined summaries for `pr_view` and `pr_diff` when `pr` is an array, so multi-request responses now include all requested pull requests in one return
@@ -5651,6 +5783,7 @@
 ## [14.5.9] - 2026-04-30
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added the `/context` slash command to display an estimated context-usage breakdown panel for the current session
 - Added `-LidA..LidB` syntax to delete inclusive line ranges in a single atom operation
@@ -5679,6 +5812,7 @@
 - Renamed the built-in tool API from `just` to `run_command`, so clients requesting/handling the old tool name must update
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a new `run_command` tool that runs project tasks via a single `op` argument, auto-detecting and supporting recipes from justfiles, `package.json` scripts (including workspace packages), Cargo bin/example/test targets, Makefiles, and Taskfiles
 - Added support for explicit runner-qualified tasks via `run_command` with `runnerId:task` syntax in the prompt guidance
@@ -5711,6 +5845,7 @@
 - Rejected atom diffs with unrecognized operations (including lone '-' lines) by throwing parse errors instead of treating them as inserts
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added duplicate-line post-edit detection that warns on newly introduced adjacent identical lines and auto-removes one duplicate when bracket-balance is restored
 - Added a warning when suspicious adjacent duplicates are introduced after edits so users can review potential stale-line issues
@@ -5732,6 +5867,7 @@
 - Renamed the built-in content-search tool from `grep` to `search`, including SDK/tool event names and settings keys (`search.enabled`, `search.contextBefore`, `search.contextAfter`), so integrations using `grep` and `grep.*` references must be updated
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added internal URL support to the `search` tool, allowing `artifact://`-style paths that resolve to local files to be searched directly
 - Added IRC relay observation in the main agent UI so every IRC exchange between agents is rendered in the main transcript, even when the main agent is not a direct participant
@@ -5753,6 +5889,7 @@
 ## [14.5.3] - 2026-04-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added bracketed `loc` forms `(anchor)`, `[anchor]`, `[anchor`, `(anchor`, `anchor]`, and `anchor)` to `atom` `splice` editing so a single anchor can target a block body, whole node, or partial node region
 - Added automatic block-delimiter inference for block splices using file extension, defaulting to `{` and using `(` for Lisp-family files
@@ -5804,6 +5941,7 @@
 ## [14.4.3] - 2026-04-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `irc` tool for agent-to-agent messaging with `list` and `send` operations, including optional broadcast to `all` and optional suppression of reply waits
 - Added `irc.enabled` tool setting (default `true`) to toggle agent-to-agent messaging
@@ -5828,6 +5966,7 @@
 - Changed `/todo append` from JSON payload input to `/todo append [<phase>] <task...>` with optional quoted tokens and automatic phase creation
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `note` to todo-write operations so you can append follow-up text notes to a task via `op: "note"` and `text`
 - Added markdown note-block support to `/todo export` and `/todo import` so task notes are written as blockquote lines and reloaded with the todo list
@@ -5866,6 +6005,7 @@
 - Replaced the legacy `gh_repo_view`, `gh_issue_view`, `gh_pr_view`, `gh_pr_diff`, `gh_pr_checkout`, `gh_pr_push`, `gh_run_watch`, `gh_search_issues`, and `gh_search_prs` tool names with only `github`, which requires updating existing callers that invoked the old `gh_*` tools
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added a `sed` verb to the `atom` edit tool for line-local substitutions using sed-style syntax (`s/pattern/replacement/`) with `g`, `i`, and `F` flags and model-tolerant delimiter choices
 - Added the unified `github` tool with op-based dispatch for repository, issue, pull request, search, checkout, push, and Actions watch workflows
@@ -5900,6 +6040,7 @@
 - Changed the hashline and chunk anchor ID format from the prior hex-like tokens to two-letter BPE bigrams (for example `#th`), which invalidates previously captured `LINE#ID`/chunk selectors and requires re-reading to refresh anchors
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added inline file overrides in atom locators (`loc: "a.ts:160sr"`) so cross-file edits can be written without a separate per-entry `path` field
 - Added `openai` to the `providers.image` options, allowing image generation to be explicitly routed through the active GPT Responses/Codex model
@@ -5959,6 +6100,7 @@
 ## [14.3.0] - 2026-04-25
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Markdown pipe-table `row_N` chunk selectors for row-level table edits.
 - Added `resolveToolAlias` export so tool names in CLI and session setup are normalized to canonical names, including mapping legacy `read` references to `open`
@@ -6018,6 +6160,7 @@
 ## [14.2.0] - 2026-04-23
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added an `apply_patch` edit mode that accepts Codex `*** Begin Patch` envelopes, shares patch-mode execution and diagnostics, and renders streaming per-file diffs in the TUI.
 
@@ -6048,6 +6191,7 @@
 - Phased task definitions in `todo_write` now reject `notes` on initial creation, so notes must be added later with `add_notes`
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `complete`, `start`, `abandon`, `remove`, `add_notes`, and `add_tasks` parameters to `todo_write` so callers can complete, jump to, drop, and annotate tasks without op wrappers
 - Added direct `add_phase` support as a top-level argument for inserting a new phase in `todo_write`
@@ -6072,6 +6216,7 @@
 - Changed the `edit` schemas for patch, replace, hashline, and chunk modes from top-level request fields to `edits` array entries, requiring path/mode details on each edit and breaking callers that send legacy top-level `path`, `old_text`, `new_text`, `op`, `move`, or `delete` payloads
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Vim ex aliases `:del`, `:ya`, `:co`, and `:mo` as shorthand for existing delete, yank, copy, and move commands
 - Added support for additional Vim ex command aliases `:write`/`write!`, `:edit`/`edit!`, and `:update`/`:up` in command parsing
@@ -6139,6 +6284,7 @@
 ## [14.1.0] - 2026-04-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added richer tool rendering details in session export HTML, including metadata badges, argument formatting, and todo task tree styling for exported tool and workflow messages
 - Added a persistent `js` tool backed by `node:vm`, with cross-session `highway` KV/pubsub, tool calls from inside JS cells, and `$` / `$$` interactive JavaScript execution
@@ -6181,6 +6327,7 @@
 ## [14.0.5] - 2026-04-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `designer` model role for UI/UX design tasks with Gemini 3.1 Pro as default model
 - Added support for model role fallback lists — roles can now resolve to multiple model patterns with automatic fallback to next available model
@@ -6224,6 +6371,7 @@
 ## [14.0.4] - 2026-04-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `PI_CHUNK_AUTOINDENT` environment variable to control whether chunk read/edit tools normalize indentation to canonical tabs or preserve literal file whitespace
 - Added dynamic chunk tool prompts that automatically adjust guidance based on `PI_CHUNK_AUTOINDENT` setting without exposing a tool parameter
@@ -6251,6 +6399,7 @@
 ## [14.0.2] - 2026-04-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/force` slash command to force the next agent turn to use a specific tool
 - Added `ToolChoiceQueue` for managing tool-choice directives with lifecycle callbacks and requeue semantics
@@ -6332,6 +6481,7 @@
 - Removed checksum requirement from insert operations (`before`, `after`, `prepend`, `append`); only `replace` requires `#CRC` suffix
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Auto QA tool (`report_tool_issue`) for automated tracking of unexpected tool behavior; enabled via `PI_AUTO_QA=1` environment variable or `dev.autoqa` setting
 - `dev.autoqa` setting to enable automated tool issue reporting for all agents
@@ -6508,6 +6658,7 @@
 ## [13.19.0] - 2026-04-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added idle auto-compaction settings and scheduling so sessions can compact after inactive turns without auto-continuing.
 - Added `onExternalEditor` callback to extension UI dialog options for handling external editor shortcut in select dialogs
@@ -6560,6 +6711,7 @@
 - Removed standalone `fetch` tool; URL fetching is now integrated into the `read` tool
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added URL reading capability to `read` tool with support for web pages, GitHub issues, Stack Overflow, Wikipedia, Reddit, NPM, arXiv, technical blogs, RSS/Atom feeds, and JSON endpoints
 - Added `offset` and `limit` parameter support for paginating cached URL fetch results
@@ -6579,6 +6731,7 @@
 ## [13.17.5] - 2026-04-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for writing to ZIP archives using fflate library for cross-platform compatibility
 
@@ -6593,6 +6746,7 @@
 ## [13.17.4] - 2026-04-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Support for writing to archive entries in `.tar`, `.tar.gz`, `.tgz`, and `.zip` files using `archive.ext:path/inside/archive` syntax
 - Ability to create new archives when writing to archive subpaths that don't yet exist
@@ -6600,6 +6754,7 @@
 ## [13.17.3] - 2026-04-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for converting Jupyter notebooks (`.ipynb`) to markdown via markit
 - Added `markit-ai` npm package for native document and notebook conversion
@@ -6618,6 +6773,7 @@
 ## [13.17.2] - 2026-04-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/marketplace help` command to display usage guide for all marketplace operations
 - Added dedicated `gh-renderer.ts` module for rich terminal rendering of GitHub Actions workflow runs with live status snapshots and job details
@@ -6686,6 +6842,7 @@
 ## [13.17.0] - 2026-03-30
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `marketplace.autoUpdate` setting (`off`/`notify`/`auto`, default `notify`) for automatic plugin update checking on startup
 - Added background marketplace catalog refresh on startup when catalogs are stale (>24h)
@@ -6749,6 +6906,7 @@
 ## [13.16.1] - 2026-03-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `searchDb` parameter to `PromptActionAutocompleteProvider` constructor for native search database integration in autocomplete workflows
 - Added `searchDb` parameter to enable native search database integration for grep and find operations
@@ -6763,6 +6921,7 @@
 ## [13.16.0] - 2026-03-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Implemented root path alias: bare `/` in tool inputs now resolves to the session working directory instead of the filesystem root
 - Added `browser.screenshotDir` setting to configure screenshot save directory with path expansion
@@ -6777,6 +6936,7 @@
 ## [13.15.3] - 2026-03-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added configurable `app.model.selectTemporary` keybinding for temporary model selection.
 
@@ -6793,6 +6953,7 @@
 - Made `pos` parameter required for `replace_line`, `append`, and `prepend` operations; `append_eof` and `prepend_bof` no longer accept anchors
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added prompt for tradeoff metrics during autoresearch setup to collect secondary metrics alongside primary metric
 - Added validation of contract path specifications to reject absolute paths and parent directory references
@@ -6908,6 +7069,7 @@
 ## [13.14.0] - 2026-03-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Auto-reconnect MCP servers on connection loss with proactive SSE stream monitoring and retry backoff
 - Tool-level reconnect: retriable connection errors (ECONNREFUSED, ECONNRESET, stale session 404/502/503) trigger automatic reconnection and single retry
@@ -6934,6 +7096,7 @@
 ## [13.13.2] - 2026-03-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added automatic stripping of hashline display prefixes (LINE#ID:) from write tool content when hashline edit mode is enabled, preventing the model from accidentally copying display markers into files
 - Added `mcpServerName` and `mcpToolName` optional properties to custom tools for MCP server discovery and search metadata
@@ -6941,12 +7104,14 @@
 ## [13.13.1] - 2026-03-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Automatic deduplication of identical context files by content, keeping the closest (lowest depth) copy when duplicates are discovered
 
 ## [13.13.0] - 2026-03-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `edit.blockAutoGenerated` setting to control whether auto-generated file detection is enforced (enabled by default)
 - Improved auto-generated file detection to use language-specific comment parsing instead of broad regex patterns, reducing false positives
@@ -6960,6 +7125,7 @@
 ## [13.12.10] - 2026-03-17
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `args` field to ShellResult to capture the executed command
 - Added `exit_code` property to ShellResult as an alias for `returncode`
@@ -6973,6 +7139,7 @@
 ## [13.12.9] - 2026-03-17
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/session delete` command to delete current session with confirmation and return to session selector
 - Added session deletion in session selector via Delete key with confirmation dialog
@@ -6997,6 +7164,7 @@
 - Changed `SessionManager.list()` signature to accept only `sessionDir` parameter instead of `cwd` and optional `sessionDir`—callers must now compute and pass the session directory explicitly
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `SessionManager.getDefaultSessionDir()` static method to explicitly resolve the canonical default session directory for a working directory
 - Added support for quoted paths in grep, ast_grep, and find tools to handle directory names with spaces
@@ -7042,6 +7210,7 @@
 ## [13.12.5] - 2026-03-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Automatic discovery of Ollama model context window from model metadata, enabling accurate token limit configuration
 - Added `attribution` option to `PromptOptions` to explicitly control billing/initiator attribution for prompts
@@ -7066,6 +7235,7 @@
 ## [13.12.4] - 2026-03-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Exposed `settings` instance in `CustomToolContext` for session-specific configuration access
 
@@ -7077,6 +7247,7 @@
 ## [13.12.2] - 2026-03-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `compaction.thresholdTokens` setting as a fixed token limit alternative to percentage-based compaction threshold
 - Added more artifact spill threshold options (1 KB to 1 MB) with size descriptions
@@ -7104,6 +7275,7 @@
 ## [13.12.1] - 2026-03-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Support for move-only operations that preserve exact bytes including binary files
 
@@ -7115,6 +7287,7 @@
 ## [13.12.0] - 2026-03-14
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added per-rule TTSR interrupt mode override via `interruptMode` field in rule frontmatter to allow fine-grained control over when TTSR interrupts stream processing
 - Added `task` model role to allow configuring a dedicated model for subtask execution via `modelRoles.task` setting
@@ -7169,6 +7342,7 @@
 ## [13.11.1] - 2026-03-13
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `llama.cpp` as local provider
 - Added `code_search` tool supporting both Exa and grep.app providers for code snippet and documentation search
@@ -7197,6 +7371,7 @@
 ## [13.11.0] - 2026-03-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Parallel as a web search provider with support for fast and research modes
 - Added Parallel extract API integration for URL content fetching and YouTube video extraction
@@ -7239,6 +7414,7 @@
 ## [13.10.1] - 2026-03-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Exported `submitInteractiveInput()` function for programmatic submission of user input in interactive mode
 - Added proactive OAuth token refresh for MCP server connections with 5-minute expiry buffer
@@ -7260,6 +7436,7 @@
 - Removed `no_fallback` option from search parameters
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `before_provider_request` extension event to intercept and modify provider request payloads before sending
 - Added `emitBeforeProviderRequest()` method to ExtensionRunner for chaining payload transformations across extensions
@@ -7294,6 +7471,7 @@
 ## [13.9.15] - 2026-03-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `ensureLoadingAnimation()` method to manage loading animation lifecycle and prevent duplicate spinners
 
@@ -7305,6 +7483,7 @@
 ## [13.9.12] - 2026-03-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Tavily as a supported web search provider with `TAVILY_API_KEY` credential discovery and provider fallback support
 - Added `#`-triggered prompt action suggestions in the editor, with keybinding hints for line navigation and prompt copy actions
@@ -7323,6 +7502,7 @@
 ## [13.9.10] - 2026-03-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `env` parameter to bash tool to pass environment variables safely without shell re-parsing, preventing quote and special character bugs with multiline or untrusted values
 - Added support for rendering partial `env` assignments in command preview while tool arguments are still streaming
@@ -7335,12 +7515,14 @@
 ## [13.9.8] - 2026-03-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added docs.rs scraper for extracting Rust crate documentation from rustdoc JSON, including support for modules, functions, structs, traits, enums, and other Rust items with caching
 
 ## [13.9.7] - 2026-03-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `skipPostPromptRecoveryWait` option to handoff operations to defer recovery work until after handoff completion
 - Added deferred auto-compaction scheduling to allow threshold-triggered handoffs to complete while the original prompt is still unwinding
@@ -7356,6 +7538,7 @@
 ## [13.9.6] - 2026-03-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `glob` parameter to `ast_grep` and `ast_edit` tools for additional glob filtering relative to the `path` parameter
 - Added `combineSearchGlobs` utility function to merge glob patterns from `path` and `glob` parameters
@@ -7370,6 +7553,7 @@
 ## [13.9.4] - 2026-03-07
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Automatic detection of Ollama model capabilities including reasoning/thinking support and vision input via the `/api/show` endpoint
 - Improved Kagi API error handling with extraction of detailed error messages from JSON and plain text responses
@@ -7389,6 +7573,7 @@
 - Changed `thinkingLevel` in session context to be optional (`ThinkingLevel | undefined`) instead of always present
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `thinking.ts` module with `getThinkingLevelMetadata()` and `resolveThinkingLevelForModel()` utilities for thinking level handling
 - Added `ThinkingConfig` support to model definitions for specifying supported thinking effort levels per model
@@ -7434,6 +7619,7 @@
 ## [13.9.2] - 2026-03-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Support for Python code execution messages with output display and error handling
 - Support for mode change entries in session exports
@@ -7458,6 +7644,7 @@
 ## [13.9.0] - 2026-03-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `read.defaultLimit` setting to configure default number of lines returned by read tool when no limit is specified (default: 300 lines)
 - Added preset options for read default limit (200, 300, 500, 1000, 5000 lines) in settings UI
@@ -7487,6 +7674,7 @@
 ## [13.8.0] - 2026-03-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `buildCompactHashlineDiffPreview()` function to generate compact diff previews for model-visible tool responses, collapsing long unchanged runs and consecutive additions/removals to show edit shape without full file content
 - Added project-level discovery for `.agent/` and `.agents/` directories, walking up from cwd to repo root (matching behavior of other providers like `.omp`, `.claude`, `.codex`). Applies to skills, rules, prompts, commands, context files (AGENTS.md), and system prompts (SYSTEM.md)
@@ -7503,6 +7691,7 @@
 ## [13.7.6] - 2026-03-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Exported `dedupeParseErrors` utility function to deduplicate parse error messages while preserving order
 
@@ -7514,6 +7703,7 @@
 ## [13.7.4] - 2026-03-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `fetch.useKagiSummarizer` setting to toggle Kagi Universal Summarizer usage in the fetch tool.
 
@@ -7525,6 +7715,7 @@
 ## [13.7.3] - 2026-03-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Kagi Universal Summarizer integration for URL summarization, now prioritized before Jina and other methods
 - Added Kagi Universal Summarizer support for YouTube video summaries when credentials are available
@@ -7547,6 +7738,7 @@
 ## [13.7.2] - 2026-03-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for direct OAuth provider login via `/login <provider>` command (e.g., `/login kagi`)
 - Added optional `providerId` parameter to `showOAuthSelector()` to enable direct provider selection without UI selector
@@ -7581,6 +7773,7 @@
 ## [13.6.0] - 2026-03-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `mcp://` internal URL protocol for reading MCP server resources directly via the read tool (e.g., `read(path="mcp://resource-uri")`)
 - Added LM Studio integration to the model registry and discovery flow.
@@ -7622,12 +7815,14 @@
 ## [13.5.5] - 2026-03-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Kagi web search provider (Search API v0) with related searches support and automatic `KAGI_API_KEY` detection
 
 ## [13.5.4] - 2026-03-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `authServerUrl` field to `AuthDetectionResult` to capture OAuth server metadata from `Mcp-Auth-Server` headers
 - Added `extractMcpAuthServerUrl()` function to parse and validate `Mcp-Auth-Server` URLs from error messages
@@ -7649,6 +7844,7 @@
 ## [13.5.3] - 2026-03-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Auto-include `ast_grep` and `ast_edit` tools when their text-based counterparts (`grep`, `edit`) are requested and the AST tools are enabled
 - Enforced tool decision in plan mode—agent now requires calling either `ask` or `exit_plan_mode` when a turn ends without a required tool call
@@ -7670,6 +7866,7 @@
 ## [13.5.2] - 2026-03-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `checkpoint` tool to create context checkpoints before exploratory work, allowing you to investigate with many intermediate tool calls and minimize context cost afterward
 - Added `rewind` tool to end an active checkpoint and replace intermediate exploration messages with a concise investigation report
@@ -7685,6 +7882,7 @@
 ## [13.5.0] - 2026-03-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `hlinejsonref` Handlebars helper for embedding hashline references inside JSON blocks in prompts
 - Added `librarian` agent for researching external libraries and APIs by reading source code
@@ -7712,6 +7910,7 @@
 - `ast_edit` parameters `pattern` + `rewrite` replaced by `ops: Array<{ pat: string; out: string }>`
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `resolve` tool to apply or discard pending preview actions with required reasoning
 - AST edit now registers pending actions after preview, allowing explicit apply/discard workflow via `resolve` tool
@@ -7761,6 +7960,7 @@
 ## [13.3.14] - 2026-02-28
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Expanded AST tool language support from 7 to all 25 ast-grep tree-sitter languages (Bash, C, C++, C#, CSS, Elixir, Go, Haskell, HCL, HTML, Java, JavaScript, JSON, Kotlin, Lua, Nix, PHP, Python, Ruby, Rust, Scala, Solidity, Swift, TSX, TypeScript, YAML)
 - AST find now emits all lines of multiline matches with hashline tags (LINE#HASH:content) consistent with read/grep output
@@ -7783,6 +7983,7 @@
 ## [13.3.8] - 2026-02-28
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `ast_find` tool for structural code search using AST matching via ast-grep, enabling syntax-aware pattern discovery across codebases
 - Added `ast_replace` tool for structural AST-aware rewrites via ast-grep, enabling safe syntax-level codemods without text-based fragility
@@ -7905,6 +8106,7 @@
 ## [13.3.5] - 2026-02-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for setting array and record configuration values using JSON syntax
 
@@ -7920,6 +8122,7 @@
 ## [13.3.3] - 2026-02-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Support for `move` parameter in `computeHashlineDiff` to enable file move operations alongside content edits
 
@@ -7930,6 +8133,7 @@
 ## [13.3.1] - 2026-02-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `topP` setting to control nucleus sampling cutoff for model output diversity
 - Added `topK` setting to sample from top-K tokens for controlled generation
@@ -7948,6 +8152,7 @@
 - Renamed `task.isolation.enabled` (boolean) setting to `task.isolation.mode` (enum: `none`, `worktree`, `fuse-overlay`). Existing `true`/`false` values are auto-migrated to `worktree`/`none`.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `PERPLEXITY_COOKIES` env var for Perplexity web search via session cookies extracted from desktop app
 - Added `fuse-overlay` isolation mode for subagents using `fuse-overlayfs` (copy-on-write overlay, no baseline patch apply needed)
@@ -8006,6 +8211,7 @@
 - Renamed `file` parameter to `path` in replace, patch, and hashline edit operations
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added clarification in hashline edit documentation that the `end` tag must include closing braces/brackets when replacing blocks to prevent syntax errors
 
@@ -8027,6 +8233,7 @@
 ## [13.0.0] - 2026-02-22
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `getTodoPhases()` and `setTodoPhases()` methods to ToolSession API for managing todo state programmatically
 - Added `getLatestTodoPhasesFromEntries()` export to retrieve todo phases from session history
@@ -8068,6 +8275,7 @@
 ## [12.19.3] - 2026-02-22
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `pty` parameter to bash tool to enable PTY mode for commands requiring a real terminal (e.g., sudo, ssh, top, less)
 
@@ -8089,6 +8297,7 @@
 ## [12.19.0] - 2026-02-22
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `poll_jobs` tool to block until background jobs complete, providing an alternative to polling `read jobs://` in loops
 - Added `task.maxConcurrency` setting to limit the number of concurrently executing subagent tasks
@@ -8137,12 +8346,14 @@
 ## [12.18.1] - 2026-02-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Buffer.toBase64() polyfill for Bun compatibility to enable base64 encoding of buffers
 
 ## [12.18.0] - 2026-02-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `overlay` option to custom UI hooks to display components as bottom-centered overlays instead of replacing the editor
 - Added automatic chat transcript rebuild when returning from custom or debug UI to prevent message duplication
@@ -8178,6 +8389,7 @@
 ## [12.17.1] - 2026-02-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `filterBrowser` option to filter out browser automation MCP servers when builtin browser tool is enabled
 - Added `isBrowserMCPServer()` function to detect browser automation MCP servers by name, URL, or command patterns
@@ -8187,6 +8399,7 @@
 ## [12.17.0] - 2026-02-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added timeout protection (5 seconds) for system prompt preparation with graceful fallback to minimal context on timeout
 
@@ -8199,6 +8412,7 @@
 ## [12.16.0] - 2026-02-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `peekApiKey` method to AuthStorage for non-blocking API key retrieval during model discovery without triggering OAuth token refresh
 - Exported `finalizeSubprocessOutput` function to handle subprocess output finalization with submit_result validation
@@ -8236,6 +8450,7 @@
 ## [12.15.0] - 2026-02-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `includeDisabled` parameter to `listAuthCredentials()` to optionally retrieve disabled credentials
 - Added `disableAuthCredential()` method for soft-deleting auth credentials while preserving database records
@@ -8254,6 +8469,7 @@
 ## [12.14.0] - 2026-02-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Support for `docs://` internal URL protocol to access embedded documentation files (e.g., `docs://sdk.md`)
 - Added `generate-docs-index` npm script to automatically index and embed documentation files at build time
@@ -8295,6 +8511,7 @@
 - Removed automatic line relocation when hash references become stale; edits with mismatched line hashes now fail with an error instead of silently relocating to matching lines elsewhere in the file
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `ssh` command for managing SSH host configurations (add, list, remove)
 - Added `/ssh` slash command in interactive mode to manage SSH hosts with subcommands
@@ -8322,6 +8539,7 @@
 ## [12.12.1] - 2026-02-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Kimi (Moonshot) as a web search provider with OAuth and API key support ([#110](https://github.com/can1357/oh-my-pi/pull/110) by [@oglassdev](https://github.com/oglassdev))
 
@@ -8336,6 +8554,7 @@
 ## [12.12.0] - 2026-02-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Display streaming text preview during agent specification generation to show real-time progress
 - Added `onRequestRender` callback to agent dashboard for triggering UI updates during async operations
@@ -8366,6 +8585,7 @@
 ## [12.11.0] - 2026-02-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Support for Synthetic model provider in web search command
 - Model sorting by priority field and version number in model selector for improved model ranking
@@ -8396,6 +8616,7 @@
 ## [12.10.1] - 2026-02-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/login` support for Cerebras and Synthetic API-key providers
 
@@ -8406,6 +8627,7 @@
 - Changed keyless provider auth sentinel from `"<no-auth>"` to `kNoAuth` (`"N/A"`) for `ModelRegistry.getApiKey()` and `ModelRegistry.getApiKeyForProvider()`
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `--no-rules` CLI flag to disable rules discovery and loading
 - Added `sessionDir` option to RpcClientOptions for specifying agent session directory
@@ -8442,6 +8664,7 @@
 ## [12.9.0] - 2026-02-17
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added OpenCode discovery provider to load configuration from ~/.config/opencode/ and .opencode/ directories
 - Added support for loading MCP servers from opencode.json mcp key
@@ -8500,6 +8723,7 @@
 ## [12.7.0] - 2026-02-16
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Z.AI web search provider support via remote MCP endpoint (webSearchPrime)
 - Added `zai` as a selectable web search provider option in settings
@@ -8508,6 +8732,7 @@
 ## [12.6.0] - 2026-02-16
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added runtime tests covering extension provider registration and deferred model pattern resolution behavior.
 
@@ -8524,6 +8749,7 @@
 ## [12.5.1] - 2026-02-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `repeatToolDescriptions` setting to render full tool descriptions in the system prompt instead of a tool name list
 
@@ -8534,6 +8760,7 @@
 - Replaced `theme` setting with `theme.dark` and `theme.light` (auto-migrated)
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `previewTheme()` function for non-destructive theme preview during settings browsing
 - Added animated microphone icon with color cycling during voice recording
@@ -8597,6 +8824,7 @@
 ## [12.3.0] - 2026-02-14
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added autonomous memory extraction and consolidation system with configurable settings
 - Added `/memory` slash command with subcommands: `view`, `clear`, `reset`, `enqueue`, `rebuild`
@@ -8613,6 +8841,7 @@
 ## [12.2.0] - 2026-02-13
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `providerSessionState` property to AgentSession for managing provider-scoped transport and session caches
 - Added automatic cleanup of provider session state resources on session disposal
@@ -8643,6 +8872,7 @@
 ## [12.1.0] - 2026-02-13
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Filesystem scan cache invalidation helpers (`invalidateFsScanAfterWrite`, `invalidateFsScanAfterDelete`, `invalidateFsScanAfterRename`) to properly invalidate shared caches after file mutations
 - Named discovery profile for file mention candidates to standardize cache visibility and ignore semantics across callers
@@ -8660,6 +8890,7 @@
 ## [12.0.0] - 2026-02-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `getAllServerNames()` method to MCPManager for enumerating all known servers
 
@@ -8677,6 +8908,7 @@
 ## [11.14.4] - 2026-02-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Exported `renderPromptTemplate` function for programmatic prompt template rendering
 - Exported `computeLineHash` function from patch utilities
@@ -8705,6 +8937,7 @@
 ## [11.14.0] - 2026-02-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added SwiftLint linter client with JSON reporter support for Swift file linting
 - Added `--no-pty` flag to disable PTY-based interactive bash execution
@@ -8723,6 +8956,7 @@
 ## [11.13.1] - 2026-02-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/move` slash command to move session to a different working directory
 - Added `moveTo()` method to SessionManager for relocating sessions with file migration and header updates
@@ -8748,6 +8982,7 @@
 - Removed support for `.pi` configuration directory alias; use `.omp` instead
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `openPath` utility function to centralize cross-platform URL and file path opening
 
@@ -8758,6 +8993,7 @@
 ## [11.12.0] - 2026-02-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `resolveFileDisplayMode` utility to centralize file display mode resolution across tools (read, grep, file mentions)
 - Added automatic hashline formatting to @file mentions when hashline mode is active
@@ -8832,6 +9068,7 @@
 ## [11.10.4] - 2026-02-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Hashline diff computation with `computeHashlineDiff` function for preview rendering of hashline-mode edits
 - Streaming preview display for hashline edits in tool execution UI showing edit sources and destinations
@@ -8847,12 +9084,14 @@
 ## [11.10.3] - 2026-02-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Exported `./patch/*` subpath for direct access to patch utilities
 
 ## [11.10.2] - 2026-02-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Exported `streamHashLinesFromUtf8` and `streamHashLinesFromLines` functions for streaming hashline-formatted output with configurable chunking
 - Added `HashlineStreamOptions` interface to control streaming behavior (startLine, maxChunkLines, maxChunkBytes)
@@ -8900,6 +9139,7 @@
 - Changed `HashlineEdit.src` from newline-separated line ref lists to range syntax: `"5:ab"` (single), `"5:ab..9:ef"` (range), `"5:ab.."` (insert after); comma and newline-separated lists are no longer supported
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added substring-based source matching for hashline edits when line reference format is invalid, allowing fallback to unique substring search within the file
 - Added automatic detection and repair of single-line merges where models absorb adjacent lines, preventing content duplication
@@ -8972,6 +9212,7 @@
 ## [11.9.0] - 2026-02-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/mcp` slash command for runtime MCP server management (add, list, remove, enable, disable, test, reauth)
 - Added interactive multi-step wizard for adding MCP servers with transport auto-detection
@@ -9014,6 +9255,7 @@
 ## [11.8.1] - 2026-02-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added current date to system prompt context in YYYY-MM-DD format for date-aware agent reasoning
 - Added file size display in UI when files are skipped due to size limits
@@ -9039,6 +9281,7 @@
 ## [11.8.0] - 2026-02-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `ctx.reload()` method to extension command context to reload extensions, skills, prompts, and themes from disk
 - Added `ctx.ui.pasteToEditor()` method to paste text into the editor with proper handling (e.g., large paste markers in interactive mode)
@@ -9089,6 +9332,7 @@
 - Fixed queued messages not delivered after auto-compaction completes
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/quit` slash command as alias for `/exit`
 - Added per-model overrides (`modelOverrides`) in `models.json` for customizing built-in model properties
@@ -9103,6 +9347,7 @@
 ## [11.5.0] - 2026-02-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added terminal breadcrumb tracking to remember the last session per terminal, enabling `--continue` to work correctly with concurrent sessions in different terminals
 
@@ -9128,6 +9373,7 @@
 ## [11.4.0] - 2026-02-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Visualize leading whitespace (indentation) in diff output with dim glyphs—tabs display as `→` and spaces as `·` for improved readability
 
@@ -9142,6 +9388,7 @@
 ## [11.3.0] - 2026-02-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added resumption hint printed to stderr on session exit showing command to resume the session (e.g., `Resume this session with claude --resume <session-id>`)
 - New `BlobStore` class for content-addressed storage of large binary data (images) externalized from session files
@@ -9248,6 +9495,7 @@
 ## [11.2.0] - 2026-02-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `omp commit` command to generate commit messages and update changelogs with `--push`, `--dry-run`, `--no-changelog`, and model override flags
 - Added `omp config` command to manage configuration settings with actions: list, get, set, reset, path
@@ -9306,6 +9554,7 @@
 ## [11.1.0] - 2026-02-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `sortDiagnostics()` utility function to sort diagnostics by severity, location, and message for consistent output ordering
 - Added `task.isolation.enabled` setting to control whether subagents run in isolated git worktrees
@@ -9338,6 +9587,7 @@
 ## [11.0.3] - 2026-02-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added new subcommands to help text: `commit` for AI-assisted git commits, `stats` for AI usage statistics dashboard, and `jupyter` for managing the shared Jupyter gateway
 - Added `grep` subcommand to help text for testing the grep tool
@@ -9379,6 +9629,7 @@
 ## [11.0.0] - 2026-02-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added UI dropdown options for `task.maxRecursion Depth` setting with presets (Unlimited, None, Single, Double, Triple)
 - Added UI dropdown options for `grep.contextBefore` setting with presets (0-5 lines)
@@ -9423,6 +9674,7 @@
 ## [10.6.1] - 2026-02-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `commit` model role for dedicated commit message generation
 - Exported `resolveModelOverride` function from model resolver for external use
@@ -9450,6 +9702,7 @@
 - Removed `n` (show line numbers) parameter—line numbers are now always displayed in grep results
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Jina as a web search provider option alongside Exa, Perplexity, and Anthropic
 - Added support for Jina Reader API integration with automatic provider detection when JINA_API_KEY is configured
@@ -9477,6 +9730,7 @@
 - Removed support for local Python kernel gateway startup; shared gateway is now required
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added browser tool powered by Ulixee Hero with support for navigation, DOM interaction, screenshots, and readable content extraction
 - Added `/browser` command to toggle browser headless vs visible mode in interactive sessions
@@ -9506,6 +9760,7 @@
 ## [10.3.2] - 2026-02-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `renderCall` and `renderResult` methods to MCP tools for structured TUI display of tool calls and results
 - Added new `mcp/render.ts` module providing JSON tree rendering for MCP tool output with collapsible/expandable views
@@ -9532,6 +9787,7 @@
 ## [10.2.3] - 2026-02-02
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `find.enabled`, `grep.enabled`, `ls.enabled`, `notebook.enabled`, `fetch.enabled`, `web_search.enabled`, `lsp.enabled`, and `calc.enabled` settings to control availability of individual tools
 - Added conditional tool documentation in system prompt that dynamically lists only enabled specialized tools
@@ -9585,6 +9841,7 @@
 ## [10.1.0] - 2026-02-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added work scheduling profiler to debug menu for analyzing CPU scheduling patterns over the last 30 seconds
 - Added support for work profile data in report bundles including folded stacks, summary, and flamegraph visualization
@@ -9592,6 +9849,7 @@
 ## [10.0.0] - 2026-02-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `shell` subcommand for interactive shell console testing with brush-core
 - Added `--cwd` / `-C` option to set working directory for shell commands
@@ -9609,6 +9867,7 @@
 - Removed persistent shell session support; bash execution now uses native bindings via brush-core for improved reliability
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `sessionKey` option to bash executor to isolate shell sessions per agent instance
 - Added shell snapshot support for bash execution to preserve shell state across commands
@@ -9664,6 +9923,7 @@
 - Removed example file `examples/sdk/10-settings.ts` demonstrating old SettingsManager API
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - New `Settings` singleton class with sync get/set operations and background persistence
 - Added `Settings.isolated()` factory for creating isolated settings instances in tests
@@ -9701,6 +9961,7 @@
 ## [9.5.0] - 2026-02-01
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `head` and `tail` parameters to bash tool to limit output lines without breaking streaming
 - Added automatic normalization of bash commands to extract `| head -n N` and `| tail -n N` patterns into native parameters
@@ -9754,6 +10015,7 @@
 ## [9.3.1] - 2026-01-31
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `getCompactContext()` API to retrieve parent conversation context for subagents, excluding system prompts and tool results
 - Added automatic `submit_result` tool injection for subagents with explicit tool lists
@@ -9785,6 +10047,7 @@
 ## [9.2.3] - 2026-01-31
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Persistent shell session support for bash tool with environment variable preservation across commands
 - New `shellForceBasic` setting to force bash/sh even if user's default shell is different (default: true)
@@ -9813,6 +10076,7 @@
 ## [9.2.2] - 2026-01-31
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added grep CLI subcommand (`omp grep`) for testing pattern matching
 - Added fuzzy matching for model resolution with scoring and ranking fallback
@@ -9876,6 +10140,7 @@
 ## [8.13.0] - 2026-01-29
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/debug` command with interactive menu for bug report generation:
   - `Report: performance issue` - CPU profiling with reproduction flow
@@ -9911,6 +10176,7 @@
 ## [8.8.8] - 2026-01-28
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/fork` command to create a new session with the exact same state (entries and artifacts) as the current session
 
@@ -9921,6 +10187,7 @@
 ## [8.6.0] - 2026-01-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `plan` model role for specifying the model used by the plan agent
 - Added `--plan` CLI flag and `OMP_PLAN_MODEL` environment variable for ephemeral plan model override
@@ -9939,6 +10206,7 @@
 ## [8.5.0] - 2026-01-27
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added subagent support for preloading skill contents into the system prompt instead of listing available skills
 - Added session init entries to capture system prompt, task, tools, and output schema for subagent session logs
@@ -9955,6 +10223,7 @@
 ## [8.4.5] - 2026-01-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Model usage tracking to record and retrieve most recently used models
 - Model sorting in selector based on usage history
@@ -9979,6 +10248,7 @@
 ## [8.4.1] - 2026-01-25
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added core plan mode with plan file approval workflow and tool gating
 - Added plan:// internal URLs for plan file access and subagent plan-mode system prompt
@@ -9993,6 +10263,7 @@
 ## [8.4.0] - 2026-01-25
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added extension API to set working/loading messages during streaming
 - Added task worker propagation of context files, skills, and prompt templates
@@ -10037,6 +10308,7 @@
 ## [8.2.0] - 2026-01-24
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `omp commit` command to generate conventional commits with changelog updates
 - Added agentic commit mode with commit-specific tools and `--legacy` fallback
@@ -10166,6 +10438,7 @@
 ## [8.0.0] - 2026-01-23
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added antigravity provider support for image generation with Google Cloud authentication
 - Added support for google-antigravity API credentials in model registry
@@ -10254,6 +10527,7 @@
 ## [7.0.0] - 2026-01-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added usage report deduplication to prevent duplicate account entries
 - Added debug logging for usage fetch operations to aid diagnostics
@@ -10312,6 +10586,7 @@
 ## [6.9.69] - 2026-01-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added cell-by-cell status tracking with duration and exit code for Python execution
 - Added syntax highlighting for Python code in execution display
@@ -10430,6 +10705,7 @@
 ## [6.8.0] - 2026-01-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added streaming abort setting to control edit tool behavior when patch preview fails
 
@@ -10458,6 +10734,7 @@
 ## [6.7.67] - 2026-01-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added normative rewrite setting to control tool call argument normalization in session history
 - Added read line numbers setting to prepend line numbers to read tool output by default
@@ -10473,6 +10750,7 @@
 ## [6.7.0] - 2026-01-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Normative patch generation to canonicalize edit tool output with tool call argument rewriting for session history
 - Patch matching fallback variants: trimmed context, collapsed duplicates, single-line reduction, comment-prefix normalization
@@ -10530,6 +10808,7 @@
 ## [6.1.0] - 2026-01-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added lspmux integration for LSP server multiplexing to reduce startup time and memory usage
 - Added LSP tool proxy support for subagent workers
@@ -10545,6 +10824,7 @@
 ## [6.0.0] - 2026-01-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Cursor and OpenAI Codex OAuth providers
 - Added Windows installer bash shell auto-configuration
@@ -10581,6 +10861,7 @@
 ## [5.6.70] - 2026-01-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added support for loading Python prelude extension modules from user and project directories
 - Added automatic discovery of Python modules from `.omp/modules` and `.pi/modules` directories
@@ -10589,6 +10870,7 @@
 ## [5.6.7] - 2026-01-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Python shared gateway setting to enable resource-efficient kernel reuse across sessions
 - Added Python tool cancellation support with proper timeout and cleanup handling
@@ -10714,6 +10996,7 @@
 ## [5.2.0] - 2026-01-14
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `withLines` parameter to read tool for optional line number output (default: true, cat -n format)
 
@@ -10760,6 +11043,7 @@
 ## [5.0.0] - 2026-01-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Implemented `xhigh` thinking level for Anthropic models with increased reasoning limits
 
@@ -10784,6 +11068,7 @@
 ## [4.7.0] - 2026-01-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Add `omp config` subcommand for managing settings (`list`, `get`, `set`, `reset`, `path`)
 - Add `todoCompletion` setting to warn agent when it stops with incomplete todos (up to 3 reminders)
@@ -10802,6 +11087,7 @@
 ## [4.6.0] - 2026-01-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Add `/skill:name` slash commands for quick skill access (toggle via `skills.enableSkillCommands` setting)
 - Add `cwd` to SessionInfo for session list display
@@ -10837,6 +11123,7 @@
 ## [4.4.4] - 2026-01-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `todo_write` tool for creating and managing structured task lists during coding sessions
 - Added persistent todo panel above the editor that displays task progress
@@ -10886,6 +11173,7 @@
 ## [4.3.0] - 2026-01-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Cursor provider support with browser-based OAuth authentication
 - Added default model configuration for Cursor provider (claude-sonnet-4-5)
@@ -10908,6 +11196,7 @@
 ## [4.2.2] - 2026-01-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added persistent cache storage for Codex usage data that survives application restarts
 - Added `--no-lsp` to disable LSP tools, formatting, diagnostics, and warmup for a session
@@ -10929,6 +11218,7 @@
 ## [4.2.1] - 2026-01-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added automatic discovery and listing of AGENTS.md files in the system prompt, providing agents with an authoritative list of project-specific instruction files without runtime searching
 - Added `planner` built-in agent for comprehensive implementation planning with slow model
@@ -10956,6 +11246,7 @@
 ## [4.2.0] - 2026-01-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `/dump` slash command to copy the full session transcript to the clipboard
 - Added automatic Nerd Fonts detection for terminals like iTerm, WezTerm, Kitty, Ghostty, and Alacritty to set appropriate symbol preset
@@ -10996,6 +11287,7 @@
 ## [4.1.0] - 2026-01-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added persistent prompt history with SQLite-backed storage and Ctrl+R search
 
@@ -11006,6 +11298,7 @@
 ## [4.0.1] - 2026-01-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added usage limit error detection to enable automatic credential switching when Codex accounts hit rate limits
 - Added Codex usage API integration to proactively check account limits before credential selection
@@ -11023,6 +11316,7 @@
 ## [4.0.0] - 2026-01-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Exported `InteractiveModeOptions` type for programmatic SDK usage
 - Exported additional UI components for extensions: `ArminComponent`, `AssistantMessageComponent`, `BashExecutionComponent`, `BranchSummaryMessageComponent`, `CompactionSummaryMessageComponent`, `CustomEditor`, `CustomMessageComponent`, `FooterComponent`, `ExtensionEditorComponent`, `ExtensionInputComponent`, `ExtensionSelectorComponent`, `LoginDialogComponent`, `ModelSelectorComponent`, `OAuthSelectorComponent`, `SessionSelectorComponent`, `SettingsSelectorComponent`, `ShowImagesSelectorComponent`, `ThemeSelectorComponent`, `ThinkingSelectorComponent`, `ToolExecutionComponent`, `TreeSelectorComponent`, `UserMessageComponent`, `UserMessageSelectorComponent`
@@ -11116,6 +11410,7 @@
 ## [3.36.0] - 2026-01-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `calc` tool for basic mathematical calculations with support for arithmetic operators, parentheses, and hex/binary/octal literals
 - Added support for multiple API credentials per provider with round-robin distribution across sessions
@@ -11135,6 +11430,7 @@
 ## [3.35.0] - 2026-01-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added retry logic with exponential backoff for auto-compaction failures
 - Added fallback to alternative models when auto-compaction fails with the primary model
@@ -11160,6 +11456,7 @@
 ## [3.34.0] - 2026-01-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added caching for system environment detection to improve startup performance
 - Added disk usage information to automatic environment detection in system prompt
@@ -11179,6 +11476,7 @@
 ## [3.33.0] - 2026-01-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `env` support in `settings.json` for automatically setting environment variables on startup
 - Added environment variable management methods to SettingsManager (get/set/clear)
@@ -11196,6 +11494,7 @@
 ## [3.32.0] - 2026-01-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added progress indicator when starting LSP servers at session startup
 - Added bundled `/init` slash command available by default
@@ -11211,6 +11510,7 @@
 ## [3.31.0] - 2026-01-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added temporary model selection: `Ctrl+Y` opens model selector for session-only model switching (not persisted to settings)
 - Added `setModelTemporary()` method to AgentSession for ephemeral model changes
@@ -11279,6 +11579,7 @@
 ## [3.30.0] - 2026-01-07
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added environment variable configuration for task limits: `OMP_TASK_MAX_PARALLEL`, `OMP_TASK_MAX_CONCURRENCY`, `OMP_TASK_MAX_OUTPUT_BYTES`, `OMP_TASK_MAX_OUTPUT_LINES`, and `OMP_TASK_MAX_AGENTS_IN_DESCRIPTION`
 - Added specialized web-fetch handlers for 50+ platforms including GitHub, GitLab, npm, PyPI, crates.io, Stack Overflow, Wikipedia, arXiv, PubMed, Hacker News, Reddit, Mastodon, Bluesky, and many more
@@ -11299,6 +11600,7 @@
 ## [3.25.0] - 2026-01-07
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `complete` tool for structured subagent output with JSON schema validation
 - Added `query` parameter to output tool for jq-like JSON querying
@@ -11315,6 +11617,7 @@
 ## [3.24.0] - 2026-01-07
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `ToolSession` interface to unify tool creation with session context including cwd, UI availability, and rulebook rules
 - Added Bun Worker-based execution for subagent tasks, replacing subprocess spawning for improved performance and event streaming
@@ -11374,6 +11677,7 @@
 - Changed image tool name from `gemini_image` to `generate_image` with label `GenerateImage`
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `webSearchProvider` setting to override auto-detection priority (Exa > Perplexity > Anthropic)
 - Added `imageProvider` setting to override auto-detection priority (OpenRouter > Gemini)
@@ -11413,6 +11717,7 @@
 ## [3.20.0] - 2026-01-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added extensions API with auto-discovery (`.omp/extensions`) and `--extension`/`-e` loading for custom tools, commands, and lifecycle hooks
 - Added prompt templates loaded from global and project `.omp/prompts` directories with `/template` expansion in the input box
@@ -11464,6 +11769,7 @@
 ## [3.15.1] - 2026-01-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added 65 new built-in color themes including dark variants (abyss, aurora, cavern, copper, cosmos, eclipse, ember, equinox, lavender, lunar, midnight, nebula, rainforest, reef, sakura, slate, solstice, starfall, swamp, taiga, terminal, tundra, twilight, volcanic), light variants (aurora-day, canyon, cirrus, coral, dawn, dunes, eucalyptus, frost, glacier, haze, honeycomb, lagoon, lavender, meadow, mint, opal, orchard, paper, prism, sand, savanna, soleil, wetland, zenith), and material themes (alabaster, amethyst, anthracite, basalt, birch, graphite, limestone, mahogany, marble, obsidian, onyx, pearl, porcelain, quartz, sandstone, titanium)
 
@@ -11474,6 +11780,7 @@
 ## [3.15.0] - 2026-01-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added spinner type variants (status and activity) with distinct animation frames per symbol preset
 - Added animated spinner for task tool progress display during subagent execution
@@ -11553,6 +11860,7 @@
 ## [3.14.0] - 2026-01-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `getUsageStatistics()` method to SessionManager for tracking cumulative token usage and costs across session messages
 
@@ -11576,6 +11884,7 @@
 ## [3.8.1337] - 2026-01-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added automatic browser opening after exporting session to HTML
 - Added automatic browser opening after sharing session as a Gist
@@ -11587,6 +11896,7 @@
 ## [3.7.1337] - 2026-01-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `EditMatchError` class for structured error handling in edit operations
 - Added `utils` module export with `once` and `untilAborted` helper functions
@@ -11605,6 +11915,7 @@
 ## [3.5.1337] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added session header and footer output in text mode showing version, model, provider, thinking level, and session ID
 - Added Extension Control Center dashboard accessible via `/extensions` command for unified management of all providers and extensions
@@ -11625,6 +11936,7 @@
 ## [3.4.1337] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Time Traveling Stream Rules (TTSR) feature that monitors agent output for pattern matches and injects rule reminders mid-stream
 - Added `ttsr_trigger` frontmatter field for rules to define regex patterns that trigger mid-stream injection
@@ -11644,6 +11956,7 @@
 ## [3.1.1337] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `spawns` frontmatter field for agent definitions to control which sub-agents can be spawned
 - Added spawn restriction enforcement preventing agents from spawning unauthorized sub-agents
@@ -11655,6 +11968,7 @@
 ## [3.0.1337] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added unified capability-based discovery system for loading configuration from multiple AI coding tools (Claude Code, Cursor, Windsurf, Gemini, Codex, Cline, GitHub Copilot, VS Code)
 - Added support for discovering MCP servers, rules, skills, hooks, tools, slash commands, prompts, and context files from tool-specific config directories
@@ -11683,6 +11997,7 @@
 ## [2.1.1337] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `pi update` command to check for and install updates from GitHub releases or via bun
 
@@ -11696,6 +12011,7 @@
 ## [2.0.1337] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added shell environment snapshot to preserve user aliases, functions, and shell options when executing bash commands
 - Added support for `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` environment variables for shell customization
@@ -11709,6 +12025,7 @@
 ## [1.500.0] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added provider tabs to model selector with Tab/Arrow navigation for filtering models by provider
 - Added context menu to model selector for choosing model role (Default, Smol, Slow) instead of keyboard shortcuts
@@ -11771,6 +12088,7 @@
 ## [1.341.0] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added interruptMode setting to control when queued messages are processed during tool execution.
 - Implemented getter and setter methods in SettingsManager for interrupt mode persistence.
@@ -11821,6 +12139,7 @@
 ## [1.339.0] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - MCP project config setting to disable loading `.mcp.json`/`mcp.json` from project root
 - Support for both `mcp.json` and `.mcp.json` filenames (prefers `mcp.json` if both exist)
@@ -11829,6 +12148,7 @@
 ## [1.338.0] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Bash interceptor setting to block shell commands that have dedicated tools (disabled by default, enable via `/settings`)
 
@@ -11845,6 +12165,7 @@
 ## [1.337.1] - 2026-01-02
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - MCP support and plugin system for external tool integration
 - Git context to system prompt for repo awareness
@@ -11874,6 +12195,7 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 ## [1.5.1] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added shell environment snapshot to preserve user aliases, functions, and shell options when executing bash commands
 - Added support for `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` environment variables for shell customization
@@ -11887,6 +12209,7 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 ## [1.5.0] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added provider tabs to model selector with Tab/Arrow navigation for filtering models by provider
 - Added context menu to model selector for choosing model role (Default, Smol, Slow) instead of keyboard shortcuts
@@ -11985,6 +12308,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 - Removed `discoverAuthStorage` and `discoverModels` from the SDK. `AuthStorage` and `ModelRegistry` now default to `~/.pi/agent` paths unless you pass an `agentDir` ([#645](https://github.com/badlogic/pi-mono/issues/645))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Session renaming in `/resume` picker via `Ctrl+R` without opening the session ([#863](https://github.com/badlogic/pi-mono/pull/863) by [@svkozak](https://github.com/svkozak))
 - Session selector keybindings are now configurable ([#948](https://github.com/badlogic/pi-mono/pull/948) by [@aos](https://github.com/aos))
@@ -12058,6 +12382,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.49.3] - 2026-01-22
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `markdown.codeBlockIndent` setting to customize code block indentation in rendered output ([#855](https://github.com/badlogic/pi-mono/pull/855) by [@terrorobe](https://github.com/terrorobe))
 - Added `inline-bash.ts` example extension for expanding `!{command}` patterns in prompts ([#881](https://github.com/badlogic/pi-mono/pull/881) by [@scutifer](https://github.com/scutifer))
@@ -12085,6 +12410,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.49.2] - 2026-01-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added widget placement option for extension widgets via `widgetPlacement` in `pi.addWidget()` ([#850](https://github.com/badlogic/pi-mono/pull/850) by [@marckrenn](https://github.com/marckrenn))
 - Added AWS credential detection for ECS/Kubernetes environments: `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_WEB_IDENTITY_TOKEN_FILE` ([#848](https://github.com/badlogic/pi-mono/issues/848))
@@ -12108,6 +12434,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.49.1] - 2026-01-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `strictResponsesPairing` compat option for custom OpenAI Responses models on Azure ([#768](https://github.com/badlogic/pi-mono/pull/768) by [@nicobako](https://github.com/nicobako))
 - Session selector (`/resume`) now supports path display toggle (`Ctrl+P`) and session deletion (`Ctrl+D`) with inline confirmation ([#816](https://github.com/badlogic/pi-mono/pull/816) by [@w-winter](https://github.com/w-winter))
@@ -12128,6 +12455,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.49.0] - 2026-01-17
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `pi.setLabel(entryId, label)` in ExtensionAPI for setting per-entry labels from extensions ([#806](https://github.com/badlogic/pi-mono/issues/806))
 - Export `keyHint`, `appKeyHint`, `editorKey`, `appKey`, `rawKeyHint` for extensions to format keybinding hints consistently ([#802](https://github.com/badlogic/pi-mono/pull/802) by [@dannote](https://github.com/dannote))
@@ -12157,6 +12485,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.48.0] - 2026-01-16
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `quietStartup` setting to silence startup output (version header, loaded context info, model scope line). Changelog notifications are still shown. ([#777](https://github.com/badlogic/pi-mono/pull/777) by [@ribelo](https://github.com/ribelo))
 - Added `editorPaddingX` setting for horizontal padding in input editor (0-3, default: 0)
@@ -12192,6 +12521,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 - Extensions using `Editor` directly must now pass `TUI` as the first constructor argument: `new Editor(tui, theme)`. The `tui` parameter is available in extension factory functions. ([#732](https://github.com/badlogic/pi-mono/issues/732))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **OpenAI Codex official support**: Full compatibility with OpenAI's Codex CLI models (`gpt-5.1`, `gpt-5.2`, `gpt-5.1-codex-mini`, `gpt-5.2-codex`). Features include static system prompt for OpenAI allowlisting, prompt caching via session ID, and reasoning signature retention across turns. Set `OPENAI_API_KEY` and use `--provider openai-codex` or select a Codex model. ([#737](https://github.com/badlogic/pi-mono/pull/737))
 - `pi-internal://` URL scheme in read tool for accessing internal documentation. The model can read files from the coding-agent package (README, docs, examples) to learn about extending pi.
@@ -12228,6 +12558,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 - Keyboard shortcuts (Ctrl+C, Ctrl+D, etc.) now work on non-Latin keyboard layouts (Russian, Ukrainian, Bulgarian, etc.) in terminals supporting Kitty keyboard protocol with alternate key reporting ([#718](https://github.com/badlogic/pi-mono/pull/718) by [@dannote](https://github.com/dannote))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Edit tool now uses fuzzy matching as fallback when exact match fails, tolerating trailing whitespace, smart quotes, Unicode dashes, and special spaces ([#713](https://github.com/badlogic/pi-mono/pull/713) by [@dannote](https://github.com/dannote))
 - Support `APPEND_SYSTEM.md` to append instructions to the system prompt ([#716](https://github.com/badlogic/pi-mono/pull/716) by [@tallshort](https://github.com/tallshort))
@@ -12247,12 +12578,14 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.45.7] - 2026-01-13
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Exported `highlightCode` and `getLanguageFromPath` for extensions ([#703](https://github.com/badlogic/pi-mono/pull/703) by [@dannote](https://github.com/dannote))
 
 ## [0.45.6] - 2026-01-13
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `ctx.ui.custom()` now accepts `overlayOptions` for overlay positioning and sizing (anchor, margins, offsets, percentages, absolute positioning) ([#667](https://github.com/badlogic/pi-mono/pull/667) by [@nicobailon](https://github.com/nicobailon))
 - `ctx.ui.custom()` now accepts `onHandle` callback to receive the `OverlayHandle` for controlling overlay visibility ([#667](https://github.com/badlogic/pi-mono/pull/667) by [@nicobailon](https://github.com/nicobailon))
@@ -12273,6 +12606,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 - Replaced `sharp` with `wasm-vips` for image processing (resize, PNG conversion). Eliminates native build requirements that caused installation failures on some systems. ([#696](https://github.com/badlogic/pi-mono/issues/696))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Extension example: `summarize.ts` for summarizing conversations using custom UI and an external model ([#684](https://github.com/badlogic/pi-mono/pull/684) by [@scutifer](https://github.com/scutifer))
 - Extension example: `question.ts` enhanced with custom UI for asking user questions ([#693](https://github.com/badlogic/pi-mono/pull/693) by [@ferologics](https://github.com/ferologics))
@@ -12302,6 +12636,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.45.0] - 2026-01-13
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - MiniMax provider support: set `MINIMAX_API_KEY` and use `minimax/MiniMax-M2.1` ([#656](https://github.com/badlogic/pi-mono/pull/656) by [@dannote](https://github.com/dannote))
 - `/scoped-models`: Alt+Up/Down to reorder enabled models. Order is preserved when saving with Ctrl+S and determines Ctrl+P cycling order. ([#676](https://github.com/badlogic/pi-mono/pull/676) by [@thomasmhr](https://github.com/thomasmhr))
@@ -12315,6 +12650,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 - `pi.getAllTools()` now returns `ToolInfo[]` (with `name` and `description`) instead of `string[]`. Extensions that only need names can use `.map(t => t.name)`. ([#648](https://github.com/badlogic/pi-mono/pull/648) by [@carsonfarmer](https://github.com/carsonfarmer))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Session naming: `/name <name>` command sets a display name shown in the session selector instead of the first message. Useful for distinguishing forked sessions. Extensions can use `pi.setSessionName()` and `pi.getSessionName()`. ([#650](https://github.com/badlogic/pi-mono/pull/650) by [@scutifer](https://github.com/scutifer))
 - Extension example: `notify.ts` for desktop notifications via OSC 777 escape sequence ([#658](https://github.com/badlogic/pi-mono/pull/658) by [@ferologics](https://github.com/ferologics))
@@ -12341,6 +12677,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 - `SessionManager.list()` and `SessionManager.listAll()` are now async, returning `Promise<SessionInfo[]>`. Callers must await them. ([#620](https://github.com/badlogic/pi-mono/pull/620) by [@tmustier](https://github.com/tmustier))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `/resume` selector now toggles between current-folder and all sessions with Tab, showing the session cwd in the All view and loading progress. ([#620](https://github.com/badlogic/pi-mono/pull/620) by [@tmustier](https://github.com/tmustier))
 - `SessionManager.list()` and `SessionManager.listAll()` accept optional `onProgress` callback for progress updates
@@ -12385,6 +12722,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.42.2] - 2026-01-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `/model <search>` now pre-filters the model selector or auto-selects on exact match. Use `provider/model` syntax to disambiguate (e.g., `/model openai/gpt-4`). ([#587](https://github.com/badlogic/pi-mono/pull/587) by [@zedrdave](https://github.com/zedrdave))
 - `FooterDataProvider` for custom footers: `ctx.ui.setFooter()` now receives a third `footerData` parameter providing `getGitBranch()`, `getExtensionStatuses()`, and `onBranchChange()` for reactive updates ([#600](https://github.com/badlogic/pi-mono/pull/600) by [@nicobailon](https://github.com/nicobailon))
@@ -12403,12 +12741,14 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.42.0] - 2026-01-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added OpenCode Zen provider support. Set `OPENCODE_API_KEY` env var and use `opencode/<model-id>` (e.g., `opencode/claude-opus-4-5`).
 
 ## [0.41.0] - 2026-01-09
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Anthropic OAuth support is back! Use `/login` to authenticate with your Claude Pro/Max subscription.
 
@@ -12421,6 +12761,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.40.0] - 2026-01-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Documentation on component invalidation and theme changes in `docs/tui.md`
 
@@ -12443,6 +12784,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 - `discoverSkills()` now returns `{ skills: Skill[], warnings: SkillWarning[] }` instead of `Skill[]`. This allows callers to handle skill loading warnings. ([#577](https://github.com/badlogic/pi-mono/pull/577) by [@cv](https://github.com/cv))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `ctx.ui.getAllThemes()`, `ctx.ui.getTheme(name)`, and `ctx.ui.setTheme(name | Theme)` methods for extensions to list, load, and switch themes at runtime ([#576](https://github.com/badlogic/pi-mono/pull/576))
 - `--no-tools` flag to disable all built-in tools, allowing extension-only tool setups ([#557](https://github.com/badlogic/pi-mono/pull/557) by [@cv](https://github.com/cv))
@@ -12479,6 +12821,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 - OpenAI Codex model aliases removed (`gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `codex-mini-latest`). Use canonical IDs: `gpt-5.1`, `gpt-5.1-codex-mini`, `gpt-5.2`, `gpt-5.2-codex`. ([#536](https://github.com/badlogic/pi-mono/pull/536) by [@ghoulr](https://github.com/ghoulr))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `--no-extensions` flag to disable extension discovery while still allowing explicit `-e` paths ([#524](https://github.com/badlogic/pi-mono/pull/524) by [@cv](https://github.com/cv))
 - SDK: `InteractiveMode`, `runPrintMode()`, `runRpcMode()` exported for building custom run modes. See `docs/sdk.md`.
@@ -12502,6 +12845,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.37.6] - 2026-01-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Extension UI dialogs (`ctx.ui.select()`, `ctx.ui.confirm()`, `ctx.ui.input()`) now accept an optional `AbortSignal` to programmatically dismiss dialogs. Useful for implementing timeouts. See `examples/extensions/timed-confirm.ts`. ([#474](https://github.com/badlogic/pi-mono/issues/474))
 - HTML export now shows bridge prompts in model change messages for Codex sessions ([#510](https://github.com/badlogic/pi-mono/pull/510) by [@mitsuhiko](https://github.com/mitsuhiko))
@@ -12509,6 +12853,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.37.5] - 2026-01-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - ExtensionAPI: `setModel()`, `getThinkingLevel()`, `setThinkingLevel()` methods for extensions to change model and thinking level at runtime ([#509](https://github.com/badlogic/pi-mono/issues/509))
 - Exported truncation utilities for custom tools: `truncateHead`, `truncateTail`, `truncateLine`, `formatSize`, `DEFAULT_MAX_BYTES`, `DEFAULT_MAX_LINES`, `TruncationOptions`, `TruncationResult`
@@ -12524,6 +12869,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.37.4] - 2026-01-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Session picker (`pi -r`) and `--session` flag now support searching/resuming by session ID (UUID prefix) ([#495](https://github.com/badlogic/pi-mono/issues/495) by [@arunsathiya](https://github.com/arunsathiya))
 - Extensions can now replace the startup header with `ctx.ui.setHeader()`, see `examples/extensions/custom-header.ts` ([#500](https://github.com/badlogic/pi-mono/pull/500) by [@tudoroancea](https://github.com/tudoroancea))
@@ -12541,6 +12887,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.37.3] - 2026-01-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Extensions can now replace the footer with `ctx.ui.setFooter()`, see `examples/extensions/custom-footer.ts` ([#481](https://github.com/badlogic/pi-mono/issues/481))
 - Session ID is now forwarded to LLM providers for session-based caching (used by OpenAI Codex for prompt caching).
@@ -12570,6 +12917,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.37.0] - 2026-01-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Share viewer: copy-link button on messages to share URLs that navigate directly to a specific message ([#477](https://github.com/badlogic/pi-mono/pull/477) by [@lockmeister](https://github.com/lockmeister))
 - Extension example: add `claude-rules` to load `.claude/rules/` entries into the system prompt ([#461](https://github.com/badlogic/pi-mono/pull/461) by [@vaayne](https://github.com/vaayne))
@@ -12594,6 +12942,7 @@ There are multiple SDK breaking changes since v0.49.3. For the quickest migratio
 ## [0.36.0] - 2026-01-05
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Experimental: OpenAI Codex OAuth provider support: access Codex models via ChatGPT Plus/Pro subscription using `/login openai-codex` ([#451](https://github.com/badlogic/pi-mono/pull/451) by [@kim0](https://github.com/kim0))
 
@@ -12789,6 +13138,7 @@ pi --extension ./safety.ts -e ./todo.ts
 ## [0.34.0] - 2026-01-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Hook API: `before_agent_start` handlers can now return `systemPromptAppend` to dynamically append text to the system prompt for that turn. Multiple hooks' appends are concatenated.
 - Hook API: `before_agent_start` handlers can now return multiple messages (all are injected, not just the first)
@@ -12814,6 +13164,7 @@ pi --extension ./safety.ts -e ./todo.ts
 - **Key detection functions removed from `@mariozechner/pi-tui`**: All `isXxx()` key detection functions (`isEnter()`, `isEscape()`, `isCtrlC()`, etc.) have been removed. Use `matchesKey(data, keyId)` instead (e.g., `matchesKey(data, "enter")`, `matchesKey(data, "ctrl+c")`). This affects hooks and custom tools that use `ctx.ui.custom()` with keyboard input handling. ([#405](https://github.com/badlogic/pi-mono/pull/405))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Clipboard image paste support via `Ctrl+V`. Images are saved to a temp file and attached to the message. Works on macOS, Windows, and Linux (X11). ([#419](https://github.com/badlogic/pi-mono/issues/419))
 - Configurable keybindings via `~/.pi/agent/keybindings.json`. All keyboard shortcuts (editor navigation, deletion, app actions like model cycling, etc.) can now be customized. Supports multiple bindings per action. ([#405](https://github.com/badlogic/pi-mono/pull/405) by [@hjanuschka](https://github.com/hjanuschka))
@@ -12835,6 +13186,7 @@ pi --extension ./safety.ts -e ./todo.ts
 ## [0.32.2] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `$ARGUMENTS` syntax for custom slash commands as alternative to `$@` for all arguments joined. Aligns with patterns used by Claude, Codex, and OpenCode. Both syntaxes remain fully supported. ([#418](https://github.com/badlogic/pi-mono/pull/418) by [@skuridin](https://github.com/skuridin))
 
@@ -12855,6 +13207,7 @@ pi --extension ./safety.ts -e ./todo.ts
 ## [0.32.1] - 2026-01-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Shell commands without context contribution: use `!!command` to execute a bash command that is shown in the TUI and saved to session history but excluded from LLM context. Useful for running commands you don't want the AI to see. ([#414](https://github.com/badlogic/pi-mono/issues/414))
 
@@ -13120,6 +13473,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 - `enabledModels`: allowlist models in `settings.json` (same format as `--models` CLI)
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `ctx.ui.setStatus(key, text)` for hooks to display persistent status text in the footer ([#385](https://github.com/badlogic/pi-mono/pull/385) by [@prateekmedia](https://github.com/prateekmedia))
 - `ctx.ui.theme` getter for styling status text and other output with theme colors
@@ -13176,6 +13530,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 - **SessionManager API**: The second parameter of `create()`, `continueRecent()`, and `list()` changed from `agentDir` to `sessionDir`. When provided, it specifies the session directory directly (no cwd encoding). When omitted, uses default (`~/.pi/agent/sessions/<encoded-cwd>/`). `open()` no longer takes `agentDir`. ([#313](https://github.com/badlogic/pi-mono/pull/313))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **`--session-dir` flag**: Use a custom directory for sessions instead of the default `~/.pi/agent/sessions/<encoded-cwd>/`. Works with `-c` (continue) and `-r` (resume) flags. ([#313](https://github.com/badlogic/pi-mono/pull/313) by [@scutifer](https://github.com/scutifer))
 - **Reverse model cycling and model selector**: Shift+Ctrl+P cycles models backward, Ctrl+L opens model selector (retaining text in editor). ([#315](https://github.com/badlogic/pi-mono/pull/315) by [@mitsuhiko](https://github.com/mitsuhiko))
@@ -13183,6 +13538,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.29.1] - 2025-12-25
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Automatic custom system prompt loading**: Pi now auto-loads `SYSTEM.md` files to replace the default system prompt. Project-local `.pi/SYSTEM.md` takes precedence over global `~/.pi/agent/SYSTEM.md`. CLI `--system-prompt` flag overrides both. ([#309](https://github.com/badlogic/pi-mono/issues/309))
 - **Unified `/settings` command**: New settings menu consolidating thinking level, theme, queue mode, auto-compact, show images, hide thinking, and collapse changelog. Replaces individual `/thinking`, `/queue`, `/theme`, `/autocompact`, and `/show-images` commands. ([#310](https://github.com/badlogic/pi-mono/issues/310))
@@ -13198,6 +13554,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 - **Renamed `/clear` to `/new`**: The command to start a fresh session is now `/new`. Hook event reasons `before_clear`/`clear` are now `before_new`/`new`. Merry Christmas [@mitsuhiko](https://github.com/mitsuhiko)! ([#305](https://github.com/badlogic/pi-mono/pull/305))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Auto-space before pasted file paths**: When pasting a file path (starting with `/`, `~`, or `.`) after a word character, a space is automatically prepended. ([#307](https://github.com/badlogic/pi-mono/pull/307) by [@mitsuhiko](https://github.com/mitsuhiko))
 - **Word navigation in input fields**: Added Ctrl+Left/Right and Alt+Left/Right for word-by-word cursor movement. ([#306](https://github.com/badlogic/pi-mono/pull/306) by [@kim0](https://github.com/kim0))
@@ -13248,6 +13605,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.27.6] - 2025-12-24
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Compaction hook improvements**: The `before_compact` session event now includes:
   - `previousSummary`: Summary from the last compaction (if any), so hooks can preserve accumulated context
@@ -13262,6 +13620,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.27.5] - 2025-12-24
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **HTML export syntax highlighting**: Code blocks in markdown and tool outputs (read, write) now have syntax highlighting using highlight.js with theme-aware colors matching the TUI.
 - **HTML export improvements**: Render markdown server-side using marked (tables, headings, code blocks, etc.), honor user's chosen theme (light/dark), add image rendering for user messages, and style code blocks with TUI-like language markers. ([@scutifer](https://github.com/scutifer))
@@ -13279,6 +13638,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.27.3] - 2025-12-24
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **API keys in settings.json**: Store API keys in `~/.pi/agent/settings.json` under the `apiKeys` field (e.g., `{ "apiKeys": { "anthropic": "sk-..." } }`). Settings keys take priority over environment variables. ([#295](https://github.com/badlogic/pi-mono/issues/295))
 
@@ -13290,6 +13650,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.27.2] - 2025-12-23
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Skip conversation restore on branch**: Hooks can return `{ skipConversationRestore: true }` from `before_branch` to create the branched session file without restoring conversation messages. Useful for checkpoint hooks that restore files separately. ([#286](https://github.com/badlogic/pi-mono/pull/286) by [@nicobarray](https://github.com/nicobarray))
 
@@ -13300,6 +13661,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 - **Skill discovery performance**: Skip `node_modules` directories when recursively scanning for skills. Fixes ~60ms startup delay when skill directories contain npm dependencies.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Startup timing instrumentation**: Set `PI_TIMING=1` to see startup performance breakdown (interactive mode only).
 
@@ -13310,6 +13672,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 - **Session hooks API redesign**: Merged `branch` event into `session` event. `BranchEvent`, `BranchEventResult` types and `pi.on("branch", ...)` removed. Use `pi.on("session", ...)` with `reason: "before_branch" | "branch"` instead. `AgentSession.branch()` returns `{ cancelled }` instead of `{ skipped }`. `AgentSession.reset()` and `switchSession()` now return `boolean` (false if cancelled by hook). RPC commands `reset`, `switch_session`, and `branch` now include `cancelled` in response data. ([#278](https://github.com/badlogic/pi-mono/issues/278))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Session lifecycle hooks**: Added `before_*` variants (`before_switch`, `before_clear`, `before_branch`) that fire before actions and can be cancelled with `{ cancel: true }`. Added `shutdown` reason for graceful exit handling. ([#278](https://github.com/badlogic/pi-mono/issues/278))
 
@@ -13327,6 +13690,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.26.0] - 2025-12-22
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **SDK for programmatic usage**: New `createAgentSession()` factory with full control over model, tools, hooks, skills, session persistence, and settings. Philosophy: "omit to discover, provide to override". Includes 12 examples and comprehensive documentation. ([#272](https://github.com/badlogic/pi-mono/issues/272))
 - **Project-specific settings**: Settings now load from both `~/.pi/agent/settings.json` (global) and `<cwd>/.pi/settings.json` (project). Project settings override global with deep merge for nested objects. Project settings are read-only (for version control). ([#276](https://github.com/badlogic/pi-mono/pull/276))
@@ -13342,6 +13706,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.25.3] - 2025-12-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Gemini 3 preview models**: Added `gemini-3-pro-preview` and `gemini-3-flash-preview` to the google-gemini-cli provider. ([#264](https://github.com/badlogic/pi-mono/pull/264) by [@LukeFost](https://github.com/LukeFost))
 - **External editor support**: Press `Ctrl+G` to edit your message in an external editor. Uses `$VISUAL` or `$EDITOR` environment variable. On successful save, the message is replaced; on cancel, the original is kept. ([#266](https://github.com/badlogic/pi-mono/pull/266) by [@aliou](https://github.com/aliou))
@@ -13365,6 +13730,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.25.0] - 2025-12-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Interruptible tool execution**: Queuing a message while tools are executing now interrupts the current tool batch. Remaining tools are skipped with an error result, and your queued message is processed immediately. Useful for redirecting the agent mid-task. ([#259](https://github.com/badlogic/pi-mono/pull/259) by [@steipete](https://github.com/steipete))
 - **Google Gemini CLI OAuth provider**: Access Gemini 2.0/2.5 models for free via Google Cloud Code Assist. Login with `/login` and select "Google Gemini CLI". Uses your Google account with rate limits.
@@ -13407,6 +13773,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.24.1] - 2025-12-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **OAuth and model config exports**: Scripts using `AgentSession` directly can now import `getAvailableModels`, `getApiKeyForModel`, `findModel`, `login`, `logout`, and `getOAuthProviders` from `@oh-my-pi/pi-coding-agent` to reuse OAuth token storage and model resolution. ([#245](https://github.com/badlogic/pi-mono/issues/245))
 - **xhigh thinking level for gpt-5.2 models**: The thinking level selector and shift+tab cycling now show xhigh option for gpt-5.2 and gpt-5.2-codex models (in addition to gpt-5.1-codex-max). ([#236](https://github.com/badlogic/pi-mono/pull/236) by [@theBucky](https://github.com/theBucky))
@@ -13424,6 +13791,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.24.0] - 2025-12-19
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Subagent orchestration example**: Added comprehensive custom tool example for spawning and orchestrating sub-agents with isolated context windows. Includes scout/planner/reviewer/worker agents and workflow commands for multi-agent pipelines. ([#215](https://github.com/badlogic/pi-mono/pull/215) by [@nicobailon](https://github.com/nicobailon))
 - **`getMarkdownTheme()` export**: Custom tools can now import `getMarkdownTheme()` from `@oh-my-pi/pi-coding-agent` to use the same markdown styling as the main UI.
@@ -13458,6 +13826,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.23.4] - 2025-12-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Syntax highlighting**: Added syntax highlighting for markdown code blocks, read tool output, and write tool content. Uses cli-highlight with theme-aware color mapping and VS Code-style syntax colors. ([#214](https://github.com/badlogic/pi-mono/pull/214) by [@svkozak](https://github.com/svkozak))
 - **Intra-line diff highlighting**: Edit tool now shows word-level changes with inverse highlighting when a single line is modified. Multi-line changes show all removed lines first, then all added lines.
@@ -13508,6 +13877,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.23.0] - 2025-12-17
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Custom tools**: Extend pi with custom tools written in TypeScript. Tools can provide custom TUI rendering, interact with users via `pi.ui` (select, confirm, input, notify), and maintain state across sessions via `onSession` callback. See [docs/custom-tools.md](docs/custom-tools.md) and [examples/custom-tools/](examples/custom-tools/). ([#190](https://github.com/badlogic/pi-mono/issues/190))
 - **Hook and tool examples**: Added `examples/hooks/` and `examples/custom-tools/` with working examples. Examples are now bundled in npm and binary releases.
@@ -13525,6 +13895,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.22.4] - 2025-12-17
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `--list-models [search]` CLI flag to list available models with optional fuzzy search. Shows provider, model ID, context window, max output, thinking support, and image support. Only lists models with configured API keys. ([#203](https://github.com/badlogic/pi-mono/issues/203))
 
@@ -13535,6 +13906,7 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 ## [0.22.3] - 2025-12-16
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Streaming bash output**: Bash tool now streams output in real-time during execution. The TUI displays live progress with the last 5 lines visible (expandable with ctrl+o). ([#44](https://github.com/badlogic/pi-mono/issues/44))
 
@@ -13566,6 +13938,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.22.0] - 2025-12-15
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **GitHub Copilot support**: Use GitHub Copilot models via OAuth login (`/login` -> "GitHub Copilot"). Supports both github.com and GitHub Enterprise. Models are sourced from models.dev and include Claude, GPT, Gemini, Grok, and more. All models are automatically enabled after login. ([#191](https://github.com/badlogic/pi-mono/pull/191) by [@cau1k](https://github.com/cau1k))
 
@@ -13576,6 +13949,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.21.0] - 2025-12-14
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Inline image rendering**: Terminals supporting Kitty graphics protocol (Kitty, Ghostty, WezTerm) or iTerm2 inline images now render images inline in tool output. Aspect ratio is preserved by querying terminal cell dimensions on startup. Toggle with `/show-images` command or `terminal.showImages` setting. Falls back to text placeholder on unsupported terminals or when disabled. ([#177](https://github.com/badlogic/pi-mono/pull/177) by [@nicobailon](https://github.com/nicobailon))
 - **Gemini 3 Pro thinking levels**: Thinking level selector now works with Gemini 3 Pro models. Minimal/low map to Google's LOW, medium/high map to Google's HIGH. ([#176](https://github.com/badlogic/pi-mono/pull/176) by [@markusylisiurunen](https://github.com/markusylisiurunen))
@@ -13588,6 +13962,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.20.1] - 2025-12-13
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Exported skills API**: `loadSkillsFromDir`, `formatSkillsForPrompt`, and related types are now exported for use by other packages (e.g., mom).
 
@@ -13598,6 +13973,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 - **Pi skills now use `SKILL.md` convention**: Pi skills must now be named `SKILL.md` inside a directory, matching Codex CLI format. Previously any `*.md` file was treated as a skill. Migrate by renaming `~/.pi/agent/skills/foo.md` to `~/.pi/agent/skills/foo/SKILL.md`.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Display loaded skills on startup in interactive mode
 
@@ -13610,6 +13986,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.19.0] - 2025-12-12
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Skills system**: Auto-discover and load instruction files on-demand. Supports Claude Code (`~/.claude/skills/*/SKILL.md`), Codex CLI (`~/.codex/skills/`), and Pi-native formats (`~/.pi/agent/skills/`, `.pi/skills/`). Skills are listed in system prompt with descriptions, agent loads them via read tool when needed. Supports `{baseDir}` placeholder. Disable with `--no-skills` or `skills.enabled: false` in settings. ([#169](https://github.com/badlogic/pi-mono/issues/169))
 - **Version flag**: Added `--version` / `-v` flag to display the current version and exit. ([#170](https://github.com/badlogic/pi-mono/pull/170))
@@ -13617,6 +13994,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.18.2] - 2025-12-11
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Auto-retry on transient errors**: Automatically retries requests when providers return overloaded, rate limit, or server errors (429, 500, 502, 503, 504). Uses exponential backoff (2s, 4s, 8s). Shows retry status in TUI with option to cancel via Escape. Configurable in `settings.json` via `retry.enabled`, `retry.maxRetries`, `retry.baseDelayMs`. RPC mode emits `auto_retry_start` and `auto_retry_end` events. ([#157](https://github.com/badlogic/pi-mono/issues/157))
 - **HTML export line numbers**: Read tool calls in HTML exports now display line number ranges (e.g., `file.txt:10-20`) when offset/limit parameters are used, matching the TUI display format. Line numbers appear in yellow color for better visibility. ([#166](https://github.com/badlogic/pi-mono/issues/166))
@@ -13630,6 +14008,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.18.1] - 2025-12-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Mistral provider**: Added support for Mistral AI models. Set `MISTRAL_API_KEY` environment variable to use.
 
@@ -13640,6 +14019,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.18.0] - 2025-12-10
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Hooks system**: TypeScript modules that extend agent behavior by subscribing to lifecycle events. Hooks can intercept tool calls, prompt for confirmation, modify results, and inject messages from external sources. Auto-discovered from `~/.pi/agent/hooks/*.ts` and `.pi/hooks/*.ts`. Thanks to [@nicobailon](https://github.com/nicobailon) for the collaboration on the design and implementation. ([#145](https://github.com/badlogic/pi-mono/issues/145), supersedes [#158](https://github.com/badlogic/pi-mono/pull/158))
 - **`pi.send()` API**: Hooks can inject messages into the agent session from external sources (file watchers, webhooks, CI systems). If streaming, messages are queued; otherwise a new agent loop starts immediately.
@@ -13657,6 +14037,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 - **Merged turn prefix summary**: When a turn is split during compaction, the turn prefix summary is now merged into the main history summary instead of being stored separately.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **`isCompacting` property on AgentSession**: Check if auto-compaction is currently running.
 - **Session compaction indicator**: When resuming a compacted session, displays "Session compacted N times" status message.
@@ -13685,6 +14066,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.14.2] - 2025-12-08
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `/debug` command now includes agent messages as JSONL in the output
 
@@ -13705,6 +14087,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 - **Custom themes require new color tokens**: Themes must now include `thinkingXhigh` and `bashMode` color tokens. The theme loader provides helpful error messages listing missing tokens. See built-in themes (dark.json, light.json) for reference values.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **OpenAI compatibility overrides in models.json**: Custom models using `openai-completions` API can now specify a `compat` object to override provider quirks (`supportsStore`, `supportsDeveloperRole`, `supportsReasoningEffort`, `maxTokensField`). Useful for LiteLLM, custom proxies, and other non-standard endpoints. ([#133](https://github.com/badlogic/pi-mono/issues/133), thanks @fink-andreas for the initial idea and PR)
 - **xhigh thinking level**: Added `xhigh` thinking level for OpenAI codex-max models. Cycle through thinking levels with Shift+Tab; `xhigh` appears only when using a codex-max model. ([#143](https://github.com/badlogic/pi-mono/issues/143))
@@ -13726,6 +14109,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.13.1] - 2025-12-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Flexible Windows shell configuration**: The bash tool now supports multiple shell sources beyond Git Bash. Resolution order: (1) custom `shellPath` in settings.json, (2) Git Bash in standard locations, (3) any bash.exe on PATH. This enables Cygwin, MSYS2, and other bash environments. Configure with `~/.pi/agent/settings.json`: `{"shellPath": "C:\\cygwin64\\bin\\bash.exe"}`.
 
@@ -13742,6 +14126,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.12.14] - 2025-12-06
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Double-Escape Branch Shortcut**: Press Escape twice with an empty editor to quickly open the `/branch` selector for conversation branching.
 
@@ -13763,6 +14148,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 - **Line wrapping escape codes**: Fixed underline style bleeding into padding when wrapping long URLs. ANSI codes now attach to the correct content, and line-end resets only turn off underline (preserving background colors). ([#109](https://github.com/badlogic/pi-mono/issues/109))
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Fuzzy search models and sessions**: Implemented a simple fuzzy search for models and sessions (e.g., `codexmax` now finds `gpt-5.1-codex-max`). ([#122](https://github.com/badlogic/pi-mono/pull/122) by [@markusylisiurunen](https://github.com/markusylisiurunen))
 - **Prompt History Navigation**: Browse previously submitted prompts using Up/Down arrow keys when the editor is empty. Press Up to cycle through older prompts, Down to return to newer ones or clear the editor. Similar to shell history and Claude Code's prompt history feature. History is session-scoped and stores up to 100 entries. ([#121](https://github.com/badlogic/pi-mono/pull/121) by [@nicobailon](https://github.com/nicobailon))
@@ -13782,6 +14168,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 - **Footer overflow crash**: Fixed TUI crash when terminal width is too narrow for the footer stats line. The footer now truncates gracefully instead of overflowing.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **`authHeader` option in models.json**: Custom providers can set `"authHeader": true` to automatically add `Authorization: Bearer <apiKey>` header. Useful for providers that require explicit auth headers. ([#81](https://github.com/badlogic/pi-mono/issues/81))
 - **`--append-system-prompt` Flag**: Append additional text or file contents to the system prompt. Supports both inline text and file paths. Complements `--system-prompt` for layering custom instructions without replacing the base system prompt. ([#114](https://github.com/badlogic/pi-mono/pull/114) by [@markusylisiurunen](https://github.com/markusylisiurunen))
@@ -13790,12 +14177,14 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.12.10] - 2025-12-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `gpt-5.1-codex-max` model support
 
 ## [0.12.9] - 2025-12-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **`/copy` Command**: Copy the last agent message to clipboard. Works cross-platform (macOS, Windows, Linux). Useful for extracting text from rendered Markdown output. ([#105](https://github.com/badlogic/pi-mono/pull/105) by [@markusylisiurunen](https://github.com/markusylisiurunen))
 
@@ -13806,6 +14195,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.12.7] - 2025-12-04
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Context Compaction**: Long sessions can now be compacted to reduce context usage while preserving recent conversation history. ([#92](https://github.com/badlogic/pi-mono/issues/92), [docs](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md#context-compaction))
   - `/compact [instructions]`: Manually compact context with optional custom instructions for the summary
@@ -13820,6 +14210,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.12.5] - 2025-12-03
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Forking/Rebranding Support**: All branding (app name, config directory, environment variable names) is now configurable via `piConfig` in `package.json`. Forks can change `piConfig.name` and `piConfig.configDir` to rebrand the CLI without code changes. Affects CLI banner, help text, config paths, and error messages. ([#95](https://github.com/badlogic/pi-mono/pull/95))
 
@@ -13830,6 +14221,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.12.4] - 2025-12-02
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **RPC Termination Safeguard**: When running as an RPC worker (stdin pipe detected), the CLI now exits immediately if the parent process terminates unexpectedly. Prevents orphaned RPC workers from persisting indefinitely and consuming system resources.
 
@@ -13849,6 +14241,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.12.1] - 2025-12-02
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Models**: Added support for OpenAI's new models:
   - `gpt-4.1` (128K context)
@@ -13860,6 +14253,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.12.0] - 2025-12-02
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **`-p, --print` Flag**: Run in non-interactive batch mode. Processes input message or piped stdin without TUI, prints agent response directly to stdout. Ideal for scripting, piping, and CI/CD integration. Exits after first response.
 - **`-P, --print-streaming` Flag**: Like `-p`, but streams response tokens as they arrive. Use `--print-streaming --no-markdown` for raw unformatted output.
@@ -13929,6 +14323,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.11.1] - 2025-11-29
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added `fd` integration for file path autocompletion. Now uses `fd` for faster fuzzy file search
 
@@ -13939,6 +14334,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.11.0] - 2025-11-29
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **File-based Slash Commands**: Create custom reusable prompts as `.txt` files in `~/.pi/slash-commands/`. Files become `/filename` commands with first-line descriptions. Supports `{{selection}}` placeholder for referencing selected/attached content.
 - **`/branch` Command**: Create conversation branches from any previous user message. Opens a selector to pick a message, then creates a new session file starting from that point. Original message text is placed in the editor for modification.
@@ -13974,6 +14370,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.10.5] - 2025-11-28
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Full multimodal support: attach images (PNG, JPEG, GIF, WebP) and PDFs to prompts using `@path` syntax or `--file` flag
 
@@ -13991,6 +14388,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.10.3] - 2025-11-28
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added RPC mode (`--rpc`) for programmatic integration. Accepts JSON commands on stdin, emits JSON events on stdout. See [RPC mode documentation](https://github.com/nicobailon/pi-mono/blob/main/packages/coding-agent/README.md#rpc-mode) for protocol details.
 
@@ -14001,6 +14399,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.10.2] - 2025-11-26
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added thinking level persistence. Default level stored in `~/.pi/settings.json`, restored on startup. Per-session overrides saved in session files.
 - Added model cycling shortcut: `Ctrl+I` cycles through available models (or scoped models with `-m` flag).
@@ -14018,6 +14417,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ## [0.10.1] - 2025-11-25
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Add custom model configuration via `~/.pi/models.json`
 
@@ -14026,6 +14426,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 Initial public release.
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Interactive TUI with streaming responses
 - Conversation session management with `--continue`, `--resume`, and `--session` flags
@@ -14046,6 +14447,7 @@ Initial public release.
 ## [0.9.3] - 2025-11-24
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Added Anthropic Claude Opus 4.5 support
 
@@ -14058,6 +14460,7 @@ Initial public release.
 ## [0.9.0] - 2025-11-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **`/clear` Command**: New slash command to reset the conversation context and start a fresh session. Aborts any in-flight agent work, clears all messages, and creates a new session file. ([#48](https://github.com/badlogic/pi-mono/pull/48))
 - **Model Cycling with Thinking Levels**: The `--models` flag now supports thinking level syntax (e.g., `--models sonnet:high,haiku:low`). When cycling models with `Ctrl+P`, the associated thinking level is automatically applied. The first model in the scope is used as the initial model when starting a new session. Both model and thinking level changes are now saved to session and settings for persistence. ([#47](https://github.com/badlogic/pi-mono/pull/47))
@@ -14096,6 +14499,7 @@ Initial public release.
 ## [0.8.0] - 2025-11-21
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Theme System**: Full theming support with 44 customizable color tokens. Two built-in themes (`dark`, `light`) with auto-detection based on terminal background. Use `/theme` command to select themes interactively. Custom themes in `~/.pi/agent/themes/*.json` support live editing - changes apply immediately when the file is saved. Themes use RGB hex values for consistent rendering across terminals. VS Code users: set `terminal.integrated.minimumContrastRatio` to `1` for proper color rendering. See [Theme Documentation](docs/theme.md) for details.
 
@@ -14108,6 +14512,7 @@ Initial public release.
 ## [0.7.28] - 2025-11-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Message Queuing**: You can now send multiple messages while the agent is processing without waiting for the previous response to complete. Messages submitted during streaming are queued and processed based on your queue mode setting. Queued messages are shown in a pending area below the chat. Press Escape to abort and restore all queued messages to the editor. Use `/queue` to select between "one-at-a-time" (process queued messages sequentially, recommended) or "all" (process all queued messages at once). The queue mode setting is saved and persists across sessions. ([#15](https://github.com/badlogic/pi-mono/issues/15))
 
@@ -14121,6 +14526,7 @@ Initial public release.
 ## [0.7.26] - 2025-11-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Tool Output Expansion**: Press `Ctrl+O` to toggle between collapsed and expanded tool output display. Expands all tool call outputs (bash, read, write, etc.) to show full content instead of truncated previews. ([#31](https://github.com/badlogic/pi-mono/issues/31))
 - **Custom Headers**: Added support for custom HTTP headers in `models.json` configuration. Headers can be specified at both provider and model level, with model-level headers overriding provider-level ones. This enables bypassing Cloudflare bot detection and other proxy requirements. ([#39](https://github.com/badlogic/pi-mono/issues/39))
@@ -14134,18 +14540,21 @@ Initial public release.
 ## [0.7.25] - 2025-11-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Model Cycling**: Press `Ctrl+P` to quickly cycle through models. Use `--models` CLI argument to scope to specific models (e.g., `--models claude-sonnet,gpt-4o`). Supports pattern matching and smart version selection (prefers aliases over dated versions). ([#37](https://github.com/badlogic/pi-mono/pull/37) by [@fightbulc](https://github.com/fightbulc))
 
 ## [0.7.24] - 2025-11-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Thinking Level Cycling**: Press `Shift+Tab` to cycle through thinking levels (off → minimal → low → medium → high) for reasoning-capable models. Editor border color changes to indicate current level (gray → blue → cyan → magenta).
 
 ## [0.7.23] - 2025-11-20
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Update Notifications**: Interactive mode now checks for new versions on startup and displays a notification if an update is available.
 
@@ -14188,6 +14597,7 @@ Initial public release.
 ## [0.7.17] - 2025-11-18
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **New Model**: Added `gemini-3-pro-preview` to Google provider.
 - **OAuth Authentication**: Added `/login` and `/logout` commands for OAuth-based authentication with Claude Pro/Max subscriptions. Tokens are stored in `~/.pi/agent/oauth.json` with 0600 permissions and automatically refreshed when expired. OAuth tokens take priority over API keys for Anthropic models.
@@ -14227,6 +14637,7 @@ Initial public release.
 ## [0.7.12] - 2025-11-16
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - **Custom Models and Providers**: Support for custom models and providers via `~/.pi/agent/models.json` configuration file. Add local models (Ollama, vLLM, LM Studio) or any OpenAI-compatible, Anthropic-compatible, or Google-compatible API. File is reloaded on every `/model` selector open, allowing live updates without restart. ([#21](https://github.com/badlogic/pi-mono/issues/21))
 - Added `gpt-5.1-codex` model to OpenAI provider (400k context, 128k max output, reasoning-capable).
@@ -14254,6 +14665,7 @@ Initial public release.
 ## [0.7.10] - 2025-11-14
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - `/branch` command for creating conversation branches. Opens a selector showing all user messages in chronological order. Selecting a message creates a new session with all messages before the selected one, and places the selected message in the editor for modification or resubmission. This allows exploring alternative conversation paths without losing the current session. (fixes [#16](https://github.com/badlogic/pi-mono/issues/16))
 
@@ -14277,6 +14689,7 @@ Initial public release.
 ## [0.7.7] - 2025-11-13
 
 ### Added
+\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 
 - Automatic changelog display on startup in interactive mode. When starting a new session (not continuing/resuming), the agent will display all changelog entries since the last version you used. The last shown version is tracked in `~/.pi/agent/settings.json`.
 - `/changelog` command to display the changelog in the TUI
