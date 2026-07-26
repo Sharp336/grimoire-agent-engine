@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import {
 	type Component,
 	Container,
@@ -13,10 +14,11 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { formatBytes } from "@oh-my-pi/pi-utils";
+import { formatBytes, getTranscriptDbPath, logger } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { SessionInfo, SessionStatus } from "../../session/session-listing";
+import { TranscriptIndex } from "../../session/transcript-index";
 import { shortenPath } from "../../tools/render-utils";
 import { DynamicBorder } from "./dynamic-border";
 import { HookSelectorComponent } from "./hook-selector";
@@ -223,6 +225,32 @@ export function mergeSessionRanking(
 
 	const metadataOnly = fuzzy.filter(session => !historyPaths.has(session.path));
 	return [...historyMatches, ...metadataOnly];
+}
+
+/**
+ * Rank sessions with transcript-index matches ahead of prompt-history matches.
+ *
+ * Transcript matches are opt-in: `transcripts.db` exists only after `/session
+ * search` has run, so the file is probed once here at selector build and the
+ * index is never created. Both pickers share this matcher so they cannot
+ * disagree; a missing or unreadable index degrades to history matches alone.
+ * Ordering is significant — transcript hits lead — while duplicates are left to
+ * `mergeSessionRanking`, which resolves IDs to sessions and dedupes by path.
+ */
+export function createSessionRankingMatcher(
+	historyMatcher: SessionHistoryMatcher | undefined,
+): SessionHistoryMatcher | undefined {
+	const transcriptDbPath = getTranscriptDbPath();
+	if (!fs.existsSync(transcriptDbPath)) return historyMatcher;
+	return (query: string) => {
+		const historyIds = historyMatcher?.(query) ?? [];
+		try {
+			return [...TranscriptIndex.open(transcriptDbPath).matchingSessionIds(query), ...historyIds];
+		} catch (error) {
+			logger.warn("Transcript index unavailable for session ranking", { error: String(error) });
+			return historyIds;
+		}
+	};
 }
 
 /**

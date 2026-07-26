@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
+import { getTranscriptDbPath } from "@oh-my-pi/pi-utils";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TranscriptIndex } from "@oh-my-pi/pi-coding-agent/session/transcript-index";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
@@ -109,5 +112,64 @@ describe("/qa slash command", () => {
 		}
 		expect(promptTextOf(acpResult)).toBe(tuiResult);
 		expect(tui.setText).toHaveBeenCalledWith("");
+	});
+});
+
+describe("/session tag subcommands", () => {
+	it("tag then tags reports the tag; untag then tags no longer reports it", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const harness = createAcpRuntime({ sessionManager });
+
+		expect(await executeAcpBuiltinSlashCommand("/session tag foo", harness.runtime)).toEqual({ consumed: true });
+		expect(harness.output).toHaveBeenCalledWith("Tagged session: foo");
+		harness.output.mockClear();
+
+		expect(await executeAcpBuiltinSlashCommand("/session tags", harness.runtime)).toEqual({ consumed: true });
+		expect(harness.output).toHaveBeenCalledWith("Tags: foo");
+		harness.output.mockClear();
+
+		expect(await executeAcpBuiltinSlashCommand("/session untag foo", harness.runtime)).toEqual({ consumed: true });
+		expect(harness.output).toHaveBeenCalledWith("Untagged session: foo");
+		harness.output.mockClear();
+
+		expect(await executeAcpBuiltinSlashCommand("/session tags", harness.runtime)).toEqual({ consumed: true });
+		expect(harness.output).toHaveBeenCalledWith("No tags on this session.");
+		expect(sessionManager.sessionTags()).toEqual([]);
+	});
+
+	it("tag with no name is consumed and reports usage without appending an empty tag", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const harness = createAcpRuntime({ sessionManager });
+
+		expect(await executeAcpBuiltinSlashCommand("/session tag", harness.runtime)).toEqual({ consumed: true });
+		expect(harness.output).toHaveBeenCalledWith("Usage: /session tag <name>");
+		expect(sessionManager.sessionTags()).toEqual([]);
+
+		const tui = createTuiRuntime({ sessionManager });
+		expect(await executeBuiltinSlashCommand("/session tag", tui.runtime)).toBe(true);
+		expect(tui.showStatus).toHaveBeenCalledWith("Usage: /session tag <name>");
+	});
+});
+
+describe("/session search", () => {
+	afterEach(() => {
+		spyOn(TranscriptIndex, "open").mockRestore();
+	});
+
+	it("with no question reports usage and does not create the transcript database", async () => {
+		const dbPath = getTranscriptDbPath();
+		const existedBefore = fs.existsSync(dbPath);
+		const openSpy = spyOn(TranscriptIndex, "open");
+		const acp = createAcpRuntime();
+
+		expect(await executeAcpBuiltinSlashCommand("/session search", acp.runtime)).toEqual({ consumed: true });
+		expect(acp.output).toHaveBeenCalledWith("Usage: /session search <question>");
+
+		const tui = createTuiRuntime();
+		expect(await executeBuiltinSlashCommand("/session search", tui.runtime)).toBe(true);
+		expect(tui.showStatus).toHaveBeenCalledWith("Usage: /session search <question>");
+		expect(tui.setText).toHaveBeenCalledWith("");
+		expect(openSpy).not.toHaveBeenCalled();
+		if (!existedBefore) expect(fs.existsSync(dbPath)).toBe(false);
 	});
 });

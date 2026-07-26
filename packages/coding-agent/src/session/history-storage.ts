@@ -24,7 +24,7 @@ const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 // Escape LIKE wildcards so user input is treated as literal text.
 // Matches the `ESCAPE '\\'` clause used by substring-search statements.
-function escapeLikePattern(text: string): string {
+export function escapeLikePattern(text: string): string {
 	return text.replace(/[\\%_]/g, "\\$&");
 }
 
