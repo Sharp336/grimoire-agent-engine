@@ -19,7 +19,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { AUTO_IMAGE_PROVIDER_ORDER, type ImageProvider, isImageProviderId } from "./image-providers";
-import { type InlineImageData, loadImageFromPath, normalizeDataUrl, toDataUrl } from "./media-input";
+import { type InlineMediaData, loadImageFromPath, normalizeDataUrl, toDataUrl } from "./media-input";
 
 const DEFAULT_MODEL = "gemini-3-pro-image-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-image-preview";
@@ -232,7 +232,7 @@ interface OpenAISseEvent {
 }
 
 interface OpenAIHostedImageResult {
-	images: InlineImageData[];
+	images: InlineMediaData[];
 	responseText?: string;
 	revisedPrompt?: string;
 	usage?: OpenAIResponsesUsage;
@@ -265,7 +265,7 @@ interface AntigravityRequest {
 	project: string;
 	model: string;
 	request: {
-		contents: Array<{ role: "user"; parts: Array<{ text?: string; inlineData?: InlineImageData }> }>;
+		contents: Array<{ role: "user"; parts: Array<{ text?: string; inlineData?: InlineMediaData }> }>;
 		systemInstruction?: { parts: Array<{ text: string }> };
 		generationConfig?: {
 			responseModalities?: GeminiResponseModality[];
@@ -329,7 +329,7 @@ interface ImageGenToolDetails {
 	model: string;
 	imageCount: number;
 	imagePaths: string[];
-	images: InlineImageData[];
+	images: InlineMediaData[];
 	responseText?: string;
 	promptFeedback?: GeminiPromptFeedback;
 	revisedPrompt?: string;
@@ -350,7 +350,7 @@ async function loadImageFromUrl(
 	imageUrl: string,
 	fetchImpl: FetchImpl,
 	signal?: AbortSignal,
-): Promise<InlineImageData> {
+): Promise<InlineMediaData> {
 	if (imageUrl.startsWith("data:")) {
 		const normalized = normalizeDataUrl(imageUrl.trim());
 		if (!normalized.mimeType) {
@@ -631,7 +631,7 @@ async function findImageApiKey(
 	}
 }
 
-async function resolveInputImage(input: ImageInput, cwd: string): Promise<InlineImageData> {
+async function resolveInputImage(input: ImageInput, cwd: string): Promise<InlineMediaData> {
 	if (input.path) {
 		return loadImageFromPath(input.path, cwd);
 	}
@@ -661,7 +661,7 @@ function getExtensionForMime(mimeType: string): string {
 	return map[mimeType] ?? "png";
 }
 
-async function saveImageToTemp(image: InlineImageData): Promise<string> {
+async function saveImageToTemp(image: InlineMediaData): Promise<string> {
 	const ext = getExtensionForMime(image.mimeType);
 	const filename = `omp-image-${Snowflake.next()}.${ext}`;
 	const filepath = path.join(os.tmpdir(), filename);
@@ -669,7 +669,7 @@ async function saveImageToTemp(image: InlineImageData): Promise<string> {
 	return filepath;
 }
 
-async function saveImagesToTemp(images: InlineImageData[]): Promise<string[]> {
+async function saveImagesToTemp(images: InlineMediaData[]): Promise<string[]> {
 	return Promise.all(images.map(saveImageToTemp));
 }
 
@@ -695,8 +695,8 @@ function collectResponseText(parts: GeminiPart[]): string | undefined {
 	return combined.length > 0 ? combined : undefined;
 }
 
-function collectInlineImages(parts: GeminiPart[]): InlineImageData[] {
-	const images: InlineImageData[] = [];
+function collectInlineImages(parts: GeminiPart[]): InlineMediaData[] {
+	const images: InlineMediaData[] = [];
 	for (const part of parts) {
 		const data = part.inlineData?.data;
 		const mimeType = part.inlineData?.mimeType;
@@ -738,7 +738,7 @@ function buildOpenAIHostedImageRequest(
 	model: Model,
 	promptText: string,
 	params: ImageGenParams,
-	inputImages: InlineImageData[],
+	inputImages: InlineMediaData[],
 	stream: boolean,
 ): OpenAIHostedImageRequest {
 	const content: OpenAIInputContent[] = [{ type: "input_text", text: promptText }];
@@ -770,14 +770,14 @@ function buildOpenAIHostedImageRequest(
 	};
 }
 
-function createOpenAIInlineImage(data: string): InlineImageData {
+function createOpenAIInlineImage(data: string): InlineMediaData {
 	const bytes = Buffer.from(data, "base64");
 	const mimeType = parseImageMetadata(bytes)?.mimeType ?? OPENAI_IMAGE_MIME_TYPE;
 	return { data, mimeType };
 }
 
 function collectOpenAIHostedImageResult(response: OpenAIHostedImageResponse): OpenAIHostedImageResult {
-	const images: InlineImageData[] = [];
+	const images: InlineMediaData[] = [];
 	const textParts: string[] = [];
 	let revisedPrompt: string | undefined;
 
@@ -897,7 +897,7 @@ async function generateOpenAIHostedImage(
 	apiKey: string,
 	model: Model,
 	params: ImageGenParams,
-	inputImages: InlineImageData[],
+	inputImages: InlineMediaData[],
 	fetchImpl: FetchImpl,
 	signal: AbortSignal | undefined,
 	sessionId: string | undefined,
@@ -945,9 +945,9 @@ function buildAntigravityRequest(
 	projectId: string,
 	aspectRatio: string | undefined,
 	imageSize: string | undefined,
-	inputImages: InlineImageData[],
+	inputImages: InlineMediaData[],
 ): AntigravityRequest {
-	const parts: Array<{ text?: string; inlineData?: InlineImageData }> = [];
+	const parts: Array<{ text?: string; inlineData?: InlineMediaData }> = [];
 	for (const image of inputImages) {
 		parts.push({ inlineData: image });
 	}
@@ -995,7 +995,7 @@ function resolveXAIResolution(imageSize: string | undefined): "1k" | "2k" {
 
 // Build the discriminated edit body. Caller must ensure images.length is in
 // [1, XAI_MAX_EDIT_IMAGES]; the bound check fires earlier in execute().
-function buildXAIEditPayload(base: XAIImageRequestBase, images: readonly InlineImageData[]): XAIImageRequestBody {
+function buildXAIEditPayload(base: XAIImageRequestBase, images: readonly InlineMediaData[]): XAIImageRequestBody {
 	const refs: readonly XAIImageReference[] = images.map(img => ({
 		type: "image_url",
 		url: toDataUrl(img),
@@ -1006,7 +1006,7 @@ function buildXAIEditPayload(base: XAIImageRequestBase, images: readonly InlineI
 }
 
 interface AntigravitySseResult {
-	images: InlineImageData[];
+	images: InlineMediaData[];
 	text: string[];
 	usage?: GeminiUsageMetadata;
 }
@@ -1017,7 +1017,7 @@ async function parseAntigravitySseForImage(response: Response, signal?: AbortSig
 	}
 
 	const textParts: string[] = [];
-	const images: InlineImageData[] = [];
+	const images: InlineMediaData[] = [];
 	let usage: GeminiUsageMetadata | undefined;
 
 	for await (const chunk of readSseJson<AntigravityResponseChunk>(response.body, signal)) {
@@ -1062,7 +1062,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			const failures: Array<{ provider: ImageProvider; error: ProviderHttpError }> = [];
 			let unsupportedAspectRatioProvider: ImageProvider | undefined;
 			let foundCredentials = false;
-			let resolvedImageCache: InlineImageData[] | undefined;
+			let resolvedImageCache: InlineMediaData[] | undefined;
 
 			for (const preferredProvider of providerOrder) {
 				const apiKey = await findImageApiKey(preferredProvider, ctx.modelRegistry, ctx.model, sessionId);
@@ -1373,7 +1373,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						const xaiData = JSON.parse(xaiRawText) as {
 							data?: Array<{ b64_json?: string; url?: string }>;
 						};
-						const xaiInlineImages: InlineImageData[] = [];
+						const xaiInlineImages: InlineMediaData[] = [];
 						for (const entry of xaiData.data ?? []) {
 							if (entry.b64_json) {
 								const bytes = Buffer.from(entry.b64_json, "base64");
@@ -1464,7 +1464,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						const message = data.choices?.[0]?.message;
 						const responseText = collectOpenRouterResponseText(message);
 						const imageUrls = extractOpenRouterImageUrls(message);
-						const inlineImages: InlineImageData[] = [];
+						const inlineImages: InlineMediaData[] = [];
 						for (const imageUrl of imageUrls) {
 							inlineImages.push(await loadImageFromUrl(imageUrl, fetchImpl, requestSignal));
 						}
@@ -1501,7 +1501,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						};
 					}
 
-					const parts = [] as Array<{ text?: string; inlineData?: InlineImageData }>;
+					const parts = [] as Array<{ text?: string; inlineData?: InlineMediaData }>;
 					for (const image of resolvedImages) {
 						parts.push({ inlineData: image });
 					}

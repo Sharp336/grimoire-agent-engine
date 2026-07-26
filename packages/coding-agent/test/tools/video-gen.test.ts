@@ -452,11 +452,496 @@ describe("videoGenTool", () => {
 		expect(resultText(result)).toContain("1080p");
 	});
 
+	it("extends a source video through the extensions endpoint", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-ext" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4", duration: 15 } }),
+			() => new Response(new Uint8Array([7])),
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-extend",
+			{
+				prompt: "the cat leaps off the sill",
+				output_path: outputPath,
+				mode: "extend",
+				video: "https://vidgen.x.ai/source.mp4",
+				duration: 5,
+			},
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls[0].url).toBe("https://api.x.ai/v1/videos/extensions");
+		expect(calls[0].body).toEqual({
+			model: "grok-imagine-video",
+			prompt: "the cat leaps off the sill",
+			duration: 5,
+			video: { url: "https://vidgen.x.ai/source.mp4" },
+		});
+		expect(resultText(result)).toContain("mode=extend");
+	});
+
+	it("edits a source video without forwarding geometry it cannot control", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-edit" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4" } }),
+			() => new Response(new Uint8Array([8])),
+		]);
+
+		await videoGenTool.execute(
+			"call-edit",
+			{
+				prompt: "add rain",
+				output_path: outputPath,
+				mode: "edit",
+				video: "https://vidgen.x.ai/source.mp4",
+			},
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls[0].url).toBe("https://api.x.ai/v1/videos/edits");
+		expect(calls[0].body).toEqual({
+			model: "grok-imagine-video",
+			prompt: "add rain",
+			video: { url: "https://vidgen.x.ai/source.mp4" },
+		});
+	});
+
+	/** A real `ftyp` box: size, type, major brand, minor version, compatible brands. */
+	function ftypBox(major: string, compatible: string[]): Uint8Array {
+		const size = 16 + compatible.length * 4;
+		const bytes = new Uint8Array(size);
+		new DataView(bytes.buffer).setUint32(0, size);
+		const write = (offset: number, text: string): void => {
+			for (let i = 0; i < 4; i++) bytes[offset + i] = text.charCodeAt(i);
+		};
+		write(4, "ftyp");
+		write(8, major);
+		compatible.forEach((brand, index) => {
+			write(16 + index * 4, brand);
+		});
+		return bytes;
+	}
+
+	it("inlines a local source video as an MP4 data URL", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		const sourcePath = `/tmp/omp-video-src-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath, sourcePath);
+		const source = ftypBox("isom", ["isom", "mp41"]);
+		await Bun.write(sourcePath, source);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-inline" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4" } }),
+			() => new Response(new Uint8Array([9])),
+		]);
+
+		await videoGenTool.execute(
+			"call-inline",
+			{ prompt: "keep going", output_path: outputPath, mode: "extend", video: sourcePath },
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls[0].body?.video).toEqual({ url: `data:video/mp4;base64,${source.toBase64()}` });
+	});
+
+	it("accepts an MP4 whose profile brand only appears in the compatible list", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		const sourcePath = `/tmp/omp-video-src-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath, sourcePath);
+		// `cmfc` (CMAF) is a real MP4 profile brand that is not itself in the
+		// allowlist; the file is only recognisable through `mp42` below it.
+		await Bun.write(sourcePath, ftypBox("cmfc", ["cmfc", "mp42"]));
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-cmaf" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4" } }),
+			() => new Response(new Uint8Array([13])),
+		]);
+
+		await videoGenTool.execute(
+			"call-cmaf",
+			{ prompt: "keep going", output_path: outputPath, mode: "extend", video: sourcePath },
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls[0].url).toBe("https://api.x.ai/v1/videos/extensions");
+	});
+
+	it("refuses a source video that is not MP4 before any request", async () => {
+		const sourcePath = `/tmp/omp-video-src-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(sourcePath);
+		// HEIF: same `ftyp` container family, still images, no MP4 brand anywhere.
+		await Bun.write(sourcePath, ftypBox("heic", ["mif1", "heic"]));
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+
+		await expect(
+			videoGenTool.execute(
+				"call-not-mp4",
+				{
+					prompt: "keep going",
+					output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`,
+					mode: "extend",
+					video: sourcePath,
+				},
+				undefined,
+				createContext(fetchMock, { xai: true }),
+			),
+		).rejects.toThrow("Unsupported video type");
+		expect(calls).toHaveLength(0);
+	});
+
+	it("sends reference images alongside a generated shot", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-ref" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4" } }),
+			() => new Response(new Uint8Array([10])),
+		]);
+
+		await videoGenTool.execute(
+			"call-ref",
+			{
+				prompt: "she walks the runway",
+				output_path: outputPath,
+				reference_images: ["https://example.test/model.png", "https://example.test/dress.png"],
+			},
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls[0].url).toBe("https://api.x.ai/v1/videos/generations");
+		expect(calls[0].body?.reference_images).toEqual([
+			{ url: "https://example.test/model.png" },
+			{ url: "https://example.test/dress.png" },
+		]);
+	});
+
+	it("refuses reference images on the model that cannot serve them", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+
+		const result = await videoGenTool.execute(
+			"call-ref-15",
+			{
+				prompt: "she walks the runway",
+				output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`,
+				model: "grok-imagine-video-1.5",
+				reference_images: ["https://example.test/model.png"],
+			},
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("reference_images");
+	});
+
+	it("skips OpenRouter for xAI-only modes instead of billing a plain generation", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+
+		const result = await videoGenTool.execute(
+			"call-or-extend",
+			{
+				prompt: "keep going",
+				output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`,
+				mode: "extend",
+				video: "https://example.test/source.mp4",
+			},
+			undefined,
+			createContext(fetchMock, { openrouter: true }),
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("xAI-only");
+	});
+
+	it("refuses request shapes the source-video endpoints cannot serve", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+		const base = { prompt: "x", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4` };
+		const ctx = createContext(fetchMock, { xai: true });
+
+		const missingVideo = await videoGenTool.execute("call-a", { ...base, mode: "extend" }, undefined, ctx);
+		const strayVideo = await videoGenTool.execute(
+			"call-b",
+			{ ...base, video: "https://example.test/source.mp4" },
+			undefined,
+			ctx,
+		);
+		const editGeometry = await videoGenTool.execute(
+			"call-c",
+			{ ...base, mode: "edit", video: "https://example.test/source.mp4", resolution: "1080p" },
+			undefined,
+			ctx,
+		);
+		const editDuration = await videoGenTool.execute(
+			"call-d",
+			{ ...base, mode: "edit", video: "https://example.test/source.mp4", duration: 5 },
+			undefined,
+			ctx,
+		);
+		const bothImageInputs = await videoGenTool.execute(
+			"call-e",
+			{ ...base, image: "https://example.test/still.png", reference_images: ["https://example.test/dress.png"] },
+			undefined,
+			ctx,
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(resultText(missingVideo)).toContain("requires `video`");
+		expect(resultText(strayVideo)).toContain("mode extend or edit");
+		expect(resultText(editGeometry)).toContain("inherits aspect ratio and resolution");
+		expect(resultText(editDuration)).toContain("duration");
+		expect(resultText(bothImageInputs)).toContain("mutually exclusive");
+		for (const result of [missingVideo, strayVideo, editGeometry, editDuration, bothImageInputs]) {
+			expect(result.isError).toBe(true);
+		}
+	});
+
+	it("refuses an extension length the endpoint cannot append", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+		const extendBase = {
+			prompt: "keep going",
+			output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`,
+			mode: "extend" as const,
+			video: "https://example.test/source.mp4",
+		};
+		const ctx = createContext(fetchMock, { xai: true });
+
+		// /videos/extensions bounds the appended segment at 2-10s, narrower than
+		// the 1-15s a fresh generation takes.
+		const tooShort = await videoGenTool.execute("call-ext-1", { ...extendBase, duration: 1 }, undefined, ctx);
+		const tooLong = await videoGenTool.execute("call-ext-15", { ...extendBase, duration: 15 }, undefined, ctx);
+
+		expect(calls).toHaveLength(0);
+		expect(resultText(tooShort)).toContain("between 2 and 10 seconds");
+		expect(resultText(tooLong)).toContain("between 2 and 10 seconds");
+	});
+
 	it("rejects a fractional duration at the schema boundary", () => {
 		const base = { prompt: "x", output_path: "/tmp/x.mp4" };
 		expect(videoGenSchema({ ...base, duration: 4.5 })).toBeInstanceOf(type.errors);
 		expect(videoGenSchema({ ...base, duration: 4 })).not.toBeInstanceOf(type.errors);
 		expect(videoGenSchema({ ...base, duration: 20 })).toBeInstanceOf(type.errors);
+	});
+
+	it("persists the result and reports the id a later call can chain from", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-store" }),
+			() =>
+				json({
+					status: "done",
+					// docs.x.ai returns the Files receipt under `video` for video jobs.
+					video: { url: "https://vidgen.x.ai/out.mp4", file_output: { file_id: "file_abc-123" } },
+				}),
+			() => new Response(new Uint8Array([11])),
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-store",
+			{ prompt: "shot one", output_path: outputPath, store: "shot-one.mp4" },
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls[0].body?.storage_options).toEqual({ filename: "shot-one.mp4", expires_after: 2_592_000 });
+		expect(resultText(result)).toContain("file_id=file_abc-123");
+	});
+
+	it("refuses a blank store filename instead of silently not storing", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+
+		const result = await videoGenTool.execute(
+			"call-store-blank",
+			{
+				prompt: "shot one",
+				output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`,
+				store: "   ",
+			},
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("`store` must be a filename");
+	});
+
+	it("sends a stored id straight through instead of re-uploading bytes", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-chain" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4" } }),
+			() => new Response(new Uint8Array([12])),
+		]);
+
+		await videoGenTool.execute(
+			"call-chain",
+			{
+				prompt: "shot two",
+				output_path: outputPath,
+				mode: "extend",
+				video: "file_abc-123",
+				duration: 5,
+			},
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls[0].url).toBe("https://api.x.ai/v1/videos/extensions");
+		expect(calls[0].body?.video).toEqual({ file_id: "file_abc-123" });
+	});
+
+	it("keeps xAI Files inputs away from OpenRouter", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+
+		const result = await videoGenTool.execute(
+			"call-or-file",
+			{
+				prompt: "animate",
+				output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`,
+				image: "file_abc-123",
+			},
+			undefined,
+			createContext(fetchMock, { openrouter: true }),
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("xAI Files");
+	});
+
+	it("never buys a second video when the first submission dies in transit", async () => {
+		setVideoProviderOrder(["xai", "openrouter"]);
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => {
+				throw new Error("socket hang up");
+			},
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-transport",
+			{ prompt: "a red balloon", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4` },
+			undefined,
+			createContext(fetchMock, { xai: true, openrouter: true }),
+		);
+
+		// The POST was already on the wire, so the job may exist and be billing.
+		// Falling through to OpenRouter would pay for a second video.
+		expect(calls).toHaveLength(1);
+		expect(result.isError).toBe(true);
+	});
+
+	it("refuses a blank image instead of billing a text-to-video", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+
+		const result = await videoGenTool.execute(
+			"call-blank-image",
+			{ prompt: "animate this", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`, image: "" },
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("`image` is blank");
+	});
+
+	it("enforces the known model limits when the caller pins the model by hand", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+		const base = { prompt: "x", output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4` };
+		const ctx = createContext(fetchMock, { xai: true });
+
+		const pinnedNo1080 = await videoGenTool.execute(
+			"call-pin-a",
+			{ ...base, model: "grok-imagine-video", image: "https://example.test/still.png", resolution: "1080p" },
+			undefined,
+			ctx,
+		);
+		const pinnedTextOnly = await videoGenTool.execute(
+			"call-pin-b",
+			{ ...base, model: "grok-imagine-video-1.5" },
+			undefined,
+			ctx,
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(resultText(pinnedNo1080)).toContain("does not serve 1080p");
+		expect(resultText(pinnedTextOnly)).toContain("image-to-video only");
+	});
+
+	it("prefers a real local file over reading its name as a Files id", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		// A bare name that matches the Files id grammar exactly, resolved against
+		// the session cwd (/tmp in these tests) — the ambiguous case.
+		const sourceName = `file_${Bun.randomUUIDv7()}`;
+		writtenPaths.push(outputPath, `/tmp/${sourceName}`);
+		await Bun.write(`/tmp/${sourceName}`, ftypBox("isom", ["isom"]));
+		const { fetch: fetchMock, calls } = sequencedFetch([
+			() => json({ request_id: "req-localfile" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4" } }),
+			() => new Response(new Uint8Array([14])),
+		]);
+
+		await videoGenTool.execute(
+			"call-localfile",
+			{ prompt: "keep going", output_path: outputPath, mode: "extend", video: sourceName },
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		const video = calls[0].body?.video as { url?: string };
+		expect(video.url?.startsWith("data:video/mp4;base64,")).toBe(true);
+	});
+
+	it("says so when a stored request comes back without a Files receipt", async () => {
+		const outputPath = `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`;
+		writtenPaths.push(outputPath);
+		const { fetch: fetchMock } = sequencedFetch([
+			() => json({ request_id: "req-noreceipt" }),
+			() => json({ status: "done", video: { url: "https://vidgen.x.ai/out.mp4" } }),
+			() => new Response(new Uint8Array([15])),
+		]);
+
+		const result = await videoGenTool.execute(
+			"call-noreceipt",
+			{ prompt: "shot one", output_path: outputPath, store: "shot-one.mp4" },
+			undefined,
+			createContext(fetchMock, { xai: true }),
+		);
+
+		expect(result.isError).toBeUndefined();
+		expect(resultText(result)).toContain("file_id=none");
+	});
+
+	it("blames the missing xAI login, not OpenRouter's feature set", async () => {
+		const { fetch: fetchMock, calls } = sequencedFetch([]);
+
+		const result = await videoGenTool.execute(
+			"call-nocreds",
+			{
+				prompt: "keep going",
+				output_path: `/tmp/omp-video-${Bun.randomUUIDv7()}.mp4`,
+				mode: "extend",
+				video: "https://example.test/source.mp4",
+			},
+			undefined,
+			createContext(fetchMock, {}),
+		);
+
+		expect(calls).toHaveLength(0);
+		expect(resultText(result)).toContain("No video generation credentials");
 	});
 });
 

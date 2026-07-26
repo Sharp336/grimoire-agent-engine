@@ -7,7 +7,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { AgentToolUpdateCallback, CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import videoGenDescription from "../prompts/tools/video-gen.md" with { type: "text" };
-import { resolveImageReferenceUrl } from "./media-input";
+import { MAX_INLINE_IMAGE_SIZE, resolveImageReferenceUrl, resolveVideoReferenceUrl } from "./media-input";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 import { replaceTabs, shortenPath } from "./render-utils";
 import { AUTO_VIDEO_PROVIDER_ORDER, isVideoProviderId, type VideoProvider } from "./video-providers";
@@ -20,6 +20,15 @@ const DEFAULT_XAI_VIDEO_MODEL = "grok-imagine-video";
  * ("Text-to-video is not supported for this model").
  */
 const XAI_1080P_VIDEO_MODEL = "grok-imagine-video-1.5";
+/**
+ * True for the 1.5 family, alias suffixes included (`-preview`, dated builds):
+ * they share the model's limits, and matching only the bare id would let an
+ * alias slip past the local refusals. The `-` boundary keeps a genuinely
+ * different id such as `grok-imagine-video-1.50` out.
+ */
+function isXai15(model: string): boolean {
+	return model === XAI_1080P_VIDEO_MODEL || model.startsWith(`${XAI_1080P_VIDEO_MODEL}-`);
+}
 /** Stand-in id for a job the provider confirmed but would not name. */
 const UNKNOWN_JOB_ID = "unknown";
 // OpenRouter brokers a dozen video models with no house default; Veo 3.1 Fast is
@@ -37,19 +46,43 @@ const VIDEO_TIMEOUT = 20 * 60 * 1000;
 const POLL_INTERVAL_MS = 5_000;
 /** xAI reports request cost in ticks; 1 USD = 10^10 ticks (docs.x.ai/developers/cost-tracking). */
 const USD_TICKS_PER_DOLLAR = 10_000_000_000;
+/**
+ * TTL applied to a `store`d result — the documented maximum. Chains finish in
+ * minutes, so this is only about not leaving a caller's Files storage growing
+ * without bound; docs.x.ai caps `expires_after` at 30 days.
+ */
+const STORED_VIDEO_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 const VIDEO_ASPECT_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"] as const;
 const VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"] as const;
+const VIDEO_MODES = ["generate", "extend", "edit"] as const;
 const VIDEO_PROVIDER_REQUEST_CHOICES = ["auto", ...AUTO_VIDEO_PROVIDER_ORDER] as const;
 
 export type VideoProviderPreference = VideoProvider | "auto";
+export type VideoMode = (typeof VIDEO_MODES)[number];
 
 export const videoGenSchema = type({
 	prompt: type("string").describe("motion description: subject, action, camera move, lighting, style"),
 	output_path: type("string").describe("path to write the finished .mp4 to"),
-	"image?": type("string").describe("path or https URL of a still image to animate (image-to-video)"),
+	"mode?": type
+		.enumerated(...VIDEO_MODES)
+		.describe(
+			"generate (default), extend (continue `video` from its last frame), or edit (restyle `video` in place) — extend and edit are xAI-only",
+		),
+	"image?": type("string").describe(
+		"path, http(s) URL, data: URL or xAI `file_...` id of a still image to animate (image-to-video)",
+	),
+	"video?": type("string").describe(
+		"path, http(s) URL, `data:video/mp4;base64,…` URL or xAI `file_...` id of the source clip; required by mode extend and edit",
+	),
+	"reference_images?": type("string[]").describe(
+		"paths, http(s) URLs, data: URLs or xAI `file_...` ids of images whose subjects appear in the video without becoming its first frame (xAI generate mode only)",
+	),
+	"store?": type("string").describe(
+		"filename to persist the result under in xAI Files (expires after 30 days); the reported `file_...` id feeds a later extend/edit with no re-upload (xAI only)",
+	),
 	"duration?": type("1 <= number.integer <= 15").describe(
-		"whole seconds of output video; omitted means the provider's own default",
+		"whole seconds of output video (1-15); in mode extend it sizes the appended segment instead and must be 2-10. omitted means the provider's own default",
 	),
 	"aspect_ratio?": type
 		.enumerated(...VIDEO_ASPECT_RATIOS)
@@ -68,11 +101,14 @@ export type VideoGenParams = typeof videoGenSchema.infer;
 export interface VideoGenToolDetails {
 	provider: VideoProvider;
 	model: string;
+	mode: VideoMode;
 	videoPath: string;
 	bytes: number;
 	requestId: string;
 	durationSeconds?: number;
 	costUsd?: number;
+	/** xAI Files id, when `store` asked for the result to be persisted. */
+	fileId?: string;
 }
 
 /** A finished provider job, normalized across the two backends. */
@@ -91,6 +127,8 @@ interface VideoJobResult {
 	requestId: string;
 	durationSeconds?: number;
 	costUsd?: number;
+	/** xAI Files id of the persisted result, when `store` requested one. */
+	fileId?: string;
 }
 
 /**
@@ -306,11 +344,16 @@ export class VideoJobPoller {
 	}
 }
 
+/** Files API receipt returned when a request carried `storage_options`. */
+interface XAIFileOutput {
+	file_id?: string;
+}
+
 interface XAIVideoStatus {
 	status?: string;
 	progress?: number;
 	model?: string;
-	video?: { url?: string; duration?: number };
+	video?: { url?: string; duration?: number; file_output?: XAIFileOutput };
 	error?: { message?: string };
 	usage?: { cost_in_usd_ticks?: number };
 }
@@ -325,19 +368,21 @@ const XAI_FAILED_STATUSES: ReadonlySet<string> = new Set(["failed", "expired", "
 /**
  * POST a generation request under `withAuth`.
  *
- * HTTP 200 is the commit point: a job now exists and is billing per second.
- * Everything from that response onward — including a body that will not parse —
- * is raised as `VideoJobCommittedError`, so it can neither be replayed by a
- * credential rotation nor fall through into a second billed generation.
+ * Dispatching the POST is the commit point, not the 200 that may follow. Once
+ * the request is on the wire the tool can no longer prove a job was NOT created
+ * — a socket that dies mid-flight looks identical whether the server never saw
+ * the request or accepted and billed it — so every failure from the `fetch`
+ * onward is raised as `VideoJobCommittedError`. That keeps a credential
+ * rotation from replaying the submission and keeps the provider loop from
+ * buying a second video on another backend.
  *
- * Failures before the 200 stay ordinary errors and may fall through to another
- * provider. That includes transport rejections, which are strictly speaking
- * ambiguous — a socket can die after the server accepted the job. Treating them
- * as committed was considered and rejected: a rejected `fetch` overwhelmingly
- * means nothing was accepted, the alternative turns any unreachable provider
- * into a hard tool failure instead of a fallback, and the errno detail needed to
- * tell the two apart is runtime-specific and cannot be verified against the real
- * providers. The residual exposure is one lost response on an accepted job.
+ * Failing closed costs a fallback: an unreachable provider ends the call
+ * instead of quietly trying the next one, and the caller retries with an
+ * explicit `provider`. That is the cheap direction to be wrong in — a lost
+ * fallback is one retry, a duplicate generation is money already spent.
+ *
+ * An HTTP error response is the exception: the server answered, so nothing was
+ * created. Those stay ordinary errors and may fall through to another provider.
  */
 async function submitVideoJob<T>(
 	provider: VideoProvider,
@@ -352,12 +397,17 @@ async function submitVideoJob<T>(
 	return withAuth(
 		apiKey,
 		async key => {
-			const submit = await fetchImpl(url, {
-				method: "POST",
-				headers: buildHeaders(key),
-				body: JSON.stringify(body),
-				signal,
-			});
+			let submit: Response;
+			try {
+				submit = await fetchImpl(url, {
+					method: "POST",
+					headers: buildHeaders(key),
+					body: JSON.stringify(body),
+					signal,
+				});
+			} catch (error) {
+				throw new VideoJobCommittedError(provider, UNKNOWN_JOB_ID, error);
+			}
 			if (!submit.ok) {
 				throw new ProviderHttpError(
 					`${label} video request failed (${submit.status}): ${await readErrorMessage(submit)}`,
@@ -383,28 +433,136 @@ function xaiHeaders(key: string): Record<string, string> {
 	};
 }
 
+/**
+ * One media input as the Imagine endpoints accept it: either a URL (https or
+ * inlined data) or a Files API id, never both.
+ */
+type XaiMediaRef = { url: string } | { file_id: string };
+
+/** Media inputs already resolved to their request-body shape. */
+interface ResolvedVideoMedia {
+	image?: XaiMediaRef;
+	video?: XaiMediaRef;
+	referenceImages?: XaiMediaRef[];
+}
+
+/** Files API ids are opaque `file_<uuid>` strings, distinguishable from paths and URLs. */
+const FILE_ID_PATTERN = /^file_[A-Za-z0-9-]+$/;
+
+/** True when any resolved input is a Files API id rather than a URL. */
+function usesFileIds(media: ResolvedVideoMedia): boolean {
+	const refs = [media.image, media.video, ...(media.referenceImages ?? [])];
+	return refs.some(ref => ref !== undefined && "file_id" in ref);
+}
+
+/**
+ * Route and body for one xAI Imagine video request.
+ *
+ * The three modes are separate endpoints, not a flag: `/videos/generations`
+ * takes a prompt plus optional first-frame or reference images, while
+ * `/videos/extensions` and `/videos/edits` take a source video and inherit its
+ * geometry — docs.x.ai documents `aspect_ratio`/`resolution` as unsupported
+ * there, and `duration` on an extension sizes the appended segment only.
+ */
+function buildXaiVideoRequest(
+	baseUrl: string,
+	model: string,
+	params: VideoGenParams,
+	media: ResolvedVideoMedia,
+): { url: string; body: Record<string, unknown> } {
+	const body: Record<string, unknown> = { model, prompt: params.prompt };
+	const mode: VideoMode = params.mode ?? "generate";
+	if (mode !== "edit" && params.duration !== undefined) body.duration = params.duration;
+	// Persisting the output is what makes a chain cheap: the next extend or edit
+	// references the returned id instead of re-uploading the clip. The TTL keeps
+	// a chain from silently filling the caller's Files storage forever.
+	if (params.store) {
+		body.storage_options = { filename: params.store, expires_after: STORED_VIDEO_TTL_SECONDS };
+	}
+	if (mode === "generate") {
+		if (params.aspect_ratio !== undefined) body.aspect_ratio = params.aspect_ratio;
+		if (params.resolution !== undefined) body.resolution = params.resolution;
+		if (media.image) body.image = media.image;
+		if (media.referenceImages?.length) body.reference_images = media.referenceImages;
+		return { url: `${baseUrl}/videos/generations`, body };
+	}
+	body.video = media.video;
+	return { url: `${baseUrl}/videos/${mode === "extend" ? "extensions" : "edits"}`, body };
+}
+
+/**
+ * Reject request shapes the endpoints cannot serve, before anything is sent.
+ *
+ * Each of these is documented on docs.x.ai as unsupported for the mode rather
+ * than merely defaulted, and refusing locally is free — whereas a submitted job
+ * bills per second of output that silently ignored half the request.
+ */
+function validateVideoRequest(params: VideoGenParams): string | null {
+	const mode: VideoMode = params.mode ?? "generate";
+	// A blank filename is the one value this tool would drop on the floor:
+	// `storage_options` is only attached when `store` is truthy, so `""` would
+	// quietly generate an unstored video the caller then cannot chain from.
+	if (params.store !== undefined && params.store.trim().length === 0) {
+		return "`store` must be a filename such as `shot-one.mp4`.";
+	}
+	// Blank media strings are the dangerous shape: `if (params.image)` would drop
+	// one silently and bill a text-to-video the caller never asked for, and a
+	// whitespace-only value would be read as a path to the working directory.
+	for (const [name, value] of [
+		["image", params.image],
+		["video", params.video],
+	] as const) {
+		if (value !== undefined && value.trim().length === 0)
+			return `\`${name}\` is blank; omit it or give a real source.`;
+	}
+	if (params.reference_images?.some(reference => reference.trim().length === 0)) {
+		return "`reference_images` contains a blank entry; every reference must be a path, URL or `file_...` id.";
+	}
+	if (mode === "generate") {
+		if (params.video) return "`video` requires mode extend or edit.";
+		// docs.x.ai: "image + reference_images — use one or the other". An image
+		// fixes the first frame; references only put subjects in the shot.
+		if (params.image && params.reference_images?.length) {
+			return "`image` and `reference_images` are mutually exclusive: an image fixes the first frame, references only guide the shot.";
+		}
+		return null;
+	}
+	if (!params.video) return `mode ${mode} requires \`video\`: a path or https URL of the source .mp4.`;
+	if (params.image || params.reference_images?.length) {
+		return `mode ${mode} takes \`video\` only; \`image\` and \`reference_images\` are generate-mode inputs.`;
+	}
+	if (params.aspect_ratio !== undefined || params.resolution !== undefined) {
+		return `mode ${mode} inherits aspect ratio and resolution from the source video (capped at 720p); drop \`aspect_ratio\` and \`resolution\`.`;
+	}
+	if (mode === "edit" && params.duration !== undefined) {
+		return "mode edit keeps the source video's duration; drop `duration`.";
+	}
+	// The REST schema for /videos/extensions bounds the appended segment at
+	// 2-10s (default 6), narrower than the 1-15s a fresh generation accepts.
+	if (mode === "extend" && params.duration !== undefined && (params.duration < 2 || params.duration > 10)) {
+		return `mode extend appends between 2 and 10 seconds; ${params.duration} is out of range.`;
+	}
+	return null;
+}
+
 async function generateXaiVideo(
 	apiKey: ApiKey,
 	baseUrl: string,
 	model: string,
 	params: VideoGenParams,
-	imageUrl: string | undefined,
+	media: ResolvedVideoMedia,
 	fetchImpl: FetchImpl,
 	signal: AbortSignal,
 	onUpdate: AgentToolUpdateCallback<VideoGenToolDetails, VideoGenParams> | undefined,
 ): Promise<VideoJobResult> {
-	const body: Record<string, unknown> = { model, prompt: params.prompt };
-	if (params.duration !== undefined) body.duration = params.duration;
-	if (params.aspect_ratio !== undefined) body.aspect_ratio = params.aspect_ratio;
-	if (params.resolution !== undefined) body.resolution = params.resolution;
-	if (imageUrl) body.image = { url: imageUrl };
+	const request = buildXaiVideoRequest(baseUrl, model, params, media);
 
 	const submitted = await submitVideoJob<{ request_id?: string }>(
 		"xai",
 		"xAI",
 		apiKey,
-		`${baseUrl}/videos/generations`,
-		body,
+		request.url,
+		request.body,
 		xaiHeaders,
 		fetchImpl,
 		signal,
@@ -436,6 +594,8 @@ async function generateXaiVideo(
 					throw new Error("xAI reported a finished video with no URL.");
 				}
 				const ticks = status.usage?.cost_in_usd_ticks;
+				// docs.x.ai polls `.video.file_output` for a video job.
+				const fileId = status.video?.file_output?.file_id;
 				return {
 					url,
 					requestId,
@@ -443,6 +603,7 @@ async function generateXaiVideo(
 					// the presence checks in the summary and render "duration=nulls".
 					durationSeconds: typeof status.video?.duration === "number" ? status.video.duration : undefined,
 					costUsd: typeof ticks === "number" ? ticks / USD_TICKS_PER_DOLLAR : undefined,
+					fileId: typeof fileId === "string" && fileId.length > 0 ? fileId : undefined,
 				};
 			}
 			// Only abandon the job on a status documented as terminal. Treating every
@@ -632,13 +793,75 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 		const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		const fetchImpl = ctx.fetch ?? fetch;
 
-		let imageUrl: string | undefined;
-		if (params.image) imageUrl = await resolveImageReferenceUrl(params.image, cwd);
+		const validationError = validateVideoRequest(params);
+		if (validationError) {
+			return { isError: true, content: [{ type: "text" as const, text: validationError }] };
+		}
+
+		const mode: VideoMode = params.mode ?? "generate";
+		// A `file_...` id is already the request-body shape. A real file on disk
+		// wins the tie: a path may legitimately be named `file_abc-123`, and
+		// misreading it as a Files id would send the provider an id that does not
+		// exist instead of the bytes the caller meant.
+		const asRef = async (
+			reference: string,
+			resolveUrl: (value: string, cwd: string) => Promise<string>,
+		): Promise<XaiMediaRef> => {
+			const trimmed = reference.trim();
+			if (FILE_ID_PATTERN.test(trimmed) && !(await Bun.file(resolveToCwd(trimmed, cwd)).exists())) {
+				return { file_id: trimmed };
+			}
+			return { url: await resolveUrl(reference, cwd) };
+		};
+		const media: ResolvedVideoMedia = {};
+		if (params.image) media.image = await asRef(params.image, resolveImageReferenceUrl);
+		if (params.video) media.video = await asRef(params.video, resolveVideoReferenceUrl);
+		if (params.reference_images?.length) {
+			// Resolved one at a time against a shared budget: each reference is
+			// individually capped, but nothing else stops a dozen of them from
+			// inlining half a gigabyte of base64 into one request body.
+			const referenceImages: XaiMediaRef[] = [];
+			let inlinedChars = 0;
+			for (const reference of params.reference_images) {
+				const ref = await asRef(reference, resolveImageReferenceUrl);
+				if ("url" in ref && ref.url.startsWith("data:")) inlinedChars += ref.url.length;
+				if (inlinedChars > MAX_INLINE_IMAGE_SIZE) {
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text" as const,
+								text: `reference_images inline to more than ${MAX_INLINE_IMAGE_SIZE / (1024 * 1024)}MB in total; pass https URLs or \`file_...\` ids instead.`,
+							},
+						],
+					};
+				}
+				referenceImages.push(ref);
+			}
+			media.referenceImages = referenceImages;
+		}
 
 		const failures: string[] = [];
 		let foundCredentials = false;
+		// A provider that could have served the request but had no credential —
+		// distinct from one skipped because it cannot do the job at all.
+		let missingCredentials = false;
 
 		for (const provider of videoProviderOrder(ctx.model, params.provider, params.model)) {
+			// Extension, editing, reference images and the Files API are all xAI
+			// Imagine surfaces; OpenRouter brokers plain generation only.
+			if (provider === "openrouter" && mode !== "generate") {
+				failures.push(`openrouter: mode ${mode} is xAI-only`);
+				continue;
+			}
+			if (provider === "openrouter" && media.referenceImages) {
+				failures.push("openrouter: reference_images is xAI-only");
+				continue;
+			}
+			if (provider === "openrouter" && (params.store || usesFileIds(media))) {
+				failures.push("openrouter: `store` and `file_...` inputs are xAI Files features");
+				continue;
+			}
 			let model = params.model ?? (provider === "xai" ? DEFAULT_XAI_VIDEO_MODEL : DEFAULT_OPENROUTER_VIDEO_MODEL);
 			// Verified against api.x.ai: `grok-imagine-video` answers a 1080p
 			// request with "1080p video resolution is not available for this
@@ -648,33 +871,74 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 			// image is present, and skip the provider rather than fire a request
 			// that cannot succeed when one is not.
 			if (provider === "xai" && !params.model && params.resolution === "1080p") {
-				if (!imageUrl) {
+				if (media.referenceImages) {
+					failures.push(
+						`xai: 1080p is served only by ${XAI_1080P_VIDEO_MODEL}, which does not support reference_images`,
+					);
+					continue;
+				}
+				if (!media.image) {
 					failures.push("xai: 1080p is image-to-video only (supply `image`, or use 720p)");
 					continue;
 				}
 				model = XAI_1080P_VIDEO_MODEL;
 			}
+			// Reference-to-video is documented as unsupported on 1.5, so an
+			// explicit pin to it cannot serve this request either. Checked before
+			// the generic 1.5 rule so the caller hears the specific reason.
+			if (provider === "xai" && media.referenceImages && isXai15(model)) {
+				failures.push(`xai: ${model} does not support reference_images (use ${DEFAULT_XAI_VIDEO_MODEL})`);
+				continue;
+			}
+			// The same limits hold when the caller pins the model by hand. Only
+			// the ids whose refusals were observed are policed: an unknown id is
+			// the caller's call, and the provider's own 400 is free and more
+			// accurate than a guess baked in here.
+			if (provider === "xai" && mode === "generate" && isXai15(model) && !media.image) {
+				failures.push(`xai: ${model} is image-to-video only (supply \`image\`)`);
+				continue;
+			}
+			if (provider === "xai" && model === DEFAULT_XAI_VIDEO_MODEL && params.resolution === "1080p") {
+				failures.push(
+					`xai: ${DEFAULT_XAI_VIDEO_MODEL} does not serve 1080p (use ${XAI_1080P_VIDEO_MODEL} with an \`image\`, or 720p)`,
+				);
+				continue;
+			}
 			let job: VideoJobResult;
 			try {
 				if (provider === "xai") {
 					const resolved = await resolveXaiKey(ctx.modelRegistry, model, sessionId);
-					if (!resolved) continue;
+					if (!resolved) {
+						missingCredentials = true;
+						continue;
+					}
 					foundCredentials = true;
 					job = await generateXaiVideo(
 						resolved.apiKey,
 						resolved.baseUrl,
 						model,
 						params,
-						imageUrl,
+						media,
 						fetchImpl,
 						requestSignal,
 						onUpdate,
 					);
 				} else {
 					const apiKey = await resolveOpenRouterKey(ctx.modelRegistry, sessionId);
-					if (!apiKey) continue;
+					if (!apiKey) {
+						missingCredentials = true;
+						continue;
+					}
 					foundCredentials = true;
-					job = await generateOpenRouterVideo(apiKey, model, params, imageUrl, fetchImpl, requestSignal, onUpdate);
+					job = await generateOpenRouterVideo(
+						apiKey,
+						model,
+						params,
+						media.image && "url" in media.image ? media.image.url : undefined,
+						fetchImpl,
+						requestSignal,
+						onUpdate,
+					);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -715,7 +979,7 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 					content: [
 						{
 							type: "text" as const,
-							text: `${provider} job ${job.requestId} finished but its download failed (${downloadFailure ?? "no response"}). The video is still retrievable at ${job.url}`,
+							text: `${provider} job ${job.requestId} finished but its download failed (${downloadFailure ?? "no response"}). The video is still retrievable at ${job.url}${job.fileId ? ` or as xAI file ${job.fileId}` : ""}`,
 						},
 					],
 				};
@@ -739,13 +1003,20 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 					content: [
 						{
 							type: "text" as const,
-							text: `${provider} job ${job.requestId} downloaded but writing ${displayPath} failed (${redactHome(message)}). The video is still retrievable at ${job.url}`,
+							text: `${provider} job ${job.requestId} downloaded but writing ${displayPath} failed (${redactHome(message)}). The video is still retrievable at ${job.url}${job.fileId ? ` or as xAI file ${job.fileId}` : ""}`,
 						},
 					],
 				};
 			}
 
 			const parts = [`Saved ${bytes.length} bytes to ${displayPath}`, `provider=${provider}`, `model=${model}`];
+			// `mode` is only worth the tokens when it is not the default, but the
+			// structured details always carry it so a renderer never has to guess.
+			if (mode !== "generate") parts.push(`mode=${mode}`);
+			// A `store` that produced no receipt is worth saying out loud: the
+			// caller planned to chain from an id that does not exist.
+			if (job.fileId) parts.push(`file_id=${job.fileId}`);
+			else if (params.store) parts.push("file_id=none (xAI returned no storage receipt)");
 			if (job.durationSeconds !== undefined) parts.push(`duration=${job.durationSeconds}s`);
 			if (job.costUsd !== undefined) parts.push(`cost=$${job.costUsd.toFixed(4)}`);
 			return {
@@ -753,25 +1024,29 @@ export const videoGenTool: CustomTool<typeof videoGenSchema, VideoGenToolDetails
 				details: {
 					provider,
 					model,
+					mode,
 					videoPath: outputPath,
 					bytes: bytes.length,
 					requestId: job.requestId,
 					durationSeconds: job.durationSeconds,
 					costUsd: job.costUsd,
+					fileId: job.fileId,
 				},
 			};
 		}
 
-		// Only claim "no credentials" when nothing else went wrong; a provider
-		// skipped for a concrete reason (unsupported request, submit rejected)
-		// must surface that reason instead.
-		if (!foundCredentials && failures.length === 0) {
+		// A provider that could have run this request had no credential, and none
+		// of the others got as far as submitting: the actionable cause is the
+		// missing login, so lead with it even when a capability skip was also
+		// recorded — that note explains why only one backend was eligible.
+		if (missingCredentials && !foundCredentials) {
+			const detail = failures.length > 0 ? ` (${failures.join("; ")})` : "";
 			return {
 				isError: true,
 				content: [
 					{
 						type: "text" as const,
-						text: "No video generation credentials. Run /login → xAI Grok OAuth (SuperGrok or X Premium+), or set XAI_API_KEY or OPENROUTER_API_KEY.",
+						text: `No video generation credentials. Run /login → xAI Grok OAuth (SuperGrok or X Premium+), or set XAI_API_KEY or OPENROUTER_API_KEY.${detail}`,
 					},
 				],
 			};

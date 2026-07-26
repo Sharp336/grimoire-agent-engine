@@ -3843,7 +3843,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "Generate Video",
 			description:
-				"Enable the generate_video tool (text-to-video and image-to-video). Billed per second of output. Exposed as an xd:// device when tools.xdev is on.",
+				"Enable the generate_video tool (text-to-video, image-to-video, and — on xAI — video extension and editing). Billed per second of output. Exposed as an xd:// device when tools.xdev is on.",
 		},
 	},
 
