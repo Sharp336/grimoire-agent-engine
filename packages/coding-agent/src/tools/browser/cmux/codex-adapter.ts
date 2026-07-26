@@ -783,9 +783,11 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 	}
 	const state = globalThis.__ompCodexBrowserState;
 	const installDocument = targetDocument => {
-		if (!targetDocument || state.observedDocuments.some(value => value === targetDocument)) return;
-		targetDocument.addEventListener("click", state.clickListener, true);
-		state.observedDocuments.push(targetDocument);
+		if (!targetDocument) return;
+		if (!state.observedDocuments.some(value => value === targetDocument)) {
+			targetDocument.addEventListener("click", state.clickListener, true);
+			state.observedDocuments.push(targetDocument);
+		}
 		const roots = [targetDocument];
 		for (const root of roots) {
 			for (const element of root.querySelectorAll("*")) {

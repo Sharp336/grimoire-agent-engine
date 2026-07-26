@@ -242,7 +242,7 @@ function labelProbe() {
 	return { document, view };
 }
 
-function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) {
+function observerProbe(multiple = false, inShadowRoot = false, inFrame = false, frameInitiallyPresent = true) {
 	type ClickEvent = {
 		target: ElementProbe;
 		defaultPrevented: boolean;
@@ -254,6 +254,7 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 	let clickCapture = false;
 	let frameClickListener: ((event: ClickEvent) => void) | undefined;
 	let frameClickCapture = false;
+	let frameMounted = inFrame && frameInitiallyPresent;
 	class ElementProbe {
 		readonly attributes = new Map<string, string>();
 		readonly kind: "file" | "button";
@@ -344,7 +345,7 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 			if (type === "click" && clickListener === listener && clickCapture === capture) clickListener = undefined;
 		},
 		querySelectorAll(selector: string) {
-			if (inFrame) {
+			if (frameMounted) {
 				if (selector === "*" || selector === "#frame") return [frame];
 				const actionToken = String(frame.getAttribute("data-omp-codex-action-token") ?? "");
 				if (actionToken && selector === `[data-omp-codex-action-token="${actionToken}"]`) return [frame];
@@ -394,7 +395,10 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 			(inObservedFrame ? frameClickListener : clickListener)?.(event);
 		}
 	};
-	return { document, frameDocument, frame, ElementProbe, file, anchor, fire };
+	const mountFrame = () => {
+		frameMounted = inFrame;
+	};
+	return { document, frameDocument, frame, ElementProbe, file, anchor, fire, mountFrame };
 }
 
 type ObserverAdapterProbe = {
@@ -2202,6 +2206,30 @@ describe("cmux Codex browser review regressions", () => {
 			expect(probe.frame.getAttribute("data-omp-codex-file-frame-token")).toBeNull();
 		} finally {
 			await requestAdapter.dispose();
+		}
+	});
+
+	it("rescans observed documents for file inputs in frames mounted after beginRun", async () => {
+		const probe = observerProbe(false, false, true, false);
+		let waits = 0;
+		const adapter = adapterForObserver(probe, async () => {
+			if (++waits > 1) throw new Error("Late frame file chooser was not observed");
+			probe.fire(probe.file);
+			await Promise.resolve();
+		});
+		await adapter.beginRun();
+		probe.mountFrame();
+
+		try {
+			const chooser = await adapter.invoke<{ token: string }>("playwright.waitForEvent", {
+				tabId: "1",
+				event: "filechooser",
+				timeoutMs: 250,
+			});
+			expect(chooser.token).toMatch(/^file-/);
+			expect(probe.file.getAttribute("data-omp-codex-file-token")).toBe(chooser.token);
+		} finally {
+			await adapter.dispose();
 		}
 	});
 
