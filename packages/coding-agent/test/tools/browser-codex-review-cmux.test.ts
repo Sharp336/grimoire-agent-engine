@@ -3662,48 +3662,64 @@ describe("cmux Codex browser review regressions", () => {
 		const commands: string[] = [];
 		let clicked = false;
 		let typed = "";
-		let syntheticTypes = 0;
+		let syntheticActions = 0;
 		const nativeActions: string[] = [];
+		const frameCalls: string[] = [];
 		const { adapter, browser } = adapterAndFacadeFor({
 			async codexEvaluate(_source: string, args: unknown[]) {
 				const command = String(args[1]);
 				commands.push(command);
 				if (command === "status") return { attached: true, visible: true, enabled: true };
-				if (command === "click") {
-					clicked = true;
-					return true;
-				}
-				if (command === "nativeTypeState") return String((args[2] as { value: string }).value);
 				if (command === "editableValue") return typed;
-				if (command === "type") {
-					syntheticTypes++;
+				if (command === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="frame"]';
+				if (command === "armNativeFileActivation") return false;
+				if (command === "click" || command === "type") {
+					syntheticActions++;
+					if (command === "click") clicked = true;
 					return true;
 				}
-				if (command === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="frame"]';
 				return false;
 			},
 			async codexEvaluateCleanup() {
 				return true;
 			},
+			async codexRequest(method: string, params: Readonly<Record<string, unknown>>) {
+				frameCalls.push(`${method}:${String(params.selector ?? "")}`);
+				return {};
+			},
+			async codexCleanupRequest(method: string) {
+				frameCalls.push(`${method}:main`);
+				return {};
+			},
 			async click() {
 				nativeActions.push("click");
 			},
-			async press(key: string) {
-				nativeActions.push(`press:${key}`);
-				typed += key;
+			async type(_selector: string, text: string) {
+				nativeActions.push(`type:${text}`);
+				typed += text;
 			},
 		});
 
 		try {
 			const frame = (await selectedTab(browser)).playwright.frameLocator("#frame");
+			const frameText = "line\n🧑‍💻";
 			await frame.locator("#button").click();
-			await frame.locator("#editor").type("inside frame");
+			await frame.locator("#editor").type(frameText);
+			const nestedError = await caughtError(() => frame.frameLocator("#nested-frame").locator("#button").click());
 
-			expect({ clicked, typed }).toEqual({ clicked: true, typed: "inside frame" });
-			expect(nativeActions).toEqual(Array.from("inside frame", key => `press:${key}`));
-			expect(syntheticTypes).toBe(0);
-			expect(commands).toContain("click");
-			expect(commands).toContain("nativeTypeState");
+			expect({ clicked, typed }).toEqual({ clicked: false, typed: frameText });
+			expect(nativeActions).toEqual(["click", `type:${frameText}`]);
+			expect(syntheticActions).toBe(0);
+			expect(frameCalls).toEqual([
+				"browser.frame.select:#frame",
+				"browser.frame.main:main",
+				"browser.frame.select:#frame",
+				"browser.frame.main:main",
+			]);
+			expect(nestedError).toEqual({
+				name: "BrowserCapabilityError",
+				message: "Browser capability is unavailable: playwright.frameLocator nested native action",
+			});
 		} finally {
 			await adapter.dispose();
 		}

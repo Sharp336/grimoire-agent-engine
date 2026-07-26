@@ -46,6 +46,7 @@ export const CODEX_BROWSER_CAPABILITIES = {
 	WAIT_FOR_EVENT: "playwright.waitForEvent",
 	DOWNLOAD_PATH: "playwright.download.path",
 	FRAME_LOCATOR_CROSS_ORIGIN: "playwright.frameLocator cross-origin",
+	FRAME_LOCATOR_NESTED_NATIVE_ACTION: "playwright.frameLocator nested native action",
 	ELEMENT_SCREENSHOT: "playwright.elementScreenshot",
 	SCREENSHOT_FULL_PAGE: "playwright.screenshot.fullPage",
 	SCREENSHOT_CLIP: "playwright.screenshot.clip",

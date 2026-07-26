@@ -224,20 +224,6 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		if (!editable(element)) throw new Error("locator.type requires an editable element");
 		return String(element.value ?? element.textContent ?? "");
 	}
-	if (command === "nativeTypeState") {
-		if (!editable(element)) throw new Error("locator.type requires an editable element");
-		element.scrollIntoView({ block: "center", inline: "center" });
-		if (typeof element.focus === "function") element.focus();
-		const value = String(payload.value);
-		const tag = String(element.tagName || "").toLowerCase();
-		const current = String(element.value ?? element.textContent ?? "");
-		if (tag === "input" || tag === "textarea") {
-			const start = typeof element.selectionStart === "number" ? element.selectionStart : current.length;
-			const end = typeof element.selectionEnd === "number" ? element.selectionEnd : start;
-			return current.slice(0, start) + value + current.slice(end);
-		}
-		return current + value;
-	}
 	const setValue = (target, value, append, label) => {
 		if (!editable(target)) throw new Error(label + " requires an editable element");
 		const tag = String(target.tagName || "").toLowerCase();
@@ -1800,6 +1786,62 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		return false;
 	}
 
+	#frameSelectors(descriptor: CodexLocatorDescriptor): string[] {
+		if (descriptor.kind === "frame") return [descriptor.selector];
+		if (descriptor.kind === "within") {
+			return [...this.#frameSelectors(descriptor.parent), ...this.#frameSelectors(descriptor.child)];
+		}
+		if (descriptor.kind === "and" || descriptor.kind === "or") {
+			return [...this.#frameSelectors(descriptor.left), ...this.#frameSelectors(descriptor.right)];
+		}
+		if (descriptor.kind === "filter") {
+			return [
+				...this.#frameSelectors(descriptor.locator),
+				...(descriptor.has ? this.#frameSelectors(descriptor.has) : []),
+				...(descriptor.hasNot ? this.#frameSelectors(descriptor.hasNot) : []),
+			];
+		}
+		if (descriptor.kind === "nth") return this.#frameSelectors(descriptor.locator);
+		return [];
+	}
+
+	async #withNativeFrameContext<TResult>(
+		descriptor: CodexLocatorDescriptor,
+		deadline: number,
+		operation: string,
+		action: () => Promise<TResult>,
+	): Promise<TResult> {
+		const frameSelectors = this.#frameSelectors(descriptor);
+		if (frameSelectors.length === 0) return await action();
+		if (frameSelectors.length > 1) {
+			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.FRAME_LOCATOR_NESTED_NATIVE_ACTION);
+		}
+		await this.#tab.codexRequest(
+			"browser.frame.select",
+			{ selector: frameSelectors[0] },
+			remainingMs(deadline, operation),
+		);
+		let result: TResult | undefined;
+		let failure: unknown;
+		let failed = false;
+		try {
+			result = await action();
+		} catch (error) {
+			failed = true;
+			failure = error;
+		}
+		try {
+			await this.#tab.codexCleanupRequest("browser.frame.main", {}, SELECTOR_TIMEOUT_MS);
+		} catch (error) {
+			if (!failed) {
+				failed = true;
+				failure = error;
+			}
+		}
+		if (failed) throw failure;
+		return result as TResult;
+	}
+
 	async #waitForLocator(
 		descriptor: CodexLocatorDescriptor,
 		state: string,
@@ -1845,27 +1887,6 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			if (readiness) await readiness;
 		}
 		await this.#waitForLocator(descriptor, args.force === true ? "attached" : "actionable", deadline, operation);
-		if (this.#containsFrame(descriptor) && nativeClick) {
-			return await this.#locator<boolean>(
-				descriptor,
-				operation === "locator.click" ? "click" : "dblclick",
-				{ button: args.button, modifiers: args.modifiers },
-				remainingMs(deadline, operation),
-			);
-		}
-		if (this.#containsFrame(descriptor) && operation === "locator.type") {
-			const value = stringArg(args, "value");
-			const expected = await this.#locator<string>(
-				descriptor,
-				"nativeTypeState",
-				{ value },
-				remainingMs(deadline, operation),
-			);
-			await this.#pressKeys(Array.from(value), deadline, operation);
-			const after = await this.#locator<string>(descriptor, "editableValue", {}, remainingMs(deadline, operation));
-			if (after !== expected) throw new ToolError("locator.type did not update the editable element");
-			return undefined;
-		}
 		if (nativeClick) {
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
 			let tokenBound = false;
@@ -1884,8 +1905,11 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 					{},
 					remainingMs(deadline, operation),
 				);
-				if (operation === "locator.click") await this.#tab.click(nativeSelector, remainingMs(deadline, operation));
-				else await this.#tab.dblclick(nativeSelector, remainingMs(deadline, operation));
+				await this.#withNativeFrameContext(descriptor, deadline, operation, async () => {
+					if (operation === "locator.click")
+						await this.#tab.click(nativeSelector, remainingMs(deadline, operation));
+					else await this.#tab.dblclick(nativeSelector, remainingMs(deadline, operation));
+				});
 				return undefined;
 			} finally {
 				if (fileActivationArmed) await this.#disarmNativeFileActivation();
@@ -1899,6 +1923,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (operation === "locator.type") {
 			await this.#locator<string>(descriptor, "editableValue", {}, remainingMs(deadline, operation));
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
+			let tokenBound = false;
 			try {
 				const nativeSelector = await this.#locator<string>(
 					descriptor,
@@ -1906,21 +1931,21 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 					{ token },
 					remainingMs(deadline, operation),
 				);
-				await this.#tab.type(nativeSelector, stringArg(args, "value"), remainingMs(deadline, operation));
+				tokenBound = true;
+				await this.#withNativeFrameContext(descriptor, deadline, operation, async () => {
+					await this.#tab.type(nativeSelector, stringArg(args, "value"), remainingMs(deadline, operation));
+				});
 				return undefined;
 			} finally {
-				await this.#tab
-					.codexEvaluateCleanup<boolean>(DISPOSE_NATIVE_ACTION_TOKEN_SOURCE, [token], SELECTOR_TIMEOUT_MS)
-					.catch(() => undefined);
+				if (tokenBound) {
+					await this.#tab
+						.codexEvaluateCleanup<boolean>(DISPOSE_NATIVE_ACTION_TOKEN_SOURCE, [token], SELECTOR_TIMEOUT_MS)
+						.catch(() => undefined);
+				}
 			}
 		}
 		if (operation === "locator.press") {
 			const key = stringArg(args, "value");
-			if (this.#containsFrame(descriptor)) {
-				await this.#locator<boolean>(descriptor, "focus", {}, remainingMs(deadline, operation));
-				await this.#tab.press(key, { timeoutMs: remainingMs(deadline, operation) });
-				return undefined;
-			}
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
 			let tokenBound = false;
 			try {
@@ -1931,8 +1956,10 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 					remainingMs(deadline, operation),
 				);
 				tokenBound = true;
-				await this.#tab.focus(nativeSelector, remainingMs(deadline, operation));
-				await this.#tab.press(key, { timeoutMs: remainingMs(deadline, operation) });
+				await this.#withNativeFrameContext(descriptor, deadline, operation, async () => {
+					await this.#tab.focus(nativeSelector, remainingMs(deadline, operation));
+					await this.#tab.press(key, { timeoutMs: remainingMs(deadline, operation) });
+				});
 				return undefined;
 			} finally {
 				if (tokenBound) {
