@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
-import {
-	MissionWorkspaceManager,
-	type MissionFeatureWorkspaceDescriptor,
+import type {
+	MissionFeatureSpec,
+	MissionRepositoryState,
+	MissionState,
+	MissionWorkerHandoff,
 } from "../../src/missions";
-import type { MissionFeatureSpec, MissionRepositoryState, MissionState, MissionWorkerHandoff } from "../../src/missions";
+import { type MissionFeatureWorkspaceDescriptor, MissionWorkspaceManager } from "../../src/missions";
 
 const GIT_ENV = {
 	GIT_AUTHOR_NAME: "workspace-test",
@@ -108,7 +110,7 @@ describe("MissionWorkspaceManager", () => {
 		const manager = new MissionWorkspaceManager();
 		const reserved = await manager.reserveFeature("owner", mission(repository), feature);
 
-		const ready = await manager.materialize(reserved) as MissionFeatureWorkspaceDescriptor;
+		const ready = (await manager.materialize(reserved)) as MissionFeatureWorkspaceDescriptor;
 		expect(ready.phase).toBe("ready");
 		expect(gitRun(ready.path, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe(ready.branch);
 		expect(await manager.releaseIfEmpty(ready)).toBe(true);
@@ -138,7 +140,9 @@ describe("MissionWorkspaceManager", () => {
 		const { root, repository } = await makeRepository();
 		roots.push(root);
 		const manager = new MissionWorkspaceManager();
-		const descriptor = await manager.materialize(await manager.reserveFeature("owner", mission(repository), feature)) as MissionFeatureWorkspaceDescriptor;
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
 		await fs.writeFile(path.join(descriptor.path, "feature.txt"), "done\n");
 		gitRun(descriptor.path, ["add", "feature.txt"]);
 		gitRun(descriptor.path, ["commit", "-q", "-m", "feature"]);
@@ -148,14 +152,142 @@ describe("MissionWorkspaceManager", () => {
 
 		expect(result).toMatchObject({ kind: "advanced", repository: { integrationHead: featureHead } });
 		expect(gitRun(root, ["rev-parse", "main"])).toBe(featureHead);
+		expect(await fs.readFile(path.join(root, "feature.txt"), "utf8")).toBe("done\n");
+		expect(await manager.advanceIntegration(repository, descriptor, handoff([featureHead]))).toMatchObject({
+			kind: "already_applied",
+			repository: { integrationHead: featureHead },
+		});
 		await manager.release(descriptor);
+	});
+
+	test("refuses to advance a dirty checked-out integration worktree", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
+		await fs.writeFile(path.join(descriptor.path, "feature.txt"), "done\n");
+		gitRun(descriptor.path, ["add", "feature.txt"]);
+		gitRun(descriptor.path, ["commit", "-q", "-m", "feature"]);
+		const featureHead = gitRun(descriptor.path, ["rev-parse", "HEAD"]);
+		await fs.writeFile(path.join(root, "README.md"), "dirty\n");
+
+		const result = await manager.advanceIntegration(repository, descriptor, handoff([featureHead]));
+
+		expect(result).toMatchObject({
+			kind: "partial_handoff",
+			issues: [{ description: "Integration worktree is dirty; integration branch cannot be advanced" }],
+		});
+		expect(gitRun(root, ["rev-parse", "main"])).toBe(repository.integrationHead);
+	});
+
+	test("rejects a handoff whose commit list differs from the feature branch", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
+		await fs.writeFile(path.join(descriptor.path, "feature.txt"), "done\n");
+		gitRun(descriptor.path, ["add", "feature.txt"]);
+		gitRun(descriptor.path, ["commit", "-q", "-m", "feature"]);
+
+		const result = await manager.advanceIntegration(repository, descriptor, handoff([]));
+
+		expect(result).toMatchObject({
+			kind: "partial_handoff",
+			issues: [{ description: "Feature commit list does not match handoff.commits" }],
+		});
+	});
+
+	test("reports an integration branch that moved since the feature was reserved", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
+		await fs.writeFile(path.join(descriptor.path, "feature.txt"), "done\n");
+		gitRun(descriptor.path, ["add", "feature.txt"]);
+		gitRun(descriptor.path, ["commit", "-q", "-m", "feature"]);
+		const featureHead = gitRun(descriptor.path, ["rev-parse", "HEAD"]);
+		await fs.writeFile(path.join(root, "other.txt"), "other\n");
+		gitRun(root, ["add", "other.txt"]);
+		gitRun(root, ["commit", "-q", "-m", "other"]);
+
+		const result = await manager.advanceIntegration(repository, descriptor, handoff([featureHead]));
+
+		expect(result).toMatchObject({ kind: "pause", reason: "integration_diverged" });
+	});
+
+	test("rejects a stale reserved feature branch instead of adopting it", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const reserved = await manager.reserveFeature("owner", mission(repository), feature);
+		await fs.writeFile(path.join(root, "stale.txt"), "stale\n");
+		gitRun(root, ["add", "stale.txt"]);
+		gitRun(root, ["commit", "-q", "-m", "stale"]);
+		gitRun(root, ["branch", reserved.branch]);
+
+		await expect(manager.materialize(reserved)).rejects.toThrow(`Feature branch ${reserved.branch} already exists`);
+	});
+
+	test("recreates a registered feature worktree whose directory disappeared without a child transcript", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
+		await fs.rm(descriptor.path, { recursive: true, force: true });
+
+		const result = await manager.reconcile(descriptor, false);
+
+		expect(result).toMatchObject({ kind: "ready", descriptor: { id: descriptor.id, phase: "ready" } });
+		expect(gitRun(descriptor.path, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe(descriptor.branch);
+	});
+
+	test("recreates a registered validator worktree whose directory disappeared without a child transcript", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const descriptor = await manager.materialize(
+			await manager.reserveValidator("owner", mission(repository), feature.id),
+		);
+		await fs.rm(descriptor.path, { recursive: true, force: true });
+
+		const result = await manager.reconcile(descriptor, false);
+
+		expect(result).toMatchObject({ kind: "ready", descriptor: { id: descriptor.id, phase: "ready" } });
+		expect(gitRun(descriptor.path, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("HEAD");
+	});
+
+	test("does not release a worktree registered to an unrelated branch", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
+		gitRun(root, ["worktree", "remove", descriptor.path]);
+		gitRun(root, ["worktree", "add", "-b", "unowned-release", descriptor.path, "main"]);
+
+		await expect(manager.release(descriptor)).rejects.toThrow("Refusing to remove unowned worktree");
+		expect(gitRun(descriptor.path, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("unowned-release");
+		gitRun(root, ["worktree", "remove", descriptor.path]);
+		gitRun(root, ["branch", "-D", "unowned-release"]);
+		gitRun(root, ["branch", "-D", descriptor.branch]);
 	});
 
 	test("rejects a worktree path registered to a branch it does not own", async () => {
 		const { root, repository } = await makeRepository();
 		roots.push(root);
 		const manager = new MissionWorkspaceManager();
-		const descriptor = await manager.materialize(await manager.reserveFeature("owner", mission(repository), feature)) as MissionFeatureWorkspaceDescriptor;
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
 		gitRun(root, ["worktree", "remove", descriptor.path]);
 		gitRun(root, ["worktree", "add", "-b", "unowned-workspace", descriptor.path, "main"]);
 

@@ -176,9 +176,13 @@ async function ensureWorktreeParent(worktreePath: string): Promise<void> {
 
 async function createFeatureWorkspace(repoRoot: string, descriptor: MissionFeatureWorkspaceDescriptor): Promise<void> {
 	const branchRef = toLocalBranchRef(descriptor.branch);
-	const branchExists = await git.ref.exists(repoRoot, branchRef);
-	if (!branchExists) {
+	const branchHead = await git.ref.resolve(repoRoot, branchRef);
+	if (branchHead === null) {
 		await git.branch.create(repoRoot, descriptor.branch, descriptor.baseSha);
+	} else if (branchHead !== descriptor.baseSha) {
+		throw new MissionWorkspaceError(
+			`Feature branch ${descriptor.branch} already exists at ${branchHead}, expected ${descriptor.baseSha}`,
+		);
 	}
 	await ensureWorktreeParent(descriptor.path);
 	await git.worktree.add(repoRoot, descriptor.path, descriptor.branch);
@@ -354,6 +358,27 @@ export class MissionWorkspaceManager {
 			const expectedOldHead = descriptor.baseSha;
 			const newHead = featureBranchHead;
 			const integrationRef = toLocalBranchRef(repository.integrationBranch);
+			const integrationWorktree = (await git.worktree.list(descriptor.repoRoot)).find(
+				entry => !entry.detached && entry.branch === integrationRef,
+			);
+			if (integrationWorktree && !isCleanSummary(await git.status.summary(integrationWorktree.path))) {
+				return {
+					kind: "partial_handoff",
+					featureBranchHead,
+					issues: [
+						blockingIssue(
+							"Integration worktree is dirty; integration branch cannot be advanced",
+							undefined,
+							descriptor.featureId,
+						),
+					],
+				};
+			}
+			const synchronizeIntegrationWorktree = async (): Promise<void> => {
+				if (integrationWorktree) {
+					await git.reset(integrationWorktree.path, { hard: true, target: newHead });
+				}
+			};
 
 			const ancestryToNew = await git.ref.isAncestor(descriptor.repoRoot, expectedOldHead, newHead);
 			if (!ancestryToNew) {
@@ -372,6 +397,7 @@ export class MissionWorkspaceManager {
 
 			let actualHead = await git.ref.resolve(descriptor.repoRoot, integrationRef);
 			if (actualHead === newHead) {
+				await synchronizeIntegrationWorktree();
 				return {
 					kind: "already_applied",
 					repository: { ...repository, integrationHead: newHead },
@@ -383,6 +409,7 @@ export class MissionWorkspaceManager {
 
 			const updated = await git.ref.update(descriptor.repoRoot, integrationRef, newHead, expectedOldHead);
 			if (updated) {
+				await synchronizeIntegrationWorktree();
 				return {
 					kind: "advanced",
 					repository: { ...repository, integrationHead: newHead },
@@ -393,6 +420,7 @@ export class MissionWorkspaceManager {
 			// equality with newHead means already-applied; anything else diverged.
 			actualHead = await git.ref.resolve(descriptor.repoRoot, integrationRef);
 			if (actualHead === newHead) {
+				await synchronizeIntegrationWorktree();
 				return {
 					kind: "already_applied",
 					repository: { ...repository, integrationHead: newHead },
@@ -401,6 +429,7 @@ export class MissionWorkspaceManager {
 			if (actualHead === expectedOldHead) {
 				const retried = await git.ref.update(descriptor.repoRoot, integrationRef, newHead, expectedOldHead);
 				if (retried) {
+					await synchronizeIntegrationWorktree();
 					return {
 						kind: "advanced",
 						repository: { ...repository, integrationHead: newHead },
@@ -408,6 +437,7 @@ export class MissionWorkspaceManager {
 				}
 				actualHead = await git.ref.resolve(descriptor.repoRoot, integrationRef);
 				if (actualHead === newHead) {
+					await synchronizeIntegrationWorktree();
 					return {
 						kind: "already_applied",
 						repository: { ...repository, integrationHead: newHead },
@@ -450,7 +480,6 @@ export class MissionWorkspaceManager {
 		const entry = findWorktreeEntry(entries, descriptor.path);
 		const onDisk = await pathExists(descriptor.path);
 		const refSha = await git.ref.resolve(repoRoot, branchRef);
-		const refExists = refSha !== null;
 
 		if (entry && !isExactFeatureWorktree(entry, descriptor)) {
 			return workspaceConflict(descriptor, "Worktree path is registered to an unowned or mismatched branch", {
@@ -459,21 +488,32 @@ export class MissionWorkspaceManager {
 				actualHead: entry.head ?? null,
 			});
 		}
-
+		if (entry && !onDisk) {
+			if (hasChildTranscript) {
+				return workspaceConflict(
+					descriptor,
+					"Registered feature workspace path is missing while a child transcript exists",
+					{
+						branch: descriptor.branch,
+					},
+				);
+			}
+			await git.worktree.prune(repoRoot);
+			await createFeatureWorkspace(repoRoot, descriptor);
+			return { kind: "ready", descriptor: { ...descriptor, phase: "ready" } };
+		}
 		if (!entry && onDisk) {
 			return workspaceConflict(descriptor, "Workspace path exists on disk but is not a registered worktree", {
 				branch: descriptor.branch,
 			});
 		}
-
-		if (!refExists && entry) {
-			return workspaceConflict(descriptor, "Feature worktree exists without its owned branch ref", {
-				branch: descriptor.branch,
-				actualHead: entry.head ?? null,
-			});
-		}
-
-		if (!refExists && !entry) {
+		if (refSha === null) {
+			if (entry) {
+				return workspaceConflict(descriptor, "Feature worktree exists without its owned branch ref", {
+					branch: descriptor.branch,
+					actualHead: entry.head ?? null,
+				});
+			}
 			if (hasChildTranscript) {
 				return workspaceConflict(descriptor, "Missing feature workspace path/ref but a child transcript exists", {
 					branch: descriptor.branch,
@@ -481,13 +521,6 @@ export class MissionWorkspaceManager {
 			}
 			await createFeatureWorkspace(repoRoot, descriptor);
 			return { kind: "ready", descriptor: { ...descriptor, phase: "ready" } };
-		}
-
-		// Owned ref exists from here.
-		if (refSha === null) {
-			return workspaceConflict(descriptor, "Feature ref ownership check lost resolvable SHA", {
-				branch: descriptor.branch,
-			});
 		}
 		if (!entry) {
 			if (hasChildTranscript) {
@@ -501,7 +534,6 @@ export class MissionWorkspaceManager {
 			await git.worktree.add(repoRoot, descriptor.path, descriptor.branch);
 			return { kind: "ready", descriptor: { ...descriptor, phase: "ready" } };
 		}
-
 		return { kind: "ready", descriptor: { ...descriptor, phase: "ready" } };
 	}
 
@@ -514,12 +546,31 @@ export class MissionWorkspaceManager {
 		const entry = findWorktreeEntry(entries, descriptor.path);
 		const onDisk = await pathExists(descriptor.path);
 
+		if (entry && !isExactValidatorWorktree(entry, descriptor)) {
+			return workspaceConflict(descriptor, "Validator worktree is unowned, attached, or at the wrong head", {
+				expectedHead: descriptor.head,
+				actualHead: entry.head ?? null,
+			});
+		}
+		if (entry && !onDisk) {
+			if (hasChildTranscript) {
+				return workspaceConflict(
+					descriptor,
+					"Registered validator workspace path is missing while a child transcript exists",
+					{
+						expectedHead: descriptor.head,
+					},
+				);
+			}
+			await git.worktree.prune(repoRoot);
+			await createValidatorWorkspace(repoRoot, descriptor);
+			return { kind: "ready", descriptor: { ...descriptor, phase: "ready" } };
+		}
 		if (!entry && onDisk) {
 			return workspaceConflict(descriptor, "Validator path exists on disk but is not a registered worktree", {
 				expectedHead: descriptor.head,
 			});
 		}
-
 		if (!entry) {
 			if (hasChildTranscript) {
 				return workspaceConflict(descriptor, "Missing validator workspace path while a child transcript exists", {
@@ -529,14 +580,6 @@ export class MissionWorkspaceManager {
 			await createValidatorWorkspace(repoRoot, descriptor);
 			return { kind: "ready", descriptor: { ...descriptor, phase: "ready" } };
 		}
-
-		if (!isExactValidatorWorktree(entry, descriptor)) {
-			return workspaceConflict(descriptor, "Validator worktree is unowned, attached, or at the wrong head", {
-				expectedHead: descriptor.head,
-				actualHead: entry.head ?? null,
-			});
-		}
-
 		return { kind: "ready", descriptor: { ...descriptor, phase: "ready" } };
 	}
 
@@ -550,6 +593,13 @@ export class MissionWorkspaceManager {
 		const entries = await git.worktree.list(descriptor.repoRoot);
 		const entry = findWorktreeEntry(entries, descriptor.path);
 		if (entry) {
+			const owned =
+				descriptor.kind === "feature"
+					? isExactFeatureWorktree(entry, descriptor)
+					: isExactValidatorWorktree(entry, descriptor);
+			if (!owned) {
+				throw new MissionWorkspaceError(`Refusing to remove unowned worktree at ${descriptor.path}`);
+			}
 			await git.worktree.remove(descriptor.repoRoot, descriptor.path, { force: false });
 		} else if (await pathExists(descriptor.path)) {
 			throw new MissionWorkspaceError(
