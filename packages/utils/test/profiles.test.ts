@@ -13,6 +13,7 @@ import {
 	getPythonGatewayDir,
 	getSessionsDir,
 	getStatsDbPath,
+	getTranscriptDbPath,
 	normalizeProfileName,
 	resolveProfileEnv,
 	setAgentDir,
@@ -127,6 +128,7 @@ describe("profile directories", () => {
 		expect(getConfigAgentDirName()).toBe(path.join(configDir, "profiles", "work", "agent"));
 		expect(getAgentDir()).toBe(agent);
 		expect(getAgentDbPath()).toBe(path.join(agent, "agent.db"));
+		expect(getTranscriptDbPath()).toBe(path.join(agent, "transcripts.db"));
 		expect(getSessionsDir()).toBe(path.join(agent, "sessions"));
 		expect(getStatsDbPath()).toBe(path.join(root, "stats.db"));
 	});
@@ -155,6 +157,9 @@ describe("profile directories", () => {
 		setProfile("work");
 
 		expect(getAgentDbPath()).toBe(path.join(process.env.XDG_DATA_HOME, "omp", "profiles", "work", "agent.db"));
+		expect(getTranscriptDbPath()).toBe(
+			path.join(process.env.XDG_DATA_HOME, "omp", "profiles", "work", "transcripts.db"),
+		);
 		expect(getSessionsDir()).toBe(path.join(process.env.XDG_DATA_HOME, "omp", "profiles", "work", "sessions"));
 		expect(getPythonGatewayDir()).toBe(
 			path.join(process.env.XDG_STATE_HOME, "omp", "profiles", "work", "python-gateway"),
@@ -201,6 +206,7 @@ describe("profile directories", () => {
 	it("restores the pre-profile PI_CODING_AGENT_DIR override on reset", () => {
 		const customAgentDir = path.join(tempRoot, "custom-agent");
 		setAgentDir(customAgentDir);
+		expect(getTranscriptDbPath(customAgentDir)).toBe(path.join(customAgentDir, "transcripts.db"));
 		expect(getAgentDir()).toBe(customAgentDir);
 		expect(process.env.PI_CODING_AGENT_DIR).toBe(customAgentDir);
 
