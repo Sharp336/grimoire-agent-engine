@@ -34,6 +34,7 @@ import {
 	type SummaryOptions,
 	shouldCompact,
 	shouldUseOpenAiRemoteCompaction,
+	shouldUseCompactionV2Streaming,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -567,6 +568,7 @@ export class SessionMaintenance {
 			let compactionCandidates = this.#getCompactionModelCandidates(
 				availableModels,
 				requireProviderRemote ? shouldUseOpenAiRemoteCompaction : undefined,
+				effectiveSettings,
 			);
 			if (requireProviderRemote && compactionCandidates.length === 0) {
 				this.#host.emitNotice(
@@ -574,7 +576,7 @@ export class SessionMaintenance {
 					`remote compaction is unavailable for ${this.#model.id} (no remote endpoint configured and no provider-native remote-capable model in the fallback chain) — using a local summary instead`,
 					"compaction",
 				);
-				compactionCandidates = this.#getCompactionModelCandidates(availableModels);
+				compactionCandidates = this.#getCompactionModelCandidates(availableModels, undefined, effectiveSettings);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
 			const preparation = prepareCompaction(pathEntries, effectiveSettings, this.#model);
@@ -1386,46 +1388,73 @@ export class SessionMaintenance {
 		return candidate;
 	}
 
-	#getCompactionModelCandidates(availableModels: Model[], filter?: (model: Model) => boolean): Model[] {
-		return this.resolveCompactionModelCandidates(this.#model, availableModels, filter);
+	#getCompactionModelCandidates(
+		availableModels: Model[],
+		filter: ((model: Model) => boolean) | undefined,
+		settings: Pick<CompactionSettings, "remoteEnabled" | "remoteStreamingV2Enabled">,
+	): Model[] {
+		return this.resolveCompactionModelCandidates(
+			this.#model,
+			availableModels,
+			filter,
+			settings.remoteEnabled !== false,
+			settings.remoteStreamingV2Enabled !== false,
+		);
 	}
 
 	resolveCompactionModelCandidates(
 		preferredModel: Model | null | undefined,
 		availableModels: Model[],
 		filter?: (model: Model) => boolean,
+		remoteEnabled = this.#host.settings.getGroup("compaction").remoteEnabled !== false,
+		remoteStreamingV2Enabled =
+			this.#host.settings.getGroup("compaction").remoteStreamingV2Enabled !== false,
 	): Model[] {
 		const candidates: Model[] = [];
 		const seen = new Set<string>();
+		const hasEffectiveNativeCompaction = (model: Model): boolean =>
+			remoteEnabled &&
+			(shouldUseOpenAiRemoteCompaction(model) ||
+				(remoteStreamingV2Enabled && shouldUseCompactionV2Streaming(model)));
+		const nativeProvider =
+			preferredModel && hasEffectiveNativeCompaction(preferredModel) ? preferredModel.provider : undefined;
 
-		const addCandidate = (model: Model | undefined): void => {
+		const addCandidate = (model: Model | undefined, source: "explicit" | "current" | "implicit"): void => {
 			if (!model) return;
 			const key = `${model.provider}/${model.id}`;
 			if (seen.has(key)) return;
 			seen.add(key);
-			// `seen` still tracks rejected models so the largest-context fallback
-			// scan below doesn't reintroduce them; the filter just suppresses
-			// inclusion in this caller's candidate chain.
+			// Explicit targets and the active model retain their established
+			// semantics. Implicit role/context fallbacks must not turn a native
+			// compaction request into a different provider's generic summary.
+			if (
+				source === "implicit" &&
+				nativeProvider !== undefined &&
+				(model.provider !== nativeProvider || !hasEffectiveNativeCompaction(model))
+			) {
+				return;
+			}
 			if (filter && !filter(model)) return;
 			candidates.push(model);
 		};
 
 		if (preferredModel) {
-			addCandidate(resolveCompactionConfiguredTarget(preferredModel, availableModels));
+			addCandidate(resolveCompactionConfiguredTarget(preferredModel, availableModels), "explicit");
 		}
-		addCandidate(preferredModel ?? undefined);
+		addCandidate(preferredModel ?? undefined, "current");
 		for (const role of MODEL_ROLE_IDS) {
 			addCandidate(
 				resolveRoleModelFull(this.#host.settings, role, availableModels, preferredModel ?? undefined).model,
+				"implicit",
 			);
 		}
 
 		const sortedByContext = [...availableModels].sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0));
 		for (const model of sortedByContext) {
-			if (!seen.has(`${model.provider}/${model.id}`)) {
-				addCandidate(model);
-				break;
-			}
+			if (seen.has(`${model.provider}/${model.id}`)) continue;
+			const candidateCount = candidates.length;
+			addCandidate(model, "implicit");
+			if (candidates.length > candidateCount) break;
 		}
 
 		return candidates;
@@ -1452,7 +1481,8 @@ export class SessionMaintenance {
 		precomputedCandidates?: Model[],
 	): Promise<CompactionResult> {
 		const candidates =
-			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
+			precomputedCandidates ??
+			this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable(), undefined, preparation.settings);
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 
 		for (const candidate of candidates) {
@@ -2468,7 +2498,7 @@ export class SessionMaintenance {
 				details = snapcompactResult.details;
 				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
 			} else {
-				const candidates = this.#getCompactionModelCandidates(availableModels);
+				const candidates = this.#getCompactionModelCandidates(availableModels, undefined, compactionSettings);
 				const retrySettings = this.#host.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;

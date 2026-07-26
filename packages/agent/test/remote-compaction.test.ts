@@ -1687,6 +1687,31 @@ describe("compact() remote compaction failure handling", () => {
 		expect(JSON.stringify(sameProviderActive?.messagesToSummarize ?? [])).not.toContain("ORIGINAL ALPHA port 4242");
 	});
 
+	test("V2 native failure falls back to V1 without generic summarization", async () => {
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		const model = makeOpenAiModel({
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			requestedUrls.push(url);
+			if (url.endsWith("/responses/compact")) {
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "enc-v1" }] });
+			}
+			return new Response("V2 unavailable", { status: 502, statusText: "Bad Gateway" });
+		};
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		expect(requestedUrls.some(url => url.endsWith("/responses"))).toBe(true);
+		expect(requestedUrls.some(url => url.endsWith("/responses/compact"))).toBe(true);
+		expect(result.shortSummary).toBe("Remote compaction");
+		expect(completeSpy).not.toHaveBeenCalled();
+	});
+
 	test("user abort during the remote compact request rejects without falling back to local summarization", async () => {
 		// Contract: Esc is a cancellation, not a remote failure. Before the fix
 		// the AbortError was swallowed by the fallback catch and compaction kept
@@ -1760,16 +1785,16 @@ describe("compact() remote compaction failure handling", () => {
 		});
 	});
 
-	test("remote compact server failure without abort still falls back to local summarization", async () => {
+	test("native compaction server failure rejects without generic summarization", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const fetchMock: FetchImpl = async () =>
 			new Response("nope", { status: 500, statusText: "Internal Server Error" });
 
-		const result = await compact(makePreparation(), makeOpenAiModel(), "test-key", undefined, undefined, {
-			fetch: fetchMock,
-		});
-
-		expect(result.summary).toContain("local summary");
-		expect(completeSpy).toHaveBeenCalled();
+		await expect(
+			compact(makePreparation(), makeOpenAiModel(), "test-key", undefined, undefined, {
+				fetch: fetchMock,
+			}),
+		).rejects.toThrow("Remote compaction failed");
+		expect(completeSpy).not.toHaveBeenCalled();
 	});
 });

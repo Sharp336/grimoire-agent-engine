@@ -1406,6 +1406,7 @@ export async function compact(
 		...recentMessages,
 	];
 	let usedRemoteCompaction = false;
+	let nativeCompactionError: unknown;
 	if (
 		settings.remoteEnabled !== false &&
 		settings.remoteStreamingV2Enabled !== false &&
@@ -1467,7 +1468,8 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
-				logger.warn("OpenAI V2 remote compaction failed, falling back to V1/local summarization", {
+				nativeCompactionError = err;
+				logger.warn("OpenAI V2 remote compaction failed, falling back to V1 remote compaction", {
 					error: err instanceof Error ? err.message : String(err),
 					model: model.id,
 					provider: model.provider,
@@ -1517,13 +1519,18 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
-				logger.warn("OpenAI remote compaction failed, falling back to local summarization", {
+				nativeCompactionError = err;
+				logger.warn("OpenAI remote compaction failed", {
 					error: err instanceof Error ? err.message : String(err),
 					model: model.id,
 					provider: model.provider,
 				});
 			}
 		}
+	}
+
+	if (!usedRemoteCompaction && nativeCompactionError !== undefined) {
+		throw nativeCompactionError;
 	}
 
 	// Generate summaries (can be parallel if both needed) and merge into one

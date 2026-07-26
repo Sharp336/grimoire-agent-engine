@@ -37,7 +37,13 @@ describe("issue #986 compaction auth fallback", () => {
 			throw new Error("Expected bundled test models to exist");
 		}
 
-		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.strategy": "context-full",
+			// This suite covers the portable summarizer's auth fallback. Native
+			// compaction keeps its implicit candidate chain provider-isolated.
+			"compaction.remoteEnabled": false,
+		});
 		if (options?.fallbackModelRole) {
 			settings.setModelRole(options.fallbackModelRole, `${fallbackModel.provider}/${fallbackModel.id}`);
 		}
