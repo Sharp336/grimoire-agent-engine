@@ -213,6 +213,22 @@ function deepestElementAtPointInDocument(x: number, y: number): Element | null {
 	return hit;
 }
 
+async function frameCanSeeEmbeddingElement(frame: Frame): Promise<boolean> {
+	let frameElement: ElementHandle | null = null;
+	try {
+		frameElement = await frame.frameElement();
+		if (!frameElement) return false;
+		return await frameElement.evaluate(element => {
+			const embedded = element as Element & { contentDocument?: unknown | null };
+			return embedded.contentDocument !== null && embedded.contentDocument !== undefined;
+		});
+	} catch {
+		return false;
+	} finally {
+		await frameElement?.dispose().catch(() => undefined);
+	}
+}
+
 interface DownloadRecord {
 	readonly filename: string;
 	readonly completion: Promise<string | null>;
@@ -1245,6 +1261,17 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 						(pageElement.tabIndex ?? -1) >= 0 ||
 						pageElement.isContentEditable === true;
 					const rect = pageElement.getBoundingClientRect();
+					let x = rect.x;
+					let y = rect.y;
+					type FrameElement = Element & { clientLeft: number; clientTop: number };
+					let frame = (target as Element).ownerDocument.defaultView?.frameElement;
+					while (frame) {
+						const frameRect = frame.getBoundingClientRect();
+						const frameElement = frame as FrameElement;
+						x += frameRect.x + frameElement.clientLeft;
+						y += frameRect.y + frameElement.clientTop;
+						frame = frame.ownerDocument.defaultView?.frameElement;
+					}
 					const id = pageElement.getAttribute("id");
 					const testId = pageElement.getAttribute("data-testid");
 					const css = (globalThis as unknown as { CSS: { escape(value: string): string } }).CSS;
@@ -1254,7 +1281,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 						nativelyInteractable,
 						visibleText: (pageElement.textContent ?? "").replace(/\s+/g, " ").trim() || null,
 						testId,
-						boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+						boundingBox: { x, y, width: rect.width, height: rect.height },
 						preview: pageElement.outerHTML.slice(0, 500),
 						selector: { primary, candidates: primary ? [primary, tagName] : [tagName] },
 					};
@@ -1323,6 +1350,8 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			if (typeof (element as { contentFrame?: unknown }).contentFrame !== "function") return element;
 			const childFrame = await run(() => element.contentFrame());
 			if (!childFrame) return element;
+			const childCanSeeFrameElement = await run(() => frameCanSeeEmbeddingElement(childFrame));
+			if (!childCanSeeFrameElement) return element;
 			const offset = await run(() =>
 				element.evaluate(frame => {
 					const frameElement = frame as Element & { clientLeft: number; clientTop: number };
@@ -2154,25 +2183,45 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				scrollIntoView(options: { block: "center"; inline: "center" }): void;
 			};
 			pointerTarget.scrollIntoView({ block: "center", inline: "center" });
+			const receivesAt = (target: Element, x: number, y: number): boolean => {
+				const ownerDocument = target.ownerDocument;
+				const view = ownerDocument.defaultView;
+				if (!view || x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) return false;
+				let hit = ownerDocument.elementFromPoint(x, y);
+				while (hit?.shadowRoot) {
+					const nested = hit.shadowRoot.elementFromPoint(x, y);
+					if (!nested || nested === hit) break;
+					hit = nested;
+				}
+				for (let current = hit; current; ) {
+					if (current === target) return true;
+					const pageCurrent = current as Element & { assignedSlot?: Element | null };
+					const root = current.getRootNode() as unknown as { host?: Element };
+					current = pageCurrent.assignedSlot ?? current.parentElement ?? root.host ?? null;
+				}
+				return false;
+			};
+			type FrameElement = Element & {
+				clientLeft: number;
+				clientTop: number;
+				scrollIntoView(options: { block: "center"; inline: "center" }): void;
+			};
 			const rect = element.getBoundingClientRect();
-			const view = element.ownerDocument.defaultView;
-			if (!view || rect.width <= 0 || rect.height <= 0) return false;
-			const x = rect.left + rect.width / 2;
-			const y = rect.top + rect.height / 2;
-			if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) return false;
-			let hit = element.ownerDocument.elementFromPoint(x, y);
-			while (hit?.shadowRoot) {
-				const nested = hit.shadowRoot.elementFromPoint(x, y);
-				if (!nested || nested === hit) break;
-				hit = nested;
+			if (rect.width <= 0 || rect.height <= 0) return false;
+			let x = rect.left + rect.width / 2;
+			let y = rect.top + rect.height / 2;
+			let target: Element = element;
+			for (;;) {
+				if (!receivesAt(target, x, y)) return false;
+				const frame = target.ownerDocument.defaultView?.frameElement;
+				if (!frame) return true;
+				const frameElement = frame as FrameElement;
+				frameElement.scrollIntoView({ block: "center", inline: "center" });
+				const frameRect = frameElement.getBoundingClientRect();
+				x += frameRect.left + frameElement.clientLeft;
+				y += frameRect.top + frameElement.clientTop;
+				target = frameElement;
 			}
-			for (let current = hit; current; ) {
-				if (current === element) return true;
-				const pageCurrent = current as Element & { assignedSlot?: Element | null };
-				const root = current.getRootNode() as unknown as { host?: Element };
-				current = pageCurrent.assignedSlot ?? current.parentElement ?? root.host ?? null;
-			}
-			return false;
 		});
 	}
 
@@ -2630,7 +2679,29 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				);
 			});
 		};
-		const contexts = typeof this.#page.frames === "function" ? this.#page.frames() : [this.#page];
+		let contexts: Array<Page | Frame>;
+		if (typeof this.#page.frames !== "function") {
+			contexts = [this.#page];
+		} else {
+			const frames = this.#page.frames();
+			const mainFrame = this.#page.mainFrame();
+			const verifiedFrameElements = new Map<Frame, boolean>([[mainFrame, true]]);
+			await this.#runBeforeDeadline(deadline, () =>
+				Promise.all(
+					frames.map(async frame => {
+						if (frame === mainFrame) return;
+						verifiedFrameElements.set(frame, await frameCanSeeEmbeddingElement(frame));
+					}),
+				),
+			);
+			contexts = frames.filter(frame => {
+				for (let current: Frame | null = frame; current; current = current.parentFrame()) {
+					if (current === mainFrame) return true;
+					if (verifiedFrameElements.get(current) !== true) return false;
+				}
+				return false;
+			});
+		}
 		const collectionPromise = Promise.all(contexts.map(context => context.evaluateHandle(collect)));
 		const collections = await this.#runBeforeDeadline(
 			deadline,

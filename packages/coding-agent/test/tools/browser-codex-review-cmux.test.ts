@@ -1030,18 +1030,20 @@ describe("cmux Codex browser review regressions", () => {
 			getElementById: () => null,
 			querySelectorAll: () => [],
 		};
+		const buttonAttributes = new Map<string, string>();
 		const button = {
-			_ariaRef: { ref: "e9" },
 			children: [],
-			getAttribute: () => null,
+			getAttribute: (name: string) => buttonAttributes.get(name) ?? null,
 			getBoundingClientRect: () => ({ x: 10, y: 20, width: 80, height: 30 }),
 			getRootNode: () => frameDocument,
-			hasAttribute: () => false,
+			hasAttribute: (name: string) => buttonAttributes.has(name),
 			innerText: "Frame Action",
 			isContentEditable: false,
 			outerHTML: "<button>Frame Action</button>",
 			ownerDocument: frameDocument,
 			parentElement: null,
+			removeAttribute: (name: string) => buttonAttributes.delete(name),
+			setAttribute: (name: string, value: string) => buttonAttributes.set(name, value),
 			tabIndex: 0,
 			tagName: "BUTTON",
 			textContent: "Frame Action",
@@ -1058,35 +1060,51 @@ describe("cmux Codex browser review regressions", () => {
 			getElementById: () => null,
 			querySelectorAll: (selector: string) => (selector === "*" ? [frame] : []),
 		};
+		const frameAttributes = new Map<string, string>();
 		frame = {
 			clientLeft: 2,
 			clientTop: 3,
 			contentDocument: frameDocument,
-			getAttribute: () => null,
+			getAttribute: (name: string) => frameAttributes.get(name) ?? null,
 			getBoundingClientRect: () => ({ x: 100, y: 50, width: 200, height: 100 }),
 			getRootNode: () => document,
-			hasAttribute: () => false,
+			hasAttribute: (name: string) => frameAttributes.has(name),
 			ownerDocument: document,
 			parentElement: null,
 			querySelectorAll: () => [],
+			removeAttribute: (name: string) => frameAttributes.delete(name),
+			setAttribute: (name: string, value: string) => frameAttributes.set(name, value),
 			tagName: "IFRAME",
 		};
 		Reflect.set(frameView, "frameElement", frame);
-		let clickedRef = "";
+		const evaluate = (source: string, args: unknown[]) =>
+			runPageEvaluator(source, args, { document, window: topView });
+		const nativeCalls: string[] = [];
+		let selectedFrame = false;
 		const current = await selectedTab(
 			facadeFor({
 				async ariaSnapshot() {
-					return '- button "Frame Action" [ref=e9] [box=112,73,80,30]';
+					return "";
 				},
-				async codexEvaluate(source: string, args: unknown[]) {
-					return runPageEvaluator(source, args, { document, window: topView });
+				codexEvaluate: evaluate,
+				codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+				async codexRequest(method: string, params: Readonly<Record<string, unknown>>) {
+					expect(method).toBe("browser.frame.select");
+					expect(params.selector).toMatch(/^\[data-omp-codex-action-token=/);
+					nativeCalls.push(`${method}:${String(params.selector)}`);
+					selectedFrame = true;
+					return {};
 				},
-				async codexEvaluateCleanup() {
-					return true;
+				async codexCleanupRequest(method: string) {
+					expect(method).toBe("browser.frame.main");
+					nativeCalls.push(`${method}:main`);
+					selectedFrame = false;
+					return {};
 				},
-				async ref(id: string) {
-					clickedRef = id;
-					return { click: async () => undefined };
+				async click(selector: string) {
+					expect(selectedFrame).toBe(true);
+					expect(selector).toMatch(/^\[data-omp-codex-action-token=/);
+					nativeCalls.push(`click:${selector}`);
 				},
 			}),
 		);
@@ -1101,10 +1119,143 @@ describe("cmux Codex browser review regressions", () => {
 		expect(localPoints).toEqual([[18, 27]]);
 		const snapshot = await current.dom_cua.get_visible_dom();
 		expect(snapshot.nodes).toEqual([
-			expect.objectContaining({ node_id: "e9", text: "Frame Action", x: 112, y: 73, width: 80, height: 30 }),
+			expect.objectContaining({ node_id: "e1", text: "Frame Action", x: 112, y: 73, width: 80, height: 30 }),
 		]);
-		await current.dom_cua.click({ node_id: "e9" });
-		expect(clickedRef).toBe("e9");
+		await current.dom_cua.click({ node_id: "e1" });
+		expect(nativeCalls).toHaveLength(3);
+		expect(nativeCalls[0]).toStartWith("browser.frame.select:");
+		expect(nativeCalls[1]).toStartWith("click:");
+		expect(nativeCalls[2]).toBe("browser.frame.main:main");
+		expect(buttonAttributes.has("data-omp-codex-action-token")).toBe(false);
+		expect(frameAttributes.has("data-omp-codex-action-token")).toBe(false);
+	});
+
+	it("dispatches bare action-token selectors through the trusted CmuxTab click RPC", async () => {
+		const selector = '[data-omp-codex-action-token="native-click"]';
+		const calls: RpcCall[] = [];
+		const client = {
+			async request(
+				method: string,
+				params: Record<string, unknown>,
+				options: { timeoutMs?: number } = {},
+			): Promise<Record<string, unknown>> {
+				calls.push({ method, params, timeoutMs: options.timeoutMs });
+				if (method === "browser.click") return {};
+				throw new Error(`Unexpected cmux RPC: ${method}`);
+			},
+		};
+		const tab = new CmuxTab({ client: client as never, surfaceId: "surface-contract" });
+
+		await tab.click(selector, 250);
+
+		expect(calls.map(call => call.method)).toEqual(["browser.click"]);
+		expect(calls[0]?.params).toEqual({ surface_id: "surface-contract", selector });
+	});
+
+	it("rejects framed shadow DOM-CUA targets instead of falling back to synthetic clicks", async () => {
+		const computedStyle = () => ({ display: "block", visibility: "visible" });
+		const topView: Record<string, unknown> = { getComputedStyle: computedStyle, frameElement: null };
+		const frameView: Record<string, unknown> = { getComputedStyle: computedStyle };
+		const buttonAttributes = new Map<string, string>();
+		const frameAttributes = new Map<string, string>();
+		let frame: Record<string, unknown>;
+		let host: Record<string, unknown>;
+		let button: Record<string, unknown>;
+		const shadowRoot: Record<string, unknown> = {
+			querySelectorAll: (selector: string) => (selector === "*" ? [button] : []),
+		};
+		const frameDocument: Record<string, unknown> = {
+			defaultView: frameView,
+			getElementById: () => null,
+			querySelectorAll: (selector: string) => (selector === "*" ? [host] : []),
+		};
+		button = {
+			children: [],
+			getAttribute: (name: string) => buttonAttributes.get(name) ?? null,
+			getBoundingClientRect: () => ({ x: 10, y: 20, width: 80, height: 30 }),
+			getRootNode: () => shadowRoot,
+			hasAttribute: (name: string) => buttonAttributes.has(name),
+			innerText: "Framed shadow action",
+			isConnected: true,
+			isContentEditable: false,
+			ownerDocument: frameDocument,
+			parentElement: null,
+			removeAttribute: (name: string) => buttonAttributes.delete(name),
+			setAttribute: (name: string, value: string) => buttonAttributes.set(name, value),
+			tabIndex: 0,
+			tagName: "BUTTON",
+			textContent: "Framed shadow action",
+		};
+		host = {
+			children: [],
+			getAttribute: () => null,
+			getBoundingClientRect: () => ({ x: 0, y: 0, width: 100, height: 50 }),
+			getRootNode: () => frameDocument,
+			hasAttribute: () => false,
+			ownerDocument: frameDocument,
+			parentElement: null,
+			shadowRoot,
+			tabIndex: -1,
+			tagName: "DIV",
+		};
+		Reflect.set(shadowRoot, "host", host);
+		const document: Record<string, unknown> = {
+			defaultView: topView,
+			getElementById: () => null,
+			querySelectorAll: (selector: string) => (selector === "*" ? [frame] : []),
+		};
+		frame = {
+			clientLeft: 0,
+			clientTop: 0,
+			contentDocument: frameDocument,
+			getAttribute: (name: string) => frameAttributes.get(name) ?? null,
+			getBoundingClientRect: () => ({ x: 100, y: 50, width: 200, height: 100 }),
+			getRootNode: () => document,
+			hasAttribute: (name: string) => frameAttributes.has(name),
+			isConnected: true,
+			ownerDocument: document,
+			parentElement: null,
+			removeAttribute: (name: string) => frameAttributes.delete(name),
+			setAttribute: (name: string, value: string) => frameAttributes.set(name, value),
+			tagName: "IFRAME",
+		};
+		Reflect.set(frameView, "frameElement", frame);
+		const fallbackSelectors: string[] = [];
+		const evaluate = (source: string, args: unknown[]) =>
+			runPageEvaluator(source, args, { document, window: topView });
+		const { adapter, browser } = adapterAndFacadeFor({
+			async ariaSnapshot() {
+				return "";
+			},
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async codexRequest() {
+				return {};
+			},
+			async codexCleanupRequest() {
+				return {};
+			},
+			async click(selector: string) {
+				fallbackSelectors.push(selector);
+			},
+		});
+
+		try {
+			const current = await selectedTab(browser);
+			const snapshot = await current.dom_cua.get_visible_dom();
+			const target = snapshot.nodes.find(node => node.text === "Framed shadow action");
+			if (!target) throw new Error("Expected framed shadow DOM-CUA target");
+
+			expect(await caughtError(() => current.dom_cua.click({ node_id: target.node_id }))).toEqual({
+				name: "BrowserCapabilityError",
+				message: "Browser capability is unavailable: dom_cua framed shadow action",
+			});
+			expect(fallbackSelectors).toEqual([]);
+			expect(buttonAttributes.has("data-omp-codex-action-token")).toBe(false);
+			expect(frameAttributes.has("data-omp-codex-action-token")).toBe(false);
+		} finally {
+			await adapter.dispose();
+		}
 	});
 
 	it("awaits asynchronous cmux media publication without calling renameSync", async () => {
@@ -1202,6 +1353,7 @@ describe("cmux Codex browser review regressions", () => {
 								height: 32,
 							},
 						],
+						pageNodeIds: [],
 					};
 				},
 			}),

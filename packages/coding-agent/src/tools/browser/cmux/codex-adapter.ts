@@ -563,9 +563,23 @@ const VISIBLE_DOM_SOURCE = `() => {
 	};
 	const nodes = [];
 	const refs = Object.create(null);
-	for (const element of allElements(document)) {
-		const node_id = element._ariaRef?.ref;
-		if (typeof node_id !== "string" || !/^e\\d+$/.test(node_id) || !interactable(element) || accessibilityHidden(element)) continue;
+	const pageNodeIds = [];
+	const elements = allElements(document);
+	let nextRef = elements.reduce((maximum, element) => {
+		const match = /^e(\\d+)$/.exec(String(element._ariaRef?.ref || ""));
+		return match ? Math.max(maximum, Number(match[1])) : maximum;
+	}, 0);
+	const syntheticRefs = [];
+	for (const element of elements) {
+		if (!interactable(element) || accessibilityHidden(element)) continue;
+		let pageOnly = element.ownerDocument !== document;
+		let node_id = element._ariaRef?.ref;
+		if (typeof node_id !== "string" || !/^e\\d+$/.test(node_id)) {
+			node_id = "e" + ++nextRef;
+			element._ariaRef = { ref: node_id };
+			syntheticRefs.push([element, node_id]);
+			pageOnly = true;
+		}
 		const role = implicitRole(element);
 		const rect = topPageRect(element);
 		const style = viewOf(element).getComputedStyle?.(element);
@@ -581,9 +595,50 @@ const VISIBLE_DOM_SOURCE = `() => {
 			width: rect.width,
 			height: rect.height,
 		});
+		if (pageOnly) pageNodeIds.push(node_id);
 	}
+	globalThis.__ompCodexDomSyntheticRefs = syntheticRefs;
 	globalThis.__ompCodexDomRefs = refs;
-	return { nodes };
+	return { nodes, pageNodeIds };
+}`;
+
+const PREPARE_DOM_REF_NATIVE_ACTION_SOURCE = `(nodeId, token, label) => {
+	if (!/^[A-Za-z0-9-]+$/.test(token)) throw new Error("Invalid native action token");
+	const target = globalThis.__ompCodexDomRefs?.[nodeId];
+	if (!target || target.isConnected === false) throw new Error(label + " node is stale; call get_visible_dom() again");
+	const frames = [];
+	let ownerDocument = target.ownerDocument;
+	while (ownerDocument && ownerDocument !== document) {
+		const frame = ownerDocument.defaultView?.frameElement;
+		if (!frame || frame.isConnected === false) throw new Error(label + " node is stale; call get_visible_dom() again");
+		frames.unshift(frame);
+		ownerDocument = frame.ownerDocument;
+	}
+	if (target.getRootNode?.()?.host) return { unsupported: "${CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION}" };
+	for (const frame of frames) {
+		if (frame.getRootNode?.()?.host) return { unsupported: "${CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION}" };
+	}
+	const frameSelectors = frames.map((frame, index) => {
+		const frameToken = token + "-frame-" + index;
+		frame.setAttribute("data-omp-codex-action-token", frameToken);
+		return '[data-omp-codex-action-token="' + frameToken + '"]';
+	});
+	target.setAttribute("data-omp-codex-action-token", token);
+	return { selector: '[data-omp-codex-action-token="' + token + '"]', frameSelectors };
+}`;
+
+const DOM_REF_OPERATION_SOURCE = `(nodeId, operation, payload) => {
+	const target = globalThis.__ompCodexDomRefs?.[nodeId];
+	if (!target || target.isConnected === false) throw new Error(operation + " node is stale; call get_visible_dom() again");
+	if (operation === "dom_cua.scroll") {
+		if (typeof target.scrollBy !== "function") throw new Error("DOM CUA node does not support scrolling");
+		target.scrollBy(Number(payload.x), Number(payload.y));
+		return true;
+	}
+	if (operation === "dom_cua.downloadMedia") {
+		return String(target.currentSrc || target.src || target.getAttribute?.("href") || "");
+	}
+	throw new Error("Unsupported DOM CUA ref operation: " + operation);
 }`;
 
 const PREPARE_ACTIVE_NATIVE_TYPE_SOURCE = `(token, label) => {
@@ -723,6 +778,11 @@ const CLEANUP_PAGE_OBSERVERS_SOURCE = `(tokenNamespace) => {
 	}
 	const writes = globalThis.__ompCodexClipboardWrites;
 	if (writes) for (const token of Object.keys(writes)) if (token.startsWith(tokenNamespace)) delete writes[token];
+	const syntheticRefs = globalThis.__ompCodexDomSyntheticRefs;
+	if (syntheticRefs) for (const [element, ref] of syntheticRefs) {
+		if (element?._ariaRef?.ref === ref) delete element._ariaRef;
+	}
+	delete globalThis.__ompCodexDomSyntheticRefs;
 	delete globalThis.__ompCodexMediaTransfers;
 	delete globalThis.__ompCodexDomRefs;
 	delete globalThis.__ompCodexBrowserState;
@@ -732,7 +792,15 @@ const CLEANUP_PAGE_OBSERVERS_SOURCE = `(tokenNamespace) => {
 	delete globalThis.__ompCodexAriaState;
 	return true;
 }`;
-const CLEAR_DOM_REFS_SOURCE = `() => { delete globalThis.__ompCodexDomRefs; return true; }`;
+const CLEAR_DOM_REFS_SOURCE = `() => {
+	const syntheticRefs = globalThis.__ompCodexDomSyntheticRefs;
+	if (syntheticRefs) for (const [element, ref] of syntheticRefs) {
+		if (element?._ariaRef?.ref === ref) delete element._ariaRef;
+	}
+	delete globalThis.__ompCodexDomSyntheticRefs;
+	delete globalThis.__ompCodexDomRefs;
+	return true;
+}`;
 
 const READ_FILE_EVENT_AFTER_SOURCE = `(baseline) => {
 	const event = globalThis.__ompCodexBrowserState?.fileEvents.find(event => event.sequence > baseline);
@@ -1002,6 +1070,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	#runState: "new" | "active" | "ended" = "new";
 	#fileChooserReadiness: Promise<number> | undefined;
 	readonly #fileChooserFrames = new Map<string, string[]>();
+	readonly #pageDomRefIds = new Set<string>();
 
 	constructor(tab: CmuxTab, state?: CmuxCodexBrowserSessionState) {
 		this.#tab = tab;
@@ -1030,6 +1099,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		for (const waiter of this.#navigationWaiters.values()) waiter.cancel();
 		this.#navigationWaiters.clear();
 		this.#fileChooserFrames.clear();
+		this.#pageDomRefIds.clear();
 		await this.#cleanupPageState();
 	}
 
@@ -1326,32 +1396,76 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				const operationDeadline = Date.now() + selectorTimeoutArg(args);
 				const readiness = this.#fileChooserReadiness;
 				if (readiness) await readiness;
-				const handle = await this.#tab.ref(String(args.nodeId), remainingMs(operationDeadline, operation));
-				if (operation === "dom_cua.click") await handle.click(remainingMs(operationDeadline, operation));
-				else await handle.dblclick(remainingMs(operationDeadline, operation));
-				return undefined as T;
+				const nodeId = String(args.nodeId);
+				if (!this.#pageDomRefIds.has(nodeId)) {
+					const handle = await this.#tab.ref(nodeId, remainingMs(operationDeadline, operation));
+					if (operation === "dom_cua.click") await handle.click(remainingMs(operationDeadline, operation));
+					else await handle.dblclick(remainingMs(operationDeadline, operation));
+					return undefined as T;
+				}
+				const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
+				try {
+					const prepared = await this.#tab.codexEvaluate<unknown>(
+						PREPARE_DOM_REF_NATIVE_ACTION_SOURCE,
+						[nodeId, token, operation],
+						remainingMs(operationDeadline, operation),
+					);
+					if (
+						isRecord(prepared) &&
+						prepared.unsupported === CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION
+					) {
+						throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION);
+					}
+					if (
+						!isRecord(prepared) ||
+						typeof prepared.selector !== "string" ||
+						!Array.isArray(prepared.frameSelectors)
+					) {
+						throw new ToolError(`${operation} returned an invalid native target`);
+					}
+					const selector = prepared.selector;
+					const frameSelectors = prepared.frameSelectors.filter(
+						(value): value is string => typeof value === "string",
+					);
+					await this.#withNativeFrameSelectors(frameSelectors, operationDeadline, operation, async () => {
+						if (operation === "dom_cua.click")
+							await this.#tab.click(selector, remainingMs(operationDeadline, operation));
+						else await this.#tab.dblclick(selector, remainingMs(operationDeadline, operation));
+					});
+					return undefined as T;
+				} finally {
+					await this.#tab
+						.codexEvaluateCleanup<boolean>(DISPOSE_NATIVE_ACTION_TOKEN_SOURCE, [token], SELECTOR_TIMEOUT_MS)
+						.catch(() => undefined);
+				}
 			}
 			case "dom_cua.scroll": {
 				const operationDeadline = Date.now() + selectorTimeoutArg(args);
 				if (args.nodeId !== undefined) {
-					const handle = await this.#tab.ref(
-						String(args.nodeId),
-						remainingMs(operationDeadline, "dom_cua.scroll"),
-					);
-					await handle.evaluateWithTimeout(
-						(element, x, y) => {
-							if (
-								!element ||
-								typeof element !== "object" ||
-								!("scrollBy" in element) ||
-								typeof element.scrollBy !== "function"
-							)
-								throw new Error("DOM CUA node does not support scrolling");
-							element.scrollBy(x, y);
-						},
-						[numberArg(args, "x"), numberArg(args, "y")],
-						remainingMs(operationDeadline, "dom_cua.scroll"),
-					);
+					const nodeId = String(args.nodeId);
+					if (this.#pageDomRefIds.has(nodeId)) {
+						await this.#tab.codexEvaluate<boolean>(
+							DOM_REF_OPERATION_SOURCE,
+							[nodeId, "dom_cua.scroll", { x: numberArg(args, "x"), y: numberArg(args, "y") }],
+							remainingMs(operationDeadline, "dom_cua.scroll"),
+						);
+					} else {
+						const handle = await this.#tab.ref(nodeId, remainingMs(operationDeadline, "dom_cua.scroll"));
+						await handle.evaluateWithTimeout(
+							(element, x, y) => {
+								if (
+									!element ||
+									typeof element !== "object" ||
+									!("scrollBy" in element) ||
+									typeof element.scrollBy !== "function"
+								)
+									throw new Error("DOM CUA node does not support scrolling");
+								element.scrollBy(x, y);
+							},
+							[numberArg(args, "x"), numberArg(args, "y")],
+							remainingMs(operationDeadline, "dom_cua.scroll"),
+						);
+					}
 				} else {
 					await this.#tab.scroll(
 						numberArg(args, "x"),
@@ -1659,10 +1773,17 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			[],
 			remainingMs(deadline, "dom_cua.get_visible_dom"),
 		);
-		if (!isRecord(value) || !Array.isArray(value.nodes)) {
+		if (
+			!isRecord(value) ||
+			!Array.isArray(value.nodes) ||
+			!Array.isArray(value.pageNodeIds) ||
+			value.pageNodeIds.some(nodeId => typeof nodeId !== "string")
+		) {
 			throw new ToolError("cmux visible DOM returned an invalid result");
 		}
-		return value as unknown as CodexVisibleDom;
+		this.#pageDomRefIds.clear();
+		for (const nodeId of value.pageNodeIds as string[]) this.#pageDomRefIds.add(nodeId);
+		return { nodes: value.nodes } as unknown as CodexVisibleDom;
 	}
 
 	async #historyNavigation(delta: number, timeoutMs: number): Promise<void> {
@@ -2096,26 +2217,36 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	async #domDownload(args: Readonly<Record<string, unknown>>): Promise<void> {
 		const deadline = Date.now() + selectorTimeoutArg(args);
-		const handle = await this.#tab.ref(String(args.nodeId), remainingMs(deadline, "dom_cua.downloadMedia"));
-		const url = await handle.evaluateWithTimeout(
-			(element: unknown) => {
-				if (!element || typeof element !== "object") return "";
-				const media = element as {
-					currentSrc?: unknown;
-					src?: unknown;
-					getAttribute?: (name: string) => string | null;
-				};
-				const source =
-					typeof media.currentSrc === "string" && media.currentSrc.length > 0
-						? media.currentSrc
-						: typeof media.src === "string" && media.src.length > 0
-							? media.src
-							: media.getAttribute?.("href");
-				return source ?? "";
-			},
-			[],
-			remainingMs(deadline, "dom_cua.downloadMedia"),
-		);
+		const nodeId = String(args.nodeId);
+		let url: string;
+		if (this.#pageDomRefIds.has(nodeId)) {
+			url = await this.#tab.codexEvaluate<string>(
+				DOM_REF_OPERATION_SOURCE,
+				[nodeId, "dom_cua.downloadMedia", {}],
+				remainingMs(deadline, "dom_cua.downloadMedia"),
+			);
+		} else {
+			const handle = await this.#tab.ref(nodeId, remainingMs(deadline, "dom_cua.downloadMedia"));
+			url = await handle.evaluateWithTimeout(
+				(element: unknown) => {
+					if (!element || typeof element !== "object") return "";
+					const media = element as {
+						currentSrc?: unknown;
+						src?: unknown;
+						getAttribute?: (name: string) => string | null;
+					};
+					const source =
+						typeof media.currentSrc === "string" && media.currentSrc.length > 0
+							? media.currentSrc
+							: typeof media.src === "string" && media.src.length > 0
+								? media.src
+								: media.getAttribute?.("href");
+					return source ?? "";
+				},
+				[],
+				remainingMs(deadline, "dom_cua.downloadMedia"),
+			);
+		}
 		await this.#saveMedia(url, deadline, "dom_cua.downloadMedia");
 	}
 

@@ -1286,6 +1286,92 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("scrolls an offscreen same-origin iframe into view before activating its DOM-CUA target", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 const initial=await page.evaluate(()=>{
+				   const frame=document.querySelector("#only-frame"); const frameTop=innerHeight+600;
+				   document.body.style.minHeight=(frameTop+200)+"px";
+				   Object.assign(frame.style,{position:"absolute",left:"300px",top:frameTop+"px",width:"180px",height:"100px",border:"0"});
+				   const button=frame.contentDocument.querySelector("#frame-button");
+				   Object.assign(button.style,{position:"absolute",left:"10px",top:"15px",width:"80px",height:"30px"});
+				   globalThis.__offscreenFrameClicks=0; button.addEventListener("click",()=>globalThis.__offscreenFrameClicks++);
+				   scrollTo(0,0); const rect=frame.getBoundingClientRect();
+				   return {frameTop:rect.top,viewportHeight:innerHeight};
+				 });
+				 const snapshot=await t.dom_cua.get_visible_dom();
+				 const target=snapshot.nodes.find(item=>item.text==="Frame target");
+				 let clickError="";
+				 if (!target) clickError="target was not published";
+				 else try { await t.dom_cua.click({node_id:target.node_id,timeoutMs:250}); } catch(error) { clickError=String(error); }
+				 const after=await page.evaluate(()=>{ const frame=document.querySelector("#only-frame"); const rect=frame.getBoundingClientRect(); return {clicks:globalThis.__offscreenFrameClicks,scrollY,frameTop:rect.top,viewportHeight:innerHeight}; });
+				 return {nodeFound:Boolean(target),clickError,clicks:after.clicks,wasBelowViewport:initial.frameTop>=initial.viewportHeight,parentScrolled:after.scrollY>0,frameInViewport:after.frameTop>=0&&after.frameTop<after.viewportHeight};`,
+				10,
+			);
+			expect(result).toEqual({
+				nodeFound: true,
+				clickError: "",
+				clicks: 1,
+				wasBelowViewport: true,
+				parentScrolled: true,
+				frameInViewport: true,
+			});
+		});
+	}, 20_000);
+
+	it("does not publish cross-origin frame contents as DOM-CUA nodes", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 const parentCanRead=await page.evaluate(async()=>{
+				   const frame=document.createElement("iframe"); frame.id="cross-origin-frame"; frame.setAttribute("sandbox","");
+				   Object.assign(frame.style,{position:"fixed",left:"520px",top:"320px",width:"180px",height:"100px",border:"0"});
+				   frame.srcdoc='<button id="cross-origin-target" aria-label="Cross-origin frame target">Hidden child</button>';
+				   const {promise,resolve}=Promise.withResolvers(); frame.addEventListener("load",resolve,{once:true}); document.body.append(frame); await promise;
+				   return frame.contentDocument!==null;
+				 });
+				 const snapshot=await t.dom_cua.get_visible_dom();
+				 return {parentCanRead,published:snapshot.nodes.some(item=>item.text==="Cross-origin frame target")};`,
+				10,
+			);
+			expect(result).toEqual({ parentCanRead: false, published: false });
+		});
+	}, 20_000);
+
+	it("rejects iframe DOM-CUA clicks when the parent frame is covered", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 const node=await page.evaluate(()=>{
+				   const frame=document.querySelector("#only-frame");
+				   Object.assign(frame.style,{position:"fixed",left:"300px",top:"200px",width:"180px",height:"100px"});
+				   const button=frame.contentDocument.querySelector("#frame-button");
+				   Object.assign(button.style,{position:"fixed",left:"10px",top:"15px",width:"80px",height:"30px"});
+				   globalThis.__coveredFrameClicks=0; button.addEventListener("click",()=>globalThis.__coveredFrameClicks++);
+				   return true;
+				 });
+				 const snapshot=await t.dom_cua.get_visible_dom();
+				 const target=snapshot.nodes.find(item=>item.text==="Frame target");
+				 await page.evaluate(()=>{
+				   const overlay=document.createElement("div");
+				   Object.assign(overlay.style,{position:"fixed",left:"300px",top:"200px",width:"180px",height:"100px",zIndex:"10"});
+				   document.body.append(overlay);
+				 });
+				 let error=""; try { await t.dom_cua.click({node_id:target.node_id,timeoutMs:80}); } catch(cause) { error=String(cause); }
+				 return {node,error,clicks:await page.evaluate(()=>globalThis.__coveredFrameClicks)};`,
+				10,
+			);
+			expect(result).toEqual({ node: true, error: expect.stringContaining("timed out"), clicks: 0 });
+		});
+	}, 20_000);
+
 	it("treats disabled shadow hosts as disabling nested controls and click actionability", async () => {
 		await withPuppeteerTool(async (tool, name) => {
 			const result = await runBrowserCode(
@@ -1542,7 +1628,12 @@ describe("Puppeteer final parity blockers", () => {
 				 return await t.playwright.elementInfo({x:560,y:150});`,
 			);
 			expect(result).toEqual([
-				expect.objectContaining({ tagName: "button", role: "button", ariaName: "Framed action" }),
+				expect.objectContaining({
+					tagName: "button",
+					role: "button",
+					ariaName: "Framed action",
+					boundingBox: { x: 550, y: 140, width: 40, height: 20 },
+				}),
 			]);
 		});
 	}, 20_000);
