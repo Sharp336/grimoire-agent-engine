@@ -192,6 +192,9 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		const state = globalThis.__ompCodexBrowserState;
 		if (!state || state.active !== true) throw new Error("Browser file chooser observer is unavailable");
 		state.nativeActivationTarget = element;
+		state.nativeActivationFrameSelectors = Array.isArray(payload.frameSelectors)
+			? payload.frameSelectors.filter(selector => typeof selector === "string")
+			: [];
 		return true;
 	}
 	if (command === "getAttribute") return element.getAttribute(payload.name);
@@ -333,7 +336,10 @@ const DISPOSE_NATIVE_ACTION_TOKEN_SOURCE = `(token) => {
 
 const DISARM_NATIVE_FILE_ACTIVATION_SOURCE = `() => {
 	const state = globalThis.__ompCodexBrowserState;
-	if (state) state.nativeActivationTarget = null;
+	if (state) {
+		state.nativeActivationTarget = null;
+		state.nativeActivationFrameSelectors = null;
+	}
 	return true;
 }`;
 
@@ -580,7 +586,9 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 			fileEventSequence: 0,
 			fileEvents: [],
 			clickListener: null,
+			observedDocuments: [],
 			nativeActivationTarget: null,
+			nativeActivationFrameSelectors: null,
 			trustedActivation: false,
 			active: true,
 		};
@@ -591,26 +599,45 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 					state.trustedActivation = false;
 				});
 			}
-			const target = event.target instanceof Element ? event.target : null;
+			const target = event.target && typeof event.target.closest === "function" ? event.target : null;
 			const composedTarget = typeof event.composedPath === "function"
-				? event.composedPath().find(candidate => candidate instanceof Element && candidate.closest?.('input[type="file"]'))
+				? event.composedPath().find(candidate => candidate && typeof candidate.closest === "function" && candidate.closest('input[type="file"]'))
 				: null;
 			const input = composedTarget?.closest('input[type="file"]') ?? target?.closest('input[type="file"]');
 			if (!input) return;
 			const nativeActivation = state.nativeActivationTarget === input;
-			if (nativeActivation) state.nativeActivationTarget = null;
+			const frameSelectors = nativeActivation && Array.isArray(state.nativeActivationFrameSelectors)
+				? state.nativeActivationFrameSelectors.slice()
+				: [];
+			if (nativeActivation) {
+				state.nativeActivationTarget = null;
+				state.nativeActivationFrameSelectors = null;
+			}
 			const delegatedActivation = !event.isTrusted && state.trustedActivation === true;
 			queueMicrotask(() => {
 				if (state.active !== true || (!event.isTrusted && !nativeActivation && !delegatedActivation) || event.defaultPrevented || input.disabled === true || input.isConnected === false) return;
 				const token = "file-" + state.tokenNamespace + "-" + state.nextToken++;
 				input.setAttribute("data-omp-codex-file-token", token);
-				state.fileEvents.push({ sequence: ++state.fileEventSequence, token, multiple: input.multiple === true });
+				state.fileEvents.push({ sequence: ++state.fileEventSequence, token, multiple: input.multiple === true, frameSelectors });
 				if (state.fileEvents.length > 32) state.fileEvents.splice(0, state.fileEvents.length - 32);
 			});
 		};
-		document.addEventListener("click", state.clickListener, true);
 		globalThis.__ompCodexBrowserState = state;
 	}
+	const state = globalThis.__ompCodexBrowserState;
+	const installDocument = targetDocument => {
+		if (!targetDocument || state.observedDocuments.some(value => value === targetDocument)) return;
+		targetDocument.addEventListener("click", state.clickListener, true);
+		state.observedDocuments.push(targetDocument);
+		const roots = [targetDocument];
+		for (const root of roots) {
+			for (const element of root.querySelectorAll("*")) {
+				if (element.shadowRoot) roots.push(element.shadowRoot);
+				try { if (element.contentDocument) installDocument(element.contentDocument); } catch {}
+			}
+		}
+	};
+	installDocument(document);
 	return globalThis.__ompCodexBrowserState.fileEventSequence;
 }`;
 
@@ -623,14 +650,18 @@ const CLEANUP_PAGE_OBSERVERS_SOURCE = `(tokenNamespace) => {
 	const state = globalThis.__ompCodexBrowserState;
 	if (state?.tokenNamespace !== tokenNamespace) return false;
 	state.active = false;
-	if (state.clickListener) document.removeEventListener("click", state.clickListener, true);
+	if (state.clickListener) {
+		for (const targetDocument of state.observedDocuments || []) {
+			targetDocument.removeEventListener("click", state.clickListener, true);
+		}
+	}
 	const roots = [document];
 	for (const root of roots) {
 		for (const element of root.querySelectorAll("*")) {
 			if (String(element.getAttribute?.("data-omp-codex-file-token") || "").startsWith("file-" + tokenNamespace + "-")) element.removeAttribute("data-omp-codex-file-token");
 			if (String(element.getAttribute?.("data-omp-codex-action-token") || "").startsWith(tokenNamespace)) element.removeAttribute("data-omp-codex-action-token");
 			if (element.shadowRoot) roots.push(element.shadowRoot);
-			if (element.contentDocument) roots.push(element.contentDocument);
+			try { if (element.contentDocument) roots.push(element.contentDocument); } catch {}
 		}
 	}
 	const transfers = globalThis.__ompCodexMediaTransfers;
@@ -654,7 +685,7 @@ const CLEAR_DOM_REFS_SOURCE = `() => { delete globalThis.__ompCodexDomRefs; retu
 
 const READ_FILE_EVENT_AFTER_SOURCE = `(baseline) => {
 	const event = globalThis.__ompCodexBrowserState?.fileEvents.find(event => event.sequence > baseline);
-	return event ? { sequence: event.sequence, token: event.token, multiple: event.multiple } : null;
+	return event ? { sequence: event.sequence, token: event.token, multiple: event.multiple, frameSelectors: event.frameSelectors } : null;
 }`;
 
 const DISPOSE_FILE_TOKEN_SOURCE = `(token) => {
@@ -663,6 +694,7 @@ const DISPOSE_FILE_TOKEN_SOURCE = `(token) => {
 		for (const element of root.querySelectorAll("*")) {
 			if (element.getAttribute?.("data-omp-codex-file-token") === token) element.removeAttribute("data-omp-codex-file-token");
 			if (element.shadowRoot) roots.push(element.shadowRoot);
+			try { if (element.contentDocument) roots.push(element.contentDocument); } catch {}
 		}
 	}
 	const state = globalThis.__ompCodexBrowserState;
@@ -806,6 +838,7 @@ interface FileEvent {
 	sequence: number;
 	token: string;
 	multiple: boolean;
+	frameSelectors: string[];
 }
 
 interface PageMediaTransferResult {
@@ -938,6 +971,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	readonly #tokenNamespace = crypto.randomUUID();
 	#runState: "new" | "active" | "ended" = "new";
 	#fileChooserReadiness: Promise<number> | undefined;
+	readonly #fileChooserFrames = new Map<string, string[]>();
 
 	constructor(tab: CmuxTab, state?: CmuxCodexBrowserSessionState) {
 		this.#tab = tab;
@@ -965,6 +999,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		this.#runState = "ended";
 		for (const waiter of this.#navigationWaiters.values()) waiter.cancel();
 		this.#navigationWaiters.clear();
+		this.#fileChooserFrames.clear();
 		await this.#cleanupPageState();
 	}
 
@@ -1720,7 +1755,10 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				[baseline],
 				remainingMs(deadline, "playwright.waitForEvent"),
 			);
-			if (result) return { token: result.token, multiple: result.multiple };
+			if (result) {
+				this.#fileChooserFrames.set(result.token, result.frameSelectors);
+				return { token: result.token, multiple: result.multiple };
+			}
 			await this.#tab.codexWait(Math.min(50, remainingMs(deadline, "playwright.waitForEvent")));
 		}
 	}
@@ -1733,13 +1771,17 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #setFiles(args: Readonly<Record<string, unknown>>): Promise<void> {
 		const deadline = Date.now() + selectorTimeoutArg(args);
 		const token = stringArg(args, "token");
+		const frameSelectors = this.#fileChooserFrames.get(token) ?? [];
 		try {
-			await this.#tab.codexUploadFile(
-				`pierce/input[data-omp-codex-file-token="${token}"]`,
-				stringArrayArg(args, "files"),
-				remainingMs(deadline, "playwright.fileChooser.setFiles"),
-			);
+			await this.#withNativeFrameSelectors(frameSelectors, deadline, "playwright.fileChooser.setFiles", async () => {
+				await this.#tab.codexUploadFile(
+					`pierce/input[data-omp-codex-file-token="${token}"]`,
+					stringArrayArg(args, "files"),
+					remainingMs(deadline, "playwright.fileChooser.setFiles"),
+				);
+			});
 		} finally {
+			this.#fileChooserFrames.delete(token);
 			await this.#tab
 				.codexEvaluateCleanup<boolean>(DISPOSE_FILE_TOKEN_SOURCE, [token], SELECTOR_TIMEOUT_MS)
 				.catch(() => undefined);
@@ -1811,7 +1853,15 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		operation: string,
 		action: () => Promise<TResult>,
 	): Promise<TResult> {
-		const frameSelectors = this.#frameSelectors(descriptor);
+		return await this.#withNativeFrameSelectors(this.#frameSelectors(descriptor), deadline, operation, action);
+	}
+
+	async #withNativeFrameSelectors<TResult>(
+		frameSelectors: readonly string[],
+		deadline: number,
+		operation: string,
+		action: () => Promise<TResult>,
+	): Promise<TResult> {
 		if (frameSelectors.length === 0) return await action();
 		if (frameSelectors.length > 1) {
 			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.FRAME_LOCATOR_NESTED_NATIVE_ACTION);
@@ -1902,7 +1952,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 				fileActivationArmed = await this.#locator<boolean>(
 					descriptor,
 					"armNativeFileActivation",
-					{},
+					{ frameSelectors: this.#frameSelectors(descriptor) },
 					remainingMs(deadline, operation),
 				);
 				await this.#withNativeFrameContext(descriptor, deadline, operation, async () => {

@@ -242,7 +242,7 @@ function labelProbe() {
 	return { document, view };
 }
 
-function observerProbe(multiple = false, inShadowRoot = false) {
+function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) {
 	type ClickEvent = {
 		target: ElementProbe;
 		defaultPrevented: boolean;
@@ -252,6 +252,8 @@ function observerProbe(multiple = false, inShadowRoot = false) {
 	};
 	let clickListener: ((event: ClickEvent) => void) | undefined;
 	let clickCapture = false;
+	let frameClickListener: ((event: ClickEvent) => void) | undefined;
+	let frameClickCapture = false;
 	class ElementProbe {
 		readonly attributes = new Map<string, string>();
 		readonly kind: "file" | "anchor";
@@ -298,6 +300,30 @@ function observerProbe(multiple = false, inShadowRoot = false) {
 		};
 	}
 	const elements = [file, anchor];
+	const frameDocument = {
+		addEventListener(type: string, listener: (event: ClickEvent) => void, capture = false) {
+			if (type === "click") {
+				frameClickListener = listener;
+				frameClickCapture = capture;
+			}
+		},
+		removeEventListener(type: string, listener: (event: ClickEvent) => void, capture = false) {
+			if (type === "click" && frameClickListener === listener && frameClickCapture === capture)
+				frameClickListener = undefined;
+		},
+		querySelectorAll(selector: string) {
+			if (selector === "*" || selector === "#upload") return [file];
+			return selector.includes("data-omp-codex-file-token") && file.getAttribute("data-omp-codex-file-token")
+				? [file]
+				: [];
+		},
+	};
+	const frame = {
+		tagName: "IFRAME",
+		contentDocument: frameDocument,
+		querySelectorAll: () => [],
+		getAttribute: () => null,
+	};
 	const document = {
 		addEventListener(type: string, listener: (event: ClickEvent) => void, capture = false) {
 			if (type === "click") {
@@ -309,6 +335,10 @@ function observerProbe(multiple = false, inShadowRoot = false) {
 			if (type === "click" && clickListener === listener && clickCapture === capture) clickListener = undefined;
 		},
 		querySelectorAll(selector: string) {
+			if (inFrame) {
+				if (selector === "*" || selector === "#frame") return [frame];
+				return [];
+			}
 			if (selector === "*") return inShadowRoot ? [anchor] : elements;
 			if (selector === "#upload") return inShadowRoot ? [] : [file];
 			const visibleElements = inShadowRoot ? [anchor] : elements;
@@ -338,9 +368,11 @@ function observerProbe(multiple = false, inShadowRoot = false) {
 				this.defaultPrevented = true;
 			},
 		};
-		if (!stopped || clickCapture) clickListener?.(event);
+		if (!stopped || (inFrame && target === file ? frameClickCapture : clickCapture)) {
+			(inFrame && target === file ? frameClickListener : clickListener)?.(event);
+		}
 	};
-	return { document, ElementProbe, file, anchor, fire };
+	return { document, frameDocument, frame, ElementProbe, file, anchor, fire };
 }
 
 type ObserverAdapterProbe = {
@@ -1685,6 +1717,75 @@ describe("cmux Codex browser review regressions", () => {
 			expect(nativeClicks).toBe(1);
 			expect(chooser.isMultiple()).toBe(true);
 			expect(commands).not.toContain("recordFileActivation");
+		} finally {
+			await adapter.dispose();
+		}
+	});
+	it("captures and populates a file chooser inside the selected same-origin frame", async () => {
+		const probe = observerProbe(true, false, true);
+		const frameCalls: string[] = [];
+		let selectedFrame = false;
+		let uploads = 0;
+		const clickOccurred = Promise.withResolvers<void>();
+		const evaluate = (source: string, args: unknown[]) => {
+			if (args[1] === "status") return { attached: true, visible: true, enabled: true };
+			return runPageEvaluator(source, args, {
+				document: probe.document,
+				window: {},
+				Element: probe.ElementProbe,
+			});
+		};
+		const { adapter, browser } = adapterAndFacadeFor({
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async codexRequest(method: string, params: Readonly<Record<string, unknown>>) {
+				frameCalls.push(`${method}:${String(params.selector ?? "")}`);
+				selectedFrame = true;
+				return {};
+			},
+			async codexCleanupRequest(method: string) {
+				frameCalls.push(`${method}:main`);
+				selectedFrame = false;
+				return {};
+			},
+			async click() {
+				expect(selectedFrame).toBe(true);
+				probe.fire(probe.file, false, false, false);
+				clickOccurred.resolve();
+			},
+			async codexUploadFile(selector: string) {
+				expect(selectedFrame).toBe(true);
+				expect(selector).toMatch(/^pierce\/input\[data-omp-codex-file-token=/);
+				uploads++;
+			},
+			async codexWait() {
+				await clickOccurred.promise;
+			},
+		});
+
+		try {
+			const current = await selectedTab(browser);
+			const frame = current.playwright.frameLocator("#frame");
+			const chooserPromise = current.playwright.waitForEvent("filechooser", { timeoutMs: 250 });
+			await Promise.resolve();
+			const pageState = (globalThis as unknown as { __ompCodexBrowserState?: { observedDocuments?: unknown[] } })
+				.__ompCodexBrowserState;
+			expect(pageState?.observedDocuments).toHaveLength(2);
+			await frame.locator("#upload").click();
+			await Promise.resolve();
+			expect(probe.file.getAttribute("data-omp-codex-file-token")).toMatch(/^file-/);
+			const chooser = await chooserPromise;
+			if (!("setFiles" in chooser)) throw new Error("Expected file chooser event");
+			await chooser.setFiles(["fixture.txt"], { timeoutMs: 250 });
+
+			expect(uploads).toBe(1);
+			expect(probe.file.getAttribute("data-omp-codex-file-token")).toBeNull();
+			expect(frameCalls).toEqual([
+				"browser.frame.select:#frame",
+				"browser.frame.main:main",
+				"browser.frame.select:#frame",
+				"browser.frame.main:main",
+			]);
 		} finally {
 			await adapter.dispose();
 		}
