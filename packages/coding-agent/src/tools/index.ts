@@ -18,6 +18,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
+import type { MissionRuntimeContract, MissionState } from "../missions/types";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -57,6 +58,7 @@ import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
+import { MissionTool } from "./mission-tool";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
@@ -304,6 +306,10 @@ export interface ToolSession {
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
+	/** Mission runtime for the active owned top-level agent session. */
+	getMissionRuntime?: () => MissionRuntimeContract | undefined;
+	/** Authoritative mission snapshot without going through the runtime. */
+	getMissionState?: () => MissionState | null;
 	/** Live one-shot wake controller for the active top-level agent session. */
 	getSessionSchedule?: () => SessionScheduleController | undefined;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
@@ -428,6 +434,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	yield: s => new YieldTool(s),
 	goal: s => new GoalTool(s),
+	mission: s => ((s.taskDepth ?? 0) === 0 ? new MissionTool(s) : null),
 };
 
 export type ToolName = BuiltinToolName;
@@ -446,8 +453,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			: undefined;
 	const goalEnabled = session.settings.get("goal.enabled");
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
+	const missionActive =
+		!restrictToolNames && (session.taskDepth ?? 0) === 0 && session.getMissionRuntime?.() !== undefined;
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
 		requestedTools.push("goal");
+	}
+	if (missionActive && requestedTools && !requestedTools.includes("mission")) {
+		requestedTools.push("mission");
 	}
 	const backends = resolveEvalBackends(session);
 	const allowPython = backends.python;
@@ -559,6 +571,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const isToolAllowed = (name: string) => {
+		if (name === "mission") return missionActive;
 		if (name === "goal") return goalEnabled && goalModeActive;
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "bash") return session.settings.get("bash.enabled");
@@ -615,6 +628,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 						.map(([name, factory]) => [name, factory] as const),
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
+					...(missionActive ? ([["mission", HIDDEN_TOOLS.mission]] as const) : []),
 				];
 
 	const activeToolNames = new Set(baseEntries.map(([name]) => name));

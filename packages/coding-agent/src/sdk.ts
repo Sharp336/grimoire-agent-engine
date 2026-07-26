@@ -1676,6 +1676,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
+			getMissionRuntime: () => (session?.missionRuntime?.hasActiveMission() ? session.missionRuntime : undefined),
+			getMissionState: () => session?.missionRuntime?.snapshot() ?? null,
 			getSessionSchedule: () => (isTopLevelSession() ? session?.getSessionSchedule() : undefined),
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
 			getTurnBudget: () => sessionManager.getTurnBudget(),
@@ -2541,6 +2543,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				builtInRegistryToolNames.add(goalTool.name);
 			}
 		}
+		if (!restrictToolNames && !toolRegistry.has("mission") && (toolSession.taskDepth ?? 0) === 0) {
+			const missionTool = await logger.time("createTools:mission:session", HIDDEN_TOOLS.mission, toolSession);
+			if (missionTool) {
+				toolRegistry.set(missionTool.name, wrapToolWithMetaNotice(missionTool));
+				builtInRegistryToolNames.add(missionTool.name);
+			}
+		}
 		for (const tool of wrappedExtensionTools) {
 			toolRegistry.set(tool.name, tool);
 			builtInRegistryToolNames.delete(tool.name);
@@ -2763,7 +2772,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const defaultInactiveToolNames = new Set(
 			registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
 		);
-		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
+		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal" && name !== "mission");
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;

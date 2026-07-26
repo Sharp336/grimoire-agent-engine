@@ -313,6 +313,34 @@ describe("createTools", () => {
 		expect(tools.map(tool => tool.name)).toEqual(["read", "write"]);
 	});
 
+	it("exposes mission only for an active top-level owner", async () => {
+		const active = await createTools(
+			createTestSession({
+				settings: createSettingsWithOverrides({ "tools.xdev": false }),
+				taskDepth: 0,
+				getMissionRuntime: () => ({}) as never,
+			}),
+		);
+		expect(active.map(tool => tool.name)).toContain("mission");
+
+		const inactive = await createTools(
+			createTestSession({ settings: createSettingsWithOverrides({ "tools.xdev": false }) }),
+		);
+		expect(inactive.map(tool => tool.name)).not.toContain("mission");
+
+		const child = await createTools(
+			createTestSession({
+				settings: createSettingsWithOverrides({ "tools.xdev": false }),
+				taskDepth: 1,
+				getMissionRuntime: () => ({}) as never,
+			}),
+		);
+		expect(child.map(tool => tool.name)).not.toContain("mission");
+		const hidden = await HIDDEN_TOOLS.mission(createTestSession());
+		expect(hidden?.name).toBe("mission");
+		expect(await HIDDEN_TOOLS.mission(createTestSession({ taskDepth: 1 }))).toBeNull();
+	});
+
 	it("records active tools on the original session object", async () => {
 		const session = createTestSession();
 
@@ -323,6 +351,6 @@ describe("createTools", () => {
 	});
 
 	it("HIDDEN_TOOLS contains yield and goal", () => {
-		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "yield"]);
+		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "mission", "yield"]);
 	});
 });

@@ -25,6 +25,7 @@ import { grepToolRenderer } from "./grep";
 import { hubToolRenderer } from "./hub";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
+import { missionToolRenderer } from "./mission-tool";
 import { readToolRenderer } from "./read";
 import { resolveRenderer } from "./resolve";
 import { scheduleToolRenderer } from "./schedule";
@@ -119,6 +120,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	todo: todoToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,
+	mission: missionToolRenderer as ToolRenderer,
 	schedule: scheduleToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,
 	vibe_spawn: createVibeToolRenderer("spawn") as ToolRenderer,

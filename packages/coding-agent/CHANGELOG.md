@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added a hidden parent mission tool that exposes plan submission, one-step dispatch, handoff resolution, and validator remediation only while its owner has an active mission.
 - Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 - Mission launch flags now start the persisted runtime, and active missions guard destructive session transitions while preserving owner-scoped child revival.
 
