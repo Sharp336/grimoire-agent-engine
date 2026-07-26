@@ -270,6 +270,12 @@ export async function resolveEffectiveSubagentPolicy(
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
+	if (request.workspace?.binding === "fixed" && !request.missionOwner) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Fixed-workspace subagents require mission ownership for safe revival.",
+		);
+	}
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
@@ -446,12 +452,18 @@ function buildExecutorOptions(
 		settings: session.settings,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
-		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+		...(request.workspace
+			? {}
+			: {
+					contextFiles: session.contextFiles?.filter(
+						file => path.basename(file.path).toLowerCase() !== "agents.md",
+					),
+					workspaceTree: session.workspaceTree,
+					promptTemplates: session.promptTemplates,
+					rules: session.rules,
+				}),
 		skills,
 		autoloadSkills,
-		workspaceTree: session.workspaceTree,
-		promptTemplates: session.promptTemplates,
-		rules: session.rules,
 		preloadedExtensionPaths: policy.planMode ? [] : session.extensionPaths,
 		preloadedCustomToolPaths: policy.planMode ? [] : session.customToolPaths,
 		localProtocolOptions,

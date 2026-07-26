@@ -340,6 +340,48 @@ describe("structured subagent primitive", () => {
 		await fs.rm(mcpDisabledRun.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("requires mission ownership and rediscovers fixed-workspace context", async () => {
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ workspace: { cwd: "/fixed", binding: "fixed" } })),
+		).rejects.toThrow("Fixed-workspace subagents require mission ownership");
+
+		mockDiscovery();
+		const fixedSession = session();
+		Object.assign(fixedSession, {
+			contextFiles: [{ path: "/parent/AGENTS.md", content: "parent" }],
+			workspaceTree: { cwd: "/parent" },
+			promptTemplates: [{ name: "parent" }],
+			rules: [{ content: "parent" }],
+		});
+		let options: executorModule.ExecutorOptions | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			options = executorOptions;
+			return result();
+		});
+
+		const run = await runStructuredSubagent(
+			request({
+				session: fixedSession,
+				workspace: { cwd: "/fixed", binding: "fixed" },
+				missionOwner: {
+					missionId: "mission",
+					ownerSessionId: "owner",
+					role: "implementation",
+					milestoneId: "milestone",
+					featureId: "feature",
+				},
+				retainArtifacts: true,
+			}),
+		);
+
+		expect(options).toMatchObject({ cwd: "/fixed", workspace: { cwd: "/fixed", binding: "fixed" } });
+		expect(options?.contextFiles).toBeUndefined();
+		expect(options?.workspaceTree).toBeUndefined();
+		expect(options?.promptTemplates).toBeUndefined();
+		expect(options?.rules).toBeUndefined();
+		await fs.rm(run.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
 		mockDiscovery();
 		const failingSession = session();

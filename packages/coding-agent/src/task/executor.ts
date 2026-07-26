@@ -7,7 +7,7 @@
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTier, ServiceTierByFamily, ServiceTierFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -139,6 +139,52 @@ export function createDelegatedParentApprovalUIContext(parent: ExtensionUIContex
 		getToolsExpanded: () => parent.getToolsExpanded(),
 		setToolsExpanded: expanded => parent.setToolsExpanded(expanded),
 	};
+}
+
+export function initializeDelegatedParentApprovalRunner(session: AgentSession, delegatedUi: ExtensionUIContext): void {
+	const runner = session.extensionRunner;
+	if (!runner || runner.hasUI()) return;
+	runner.initialize(
+		{
+			sendMessage: (message, options) => {
+				void session.sendCustomMessage(message, options).catch(error => {
+					logger.error("Delegated extension sendMessage failed", { error: String(error) });
+				});
+			},
+			sendUserMessage: (content, options) => {
+				void session.sendUserMessage(content, options).catch(error => {
+					logger.error("Delegated extension sendUserMessage failed", { error: String(error) });
+				});
+			},
+			appendEntry: (customType, data) => session.sessionManager.appendCustomEntry(customType, data),
+			setLabel: (targetId, label) => session.sessionManager.appendLabelChange(targetId, label),
+			getActiveTools: () => session.getEnabledToolNames(),
+			getAllTools: () => session.getAllToolNames(),
+			setActiveTools: toolNames => session.setActiveToolsByName(toolNames),
+			getCommands: () => getSessionSlashCommands(session),
+			setModel: model => runExtensionSetModel(session, model),
+			getThinkingLevel: () => session.thinkingLevel,
+			setThinkingLevel: level => session.setThinkingLevel(level),
+			getServiceTiers: () => session.serviceTierByFamily,
+			setServiceTier: (family, tier) => session.setServiceTierFamily(family, tier),
+			getSessionName: () => session.sessionManager.getSessionName(),
+			setSessionName: async name => {
+				await session.sessionManager.setSessionName(name, "user");
+			},
+		},
+		{
+			getModel: () => session.model,
+			isIdle: () => !session.isStreaming,
+			abort: () => session.abort({ reason: USER_INTERRUPT_LABEL }),
+			hasPendingMessages: () => session.queuedMessageCount > 0,
+			shutdown: () => {},
+			getContextUsage: () => session.getContextUsage(),
+			getSystemPrompt: () => session.systemPrompt,
+			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
+		},
+		undefined,
+		delegatedUi,
+	);
 }
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
@@ -2942,53 +2988,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				if (parentApproval.clientBridge) {
 					childSession.setClientBridge(parentApproval.clientBridge);
 				}
-				// Live/cold revive builds a fresh ExtensionRunner; without initialize the
-				// approval wrapper sees hasUI=false and fails closed even when the parent
-				// UI is available. Bind the delegated UI here (actions are filled by the
-				// initial-run initialize path, or minimal stubs on revive).
-				const runner = childSession.extensionRunner;
-				if (runner && delegatedUi && !runner.hasUI()) {
-					runner.initialize(
-						{
-							sendMessage: () => {},
-							sendUserMessage: () => {},
-							appendEntry: (customType, data) => {
-								childSession.sessionManager.appendCustomEntry(customType, data);
-							},
-							setLabel: (targetId, label) => {
-								childSession.sessionManager.appendLabelChange(targetId, label);
-							},
-							getActiveTools: () => childSession.getEnabledToolNames(),
-							getAllTools: () => childSession.getAllToolNames(),
-							setActiveTools: async toolNames => {
-								await childSession.setActiveToolsByName(toolNames);
-							},
-							getCommands: () => getSessionSlashCommands(childSession),
-							setModel: model => runExtensionSetModel(childSession, model),
-							getThinkingLevel: () => childSession.thinkingLevel,
-							setThinkingLevel: level => childSession.setThinkingLevel(level),
-							getServiceTiers: () => childSession.serviceTierByFamily,
-							setServiceTier: (family: ServiceTierFamily, tier: ServiceTier | undefined) =>
-								childSession.setServiceTierFamily(family, tier),
-							getSessionName: () => childSession.sessionManager.getSessionName(),
-							setSessionName: async name => {
-								await childSession.sessionManager.setSessionName(name, "user");
-							},
-						},
-						{
-							getModel: () => childSession.model,
-							isIdle: () => !childSession.isStreaming,
-							abort: () => childSession.abort({ reason: USER_INTERRUPT_LABEL }),
-							hasPendingMessages: () => childSession.queuedMessageCount > 0,
-							shutdown: () => {},
-							getContextUsage: () => childSession.getContextUsage(),
-							getSystemPrompt: () => childSession.systemPrompt,
-							compact: instructionsOrOptions => runExtensionCompact(childSession, instructionsOrOptions),
-						},
-						undefined,
-						delegatedUi,
-					);
-				}
 			};
 			applyParentApprovalDelegate(session, setToolUIContext);
 			if (sessionFile !== null && worktree === undefined) {
@@ -2997,6 +2996,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// (createAgentSession → agent.replaceMessages). Isolated runs are not
 				// resumable (worktree is merged + cleaned) and never get a reviver.
 				reviveSession = async expectedAgentRef => {
+					if (
+						options.missionOwner &&
+						options.missionOwner.ownerSessionId !== options.localProtocolOptions?.getSessionId?.()
+					) {
+						throw new Error(`Cannot revive mission child ${id}: its owning session has changed.`);
+					}
 					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
 						suppressBreadcrumb: true,
 					});
@@ -3008,6 +3013,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					);
 					installRegistryStatusSync(revived);
 					applyParentApprovalDelegate(revived, setRevivedToolUIContext);
+					if (parentApproval?.uiContext) {
+						initializeDelegatedParentApprovalRunner(
+							revived,
+							createDelegatedParentApprovalUIContext(parentApproval.uiContext),
+						);
+					}
 					return revived;
 				};
 			}

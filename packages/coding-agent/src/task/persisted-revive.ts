@@ -1,5 +1,4 @@
 import * as fs from "node:fs/promises";
-import type { ServiceTier, ServiceTierFamily } from "@oh-my-pi/pi-ai";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -10,7 +9,12 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
-import { createDelegatedParentApprovalUIContext, createMCPProxyTools, createSubagentSettings } from "./executor";
+import {
+	createDelegatedParentApprovalUIContext,
+	createMCPProxyTools,
+	createSubagentSettings,
+	initializeDelegatedParentApprovalRunner,
+} from "./executor";
 
 /**
  * Ambient context the reviver needs at revive time. The top-level session is
@@ -136,7 +140,7 @@ export function createPersistedSubagentReviverFactory(
 				enableLsp: restrictToolNames ? false : ctx.enableLsp,
 				// Fixed mission children run outside the parent checkout — pass the
 				// owner's loaded skills so skill://<name> still resolves.
-				...(isFixedMissionChild ? { skills: [...ctx.session.skills] } : {}),
+				...(isFixedMissionChild ? { skills: [...(ctx.session.skills ?? [])] } : {}),
 				...(restrictToolNames
 					? {
 							enableIrc: false,
@@ -157,49 +161,7 @@ export function createPersistedSubagentReviverFactory(
 				}
 				const bridge = ctx.session.clientBridge;
 				if (bridge) session.setClientBridge(bridge);
-				const runner = session.extensionRunner;
-				if (runner && delegatedUi && !runner.hasUI()) {
-					runner.initialize(
-						{
-							sendMessage: () => {},
-							sendUserMessage: () => {},
-							appendEntry: (customType, data) => {
-								session.sessionManager.appendCustomEntry(customType, data);
-							},
-							setLabel: (targetId, label) => {
-								session.sessionManager.appendLabelChange(targetId, label);
-							},
-							getActiveTools: () => session.getEnabledToolNames(),
-							getAllTools: () => session.getAllToolNames(),
-							setActiveTools: async toolNames => {
-								await session.setActiveToolsByName(toolNames);
-							},
-							getCommands: () => [],
-							setModel: async () => false,
-							getThinkingLevel: () => session.thinkingLevel,
-							setThinkingLevel: level => session.setThinkingLevel(level),
-							getServiceTiers: () => session.serviceTierByFamily,
-							setServiceTier: (family: ServiceTierFamily, tier: ServiceTier | undefined) =>
-								session.setServiceTierFamily(family, tier),
-							getSessionName: () => session.sessionManager.getSessionName(),
-							setSessionName: async name => {
-								await session.sessionManager.setSessionName(name, "user");
-							},
-						},
-						{
-							getModel: () => session.model,
-							isIdle: () => !session.isStreaming,
-							abort: () => session.abort(),
-							hasPendingMessages: () => session.queuedMessageCount > 0,
-							shutdown: () => {},
-							getContextUsage: () => session.getContextUsage(),
-							getSystemPrompt: () => session.systemPrompt,
-							compact: async () => {},
-						},
-						undefined,
-						delegatedUi,
-					);
-				}
+				if (delegatedUi) initializeDelegatedParentApprovalRunner(session, delegatedUi);
 			}
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools

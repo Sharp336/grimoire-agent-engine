@@ -43,7 +43,11 @@ function createRevivedSession(activeToolNames: string[][]): AgentSession {
 	} as unknown as AgentSession;
 }
 
-async function createPersistedSession(cwd: string, restrictToolNames?: boolean): Promise<string> {
+async function createPersistedSession(
+	cwd: string,
+	restrictToolNames?: boolean,
+	missionOwner?: { ownerSessionId: string },
+): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
@@ -52,6 +56,18 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean):
 		task: "persisted task",
 		tools: ["read", "yield"],
 		restrictToolNames,
+		...(missionOwner
+			? {
+					cwdBinding: "fixed" as const,
+					missionOwner: {
+						missionId: "mission",
+						ownerSessionId: missionOwner.ownerSessionId,
+						role: "implementation" as const,
+						milestoneId: "milestone",
+						featureId: "feature",
+					},
+				}
+			: {}),
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -74,8 +90,9 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean):
 	return sessionFile;
 }
 
-function createFactory(cwd: string) {
+function createFactory(cwd: string, sessionId?: string) {
 	const parentSession = {
+		sessionId,
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
@@ -154,5 +171,24 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.enableLsp).toBe(true);
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
+	});
+
+	it("revives a fixed child only for its owner and at its recorded workspace", async () => {
+		const cwd = makeTempDir("@pi-fixed-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, { ownerSessionId: "owner" });
+		const ref = createRef(sessionFile);
+
+		expect(await createFactory(cwd, "other")(ref)).toBeUndefined();
+
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]) } as CreateAgentSessionResult;
+		});
+		const reviver = await createFactory("/parent", "owner")(ref);
+		if (!reviver) throw new Error("Expected fixed workspace reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.cwd).toBe(cwd);
 	});
 });
