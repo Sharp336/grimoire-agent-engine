@@ -169,11 +169,11 @@ describe("browser run cancellation", () => {
 		const adapter: CodexBrowserAdapter = {
 			currentTabId: "1",
 			invoke<T>(_operation: CodexBrowserOperation): Promise<T> {
-				return new Promise<T>((_resolve, reject) => {
-					const rejectOnAbort = () => reject(controller.signal.reason);
-					controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
-					if (controller.signal.aborted) rejectOnAbort();
-				});
+				const deferred = Promise.withResolvers<T>();
+				const rejectOnAbort = () => deferred.reject(controller.signal.reason);
+				controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
+				if (controller.signal.aborted) rejectOnAbort();
+				return deferred.promise;
 			},
 		};
 		const attached = attachCodexBrowserToAgent({}, adapter);
