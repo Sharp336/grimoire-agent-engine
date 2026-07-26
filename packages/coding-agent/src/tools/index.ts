@@ -27,6 +27,7 @@ import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
+import type { SessionScheduleController } from "../session/session-schedule";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
@@ -59,6 +60,7 @@ import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
+import { ScheduleTool } from "./schedule";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, XdevRegistry } from "./xdev";
@@ -217,6 +219,8 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Whether this tool session owns the top-level agent turn loop. */
+	isTopLevelSession?(): boolean;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
@@ -300,6 +304,8 @@ export interface ToolSession {
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
+	/** Live one-shot wake controller for the active top-level agent session. */
+	getSessionSchedule?: () => SessionScheduleController | undefined;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
 	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */
@@ -416,6 +422,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	schedule: ScheduleTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
@@ -540,6 +547,15 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				requestedTools.push("learn");
 			}
 		}
+		// Wakes are delivered into the top-level session's turn loop, so a subagent
+		// session would die before its own schedule ever fired.
+		if (
+			session.settings.get("schedule.enabled") &&
+			session.isTopLevelSession?.() === true &&
+			!requestedTools.includes("schedule")
+		) {
+			requestedTools.push("schedule");
+		}
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const isToolAllowed = (name: string) => {
@@ -571,6 +587,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
 		if (name === "manage_skill") return session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0;
+		if (name === "schedule")
+			return session.settings.get("schedule.enabled") && session.isTopLevelSession?.() === true;
 		if (name === "learn") {
 			return (
 				session.settings.get("autolearn.enabled") &&

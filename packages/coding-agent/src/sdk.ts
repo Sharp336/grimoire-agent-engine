@@ -1606,6 +1606,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
 		const activeToolNames = new Set<string>();
+		const isTopLevelSession = (): boolean => agentKind === "main";
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
 			for (const name of names) {
@@ -1645,6 +1646,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
+			isTopLevelSession,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
@@ -1674,6 +1676,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
+			getSessionSchedule: () => (isTopLevelSession() ? session?.getSessionSchedule() : undefined),
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
 			getTurnBudget: () => sessionManager.getTurnBudget(),
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),

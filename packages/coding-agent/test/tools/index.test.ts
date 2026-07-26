@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BUILTIN_TOOLS, createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -43,6 +43,27 @@ function createActiveGoalState() {
 describe("createTools", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("self-gates the public schedule factory", () => {
+		expect(BUILTIN_TOOLS.schedule(createTestSession())).toBeNull();
+		expect(
+			BUILTIN_TOOLS.schedule(
+				createTestSession({
+					settings: createSettingsWithOverrides({ "schedule.enabled": true }),
+					taskDepth: 1,
+				}),
+			),
+		).toBeNull();
+		expect(
+			BUILTIN_TOOLS.schedule(
+				createTestSession({
+					settings: createSettingsWithOverrides({ "schedule.enabled": true }),
+					taskDepth: 0,
+					isTopLevelSession: () => true,
+				}),
+			),
+		).not.toBeNull();
 	});
 
 	it("creates all builtin tools by default", async () => {

@@ -66,6 +66,7 @@ export interface SessionHandoffHost {
 	buildDisplaySessionContext(): SessionContext;
 	resetAdvisorRuntimes(): void;
 	syncTodoPhasesFromBranch(): void;
+	rearmSessionSchedules(): void;
 }
 
 /** Generates handoff documents and owns the handoff session transition. */
@@ -284,6 +285,7 @@ export class SessionHandoff {
 			// Rebuild agent messages from session
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.rearmSessionSchedules();
 			this.#host.resetAdvisorRuntimes();
 			this.#host.syncTodoPhasesFromBranch();
 			if (this.#host.extensionRunner) {
