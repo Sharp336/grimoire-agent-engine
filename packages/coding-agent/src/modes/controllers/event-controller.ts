@@ -208,6 +208,8 @@ export class EventController {
 				this.ctx.ui.resetDisplay();
 			},
 			goal_updated: async () => {},
+			mission_updated: async () => {},
+			mission_progress: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 

@@ -81,6 +81,7 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
 10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+12. Mission frames (`mission_updated`, `mission_progress`) for persisted state transitions and worker progress
 
 ### Inbound frame categories (stdin)
 
@@ -181,6 +182,21 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 - `{ id?, type: "get_last_assistant_text" }`
 - `{ id?, type: "set_session_name", name: string }`
 - `{ id?, type: "handoff", customInstructions?: string }`
+
+### Mission
+
+- `{ id?, type: "mission_start", goal: string, workerModel?: string | string[], validatorModel?: string | string[] }`
+- `{ id?, type: "get_mission" }`
+- `{ id?, type: "mission_accept" }`
+- `{ id?, type: "mission_pause" }`
+- `{ id?, type: "mission_resume", messageToWorker?: string }`
+- `{ id?, type: "mission_restart", messageToWorker?: string }`
+- `{ id?, type: "mission_cancel" }`
+
+Mutating commands return the persisted mission snapshot and also produce
+`mission_updated` frames. Worker lifecycle changes produce `mission_progress`
+frames. `mission_restart` requires an idle mission and starts a fresh worker when
+the paused state has a runnable child.
 
 ### Messages
 
@@ -639,6 +655,10 @@ Failures are `success: false` with string `error`.
   "error": "Model not found: provider/model"
 }
 ```
+
+Mission command failures may include `code: "MISSION_BUSY"` while work is in
+flight or `code: "INVALID_MISSION_TRANSITION"` when the requested state change is
+not legal. Clients SHOULD branch on `code` and display `error` to the user.
 
 ### Recoverability expectations
 

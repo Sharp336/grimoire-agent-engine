@@ -9,6 +9,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { MissionProgressEvent, MissionState } from "../../missions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -83,6 +84,21 @@ export type RpcCommand =
 	| { id?: string; type: "set_session_name"; name: string }
 	| { id?: string; type: "handoff"; customInstructions?: string }
 
+	// Mission
+	| {
+			id?: string;
+			type: "mission_start";
+			goal: string;
+			workerModel?: string | string[];
+			validatorModel?: string | string[];
+	  }
+	| { id?: string; type: "get_mission" }
+	| { id?: string; type: "mission_accept" }
+	| { id?: string; type: "mission_pause" }
+	| { id?: string; type: "mission_resume"; messageToWorker?: string }
+	| { id?: string; type: "mission_restart"; messageToWorker?: string }
+	| { id?: string; type: "mission_cancel" }
+
 	// Messages
 	| { id?: string; type: "get_messages" }
 	| { id?: string; type: "get_messages_page"; cursor?: string; limit?: number }
@@ -156,6 +172,11 @@ export interface RpcChunkFrame {
 
 export interface RpcHandoffResult {
 	savedPath?: string;
+}
+
+/** Durable snapshot returned by every mission RPC command. */
+export interface RpcMissionResult {
+	mission: MissionState | null;
 }
 
 export type RpcSubagentSubscriptionLevel = "off" | "progress" | "events";
@@ -313,6 +334,15 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
 	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }
 
+	// Mission
+	| { id?: string; type: "response"; command: "mission_start"; success: true; data: RpcMissionResult }
+	| { id?: string; type: "response"; command: "get_mission"; success: true; data: RpcMissionResult }
+	| { id?: string; type: "response"; command: "mission_accept"; success: true; data: RpcMissionResult }
+	| { id?: string; type: "response"; command: "mission_pause"; success: true; data: RpcMissionResult }
+	| { id?: string; type: "response"; command: "mission_resume"; success: true; data: RpcMissionResult }
+	| { id?: string; type: "response"; command: "mission_restart"; success: true; data: RpcMissionResult }
+	| { id?: string; type: "response"; command: "mission_cancel"; success: true; data: RpcMissionResult }
+
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
 	| { id?: string; type: "response"; command: "get_messages_page"; success: true; data: RpcMessagesPage }
@@ -350,6 +380,18 @@ export interface RpcSubagentEventFrame {
 }
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
+
+export interface RpcMissionUpdatedFrame {
+	type: "mission_updated";
+	mission: MissionState;
+}
+
+export interface RpcMissionProgressFrame {
+	type: "mission_progress";
+	event: MissionProgressEvent;
+}
+
+export type RpcMissionFrame = RpcMissionUpdatedFrame | RpcMissionProgressFrame;
 
 export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
 

@@ -25,6 +25,12 @@ import {
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import {
+	INVALID_MISSION_TRANSITION,
+	MISSION_BUSY,
+	type MissionRestartRuntime,
+	restartMission,
+} from "../../missions/runtime";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -51,6 +57,7 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcMissionResult,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
@@ -112,6 +119,48 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
+
+export type RpcMissionCommand = Extract<RpcCommand, { type: `mission_${string}` } | { type: "get_mission" }>;
+export type RpcMissionSession = Pick<AgentSession, "startMission"> & {
+	missionRuntime: MissionRestartRuntime &
+		Pick<AgentSession["missionRuntime"], "accept" | "pause" | "cancel" | "isBusy">;
+};
+
+/** Execute the mission protocol through the session-owned runtime. */
+export async function handleRpcMissionCommand(
+	session: RpcMissionSession,
+	command: RpcMissionCommand,
+): Promise<RpcMissionResult> {
+	const result = (mission: RpcMissionResult["mission"]): RpcMissionResult => ({ mission });
+	switch (command.type) {
+		case "mission_start":
+			return result(
+				await session.startMission(command.goal, {
+					workerModel: command.workerModel,
+					validatorModel: command.validatorModel,
+				}),
+			);
+		case "get_mission":
+			return result(session.missionRuntime.snapshot());
+		case "mission_accept":
+			return result(await session.missionRuntime.accept());
+		case "mission_pause":
+			return result(await session.missionRuntime.pause("user_requested"));
+		case "mission_resume":
+			return result(await session.missionRuntime.resume({ messageToWorker: command.messageToWorker }));
+		case "mission_restart":
+			if (session.missionRuntime.isBusy()) {
+				throw new Error(`${MISSION_BUSY}: cannot restart while mission work is in flight.`);
+			}
+			return result(await restartMission(session.missionRuntime, command.messageToWorker));
+		case "mission_cancel":
+			return result(await session.missionRuntime.cancel());
+	}
+}
+
+function isMissionTransitionBlocked(session: Pick<AgentSession, "missionRuntime">): boolean {
+	return session.missionRuntime.hasActiveMission();
+}
 
 export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
@@ -1049,6 +1098,14 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
+				if (isMissionTransitionBlocked(session)) {
+					return error(
+						id,
+						command.type,
+						"Cannot change sessions while a mission is active; cancel or complete it first.",
+						INVALID_MISSION_TRANSITION,
+					);
+				}
 				const result = await handleRpcSessionChange(session, command, subagentRegistry);
 				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
 				return success(id, result.type, result.data);
@@ -1303,6 +1360,14 @@ export async function runRpcMode(
 			}
 
 			case "handoff": {
+				if (isMissionTransitionBlocked(session)) {
+					return error(
+						id,
+						"handoff",
+						"Cannot hand off while a mission is active; cancel or complete it first.",
+						INVALID_MISSION_TRANSITION,
+					);
+				}
 				// Resetting the agent mid-stream lets the live turn keep emitting into a
 				// session that handoff has already torn down. Refuse while a prompt is in
 				// flight (mirrors the TUI /handoff guard).
@@ -1410,6 +1475,22 @@ export async function runRpcMode(
 					return success(id, "login", { providerId: command.providerId });
 				} catch (err: unknown) {
 					return error(id, "login", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "mission_start":
+			case "get_mission":
+			case "mission_accept":
+			case "mission_pause":
+			case "mission_resume":
+			case "mission_restart":
+			case "mission_cancel": {
+				try {
+					return success(id, command.type, await handleRpcMissionCommand(session, command));
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const code = message.startsWith(MISSION_BUSY) ? MISSION_BUSY : undefined;
+					return error(id, command.type, message, code);
 				}
 			}
 

@@ -31,6 +31,9 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcMissionProgressFrame,
+	RpcMissionResult,
+	RpcMissionUpdatedFrame,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentEventFrame,
@@ -73,6 +76,8 @@ export type RpcSessionEventListener = (event: AgentSessionEvent) => void;
 export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["payload"]) => void;
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
+export type RpcMissionUpdatedListener = (mission: RpcMissionUpdatedFrame["mission"]) => void;
+export type RpcMissionProgressListener = (event: RpcMissionProgressFrame["event"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
@@ -182,6 +187,14 @@ function isRpcSubagentEventFrame(value: unknown): value is RpcSubagentEventFrame
 	return value.type === "subagent_event" && isRecord(value.payload);
 }
 
+function isRpcMissionUpdatedFrame(value: unknown): value is RpcMissionUpdatedFrame {
+	return isRecord(value) && value.type === "mission_updated" && isRecord(value.mission);
+}
+
+function isRpcMissionProgressFrame(value: unknown): value is RpcMissionProgressFrame {
+	return isRecord(value) && value.type === "mission_progress" && isRecord(value.event);
+}
+
 function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
@@ -249,6 +262,8 @@ export class RpcClient {
 	#subagentLifecycleListeners = new Set<RpcSubagentLifecycleListener>();
 	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
+	#missionUpdatedListeners = new Set<RpcMissionUpdatedListener>();
+	#missionProgressListeners = new Set<RpcMissionProgressListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
@@ -520,6 +535,18 @@ export class RpcClient {
 		return () => this.#subagentEventListeners.delete(listener);
 	}
 
+	/** Subscribe to durable mission-state updates emitted by the RPC server. */
+	onMissionUpdated(listener: RpcMissionUpdatedListener): () => void {
+		this.#missionUpdatedListeners.add(listener);
+		return () => this.#missionUpdatedListeners.delete(listener);
+	}
+
+	/** Subscribe to mission progress emitted by the RPC server. */
+	onMissionProgress(listener: RpcMissionProgressListener): () => void {
+		this.#missionProgressListeners.add(listener);
+		return () => this.#missionProgressListeners.delete(listener);
+	}
+
 	/**
 	 * Subscribe to slash-command availability updates emitted by the RPC server.
 	 */
@@ -785,6 +812,40 @@ export class RpcClient {
 		return this.#getData(response);
 	}
 
+	/** Start a mission and return its persisted planning snapshot. */
+	async startMission(
+		goal: string,
+		options?: { workerModel?: string | string[]; validatorModel?: string | string[] },
+	): Promise<RpcMissionResult> {
+		const response = await this.#send({ type: "mission_start", goal, ...options }, 300_000);
+		return this.#getData(response);
+	}
+
+	/** Return the current mission snapshot, including while mission work is active. */
+	async getMission(): Promise<RpcMissionResult> {
+		return this.#getData(await this.#send({ type: "get_mission" }));
+	}
+
+	async acceptMission(): Promise<RpcMissionResult> {
+		return this.#getData(await this.#send({ type: "mission_accept" }, 300_000));
+	}
+
+	async pauseMission(): Promise<RpcMissionResult> {
+		return this.#getData(await this.#send({ type: "mission_pause" }));
+	}
+
+	async resumeMission(messageToWorker?: string): Promise<RpcMissionResult> {
+		return this.#getData(await this.#send({ type: "mission_resume", messageToWorker }, 300_000));
+	}
+
+	async restartMission(messageToWorker?: string): Promise<RpcMissionResult> {
+		return this.#getData(await this.#send({ type: "mission_restart", messageToWorker }, 300_000));
+	}
+
+	async cancelMission(): Promise<RpcMissionResult> {
+		return this.#getData(await this.#send({ type: "mission_cancel" }, 300_000));
+	}
+
 	/**
 	 * Get messages available for branching.
 	 */
@@ -1044,6 +1105,16 @@ export class RpcClient {
 			for (const listener of this.#subagentEventListeners) {
 				listener(data.payload);
 			}
+			return;
+		}
+
+		if (isRpcMissionUpdatedFrame(data)) {
+			for (const listener of this.#missionUpdatedListeners) listener(data.mission);
+			return;
+		}
+
+		if (isRpcMissionProgressFrame(data)) {
+			for (const listener of this.#missionProgressListeners) listener(data.event);
 			return;
 		}
 

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added typed RPC mission controls for starting, inspecting, accepting, pausing, resuming, restarting, and cancelling missions; the protocol emits durable mission updates and exposes progress frames to clients. Active missions now refuse destructive session changes through RPC.
 - Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 - Mission launch flags now start the persisted runtime, and active missions guard destructive session transitions while preserving owner-scoped child revival.
 
