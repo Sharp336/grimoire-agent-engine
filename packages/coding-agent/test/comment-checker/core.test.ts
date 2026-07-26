@@ -560,7 +560,7 @@ describe("createCommentCheckerToolResultHandler UI status update and warning cle
 		expect(setStatusCalls.length).toBe(1);
 		expect(setStatusCalls[0]).toEqual({
 			key: "omp-comment-checker",
-			text: "⚠ comment-checker: 1 warning(s) in src/foo.ts",
+			text: "⚠ comment-checker: 1 warning(s) in /root/src/foo.ts",
 		});
 
 		const cleanHandler = createCommentCheckerToolResultHandler({
@@ -574,7 +574,78 @@ describe("createCommentCheckerToolResultHandler UI status update and warning cle
 		});
 
 		await cleanHandler(event, mockCtx);
-		expect(clearedFiles).toEqual([["src/foo.ts"], ["src/foo.ts"]]);
+		expect(clearedFiles).toEqual([["/root/src/foo.ts"], ["/root/src/foo.ts"]]);
+	});
+
+	it("normalizes relative and absolute file paths so edit rechecks clear warnings recorded from write", async () => {
+		let recordedWarning: { filePath: string; message: string; sourceToolName: string } | undefined;
+		let clearedFiles: string[] = [];
+
+		const mockSessionManager = {
+			getSessionId: () => "sess-1",
+			getHeader: () => null,
+		} as unknown as ReadonlySessionManager;
+
+		const mockUI = {
+			setStatus: () => {},
+			setWidget: () => {},
+		} as unknown as ExtensionUIContext;
+
+		const mockCtx: ExtensionContext = {
+			sessionManager: mockSessionManager,
+			cwd: "/workspace",
+			ui: mockUI,
+		} as unknown as ExtensionContext;
+
+		const writeHandler = createCommentCheckerToolResultHandler({
+			run: async () => ({
+				status: "warning",
+				message: "Avoid vague comments",
+			}),
+			onWarning: warning => {
+				recordedWarning = warning;
+			},
+			onClearWarnings: cleanFiles => {
+				clearedFiles = cleanFiles;
+			},
+		});
+
+		const writeEvent: ToolResultEvent = {
+			type: "tool_result",
+			toolCallId: "call_1",
+			toolName: "write",
+			input: { filePath: "src/foo.ts", content: "// TODO fix" },
+			content: [{ type: "text", text: "wrote src/foo.ts" }],
+			isError: false,
+			details: undefined,
+		};
+
+		await writeHandler(writeEvent, mockCtx);
+		expect(recordedWarning?.filePath).toBe("/workspace/src/foo.ts");
+		expect(clearedFiles).toEqual(["/workspace/src/foo.ts"]);
+
+		const editHandler = createCommentCheckerToolResultHandler({
+			run: async () => ({
+				status: "pass",
+				message: "",
+			}),
+			onClearWarnings: cleanFiles => {
+				clearedFiles = cleanFiles;
+			},
+		});
+
+		const editEvent: ToolResultEvent = {
+			type: "tool_result",
+			toolCallId: "call_2",
+			toolName: "edit",
+			input: { path: "/workspace/src/foo.ts", old_string: "// TODO fix", new_string: "const x = 1;" },
+			content: [{ type: "text", text: "edited" }],
+			isError: false,
+			details: { path: "/workspace/src/foo.ts" },
+		};
+
+		await editHandler(editEvent, mockCtx);
+		expect(clearedFiles).toEqual(["/workspace/src/foo.ts"]);
 	});
 });
 

@@ -88,7 +88,7 @@ export function resolveCommentCheckerBinary(): string | undefined {
 	if (fromPackageApi) return fromPackageApi;
 	const fromPackage = resolvePackageBinary(binaryName);
 	if (fromPackage) return fromPackage;
-	return $which(binaryName) ?? undefined;
+	return $which("comment-checker") ?? undefined;
 }
 
 function resolvePackageApiBinary(): string | undefined {
