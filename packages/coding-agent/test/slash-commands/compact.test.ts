@@ -69,7 +69,7 @@ describe("/compact dispatch (ACP)", () => {
 	it("advertises the mode subcommands and input hint to ACP clients", () => {
 		const advertised = ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "compact");
 		expect(advertised).toBeDefined();
-		expect(advertised?.input?.hint).toBe("[soft|remote|snapcompact] [focus]");
+		expect(advertised?.input?.hint).toBe("[managed|soft|remote|snapcompact] [focus]");
 	});
 });
 

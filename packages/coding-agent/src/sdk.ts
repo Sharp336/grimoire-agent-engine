@@ -59,6 +59,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
+import { ContextManagerController, type ContextManagerMode, NativeContextAgentRunner } from "./context-manager";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
@@ -109,6 +110,7 @@ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } fr
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import { computeNonMessageTokens } from "./modes/utils/context-usage";
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
@@ -507,6 +509,10 @@ export interface CreateAgentSessionOptions {
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
+	/** Managed-context lifecycle mode. Defaults to primary for top-level sessions and child for subagents. */
+	contextManagerMode?: ContextManagerMode;
+	/** SDK/test-only ContextStore path override; never loaded from project settings. */
+	contextStorePath?: string | ":memory:";
 
 	/** Override local:// protocol options for subagent local:// sharing. Default: uses the session's own artifacts dir and session ID. */
 	localProtocolOptions?: LocalProtocolOptions;
@@ -1551,6 +1557,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	let agent: Agent;
 	let session!: AgentSession;
+	let contextManager: ContextManagerController | undefined;
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
@@ -1595,6 +1602,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
 
 	try {
+		const contextManagerMode = options.contextManagerMode ?? (agentKind === "sub" ? "child" : "primary");
+		contextManager = await ContextManagerController.create({
+			mode: contextManagerMode,
+			settings,
+			sessionManager,
+			storePath: options.contextStorePath,
+		});
 		const getActiveModelString = (): string | undefined => {
 			const activeModel = agent?.state.model;
 			if (activeModel) return formatModelString(activeModel);
@@ -1656,6 +1670,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			getContextManager: () => contextManager,
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
@@ -2880,10 +2895,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return obfuscateMessages(obfuscator, converted);
 		};
 
-		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
+		const sessionTransformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
 			return wrapSteeringForModel(withContext);
 		};
+		const activeContextManager = contextManager?.active ? contextManager : undefined;
+		const transformContext = activeContextManager
+			? async (messages: AgentMessage[], signal?: AbortSignal) => {
+					const canonicalMessages = await activeContextManager.prepareCanonicalMessages(messages, signal);
+					const transformedMessages = await sessionTransformContext(canonicalMessages, signal);
+					return activeContextManager.transformContext(
+						transformedMessages,
+						signal,
+						agent?.state.model ?? model,
+						hasSession ? computeNonMessageTokens(session) : 0,
+					);
+				}
+			: sessionTransformContext;
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames, then
 		// clamp images to the active provider budget before the request is sent.
@@ -3101,6 +3129,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,
+			contextManager,
 			autoApprove: options.autoApprove,
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
@@ -3138,7 +3167,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					? () => createVibeTools(toolSession)
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
-			transformContext,
+			transformContext: sessionTransformContext,
 			transformProviderContext,
 			onPayload,
 			onResponse,
@@ -3179,6 +3208,28 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		if (contextManager?.active) {
+			contextManager.setNoticeSink((level, message) => session.emitNotice(level, message, "context-manager"));
+			contextManager.setAgentRunner(
+				new NativeContextAgentRunner({
+					settings,
+					modelRegistry,
+					streamFn: settingsAwareStreamFn,
+					parentSessionId: () => session.sessionId,
+					activeModel: () => session.model,
+					activeThinkingLevel: () => session.configuredThinkingLevel(),
+					telemetry: options.telemetry,
+					cwd: () => session.sessionManager.getCwd(),
+					resolveTools: names =>
+						names
+							.map(name => session.getToolByName(name))
+							.filter((tool): tool is AgentTool => tool !== undefined),
+					saveDebugArtifact: async (role, content) => {
+						await sessionManager.saveArtifact(content, `context-agent-${role}`);
+					},
+				}),
+			);
+		}
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
 			build: buildMcpNotificationBatchMessage,
 		});
@@ -3393,15 +3444,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (!restrictToolNames) {
-			if (settings.get("autolearn.enabled") && taskDepth === 0) {
+			const autoLearnEnabled = settings.get("autolearn.enabled") && taskDepth === 0;
+			const managedMemoryEnabled = contextManager?.active === true && settings.get("memory.backend") === "mnemopi";
+			if (autoLearnEnabled || managedMemoryEnabled) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
+			} else {
+				void logger.time("startMemoryStartupTask", startMemoryBackend);
+			}
+			if (autoLearnEnabled) {
 				new AutoLearnController({
 					session,
 					settings,
 					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
 				});
-			} else {
-				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}
 		}
 
@@ -3471,6 +3526,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				await session.dispose();
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
+				await contextManager?.dispose();
 				if (hasRegistered) unregisterUnlessParked();
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {

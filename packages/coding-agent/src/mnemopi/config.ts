@@ -101,6 +101,33 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	};
 }
 
+/**
+ * Rebind project-local Mnemopi storage to the managed-context canonical
+ * project identity. Legacy cwd-derived banks remain recall-visible so existing
+ * memories migrate naturally, while all new writes converge on one bank across
+ * clones and worktrees.
+ */
+export function bindMnemopiConfigToProject(
+	config: MnemopiBackendConfig,
+	canonicalProjectId: string,
+): MnemopiBackendConfig {
+	if (config.scoping === "global") return config;
+	const identity = sanitizeBankName(canonicalProjectId) ?? Bun.hash(canonicalProjectId).toString(36);
+	const base = sanitizeBankName(config.baseBank);
+	const projectBank = limitBankName(base ? `${base}-${identity}` : identity);
+	const legacyRecallBanks = config.recallBanks ?? [config.bank];
+	const recallBanks =
+		config.scoping === "per-project-tagged"
+			? [...new Set([projectBank, config.globalBank ?? config.baseBank ?? "default", ...legacyRecallBanks])]
+			: [...new Set([projectBank, ...legacyRecallBanks])];
+	return {
+		...config,
+		bank: projectBank,
+		retainBank: projectBank,
+		recallBanks,
+	};
+}
+
 const DEFAULT_SHARED_BANK = "default";
 
 // Cap legacy-bank scanning at session start so a pathological banks/

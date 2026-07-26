@@ -6,6 +6,7 @@ import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
+import type { SessionContextManager } from "../context-manager";
 import { EditTool } from "../edit";
 import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
@@ -42,6 +43,7 @@ import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ComputerTool } from "./computer";
+import { CtxExpandTool, CtxMemoryTool, CtxNoteTool, CtxReduceTool, CtxSearchTool } from "./context-manager";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -78,6 +80,7 @@ export * from "./browser";
 export * from "./checkpoint";
 export * from "./computer";
 export * from "./computer/supervisor";
+export * from "./context-manager";
 export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
@@ -235,6 +238,8 @@ export interface ToolSession {
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
+	/** Get the session-scoped managed context controller exposed to context tools. */
+	getContextManager?: () => SessionContextManager | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
@@ -408,6 +413,11 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
+	ctx_reduce: CtxReduceTool.createIf,
+	ctx_expand: CtxExpandTool.createIf,
+	ctx_search: CtxSearchTool.createIf,
+	ctx_memory: CtxMemoryTool.createIf,
+	ctx_note: CtxNoteTool.createIf,
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
 	memory_edit: MemoryEditTool.createIf,

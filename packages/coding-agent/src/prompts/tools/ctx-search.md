@@ -1,0 +1,3 @@
+Search managed context across session facts, history compartments, notes, Git commits, and Mnemopi memory.
+
+Use `sources` to restrict the search and `limit` to bound results. Hits include stable source IDs, canonical IDs when available, relevance scores, snippets, and tag ranges. Unavailable sources are reported explicitly. Use returned IDs with the corresponding read or memory operation rather than guessing IDs.

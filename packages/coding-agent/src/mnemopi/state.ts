@@ -84,16 +84,22 @@ interface AgentSessionWithMnemopiState extends AgentSession {
 	[kMnemopiSessionState]?: MnemopiSessionState;
 }
 
-interface MnemopiScopedMemory {
-	bank: string;
-	memory: Mnemopi;
+export interface MnemopiScopedMemory {
+	readonly bank: string;
+	readonly memory: Mnemopi;
 }
 
 interface MnemopiScopedResources {
-	retain: MnemopiScopedMemory;
-	recall: readonly MnemopiScopedMemory[];
-	owned: readonly Mnemopi[];
-	global?: MnemopiScopedMemory;
+	readonly retain: MnemopiScopedMemory;
+	readonly recall: readonly MnemopiScopedMemory[];
+	readonly owned: readonly Mnemopi[];
+	readonly open: (bank: string) => MnemopiScopedMemory;
+	readonly global?: MnemopiScopedMemory;
+}
+
+export interface MnemopiContextMemoryTargets {
+	readonly project: MnemopiScopedMemory;
+	readonly user: MnemopiScopedMemory;
 }
 
 type MnemopiRememberInput = Parameters<Mnemopi["remember"]>[0];
@@ -275,6 +281,14 @@ export class MnemopiSessionState {
 
 	getScopedRetainTarget(): MnemopiScopedMemory {
 		return this.scoped.retain;
+	}
+
+	getContextMemoryTargets(): MnemopiContextMemoryTargets {
+		const userBank = this.config.globalBank ?? this.config.baseBank ?? this.config.bank;
+		return {
+			project: this.scoped.retain,
+			user: this.scoped.open(userBank),
+		};
 	}
 
 	/**
@@ -704,11 +718,13 @@ function createScopedResources(config: MnemopiBackendConfig): MnemopiScopedResou
 	});
 	const banks = resolveScopedBanks(config);
 	const memories = new Map<string, MnemopiScopedMemory>();
+	const owned: Mnemopi[] = [];
 	const open = (bank: string): MnemopiScopedMemory => {
 		const existing = memories.get(bank);
 		if (existing) return existing;
 		const scoped = { bank, memory: createMemory(config, bank) };
 		memories.set(bank, scoped);
+		owned.push(scoped.memory);
 		return scoped;
 	};
 	const retain = open(banks.retainBank);
@@ -718,7 +734,8 @@ function createScopedResources(config: MnemopiBackendConfig): MnemopiScopedResou
 		retain,
 		recall,
 		global,
-		owned: [...memories.values()].map(entry => entry.memory),
+		open,
+		owned,
 	};
 }
 

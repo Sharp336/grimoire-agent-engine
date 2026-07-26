@@ -320,6 +320,9 @@ modelRoles:
   vision: gemini/gemini-3-pro-preview
   plan: anthropic/claude-opus-4-5
   advisor: anthropic/claude-sonnet-4-5:medium
+  historian: openai/gpt-5-mini
+  dreamer: anthropic/claude-sonnet-4-5:medium
+  sidekick: openai/gpt-5-mini
 
 cycleOrder:
   - smol
@@ -336,7 +339,7 @@ enabledModels:
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `modelRoles` | record | `{}` | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`. The `tiny` role overrides the online model for lightweight background tasks (titles, memory, auto-thinking, unexpected-stop), else `@smol`. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`; configure the advisor with `modelRoles.advisor`. |
+| `modelRoles` | record | `{}` | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`, `historian`, `dreamer`, `sidekick`. `tiny`, `historian`, and `sidekick` use the fast `smol` priority chain when unset; `advisor` and `dreamer` use the strong `slow` chain. Managed-context hidden-agent roles are global/CLI-only. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`. |
 | `modelTags` | record | `{}` | Custom role/tag metadata; can introduce additional roles. |
 | `modelProviderOrder` | array | `[]` | Preferred provider order when a model id is ambiguous. |
 | `cycleOrder` | array | `["smol","default","slow"]` | Roles cycled by the model switcher. |
@@ -582,22 +585,37 @@ contextPromotion:
 
 compaction:
   enabled: true
-  strategy: snapcompact     # context-full, handoff, shake, snapcompact, off
+  strategy: managed         # managed, context-full, handoff, shake, snapcompact, off
+  managedFallback: context-full
   midTurnEnabled: true      # check thresholds between tool-loop provider requests
-  thresholdPercent: -1       # -1 = default reserve-based behavior
-  thresholdTokens: -1        # fixed token limit when > 0
+  thresholdPercent: -1      # -1 = default reserve-based behavior
+  thresholdTokens: -1       # fixed token limit when > 0
   remoteEnabled: true
 
+contextManager:
+  enabled: true
+  historian:
+    enabled: true
+    tools: []
+  autoSearch:
+    enabled: true
+  gitCommitIndexing:
+    enabled: false
+  sidekick:
+    enabled: false
+  dreamer:
+    enabled: true
+
 memory:
-  backend: off               # off, local, hindsight, mnemopi
-```
+  backend: off              # off, local, hindsight, mnemopi
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `contextPromotion.enabled` | boolean | `false` | Promote to the active model's explicit `contextPromotionTarget` on context overflow. |
 | `compaction.enabled` | boolean | `true` | Automatic conversation compaction. |
 | `compaction.midTurnEnabled` | boolean | `true` | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request. |
-| `compaction.strategy` | enum | `snapcompact` | `context-full`, `handoff`, `shake`, `snapcompact`, `off`. |
+| `compaction.strategy` | enum | `managed` | `managed`, `context-full`, `handoff`, `shake`, `snapcompact`, `off`. |
+| `compaction.managedFallback` | enum | `context-full` | Legacy strategy used if managed context is unavailable or cannot recover enough headroom: `context-full`, `handoff`, `shake`, or `snapcompact`. |
 | `compaction.thresholdPercent` | number | `-1` | Percent-of-context trigger; `-1` = reserve-based default. |
 | `compaction.thresholdTokens` | number | `-1` | Fixed token trigger when `> 0`. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for the next turn. |
@@ -605,11 +623,40 @@ memory:
 | `compaction.remoteEnabled` | boolean | `true` | Allow remote compaction service. |
 | `compaction.autoContinue` | boolean | `true` | Continue automatically after compaction. |
 | `memory.backend` | enum | `off` | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys. |
+| `contextManager.enabled` | boolean | `true` | Enable branch-aware stable tags, protocol-safe reduction, tiered history, retrieval, and maintenance. |
+| `contextManager.language` | string | unset | Preferred natural-language output for historian, dreamer, and sidekick agents. |
+| `contextManager.cacheTtl` | record | `{ default: "5m" }` | Provider/model glob to minimum prefix-cache age before queued drops materialize. |
+| `contextManager.executeThresholdPercent` | record | `{ default: 65 }` | Provider/model pressure threshold; values are capped at 80%. |
+| `contextManager.executeThresholdTokens` | record | `{}` | Optional provider/model absolute pressure threshold. |
+| `contextManager.protectedTags` | number | `20` | Newest stable tags protected from reduction. |
+| `contextManager.clearReasoningAge` | number | `50` | Age at which old assistant reasoning may be cleared while final text remains. |
+| `contextManager.historyBudgetPercent` | number | `0.15` | Fraction of the execution threshold reserved for tiered history. |
+| `contextManager.temporalAwareness` | boolean | `true` | Add deterministic time-gap and compartment date metadata. |
+| `contextManager.smartDrops` | boolean | `false` | Enable deterministic stale todo/status/note/edit cleanup. |
+| `contextManager.caveman.enabled` | boolean | `false` | Compress eligible old prose while preserving structured content. |
+| `contextManager.historian.enabled` | boolean | `true` | Run the validated, staged historian. |
+| `contextManager.historian.chunkTokens` | number | `30000` | Target canonical chunk size for historian runs. |
+| `contextManager.historian.twoPass` | boolean | `false` | Use a second editor pass before publication. |
+| `contextManager.historian.tools` | string[] | `[]` | Explicit historian tool grant; empty means no tools. Global/CLI only. |
+| `contextManager.commitCluster.enabled` | boolean | `true` | Permit early historian runs after separated commit clusters. |
+| `contextManager.commitCluster.minClusters` | number | `3` | Minimum separated commit clusters for that trigger. |
+| `contextManager.memory.injectionBudgetTokens` | number | `4000` | Maximum Mnemopi recall block injected by managed context. |
+| `contextManager.memory.autoPromote` | boolean | `true` | Promote sufficiently supported session facts into Mnemopi. |
+| `contextManager.autoSearch.enabled` | boolean | `true` | Attach one stable bounded search hint to substantive user turns. |
+| `contextManager.gitCommitIndexing.enabled` | boolean | `false` | Index bounded, HEAD-reachable, non-merge Git commits. |
+| `contextManager.embeddings.enabled` | boolean | `true` | Add Mnemopi-backed semantic candidates when that adapter exposes embeddings. |
+| `contextManager.sidekick.enabled` | boolean | `false` | Enable opt-in `/ctx-aug` read-only augmentation. Global config must enable it. |
+| `contextManager.dreamer.enabled` | boolean | `true` | Run activity-gated recurring maintenance. Memory tasks are no-ops unless Mnemopi is active. |
+| `contextManager.dreamer.injectDocs` | boolean | `true` | Inject bounded root `ARCHITECTURE.md`/`STRUCTURE.md` files as untrusted data. |
 | `autolearn.enabled` | boolean | `false` | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
 | `autolearn.autoContinue` | boolean | `false` | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn. |
 | `autolearn.minToolCalls` | number | `5` | Only nudge after a turn that used at least this many tools. |
 
 `compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
+
+Managed context keeps the session JSONL as canonical truth. Its SQLite database contains rebuildable tags, drops, compartments, notes, search documents, embeddings, and job leases only. Mnemopi remains the sole project/user long-term-memory store when `memory.backend: mnemopi`; managed context does not duplicate it.
+
+Project-discovered settings may tune safe thresholds and may turn capabilities off, but cannot turn on a globally disabled hidden agent. Historian/dreamer/sidekick model roles, historian tool grants, task models, and task schedules are global/CLI-only. An empty dream task schedule disables that recurring task; `maintain-docs` is disabled by default. See [Compaction](./compaction.md) for lifecycle and fallback semantics.
 
 ### Appearance and terminal
 

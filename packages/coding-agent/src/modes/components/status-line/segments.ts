@@ -460,7 +460,14 @@ const contextPctSegment: StatusLineSegment = {
 		const text = `${formatContextUsage(pct, window, ctx.contextTokens)}${autoIcon}`;
 
 		const color = getContextUsageThemeColor(getContextUsageLevel(pct ?? 0, window));
-		const content = withIcon(theme.icon.context, theme.fg(color, text));
+		const managedState = ctx.session.contextManager?.statusLineState();
+		const managedSuffix = managedState
+			? theme.fg(
+					managedState === "error" ? "error" : managedState === "historian" ? "warning" : "accent",
+					` ${managedState}`,
+				)
+			: "";
+		const content = `${withIcon(theme.icon.context, theme.fg(color, text))}${managedSuffix}`;
 
 		return { content, visible: true };
 	},

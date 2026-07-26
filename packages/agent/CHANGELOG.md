@@ -13,6 +13,7 @@
 ### Added
 
 - Added the provider-neutral native computer-call lifecycle, preserving observation outputs and input actions across pending and acknowledged tool results.
+- Added the `managed` compaction strategy marker so coding-agent can own branch-aware managed context while core compaction rejects accidental direct execution.
 
 ### Changed
 

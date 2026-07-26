@@ -8,6 +8,9 @@ For installation, setup, provider configuration, model roles, slash commands, an
 
 Package-specific references:
 - [CHANGELOG](./CHANGELOG.md)
+- [Managed context and compaction](../../docs/compaction.md)
+- [Settings reference](../../docs/settings.md)
+- [Mnemopi memory backend](../../docs/mnemosyne-memory-backend.md)
 - [MCP configuration guide](../../docs/mcp-config.md)
 - [MCP runtime lifecycle](../../docs/mcp-runtime-lifecycle.md)
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
@@ -15,11 +18,14 @@ Package-specific references:
 
 ## Memory backends
 
-The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):
+The agent supports four mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/agent/config.yml`):
 
 - `off` (default) — no memory subsystem runs.
 - `local` — existing rollout-summarisation pipeline; writes `memory_summary.md` and consolidated artifacts under the agent dir.
 - `hindsight` — talks to a [Hindsight](https://hindsight.vectorize.io) server (Cloud or self-hosted Docker), retains transcripts every Nth user turn, recalls memories on the first turn of a session, and exposes `retain`, `recall`, and `reflect`.
+- `mnemopi` — local SQLite-backed project/user long-term memory with scoped recall, typed memory operations, optional embeddings, and `retain`/`recall`/`reflect`/`memory_edit`. When managed context is active, it owns the single Mnemopi recall injection and uses Mnemopi as its only long-term-memory store.
+
+Managed context itself is enabled independently through `compaction.strategy: managed` (the default) and `contextManager.*`; it remains fully useful with `memory.backend: off`. See [Managed context and compaction](../../docs/compaction.md) and the [settings reference](../../docs/settings.md).
 
 ### Hindsight quickstart
 

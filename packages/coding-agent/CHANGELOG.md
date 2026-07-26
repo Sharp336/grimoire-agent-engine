@@ -62,6 +62,11 @@
 - Added the `/computer` slash command (`on`/`off`/`status`/toggle) to enable or disable the computer tool for the current session without persisting settings.
 - Exposed `computer` to models without native OpenAI computer-use support as a regular function tool with a typed GA action schema; the same native desktop backend and approval policy apply on both paths.
 - Hardened computer action ingress: action-specific fields, modifier/key arrays, coordinates, drag points, and scroll deltas fail closed before native input; numeric fields must be signed 32-bit integers and coordinates must be non-negative.
+- Added native managed context with stable transcript tags, protocol-safe delayed reductions, validated tiered history, Mnemopi-only long-term-memory bridging, full-text/semantic/Git retrieval, five context tools, eight slash commands, and leased historian/dreamer/sidekick maintenance.
+
+### Changed
+
+- Changed the default compaction strategy from `snapcompact` to `managed`, with clean fallback to `context-full` when managed context is disabled, unavailable, or cannot recover enough provider headroom.
 
 ### Changed
 
@@ -76,6 +81,7 @@
 - Fixed spilled tool-output artifact descriptors leaking on error/abort paths. `OutputSink.dump()` was the only path that closed the spill `Bun.FileSink`, but the bash and Python executors re-throw on failure and their `finally` blocks never closed the sink, so a large-output command that errored leaked the artifact descriptor until an unrelated read (e.g. a `SKILL.md` load) hit `EMFILE`. `OutputSink` now exposes an idempotent `dispose()` that closes the sink exactly once, wired into every executor's `finally` ([#6463](https://github.com/can1357/oh-my-pi/issues/6463)).
 - Fixed the first submitted prompt stalling while the local tiny-title worker started: the interactive submit handler now paints the pending user row before starting title generation, and startup prewarms an idle, unref'd worker so the first submit reuses a live subprocess instead of paying spawn latency ahead of the first frame ([#6462](https://github.com/can1357/oh-my-pi/issues/6462)).
 - Fixed legacy Pi extensions failing validation when importing the upstream `keyText` keybinding helper ([#6470](https://github.com/can1357/oh-my-pi/issues/6470)).
+- Fixed managed manual compaction fallback accidentally passing the coding-agent-owned `managed` marker into core compaction after an inactive or failed managed wrapup.
 
 ## [17.1.0] - 2026-07-24
 

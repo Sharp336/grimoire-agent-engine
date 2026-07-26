@@ -1,3 +1,4 @@
+import { formatManagedContextStatus } from "../../context-manager/report";
 import { computeContextBreakdown } from "../../modes/utils/context-usage";
 import type { SlashCommandRuntime } from "../types";
 import { renderAsciiBar } from "./format";
@@ -7,7 +8,7 @@ import { renderAsciiBar } from "./format";
  * (categories + auto-compact buffer + free slack) and falls back to the
  * minimal "window/used" lines when the breakdown helper throws.
  */
-export function buildContextReportText(runtime: SlashCommandRuntime): string {
+function buildBaseContextReportText(runtime: SlashCommandRuntime): string {
 	try {
 		const breakdown = computeContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
@@ -62,5 +63,16 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 		const fallback = runtime.session.getContextUsage();
 		if (!fallback) return "Context usage is unavailable.";
 		return ["Context", `Window: ${fallback.contextWindow}`, `Used: ${fallback.tokens ?? 0}`].join("\n");
+	}
+}
+
+export async function buildContextReportText(runtime: SlashCommandRuntime): Promise<string> {
+	const base = buildBaseContextReportText(runtime);
+	const manager = runtime.session.contextManager;
+	if (!manager) return base;
+	try {
+		return `${base}\n\n${formatManagedContextStatus(await manager.diagnostics())}`;
+	} catch {
+		return base;
 	}
 }

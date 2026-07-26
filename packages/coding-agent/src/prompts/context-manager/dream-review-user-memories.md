@@ -1,0 +1,1 @@
+Review the supplied recurring user-scoped facts and observations. Promote only stable cross-project preferences or instructions. Output `{ "memories": [{ "category": "preference" | "instruction" | "personality" | "relationship", "content": string, "sourceIds": string[] }] }`. Require repeated support, merge duplicates, and exclude project-specific facts or one-off requests.

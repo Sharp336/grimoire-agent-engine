@@ -22,6 +22,8 @@ export interface PruneConfig {
 	minimumSavings: number;
 	/** Tool-result protection matchers. String entries protect every result from that tool; predicates may inspect the paired tool call. */
 	protectedTools: ProtectedToolMatcher[];
+	/** Canonical entries protected by a higher-level policy (for example a stable-tag tail). */
+	protectedEntryIds?: ReadonlySet<string>;
 	/**
 	 * Optional supersede key function (see {@link SupersedePruneConfig.supersedeKey}).
 	 * When provided, superseded tool results are pruned first — even inside the
@@ -61,6 +63,21 @@ export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 export interface PruneResult {
 	prunedCount: number;
 	tokensSaved: number;
+}
+
+export type ToolOutputPruneReason = "age" | "superseded" | "useless";
+
+export interface ToolOutputPruneCandidate {
+	readonly entry: SessionMessageEntry;
+	readonly index: number;
+	readonly tokens: number;
+	readonly notice: string;
+	readonly reason: ToolOutputPruneReason;
+}
+
+export interface ToolOutputPrunePlan {
+	readonly candidates: readonly ToolOutputPruneCandidate[];
+	readonly tokensSaved: number;
 }
 
 /** Exact placeholder written over a superseded tool result. */
@@ -302,12 +319,18 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 	return { prunedCount: toPrune.length, tokensSaved };
 }
 
-export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = DEFAULT_PRUNE_CONFIG): PruneResult {
+/**
+ * Select tool-result replacements without mutating canonical session entries.
+ * Managed-context callers persist this plan and replay it on provider clones;
+ * legacy compaction applies the same plan below.
+ */
+export function planToolOutputPruning(
+	entries: readonly SessionEntry[],
+	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
+): ToolOutputPrunePlan {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
-	let prunedCount = 0;
-
-	const candidates: Array<{ entry: SessionMessageEntry; tokens: number; superseded: boolean; useless: boolean }> = [];
+	const candidates: ToolOutputPruneCandidate[] = [];
 	const toolCallsById = collectToolCallsById(entries);
 	const supersededMessages = config.supersedeKey
 		? new Set(
@@ -330,7 +353,6 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
 	const cacheWarmSuffixTokens = config.cacheWarmSuffixTokens;
-	// All-message suffix per index, only when the cache guard is armed.
 	const messageSuffix = cacheWarmSuffixTokens === undefined ? undefined : computeMessageSuffixTokens(entries);
 
 	for (let i = entries.length - 1; i >= 0; i--) {
@@ -340,18 +362,11 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 
 		const tokens = estimateTokens(message as AgentMessage);
 		const isProtected = isProtectedToolResult(message, toolCallsById.get(message.toolCallId), config.protectedTools);
-
 		if (message.prunedAt !== undefined) {
 			accumulatedTokens += tokens;
 			continue;
 		}
 
-		// Prompt-cache guard: a result whose all-message suffix exceeds the
-		// warm-cache window sits in the already-sent cached prefix — mutating it
-		// re-writes the whole suffix (cacheWrite premium). Entries before the
-		// compaction boundary are summarized away (never sent). Both are skipped
-		// before any prune decision, so superseded/useless cannot reach a deep,
-		// still-cached copy; compaction/shake reclaim those when they rebuild.
 		const inWarmPrefix =
 			messageSuffix !== undefined && cacheWarmSuffixTokens !== undefined && messageSuffix[i] > cacheWarmSuffixTokens;
 		if (inWarmPrefix || i < boundaryIndex) {
@@ -359,52 +374,51 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 			continue;
 		}
 
-		// Superseded and useless results bypass the age-based protect window
-		// (a stale re-read copy, or a result the tool flagged as uninformative,
-		// is dead weight at any age) — but only within the cache-warm tail: the
-		// guard above already excluded deeper, still-cached copies.
 		const superseded = supersededMessages?.has(message) ?? false;
 		const useless = uselessMessages?.has(message) ?? false;
 		const tooSmall = tokens < MIN_PRUNE_TOKENS;
-		if (!superseded && !useless && (accumulatedTokens < config.protectTokens || isProtected || tooSmall)) {
+		if (
+			!superseded &&
+			!useless &&
+			(accumulatedTokens < config.protectTokens ||
+				isProtected ||
+				config.protectedEntryIds?.has(entry.id) === true ||
+				tooSmall)
+		) {
 			accumulatedTokens += tokens;
 			continue;
 		}
 
-		candidates.push({ entry: entry as SessionMessageEntry, tokens, superseded, useless });
+		const reason: ToolOutputPruneReason = superseded ? "superseded" : useless ? "useless" : "age";
+		const notice =
+			reason === "superseded"
+				? SUPERSEDED_NOTICE
+				: reason === "useless"
+					? USELESS_NOTICE
+					: createPrunedNotice(tokens);
+		candidates.push({ entry: entry as SessionMessageEntry, index: i, tokens, notice, reason });
+		tokensSaved += estimatePrunedSavings(tokens, notice);
 		accumulatedTokens += tokens;
 	}
 
-	for (const candidate of candidates) {
-		tokensSaved += estimatePrunedSavings(
-			candidate.tokens,
-			candidate.superseded
-				? SUPERSEDED_NOTICE
-				: candidate.useless
-					? USELESS_NOTICE
-					: createPrunedNotice(candidate.tokens),
-		);
-	}
-
 	if (tokensSaved < config.minimumSavings || candidates.length === 0) {
-		return { prunedCount: 0, tokensSaved: 0 };
+		return { candidates: [], tokensSaved: 0 };
 	}
+	return { candidates, tokensSaved };
+}
+
+export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = DEFAULT_PRUNE_CONFIG): PruneResult {
+	const plan = planToolOutputPruning(entries, config);
+	if (plan.candidates.length === 0) return { prunedCount: 0, tokensSaved: 0 };
 
 	const prunedAt = Date.now();
-	for (const candidate of candidates) {
+	for (const candidate of plan.candidates) {
 		const message = candidate.entry.message as ToolResultMessage;
-		const notice = candidate.superseded
-			? SUPERSEDED_NOTICE
-			: candidate.useless
-				? USELESS_NOTICE
-				: createPrunedNotice(candidate.tokens);
-		message.content = [{ type: "text", text: notice }];
+		message.content = [{ type: "text", text: candidate.notice }];
 		message.prunedAt = prunedAt;
 		invalidateMessageCache(message as AgentMessage);
-		prunedCount++;
 	}
-
-	return { prunedCount, tokensSaved };
+	return { prunedCount: plan.candidates.length, tokensSaved: plan.tokensSaved };
 }
 
 /**

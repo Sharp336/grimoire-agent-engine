@@ -447,9 +447,11 @@ Resolution precedence for exact selectors:
 
 Supported model roles:
 
-- `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`
+- `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`, `historian`, `dreamer`, `sidekick`
 
 The `tiny` role overrides the online model used for lightweight background tasks (session titles, memory, `auto`-thinking difficulty classification, unexpected-stop detection); when unset, these fall back to `@smol`. Pick one in `/models`.
+
+Managed-context roles are hidden functional roles: `historian` builds validated tiered history, `dreamer` runs activity-gated maintenance, and `sidekick` powers opt-in prompt augmentation. When unset, historian/sidekick consult the `smol` priority chain and dreamer consults `slow`, then their runners may use the active model as a final fallback. Project settings cannot replace these three role assignments; configure them globally or through an explicit CLI config overlay.
 
 Role aliases like `@smol` expand through `settings.modelRoles`; `*` selects `@default`. Quote `@` aliases in YAML values (`fable: "@slow"`). Each role value can also append a thinking selector such as `:minimal`, `:low`, `:medium`, or `:high`.
 

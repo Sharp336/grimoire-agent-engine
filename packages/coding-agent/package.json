@@ -80,6 +80,7 @@
     "@xterm/headless": "catalog:",
     "arktype": "catalog:",
     "chalk": "catalog:",
+    "cron-parser": "5.6.2",
     "fast-xml-parser": "catalog:",
     "handlebars": "catalog:",
     "header-generator": "catalog:",

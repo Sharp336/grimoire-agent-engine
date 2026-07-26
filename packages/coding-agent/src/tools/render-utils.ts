@@ -690,6 +690,9 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	}
 	return filePath;
 }
+export function shortenPathsInText(text: string, homeDir = os.homedir()): string {
+	return homeDir ? text.replaceAll(homeDir, "~") : text;
+}
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
 	if (!workdir) return undefined;

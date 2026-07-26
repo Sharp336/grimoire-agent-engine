@@ -13,6 +13,7 @@ import {
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
+import { formatManagedContextStatus } from "../../context-manager/report";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
 import { parseExportArgs } from "../../export/html/args";
@@ -594,7 +595,7 @@ export class CommandController {
 		showMarkdownPanel(this.ctx, "Available Tools", tools);
 	}
 
-	handleContextCommand(): void {
+	async handleContextCommand(): Promise<void> {
 		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
@@ -606,6 +607,17 @@ export class CommandController {
 		block.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
 		block.addChild(new Spacer(1));
 		block.addChild(new Text(output, 1, 0));
+		const contextManager = this.ctx.session.contextManager;
+		if (contextManager?.active) {
+			try {
+				block.addChild(new Spacer(1));
+				block.addChild(new Text(theme.bold(theme.fg("accent", "Managed Context")), 1, 0));
+				block.addChild(new Spacer(1));
+				block.addChild(new Text(formatManagedContextStatus(await contextManager.diagnostics()), 1, 0));
+			} catch {
+				// The base usage report remains available when derived diagnostics fail.
+			}
+		}
 		block.addChild(new DynamicBorder());
 		this.ctx.present(block);
 	}

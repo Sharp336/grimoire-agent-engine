@@ -11,6 +11,7 @@ import { expandRoleAlias, getModelMatchPreferences, resolveCliModel } from "../c
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
+import { CONTEXT_DREAM_TASK_NAMES } from "../context-manager/dreamer-registry";
 import {
 	clearPluginRootsAndCaches,
 	resolveActiveProjectRegistryPath,
@@ -47,6 +48,16 @@ import {
 } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
+import {
+	handleContextAugment,
+	handleContextDream,
+	handleContextEmbed,
+	handleContextFlush,
+	handleContextRecomp,
+	handleContextSessionUpgrade,
+	handleContextStatus,
+	handleContextWrapup,
+} from "./helpers/context-manager";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
@@ -1361,13 +1372,71 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return `Context: ${Math.round(usage.percent)}% (${formatTokenCount(usage.tokens)}/${formatTokenCount(usage.contextWindow)})`;
 		},
 		handle: async (_command, runtime) => {
-			await runtime.output(buildContextReportText(runtime));
+			await runtime.output(await buildContextReportText(runtime));
 			return commandConsumed();
 		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.handleContextCommand();
+		handleTui: async (_command, runtime) => {
+			await runtime.ctx.handleContextCommand();
 			runtime.ctx.editor.setText("");
 		},
+	},
+	{
+		name: "ctx-status",
+		description: "Show managed-context tags, history, memory, embedding, and job status",
+		handle: handleContextStatus,
+	},
+	{
+		name: "ctx-flush",
+		description: "Materialize pending managed-context operations now",
+		handle: handleContextFlush,
+	},
+	{
+		name: "ctx-recomp",
+		description: "Rebuild managed history compartments from canonical messages",
+		allowArgs: true,
+		inlineHint: "[full|<start>-<end>]",
+		handle: handleContextRecomp,
+	},
+	{
+		name: "ctx-wrapup",
+		description: "Finalize managed context while retaining a recent message tail",
+		allowArgs: true,
+		inlineHint: "[messages-to-keep]",
+		handle: handleContextWrapup,
+	},
+	{
+		name: "ctx-aug",
+		description: "Ask the read-only sidekick to augment a pending prompt",
+		allowArgs: true,
+		inlineHint: "<prompt>",
+		handle: handleContextAugment,
+	},
+	{
+		name: "ctx-embed",
+		description: "Start, pause, or inspect managed-context embeddings",
+		allowArgs: true,
+		subcommands: [
+			{ name: "start", description: "Start or resume the embedding drain" },
+			{ name: "pause", description: "Pause the embedding drain" },
+			{ name: "status", description: "Show embedding progress" },
+		],
+		handle: handleContextEmbed,
+	},
+	{
+		name: "ctx-session-upgrade",
+		description: "Rebuild the current session into managed history and classify memories",
+		handle: handleContextSessionUpgrade,
+	},
+	{
+		name: "ctx-dream",
+		description: "Run managed-context maintenance tasks now",
+		allowArgs: true,
+		inlineHint: "[task|all] [--force]",
+		subcommands: [
+			{ name: "all", description: "Run every maintenance task" },
+			...CONTEXT_DREAM_TASK_NAMES.map(name => ({ name, description: `Run the ${name} task` })),
+		],
+		handle: handleContextDream,
 	},
 	{
 		name: "extensions",

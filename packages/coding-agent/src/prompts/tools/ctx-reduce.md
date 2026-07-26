@@ -1,0 +1,3 @@
+Queue managed-context reduction for tagged history.
+
+Pass one or more stable tags exactly as shown in the transcript, for example `§12§`. Reduction preserves the canonical session log and expands each requested tag to the smallest protocol-safe turn/tool unit. The result reports both requested and expanded tags plus when the queued drop becomes eligible. The newest protected turn, incomplete tool batches, and protected tags are rejected. This tool does not remove content immediately; use `ctx_expand` to read canonical content later.

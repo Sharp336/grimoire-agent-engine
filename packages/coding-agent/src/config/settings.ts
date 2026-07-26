@@ -114,6 +114,96 @@ function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
 	current[segments[segments.length - 1]] = value;
 }
 
+const CONTEXT_MANAGER_PROJECT_MUTABLE_PATHS = [
+	"enabled",
+	"cacheTtl",
+	"executeThresholdPercent",
+	"executeThresholdTokens",
+	"protectedTags",
+	"clearReasoningAge",
+	"historyBudgetPercent",
+	"temporalAwareness",
+	"smartDrops",
+	"caveman.enabled",
+	"caveman.minChars",
+	"historian.enabled",
+	"historian.chunkTokens",
+	"historian.timeoutMs",
+	"historian.twoPass",
+	"commitCluster.enabled",
+	"commitCluster.minClusters",
+	"memory.injectionBudgetTokens",
+	"memory.autoPromote",
+	"memory.retrievalPromotionThreshold",
+	"autoSearch.enabled",
+	"autoSearch.scoreThreshold",
+	"autoSearch.minPromptChars",
+	"gitCommitIndexing.enabled",
+	"gitCommitIndexing.sinceDays",
+	"gitCommitIndexing.maxCommits",
+	"embeddings.enabled",
+	"sidekick.enabled",
+	"dreamer.enabled",
+	"dreamer.injectDocs",
+	"debug",
+] as const;
+
+const CONTEXT_MANAGER_PROJECT_DISABLE_ONLY_PATHS: Record<string, true> = {
+	enabled: true,
+	smartDrops: true,
+	"caveman.enabled": true,
+	"historian.enabled": true,
+	"historian.twoPass": true,
+	"commitCluster.enabled": true,
+	"memory.autoPromote": true,
+	"autoSearch.enabled": true,
+	"gitCommitIndexing.enabled": true,
+	"embeddings.enabled": true,
+	"sidekick.enabled": true,
+	"dreamer.enabled": true,
+	"dreamer.injectDocs": true,
+	debug: true,
+};
+const GLOBAL_ONLY_MODEL_ROLES = new Set(["historian", "dreamer", "sidekick"]);
+
+function filterProjectModelRoles(value: unknown): Record<string, unknown> | undefined {
+	if (!isRecord(value)) return undefined;
+	const filtered = Object.fromEntries(Object.entries(value).filter(([role]) => !GLOBAL_ONLY_MODEL_ROLES.has(role)));
+	return Object.keys(filtered).length > 0 ? filtered : undefined;
+}
+
+function filterProjectContextManagerSettings(value: unknown): RawSettings | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+
+	const source = value as RawSettings;
+	const filtered: RawSettings = {};
+	for (const path of CONTEXT_MANAGER_PROJECT_MUTABLE_PATHS) {
+		const segments = path.split(".");
+		const candidate = getByPath(source, segments);
+		if (candidate === undefined) continue;
+		if (CONTEXT_MANAGER_PROJECT_DISABLE_ONLY_PATHS[path] && candidate !== false) continue;
+		setByPath(filtered, segments, candidate);
+	}
+	return Object.keys(filtered).length > 0 ? filtered : undefined;
+}
+
+function filterContextManagerProjectLayer(layer: RawSettings): RawSettings {
+	const filtered = { ...layer };
+	const rawContextManager = getByPath(layer, ["contextManager"]);
+	if (rawContextManager !== undefined) {
+		const contextManager = filterProjectContextManagerSettings(rawContextManager);
+		if (contextManager) filtered.contextManager = contextManager;
+		else delete filtered.contextManager;
+	}
+	const rawModelRoles = getByPath(layer, ["modelRoles"]);
+	if (rawModelRoles !== undefined) {
+		const modelRoles = filterProjectModelRoles(rawModelRoles);
+		if (modelRoles) filtered.modelRoles = modelRoles;
+		else delete filtered.modelRoles;
+	}
+	return filtered;
+}
+
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 	const normalized: Record<string, number> = {};
@@ -895,6 +985,10 @@ export class Settings {
 	 * Set a model role in the current project's settings layer.
 	 */
 	setProjectModelRole(role: ModelRole | string, modelId: string): void {
+		if (GLOBAL_ONLY_MODEL_ROLES.has(role)) {
+			this.setModelRole(role, modelId);
+			return;
+		}
 		this.#setProjectModelRoleValue(role, modelId);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, modelId);
@@ -903,6 +997,10 @@ export class Settings {
 	 * Clear a model role from the current project's settings layer.
 	 */
 	clearProjectModelRole(role: ModelRole | string): void {
+		if (GLOBAL_ONLY_MODEL_ROLES.has(role)) {
+			this.setModelRole(role, undefined);
+			return;
+		}
 		this.#setProjectModelRoleValue(role, null);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, undefined);
@@ -928,6 +1026,7 @@ export class Settings {
 	 * Get a model role from only the current project settings layer.
 	 */
 	getProjectModelRole(role: ModelRole | string): string | undefined {
+		if (GLOBAL_ONLY_MODEL_ROLES.has(role)) return undefined;
 		const modelId = this.#modelRolesFromLayer(this.#project)[role];
 		return modelId || undefined;
 	}
@@ -1094,13 +1193,17 @@ export class Settings {
 			let merged: RawSettings = {};
 			for (const item of result.items as SettingsCapabilityItem[]) {
 				if (item.level === "project") {
-					merged = this.#deepMerge(merged, item.data as RawSettings);
+					merged = this.#deepMerge(merged, filterContextManagerProjectLayer(item.data as RawSettings));
 				}
 			}
 			const nativeProject = await this.#loadYaml(path.join(this.#cwd, ".omp", "config.yml"));
-			const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
-			if (nativeModelRoles !== undefined) {
+			const nativeModelRoles = filterProjectModelRoles(getByPath(nativeProject, ["modelRoles"]));
+			if (nativeModelRoles) {
 				merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
+			}
+			const nativeContextManager = filterProjectContextManagerSettings(getByPath(nativeProject, ["contextManager"]));
+			if (nativeContextManager) {
+				merged = this.#deepMerge(merged, { contextManager: nativeContextManager });
 			}
 			return this.#migrateRawSettings(merged);
 		} catch {
@@ -1848,14 +1951,19 @@ export class Settings {
 		const projectRoles = getByPath(this.#project, ["modelRoles"]);
 		if (!isRecord(projectRoles)) return this.#project;
 
-		let filteredRoles: Record<string, unknown> | undefined;
+		const filteredRoles = { ...projectRoles };
+		let changed = false;
 		for (const role in projectRoles) {
-			if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined)
+			if (
+				!Object.hasOwn(projectRoles, role) ||
+				(!GLOBAL_ONLY_MODEL_ROLES.has(role) && modelRoleValueFromUnknown(projectRoles[role]) !== undefined)
+			) {
 				continue;
-			filteredRoles ??= { ...projectRoles };
+			}
 			delete filteredRoles[role];
+			changed = true;
 		}
-		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
+		return changed ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
 	}
 
 	#rebuildMerged(): void {

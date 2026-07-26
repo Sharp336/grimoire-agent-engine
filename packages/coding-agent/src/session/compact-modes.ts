@@ -12,7 +12,7 @@
  */
 
 /** Subcommand selecting a one-off compaction mode for manual `/compact`. */
-export type CompactMode = "soft" | "remote" | "snapcompact";
+export type CompactMode = "managed" | "soft" | "remote" | "snapcompact";
 
 /**
  * Per-invocation overrides merged over the configured `compaction.*` settings.
@@ -20,7 +20,7 @@ export type CompactMode = "soft" | "remote" | "snapcompact";
  * assignable to the full `CompactionSettings`.
  */
 export interface CompactionOverride {
-	strategy?: "context-full" | "snapcompact";
+	strategy?: "managed" | "context-full" | "snapcompact";
 	remoteEnabled?: boolean;
 }
 
@@ -45,6 +45,11 @@ export interface CompactModeDef {
 }
 
 export const COMPACT_MODES: readonly CompactModeDef[] = [
+	{
+		name: "managed",
+		description: "Wrap older history into managed context compartments without rewriting session JSONL",
+		overrides: { strategy: "managed" },
+	},
 	{
 		name: "soft",
 		description: "Summarize locally with the active model (skip remote endpoints)",

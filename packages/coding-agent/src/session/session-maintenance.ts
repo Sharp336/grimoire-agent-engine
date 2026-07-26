@@ -52,6 +52,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { getDefault } from "../config/settings";
+import type { ContextHistorianRunResult } from "../context-manager/types";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { GoalModeState } from "../goals/state";
@@ -183,6 +184,8 @@ export interface SessionMaintenanceHost {
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	isGeneratingHandoff(): boolean;
+	isManagedContextActive(): boolean;
+	runManagedContextWrapup(): Promise<ContextHistorianRunResult>;
 	promptGeneration(): number;
 	sessionId(): string;
 	messages(): AgentMessage[];
@@ -553,9 +556,45 @@ export class SessionMaintenance {
 			// strategy/remote flags for this one invocation. Merged before
 			// prepareCompaction so the remote gating (preparation.settings.
 			// remoteEnabled/endpoint) and the snapcompact decision below both see it.
-			const effectiveSettings = compactMode
+			let effectiveSettings: CompactionSettings = compactMode
 				? { ...compactionSettings, ...compactMode.overrides }
 				: compactionSettings;
+			if (
+				(!compactMode || compactMode.name === "managed") &&
+				effectiveSettings.strategy === "managed" &&
+				!customInstructions &&
+				!options?.internalGuidance &&
+				this.#host.isManagedContextActive()
+			) {
+				const managedResult = await this.#host.runManagedContextWrapup();
+				if (managedResult.status === "published" || managedResult.status === "noop") {
+					const managedPathEntries = this.#host.sessionManager.getBranch();
+					const firstKeptEntryId =
+						managedPathEntries.find(entry => entry.type === "message")?.id ?? managedPathEntries.at(-1)?.id;
+					if (firstKeptEntryId) {
+						const result: CompactionResult = {
+							summary: `Managed context wrapup retained canonical history and published ${managedResult.compartments} compartment(s).`,
+							shortSummary: "Managed context wrapup",
+							firstKeptEntryId,
+							tokensBefore: this.#estimateStoredContextTokens(),
+							details: { strategy: "managed", ...managedResult },
+						};
+						options?.onComplete?.(result);
+						return result;
+					}
+				}
+				this.#host.emitNotice(
+					"warning",
+					`Managed context wrapup did not complete${managedResult.error ? `: ${managedResult.error}` : ""}; using ${this.#host.settings.get("compaction.managedFallback")} compaction instead.`,
+					"compaction",
+				);
+			}
+			if (effectiveSettings.strategy === "managed") {
+				effectiveSettings = {
+					...effectiveSettings,
+					strategy: this.#host.settings.get("compaction.managedFallback"),
+				};
+			}
 			// /compact remote demands provider-native compaction. When no remote
 			// endpoint is configured (one would override per-model gating in
 			// compact()), drop fallback candidates that aren't remote-capable so the
@@ -980,6 +1019,14 @@ export class SessionMaintenance {
 			});
 			return;
 		}
+		if (compactionSettings.strategy === "managed" && this.#host.isManagedContextActive()) {
+			logger.debug("Managed context owns pre-prompt threshold maintenance", {
+				contextTokens,
+				contextWindow,
+				model: `${model.provider}/${model.id}`,
+			});
+			return;
+		}
 
 		logger.debug("Pre-prompt context maintenance triggered by pending prompt size", {
 			contextTokens,
@@ -1054,6 +1101,14 @@ export class SessionMaintenance {
 				contextTokens,
 				contextWindow,
 				from: `${model?.provider}/${model?.id}`,
+			});
+			return;
+		}
+		if (compactionSettings.strategy === "managed" && this.#host.isManagedContextActive()) {
+			logger.debug("Managed context owns mid-run threshold maintenance", {
+				contextTokens,
+				contextWindow,
+				model: `${model?.provider}/${model?.id}`,
 			});
 			return;
 		}
@@ -1241,12 +1296,21 @@ export class SessionMaintenance {
 			return COMPACTION_CHECK_NONE;
 		}
 
-		// Stale-result pass runs every turn, before any threshold gating: it is
-		// cheap (bails when no candidate) and independent of the compaction
-		// setting.
-		const supersedeResult = await this.#pruneStaleToolResults();
-
 		const compactionSettings = this.#host.settings.getGroup("compaction");
+		if (compactionSettings.strategy === "managed" && this.#host.isManagedContextActive()) {
+			if (!compactionSettings.enabled || assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
+			const assistantUsageContextTokens = calculateContextTokens(assistantMessage.usage);
+			const storedContextTokens = this.#estimateStoredContextTokens();
+			const contextTokens = compactionContextTokens(assistantUsageContextTokens, storedContextTokens);
+			if (shouldCompact(contextTokens, contextWindow, compactionSettings)) {
+				await this.#tryContextPromotion(assistantMessage);
+			}
+			return COMPACTION_CHECK_NONE;
+		}
+
+		// Legacy stale-result pruning mutates stored messages. Managed context keeps
+		// canonical JSONL byte-stable, so only legacy/off strategies run this pass.
+		const supersedeResult = await this.#pruneStaleToolResults();
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 
 		// Case 4: Threshold - turn succeeded but context is getting large
@@ -2045,6 +2109,11 @@ export class SessionMaintenance {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
+		const managedContextActive = compactionSettings.strategy === "managed" && this.#host.isManagedContextActive();
+		const effectiveStrategy =
+			compactionSettings.strategy === "managed"
+				? this.#host.settings.get("compaction.managedFallback")
+				: compactionSettings.strategy;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
@@ -2056,7 +2125,10 @@ export class SessionMaintenance {
 		// Shake runs inline (cheap, no remote LLM). On overflow recovery, if shake
 		// reclaims nothing we fall through to the summary-compaction body below so
 		// the oversized input still gets resolved.
-		if (compactionSettings.strategy === "shake") {
+		if (managedContextActive && reason !== "overflow" && reason !== "incomplete") {
+			return COMPACTION_CHECK_NONE;
+		}
+		if (effectiveStrategy === "shake") {
 			const outcome = await this.#runAutoShake(
 				reason,
 				willRetry,
@@ -2079,7 +2151,7 @@ export class SessionMaintenance {
 			reason !== "overflow" &&
 			reason !== "incomplete" &&
 			reason !== "idle" &&
-			compactionSettings.strategy === "handoff"
+			effectiveStrategy === "handoff"
 		) {
 			this.#host.schedulePostPromptTask(
 				async signal => {
@@ -2102,9 +2174,9 @@ export class SessionMaintenance {
 		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
 		// so a handoff request on the existing context is still viable.
 		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "snapcompact"
+			effectiveStrategy === "snapcompact"
 				? "snapcompact"
-				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
+				: effectiveStrategy === "handoff" && reason !== "overflow" && !suppressHandoff
 					? "handoff"
 					: "context-full";
 		if (action === "snapcompact" && this.#model && !this.#model.input.includes("image")) {
