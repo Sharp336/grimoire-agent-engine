@@ -145,6 +145,37 @@ describe("skill usage stats pipeline", () => {
 		expect(response.status).toBe(200);
 		expect((await response.json()) as SkillDashboardStats).toEqual(dashboard);
 	});
+	it("normalizes canonical skill URL selectors before persistence", async () => {
+		const selectorPaths = [
+			"skill://review:raw",
+			"skill://review:1-10",
+			"skill://review:raw:1-10",
+			"skill://review:conflicts",
+			"skill://review:5-16,960-973",
+			"SKILL://review:raw",
+			"sKiLl://review/checklist.md:raw:1-10",
+		];
+		await writeSessionFile("selector-grammar.jsonl", "selector-grammar-sess", [
+			assistantEntry({
+				id: "selector-grammar-asst",
+				timestamp: TS1,
+				calls: selectorPaths.map((path, index) => ({
+					id: `selector-call-${index}`,
+					name: "read",
+					arguments: { path },
+				})),
+				totalTokens: 100,
+				outputTokens: 20,
+				cost: 0.01,
+			}),
+		]);
+
+		await syncAllSessions({ workers: 1 });
+
+		const stats = getSkillStats();
+		expect(stats).toHaveLength(1);
+		expect(stats[0]).toMatchObject({ skill: "review", calls: selectorPaths.length });
+	});
 
 	it("migrates a legacy tool_calls table and replays historical skill invocations", async () => {
 		const sessionFile = await writeSessionFile("migration.jsonl", "migration-sess", [

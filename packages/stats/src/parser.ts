@@ -83,7 +83,7 @@ function stripSkillUrlSelector(rawPath: string): string {
 function extractSkillName(tool: ToolCall): string | null {
 	if (tool.name !== "read" || typeof tool.arguments?.path !== "string") return null;
 	const rawPath = tool.arguments.path;
-	if (!rawPath.startsWith("skill://")) return null;
+	if (!/^skill:\/\//i.test(rawPath)) return null;
 	const cleanPath = stripSkillUrlSelector(rawPath);
 	const authorityStart = "skill://".length;
 	const slash = cleanPath.indexOf("/", authorityStart);
