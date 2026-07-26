@@ -239,13 +239,14 @@ export function mergeSessionRanking(
  */
 export function createSessionRankingMatcher(
 	historyMatcher: SessionHistoryMatcher | undefined,
+	sessionDir?: string,
 ): SessionHistoryMatcher | undefined {
 	const transcriptDbPath = getTranscriptDbPath();
 	if (!fs.existsSync(transcriptDbPath)) return historyMatcher;
 	return (query: string) => {
 		const historyIds = historyMatcher?.(query) ?? [];
 		try {
-			return [...TranscriptIndex.open(transcriptDbPath).matchingSessionIds(query), ...historyIds];
+			return [...TranscriptIndex.open(transcriptDbPath).matchingSessionIds(query, { sessionDir }), ...historyIds];
 		} catch (error) {
 			logger.warn("Transcript index unavailable for session ranking", { error: String(error) });
 			return historyIds;

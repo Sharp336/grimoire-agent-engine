@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `getTranscriptDbPath()` for transcript-index consumers.
+
 ## [17.0.9] - 2026-07-23
 
 ### Breaking Changes

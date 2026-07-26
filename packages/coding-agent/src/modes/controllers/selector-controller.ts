@@ -1350,6 +1350,7 @@ export class SelectorController {
 		const historyStorage = this.ctx.historyStorage;
 		const historyMatcher = createSessionRankingMatcher(
 			historyStorage ? (query: string) => historyStorage.matchingSessionIds(query) : undefined,
+			this.ctx.sessionManager.getSessionDir(),
 		);
 		// Keep the fullscreen picker on the alternate buffer while a selected
 		// session is loaded and its transcript is rebuilt. Closing it first exposes
