@@ -1862,8 +1862,8 @@ export const ref = {
 		const args = ["update-ref", refName, newSha, expectedOldSha];
 		const result = await git(cwd, args, { signal });
 		if (result.exitCode === 0) return true;
-		// Git reports a lost CAS as exit 128 with "is at <sha> but expected <sha>".
-		if (/but expected /i.test(result.stderr)) return false;
+		// Git reports a lost CAS with "but expected", "unable to resolve reference", or "reference already exists".
+		if (/but expected |unable to resolve reference|reference already exists/i.test(result.stderr)) return false;
 		throw new GitCommandError(args, result);
 	},
 };
@@ -1875,7 +1875,7 @@ export const ref = {
 export const merge = {
 	/** Fast-forward the current branch to `ref` (`git merge --ff-only`). */
 	async fastForwardOnly(cwd: string, ref: string, signal?: AbortSignal): Promise<void> {
-		await runEffect(cwd, ["merge", "--ff-only", ref], { signal });
+		await runEffect(cwd, ["merge", "--ff-only", "--", ref], { signal });
 	},
 };
 
