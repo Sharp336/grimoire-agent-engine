@@ -21,6 +21,7 @@ import {
 	parseAzureDeploymentNameMap,
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
 	CODEX_BASE_URL,
 	getCodexAccountId,
@@ -334,18 +335,19 @@ async function attemptCompactionV2Streaming(
 	});
 
 	if (!response.ok) {
-		const errorText = await response.text().catch(() => "");
+		const cause = await captureOpenAIHttpError(response);
 		logger.warn("V2 remote compaction failed", {
 			endpoint,
 			status: response.status,
 			statusText: response.statusText,
-			errorText,
+			errorText: cause.captured.bodyText ?? "",
 		});
 		throw new ProviderHttpError(
 			`V2 remote compaction failed (${response.status} ${response.statusText})`,
 			response.status,
 			{
 				headers: response.headers,
+				cause,
 			},
 		);
 	}
