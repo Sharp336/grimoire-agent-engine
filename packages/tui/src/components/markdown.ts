@@ -1088,7 +1088,6 @@ export interface MarkdownTheme {
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
-	codeBlockBorder: (text: string) => string;
 	quote: (text: string) => string;
 	quoteBorder: (text: string) => string;
 	hr: (text: string) => string;
@@ -2212,7 +2211,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 				if (headingLevel === 1) {
 					styledHeading = this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)));
 				} else {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingText));
+					styledHeading = `${padding((headingLevel - 2) * 2)}${this.#theme.heading(this.#theme.bold(headingText))}`;
 				}
 				lines.push(styledHeading);
 				if (nextTokenType && nextTokenType !== "space") {

@@ -911,25 +911,41 @@ ${table}`;
 
 	describe("Source syntax presentation", () => {
 		it("hides fenced-code delimiters while preserving code content", () => {
-			const markdown = new Markdown("```ts\nconst answer = 42;\nconsole.log(answer);\n```", 0, 0, defaultMarkdownTheme);
+			const markdown = new Markdown(
+				"```ts\nconst answer = 42;\nconsole.log(answer);\n```",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
 			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
 
 			expect(plainLines).toEqual(["  const answer = 42;", "  console.log(answer);"]);
 		});
 
-		it("styles level-three and deeper headings without rendering source hashes", () => {
+		it("indents level-two through level-six headings without rendering source hashes", () => {
 			const markerTheme = {
 				...defaultMarkdownTheme,
 				heading: (text: string) => `<heading>${text}</heading>`,
 				bold: (text: string) => `<bold>${text}</bold>`,
 			};
-			const markdown = new Markdown("### Details\n\n#### Internals", 0, 0, markerTheme);
+			const markdown = new Markdown(
+				"## Two\n\n### Three\n\n#### Four\n\n##### Five\n\n###### Six",
+				0,
+				0,
+				markerTheme,
+			);
 			const lines = markdown.render(80).map(line => line.trimEnd());
 
 			expect(lines).toEqual([
-				"<heading><bold>Details</bold></heading>",
+				"<heading><bold>Two</bold></heading>",
 				"",
-				"<heading><bold>Internals</bold></heading>",
+				"  <heading><bold>Three</bold></heading>",
+				"",
+				"    <heading><bold>Four</bold></heading>",
+				"",
+				"      <heading><bold>Five</bold></heading>",
+				"",
+				"        <heading><bold>Six</bold></heading>",
 			]);
 		});
 

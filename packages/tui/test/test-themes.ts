@@ -63,7 +63,6 @@ export const defaultMarkdownTheme: MarkdownTheme = {
 	linkUrl: (text: string) => chalk.dim(text),
 	code: (text: string) => chalk.yellow(text),
 	codeBlock: (text: string) => chalk.green(text),
-	codeBlockBorder: (text: string) => chalk.dim(text),
 	quote: (text: string) => chalk.italic(text),
 	quoteBorder: (text: string) => chalk.dim(text),
 	hr: (text: string) => chalk.dim(text),

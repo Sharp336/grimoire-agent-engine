@@ -116,20 +116,20 @@ describe("Markdown tree-guide hanging wrap", () => {
 		expect(plain).toEqual(["├── alpha", "│   └── beta", "└── gamma"]);
 	});
 
-	it("keeps the old column-0 wrap for '├── ' lines inside fenced code blocks", () => {
+	it("keeps column-0 continuation wraps for tree lines inside fenced code blocks", () => {
 		const codeLine = "├── alpha bravo charlie delta echo foxtrot golf hotel india";
 		const raw = renderRaw(`\`\`\`\n${codeLine}\n\`\`\``);
 		const plain = raw.map(line => stripVTControlCharacters(line).trimEnd());
 
-		expect(plain[0]).toBe("```");
-		expect(plain[plain.length - 1]).toBe("```");
+		expect(plain[0]).toStartWith("  ├── alpha bravo");
+		expect(plain).not.toContain("```");
 
 		const treeRow = plain.findIndex(line => line.includes("├──"));
-		expect(treeRow).toBeGreaterThan(0);
-		// The code line overflows, so a continuation row exists before the
-		// closing fence — and it starts flush at column 0, no hanging prefix.
+		expect(treeRow).toBe(0);
+		// The code line overflows, so a continuation row follows the rendered
+		// content directly and starts flush at column 0, with no hanging prefix.
 		const continuation = plain[treeRow + 1]!;
-		expect(treeRow + 1).toBeLessThan(plain.length - 1);
+		expect(treeRow + 1).toBeLessThan(plain.length);
 		expect(continuation.length).toBeGreaterThan(0);
 		expect(continuation[0]).not.toBe(" ");
 		expect(continuation[0]).not.toBe("│");

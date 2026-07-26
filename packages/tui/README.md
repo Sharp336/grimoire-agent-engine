@@ -242,7 +242,6 @@ interface MarkdownTheme {
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
-	codeBlockBorder: (text: string) => string;
 	quote: (text: string) => string;
 	quoteBorder: (text: string) => string;
 	hr: (text: string) => string;

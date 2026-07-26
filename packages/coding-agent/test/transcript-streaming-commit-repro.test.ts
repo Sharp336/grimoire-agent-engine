@@ -31,7 +31,6 @@ class MutableLiveBlock implements Component {
 const diffMarkdownTheme: MarkdownTheme = {
 	...defaultMarkdownTheme,
 	codeBlock: text => text,
-	codeBlockBorder: text => text,
 	highlightCode: (source, lang) => {
 		const normalizedLang = lang?.trim().toLowerCase();
 		const highlighted: string[] = [];
@@ -196,10 +195,8 @@ describe("transcript streaming commit (assistant text)", () => {
 		block.setStreamingText("```diff\n\n+next");
 
 		const rows = block.render(40).map(row => Bun.stripANSI(row).trimEnd());
-		const fenceRow = rows.indexOf("```diff");
 
-		expect(fenceRow).toBeGreaterThanOrEqual(0);
-		expect(rows.slice(fenceRow, fenceRow + 4)).toEqual(["```diff", "", "  +next", "```"]);
+		expect(rows).toEqual(["", "  +next"]);
 	});
 
 	it("appends a completed blank row when the streamed diff line cache grows", () => {
@@ -229,9 +226,7 @@ describe("transcript streaming commit (assistant text)", () => {
 		block.setStreamingText("```diff\n\n+done\n-streaming");
 
 		const rows = block.render(40).map(row => Bun.stripANSI(row).trimEnd());
-		const fenceRow = rows.indexOf("```diff");
 
-		expect(fenceRow).toBeGreaterThanOrEqual(0);
-		expect(rows.slice(fenceRow, fenceRow + 5)).toEqual(["```diff", "", "  +done", "  -streaming", "```"]);
+		expect(rows).toEqual(["", "  +done", "  -streaming"]);
 	});
 });

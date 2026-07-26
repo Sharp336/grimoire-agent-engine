@@ -33,7 +33,11 @@
 - Fixed plain Backspace deleting a whole word inside tmux/GNU screen/Zellij panes launched from Windows Terminal: multiplexers inherit `WT_SESSION` but emit raw `0x08` for plain Backspace, so the automatic raw-backspace → `ctrl+backspace` heuristic misfired. The heuristic now skips multiplexer sessions (`TMUX`/`STY`/`ZELLIJ` or `TERM` starting with `tmux`/`screen`); `PI_TUI_RAW_BACKSPACE_IS_CTRL=1` remains the explicit opt-in everywhere ([#6784](https://github.com/can1357/oh-my-pi/pull/6784)).
 ### Fixed
 
-- Hid fenced-code delimiters and Markdown heading hashes from rendered output while preserving code indentation and list nesting.
+- Hid fenced-code delimiters and Markdown heading hashes from rendered output while preserving code indentation, list nesting, and heading hierarchy through indentation.
+
+### Removed
+
+- Removed the obsolete `MarkdownTheme.codeBlockBorder` callback now that source fence delimiters are not rendered.
 
 ## [17.1.4] - 2026-07-26
 

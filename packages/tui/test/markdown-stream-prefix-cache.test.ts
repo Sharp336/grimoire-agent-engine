@@ -15,16 +15,11 @@ function renderCold(text: string, theme: MarkdownTheme): readonly string[] {
 describe("Markdown streaming prefix render cache", () => {
 	it("reuses rendered frozen prefix lines during transient append renders", () => {
 		let codeBlockCalls = 0;
-		let codeBlockBorderCalls = 0;
 		const theme: MarkdownTheme = {
 			...defaultMarkdownTheme,
 			codeBlock: text => {
 				codeBlockCalls++;
 				return defaultMarkdownTheme.codeBlock(text);
-			},
-			codeBlockBorder: text => {
-				codeBlockBorderCalls++;
-				return defaultMarkdownTheme.codeBlockBorder(text);
 			},
 		};
 
@@ -35,27 +30,20 @@ describe("Markdown streaming prefix render cache", () => {
 		md.render(WIDTH);
 
 		codeBlockCalls = 0;
-		codeBlockBorderCalls = 0;
 		md.setText(secondText);
 		const streamingLines = md.render(WIDTH);
 
 		expect(codeBlockCalls).toBe(0);
-		expect(codeBlockBorderCalls).toBe(0);
 		expect(streamingLines).toEqual(renderCold(secondText, theme));
 	});
 
 	it("advances the rendered prefix cache when a new stable block freezes", () => {
 		let codeBlockCalls = 0;
-		let codeBlockBorderCalls = 0;
 		const theme: MarkdownTheme = {
 			...defaultMarkdownTheme,
 			codeBlock: text => {
 				codeBlockCalls++;
 				return defaultMarkdownTheme.codeBlock(text);
-			},
-			codeBlockBorder: text => {
-				codeBlockBorderCalls++;
-				return defaultMarkdownTheme.codeBlockBorder(text);
 			},
 		};
 		const firstBlock = "```ts\nconst first = 1;\n```\n\n";
@@ -71,12 +59,10 @@ describe("Markdown streaming prefix render cache", () => {
 		md.render(WIDTH);
 
 		codeBlockCalls = 0;
-		codeBlockBorderCalls = 0;
 		md.setText(thirdText);
 		const streamingLines = md.render(WIDTH);
 
 		expect(codeBlockCalls).toBe(0);
-		expect(codeBlockBorderCalls).toBe(0);
 		expect(streamingLines).toEqual(renderCold(thirdText, theme));
 	});
 
