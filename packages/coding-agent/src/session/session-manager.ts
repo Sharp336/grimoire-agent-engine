@@ -43,6 +43,7 @@ import {
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type NewSessionOptions,
+	SESSION_TAG_PREFIX,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
 	type SessionHeader,
@@ -2079,6 +2080,33 @@ export class SessionManager {
 		if (!this.#index.has(targetId)) throw new Error(`Entry ${targetId} not found`);
 
 		const entry: LabelEntry = { type: "label", ...this.#freshEntryFields(), targetId, label };
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/**
+	 * Session-level tags, sorted. Tags are {@link LabelEntry} rows namespaced under
+	 * {@link SESSION_TAG_PREFIX}, so the label index already folds them last-write-wins.
+	 */
+	sessionTags(): string[] {
+		const tags: string[] = [];
+		for (const [targetId, label] of this.#index.labelsInEffect()) {
+			if (label && targetId.startsWith(SESSION_TAG_PREFIX)) tags.push(label);
+		}
+		return tags.sort();
+	}
+
+	/**
+	 * Add or remove one session tag. Unlike {@link appendLabelChange} this takes no entry
+	 * guard: a tag's target is a synthetic namespace key, never an existing entry id.
+	 */
+	appendSessionTag(tag: string, present: boolean): string {
+		const entry: LabelEntry = {
+			type: "label",
+			...this.#freshEntryFields(),
+			targetId: SESSION_TAG_PREFIX + tag,
+			label: present ? tag : undefined,
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}

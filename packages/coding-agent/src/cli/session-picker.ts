@@ -1,6 +1,6 @@
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
-import { SessionSelectorComponent } from "../modes/components/session-selector";
+import { createSessionRankingMatcher, SessionSelectorComponent } from "../modes/components/session-selector";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionInfo } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
@@ -24,14 +24,17 @@ export async function selectSession(
 
 	// Rank sessions with prompt-history matches too, recovering prompts the 4KB
 	// session-list prefix never sees. Best-effort: a missing/locked history.db
-	// must not break the picker.
-	let historyMatcher: ((query: string) => string[]) | undefined;
+	// must not break the picker. Transcript hits fold in ahead of history matches
+	// through the same combined matcher as the in-editor /resume selector, so the
+	// two pickers cannot disagree.
+	let historyOnly: ((query: string) => string[]) | undefined;
 	try {
 		const history = HistoryStorage.open();
-		historyMatcher = (query: string) => history.matchingSessionIds(query);
+		historyOnly = (query: string) => history.matchingSessionIds(query);
 	} catch (error) {
 		logger.warn("History storage unavailable for session ranking", { error: String(error) });
 	}
+	const historyMatcher = createSessionRankingMatcher(historyOnly);
 
 	const showSelector = () => {
 		const selector = new SessionSelectorComponent(

@@ -87,7 +87,7 @@ import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
-import { SessionSelectorComponent } from "../components/session-selector";
+import { createSessionRankingMatcher, SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
@@ -1348,7 +1348,9 @@ export class SelectorController {
 		// invites the user to Tab into all-projects rather than silently surfacing
 		// every project's history when the cwd has nothing to resume. See #3099.
 		const historyStorage = this.ctx.historyStorage;
-		const historyMatcher = historyStorage ? (query: string) => historyStorage.matchingSessionIds(query) : undefined;
+		const historyMatcher = createSessionRankingMatcher(
+			historyStorage ? (query: string) => historyStorage.matchingSessionIds(query) : undefined,
+		);
 		// Keep the fullscreen picker on the alternate buffer while a selected
 		// session is loaded and its transcript is rebuilt. Closing it first exposes
 		// the stale normal buffer for the entire async switch on terminals without
