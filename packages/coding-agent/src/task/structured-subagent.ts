@@ -9,6 +9,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
+import type { ExtensionUIContext } from "../extensibility/extensions/types";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -16,6 +17,8 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { ClientBridge } from "../session/client-bridge";
+import type { MissionChildOwnerEntry } from "../session/session-entries";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
@@ -69,6 +72,22 @@ export interface StructuredSubagentIsolationControls {
 	apply?: boolean;
 }
 
+/**
+ * Parent-mediated approvals for mission children. UI lives on the delegate, never
+ * on ToolSession — AgentSession builds this as a closure over its private UI/bridge.
+ */
+export interface ParentApprovalDelegate {
+	kind: "parent";
+	uiContext?: ExtensionUIContext;
+	clientBridge?: ClientBridge;
+}
+
+/** Fixed worktree cwd for a crash-recoverable mission child (not ordinary isolation). */
+export interface PersistentSubagentWorkspace {
+	cwd: string;
+	binding: "fixed";
+}
+
 /** Identity and presentation metadata supplied by the calling surface. */
 export interface StructuredSubagentIdentity {
 	/** A previously reserved output/registry id. */
@@ -97,6 +116,12 @@ export interface StructuredSubagentRequest {
 	invokedAt?: number;
 	acquiredAt?: number;
 	isolation?: StructuredSubagentIsolationControls;
+	/** Fixed mission worktree; omitted callers keep parent cwd. */
+	workspace?: PersistentSubagentWorkspace;
+	/** Parent-mediated approvals; omitted callers keep the yolo subagent boundary. */
+	approvalDelegate?: ParentApprovalDelegate;
+	/** Mission ownership markers written to session_init for cold revive. */
+	missionOwner?: MissionChildOwnerEntry;
 	/** The parent agent name forbidden from recursively spawning itself. */
 	blockedAgent?: string;
 	/** Preserve a completed temporary artifacts directory for an agent:// handle. */
@@ -375,7 +400,7 @@ function buildExecutorOptions(
 	};
 	const enableMCP = !policy.planMode && (session.enableMCP ?? true);
 	return {
-		cwd: session.cwd,
+		cwd: request.workspace?.cwd ?? session.cwd,
 		additionalDirectories: session.additionalDirectories,
 		agent: policy.effectiveAgent,
 		task: renderSubagentPrompt(request.assignment),
@@ -410,6 +435,9 @@ function buildExecutorOptions(
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames: policy.planMode,
 		keepAlive: request.keepAlive,
+		...(request.workspace ? { workspace: request.workspace } : {}),
+		...(request.approvalDelegate ? { approvalDelegate: request.approvalDelegate } : {}),
+		...(request.missionOwner ? { missionOwner: request.missionOwner } : {}),
 		signal: request.signal,
 		eventBus: session.eventBus,
 		onProgress: request.onProgress,

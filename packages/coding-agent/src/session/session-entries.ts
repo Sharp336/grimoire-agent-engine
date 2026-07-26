@@ -164,6 +164,19 @@ export interface TtsrInjectionEntry extends SessionEntryBase {
 	injectedRules: string[];
 }
 
+/**
+ * JSON-safe mission-child ownership markers for session_init.
+ * Lives beside SessionInitEntry (not the mission domain) so session persistence
+ * never imports MissionRuntime.
+ */
+export interface MissionChildOwnerEntry {
+	missionId: string;
+	ownerSessionId: string;
+	role: "implementation" | "scrutiny" | "user-testing";
+	milestoneId: string;
+	featureId: string;
+}
+
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
@@ -183,6 +196,10 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** Fixed mission worktree binding; absent preserves ordinary-task revive-at-parent-cwd semantics. */
+	cwdBinding?: "fixed";
+	/** Mission ownership required to cold-revive a fixed-cwd child in the owning top-level session. */
+	missionOwner?: MissionChildOwnerEntry;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
