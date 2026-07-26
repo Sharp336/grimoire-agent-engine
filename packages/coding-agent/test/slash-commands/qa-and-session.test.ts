@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -48,6 +49,40 @@ function createAcpRuntime(options?: { sessionManager?: SessionManager }) {
 	};
 }
 
+function createCollabQaHarness(readOnly: boolean) {
+	let editorText = "";
+	const sendPrompt = vi.fn();
+	const showStatus = vi.fn();
+	const sessionManager = SessionManager.inMemory();
+	const editor = {
+		setText: (text: string) => {
+			editorText = text;
+		},
+		getText: () => editorText,
+		getExpandedText: () => editorText,
+		addToHistory: vi.fn(),
+		onSubmit: undefined as undefined | ((text: string) => Promise<void>),
+		pendingImages: [],
+		pendingImageLinks: [],
+		clearDraft: vi.fn(() => {
+			editorText = "";
+		}),
+	};
+	const ctx = cast<InteractiveModeContext>({
+		editor,
+		showStatus,
+		sessionManager,
+		session: { isStreaming: false, queuedMessageCount: 0, extensionRunner: undefined },
+		ui: { requestRender: vi.fn() },
+		collabGuest: { readOnly, sendPrompt },
+	});
+
+	const controller = new InputController(ctx);
+	controller.setupEditorSubmitHandler();
+
+	return { editor, sendPrompt, showStatus };
+}
+
 /**
  * Narrow a slash-command result to its prompt text. A real check rather than an
  * inline cast, so a handler that stops returning a prompt fails here loudly
@@ -72,13 +107,22 @@ describe("/qa slash command", () => {
 		expect(prompt).toContain(request);
 	});
 
-	it("with an empty request still returns a non-empty prompt", async () => {
-		const harness = createAcpRuntime();
+	it("forwards rendered QA prompts from writable collaboration guests", async () => {
+		const harness = createCollabQaHarness(false);
+		const request = "verify writable collaboration QA";
 
-		const result = await executeAcpBuiltinSlashCommand("/qa", harness.runtime);
+		await harness.editor.onSubmit?.(`/qa ${request}`);
 
-		expect(result).toEqual(expect.objectContaining({ prompt: expect.any(String) }));
-		expect(promptTextOf(result)).not.toHaveLength(0);
+		expect(harness.sendPrompt).toHaveBeenCalledWith(expect.stringContaining(request), undefined);
+	});
+
+	it("does not forward QA prompts from read-only collaboration guests", async () => {
+		const harness = createCollabQaHarness(true);
+
+		await harness.editor.onSubmit?.("/qa verify read-only policy");
+
+		expect(harness.sendPrompt).not.toHaveBeenCalled();
+		expect(harness.showStatus).toHaveBeenCalledWith("This collab link is read-only — prompting is disabled");
 	});
 
 	it("ACP and TUI dispatchers submit the same rendered prompt for the same input", async () => {
