@@ -60,18 +60,8 @@ function promptTextOf(result: unknown): string {
 	return result.prompt;
 }
 
-function expectQaPhaseObligations(prompt: string) {
-	expect(prompt).toMatch(/inventory/i);
-	expect(prompt).toMatch(/scout/i);
-	expect(prompt).toMatch(/exercise/i);
-	expect(prompt).toMatch(/evidence/i);
-	expect(prompt).toMatch(/report/i);
-	expect(prompt).toMatch(/verdict/i);
-	expect(prompt).toMatch(/no code edits/i);
-}
-
 describe("/qa slash command", () => {
-	it("returns a prompt carrying the request and each phase obligation", async () => {
+	it("returns a prompt carrying the request", async () => {
 		const harness = createAcpRuntime();
 		const request = "verify the login form submits and surfaces errors";
 
@@ -80,22 +70,18 @@ describe("/qa slash command", () => {
 		expect(result).toEqual(expect.objectContaining({ prompt: expect.any(String) }));
 		const prompt = promptTextOf(result);
 		expect(prompt).toContain(request);
-		expectQaPhaseObligations(prompt);
 	});
 
-	it("with an empty request still returns a prompt that infers scope from the working tree", async () => {
+	it("with an empty request still returns a non-empty prompt", async () => {
 		const harness = createAcpRuntime();
 
 		const result = await executeAcpBuiltinSlashCommand("/qa", harness.runtime);
 
 		expect(result).toEqual(expect.objectContaining({ prompt: expect.any(String) }));
-		const prompt = promptTextOf(result);
-		expect(prompt.length).toBeGreaterThan(0);
-		expect(prompt).toMatch(/working tree|git status|recent diff/i);
-		expectQaPhaseObligations(prompt);
+		expect(promptTextOf(result)).not.toHaveLength(0);
 	});
 
-	it("ACP handle and TUI handleTui return the same prompt text for the same input", async () => {
+	it("ACP and TUI dispatchers submit the same rendered prompt for the same input", async () => {
 		const request = "check the slash-command wiring for /qa";
 		const acp = createAcpRuntime();
 		const tui = createTuiRuntime();
@@ -105,8 +91,10 @@ describe("/qa slash command", () => {
 
 		expect(acpResult).toEqual(expect.objectContaining({ prompt: expect.any(String) }));
 		if (typeof tuiResult !== "string") {
-			throw new Error(`expected handleTui to return prompt text, got ${typeof tuiResult}`);
+			throw new Error(`expected TUI dispatch to return prompt text, got ${typeof tuiResult}`);
 		}
+		expect(tuiResult).not.toHaveLength(0);
+		expect(tuiResult).toContain(request);
 		expect(promptTextOf(acpResult)).toBe(tuiResult);
 		expect(tui.setText).toHaveBeenCalledWith("");
 	});

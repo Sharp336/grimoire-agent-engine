@@ -2553,14 +2553,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		acpDescription: "Run an evidence-first QA pass",
 		inlineHint: "[what to verify]",
 		allowArgs: true,
-		handle: (command, runtime) => {
-			void runtime;
-			return { prompt: prompt.render(qaMd, { request: command.args.trim() }) };
-		},
-		handleTui: (command, runtime) => {
-			runtime.ctx.editor.setText("");
-			return { prompt: prompt.render(qaMd, { request: command.args.trim() }) };
-		},
+		handle: command => ({ prompt: prompt.render(qaMd, { request: command.args.trim() }) }),
 	},
 	{
 		name: "live",
