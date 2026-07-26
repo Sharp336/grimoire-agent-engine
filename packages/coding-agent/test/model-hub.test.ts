@@ -341,14 +341,14 @@ describe("ModelHub", () => {
 			hub.handleInput("\n");
 			expect(footerLine(hub.render(220))).toContain("New role name:");
 
-			for (const ch of "reviewer") hub.handleInput(ch);
+			for (const ch of "auditor") hub.handleInput(ch);
 			hub.handleInput("\n");
-			expect(normalize(hub.render(220))).toContain("Assigning reviewer");
+			expect(normalize(hub.render(220))).toContain("Assigning auditor");
 
 			hub.handleInput("\n"); // pick the sole model for the new role
 			expect(onAssign).toHaveBeenCalledTimes(1);
 			const call = onAssign.mock.calls[0];
-			expect(call?.[1]).toBe("reviewer");
+			expect(call?.[1]).toBe("auditor");
 			expect(call?.[3]).toBe("test/reviewer-model");
 		});
 	});

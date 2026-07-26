@@ -143,6 +143,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Grep & Browser",
 		"Computer",
 		"GitHub",
+		"Reviewer",
 		"Output Limits",
 		"Execution",
 		"Discovery & MCP",
