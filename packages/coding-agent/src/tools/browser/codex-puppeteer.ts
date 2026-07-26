@@ -15,6 +15,7 @@ import type {
 	Page,
 } from "puppeteer-core";
 import { withFileLock } from "../../config/file-lock";
+import { truncateHeadBytes } from "../../session/streaming-output";
 import { resolveToCwd } from "../path-utils";
 import { throwIfAborted } from "../tool-errors";
 import { captureAriaSnapshot, getAriaElementState, queryAriaLocatorHandle } from "./aria/aria-snapshot";
@@ -61,6 +62,7 @@ export interface PuppeteerCodexSessionState {
 	closed: boolean;
 	sessionName: string;
 	logs: BrowserLogEntry[];
+	logBytes: number;
 	logPage?: Page;
 	logSession?: CDPSession;
 	logHandler?: (event: RuntimeConsoleEvent) => void;
@@ -68,7 +70,7 @@ export interface PuppeteerCodexSessionState {
 }
 
 export function createPuppeteerCodexSessionState(): PuppeteerCodexSessionState {
-	return { currentTabId: "1", nextTabId: 2, closed: false, sessionName: "", logs: [] };
+	return { currentTabId: "1", nextTabId: 2, closed: false, sessionName: "", logs: [], logBytes: 0 };
 }
 
 interface PuppeteerAdapterOptions {
@@ -99,9 +101,29 @@ function runtimeValueText(value: RuntimeRemoteObject): string {
 	return value.description ?? value.type;
 }
 
+const BROWSER_LOG_ENTRY_MAX_BYTES = 16 * 1024;
+const BROWSER_LOG_TOTAL_MAX_BYTES = 1024 * 1024;
+const BROWSER_LOG_TRUNCATION_MARKER = "\n[…browser log truncated…]";
+const BROWSER_LOG_TRUNCATION_MARKER_BYTES = Buffer.byteLength(BROWSER_LOG_TRUNCATION_MARKER, "utf8");
+
 function appendBrowserLog(state: PuppeteerCodexSessionState, level: string, text: string): void {
-	state.logs.push({ level, text, timestamp: Date.now() });
-	if (state.logs.length > 5_000) state.logs.splice(0, state.logs.length - 5_000);
+	const textBytes = Buffer.byteLength(text, "utf8");
+	const retainedText =
+		textBytes <= BROWSER_LOG_ENTRY_MAX_BYTES
+			? text
+			: truncateHeadBytes(text, BROWSER_LOG_ENTRY_MAX_BYTES - BROWSER_LOG_TRUNCATION_MARKER_BYTES).text +
+				BROWSER_LOG_TRUNCATION_MARKER;
+	state.logs.push({ level, text: retainedText, timestamp: Date.now() });
+	state.logBytes += Buffer.byteLength(retainedText, "utf8");
+	let removeCount = 0;
+	while (
+		removeCount < state.logs.length &&
+		(state.logBytes > BROWSER_LOG_TOTAL_MAX_BYTES || state.logs.length - removeCount > 5_000)
+	) {
+		state.logBytes -= Buffer.byteLength(state.logs[removeCount].text, "utf8");
+		removeCount++;
+	}
+	if (removeCount > 0) state.logs.splice(0, removeCount);
 }
 
 function runtimeExceptionText(event: RuntimeExceptionEvent): string {
@@ -640,6 +662,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			closed: false,
 			sessionName: "",
 			logs: [],
+			logBytes: 0,
 		};
 		this.#page = options.page;
 		this.#browser = options.browser;

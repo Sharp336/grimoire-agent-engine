@@ -37,7 +37,14 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	const normalizeText = value => String(value ?? "").replace(/\\s+/g, " ").trim();
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const canonicalState = element => typeof globalThis.__ompCodexAriaState === "function" ? globalThis.__ompCodexAriaState(element) : null;
-	const textOf = element => normalizeText(element.innerText ?? element.textContent ?? "");
+	const textOf = element => {
+		const tag = String(element?.tagName || "").toLowerCase();
+		const type = String(element?.type || element?.getAttribute?.("type") || "text").toLowerCase();
+		if (tag === "input" && (type === "button" || type === "submit")) {
+			return normalizeText(element.value ?? element.getAttribute?.("value") ?? "");
+		}
+		return normalizeText(element.innerText ?? element.textContent ?? "");
+	};
 	const patternMatches = (pattern, value) => {
 		if (!pattern) return true;
 		const normalized = normalizeText(value);
@@ -144,9 +151,9 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		switch (value.kind) {
 			case "css": return unique(queryAll(roots, value.selector));
 			case "role": return descendants(roots).filter(element => !accessibilityHidden(element) && implicitRole(element) === value.role && patternMatches(value.name, accessibleName(element)));
-			case "text": return descendants(roots).filter(element => !accessibilityHidden(element) && patternMatches(value.text, textOf(element)) && !Array.from(element.children).some(child => patternMatches(value.text, textOf(child))));
-			case "label": return descendants(roots).filter(element => !accessibilityHidden(element) && labelCandidates(element).some(label => patternMatches(value.text, label)));
-			case "placeholder": return descendants(roots).filter(element => !accessibilityHidden(element) && patternMatches(value.text, String(element.getAttribute("placeholder") || "")));
+			case "text": return descendants(roots).filter(element => patternMatches(value.text, textOf(element)) && !Array.from(element.children).some(child => patternMatches(value.text, textOf(child))));
+			case "label": return descendants(roots).filter(element => labelCandidates(element).some(label => patternMatches(value.text, label)));
+			case "placeholder": return descendants(roots).filter(element => patternMatches(value.text, String(element.getAttribute("placeholder") || "")));
 			case "testId": return unique(rootsFor(roots).flatMap(root => Array.from(root.querySelectorAll('[data-testid="' + CSS.escape(value.testId) + '"]'))));
 			case "frame": return unique(rootsFor(roots).flatMap(root => Array.from(root.querySelectorAll(value.selector)).filter(isFrame)));
 			case "within": return query(value.child, query(value.parent, roots));

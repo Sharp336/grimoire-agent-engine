@@ -2891,6 +2891,15 @@ describe("cmux Codex browser review regressions", () => {
 		const mixedText = element("DIV", {});
 		mixedText.textContent = "Mixed   Case Text";
 		mixedText.innerText = "Mixed   Case Text";
+		const hiddenText = element("SPAN", {}, hiddenParent);
+		hiddenText.textContent = "Hidden text";
+		hiddenText.innerText = "Hidden text";
+		const hiddenInput = element(
+			"INPUT",
+			{ "aria-label": "Hidden label", placeholder: "Hidden placeholder" },
+			hiddenParent,
+		);
+		const inputButton = element("INPUT", { type: "submit", value: "Log in" });
 		elements = [
 			element("INPUT", { type: "search", "aria-label": "Search" }),
 			element("INPUT", { type: "number", "aria-label": "Number" }),
@@ -2907,6 +2916,9 @@ describe("cmux Codex browser review regressions", () => {
 			hiddenParent,
 			element("BUTTON", { "aria-label": "Hidden" }, hiddenParent),
 			element("BUTTON", { "aria-label": "Inert" }, inertParent),
+			hiddenText,
+			hiddenInput,
+			inputButton,
 		];
 		const current = await selectedTab(
 			facadeFor({
@@ -2930,8 +2942,12 @@ describe("cmux Codex browser review regressions", () => {
 				current.playwright.getByText("mixed case").count(),
 				current.playwright.getByRole("button", { name: "Hidden", exact: true }).count(),
 				current.playwright.getByRole("button", { name: "Inert", exact: true }).count(),
+				current.playwright.getByText("Hidden text", { exact: true }).count(),
+				current.playwright.getByLabel("Hidden label", { exact: true }).count(),
+				current.playwright.getByPlaceholder("Hidden placeholder", { exact: true }).count(),
+				current.playwright.getByText("Log in", { exact: true }).count(),
 			]),
-		).toEqual([1, 1, 1, 0, 0, 2, 1, 1, 1, 1, 0, 0]);
+		).toEqual([1, 1, 1, 0, 0, 2, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1]);
 	});
 
 	it("normalizes ARIA true states while keeping visual visibility independent", async () => {

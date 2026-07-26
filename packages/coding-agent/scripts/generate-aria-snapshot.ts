@@ -95,6 +95,10 @@ function patternMatches(pattern: TextPattern | undefined, value: string): boolea
 }
 
 function textOf(element: Element): string {
+	if (element.tagName.toLowerCase() === "input") {
+		const type = (element.getAttribute("type") ?? "text").toLowerCase();
+		if (type === "button" || type === "submit") return normalizeText((element as HTMLInputElement).value);
+	}
 	return normalizeText(element.textContent);
 }
 
@@ -181,23 +185,15 @@ function queryLocator(descriptor: LocatorDescriptor, roots: QueryRoot[]): Elemen
 				patternMatches(descriptor.name, normalizeText(getElementAccessibleName(element, false) || textOf(element))),
 			);
 		case "text": {
-			const matched = descendants(roots).filter(element =>
-				!isElementHiddenForAria(element) &&
-				!isInertForAria(element) &&
-				patternMatches(descriptor.text, textOf(element)),
-			);
+			const matched = descendants(roots).filter(element => patternMatches(descriptor.text, textOf(element)));
 			return matched.filter(element => !Array.from(element.children).some(child => patternMatches(descriptor.text, textOf(child))));
 		}
 		case "label":
 			return descendants(roots).filter(element =>
-				!isElementHiddenForAria(element) &&
-				!isInertForAria(element) &&
 				labelCandidates(element).some(label => patternMatches(descriptor.text, label)),
 			);
 		case "placeholder":
 			return descendants(roots).filter(element =>
-				!isElementHiddenForAria(element) &&
-				!isInertForAria(element) &&
 				patternMatches(descriptor.text, element.getAttribute("placeholder") ?? ""),
 			);
 		case "testId":

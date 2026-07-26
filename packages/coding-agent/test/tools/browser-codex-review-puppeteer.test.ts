@@ -67,7 +67,7 @@ async function withPuppeteerTool(test: (tool: BrowserTool, name: string) => Prom
 	<iframe id="only-frame" srcdoc="<button id='frame-button'>Frame target</button>"></iframe>
 	<div id="button-row"><button id="stable">Stable target</button><button id="other">Other target</button></div>
 	<div id="scrollbox" tabindex="0"><div id="scrollcontent">Scroll content</div></div>
-	<select id="choices"><option>One</option></select>`;
+	<select id="choices"><option>One</option></select><input id="submit" type="submit" value="Log in">`;
 	try {
 		await tool.execute("codex-browser-open", {
 			action: "open",
@@ -175,6 +175,26 @@ describe("Puppeteer Codex log capture", () => {
 		});
 		expect(state.logs).toHaveLength(2);
 		expect(session.detachCount).toBe(1);
+	});
+
+	it("bounds retained console payloads and aggregate log bytes", async () => {
+		const session = new DownloadSessionDouble();
+		const state = createPuppeteerCodexSessionState();
+		const page = { target: () => ({ createCDPSession: async () => session }) } as never;
+
+		await attachPuppeteerCodexLogCapture(page, state);
+		for (let index = 0; index < 80; index++) {
+			session.emit("Runtime.consoleAPICalled", {
+				type: "log",
+				args: [{ type: "string", value: `${index}:` + "x".repeat(32 * 1024) }],
+			});
+		}
+
+		expect(state.logs.length).toBeGreaterThan(0);
+		expect(state.logs.every(entry => Buffer.byteLength(entry.text, "utf8") <= 16 * 1024)).toBe(true);
+		expect(state.logs.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.text, "utf8"), 0)).toBeLessThanOrEqual(
+			1024 * 1024,
+		);
 	});
 });
 
@@ -1120,7 +1140,8 @@ describe("Puppeteer final parity blockers", () => {
 				   hiddenPlaceholder:await p.getByPlaceholder("ARIA hidden placeholder",{exact:true}).count(),
 				   inertText:await p.getByText("Inert hidden text",{exact:true}).count(),
 				   inertLabel:await p.getByLabel("Inert hidden label",{exact:true}).count(),
-				   inertPlaceholder:await p.getByPlaceholder("Inert hidden placeholder",{exact:true}).count()
+				   inertPlaceholder:await p.getByPlaceholder("Inert hidden placeholder",{exact:true}).count(),
+				   inputButtonText:await p.getByText("Log in",{exact:true}).count()
 				 };`,
 			);
 			expect(result).toEqual({
@@ -1137,12 +1158,13 @@ describe("Puppeteer final parity blockers", () => {
 				displayHidden: 0,
 				ariaHidden: 0,
 				inertHidden: 0,
-				hiddenText: 0,
-				hiddenLabel: 0,
-				hiddenPlaceholder: 0,
-				inertText: 0,
-				inertLabel: 0,
-				inertPlaceholder: 0,
+				hiddenText: 1,
+				hiddenLabel: 1,
+				hiddenPlaceholder: 1,
+				inertText: 1,
+				inertLabel: 1,
+				inertPlaceholder: 1,
+				inputButtonText: 1,
 			});
 		});
 	}, 20_000);
