@@ -909,6 +909,55 @@ ${table}`;
 		});
 	});
 
+	describe("Source syntax presentation", () => {
+		it("hides fenced-code delimiters while preserving code content", () => {
+			const markdown = new Markdown("```ts\nconst answer = 42;\nconsole.log(answer);\n```", 0, 0, defaultMarkdownTheme);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["  const answer = 42;", "  console.log(answer);"]);
+		});
+
+		it("styles level-three and deeper headings without rendering source hashes", () => {
+			const markerTheme = {
+				...defaultMarkdownTheme,
+				heading: (text: string) => `<heading>${text}</heading>`,
+				bold: (text: string) => `<bold>${text}</bold>`,
+			};
+			const markdown = new Markdown("### Details\n\n#### Internals", 0, 0, markerTheme);
+			const lines = markdown.render(80).map(line => line.trimEnd());
+
+			expect(lines).toEqual([
+				"<heading><bold>Details</bold></heading>",
+				"",
+				"<heading><bold>Internals</bold></heading>",
+			]);
+		});
+
+		it("hides fenced-code delimiters inside lists while preserving nesting", () => {
+			const markdown = new Markdown(
+				"- Example:\n\n  ```ts\n  const nested = true;\n  ```",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["- Example:", "    const nested = true;"]);
+		});
+
+		it("separates consecutive fenced blocks inside one list item without showing delimiters", () => {
+			const markdown = new Markdown(
+				"- Examples:\n\n  ```ts\n  const first = 1;\n  ```\n\n  ```sh\n  echo second\n  ```",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["- Examples:", "    const first = 1;", "", "    echo second"]);
+		});
+	});
+
 	describe("Spacing after code blocks", () => {
 		it("should have only one blank line between code block and following paragraph", () => {
 			const markdown = new Markdown(
@@ -927,15 +976,15 @@ again, hello world`,
 			const lines = markdown.render(80);
 			const plainLines = lines.map(line => stripVTControlCharacters(line).trimEnd());
 
-			const closingBackticksIndex = plainLines.indexOf("```");
-			expect(closingBackticksIndex !== -1, "Should have closing backticks").toBeTruthy();
+			const codeLineIndex = plainLines.indexOf('  const hello = "world";');
+			expect(codeLineIndex !== -1, "Should render code content").toBeTruthy();
 
-			const afterBackticks = plainLines.slice(closingBackticksIndex + 1);
-			const emptyLineCount = afterBackticks.findIndex(line => line !== "");
+			const afterCode = plainLines.slice(codeLineIndex + 1);
+			const emptyLineCount = afterCode.findIndex(line => line !== "");
 
 			expect(
 				emptyLineCount,
-				`Expected 1 empty line after code block, but found ${emptyLineCount}. Lines after backticks: ${JSON.stringify(afterBackticks.slice(0, 5))}`,
+				`Expected 1 empty line after code block, but found ${emptyLineCount}. Lines after code: ${JSON.stringify(afterCode.slice(0, 5))}`,
 			).toBe(1);
 		});
 
@@ -954,7 +1003,7 @@ code block
 
 more text`,
 			];
-			const expectedLines = ["hello this is text", "", "```", "  code block", "```", "", "more text"];
+			const expectedLines = ["hello this is text", "", "  code block", "", "more text"];
 
 			for (const text of cases) {
 				const markdown = new Markdown(text, 0, 0, defaultMarkdownTheme);
@@ -1000,7 +1049,7 @@ more text`,
 			expect(plainLines.some(line => line.includes("```mermaid"))).toBeFalsy();
 		});
 
-		it("falls back to the original fenced code block when mermaid resolution returns null", () => {
+		it("falls back to styled code content when mermaid resolution returns null", () => {
 			const invalidMermaid = "```mermaid\nflowchart TD\n  A --\n```";
 			const invalidSource = "flowchart TD\n  A --";
 			const seenSources: string[] = [];
@@ -1011,7 +1060,7 @@ more text`,
 			});
 
 			expect(seenSources).toEqual([invalidSource]);
-			expect(plainLines).toEqual(["```mermaid", "  flowchart TD", "    A --", "```"]);
+			expect(plainLines).toEqual(["  flowchart TD", "    A --"]);
 		});
 	});
 
@@ -1378,9 +1427,9 @@ bar`,
 			const output = lines.join("\n");
 			const plainOutput = quotedLines.join("\n");
 
-			expect(plainOutput.includes("```js")).toBeTruthy();
+			expect(plainOutput.includes("```js")).toBeFalsy();
 			expect(plainOutput.includes("console.log(1)")).toBeTruthy();
-			expect(plainOutput.includes("```")).toBeTruthy();
+			expect(plainOutput.includes("```")).toBeFalsy();
 			expect(output.includes("\x1b[35m")).toBeFalsy();
 			expect(output.includes("\x1b[3m")).toBeTruthy();
 		});

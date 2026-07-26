@@ -2194,7 +2194,6 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 		switch (token.type) {
 			case "heading": {
 				const headingLevel = token.depth;
-				const headingPrefix = `${"#".repeat(headingLevel)} `;
 				const headingText = this.#renderInlineTokens(token.tokens || [], styleContext);
 				const headingPlainText = plainInlineTokens(token.tokens || []);
 				let styledHeading: string;
@@ -2212,10 +2211,8 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 				}
 				if (headingLevel === 1) {
 					styledHeading = this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)));
-				} else if (headingLevel === 2) {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingText));
 				} else {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingPrefix + headingText));
+					styledHeading = this.#theme.heading(this.#theme.bold(headingText));
 				}
 				lines.push(styledHeading);
 				if (nextTokenType && nextTokenType !== "space") {
@@ -2262,11 +2259,9 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 				}
 
 				const codeIndent = padding(this.#codeBlockIndent);
-				lines.push(this.#theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
 				for (const bodyLine of this.#renderCodeBodyLines(token, codeIndent)) {
 					lines.push(bodyLine);
 				}
-				lines.push(this.#theme.codeBlockBorder("```"));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}
@@ -2663,6 +2658,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 		styleContext?: InlineStyleContext,
 	): Array<{ text: string; nested: boolean }> {
 		const lines: Array<{ text: string; nested: boolean }> = [];
+		let previousNonSpaceType: string | undefined;
 
 		for (const token of tokens) {
 			if (token.type === "list") {
@@ -2698,12 +2694,11 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 				}
 			} else if (token.type === "code") {
 				// Code block in list item
+				if (previousNonSpaceType === "code") lines.push({ text: "", nested: false });
 				const codeIndent = padding(this.#codeBlockIndent);
-				lines.push({ text: this.#theme.codeBlockBorder(`\`\`\`${token.lang || ""}`), nested: false });
 				for (const bodyLine of this.#renderCodeBodyLines(token, codeIndent)) {
 					lines.push({ text: bodyLine, nested: false });
 				}
-				lines.push({ text: this.#theme.codeBlockBorder("```"), nested: false });
 			} else if (isMathToken(token)) {
 				// Display math block inside a list item: stack fractions / matrix rows.
 				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
@@ -2715,6 +2710,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 					lines.push({ text, nested: false });
 				}
 			}
+			if (token.type !== "space") previousNonSpaceType = token.type;
 		}
 
 		return lines;
