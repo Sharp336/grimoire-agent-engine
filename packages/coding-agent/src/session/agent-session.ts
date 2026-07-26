@@ -35,6 +35,8 @@ import {
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
+	type BeforeToolCallContext,
+	type BeforeToolCallResult,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -1175,6 +1177,9 @@ export class AgentSession {
 		});
 		// Tool-result hook owns synchronous post-tool actions that must affect the current loop.
 		this.agent.afterToolCall = ctx => this.#afterToolCall(ctx);
+		// Pre-call hook owns the loop-guard veto gate (blocks no-progress / wandering
+		// calls before they execute) and must run before any tool dispatch.
+		this.agent.beforeToolCall = (ctx, signal) => this.#beforeToolCall(ctx, signal);
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
@@ -2945,7 +2950,23 @@ export class AgentSession {
 		}
 	}
 
+	#beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): BeforeToolCallResult | undefined {
+		// The loop-guard veto gate runs first — if it blocks, the tool never executes.
+		const loopResult = this.#loopGuards.beforeToolCall(ctx, signal);
+		if (loopResult?.block) return loopResult;
+		return undefined;
+	}
+
 	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+		// Run TTSR first — it may prepend a reminder to the result content that
+		// the model sees. The loop guard must hash the TTSR-transformed result,
+		// not the raw one, so two calls with the same raw output but different
+		// TTSR rules don't falsely match (or vice versa).
+		const ttsrResult = this.#ttsr.afterToolCall(ctx);
+		const effectiveCtx =
+			ttsrResult?.content !== undefined ? { ...ctx, result: { ...ctx.result, content: ttsrResult.content } } : ctx;
+		// Feed the effective (TTSR-transformed) outcome into the loop-guard tracker.
+		this.#loopGuards.afterToolCall(effectiveCtx);
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -2956,8 +2977,13 @@ export class AgentSession {
 			this.#markTerminalYieldToolCall(ctx.toolCall.id);
 			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+			// Terminal yields abort the turn, which skips onTurnEnd → recordTurn.
+			// Without resetting here, identical terminal yields across separate
+			// prompts accumulate a no-progress streak that would eventually
+			// veto the next yield and block task completion.
+			this.#loopGuards.resetStreaks();
 		}
-		return this.#ttsr.afterToolCall(ctx);
+		return ttsrResult;
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */

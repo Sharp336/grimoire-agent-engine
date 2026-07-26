@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ToolCallLoopGuard` now detects no-progress loops (identical args AND identical result across consecutive turns) and vetoes the next call before it executes via the new `check()` pre-call gate — the stuck tool never runs, never burns tokens. Vetoed calls are excluded from the streak so the veto itself doesn't inflate it. Volatile result fields (`timestamp`, `requestId`, `durationMs`, etc.) are stripped before hashing so per-call timings don't defeat detection.
+- Added a wandering detector for prone tools (`web.fetch`, `http.request`, `browser.*`): counts distinct argument sets and warns at `wanderingThreshold` (default 6), escalating to a breaker veto at `wanderingEscalation` (default 12). Bulk reads over distinct files are deliberately not prone.
+- Added a breaker: consecutive critical vetoes ≥ `breakerVetoStreak` (default 3) end the turn gracefully — the session stays pending, no hard failure.
+- Exported new types: `ToolCallCheckInput`, `ToolCallCheckVerdict`, `ToolCallOutcome`, `WanderingToolCallDetection`, `ToolCallLoopDetection`.
+
 ## [17.1.4] - 2026-07-26
 
 ### Added

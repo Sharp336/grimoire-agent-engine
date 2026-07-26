@@ -313,6 +313,15 @@ const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
+const DEFAULT_TOOL_CALL_LOOP_PRONE_TOOLS: string[] = [
+	"web.fetch",
+	"fetch",
+	"http.request",
+	"browser",
+	"browser.click",
+	"browser.navigate",
+	"browser.type",
+];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
@@ -1174,6 +1183,66 @@ export const SETTINGS_SCHEMA = {
 			group: "Thinking",
 			label: "Tool-Call Loop Exempt Tools",
 			description: "Tool names that may repeat consecutively without triggering the cross-turn loop guard",
+		},
+	},
+
+	"model.toolCallLoopGuard.noProgressThreshold": {
+		type: "number",
+		default: 5,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Tool-Call No-Progress Threshold",
+			description:
+				"Consecutive identical tool calls (same args AND same result) before the guard vetoes the next call before it runs. 0 disables the no-progress veto.",
+		},
+	},
+
+	"model.toolCallLoopGuard.wanderingThreshold": {
+		type: "number",
+		default: 6,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Tool-Call Wandering Threshold",
+			description:
+				"Distinct argument sets on a prone tool (web.fetch, http.request, browser.*) before the guard warns about wandering. 0 disables.",
+		},
+	},
+
+	"model.toolCallLoopGuard.wanderingEscalation": {
+		type: "number",
+		default: 12,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Tool-Call Wandering Escalation",
+			description:
+				"Distinct argument sets on a prone tool before the guard escalates wandering to a veto / breaker. Must be >= wanderingThreshold.",
+		},
+	},
+
+	"model.toolCallLoopGuard.breakerVetoStreak": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Tool-Call Breaker Veto Streak",
+			description:
+				"Consecutive no-progress vetoes before the breaker ends the turn gracefully (session stays pending, no hard failure).",
+		},
+	},
+
+	"model.toolCallLoopGuard.proneTools": {
+		type: "array",
+		default: DEFAULT_TOOL_CALL_LOOP_PRONE_TOOLS,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Tool-Call Wandering-Prone Tools",
+			description:
+				"Tool names where many distinct argument sets indicate wandering (probing) rather than legitimate bulk work.",
 		},
 	},
 
