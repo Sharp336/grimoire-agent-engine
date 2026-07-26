@@ -129,6 +129,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"notice",
 	"thinking_level_changed",
 	"goal_updated",
+	"mission_updated",
+	"mission_progress",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {

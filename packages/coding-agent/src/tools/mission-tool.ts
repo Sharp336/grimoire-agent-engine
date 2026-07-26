@@ -148,7 +148,7 @@ function milestoneOf(state: MissionState | null, feature: MissionFeature | undef
 	return state.milestones.find(milestone => milestone.id === feature.milestoneId);
 }
 
-function sanitizeMissionLine(value: string, maxWidth: number): string {
+export function sanitizeMissionLine(value: string, maxWidth: number): string {
 	return replaceTabs(truncateToWidth(value.replaceAll(/\s+/g, " ").trim(), maxWidth));
 }
 

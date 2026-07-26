@@ -27,6 +27,8 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import { resolveMemoryBackend } from "../memory-backend";
+import { MISSION_BUSY, type MissionRuntime, MissionRuntimeError, restartMission } from "../missions/runtime";
+import type { MissionState } from "../missions/types";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
@@ -37,7 +39,9 @@ import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { sanitizeMissionLine } from "../tools/mission-tool";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
+import { TRUNCATE_LENGTHS } from "../tools/render-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
 	getChangelogPath,
@@ -108,6 +112,53 @@ async function applyComputerUseToggle(session: AgentSession, enable: boolean): P
 	}
 	session.settings.override("computer.enabled", enable);
 	return `Computer use ${enable ? "enabled" : "disabled"} for this session.`;
+}
+
+/** One-screen mission summary shared by every `/mission` verb and both hosts. */
+function formatMissionStatus(state: MissionState): string {
+	const lines = [
+		`Mission: ${state.status}${state.pauseReason ? ` (${state.pauseReason})` : ""}`,
+		`Goal: ${sanitizeMissionLine(state.goal, TRUNCATE_LENGTHS.CONTENT)}`,
+	];
+	const active = state.features.find(feature => feature.status === "in_progress");
+	if (active)
+		lines.push(`Current: ${active.id} — ${sanitizeMissionLine(active.description, TRUNCATE_LENGTHS.CONTENT)}`);
+	const done = state.features.filter(feature => feature.status === "completed").length;
+	lines.push(`Features: ${done}/${state.features.length} completed`);
+	return lines.join("\n");
+}
+
+/**
+ * `/mission` verb semantics, owned in one place so the ACP and TUI hosts cannot drift.
+ * Returns the text to surface; each host decides how to display it.
+ */
+async function runMissionVerb(mission: MissionRuntime, args: string): Promise<string> {
+	const { verb, rest } = parseSubcommand(args);
+	const messageToWorker = rest || undefined;
+	switch (verb) {
+		case "status": {
+			const snapshot = mission.snapshot();
+			return snapshot ? formatMissionStatus(snapshot) : "No active mission.";
+		}
+		case "accept":
+			return formatMissionStatus(await mission.accept());
+		case "pause":
+			return formatMissionStatus(await mission.pause("user_requested"));
+		case "resume":
+			if (mission.isBusy()) throw new MissionRuntimeError(`${MISSION_BUSY}: cannot resume while work is in flight.`);
+			return formatMissionStatus(await mission.resume({ messageToWorker }));
+		case "restart": {
+			if (mission.isBusy())
+				throw new MissionRuntimeError(`${MISSION_BUSY}: cannot restart while work is in flight.`);
+			const state = await restartMission(mission, messageToWorker);
+			return state ? formatMissionStatus(state) : "No active mission.";
+		}
+		case "cancel":
+			return formatMissionStatus(await mission.cancel());
+		default:
+			// Anything else is the goal itself: `/mission <goal>` starts one.
+			return formatMissionStatus(await mission.start(args.trim()));
+	}
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -2544,6 +2595,38 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
+		},
+	},
+	{
+		name: "mission",
+		description: "Run a long multi-feature goal as an orchestrated mission",
+		acpDescription: "Manage the session's mission",
+		inlineHint: "[goal | status | accept | pause | resume | restart | cancel]",
+		acpInputHint: "[goal|status|accept|pause|resume|restart|cancel]",
+		subcommands: [
+			{ name: "status", description: "Show the current mission snapshot" },
+			{ name: "accept", description: "Accept the proposed plan and begin execution" },
+			{ name: "pause", description: "Pause the mission after in-flight work settles" },
+			{ name: "resume", description: "Resume by the recorded pause reason", usage: "[message]" },
+			{ name: "restart", description: "Release the current worker and retry fresh", usage: "[message]" },
+			{ name: "cancel", description: "Cancel the mission, preserving nonempty workspaces" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			try {
+				await runtime.output(await runMissionVerb(runtime.session.missionRuntime, command.args));
+			} catch (err) {
+				return usage(`Mission: ${errorMessage(err)}`, runtime);
+			}
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			try {
+				runtime.ctx.showStatus(await runMissionVerb(runtime.ctx.session.missionRuntime, command.args));
+			} catch (err) {
+				runtime.ctx.showError(`Mission: ${errorMessage(err)}`);
+			}
 		},
 	},
 	{

@@ -4287,8 +4287,8 @@ export class AgentSession {
 			ownerSessionId: () => this.sessionManager.getSessionId(),
 			cwd: () => this.sessionManager.getCwd(),
 			sessionManager: this.sessionManager,
-			emitUpdated: () => {},
-			emitProgress: () => {},
+			emitUpdated: state => this.#emitSessionEvent({ type: "mission_updated", mission: state }),
+			emitProgress: event => this.#emitSessionEvent({ type: "mission_progress", event }),
 			sendHiddenMessage: async message => {
 				await this.sendCustomMessage(
 					{ customType: message.customType, content: message.content, display: false, attribution: "agent" },

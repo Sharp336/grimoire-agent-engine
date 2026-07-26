@@ -208,6 +208,10 @@ export class EventController {
 				this.ctx.ui.resetDisplay();
 			},
 			goal_updated: async () => {},
+			// The mission tool renderer already draws mission state in the transcript; the TUI
+			// needs no extra repaint on these.
+			mission_updated: async () => {},
+			mission_progress: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 
