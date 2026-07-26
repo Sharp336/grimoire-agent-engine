@@ -103,6 +103,7 @@ describe("AgentSession handoff", () => {
 			settings: Settings.isolated({
 				"compaction.enabled": true,
 				"compaction.autoContinue": false,
+				"schedule.enabled": true,
 			}),
 			modelRegistry,
 			obfuscator,
@@ -161,6 +162,20 @@ describe("AgentSession handoff", () => {
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+	});
+
+	it("re-arms schedules after handoff replaces the transcript", async () => {
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
+		const oldController = session.getSessionSchedule();
+		if (!oldController) throw new Error("Expected initial schedule controller");
+		oldController.create({ delayMs: 60_000, prompt: "old transcript wake" });
+
+		await session.handoff();
+
+		const replacementController = session.getSessionSchedule();
+		expect(replacementController).toBeDefined();
+		expect(replacementController).not.toBe(oldController);
+		expect(replacementController?.listPending()).toEqual([]);
 	});
 
 	it("clears staged preview state when handoff creates the replacement session", async () => {

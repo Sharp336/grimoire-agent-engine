@@ -305,6 +305,7 @@ import {
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
+import { initSessionSchedules, type SessionScheduleController } from "./session-schedule";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -480,6 +481,15 @@ export class AgentSession {
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
+	/**
+	 * Dedicated timer pool for session schedules. Deliberately NOT the extension
+	 * runner's `ManagedTimers`: its `clearAll()` runs on extension teardown, which
+	 * would silently disarm every pending wake.
+	 */
+	readonly #sessionScheduleTimers = new ManagedTimers((event, error) =>
+		logger.warn("Session schedule timer callback threw", { event, error }),
+	);
+	#sessionSchedule: SessionScheduleController | undefined;
 	readonly #advisors: SessionAdvisors;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
@@ -1263,6 +1273,7 @@ export class AgentSession {
 				);
 			},
 		});
+		this.#rearmSessionSchedules();
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
 		});
@@ -1425,6 +1436,7 @@ export class AgentSession {
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
+			rearmSessionSchedules: () => this.#rearmSessionSchedules(),
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
 
@@ -3505,6 +3517,9 @@ export class AgentSession {
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
+		this.#sessionSchedule?.dispose();
+		this.#sessionSchedule = undefined;
+		this.#sessionScheduleTimers.clearAll();
 		try {
 			await emitSessionShutdownEvent(this.#extensionRunner);
 		} catch (error) {
@@ -3513,6 +3528,9 @@ export class AgentSession {
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();
+		// Same reason, and one more: an armed wake closes over this session's manager, so a
+		// schedule surviving teardown would both pin the disposed session and later fire
+		// getEntries/appendCustomEntry against a SessionManager already closed below.
 		this.abortRetry();
 		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
@@ -4227,6 +4245,48 @@ export class AgentSession {
 
 	get goalRuntime(): GoalRuntime {
 		return this.#goalRuntime;
+	}
+
+	/** Deliver an agent-authored message that stays hidden from the transcript. */
+	async #sendHiddenMessage(message: {
+		customType: string;
+		content: string;
+		deliverAs?: "steer" | "followUp" | "nextTurn";
+		triggerTurn?: boolean;
+	}): Promise<void> {
+		if (this.#isDisposed) return;
+		await this.sendCustomMessage(
+			{
+				customType: message.customType,
+				content: message.content,
+				display: false,
+				attribution: "agent",
+			},
+			{ deliverAs: message.deliverAs, triggerTurn: message.triggerTurn },
+		);
+	}
+
+	/**
+	 * (Re)arm persisted one-shot wakes for the active branch. Called at construction and
+	 * after any branch swap, since `newSession`/`switchSession` replace the entry set the
+	 * pending fold derives from.
+	 */
+	#rearmSessionSchedules(): void {
+		this.#sessionSchedule?.dispose();
+		this.#sessionSchedule = undefined;
+		if (!this.settings.get("schedule.enabled") || this.#agentKind === "sub") return;
+		this.#sessionSchedule = initSessionSchedules(this.sessionManager.getBranch(), this.#sessionScheduleTimers, {
+			getEntries: () => this.sessionManager.getBranch(),
+			appendCustomEntry: (customType, data) => this.sessionManager.appendCustomEntry(customType, data),
+			flush: () => this.sessionManager.flush(),
+			sendHiddenMessage: message => this.#sendHiddenMessage(message),
+			isLive: () => !this.#isDisposed,
+		});
+	}
+
+	/** Live schedule controller read by the schedule tool. */
+	getSessionSchedule(): SessionScheduleController | undefined {
+		return this.#sessionSchedule;
 	}
 
 	markPlanReferenceSent(): void {
@@ -5966,6 +6026,10 @@ export class AgentSession {
 		// not the previous session's — refresh before the next turn goes out.
 		await this.refreshBaseSystemPrompt();
 
+		// The branch just changed, so the previous branch's wakes are no longer ours to
+		// fire and this branch's have never been armed.
+		this.#rearmSessionSchedules();
+
 		// Emit session_switch event with reason "new" to hooks
 		if (this.#extensionRunner) {
 			await this.#extensionRunner.emit({
@@ -6053,6 +6117,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		await this.#memory.resetContextForNewTranscript();
+		this.#rearmSessionSchedules();
 
 		// Emit session_switch event with reason "fork" to hooks
 		if (this.#extensionRunner) {
@@ -6362,6 +6427,7 @@ export class AgentSession {
 		this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
 		this.#advisors.resetSessionState();
 		this.#todo.syncFromBranch();
+		this.#rearmSessionSchedules();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
@@ -6980,6 +7046,9 @@ export class AgentSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisors.resetSessionState();
 			this.#todo.syncFromBranch();
+			// Same reason as newSession: the entry set the pending fold derives from was
+			// just replaced, so re-arm against the branch we actually switched to.
+			this.#rearmSessionSchedules();
 			if (switchingToDifferentSession) {
 				this.#closeAllProviderSessions("session switch");
 			} else if (didReloadConversationChange) {
@@ -7113,6 +7182,7 @@ export class AgentSession {
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
 			this.#todo.syncFromBranch();
+			this.#rearmSessionSchedules();
 			this.#advisors.resetAllRuntimes();
 			this.#reconnectToAgent();
 			try {
@@ -7197,6 +7267,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		await this.#memory.resetContextForNewTranscript();
+		this.#rearmSessionSchedules();
 
 		// Reload messages from entries (works for both file and in-memory mode)
 		const sessionContext = this.buildDisplaySessionContext();
@@ -7301,6 +7372,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		await this.#memory.resetContextForNewTranscript();
+		this.#rearmSessionSchedules();
 
 		const sessionContext = this.buildDisplaySessionContext();
 
@@ -7600,6 +7672,7 @@ export class AgentSession {
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState();
 		this.#todo.syncFromBranch();
+		this.#rearmSessionSchedules();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
 		this.#branchSummaryAbortController = undefined;

@@ -3842,6 +3842,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Default-off: an armed wake re-enters the model on a timer, so it stays opt-in.
+	"schedule.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Schedule",
+			description: "Let the agent schedule a one-shot wake prompt for this session (fires only while it runs)",
+		},
+	},
+
 	"computer.backend": {
 		type: "enum",
 		values: ["auto", "native"] as const,
