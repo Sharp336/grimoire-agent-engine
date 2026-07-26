@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 
 export type CheckerToolName = "Write" | "Edit" | "MultiEdit";
@@ -84,7 +83,6 @@ export function extractFromOmpEditDetails(
 			const movePath = getString(item, ["move", "movePath", "move_path"]);
 			let oldText = getString(item, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
 			let newText = getString(item, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
-			const targetPath = movePath ?? filePath;
 
 			const isPruned = item.snapshotsPruned === true || details.snapshotsPruned === true;
 			const hasSnapshotText =
@@ -92,18 +90,14 @@ export function extractFromOmpEditDetails(
 				hasField(item, ["newText", "new_text", "newString", "new_string", "after", "new"]);
 
 			if (isPruned) {
-				if (targetPath && existsSync(targetPath)) {
-					try {
-						newText = readFileSync(targetPath, "utf-8");
-					} catch {
-						// ignore
-					}
+				if (oldText.length === 0 && input) {
+					oldText = getString(input, ["old_string", "oldString", "oldText", "old_text", "before", "old"]) ?? "";
 				}
 				if (newText.length === 0 && input) {
-					newText = getString(input, ["content", "new_string", "newString", "newText", "after", "new"]) ?? "";
-					if (oldText.length === 0) {
-						oldText = getString(input, ["old_string", "oldString", "oldText", "before", "old"]) ?? "";
-					}
+					newText = getString(input, ["new_string", "newString", "newText", "new_text", "after", "new"]) ?? "";
+				}
+				if (oldText.length === 0 || newText.length === 0) {
+					continue;
 				}
 			} else if (!hasSnapshotText) {
 				continue;
@@ -128,7 +122,6 @@ export function extractFromOmpEditDetails(
 			const movePath = getString(details, ["move", "movePath", "move_path"]);
 			let oldText = getString(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
 			let newText = getString(details, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
-			const targetPath = movePath ?? filePath;
 
 			const isPruned = details.snapshotsPruned === true;
 			const hasSnapshotText =
@@ -136,18 +129,14 @@ export function extractFromOmpEditDetails(
 				hasField(details, ["newText", "new_text", "newString", "new_string", "after", "new"]);
 
 			if (isPruned) {
-				if (targetPath && existsSync(targetPath)) {
-					try {
-						newText = readFileSync(targetPath, "utf-8");
-					} catch {
-						// ignore
-					}
+				if (oldText.length === 0 && input) {
+					oldText = getString(input, ["old_string", "oldString", "oldText", "old_text", "before", "old"]) ?? "";
 				}
 				if (newText.length === 0 && input) {
-					newText = getString(input, ["content", "new_string", "newString", "newText", "after", "new"]) ?? "";
-					if (oldText.length === 0) {
-						oldText = getString(input, ["old_string", "oldString", "oldText", "before", "old"]) ?? "";
-					}
+					newText = getString(input, ["new_string", "newString", "newText", "new_text", "after", "new"]) ?? "";
+				}
+				if (oldText.length === 0 || newText.length === 0) {
+					return [];
 				}
 			} else if (!hasSnapshotText) {
 				return [];

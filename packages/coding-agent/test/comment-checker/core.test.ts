@@ -358,7 +358,7 @@ describe("extractCommentCheckRequests", () => {
 		]);
 	});
 
-	it("re-reads or falls back to input when per-file result has snapshotsPruned", () => {
+	it("skips file when per-file result has snapshotsPruned and deltas cannot be reconstructed from input", () => {
 		const details = {
 			perFileResults: [
 				{
@@ -387,13 +387,33 @@ describe("extractCommentCheckRequests", () => {
 				success: true,
 				op: "edit",
 			},
+		]);
+	});
+
+	it("reconstructs edit delta from input when snapshots are pruned and both old and new text exist in input", () => {
+		const details = {
+			perFileResults: [
+				{
+					path: "src/pruned.ts",
+					snapshotsPruned: true,
+				},
+			],
+		};
+		const input = {
+			old_string: "const a = 1;",
+			new_string: "const a = 2;",
+		};
+
+		const results = extractFromOmpEditDetails(details, input);
+
+		expect(results).toEqual([
 			{
-				filePath: "src/b.ts",
+				filePath: "src/pruned.ts",
 				movePath: undefined,
-				oldText: "",
-				newText: "const b = 2;\n",
+				oldText: "const a = 1;",
+				newText: "const a = 2;",
+				op: "edit",
 				success: true,
-				op: "write",
 			},
 		]);
 	});
@@ -461,7 +481,7 @@ describe("extractCommentCheckRequests", () => {
 		]);
 	});
 
-	it("re-reads updated content from disk when edit details snapshots are pruned and file exists", () => {
+	it("skips pruned snapshots without deltas instead of re-reading from disk and emitting whole-file scan", () => {
 		using tempDir = TempDir.createSync("@omp-comment-checker-test-");
 		const filePath = join(tempDir.path(), "pruned.ts");
 		writeFileSync(filePath, "const diskValue = 42;\n", "utf-8");
@@ -477,16 +497,7 @@ describe("extractCommentCheckRequests", () => {
 
 		const results = extractFromOmpEditDetails(details);
 
-		expect(results).toEqual([
-			{
-				filePath,
-				movePath: undefined,
-				oldText: "",
-				newText: "const diskValue = 42;\n",
-				op: "write",
-				success: true,
-			},
-		]);
+		expect(results).toEqual([]);
 	});
 });
 
