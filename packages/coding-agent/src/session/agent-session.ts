@@ -1691,7 +1691,7 @@ export class AgentSession {
 			rekeyMemoryForCurrentSessionId: () => {
 				this.#memory.rekeyForCurrentSessionId();
 			},
-			resetMemoryContextForNewTranscript: () => this.#memory.resetContextForNewTranscript(),
+			resetMemoryContextForNewTranscript: () => this.#resetMemoryContextForNewTranscript(),
 			clearPendingNextTurnMessages: () => {
 				this.#pendingNextTurnMessages = [];
 				this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -4567,6 +4567,13 @@ export class AgentSession {
 		return this.#memory.applyMemoryBackend();
 	}
 
+	async #resetMemoryContextForNewTranscript(): Promise<void> {
+		if (this.#memoryBackend?.id !== this.settings.get("memory.backend")) {
+			await this.#memory.applyMemoryBackend();
+		}
+		await this.#memory.resetContextForNewTranscript();
+	}
+
 	/** Replaces connected MCP tools and enables them immediately. */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		return this.#tools.refreshMCPTools(mcpTools);
@@ -6786,11 +6793,8 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
-			if (this.#memoryBackend?.id !== this.settings.get("memory.backend")) {
-				await this.#memory.applyMemoryBackend();
-			}
 			this.#memory.rekeyForCurrentSessionId();
-			await this.#memory.resetContextForNewTranscript();
+			await this.#resetMemoryContextForNewTranscript();
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 
@@ -6894,7 +6898,7 @@ export class AgentSession {
 		this.#adoptInheritedProviderPromptCacheKey();
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
-		await this.#memory.resetContextForNewTranscript();
+		await this.#resetMemoryContextForNewTranscript();
 
 		// Emit session_switch event with reason "fork" to hooks
 		if (this.#extensionRunner) {
@@ -7967,7 +7971,7 @@ export class AgentSession {
 			);
 
 			if (switchingToDifferentSession) {
-				await this.#memory.resetContextForNewTranscript();
+				await this.#resetMemoryContextForNewTranscript();
 			}
 			if (switchingToDifferentSession) {
 				this.#clearSessionScopedToolState();
@@ -8099,7 +8103,7 @@ export class AgentSession {
 		this.#clearInheritedProviderPromptCacheKey();
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
-		await this.#memory.resetContextForNewTranscript();
+		await this.#resetMemoryContextForNewTranscript();
 
 		// Reload messages from entries (works for both file and in-memory mode)
 		const sessionContext = this.buildDisplaySessionContext();
@@ -8203,7 +8207,7 @@ export class AgentSession {
 		this.#freshProviderSessionId = undefined;
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
-		await this.#memory.resetContextForNewTranscript();
+		await this.#resetMemoryContextForNewTranscript();
 
 		const sessionContext = this.buildDisplaySessionContext();
 

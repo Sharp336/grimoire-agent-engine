@@ -791,7 +791,11 @@ describe("AgentSession message pipeline", () => {
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false, "provider.appendOnlyContext": "on" }),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"memory.backend": "mnemopi",
+				"provider.appendOnlyContext": "on",
+			}),
 			modelRegistry: createModelRegistryStub() as never,
 			rebuildSystemPrompt: async () => ({
 				systemPrompt: remembered

@@ -35,6 +35,7 @@ describe("AgentSession memory backend lifecycle", () => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("openai", "test-key");
 		settings = Settings.isolated({
 			"compaction.enabled": false,
 			"memory.backend": "off",
@@ -73,7 +74,7 @@ describe("AgentSession memory backend lifecycle", () => {
 		const toolRegistry = new Map<string, AgentTool>([[read.name, read]]);
 		session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.join("sessions")),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
 			memoryAgentDir: tempDir.path(),
@@ -118,6 +119,41 @@ describe("AgentSession memory backend lifecycle", () => {
 
 		settings.override("memory.backend", "off");
 		await current.newSession();
+
+		expect(current.getMemoryBackend()?.id).toBe("off");
+		expect(getMnemopiSessionState(current)).toBeUndefined();
+		expect(current.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("applies a deferred backend change when a fork starts", async () => {
+		const current = createSession(async () =>
+			settings.get("memory.backend") === "mnemopi" ? [createTool("retain"), createTool("memory_edit")] : [],
+		);
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+		await current.sendUserMessage("first");
+
+		settings.override("memory.backend", "off");
+		expect(await current.fork()).toBe(true);
+
+		expect(current.getMemoryBackend()?.id).toBe("off");
+		expect(getMnemopiSessionState(current)).toBeUndefined();
+		expect(current.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("applies a deferred backend change when another session resumes", async () => {
+		const current = createSession(async () =>
+			settings.get("memory.backend") === "mnemopi" ? [createTool("retain"), createTool("memory_edit")] : [],
+		);
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+		await current.sendUserMessage("first");
+		const firstSessionFile = current.sessionManager.getSessionFile();
+		if (!firstSessionFile) throw new Error("Expected a persisted session file");
+		await current.newSession();
+
+		settings.override("memory.backend", "off");
+		await current.switchSession(firstSessionFile);
 
 		expect(current.getMemoryBackend()?.id).toBe("off");
 		expect(getMnemopiSessionState(current)).toBeUndefined();
