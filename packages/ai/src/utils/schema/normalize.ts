@@ -465,7 +465,7 @@ function applyNodePostProcessing(schema: JsonObject, options: NormalizeSchemaWal
 	}
 	if (options.foldOneOfIntoAnyOf) current = foldOneOfIntoAnyOf(current);
 	if (options.dropNonScalarEnum) current = dropNonScalarEnumForMfjs(current);
-	if (options.stringEnumsOnly) current = dropNonStringEnumForGoogle(current);
+	if (options.stringEnumsOnly && options.booleanIsSubschema) current = dropNonStringEnumForGoogle(current);
 	return current;
 }
 

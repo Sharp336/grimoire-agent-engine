@@ -220,6 +220,19 @@ describe("normalizeSchemaForGoogle", () => {
 		});
 	});
 
+	it("preserves enum keys inside object-valued defaults", () => {
+		expect(
+			normalizeSchemaForGoogle({
+				type: "object",
+				default: { enum: [1], value: 2 },
+			}),
+		).toEqual({
+			type: "object",
+			default: { enum: [1], type: "number", value: 2 },
+			properties: {},
+		});
+	});
+
 	it("sets object type while removing an object-valued enum converted from const", () => {
 		const sanitized = normalizeSchemaForGoogle({
 			const: { a: 1 },
