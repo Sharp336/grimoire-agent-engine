@@ -51,7 +51,15 @@ export interface PruneConfig {
 	cacheWarmSuffixTokens?: number;
 }
 
-export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
+/**
+ * Configuration supported by {@link pruneToolOutputMessages}.
+ *
+ * Message lists carry no stable entry IDs, so entry-boundary pruning is only
+ * available through {@link pruneToolOutputs}.
+ */
+export type PruneMessagesConfig = Omit<PruneConfig, "keepBoundaryId"> & { keepBoundaryId?: never };
+
+export const DEFAULT_PRUNE_CONFIG: PruneMessagesConfig = {
 	protectTokens: 40_000,
 	minimumSavings: 20_000,
 	protectedTools: ["skill", isSkillReadToolResult],
@@ -61,6 +69,45 @@ export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 export interface PruneResult {
 	prunedCount: number;
 	tokensSaved: number;
+}
+
+export interface PruneMessagesResult extends PruneResult {
+	messages: AgentMessage[];
+}
+
+/**
+ * Prune tool outputs in an immutable message list.
+ *
+ * Unlike {@link pruneToolOutputs}, this helper never rewrites caller-owned
+ * messages. It preserves the entry-based pruning policy where possible by
+ * presenting cloned tool results to the existing implementation, then
+ * structurally shares every message that was not pruned. Entry-ID compaction
+ * boundaries are intentionally excluded because messages have no stable entry
+ * identity.
+ */
+export function pruneToolOutputMessages(
+	messages: readonly AgentMessage[],
+	config?: PruneMessagesConfig,
+): PruneMessagesResult {
+	const workingMessages = messages.map(message =>
+		message.role === "toolResult" ? ({ ...message } as AgentMessage) : message,
+	);
+	const entries: SessionMessageEntry[] = workingMessages.map((message, index) => ({
+		type: "message",
+		id: `message-${index}`,
+		parentId: index === 0 ? null : `message-${index - 1}`,
+		timestamp: "1970-01-01T00:00:00.000Z",
+		message,
+	}));
+
+	const result = pruneToolOutputs(entries, config ?? DEFAULT_PRUNE_CONFIG);
+	const prunedMessages = workingMessages.map((message, index) => {
+		const original = messages[index];
+		if (message.role !== "toolResult" || original?.role !== "toolResult") return original ?? message;
+		return message.prunedAt === original.prunedAt ? original : message;
+	});
+
+	return { ...result, messages: prunedMessages };
 }
 
 /** Exact placeholder written over a superseded tool result. */
