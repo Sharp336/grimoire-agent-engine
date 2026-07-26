@@ -210,65 +210,53 @@ describe("createAgentSession with mcp.awaitStartupMs (interactive UI)", () => {
 		const throwingExtension: ExtensionFactory = () => {
 			throw new Error("simulated post-MCP startup failure");
 		};
-		try {
-			await expect(
-				createAgentSession({
-					cwd: tempDir,
-					agentDir: tempDir,
-					modelRegistry,
-					sessionManager: SessionManager.inMemory(),
-					settings: Settings.isolated({ "mcp.awaitStartupMs": 5000 }),
-					model: getBundledModel("openai", "gpt-4o-mini"),
-					disableExtensionDiscovery: true,
-					extensions: [throwingExtension],
-					skills: [],
-					contextFiles: [],
-					promptTemplates: [],
-					slashCommands: [],
-					enableLsp: false,
-					skipPythonPreflight: true,
-					enableMCP: true,
-					hasUI: true,
-				}),
-			).rejects.toThrow("simulated post-MCP startup failure");
-			expect(disconnect).toHaveBeenCalled();
-			expect(MCPManager.instance()).toBe(previousManager);
-		} finally {
-			MCPManager.setInstance(previousManager);
-		}
+		await expect(
+			createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "mcp.awaitStartupMs": 5000 }),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [throwingExtension],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableLsp: false,
+				skipPythonPreflight: true,
+				enableMCP: true,
+				hasUI: true,
+			}),
+		).rejects.toThrow("simulated post-MCP startup failure");
+		expect(disconnect).toHaveBeenCalled();
+		expect(MCPManager.instance()).toBe(previousManager);
 	}, 20_000);
 
 	it("restores the prior MCP manager when awaited replay fails", async () => {
-		const originalManager = MCPManager.instance();
 		const previousManager = new MCPManager(tempDir);
 		MCPManager.setInstance(previousManager);
-		const refresh = spyOn(AgentSession.prototype, "refreshMCPTools").mockRejectedValue(
-			new Error("simulated awaited replay failure"),
-		);
-		try {
-			await expect(
-				createAgentSession({
-					cwd: tempDir,
-					agentDir: tempDir,
-					modelRegistry,
-					sessionManager: SessionManager.inMemory(),
-					settings: Settings.isolated({ "mcp.awaitStartupMs": 5000 }),
-					model: getBundledModel("openai", "gpt-4o-mini"),
-					disableExtensionDiscovery: true,
-					skills: [],
-					contextFiles: [],
-					promptTemplates: [],
-					slashCommands: [],
-					enableLsp: false,
-					skipPythonPreflight: true,
-					enableMCP: true,
-					hasUI: true,
-				}),
-			).rejects.toThrow("simulated awaited replay failure");
-			expect(MCPManager.instance()).toBe(previousManager);
-		} finally {
-			refresh.mockRestore();
-			MCPManager.setInstance(originalManager);
-		}
+		spyOn(AgentSession.prototype, "refreshMCPTools").mockRejectedValue(new Error("simulated awaited replay failure"));
+		await expect(
+			createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "mcp.awaitStartupMs": 5000 }),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableLsp: false,
+				skipPythonPreflight: true,
+				enableMCP: true,
+				hasUI: true,
+			}),
+		).rejects.toThrow("simulated awaited replay failure");
+		expect(MCPManager.instance()).toBe(previousManager);
 	}, 20_000);
 });
