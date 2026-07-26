@@ -896,6 +896,31 @@ describe("Codex agent.browser public contract", () => {
 		).toEqual({ name: "Error", message: "playwright.waitForURL state is invalid" });
 	});
 
+	it("rejects unknown top-level screenshot options before adapter dispatch", async () => {
+		const adapter = new RecordingAdapter();
+		const current = await createCodexBrowserFacade(adapter).tabs.selected();
+		if (!current) throw new Error("Expected selected contract tab");
+
+		expect(await caughtError(() => current.playwright.screenshot({ fullpage: true } as never))).toEqual({
+			name: "Error",
+			message: "playwright.screenshot does not accept fullpage",
+		});
+		expect(adapter.calls.some(call => call.operation === "playwright.screenshot")).toBe(false);
+	});
+
+	it("rejects unknown screenshot clip fields before adapter dispatch", async () => {
+		const adapter = new RecordingAdapter();
+		const current = await createCodexBrowserFacade(adapter).tabs.selected();
+		if (!current) throw new Error("Expected selected contract tab");
+
+		expect(
+			await caughtError(() =>
+				current.playwright.screenshot({ clip: { x: 0, y: 0, width: 10, height: 20, scale: 2 } } as never),
+			),
+		).toEqual({ name: "Error", message: "playwright.screenshot clip does not accept scale" });
+		expect(adapter.calls.some(call => call.operation === "playwright.screenshot")).toBe(false);
+	});
+
 	it("protects dblclick internals and validates the exact public option vocabulary", async () => {
 		const adapter = new RecordingAdapter();
 		const current = await createCodexBrowserFacade(adapter).tabs.selected();

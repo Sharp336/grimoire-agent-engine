@@ -173,10 +173,10 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	};
 	const elements = typeof globalThis.__ompCodexAriaQuery === "function" ? globalThis.__ompCodexAriaQuery(descriptor) : query(descriptor);
 	const element = elements[0];
-	if (command === "status") return { attached: elements.length > 0, visible: !!element && visible(element), enabled: !!element && !disabled(element) };
 	if (command === "count") return elements.length;
 	if (command === "allTextContents") return elements.map(item => String(item.textContent ?? ""));
-	if (elements.length > 1) throw new Error("locator." + command + " resolved to " + elements.length + " elements; use first() or nth()");
+	if (elements.length > 1) throw new Error("locator." + (payload.strictLabel || command) + " resolved to " + elements.length + " elements; use first() or nth()");
+	if (command === "status") return { attached: elements.length > 0, visible: !!element && visible(element), enabled: !!element && !disabled(element) };
 	if (command === "isVisible") return !!element && visible(element);
 	if (command === "isEnabled") return !!element && !disabled(element);
 	if (!element) throw new Error("Locator did not resolve to an element");
@@ -1794,7 +1794,12 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	): Promise<LocatorStatus> {
 		while (true) {
 			const status = locatorStatus(
-				await this.#locator<unknown>(descriptor, "status", {}, remainingMs(deadline, operation)),
+				await this.#locator<unknown>(
+					descriptor,
+					"status",
+					{ strictLabel: operation.slice("locator.".length) },
+					remainingMs(deadline, operation),
+				),
 			);
 			if (
 				(state === "attached" && status.attached) ||

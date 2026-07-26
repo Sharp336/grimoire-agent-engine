@@ -464,6 +464,8 @@ const CLICK_OPTION_KEYS: Readonly<Record<string, true>> = {
 };
 const SET_CHECKED_OPTION_KEYS: Readonly<Record<string, true>> = { force: true, timeoutMs: true };
 const SELECT_OPTION_KEYS: Readonly<Record<string, true>> = { value: true, label: true, index: true };
+const SCREENSHOT_OPTION_KEYS: Readonly<Record<string, true>> = { fullPage: true, clip: true };
+const SCREENSHOT_CLIP_KEYS: Readonly<Record<string, true>> = { x: true, y: true, width: true, height: true };
 
 function assertAllowedKeys(
 	value: Readonly<Record<string, unknown>>,
@@ -1032,11 +1034,13 @@ export class CodexPlaywright {
 
 	async screenshot(options: CodexScreenshotOptions = {}): Promise<CodexImage> {
 		const value = requireObject(options, "playwright.screenshot");
+		assertAllowedKeys(value, "playwright.screenshot", SCREENSHOT_OPTION_KEYS);
 		if (value.fullPage !== undefined && typeof value.fullPage !== "boolean")
 			throw new Error("playwright.screenshot fullPage must be a boolean");
 		let clip: { x: number; y: number; width: number; height: number } | undefined;
 		if (value.clip !== undefined) {
 			const source = requireObject(value.clip, "playwright.screenshot clip");
+			assertAllowedKeys(source, "playwright.screenshot clip", SCREENSHOT_CLIP_KEYS);
 			clip = {
 				x: requireNumber(source.x, "playwright.screenshot clip x"),
 				y: requireNumber(source.y, "playwright.screenshot clip y"),

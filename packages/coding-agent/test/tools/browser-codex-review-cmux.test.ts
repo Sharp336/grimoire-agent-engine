@@ -897,6 +897,23 @@ describe("cmux Codex browser review regressions", () => {
 		});
 	});
 
+	it("rejects ambiguous cmux waitFor visible locators instead of using the first match", async () => {
+		const { document, window } = parseHTML("<html><body><button>First</button><button>Second</button></body></html>");
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible", opacity: "1" }));
+		const current = await selectedTab(
+			facadeFor({
+				async codexEvaluate(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window });
+				},
+			}),
+		);
+
+		expect(await caughtError(() => current.playwright.getByRole("button").waitFor({ state: "visible" }))).toEqual({
+			name: "Error",
+			message: "locator.waitFor resolved to 2 elements; use first() or nth()",
+		});
+	});
+
 	it("uses canonical implicit roles and accessible names in elementInfo", async () => {
 		const nativeLabel = { innerText: "Native Name", textContent: "Native Name" };
 		const checkbox = {
