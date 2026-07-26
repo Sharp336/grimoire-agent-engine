@@ -88,44 +88,62 @@ export function waitForBrowserRun(
 
 /** Binds a long-lived browser facade to one evaluated run's abort signal. */
 export function bindBrowserRunFacade<T extends object>(target: T, signal: AbortSignal): T {
-	const cache = new Map<PropertyKey, unknown>();
-	return new Proxy(target, {
-		get(current, prop) {
-			throwIfAborted(signal);
-			const cached = cache.get(prop);
-			if (cached) return cached;
-			const value = Reflect.get(current, prop, current);
-			if (typeof value === "function") {
-				const wrapped = (...args: unknown[]): unknown => {
-					throwIfAborted(signal);
-					const result = Reflect.apply(value, current, args);
-					if (result && typeof result === "object") {
-						const then = Reflect.get(result, "then");
-						if (typeof then === "function") {
-							return markHandled(
-								Promise.resolve(result).then(resolved => {
-									throwIfAborted(signal);
-									return resolved;
-								}),
-							);
+	const boundObjects = new WeakMap<object, object>();
+	const hasCallableSurface = (value: object): boolean => {
+		for (const key of Reflect.ownKeys(value)) {
+			if (typeof Object.getOwnPropertyDescriptor(value, key)?.value === "function") return true;
+		}
+		const prototype = Object.getPrototypeOf(value);
+		if (!prototype || prototype === Object.prototype || prototype === Array.prototype) return false;
+		return Reflect.ownKeys(prototype).some(
+			key => key !== "constructor" && typeof Object.getOwnPropertyDescriptor(prototype, key)?.value === "function",
+		);
+	};
+	const bind = <U extends object>(current: U): U => {
+		if (current instanceof AbortSignal) return current;
+		const existing = boundObjects.get(current);
+		if (existing) return existing as U;
+		const cache = new Map<PropertyKey, unknown>();
+		const proxy = new Proxy(current, {
+			get(source, prop) {
+				throwIfAborted(signal);
+				if (cache.has(prop)) return cache.get(prop);
+				const value = Reflect.get(source, prop, source);
+				if (typeof value === "function") {
+					const wrapped = (...args: unknown[]): unknown => {
+						throwIfAborted(signal);
+						const result = Reflect.apply(value, source, args);
+						if (result && typeof result === "object") {
+							const then = Reflect.get(result, "then");
+							if (typeof then === "function") {
+								return markHandled(
+									Promise.resolve(result).then(resolved => {
+										throwIfAborted(signal);
+										if (!resolved || typeof resolved !== "object") return resolved;
+										const callableValue = Array.isArray(resolved)
+											? resolved.some(item => item && typeof item === "object" && hasCallableSurface(item))
+											: hasCallableSurface(resolved);
+										return callableValue ? bind(resolved) : resolved;
+									}),
+								);
+							}
 						}
-					}
-					throwIfAborted(signal);
-					return result;
-				};
-				cache.set(prop, wrapped);
-				return wrapped;
-			}
-			if (value && typeof value === "object") {
-				// Never proxy AbortSignals: native combinators (AbortSignal.any, fetch)
-				// brand-check internal slots that a Proxy cannot forward, and reading a
-				// signal needs no abort gating anyway.
-				if (value instanceof AbortSignal) return value;
-				const wrapped = bindBrowserRunFacade(value, signal);
-				cache.set(prop, wrapped);
-				return wrapped;
-			}
-			return value;
-		},
-	});
+						throwIfAborted(signal);
+						return result;
+					};
+					cache.set(prop, wrapped);
+					return wrapped;
+				}
+				if (value && typeof value === "object") {
+					const wrapped = bind(value);
+					cache.set(prop, wrapped);
+					return wrapped;
+				}
+				return value;
+			},
+		});
+		boundObjects.set(current, proxy);
+		return proxy;
+	};
+	return bind(target);
 }

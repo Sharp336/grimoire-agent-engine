@@ -3043,8 +3043,10 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	#locatorPressChord(value: string): [finalKey: string, ...modifiers: string[]] {
-		const keys = value.split("+");
-		const finalKey = keys.pop();
+		if (value === "+") return [value];
+		const plusFinalKey = value.endsWith("++");
+		const keys = (plusFinalKey ? value.slice(0, -2) : value).split("+");
+		const finalKey = plusFinalKey ? "+" : keys.pop();
 		if (!finalKey) throw new Error("locator.press requires a final key after its modifiers");
 		return [finalKey, ...keys.map(modifier => this.#normalizeLocatorModifier(modifier, "locator.press"))];
 	}

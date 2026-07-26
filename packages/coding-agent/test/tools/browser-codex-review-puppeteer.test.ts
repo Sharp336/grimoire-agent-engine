@@ -3457,9 +3457,32 @@ describe("Puppeteer final parity blockers", () => {
 			value: "Shift+Tab",
 			timeoutMs: 100,
 		});
+		await adapter.invoke("locator.press", {
+			tabId: "1",
+			locator: { kind: "css", selector: "#target" },
+			value: "+",
+			timeoutMs: 100,
+		});
+		await adapter.invoke("locator.press", {
+			tabId: "1",
+			locator: { kind: "css", selector: "#target" },
+			value: "Control++",
+			timeoutMs: 100,
+		});
 		await adapter.dispose();
 
-		expect(events).toEqual(["down:Control", "press:L", "up:Control", "down:Shift", "press:Tab", "up:Shift"]);
+		expect(events).toEqual([
+			"down:Control",
+			"press:L",
+			"up:Control",
+			"down:Shift",
+			"press:Tab",
+			"up:Shift",
+			"press:+",
+			"down:Control",
+			"press:+",
+			"up:Control",
+		]);
 	});
 
 	it("releases locator press modifiers when the final key press fails", async () => {

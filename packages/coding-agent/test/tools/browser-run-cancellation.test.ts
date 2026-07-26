@@ -144,6 +144,34 @@ describe("browser run cancellation", () => {
 		expect(reasons).toEqual([]);
 	});
 
+	it("handles unawaited methods on facade objects resolved from promises", async () => {
+		const controller = new AbortController();
+		const deferred = Promise.withResolvers<void>();
+		const tabTarget = {
+			goto(): Promise<void> {
+				return deferred.promise;
+			},
+		};
+		const facade = bindBrowserRunFacade(
+			{
+				async selected() {
+					return tabTarget;
+				},
+			},
+			controller.signal,
+		);
+		expect(await facade.selected()).toBe(await facade.selected());
+
+		const reasons = await collectUnhandledRejections(async () => {
+			const tab = await facade.selected();
+			void tab.goto();
+			controller.abort(postmortem.markExpectedCleanupError(new Error("browser run ended")));
+			deferred.reject(controller.signal.reason);
+		});
+
+		expect(reasons).toEqual([]);
+	});
+
 	it("rejects awaited facade method calls that settle after abort", async () => {
 		const controller = new AbortController();
 		const deferred = Promise.withResolvers<string>();
