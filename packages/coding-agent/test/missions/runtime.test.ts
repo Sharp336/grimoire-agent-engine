@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import {
 	MISSION_STATE_CUSTOM_TYPE,
 	type MissionFeature,
@@ -8,6 +8,7 @@ import {
 	type MissionRuntimeHost,
 	type MissionState,
 } from "../../src/missions";
+import { MissionWorkspaceManager } from "../../src/missions/workspace";
 import type { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { SessionEntry } from "../../src/session/session-entries";
 import type { ToolSession } from "../../src/tools";
@@ -114,6 +115,10 @@ function runtime(initial: MissionState | null = null, failPersistence = false): 
 	return new MissionRuntime(host);
 }
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("MissionRuntime", () => {
 	test("rejects a blank goal before any mission state is persisted", async () => {
 		const mission = runtime();
@@ -207,6 +212,49 @@ describe("MissionRuntime", () => {
 		const retried = await mission.resolveHandoff({ decision: "retry_same" });
 		expect(retried).toMatchObject({ status: "running", pendingHandoff: undefined });
 		expect(retried.features[0]).toMatchObject({ status: "pending", nextRunIntent: { mode: "follow_up" } });
+	});
+
+	test("restarts after a cleaned validator workspace without bypassing ordinary resume", async () => {
+		const workspace = {
+			id: "validator-workspace",
+			ownerSessionId: "owner",
+			repoRoot: "/repo",
+			path: "/repo-validator",
+			featureId: "validate",
+			phase: "ready" as const,
+			kind: "validator" as const,
+			head: "abc123",
+		};
+		const validator = {
+			...validation("validate"),
+			status: "completed" as const,
+			workspace,
+			validatedHead: workspace.head,
+		};
+		const mission = runtime(
+			state({
+				status: "paused",
+				pauseReason: "validator_workspace_dirty",
+				milestones: [
+					{
+						id: "milestone",
+						description: "M",
+						featureIds: ["validate"],
+						validators: ["scrutiny"],
+						kind: "planned",
+					},
+				],
+				features: [validator],
+			}),
+		);
+		await mission.restore();
+		await expect(mission.resume()).rejects.toThrow("restart the mission");
+		const release = vi.spyOn(MissionWorkspaceManager.prototype, "releaseIfEmpty").mockResolvedValue(true);
+
+		const resumed = await mission.resume({ restartWorker: true });
+
+		expect(release).toHaveBeenCalledWith(workspace);
+		expect(resumed).toMatchObject({ status: "running", pauseReason: undefined });
 	});
 
 	test("keeps prior state authoritative when persistence fails", async () => {
