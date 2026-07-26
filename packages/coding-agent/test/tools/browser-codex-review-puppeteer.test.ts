@@ -861,6 +861,7 @@ describe("Puppeteer Codex download adapter", () => {
 		const identity = new Bun.CryptoHasher("sha256").update(endpoint).digest("hex");
 		const downloadDirectory = path.join(os.tmpdir(), "oh-my-pi-codex-downloads", identity);
 		const stateRoot = `${downloadDirectory}.policy`;
+		await fs.mkdir(path.dirname(stateRoot), { recursive: true });
 		const lockEntered = Promise.withResolvers<void>();
 		const releaseLock = Promise.withResolvers<void>();
 		const blocker = withFileLock(stateRoot, async () => {
