@@ -7825,9 +7825,13 @@ export class AgentSession {
 
 		this.#disconnectFromAgent();
 		let preparedMemoryBackend: PreparedMemoryBackendTransition | undefined;
+		let sessionModeQuiescingStarted = false;
 		try {
 			await this.abort({ goalReason: "internal" });
-			await this.#sessionBeforeSwitchReconciler?.();
+			if (this.#sessionBeforeSwitchReconciler) {
+				sessionModeQuiescingStarted = true;
+				await this.#sessionBeforeSwitchReconciler();
+			}
 
 			await this.#bash.flushPending();
 			// Flush pending writes before switching so restore snapshots reflect committed state.
@@ -7837,6 +7841,16 @@ export class AgentSession {
 				: undefined;
 		} catch (error) {
 			this.#reconnectToAgent();
+			if (sessionModeQuiescingStarted) {
+				try {
+					await this.#sessionSwitchReconciler?.();
+				} catch (reconcileError) {
+					logger.warn("Failed to reconcile session mode after aborted switch", {
+						targetSessionFile: sessionPath,
+						error: String(reconcileError),
+					});
+				}
+			}
 			throw error;
 		}
 		const previousSessionState = this.sessionManager.captureState();

@@ -303,6 +303,43 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(eventTypes).toContain("agent_end");
 	});
 
+	it("reconciles the current mode when transcript preparation aborts a session switch", async () => {
+		const backend: MemoryBackend = {
+			id: "mnemopi",
+			async start() {},
+			async beforeTranscriptReplace() {
+				throw new Error("retention failed");
+			},
+			async buildDeveloperInstructions() {
+				return undefined;
+			},
+			async clear() {},
+			async enqueue() {},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+		const current = createSession(async () => []);
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+		const previousSessionId = current.sessionId;
+		const targetManager = SessionManager.create(tempDir.path(), tempDir.join("failed-switch-target"));
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		await targetManager.close();
+		if (!targetSessionFile) throw new Error("Expected a target session file");
+		const events: string[] = [];
+		current.setSessionBeforeSwitchReconciler(async () => {
+			events.push("quiesce");
+		});
+		current.setSessionSwitchReconciler(async () => {
+			events.push("reconcile");
+		});
+
+		await expect(current.switchSession(targetSessionFile)).rejects.toThrow("retention failed");
+
+		expect(current.sessionId).toBe(previousSessionId);
+		expect(events).toEqual(["quiesce", "reconcile"]);
+	});
+
 	it("cancels a displaced local startup generation", async () => {
 		const current = createSession(async () => []);
 		const localStartup = current.beginLocalMemoryStartup();
