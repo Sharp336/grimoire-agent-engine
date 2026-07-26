@@ -71,13 +71,13 @@ export function extractFromOmpEditDetails(
 	input?: Record<string, unknown>,
 ): Array<OmpPerFileEditResult & { op: "write" | "edit" }> {
 	if (!isRecord(details)) return [];
-	if (details.isError === true) return [];
+	if (details.isError === true || details.success === false || details.error !== undefined) return [];
 	const source = details.perFileResults ?? details.files;
 	const results: Array<OmpPerFileEditResult & { op: "write" | "edit" }> = [];
 	if (Array.isArray(source)) {
 		for (const item of source) {
 			if (!isRecord(item)) continue;
-			if (item.isError === true) continue;
+			if (item.isError === true || item.success === false || item.error !== undefined) continue;
 			const typeOp = getString(item, ["type", "op", "operation"]);
 			if (typeOp === "delete") continue;
 			const filePath = getString(item, ["path", "filePath", "file_path"]) ?? "";
@@ -86,7 +86,12 @@ export function extractFromOmpEditDetails(
 			let newText = getString(item, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
 			const targetPath = movePath ?? filePath;
 
-			if (item.snapshotsPruned === true || details.snapshotsPruned === true || newText.length === 0) {
+			const isPruned = item.snapshotsPruned === true || details.snapshotsPruned === true;
+			const hasSnapshotText =
+				hasField(item, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ||
+				hasField(item, ["newText", "new_text", "newString", "new_string", "after", "new"]);
+
+			if (isPruned) {
 				if (targetPath && existsSync(targetPath)) {
 					try {
 						newText = readFileSync(targetPath, "utf-8");
@@ -100,6 +105,8 @@ export function extractFromOmpEditDetails(
 						oldText = getString(input, ["old_string", "oldString", "oldText", "before", "old"]) ?? "";
 					}
 				}
+			} else if (!hasSnapshotText) {
+				continue;
 			}
 
 			if (typeof filePath !== "string" || filePath.length === 0) continue;
@@ -123,7 +130,12 @@ export function extractFromOmpEditDetails(
 			let newText = getString(details, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
 			const targetPath = movePath ?? filePath;
 
-			if (details.snapshotsPruned === true || newText.length === 0) {
+			const isPruned = details.snapshotsPruned === true;
+			const hasSnapshotText =
+				hasField(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ||
+				hasField(details, ["newText", "new_text", "newString", "new_string", "after", "new"]);
+
+			if (isPruned) {
 				if (targetPath && existsSync(targetPath)) {
 					try {
 						newText = readFileSync(targetPath, "utf-8");
@@ -137,6 +149,8 @@ export function extractFromOmpEditDetails(
 						oldText = getString(input, ["old_string", "oldString", "oldText", "before", "old"]) ?? "";
 					}
 				}
+			} else if (!hasSnapshotText) {
+				return [];
 			}
 
 			if (oldText.length === 0 || newText.length > 0) {
@@ -188,6 +202,14 @@ function ompEditResultsToCommentCheckRequests(
 }
 
 export function extractCommentCheckRequests(event: ToolResultLike): CommentCheckRequest[] {
+	const hasPerFileResults =
+		isRecord(event.details) && (Array.isArray(event.details.perFileResults) || Array.isArray(event.details.files));
+
+	if (!hasPerFileResults) {
+		if (event.isError) return [];
+		if (isToolFailureOutput(getContentText(event.content))) return [];
+	}
+
 	const ompResults = extractFromOmpEditDetails(event.details, event.input);
 	const ompRequests = ompEditResultsToCommentCheckRequests(event.toolName, ompResults);
 	if (ompRequests.length > 0) return ompRequests;
@@ -467,6 +489,14 @@ function getString(input: Record<string, unknown>, keys: string[]): string | und
 		if (typeof value === "string") return value;
 	}
 	return undefined;
+}
+
+function hasField(input: Record<string, unknown>, keys: string[]): boolean {
+	for (const key of keys) {
+		const value = input[key];
+		if (value !== undefined && value !== null) return true;
+	}
+	return false;
 }
 
 function getEdits(value: unknown): CheckerEdit[] {

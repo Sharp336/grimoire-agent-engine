@@ -220,6 +220,29 @@ describe("extractCommentCheckRequests", () => {
 		expect(requests).toEqual([]);
 	});
 
+	it("suppresses failed multi-entry edit details and does not re-read from disk", () => {
+		using tempDir = TempDir.createSync("@omp-comment-checker-test-");
+		const filePath = join(tempDir.path(), "existing.ts");
+		writeFileSync(filePath, "// TODO: pre-existing comment\nconst a = 1;\n", "utf-8");
+
+		const event: ToolResultLike = {
+			toolName: "edit",
+			input: {
+				file_path: filePath,
+			},
+			details: {
+				diff: "",
+				path: filePath,
+			},
+			content: [{ type: "text", text: `Error editing ${filePath} (entry 1 of 2): Failed to match old_string` }],
+			isError: true,
+		};
+
+		const requests = extractCommentCheckRequests(event);
+
+		expect(requests).toEqual([]);
+	});
+
 	it("extracts top-level single-file edit details in extractFromOmpEditDetails", () => {
 		const details = {
 			path: "src/single.ts",
