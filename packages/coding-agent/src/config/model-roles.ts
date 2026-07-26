@@ -114,3 +114,14 @@ export function getRoleInfo(role: string, settings: Settings): RoleInfo {
 
 	return { name: role, color: "muted" };
 }
+
+/**
+ * Whether the reviewer is effectively active: the `reviewer.enabled` setting is
+ * on (default) AND the `reviewer` agent has not been disabled via
+ * `task.disabledAgents`. Single source of truth for gating the proactive
+ * reviewer guidance (review-before-PR + Code Review routing).
+ */
+export function isReviewerActive(settings: Settings): boolean {
+	const disabledAgents = settings.get("task.disabledAgents") as string[];
+	return (settings.get("reviewer.enabled") ?? true) && !disabledAgents.includes("reviewer");
+}

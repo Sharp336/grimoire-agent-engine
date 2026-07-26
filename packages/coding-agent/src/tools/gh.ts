@@ -12,6 +12,7 @@ import type {
 
 import { getWorktreeDir, hashPath, isEnoent, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
+import { isReviewerActive } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
 import * as git from "../utils/git";
@@ -2462,7 +2463,8 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 	readonly label = "GitHub";
 	get description() {
 		return prompt.render(githubDescription, {
-			reviewerEnabled: this.session.settings.get("reviewer.enabled") ?? true,
+			reviewerEnabled: isReviewerActive(this.session.settings),
+			taskAvailable: this.session.isToolActive?.("task") ?? true,
 		});
 	}
 	readonly parameters = githubSchema;

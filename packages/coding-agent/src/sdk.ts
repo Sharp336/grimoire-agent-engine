@@ -55,6 +55,7 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 } from "./config/model-resolver";
+import { isReviewerActive } from "./config/model-roles";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
@@ -2687,7 +2688,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						settings.get("tools.xdevInlineDevices"),
 					) ?? "",
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
-				reviewerEnabled: settings.get("reviewer.enabled"),
+				reviewerEnabled: isReviewerActive(settings),
 				resolvedCustomPrompt: options.customSystemPrompt,
 				skills: session?.skills ?? skills,
 				contextFiles,

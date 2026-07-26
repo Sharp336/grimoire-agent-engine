@@ -344,7 +344,7 @@ function buildPrContextInstruction(ref: ReviewPrRef): string {
 	return `MUST NOT read local workspace files for PR file context; use the fetched PR diff and \`${prDiffUrl}/all\` or per-file \`${prDiffUrl}/<index>\` only`;
 }
 
-export function extractReviewPrRefFromArgs(args: string[]): ParsedReviewArgs {
+function extractReviewPrRefFromArgs(args: string[]): ParsedReviewArgs {
 	let prRef: ReviewPrRef | undefined;
 	let barePrNumber: number | undefined;
 	let consumedIndex = -1;
@@ -511,7 +511,7 @@ export class ReviewCommand implements CustomCommand {
 				const message = err instanceof Error ? err.message : String(err);
 				const failure =
 					`Could not resolve current repository for PR #${number}: ${message}. ` +
-					`Use a full ref like \`/review owner/repo/${number}\` or a GitHub PR URL.`;
+					`Use a full ref like \`/review pr://owner/repo/${number}\` or a GitHub PR URL.`;
 				if (ctx.hasUI) {
 					ctx.ui.notify(failure, "error");
 					return undefined;

@@ -2,10 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	extractReviewPrRefFromArgs,
-	ReviewCommand,
-} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
+import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -610,6 +607,35 @@ describe("ReviewCommand", () => {
 		expect(result!).toContain("focus auth");
 	});
 
+	it("resolves a bare PR number without a # prefix to the current repo", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["23"], ctx);
+
+		expect(gh.resolveDefaultRepoMemoized).toHaveBeenCalledWith(dir);
+		expect(gh.getOrFetchPrDiff).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 23 });
+		expect(result!).toContain("PR owner/repo#23");
+	});
+
+	it("prefers a fully-qualified GitHub URL over a bare PR number", async () => {
+		const dir = await createTempDir();
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const resolveSpy = spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["https://github.com/owner/repo/pull/99", "42"], ctx);
+
+		// The URL's PR is reviewed; the bare number never triggers a repo resolve.
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 99 });
+		expect(resolveSpy).not.toHaveBeenCalled();
+		expect(result!).toContain("PR owner/repo#99");
+	});
+
 	it("surfaces a repo-resolution failure for a bare PR number in headless mode", async () => {
 		const dir = await createTempDir();
 		spyOn(gh, "resolveDefaultRepoMemoized").mockRejectedValue(new Error("no git remote"));
@@ -621,6 +647,7 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		expect(result!).toContain("Could not resolve current repository for PR #23");
 		expect(result!).toContain("no git remote");
+		expect(result!).toContain("pr://owner/repo/23");
 	});
 
 	it("renders headless review requests through the reviewer task prompt", async () => {
@@ -632,70 +659,5 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		const promptText = result!;
 		expect(promptText).toContain("focus auth");
-	});
-});
-
-describe("extractReviewPrRefFromArgs", () => {
-	it("treats a bare number as a PR number in the current repo", () => {
-		const result = extractReviewPrRefFromArgs(["23"]);
-		expect(result.prRef).toBeUndefined();
-		expect(result.barePrNumber).toBe(23);
-		expect(result.extraInstructions).toBe("");
-	});
-
-	it("treats a #-prefixed number as a PR number", () => {
-		const result = extractReviewPrRefFromArgs(["#23"]);
-		expect(result.prRef).toBeUndefined();
-		expect(result.barePrNumber).toBe(23);
-	});
-
-	it("preserves extra instructions alongside a bare PR number", () => {
-		const result = extractReviewPrRefFromArgs(["23", "focus", "on", "auth"]);
-		expect(result.barePrNumber).toBe(23);
-		expect(result.extraInstructions).toBe("focus on auth");
-	});
-
-	it("prefers a fully-qualified GitHub URL over a bare number", () => {
-		const result = extractReviewPrRefFromArgs(["https://github.com/owner/repo/pull/99", "42"]);
-		expect(result.barePrNumber).toBeUndefined();
-		expect(result.prRef).toMatchObject({ repo: "owner/repo", number: 99, kind: "github-url" });
-		// The unconsumed bare number stays in the extra instructions.
-		expect(result.extraInstructions).toBe("42");
-	});
-
-	it("prefers a pr:// ref over a bare number", () => {
-		const result = extractReviewPrRefFromArgs(["pr://owner/repo/7/diff/all"]);
-		expect(result.barePrNumber).toBeUndefined();
-		expect(result.prRef).toMatchObject({ repo: "owner/repo", number: 7, kind: "pr-url" });
-	});
-
-	it("does not treat zero, negatives, or non-numeric tokens as bare PR numbers", () => {
-		for (const token of ["0", "#0", "-1", "#abc", "v2"]) {
-			const result = extractReviewPrRefFromArgs([token]);
-			expect(result.prRef).toBeUndefined();
-			expect(result.barePrNumber).toBeUndefined();
-			expect(result.extraInstructions).toBe(token);
-		}
-	});
-
-	it("returns no ref and no bare number for plain instruction text", () => {
-		const result = extractReviewPrRefFromArgs(["focus", "on", "auth"]);
-		expect(result.prRef).toBeUndefined();
-		expect(result.barePrNumber).toBeUndefined();
-		expect(result.extraInstructions).toBe("focus on auth");
-	});
-
-	it("does not treat a non-leading number as a bare PR number", () => {
-		const result = extractReviewPrRefFromArgs(["the", "3", "new", "functions"]);
-		expect(result.prRef).toBeUndefined();
-		expect(result.barePrNumber).toBeUndefined();
-		expect(result.extraInstructions).toBe("the 3 new functions");
-	});
-
-	it("returns empty extra instructions for no args", () => {
-		const result = extractReviewPrRefFromArgs([]);
-		expect(result.prRef).toBeUndefined();
-		expect(result.barePrNumber).toBeUndefined();
-		expect(result.extraInstructions).toBe("");
 	});
 });

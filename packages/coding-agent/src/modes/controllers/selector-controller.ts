@@ -387,10 +387,21 @@ export class SelectorController {
 			anchor: "top-left",
 			margin: 0,
 		});
+		const disabledAgentsBefore = new Set<string>((this.ctx.settings.get("task.disabledAgents") as string[]) ?? []);
 		dashboard.onClose = () => {
 			overlay.hide();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
+			// The reviewer's proactive guidance is gated on the reviewer agent being
+			// enabled (not in task.disabledAgents); rebuild the base prompt if that set
+			// changed so the Code Review block reflects the new state without a turn lag.
+			const disabledAfter = (this.ctx.settings.get("task.disabledAgents") as string[]) ?? [];
+			if (
+				disabledAfter.length !== disabledAgentsBefore.size ||
+				disabledAfter.some(name => !disabledAgentsBefore.has(name))
+			) {
+				void this.ctx.session.refreshBaseSystemPrompt().catch(() => {});
+			}
 		};
 		dashboard.onRequestRender = () => {
 			this.ctx.ui.requestRender();
@@ -443,6 +454,11 @@ export class SelectorController {
 			case "tools.xdevDocs":
 				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
+				});
+				break;
+			case "reviewer.enabled":
+				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
+					this.ctx.showError(`Failed to apply reviewer setting: ${err}`);
 				});
 				break;
 			case "memory.backend":
