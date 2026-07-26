@@ -2911,7 +2911,7 @@ describe("cmux Codex browser review regressions", () => {
 				if (method === "browser.url.get") return { url: "https://fixture.test/current" };
 				if (method === "browser.type") {
 					nativeMethods.push(method);
-					const text = String(params.text ?? "").trim();
+					const text = String(params.text ?? "");
 					(input.dispatchEvent as (event: EventProbe) => boolean)(new EventProbe("beforeinput"));
 					Reflect.apply(input.setRangeText as (...args: unknown[]) => unknown, input, [
 						text,
@@ -2955,7 +2955,7 @@ describe("cmux Codex browser review regressions", () => {
 
 		await current.dom_cua.type({ text: " padded " });
 		expect(input.value).toBe("typed padded ");
-		expect(nativeMethods).toEqual(["browser.type", "browser.fill"]);
+		expect(nativeMethods).toEqual(["browser.type", "browser.type"]);
 	});
 
 	it("keeps shadow-root DOM refs actionable through composed hit testing", async () => {
@@ -3662,6 +3662,7 @@ describe("cmux Codex browser review regressions", () => {
 		const commands: string[] = [];
 		let clicked = false;
 		let typed = "";
+		let syntheticTypes = 0;
 		const nativeActions: string[] = [];
 		const { adapter, browser } = adapterAndFacadeFor({
 			async codexEvaluate(_source: string, args: unknown[]) {
@@ -3672,9 +3673,10 @@ describe("cmux Codex browser review regressions", () => {
 					clicked = true;
 					return true;
 				}
-				if (command === "editableValue") return "";
+				if (command === "nativeTypeState") return String((args[2] as { value: string }).value);
+				if (command === "editableValue") return typed;
 				if (command === "type") {
-					typed = String((args[2] as { value: string }).value);
+					syntheticTypes++;
 					return true;
 				}
 				if (command === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="frame"]';
@@ -3686,8 +3688,9 @@ describe("cmux Codex browser review regressions", () => {
 			async click() {
 				nativeActions.push("click");
 			},
-			async type() {
-				nativeActions.push("type");
+			async press(key: string) {
+				nativeActions.push(`press:${key}`);
+				typed += key;
 			},
 		});
 
@@ -3697,9 +3700,10 @@ describe("cmux Codex browser review regressions", () => {
 			await frame.locator("#editor").type("inside frame");
 
 			expect({ clicked, typed }).toEqual({ clicked: true, typed: "inside frame" });
-			expect(nativeActions).toEqual([]);
+			expect(nativeActions).toEqual(Array.from("inside frame", key => `press:${key}`));
+			expect(syntheticTypes).toBe(0);
 			expect(commands).toContain("click");
-			expect(commands).toContain("type");
+			expect(commands).toContain("nativeTypeState");
 		} finally {
 			await adapter.dispose();
 		}

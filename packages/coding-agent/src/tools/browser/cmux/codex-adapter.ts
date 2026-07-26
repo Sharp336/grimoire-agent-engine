@@ -224,6 +224,20 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		if (!editable(element)) throw new Error("locator.type requires an editable element");
 		return String(element.value ?? element.textContent ?? "");
 	}
+	if (command === "nativeTypeState") {
+		if (!editable(element)) throw new Error("locator.type requires an editable element");
+		element.scrollIntoView({ block: "center", inline: "center" });
+		if (typeof element.focus === "function") element.focus();
+		const value = String(payload.value);
+		const tag = String(element.tagName || "").toLowerCase();
+		const current = String(element.value ?? element.textContent ?? "");
+		if (tag === "input" || tag === "textarea") {
+			const start = typeof element.selectionStart === "number" ? element.selectionStart : current.length;
+			const end = typeof element.selectionEnd === "number" ? element.selectionEnd : start;
+			return current.slice(0, start) + value + current.slice(end);
+		}
+		return current + value;
+	}
 	const setValue = (target, value, append, label) => {
 		if (!editable(target)) throw new Error(label + " requires an editable element");
 		const tag = String(target.tagName || "").toLowerCase();
@@ -1840,13 +1854,17 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			);
 		}
 		if (this.#containsFrame(descriptor) && operation === "locator.type") {
-			await this.#locator<string>(descriptor, "editableValue", {}, remainingMs(deadline, operation));
-			return await this.#locator<boolean>(
+			const value = stringArg(args, "value");
+			const expected = await this.#locator<string>(
 				descriptor,
-				"type",
-				{ value: stringArg(args, "value") },
+				"nativeTypeState",
+				{ value },
 				remainingMs(deadline, operation),
 			);
+			await this.#pressKeys(Array.from(value), deadline, operation);
+			const after = await this.#locator<string>(descriptor, "editableValue", {}, remainingMs(deadline, operation));
+			if (after !== expected) throw new ToolError("locator.type did not update the editable element");
+			return undefined;
 		}
 		if (nativeClick) {
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;

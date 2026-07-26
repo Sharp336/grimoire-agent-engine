@@ -1146,11 +1146,7 @@ export class CmuxTab {
 						throw new ToolError("tab.type could not determine the expected editable value");
 					}
 					const expected = state.expected;
-					if (text.length === 0 || text.trim().length !== text.length) {
-						await this.#request("browser.fill", { selector: nativeSelector, text: expected }, remaining());
-					} else {
-						await this.#request("browser.type", { selector: nativeSelector, text }, remaining());
-					}
+					await this.#request("browser.type", { selector: nativeSelector, text }, remaining());
 					const after = await this.#evalSelectorAction<string>(
 						spec,
 						"editableValue",
