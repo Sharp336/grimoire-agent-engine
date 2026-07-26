@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getTranscriptDbPath` helper for resolving `transcripts.db` location.
+
 ## [17.0.9] - 2026-07-23
 
 ### Breaking Changes
