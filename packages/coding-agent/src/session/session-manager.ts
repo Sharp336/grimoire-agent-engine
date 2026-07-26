@@ -40,6 +40,7 @@ import {
 	type CustomMessageEntry,
 	type FileEntry,
 	type LabelEntry,
+	type MissionChildOwnerEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type NewSessionOptions,
@@ -1942,6 +1943,8 @@ export class SessionManager {
 		restrictToolNames?: boolean;
 		spawns?: string;
 		readSummarize?: boolean;
+		cwdBinding?: "fixed";
+		missionOwner?: MissionChildOwnerEntry;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -2382,6 +2385,8 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			cwdBinding?: "fixed";
+			missionOwner?: MissionChildOwnerEntry;
 		} | null;
 	} | null> {
 		let loaded: FileEntry[];
@@ -2402,6 +2407,8 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			cwdBinding?: "fixed";
+			missionOwner?: MissionChildOwnerEntry;
 		} | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
 			const entry = loaded[index];
@@ -2415,6 +2422,8 @@ export class SessionManager {
 					restrictToolNames: entry.restrictToolNames,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
+					cwdBinding: entry.cwdBinding,
+					missionOwner: entry.missionOwner,
 				};
 				break;
 			}

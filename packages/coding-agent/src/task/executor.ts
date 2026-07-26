@@ -7,7 +7,7 @@
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ServiceTier, ServiceTierByFamily, ServiceTierFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -28,6 +28,7 @@ import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
+import type { ExtensionUIContext, ExtensionUIDialogOptions } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -43,7 +44,9 @@ import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
+import type { ClientBridge } from "../session/client-bridge";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import type { MissionChildOwnerEntry } from "../session/session-entries";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
@@ -77,6 +80,66 @@ import {
 import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 
 export type { YieldItem } from "./types";
+
+/** Default parent-approval dialog timeout for mission children (fail closed on expiry). */
+export const MISSION_PARENT_APPROVAL_TIMEOUT_MS = 300_000;
+
+function withMissionParentApprovalTimeout(
+	dialogOptions: ExtensionUIDialogOptions | undefined,
+): ExtensionUIDialogOptions {
+	const requested = dialogOptions?.timeout;
+	const timeout =
+		typeof requested === "number" &&
+		Number.isFinite(requested) &&
+		requested > 0 &&
+		requested < MISSION_PARENT_APPROVAL_TIMEOUT_MS
+			? requested
+			: MISSION_PARENT_APPROVAL_TIMEOUT_MS;
+	return { ...dialogOptions, timeout };
+}
+
+/**
+ * Forward parent UI while enforcing the mission approval timeout unless the child
+ * asked for something shorter. Timeout/denial stay fail-closed in the parent UI.
+ */
+export function createDelegatedParentApprovalUIContext(parent: ExtensionUIContext): ExtensionUIContext {
+	const wrap = (dialogOptions?: ExtensionUIDialogOptions) => withMissionParentApprovalTimeout(dialogOptions);
+	return {
+		get timeoutStartsOnPresentation() {
+			return parent.timeoutStartsOnPresentation;
+		},
+		select: (title, options, dialogOptions) => parent.select(title, options, wrap(dialogOptions)),
+		confirm: (title, message, dialogOptions) => parent.confirm(title, message, wrap(dialogOptions)),
+		input: (title, placeholder, dialogOptions) => parent.input(title, placeholder, wrap(dialogOptions)),
+		askDialog: parent.askDialog
+			? (questions, dialogOptions) => parent.askDialog!(questions, wrap(dialogOptions))
+			: undefined,
+		notify: (message, type) => parent.notify(message, type),
+		onTerminalInput: handler => parent.onTerminalInput(handler),
+		setStatus: (key, text) => parent.setStatus(key, text),
+		setWorkingMessage: message => parent.setWorkingMessage(message),
+		setWidget: (key, content, options) => parent.setWidget(key, content, options),
+		setFooter: factory => parent.setFooter(factory),
+		setHeader: factory => parent.setHeader(factory),
+		setTitle: title => parent.setTitle(title),
+		custom: (factory, options) => parent.custom(factory, options),
+		setEditorText: text => parent.setEditorText(text),
+		pasteToEditor: text => parent.pasteToEditor(text),
+		getEditorText: () => parent.getEditorText(),
+		editor: (title, prefill, dialogOptions, editorOptions) =>
+			parent.editor(title, prefill, wrap(dialogOptions), editorOptions),
+		addAutocompleteProvider: factory => parent.addAutocompleteProvider(factory),
+		setEditorComponent: factory => parent.setEditorComponent(factory),
+		get theme() {
+			return parent.theme;
+		},
+		getAllThemes: () => parent.getAllThemes(),
+		getTheme: name => parent.getTheme(name),
+		setTheme: theme => parent.setTheme(theme),
+		getToolsExpanded: () => parent.getToolsExpanded(),
+		setToolsExpanded: expanded => parent.setToolsExpanded(expanded),
+	};
+}
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
 
@@ -439,6 +502,19 @@ export interface ExecutorOptions {
 	 * set this false so disposal unregisters them instead of leaving idle peers.
 	 */
 	keepAlive?: boolean;
+	/** Fixed mission worktree binding; does not set {@link worktree} (reviver gate unchanged). */
+	workspace?: {
+		cwd: string;
+		binding: "fixed";
+	};
+	/** Parent-mediated approvals; when present, overrides the yolo subagent boundary. */
+	approvalDelegate?: {
+		kind: "parent";
+		uiContext?: ExtensionUIContext;
+		clientBridge?: ClientBridge;
+	};
+	/** Mission ownership markers persisted on session_init for cold revive. */
+	missionOwner?: MissionChildOwnerEntry;
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -2425,12 +2501,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
+	const parentApproval = options.approvalDelegate?.kind === "parent" ? options.approvalDelegate : undefined;
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
+			// Mission parent delegate: restore the parent's approval mode/policies
+			// instead of the ordinary yolo subagent boundary. Fail closed — never
+			// leave yolo when a parent delegate was requested.
+			...(parentApproval
+				? {
+						"tools.approvalMode": settings.get("tools.approvalMode"),
+						"tools.approval": settings.get("tools.approval"),
+					}
+				: undefined),
 		},
 		options.parentServiceTier,
 	);
@@ -2801,7 +2887,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
 				},
 				sessionManager: sessionManagerForRun,
-				hasUI: false,
+				hasUI: parentApproval?.uiContext !== undefined,
 				prewalk,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
@@ -2828,8 +2914,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
+			let setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
 			try {
-				({ session } = await awaitAbortable(sessionPromise));
+				({ session, setToolUIContext } = await awaitAbortable(sessionPromise));
 			} catch (err) {
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
@@ -2841,6 +2928,69 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			monitor.setActiveSession(session);
 			installRegistryStatusSync(session);
+			const applyParentApprovalDelegate = (
+				childSession: AgentSession,
+				setChildToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
+			): void => {
+				if (!parentApproval) return;
+				const delegatedUi = parentApproval.uiContext
+					? createDelegatedParentApprovalUIContext(parentApproval.uiContext)
+					: undefined;
+				if (delegatedUi) {
+					setChildToolUIContext(delegatedUi, true);
+				}
+				if (parentApproval.clientBridge) {
+					childSession.setClientBridge(parentApproval.clientBridge);
+				}
+				// Live/cold revive builds a fresh ExtensionRunner; without initialize the
+				// approval wrapper sees hasUI=false and fails closed even when the parent
+				// UI is available. Bind the delegated UI here (actions are filled by the
+				// initial-run initialize path, or minimal stubs on revive).
+				const runner = childSession.extensionRunner;
+				if (runner && delegatedUi && !runner.hasUI()) {
+					runner.initialize(
+						{
+							sendMessage: () => {},
+							sendUserMessage: () => {},
+							appendEntry: (customType, data) => {
+								childSession.sessionManager.appendCustomEntry(customType, data);
+							},
+							setLabel: (targetId, label) => {
+								childSession.sessionManager.appendLabelChange(targetId, label);
+							},
+							getActiveTools: () => childSession.getEnabledToolNames(),
+							getAllTools: () => childSession.getAllToolNames(),
+							setActiveTools: async toolNames => {
+								await childSession.setActiveToolsByName(toolNames);
+							},
+							getCommands: () => getSessionSlashCommands(childSession),
+							setModel: model => runExtensionSetModel(childSession, model),
+							getThinkingLevel: () => childSession.thinkingLevel,
+							setThinkingLevel: level => childSession.setThinkingLevel(level),
+							getServiceTiers: () => childSession.serviceTierByFamily,
+							setServiceTier: (family: ServiceTierFamily, tier: ServiceTier | undefined) =>
+								childSession.setServiceTierFamily(family, tier),
+							getSessionName: () => childSession.sessionManager.getSessionName(),
+							setSessionName: async name => {
+								await childSession.sessionManager.setSessionName(name, "user");
+							},
+						},
+						{
+							getModel: () => childSession.model,
+							isIdle: () => !childSession.isStreaming,
+							abort: () => childSession.abort({ reason: USER_INTERRUPT_LABEL }),
+							hasPendingMessages: () => childSession.queuedMessageCount > 0,
+							shutdown: () => {},
+							getContextUsage: () => childSession.getContextUsage(),
+							getSystemPrompt: () => childSession.systemPrompt,
+							compact: instructionsOrOptions => runExtensionCompact(childSession, instructionsOrOptions),
+						},
+						undefined,
+						delegatedUi,
+					);
+				}
+			};
+			applyParentApprovalDelegate(session, setToolUIContext);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
@@ -2853,10 +3003,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					if (options.parentArtifactManager) {
 						reopened.adoptArtifactManager(options.parentArtifactManager);
 					}
-					const { session: revived } = await createAgentSession(
+					const { session: revived, setToolUIContext: setRevivedToolUIContext } = await createAgentSession(
 						buildSubagentSessionOptions(reopened, expectedAgentRef),
 					);
 					installRegistryStatusSync(revived);
+					applyParentApprovalDelegate(revived, setRevivedToolUIContext);
 					return revived;
 				};
 			}
@@ -2895,6 +3046,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				...(options.workspace?.binding === "fixed" ? { cwdBinding: "fixed" as const } : {}),
+				...(options.missionOwner ? { missionOwner: options.missionOwner } : {}),
 			});
 
 			abortSignal.addEventListener(
@@ -2963,6 +3116,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						getSystemPrompt: () => session.systemPrompt,
 						compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 					},
+					undefined,
+					parentApproval?.uiContext ? createDelegatedParentApprovalUIContext(parentApproval.uiContext) : undefined,
 				);
 				extensionRunner.onError(err => {
 					logger.error("Extension error", { path: err.extensionPath, error: err.error });

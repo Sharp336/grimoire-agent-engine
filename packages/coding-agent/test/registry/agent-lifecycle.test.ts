@@ -209,6 +209,38 @@ describe("AgentLifecycleManager", () => {
 		expect(revived.disposeCalls()).toBe(1);
 	});
 
+	it("routes persisted cold revival to the factory registered for that agent id", async () => {
+		const first = makeSessionStub();
+		const second = makeSessionStub();
+		registry.register({
+			id: "first-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/first-Sub.jsonl",
+			status: "parked",
+		});
+		registry.register({
+			id: "second-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/second-Sub.jsonl",
+			status: "parked",
+		});
+
+		const firstReviver = vi.fn(async () => async () => first.session);
+		const secondReviver = vi.fn(async () => async () => second.session);
+		lifecycle.registerPersistedReviver("first-Sub", firstReviver, TTL);
+		lifecycle.registerPersistedReviver("second-Sub", secondReviver, TTL);
+
+		await expect(lifecycle.ensureLive("second-Sub")).resolves.toBe(second.session);
+		expect(secondReviver).toHaveBeenCalledTimes(1);
+		expect(firstReviver).not.toHaveBeenCalled();
+		expect(registry.get("second-Sub")?.session).toBe(second.session);
+		expect(registry.get("first-Sub")?.status).toBe("parked");
+	});
+
 	it("a persisted factory that declines leaves the parked ref transcript-only", async () => {
 		registry.register({
 			id: "7-Sub",
