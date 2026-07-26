@@ -237,8 +237,11 @@ describe("imageGenTool", () => {
 
 	it.each([
 		"https://chatgpt.com/backend-api",
+		"https://chatgpt.com/backend-api/",
 		"https://chatgpt.com/backend-api/codex",
+		"https://chatgpt.com/backend-api/codex/",
 		"https://chatgpt.com/backend-api/codex/responses",
+		"https://chatgpt.com/backend-api/codex/responses/",
 	])("uses the Codex Images API for official-JWT text generation with base URL %s", async baseUrl => {
 		setImageProviderOrder(["openai-codex"]);
 		let requestUrl: string | undefined;

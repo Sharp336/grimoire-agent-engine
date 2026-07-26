@@ -240,7 +240,7 @@
 - Fixed legacy Pi extensions failing validation when importing the upstream `keyText` keybinding helper ([#6470](https://github.com/can1357/oh-my-pi/issues/6470)).
 ### Changed
 
-- Changed ChatGPT/Codex subscription image generation to use the native Codex Images API with `gpt-image-2`, while preserving custom-proxy and provider fallback routing.
+- Changed ChatGPT/Codex subscription image generation to use the native Codex Images API with `gpt-image-2` for every official backend URL form (`/backend-api`, `/codex`, or `/codex/responses`, with or without a trailing slash), while preserving hosted Responses routing for custom proxies and standard OpenAI models.
 
 ## [17.1.0] - 2026-07-24
 
