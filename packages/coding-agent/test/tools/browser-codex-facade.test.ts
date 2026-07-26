@@ -123,7 +123,16 @@ async function withCmuxTool(test: (tool: BrowserTool, name: string, calls: RpcCa
 						typeof params.script === "string" &&
 						params.script.includes(',\\"bindNativeSelector\\",{\\"token\\":')
 					) {
-						return { value: 'pierce/[data-omp-codex-action-token="contract"]' };
+						const token = params.script.match(
+							/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-action-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+						)?.[0];
+						if (!token) throw new Error("Expected native action token");
+						return {
+							value: {
+								selector: `[data-omp-codex-action-token="${token}"]`,
+								frameSelectors: [],
+							},
+						};
 					}
 					if (typeof params.script === "string" && params.script.includes("globalThis[key] = true")) {
 						navigationMarkers.add(String(params.surface_id));
@@ -841,7 +850,10 @@ describe("Codex agent.browser public contract", () => {
 					now = 2_500;
 					return { attached: true, visible: true, enabled: true };
 				}
-				if (args[1] === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="deadline"]';
+				if (args[1] === "bindNativeSelector") {
+					const token = (args[2] as { token: string }).token;
+					return { selector: `[data-omp-codex-action-token="${token}"]`, frameSelectors: [] };
+				}
 				return true;
 			},
 			async codexEvaluateCleanup() {
@@ -1452,7 +1464,10 @@ describe("Codex agent.browser public contract", () => {
 			async codexEvaluate(_source: string, args: unknown[]) {
 				if (args[1] === "status") return { attached: true, visible: true, enabled: true };
 				if (args[1] === "editableValue") return editableValue;
-				if (args[1] === "bindNativeSelector") return "#name";
+				if (args[1] === "bindNativeSelector") {
+					const token = (args[2] as { token: string }).token;
+					return { selector: `[data-omp-codex-action-token="${token}"]`, frameSelectors: [] };
+				}
 				return true;
 			},
 			async codexEvaluateCleanup() {
@@ -1483,8 +1498,8 @@ describe("Codex agent.browser public contract", () => {
 			timeoutMs: 3_000,
 		});
 		expect(nativeCalls).toEqual([
-			{ operation: "type", args: ["#name", " ab "] },
-			{ operation: "focus", args: ["#name"] },
+			{ operation: "type", args: [expect.stringMatching(/^\[data-omp-codex-action-token=/), " ab "] },
+			{ operation: "focus", args: [expect.stringMatching(/^\[data-omp-codex-action-token=/)] },
 			{ operation: "press", args: ["Backspace"] },
 		]);
 	});

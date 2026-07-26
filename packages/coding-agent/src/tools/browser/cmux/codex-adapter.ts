@@ -184,18 +184,37 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	if (command === "bindNativeSelector") {
 		const token = String(payload.token || "");
 		if (!/^[A-Za-z0-9-]+$/.test(token)) throw new Error("Invalid native action token");
+		const frames = [];
+		for (let currentDocument = element.ownerDocument; currentDocument;) {
+			const frame = currentDocument.defaultView?.frameElement;
+			if (!frame) break;
+			frames.unshift(frame);
+			currentDocument = frame.ownerDocument;
+		}
+		if (element.getRootNode?.()?.host || frames.some(frame => frame.getRootNode?.()?.host)) {
+			return { unsupported: "${CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION}" };
+		}
+		const frameSelectors = frames.map((frame, index) => {
+			const frameToken = token + "-frame-" + index;
+			frame.setAttribute("data-omp-codex-action-token", frameToken);
+			return '[data-omp-codex-action-token="' + frameToken + '"]';
+		});
 		element.setAttribute("data-omp-codex-action-token", token);
-		return 'pierce/[data-omp-codex-action-token="' + token + '"]';
+		return { selector: '[data-omp-codex-action-token="' + token + '"]', frameSelectors };
 	}
 	if (command === "armNativeFileActivation") {
 		const isFileInput = String(element.tagName || "").toLowerCase() === "input" && String(element.type || element.getAttribute("type") || "").toLowerCase() === "file";
 		if (!isFileInput) return false;
 		const state = globalThis.__ompCodexBrowserState;
 		if (!state || state.active !== true) throw new Error("Browser file chooser observer is unavailable");
+		const frameSelectors = Array.isArray(payload.frameSelectors) ? payload.frameSelectors : [];
+		if (frameSelectors.some(selector => typeof selector !== "string")) {
+			throw new Error("Invalid native file activation frame selectors");
+		}
+		const frames = frameSelectors.map(selector => document.querySelectorAll(selector)[0]);
+		if (frames.some(frame => !frame)) throw new Error("Native file activation frame is unavailable");
 		state.nativeActivationTarget = element;
-		state.nativeActivationFrameSelectors = Array.isArray(payload.frameSelectors)
-			? payload.frameSelectors.filter(selector => typeof selector === "string")
-			: [];
+		state.nativeActivationFrames = frames;
 		return true;
 	}
 	if (command === "getAttribute") return element.getAttribute(payload.name);
@@ -329,7 +348,7 @@ const DISPOSE_NATIVE_ACTION_TOKEN_SOURCE = `(token) => {
 		for (const element of root.querySelectorAll("*")) {
 			if (String(element.getAttribute?.("data-omp-codex-action-token") || "").startsWith(token)) element.removeAttribute("data-omp-codex-action-token");
 			if (element.shadowRoot) roots.push(element.shadowRoot);
-			if (element.contentDocument) roots.push(element.contentDocument);
+			try { if (element.contentDocument) roots.push(element.contentDocument); } catch {}
 		}
 	}
 	return true;
@@ -339,9 +358,44 @@ const DISARM_NATIVE_FILE_ACTIVATION_SOURCE = `() => {
 	const state = globalThis.__ompCodexBrowserState;
 	if (state) {
 		state.nativeActivationTarget = null;
-		state.nativeActivationFrameSelectors = null;
+		state.nativeActivationFrames = null;
 	}
 	return true;
+}`;
+
+const FRAME_AWARE_POINT_DESCENT_SOURCE = `const deepestElementFromPoint = (pointX, pointY) => {
+	let root = document;
+	let localX = pointX;
+	let localY = pointY;
+	let offsetX = 0;
+	let offsetY = 0;
+	for (;;) {
+		let hit = root?.elementFromPoint?.(localX, localY) ?? null;
+		while (hit?.shadowRoot?.elementFromPoint) {
+			const nested = hit.shadowRoot.elementFromPoint(localX, localY);
+			if (!nested || nested === hit) break;
+			hit = nested;
+		}
+		if (!hit) return { element: null, offsetX, offsetY };
+		let frameDocument = null;
+		try { frameDocument = hit.contentDocument; } catch {}
+		if (!frameDocument?.elementFromPoint) return { element: hit, offsetX, offsetY };
+		const rect = hit.getBoundingClientRect();
+		const frameX = rect.x + Number(hit.clientLeft || 0);
+		const frameY = rect.y + Number(hit.clientTop || 0);
+		offsetX += frameX;
+		offsetY += frameY;
+		localX -= frameX;
+		localY -= frameY;
+		root = frameDocument;
+	}
+};`;
+
+const COORDINATE_MEDIA_URL_SOURCE = `(x, y) => {
+	${FRAME_AWARE_POINT_DESCENT_SOURCE}
+	const element = deepestElementFromPoint(x, y).element;
+	if (!element || String(element.tagName || "").toLowerCase() === "iframe") return "";
+	return String(element.currentSrc || element.src || element.href || element.getAttribute?.("src") || element.getAttribute?.("href") || "");
 }`;
 
 const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
@@ -414,33 +468,7 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 		String(element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim() ||
 		associatedLabelText(element) ||
 		String(element.getAttribute("alt") || element.getAttribute("title") || valueName(element) || textOf(element) || descendantAlternative(element)).replace(/\\s+/g, " ").trim();
-	const deepestElementFromPoint = (pointX, pointY) => {
-		let root = document;
-		let localX = pointX;
-		let localY = pointY;
-		let offsetX = 0;
-		let offsetY = 0;
-		for (;;) {
-			let hit = root?.elementFromPoint?.(localX, localY) ?? null;
-			while (hit?.shadowRoot?.elementFromPoint) {
-				const nested = hit.shadowRoot.elementFromPoint(localX, localY);
-				if (!nested || nested === hit) break;
-				hit = nested;
-			}
-			if (!hit) return { element: null, offsetX, offsetY };
-			let frameDocument = null;
-			try { frameDocument = hit.contentDocument; } catch {}
-			if (!frameDocument?.elementFromPoint) return { element: hit, offsetX, offsetY };
-			const rect = hit.getBoundingClientRect();
-			const frameX = rect.x + Number(hit.clientLeft || 0);
-			const frameY = rect.y + Number(hit.clientTop || 0);
-			offsetX += frameX;
-			offsetY += frameY;
-			localX -= frameX;
-			localY -= frameY;
-			root = frameDocument;
-		}
-	};
+	${FRAME_AWARE_POINT_DESCENT_SOURCE}
 	const target = deepestElementFromPoint(x, y);
 	let element = target.element;
 	if (element && accessibilityHidden(element)) return [];
@@ -694,7 +722,7 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 			clickListener: null,
 			observedDocuments: [],
 			nativeActivationTarget: null,
-			nativeActivationFrameSelectors: null,
+			nativeActivationFrames: null,
 			trustedActivation: false,
 			active: true,
 		};
@@ -712,17 +740,22 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 			const input = composedTarget?.closest('input[type="file"]') ?? target?.closest('input[type="file"]');
 			if (!input) return;
 			const nativeActivation = state.nativeActivationTarget === input;
-			const frameSelectors = nativeActivation && Array.isArray(state.nativeActivationFrameSelectors)
-				? state.nativeActivationFrameSelectors.slice()
+			const nativeActivationFrames = nativeActivation && Array.isArray(state.nativeActivationFrames)
+				? state.nativeActivationFrames.slice()
 				: [];
 			if (nativeActivation) {
 				state.nativeActivationTarget = null;
-				state.nativeActivationFrameSelectors = null;
+				state.nativeActivationFrames = null;
 			}
 			const delegatedActivation = !event.isTrusted && state.trustedActivation === true;
 			queueMicrotask(() => {
 				if (state.active !== true || (!event.isTrusted && !nativeActivation && !delegatedActivation) || event.defaultPrevented || input.disabled === true || input.isConnected === false) return;
 				const token = "file-" + state.tokenNamespace + "-" + state.nextToken++;
+				const frameSelectors = nativeActivationFrames.map((frame, index) => {
+					const frameToken = token + "-frame-" + index;
+					frame.setAttribute("data-omp-codex-file-frame-token", frameToken);
+					return '[data-omp-codex-file-frame-token="' + frameToken + '"]';
+				});
 				input.setAttribute("data-omp-codex-file-token", token);
 				state.fileEvents.push({ sequence: ++state.fileEventSequence, token, multiple: input.multiple === true, frameSelectors });
 				if (state.fileEvents.length > 32) state.fileEvents.splice(0, state.fileEvents.length - 32);
@@ -765,6 +798,7 @@ const CLEANUP_PAGE_OBSERVERS_SOURCE = `(tokenNamespace) => {
 	for (const root of roots) {
 		for (const element of root.querySelectorAll("*")) {
 			if (String(element.getAttribute?.("data-omp-codex-file-token") || "").startsWith("file-" + tokenNamespace + "-")) element.removeAttribute("data-omp-codex-file-token");
+			if (String(element.getAttribute?.("data-omp-codex-file-frame-token") || "").startsWith("file-" + tokenNamespace + "-")) element.removeAttribute("data-omp-codex-file-frame-token");
 			if (String(element.getAttribute?.("data-omp-codex-action-token") || "").startsWith(tokenNamespace)) element.removeAttribute("data-omp-codex-action-token");
 			if (element.shadowRoot) roots.push(element.shadowRoot);
 			try { if (element.contentDocument) roots.push(element.contentDocument); } catch {}
@@ -812,6 +846,7 @@ const DISPOSE_FILE_TOKEN_SOURCE = `(token) => {
 	for (const root of roots) {
 		for (const element of root.querySelectorAll("*")) {
 			if (element.getAttribute?.("data-omp-codex-file-token") === token) element.removeAttribute("data-omp-codex-file-token");
+			if (String(element.getAttribute?.("data-omp-codex-file-frame-token") || "").startsWith(token + "-frame-")) element.removeAttribute("data-omp-codex-file-frame-token");
 			if (element.shadowRoot) roots.push(element.shadowRoot);
 			try { if (element.contentDocument) roots.push(element.contentDocument); } catch {}
 		}
@@ -1988,37 +2023,34 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		return false;
 	}
 
-	#frameSelectors(descriptor: CodexLocatorDescriptor): string[] {
-		if (descriptor.kind === "frame") return [descriptor.selector];
-		if (descriptor.kind === "within") {
-			return [...this.#frameSelectors(descriptor.parent), ...this.#frameSelectors(descriptor.child)];
-		}
-		if (descriptor.kind === "and" || descriptor.kind === "or") {
-			const left = this.#frameSelectors(descriptor.left);
-			const right = this.#frameSelectors(descriptor.right);
-			if (left.length === right.length && left.every((selector, index) => selector === right[index])) return left;
-			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.FRAME_LOCATOR_NESTED_NATIVE_ACTION);
-		}
-		if (descriptor.kind === "filter") {
-			return [
-				...this.#frameSelectors(descriptor.locator),
-				...(descriptor.has ? this.#frameSelectors(descriptor.has) : []),
-				...(descriptor.hasNot ? this.#frameSelectors(descriptor.hasNot) : []),
-			];
-		}
-		if (descriptor.kind === "nth") return this.#frameSelectors(descriptor.locator);
-		return [];
-	}
-
-	async #withNativeFrameContext<TResult>(
+	async #bindNativeLocatorTarget(
 		descriptor: CodexLocatorDescriptor,
+		token: string,
 		deadline: number,
 		operation: string,
-		action: () => Promise<TResult>,
-	): Promise<TResult> {
-		return await this.#withNativeFrameSelectors(this.#frameSelectors(descriptor), deadline, operation, action);
+	): Promise<{ selector: string; frameSelectors: string[] }> {
+		const prepared = await this.#locator<unknown>(
+			descriptor,
+			"bindNativeSelector",
+			{ token },
+			remainingMs(deadline, operation),
+		);
+		if (isRecord(prepared) && prepared.unsupported === CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION) {
+			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION);
+		}
+		const selector = `[data-omp-codex-action-token="${token}"]`;
+		if (
+			!isRecord(prepared) ||
+			prepared.selector !== selector ||
+			!Array.isArray(prepared.frameSelectors) ||
+			prepared.frameSelectors.some(
+				(frameSelector, index) => frameSelector !== `[data-omp-codex-action-token="${token}-frame-${index}"]`,
+			)
+		) {
+			throw new ToolError(`${operation} returned an invalid native target`);
+		}
+		return { selector, frameSelectors: prepared.frameSelectors as string[] };
 	}
-
 	async #withNativeFrameSelectors<TResult>(
 		frameSelectors: readonly string[],
 		deadline: number,
@@ -2102,26 +2134,22 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		await this.#waitForLocator(descriptor, args.force === true ? "attached" : "actionable", deadline, operation);
 		if (nativeClick) {
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
-			let tokenBound = false;
 			let fileActivationArmed = false;
+			let tokenBound = false;
 			try {
-				const nativeSelector = await this.#locator<string>(
-					descriptor,
-					"bindNativeSelector",
-					{ token },
-					remainingMs(deadline, operation),
-				);
+				remainingMs(deadline, operation);
 				tokenBound = true;
+				const nativeTarget = await this.#bindNativeLocatorTarget(descriptor, token, deadline, operation);
 				fileActivationArmed = await this.#locator<boolean>(
 					descriptor,
 					"armNativeFileActivation",
-					{ frameSelectors: this.#frameSelectors(descriptor) },
+					{ frameSelectors: nativeTarget.frameSelectors },
 					remainingMs(deadline, operation),
 				);
-				await this.#withNativeFrameContext(descriptor, deadline, operation, async () => {
+				await this.#withNativeFrameSelectors(nativeTarget.frameSelectors, deadline, operation, async () => {
 					if (operation === "locator.click")
-						await this.#tab.click(nativeSelector, remainingMs(deadline, operation));
-					else await this.#tab.dblclick(nativeSelector, remainingMs(deadline, operation));
+						await this.#tab.click(nativeTarget.selector, remainingMs(deadline, operation));
+					else await this.#tab.dblclick(nativeTarget.selector, remainingMs(deadline, operation));
 				});
 				return undefined;
 			} finally {
@@ -2138,15 +2166,11 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
 			let tokenBound = false;
 			try {
-				const nativeSelector = await this.#locator<string>(
-					descriptor,
-					"bindNativeSelector",
-					{ token },
-					remainingMs(deadline, operation),
-				);
+				remainingMs(deadline, operation);
 				tokenBound = true;
-				await this.#withNativeFrameContext(descriptor, deadline, operation, async () => {
-					await this.#tab.type(nativeSelector, stringArg(args, "value"), remainingMs(deadline, operation));
+				const nativeTarget = await this.#bindNativeLocatorTarget(descriptor, token, deadline, operation);
+				await this.#withNativeFrameSelectors(nativeTarget.frameSelectors, deadline, operation, async () => {
+					await this.#tab.type(nativeTarget.selector, stringArg(args, "value"), remainingMs(deadline, operation));
 				});
 				return undefined;
 			} finally {
@@ -2162,15 +2186,11 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
 			let tokenBound = false;
 			try {
-				const nativeSelector = await this.#locator<string>(
-					descriptor,
-					"bindNativeSelector",
-					{ token },
-					remainingMs(deadline, operation),
-				);
+				remainingMs(deadline, operation);
 				tokenBound = true;
-				await this.#withNativeFrameContext(descriptor, deadline, operation, async () => {
-					await this.#tab.focus(nativeSelector, remainingMs(deadline, operation));
+				const nativeTarget = await this.#bindNativeLocatorTarget(descriptor, token, deadline, operation);
+				await this.#withNativeFrameSelectors(nativeTarget.frameSelectors, deadline, operation, async () => {
+					await this.#tab.focus(nativeTarget.selector, remainingMs(deadline, operation));
 					await this.#tab.press(key, { timeoutMs: remainingMs(deadline, operation) });
 				});
 				return undefined;
@@ -2253,15 +2273,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	async #coordinateDownload(args: Readonly<Record<string, unknown>>): Promise<void> {
 		const deadline = Date.now() + selectorTimeoutArg(args);
 		const url = await this.#tab.codexEvaluate<string>(
-			`(x, y) => {
-				let element = document.elementFromPoint(x, y);
-				while (element?.shadowRoot?.elementFromPoint) {
-					const nested = element.shadowRoot.elementFromPoint(x, y);
-					if (!nested || nested === element) break;
-					element = nested;
-				}
-				return element ? String(element.currentSrc || element.src || element.href || element.getAttribute?.("src") || element.getAttribute?.("href") || "") : "";
-			}`,
+			COORDINATE_MEDIA_URL_SOURCE,
 			[numberArg(args, "x"), numberArg(args, "y")],
 			remainingMs(deadline, "cua.downloadMedia"),
 		);

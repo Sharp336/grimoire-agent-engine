@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { JsRuntime, type RuntimeHooks } from "../../src/eval/js/shared/runtime";
+import {
+	attachCodexBrowserToAgent,
+	type CodexBrowserAdapter,
+	type CodexBrowserOperation,
+} from "../../src/tools/browser/codex-facade";
 import { bindBrowserRunFacade, markHandled, waitForBrowserRun } from "../../src/tools/browser/run-cancellation";
 import { ToolAbortError } from "../../src/tools/tool-errors";
 
@@ -144,6 +149,31 @@ describe("browser run cancellation", () => {
 		deferred.resolve("late title");
 
 		await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
+	});
+
+	it("handles unawaited attached facade rejection while preserving awaited teardown rejection", async () => {
+		const controller = new AbortController();
+		const teardownError = postmortem.markExpectedCleanupError(new Error("browser run ended"));
+		const adapter: CodexBrowserAdapter = {
+			currentTabId: "1",
+			invoke<T>(_operation: CodexBrowserOperation): Promise<T> {
+				return new Promise<T>((_resolve, reject) => {
+					const rejectOnAbort = () => reject(controller.signal.reason);
+					controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
+					if (controller.signal.aborted) rejectOnAbort();
+				});
+			},
+		};
+		const attached = attachCodexBrowserToAgent({}, adapter);
+
+		const reasons = await collectUnhandledRejections(async () => {
+			void attached.browser.nameSession("unawaited");
+			const awaited = attached.browser.nameSession("awaited");
+			controller.abort(teardownError);
+			await expect(awaited).rejects.toBe(teardownError);
+		});
+
+		expect(reasons).toEqual([]);
 	});
 
 	it("aborts run-scoped wait() before a stale continuation can mutate the tab", async () => {

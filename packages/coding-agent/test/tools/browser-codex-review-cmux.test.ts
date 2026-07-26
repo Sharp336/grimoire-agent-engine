@@ -260,6 +260,8 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 		readonly multiple: boolean;
 		readonly tagName: "INPUT" | "A";
 		shadowRoot?: { querySelectorAll(selector: string): ElementProbe[] };
+		ownerDocument?: unknown;
+		root?: unknown;
 
 		constructor(kind: "file" | "anchor") {
 			this.kind = kind;
@@ -273,6 +275,9 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 			return null;
 		}
 
+		getRootNode(): unknown {
+			return this.root ?? this.ownerDocument;
+		}
 		getAttribute(name: string): string | null {
 			return this.attributes.get(name) ?? null;
 		}
@@ -300,6 +305,7 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 		};
 	}
 	const elements = [file, anchor];
+	const frameAttributes = new Map<string, string>();
 	const frameDocument = {
 		addEventListener(type: string, listener: (event: ClickEvent) => void, capture = false) {
 			if (type === "click") {
@@ -322,7 +328,10 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 		tagName: "IFRAME",
 		contentDocument: frameDocument,
 		querySelectorAll: () => [],
-		getAttribute: () => null,
+		getAttribute: (name: string) => frameAttributes.get(name) ?? null,
+		hasAttribute: (name: string) => frameAttributes.has(name),
+		removeAttribute: (name: string) => frameAttributes.delete(name),
+		setAttribute: (name: string, value: string) => frameAttributes.set(name, value),
 	};
 	const document = {
 		addEventListener(type: string, listener: (event: ClickEvent) => void, capture = false) {
@@ -337,6 +346,10 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 		querySelectorAll(selector: string) {
 			if (inFrame) {
 				if (selector === "*" || selector === "#frame") return [frame];
+				const actionToken = String(frame.getAttribute("data-omp-codex-action-token") ?? "");
+				if (actionToken && selector === `[data-omp-codex-action-token="${actionToken}"]`) return [frame];
+				const fileFrameToken = String(frame.getAttribute("data-omp-codex-file-frame-token") ?? "");
+				if (fileFrameToken && selector === `[data-omp-codex-file-frame-token="${fileFrameToken}"]`) return [frame];
 				return [];
 			}
 			if (selector === "*") return inShadowRoot ? [anchor] : elements;
@@ -352,6 +365,14 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 			});
 		},
 	};
+	const frameView = { frameElement: frame };
+	Reflect.set(frameDocument, "defaultView", frameView);
+	Reflect.set(frame, "ownerDocument", document);
+	Reflect.set(frame, "getRootNode", () => document);
+	file.ownerDocument = inFrame ? frameDocument : document;
+	file.root = inShadowRoot ? anchor.shadowRoot : file.ownerDocument;
+	anchor.ownerDocument = document;
+	anchor.root = document;
 	const fire = (
 		target: ElementProbe,
 		cancelled = false,
@@ -1427,7 +1448,7 @@ describe("cmux Codex browser review regressions", () => {
 			facadeFor({
 				codexCwd: () => "/tmp/codex-media-contract",
 				async codexEvaluate(source: string, args: unknown[]) {
-					if (source.includes("document.elementFromPoint")) {
+					if (source.includes("deepestElementFromPoint")) {
 						coordinateEvaluations++;
 						return runPageEvaluator(source, args, { document, window: {} });
 					}
@@ -1469,6 +1490,90 @@ describe("cmux Codex browser review regressions", () => {
 			message: "cua.downloadMedia target has no downloadable URL",
 		});
 		expect(requestedUrls).toHaveLength(1);
+	});
+
+	it("downloads framed coordinate media with border-adjusted shadow traversal and stops at inaccessible frames", async () => {
+		const payload = Buffer.from("framed-shadow-media");
+		const frameUrl = "https://fixture.test/frame.html";
+		const mediaUrl = "https://fixture.test/inner-media.png";
+		const requestedUrls: string[] = [];
+		const localPoints: Array<[number, number]> = [];
+		const writes: Uint8Array[] = [];
+		const mediaLink = { href: mediaUrl, tagName: "A" };
+		const shadowRoot = {
+			elementFromPoint(x: number, y: number) {
+				localPoints.push([x, y]);
+				return mediaLink;
+			},
+		};
+		const shadowHost = { shadowRoot };
+		const frameDocument = {
+			elementFromPoint(x: number, y: number) {
+				localPoints.push([x, y]);
+				return shadowHost;
+			},
+		};
+		const sameOriginFrame = {
+			clientLeft: 4,
+			clientTop: 6,
+			contentDocument: frameDocument,
+			getBoundingClientRect: () => ({ x: 100, y: 50, width: 300, height: 200 }),
+			src: frameUrl,
+			tagName: "IFRAME",
+		};
+		const inaccessibleFrame = {
+			get contentDocument(): never {
+				throw new Error("Blocked a frame with origin");
+			},
+			src: "https://cross-origin.test/frame.html",
+			tagName: "IFRAME",
+		};
+		let topHit: object = sameOriginFrame;
+		const document = { elementFromPoint: () => topHit };
+		const current = await selectedTab(
+			facadeFor({
+				codexCwd: () => "/tmp/codex-media-contract",
+				async codexEvaluate(source: string, args: unknown[]) {
+					if (source.includes("deepestElementFromPoint") || source.includes("document.elementFromPoint")) {
+						return runPageEvaluator(source, args, { document, window: {} });
+					}
+					if (source.includes("__ompCodexMediaTransfers") && args.length === 2) {
+						requestedUrls.push(String(args[0]));
+						return true;
+					}
+					if (source.includes("__ompCodexMediaTransfers") && args.length === 1) {
+						return {
+							url: requestedUrls.at(-1),
+							contentType: "image/png",
+							base64Chunks: [payload.toString("base64")],
+						};
+					}
+					throw new Error("Unexpected page evaluation");
+				},
+				async codexEvaluateCleanup() {
+					return true;
+				},
+				async codexPersistFile(_path: string, data: Uint8Array) {
+					writes.push(data);
+				},
+			}),
+		);
+
+		await current.cua.downloadMedia({ x: 124, y: 86, timeoutMs: 250 });
+		expect(localPoints).toEqual([
+			[20, 30],
+			[20, 30],
+		]);
+		expect(requestedUrls).toEqual([mediaUrl]);
+		expect(writes.map(data => Buffer.from(data))).toEqual([payload]);
+
+		topHit = inaccessibleFrame;
+		const inaccessible = await caughtError(() => current.cua.downloadMedia({ x: 124, y: 86, timeoutMs: 250 }));
+		expect(inaccessible).toEqual({
+			name: "ToolError",
+			message: "cua.downloadMedia target has no downloadable URL",
+		});
+		expect(requestedUrls).toEqual([mediaUrl]);
 	});
 
 	it("rejects unknown-length media before retaining a streaming chunk beyond 32 MiB", async () => {
@@ -1590,7 +1695,13 @@ describe("cmux Codex browser review regressions", () => {
 					const command = String(args[1]);
 					commands.push(command);
 					if (command === "status") return { attached: true, visible: true, enabled: true };
-					if (command === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="press"]';
+					if (command === "bindNativeSelector") {
+						const token = String((args[2] as { token: string }).token);
+						return {
+							selector: `[data-omp-codex-action-token="${token}"]`,
+							frameSelectors: [],
+						};
+					}
 					return true;
 				},
 				async codexEvaluateCleanup() {
@@ -1608,7 +1719,7 @@ describe("cmux Codex browser review regressions", () => {
 		await current.playwright.getByLabel("Name").press("a");
 
 		expect(commands).toEqual(["status", "bindNativeSelector"]);
-		expect(focuses).toEqual(['pierce/[data-omp-codex-action-token="press"]']);
+		expect(focuses).toEqual([expect.stringMatching(/^\[data-omp-codex-action-token=/)]);
 		expect(presses).toHaveLength(1);
 		expect(presses[0]?.key).toBe("a");
 		expect(presses[0]?.timeoutMs).toBeGreaterThan(0);
@@ -1627,7 +1738,7 @@ describe("cmux Codex browser review regressions", () => {
 					if (command === "status") return { attached: true, visible: true, enabled: true };
 					if (command === "bindNativeSelector") {
 						const token = String((args[2] as { token: string }).token);
-						return `[data-omp-codex-action-token="${token}"]`;
+						return { selector: `[data-omp-codex-action-token="${token}"]`, frameSelectors: [] };
 					}
 					if (command === "click" || command === "dblclick") throw new Error("synthetic click must not run");
 					if (command === "armNativeFileActivation") return false;
@@ -1669,79 +1780,58 @@ describe("cmux Codex browser review regressions", () => {
 		}
 	});
 
-	it("keeps CSS and semantic locators inside open shadow roots actionable through native input", async () => {
-		const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
+	it("uses plain CSS tokens for light-DOM locator clicks and rejects shadow targets before mutation", async () => {
+		const { document, window } = parseHTML(
+			'<html><body><button class="light">Light click</button><button class="light">Light double click</button><div id="host"></div></body></html>',
+		);
+		const lightButtons = Array.from(document.querySelectorAll("button.light")) as Element[];
 		const host = document.getElementById("host");
-		if (!host) throw new Error("Expected shadow host");
+		if (!host || lightButtons.length !== 2) throw new Error("Expected light DOM controls and shadow host");
 		const shadowRoot = host.attachShadow({ mode: "open" });
-		shadowRoot.innerHTML = '<button>Shadow action</button><input aria-label="Shadow editor">';
-		const button = shadowRoot.querySelector("button");
-		const input = shadowRoot.querySelector("input");
-		if (!button || !input) throw new Error("Expected shadow controls");
-		for (const element of [button, input]) {
+		shadowRoot.innerHTML = "<button>Shadow action</button>";
+		const shadowButton = shadowRoot.querySelector("button");
+		if (!shadowButton) throw new Error("Expected shadow control");
+		for (const element of [...lightButtons, shadowButton]) {
 			Reflect.set(element, "getBoundingClientRect", () => ({ x: 0, y: 0, width: 100, height: 20 }));
 			Reflect.set(element, "scrollIntoView", () => undefined);
 		}
 		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
-		const nativeSelectors: string[] = [];
-		const pressed: string[] = [];
-		const resolveNativeSelector = (selector: string): Element | null => {
-			if (!selector.startsWith("pierce/")) return document.querySelector(selector);
-			const css = selector.slice("pierce/".length);
-			const visit = (root: Pick<typeof document, "querySelector" | "querySelectorAll">): Element | null => {
-				const direct = root.querySelector(css);
-				if (direct) return direct;
-				for (const element of root.querySelectorAll("*")) {
-					if (element.shadowRoot) {
-						const nested = visit(element.shadowRoot);
-						if (nested) return nested;
-					}
-				}
-				return null;
-			};
-			return visit(document);
-		};
+		const nativeClicks: Array<{ kind: "click" | "dblclick"; selector: string }> = [];
 		const evaluate = (source: string, args: unknown[]) => runPageEvaluator(source, args, { document, window });
 		const { adapter, browser } = adapterAndFacadeFor({
 			codexEvaluate: evaluate,
 			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
 			async codexWait() {
-				throw new Error("Shadow controls should be immediately actionable");
+				throw new Error("Controls should be immediately actionable");
 			},
 			async click(selector: string) {
-				nativeSelectors.push(selector);
-				if (resolveNativeSelector(selector) !== button)
-					throw new Error("Native click selector missed shadow target");
+				nativeClicks.push({ kind: "click", selector });
+				expect(selector).not.toStartWith("pierce/");
+				expect(document.querySelector(selector)).toBe(lightButtons[0]);
 			},
-			async type(selector: string, text: string) {
-				nativeSelectors.push(selector);
-				if (resolveNativeSelector(selector) !== input) throw new Error("Native type selector missed shadow target");
-				input.value += text;
-			},
-			async focus(selector: string) {
-				nativeSelectors.push(selector);
-				if (resolveNativeSelector(selector) !== input)
-					throw new Error("Native focus selector missed shadow target");
-			},
-			async press(key: string) {
-				pressed.push(key);
+			async dblclick(selector: string) {
+				nativeClicks.push({ kind: "dblclick", selector });
+				expect(selector).not.toStartWith("pierce/");
+				expect(document.querySelector(selector)).toBe(lightButtons[1]);
 			},
 		});
 
 		try {
 			const current = await selectedTab(browser);
-			await current.playwright.locator("button").click();
-			await current.playwright.locator("input").type("css-");
-			await current.playwright.getByText("Shadow action", { exact: true }).click();
-			await current.playwright.getByRole("textbox", { name: "Shadow editor", exact: true }).type("typed");
-			await current.playwright.locator("input").press("A");
+			await current.playwright.locator("button.light").first().click();
+			await current.playwright.locator("button.light").nth(1).dblclick();
+			const shadowError = await caughtError(() =>
+				current.playwright.getByText("Shadow action", { exact: true }).click(),
+			);
 
-			expect(nativeSelectors).toHaveLength(5);
-			expect(nativeSelectors.every(selector => selector.startsWith("pierce/"))).toBe(true);
-			expect(input.value).toBe("css-typed");
-			expect(pressed).toEqual(["A"]);
-			expect(button.hasAttribute("data-omp-codex-action-token")).toBe(false);
-			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
+			expect(nativeClicks.map(call => call.kind)).toEqual(["click", "dblclick"]);
+			expect(nativeClicks.every(call => call.selector.startsWith('[data-omp-codex-action-token="'))).toBe(true);
+			expect(shadowError).toEqual({
+				name: "BrowserCapabilityError",
+				message: "Browser capability is unavailable: dom_cua framed shadow action",
+			});
+			expect(lightButtons.every(button => !button.hasAttribute("data-omp-codex-action-token"))).toBe(true);
+			expect(shadowButton.hasAttribute("data-omp-codex-action-token")).toBe(false);
 		} finally {
 			await adapter.dispose();
 		}
@@ -1761,7 +1851,7 @@ describe("cmux Codex browser review regressions", () => {
 					if (command === "armNativeFileActivation") return false;
 					if (command === "bindNativeSelector") {
 						const token = String((args[2] as { token: string }).token);
-						return `[data-omp-codex-action-token="${token}"]`;
+						return { selector: `[data-omp-codex-action-token="${token}"]`, frameSelectors: [] };
 					}
 					return true;
 				},
@@ -1979,6 +2069,8 @@ describe("cmux Codex browser review regressions", () => {
 			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
 			async codexRequest(method: string, params: Readonly<Record<string, unknown>>) {
 				frameCalls.push(`${method}:${String(params.selector ?? "")}`);
+				expect(params.selector).not.toBe("#frame");
+				expect(params.selector).not.toStartWith("pierce/");
 				selectedFrame = true;
 				return {};
 			},
@@ -2019,12 +2111,13 @@ describe("cmux Codex browser review regressions", () => {
 
 			expect(uploads).toBe(1);
 			expect(probe.file.getAttribute("data-omp-codex-file-token")).toBeNull();
-			expect(frameCalls).toEqual([
-				"browser.frame.select:#frame",
-				"browser.frame.main:main",
-				"browser.frame.select:#frame",
-				"browser.frame.main:main",
-			]);
+			expect(probe.frame.getAttribute("data-omp-codex-action-token")).toBeNull();
+			expect(probe.frame.getAttribute("data-omp-codex-file-frame-token")).toBeNull();
+			expect(frameCalls).toHaveLength(4);
+			expect(frameCalls[0]).toMatch(/^browser\.frame\.select:\[data-omp-codex-action-token=/);
+			expect(frameCalls[1]).toBe("browser.frame.main:main");
+			expect(frameCalls[2]).toMatch(/^browser\.frame\.select:\[data-omp-codex-file-frame-token=/);
+			expect(frameCalls[3]).toBe("browser.frame.main:main");
 		} finally {
 			await adapter.dispose();
 		}
@@ -4020,6 +4113,129 @@ describe("cmux Codex browser review regressions", () => {
 		expect(sequence).toEqual(["arm", "reload", "prepare"]);
 		expect(navigationSignal?.aborted).toBe(true);
 	});
+	it("selects the exact resolved iframe token for scoped nth frame locators", async () => {
+		const view = { getComputedStyle: () => ({ display: "block", visibility: "visible" }) };
+		const topDocument: Record<string, unknown> = { defaultView: view };
+		const makeAttributes = () => {
+			const values = new Map<string, string>();
+			return {
+				getAttribute: (name: string) => values.get(name) ?? null,
+				hasAttribute: (name: string) => values.has(name),
+				removeAttribute: (name: string) => values.delete(name),
+				setAttribute: (name: string, value: string) => values.set(name, value),
+			};
+		};
+		const frameAttributes = [makeAttributes(), makeAttributes()];
+		const buttonAttributes = [makeAttributes(), makeAttributes()];
+		const frameDocuments: Array<Record<string, unknown>> = [];
+		const frames: Array<Record<string, unknown>> = [];
+		const buttons: Array<Record<string, unknown>> = [];
+		for (let index = 0; index < 2; index++) {
+			const frameView: Record<string, unknown> = { getComputedStyle: view.getComputedStyle };
+			const frameDocument: Record<string, unknown> = { defaultView: frameView };
+			const button = {
+				...buttonAttributes[index],
+				children: [],
+				disabled: false,
+				getBoundingClientRect: () => ({ x: 0, y: 0, width: 100, height: 20 }),
+				getRootNode: () => frameDocument,
+				innerText: `Action ${index}`,
+				matches: () => false,
+				ownerDocument: frameDocument,
+				parentElement: null,
+				scrollIntoView: () => undefined,
+				tagName: "BUTTON",
+				textContent: `Action ${index}`,
+			};
+			Reflect.set(frameDocument, "querySelectorAll", (selector: string) => {
+				if (selector === "*" || selector === "#action") return [button];
+				return buttonAttributes[index]?.getAttribute("data-omp-codex-action-token") &&
+					selector ===
+						`[data-omp-codex-action-token="${buttonAttributes[index]?.getAttribute("data-omp-codex-action-token")}"]`
+					? [button]
+					: [];
+			});
+			const frame = {
+				...frameAttributes[index],
+				contentDocument: frameDocument,
+				getRootNode: () => topDocument,
+				ownerDocument: topDocument,
+				parentElement: null,
+				querySelectorAll: () => [],
+				tagName: "IFRAME",
+			};
+			Reflect.set(frameView, "frameElement", frame);
+			frameDocuments.push(frameDocument);
+			frames.push(frame);
+			buttons.push(button);
+		}
+		const frameScope = {
+			ownerDocument: topDocument,
+			querySelectorAll: (selector: string) => (selector === "iframe" || selector === "*" ? frames : []),
+		};
+		Reflect.set(topDocument, "querySelectorAll", (selector: string) =>
+			selector === "#frames" ? [frameScope] : selector === "*" ? [frameScope, ...frames] : [],
+		);
+		const evaluate = (source: string, args: unknown[]) =>
+			runPageEvaluator(source, args, { document: topDocument, window: view });
+		let selectedFrame = -1;
+		const nativeSelectors: string[] = [];
+		const { adapter, browser } = adapterAndFacadeFor({
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async codexRequest(method: string, params: Readonly<Record<string, unknown>>) {
+				expect(method).toBe("browser.frame.select");
+				const selector = String(params.selector);
+				expect(selector).not.toBe("iframe");
+				expect(selector).not.toStartWith("pierce/");
+				selectedFrame = frames.findIndex(
+					(_frame, index) =>
+						selector ===
+						`[data-omp-codex-action-token="${frameAttributes[index]?.getAttribute("data-omp-codex-action-token")}"]`,
+				);
+				expect(selectedFrame).toBe(1);
+				return {};
+			},
+			async codexCleanupRequest(method: string) {
+				expect(method).toBe("browser.frame.main");
+				selectedFrame = -1;
+				return {};
+			},
+			async click(selector: string) {
+				nativeSelectors.push(selector);
+				expect(selector).not.toStartWith("pierce/");
+				expect(selectedFrame).toBe(1);
+				const selectedDocument = frameDocuments[selectedFrame];
+				if (!selectedDocument || typeof selectedDocument.querySelectorAll !== "function") {
+					throw new Error("Selected frame document is unavailable");
+				}
+				expect(selectedDocument.querySelectorAll(selector)).toEqual([buttons[1]]);
+			},
+		});
+
+		try {
+			const current = await selectedTab(browser);
+			const action = current.playwright.locator("#frames").frameLocator("iframe").nth(1).locator("#action");
+			await action.click();
+			Reflect.set(frames[1] as object, "getRootNode", () => ({ host: {} }));
+			const shadowFrameError = await caughtError(() => action.click());
+
+			expect(nativeSelectors).toHaveLength(1);
+			expect(shadowFrameError).toEqual({
+				name: "BrowserCapabilityError",
+				message: "Browser capability is unavailable: dom_cua framed shadow action",
+			});
+			expect(frameAttributes.every(attributes => !attributes.hasAttribute("data-omp-codex-action-token"))).toBe(
+				true,
+			);
+			expect(buttonAttributes.every(attributes => !attributes.hasAttribute("data-omp-codex-action-token"))).toBe(
+				true,
+			);
+		} finally {
+			await adapter.dispose();
+		}
+	});
+
 	it("keeps same-origin frame locator actions inside their resolved frame context", async () => {
 		const commands: string[] = [];
 		let clicked = false;
@@ -4033,7 +4249,17 @@ describe("cmux Codex browser review regressions", () => {
 				commands.push(command);
 				if (command === "status") return { attached: true, visible: true, enabled: true };
 				if (command === "editableValue") return typed;
-				if (command === "bindNativeSelector") return 'pierce/[data-omp-codex-action-token="frame"]';
+				if (command === "bindNativeSelector") {
+					const token = String((args[2] as { token: string }).token);
+					const nested = JSON.stringify(args[0]).includes("#nested-frame");
+					return {
+						selector: `[data-omp-codex-action-token="${token}"]`,
+						frameSelectors: Array.from(
+							{ length: nested ? 2 : 1 },
+							(_value, index) => `[data-omp-codex-action-token="${token}-frame-${index}"]`,
+						),
+					};
+				}
 				if (command === "armNativeFileActivation") return false;
 				if (command === "click" || command === "type") {
 					syntheticActions++;
@@ -4074,16 +4300,11 @@ describe("cmux Codex browser review regressions", () => {
 			expect({ clicked, typed }).toEqual({ clicked: false, typed: `${frameText} combined` });
 			expect(nativeActions).toEqual(["click", `type:${frameText}`, "click", "type: combined"]);
 			expect(syntheticActions).toBe(0);
-			expect(frameCalls).toEqual([
-				"browser.frame.select:#frame",
-				"browser.frame.main:main",
-				"browser.frame.select:#frame",
-				"browser.frame.main:main",
-				"browser.frame.select:#frame",
-				"browser.frame.main:main",
-				"browser.frame.select:#frame",
-				"browser.frame.main:main",
-			]);
+			expect(frameCalls).toHaveLength(8);
+			for (let index = 0; index < frameCalls.length; index += 2) {
+				expect(frameCalls[index]).toMatch(/^browser\.frame\.select:\[data-omp-codex-action-token=/);
+				expect(frameCalls[index + 1]).toBe("browser.frame.main:main");
+			}
 			expect(nestedError).toEqual({
 				name: "BrowserCapabilityError",
 				message: "Browser capability is unavailable: playwright.frameLocator nested native action",

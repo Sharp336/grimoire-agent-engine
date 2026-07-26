@@ -2189,6 +2189,133 @@ describe("Puppeteer final parity blockers", () => {
 			"Browser adapter run has ended",
 		);
 	});
+	it("disposes fulfilled visible DOM collections and extracted handles when another context detaches", async () => {
+		const collectionCreated = Promise.withResolvers<void>();
+		const detached = Promise.withResolvers<never>();
+		const originalError = new Error("Execution context was destroyed by frame detachment");
+		let collectionDisposals = 0;
+		let propertyReads = 0;
+		let elementDisposals = 0;
+		const element = {
+			asElement: () => element,
+			dispose: async () => {
+				elementDisposals++;
+			},
+		};
+		const collection = {
+			getProperties: async () => {
+				propertyReads++;
+				return new Map([["0", element]]);
+			},
+			dispose: async () => {
+				collectionDisposals++;
+			},
+		};
+		const mainFrame: Record<string, unknown> = {
+			parentFrame: () => null,
+			evaluateHandle: async () => {
+				collectionCreated.resolve();
+				return collection;
+			},
+		};
+		const embeddingElement = {
+			evaluate: async () => true,
+			dispose: async () => undefined,
+		};
+		const childFrame: Record<string, unknown> = {
+			parentFrame: () => mainFrame,
+			frameElement: async () => embeddingElement,
+			evaluateHandle: async () => await detached.promise,
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "https://fixture.test/current",
+				frames: () => [mainFrame, childFrame],
+				mainFrame: () => mainFrame,
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		const snapshot = adapter.invoke("dom_cua.get_visible_dom", { tabId: "1", timeoutMs: 1_000 });
+		await collectionCreated.promise;
+		await flushMicrotasks();
+		detached.reject(originalError);
+		const error = await snapshot.then(
+			() => null,
+			reason => reason,
+		);
+
+		expect(error).toBe(originalError);
+		expect({ collectionDisposals, propertyReads, elementDisposals }).toEqual({
+			collectionDisposals: 1,
+			propertyReads: 0,
+			elementDisposals: 0,
+		});
+		await adapter.dispose();
+
+		let extractedCollectionDisposals = 0;
+		let extractedHandleDisposals = 0;
+		const extractedHandle: Record<string, unknown> = {
+			asElement: () => extractedHandle,
+			dispose: async () => {
+				extractedHandleDisposals++;
+			},
+		};
+		const firstCollection = {
+			getProperties: async () => new Map([["0", extractedHandle]]),
+			dispose: async () => {
+				extractedCollectionDisposals++;
+			},
+		};
+		const propertyError = new Error("Execution context detached while reading the child collection");
+		const detachedCollection = {
+			getProperties: async () => {
+				throw propertyError;
+			},
+			dispose: async () => {
+				extractedCollectionDisposals++;
+			},
+		};
+		const firstFrame: Record<string, unknown> = {
+			parentFrame: () => null,
+			evaluateHandle: async () => firstCollection,
+		};
+		const detachedFrame: Record<string, unknown> = {
+			parentFrame: () => firstFrame,
+			frameElement: async () => embeddingElement,
+			evaluateHandle: async () => detachedCollection,
+		};
+		const extractionAdapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "https://fixture.test/current",
+				frames: () => [firstFrame, detachedFrame],
+				mainFrame: () => firstFrame,
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+		const extractionError = await extractionAdapter
+			.invoke("dom_cua.get_visible_dom", { tabId: "1", timeoutMs: 1_000 })
+			.then(
+				() => null,
+				reason => reason,
+			);
+
+		expect(extractionError).toBe(propertyError);
+		expect({ extractedCollectionDisposals, extractedHandleDisposals }).toEqual({
+			extractedCollectionDisposals: 2,
+			extractedHandleDisposals: 1,
+		});
+		await extractionAdapter.dispose();
+	});
+
 	it("disposes a visible DOM collection that resolves after run abort without publishing nodes", async () => {
 		const controller = new AbortController();
 		const collectionResolution = Promise.withResolvers<Record<string, unknown>>();
@@ -3022,6 +3149,159 @@ describe("Puppeteer final parity blockers", () => {
 		}
 		expect(requested).toEqual(["https://fixture.test/deep-shadow.png"]);
 	});
+	it("parses locator press chords and releases modifiers around the final key", async () => {
+		const events: string[] = [];
+		const handle: Record<string, unknown> = {
+			asElement: () => handle,
+			dispose: async () => undefined,
+			evaluate: async () => true,
+			focus: async () => undefined,
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				evaluateHandle: async () => ({
+					getProperties: async () => new Map([["0", handle]]),
+					dispose: async () => undefined,
+				}),
+				keyboard: {
+					down: async (key: string) => void events.push(`down:${key}`),
+					press: async (key: string) => void events.push(`press:${key}`),
+					up: async (key: string) => void events.push(`up:${key}`),
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await adapter.invoke("locator.press", {
+			tabId: "1",
+			locator: { kind: "css", selector: "#target" },
+			value: "Control+L",
+			timeoutMs: 100,
+		});
+		await adapter.invoke("locator.press", {
+			tabId: "1",
+			locator: { kind: "css", selector: "#target" },
+			value: "Shift+Tab",
+			timeoutMs: 100,
+		});
+		await adapter.dispose();
+
+		expect(events).toEqual(["down:Control", "press:L", "up:Control", "down:Shift", "press:Tab", "up:Shift"]);
+	});
+
+	it("releases locator press modifiers when the final key press fails", async () => {
+		const events: string[] = [];
+		const handle: Record<string, unknown> = {
+			asElement: () => handle,
+			dispose: async () => undefined,
+			evaluate: async () => true,
+			focus: async () => undefined,
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				evaluateHandle: async () => ({
+					getProperties: async () => new Map([["0", handle]]),
+					dispose: async () => undefined,
+				}),
+				keyboard: {
+					down: async (key: string) => void events.push(`down:${key}`),
+					press: async (key: string) => {
+						events.push(`press:${key}`);
+						throw new Error("press failed");
+					},
+					up: async (key: string) => void events.push(`up:${key}`),
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		await expect(
+			adapter.invoke("locator.press", {
+				tabId: "1",
+				locator: { kind: "css", selector: "#target" },
+				value: "Control+L",
+				timeoutMs: 100,
+			}),
+		).rejects.toThrow("press failed");
+		await adapter.dispose();
+
+		expect(events).toEqual(["down:Control", "press:L", "up:Control"]);
+	});
+
+	it("rejects unsupported forced hidden click options before dispatching input events", async () => {
+		const outcomes: string[] = [];
+		const allEvents: string[][] = [];
+		const cases = [
+			{ operation: "locator.click", options: { button: "right" } },
+			{ operation: "locator.dblclick", options: { modifiers: ["Shift"] } },
+		] as const;
+
+		for (const { operation, options } of cases) {
+			const events: string[] = [];
+			let evaluations = 0;
+			const handle: Record<string, unknown> = {
+				asElement: () => handle,
+				dispose: async () => undefined,
+				evaluate: async () => {
+					evaluations++;
+					if (evaluations === 1) return true;
+					if (evaluations === 2) return false;
+					events.push("synthetic");
+				},
+				click: async () => void events.push("native"),
+			};
+			const adapter = new PuppeteerCodexBrowserAdapter({
+				currentTabId: "1",
+				page: {
+					url: () => "about:blank",
+					evaluateHandle: async () => ({
+						getProperties: async () => new Map([["0", handle]]),
+						dispose: async () => undefined,
+					}),
+					keyboard: {
+						down: async (key: string) => void events.push(`down:${key}`),
+						up: async (key: string) => void events.push(`up:${key}`),
+					},
+				} as never,
+				browser: {} as never,
+				signal: new AbortController().signal,
+				cwd: "/tmp/browser-contract",
+				captureScreenshot: async () => "",
+			});
+			const outcome = await adapter
+				.invoke(operation, {
+					tabId: "1",
+					locator: { kind: "css", selector: "#target" },
+					force: true,
+					...options,
+					timeoutMs: 100,
+				})
+				.then(
+					() => "fulfilled",
+					error => (error instanceof Error ? error.message : String(error)),
+				);
+			await adapter.dispose();
+			outcomes.push(outcome);
+			allEvents.push(events);
+		}
+
+		expect(outcomes).toEqual([
+			"Browser capability is unavailable: locator.click options",
+			"Browser capability is unavailable: locator.click options",
+		]);
+		expect(allEvents).toEqual([[], []]);
+	});
+
 	it("holds chord modifiers while pressing the final CUA key", async () => {
 		const events: string[] = [];
 		const adapter = new PuppeteerCodexBrowserAdapter({

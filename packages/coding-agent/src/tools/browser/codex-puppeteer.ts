@@ -844,8 +844,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					locatorArgs(args),
 					"locator.press",
 					async handle => {
+						const [finalKey, ...modifiers] = this.#locatorPressChord(stringArg(args, "value"));
 						await handle.focus();
-						await this.#page.keyboard.press(stringArg(args, "value") as KeyInput);
+						await this.#withHeldKeys(modifiers, async () => {
+							await this.#page.keyboard.press(finalKey as KeyInput);
+						});
 					},
 					{ visible: true, enabled: true },
 				);
@@ -2251,9 +2254,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			label,
 			async handle => {
 				const modifiers = Array.isArray(args.modifiers) ? (args.modifiers as string[]) : [];
-				const normalized = modifiers.map(modifier =>
-					modifier === "ControlOrMeta" ? (process.platform === "darwin" ? "Meta" : "Control") : modifier,
-				);
+				const normalized = modifiers.map(modifier => this.#normalizeLocatorModifier(modifier, label));
+				const synthetic = force && !(await this.#isVisible(handle));
+				if (synthetic && ((args.button !== undefined && args.button !== "left") || normalized.length > 0)) {
+					throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.LOCATOR_CLICK_OPTIONS);
+				}
 				let failure: unknown;
 				try {
 					for (const modifier of normalized) {
@@ -2270,7 +2275,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 							throw new Error(`${label} was abandoned`);
 						}
 					}
-					if (force && !(await this.#isVisible(handle))) {
+					if (synthetic) {
 						await handle.evaluate(
 							(element, detail) => {
 								const target = element as unknown as { click(): void; dispatchEvent(event: unknown): boolean };
@@ -2702,17 +2707,32 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				return false;
 			});
 		}
-		const collectionPromise = Promise.all(contexts.map(context => context.evaluateHandle(collect)));
-		const collections = await this.#runBeforeDeadline(
-			deadline,
-			() => collectionPromise,
-			() => {
-				void collectionPromise.then(
-					values => Promise.all(values.map(value => value.dispose().catch(() => undefined))),
-					() => undefined,
-				);
-			},
+		const ownedCollections = new Set<{ dispose(): Promise<void> }>();
+		let acceptingCollections = true;
+		const releaseOwnedCollections = async (): Promise<void> => {
+			acceptingCollections = false;
+			const owned = [...ownedCollections];
+			ownedCollections.clear();
+			await this.#disposeHandlesBeforeDeadline(owned, deadline);
+		};
+		const collectionPromise = Promise.all(
+			contexts.map(context =>
+				Promise.resolve()
+					.then(() => context.evaluateHandle(collect))
+					.then(collection => {
+						if (acceptingCollections) ownedCollections.add(collection);
+						else void this.#disposeHandlesBeforeDeadline([collection], deadline);
+						return collection;
+					}),
+			),
 		);
+		let collections: Awaited<typeof collectionPromise>;
+		try {
+			collections = await this.#runBeforeDeadline(deadline, () => collectionPromise, releaseOwnedCollections);
+		} catch (error) {
+			await releaseOwnedCollections();
+			throw error;
+		}
 		const handles: ElementHandle[] = [];
 		try {
 			for (const collection of collections) {
@@ -2801,7 +2821,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			await this.#disposeHandlesBeforeDeadline(handles, deadline);
 			throw error;
 		} finally {
-			await this.#disposeHandlesBeforeDeadline(collections, deadline);
+			await releaseOwnedCollections();
 		}
 	}
 
@@ -2950,6 +2970,19 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (value === 2) return "middle";
 		if (value === 3) return "right";
 		return "left";
+	}
+
+	#locatorPressChord(value: string): [finalKey: string, ...modifiers: string[]] {
+		const keys = value.split("+");
+		const finalKey = keys.pop();
+		if (!finalKey) throw new Error("locator.press requires a final key after its modifiers");
+		return [finalKey, ...keys.map(modifier => this.#normalizeLocatorModifier(modifier, "locator.press"))];
+	}
+
+	#normalizeLocatorModifier(modifier: string, label: string): string {
+		if (modifier === "ControlOrMeta") return process.platform === "darwin" ? "Meta" : "Control";
+		if (modifier === "Alt" || modifier === "Control" || modifier === "Meta" || modifier === "Shift") return modifier;
+		throw new Error(`${label} modifier must be Alt, Control, ControlOrMeta, Meta, or Shift`);
 	}
 
 	async #withHeldKeys(rawKeys: unknown, action: () => Promise<void>): Promise<void> {

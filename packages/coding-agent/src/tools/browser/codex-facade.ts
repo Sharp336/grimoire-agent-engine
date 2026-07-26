@@ -1,6 +1,8 @@
 import { ToolError } from "../tool-errors";
+import { bindBrowserRunFacade } from "./run-cancellation";
 
 const NAVIGATION_TIMEOUT_MS = 10_000;
+const NON_ABORTING_SIGNAL = new AbortController().signal;
 const SELECTOR_TIMEOUT_MS = 3_000;
 /** File formats accepted when callers export Google Workspace content. */
 export type CodexGsuiteFormat = "pdf" | "md" | "xlsx" | "csv" | "docx" | "pptx";
@@ -1609,7 +1611,7 @@ export function attachCodexBrowserToAgent<T extends object>(
 	agent: T,
 	adapter: CodexBrowserAdapter,
 ): T & { browser: CodexBrowserFacade } {
-	const browser = createCodexBrowserFacade(adapter);
+	const browser = bindBrowserRunFacade(createCodexBrowserFacade(adapter), NON_ABORTING_SIGNAL);
 	Object.defineProperty(agent, "browser", {
 		value: browser,
 		configurable: true,
