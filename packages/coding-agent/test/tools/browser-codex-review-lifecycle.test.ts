@@ -634,6 +634,23 @@ describe("Codex agent.browser Puppeteer inline-worker lifecycle", () => {
 			});
 			expect(probe.requestInterception.at(-1)).toBe(false);
 
+			const disposalOnly = harness.waitFor(message => message.type === "result" && message.id === "disposal-only");
+			harness.send({
+				type: "run",
+				id: "disposal-only",
+				name: "disposal-only",
+				code: 'page.on("request", () => undefined); return "completed";',
+				timeoutMs: 5_000,
+				session: { cwd: process.cwd() },
+			});
+			await expect(waitForLifecycleStep(disposalOnly, "standalone disposal failure result")).resolves.toMatchObject({
+				type: "result",
+				id: "disposal-only",
+				ok: false,
+				error: { message: "adapter disposal failed" },
+			});
+			expect(probe.requestInterception.at(-1)).toBe(false);
+
 			disposeSpy.mockRestore();
 			const recovered = harness.waitFor(message => message.type === "result" && message.id === "recovered-run");
 			harness.send({
