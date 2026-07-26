@@ -12,6 +12,7 @@ import {
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const originalOpenRouterKey = Bun.env.OPENROUTER_API_KEY;
+const originalAgnesKey = Bun.env.AGNES_API_KEY;
 const generatedImagePaths: string[] = [];
 
 afterEach(async () => {
@@ -20,6 +21,12 @@ afterEach(async () => {
 		delete Bun.env.OPENROUTER_API_KEY;
 	} else {
 		Bun.env.OPENROUTER_API_KEY = originalOpenRouterKey;
+	}
+	setImageProviderOrder([]);
+	if (originalAgnesKey === undefined) {
+		delete Bun.env.AGNES_API_KEY;
+	} else {
+		Bun.env.AGNES_API_KEY = originalAgnesKey;
 	}
 	setImageProviderOrder([]);
 });
@@ -802,5 +809,522 @@ describe("imageGenTool", () => {
 
 		expect(requestUrls).toEqual(["https://api.x.ai/v1/images/generations"]);
 		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("routes Agnes image generation with b64_json to apihub.agnes-ai.com", async () => {
+		setImageProviderOrder(["agnes"]);
+		let requestUrl: string | undefined;
+		let requestBody: Record<string, unknown> | undefined;
+		let authorization: string | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestUrl = input.toString();
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			authorization = new Headers(init?.headers).get("authorization") ?? undefined;
+			return new Response(
+				JSON.stringify({
+					data: [{ b64_json: Buffer.from("fake-agnes-image").toString("base64") }],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "agnes" ? "test-agnes-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: () => async () => "test-agnes-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-agnes", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrl).toBe("https://apihub.agnes-ai.com/v1/images/generations");
+		expect(authorization).toBe("Bearer test-agnes-key");
+		expect(requestBody).toMatchObject({
+			model: "agnes-image-2.1-flash",
+			prompt: "a cat.",
+			n: 1,
+			size: "1K",
+			ratio: "1:1",
+			return_base64: true,
+		});
+		expect(result.details?.provider).toBe("agnes");
+		expect(result.details?.model).toBe("agnes-image-2.1-flash");
+		expect(result.details?.imageCount).toBe(1);
+		const savedPath = result.details?.imagePaths[0];
+		if (!savedPath) throw new Error("Expected generated image path");
+		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("fake-agnes-image"));
+	});
+
+	it("scopes Agnes auth and request URL to a provider baseUrl override", async () => {
+		setImageProviderOrder(["agnes"]);
+		let requestUrl: string | undefined;
+		let resolverProvider: string | undefined;
+		let resolverOptions: { sessionId?: string; baseUrl?: string; modelId?: string } | undefined;
+		let getApiKeyOptions: { baseUrl?: string; modelId?: string } | undefined;
+		const customBaseUrl = "https://proxy.example/agnes/v1";
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, _init?: RequestInit) => {
+			requestUrl = input.toString();
+			return new Response(
+				JSON.stringify({
+					data: [{ b64_json: Buffer.from("scoped-agnes-image").toString("base64") }],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (
+					_provider: string,
+					_sessionId?: string,
+					options?: { baseUrl?: string; modelId?: string },
+				) => {
+					getApiKeyOptions = options;
+					return "scoped-agnes-key";
+				},
+				getProviderBaseUrl: (provider: string) => (provider === "agnes" ? customBaseUrl : undefined),
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: ((provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }) => {
+					resolverProvider = provider;
+					resolverOptions = options;
+					return async () => "scoped-agnes-key";
+				}) as never,
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-agnes-scoped", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrl).toBe(`${customBaseUrl}/images/generations`);
+		expect(resolverProvider).toBe("agnes");
+		expect(resolverOptions).toEqual({
+			sessionId: "test-session",
+			baseUrl: customBaseUrl,
+			modelId: "agnes-image-2.1-flash",
+		});
+		expect(getApiKeyOptions).toEqual({ baseUrl: customBaseUrl, modelId: "agnes-image-2.1-flash" });
+		expect(result.details?.provider).toBe("agnes");
+		expect(result.details?.imageCount).toBe(1);
+		const savedPath = result.details?.imagePaths[0];
+		if (!savedPath) throw new Error("Expected generated image path");
+		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("scoped-agnes-image"));
+	});
+
+	it("resolves Agnes credentials from AGNES_API_KEY env var when no model registry", async () => {
+		setImageProviderOrder(["agnes"]);
+		Bun.env.AGNES_API_KEY = "env-agnes-key";
+		let authorization: string | undefined;
+
+		const fetchMock: typeof fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			authorization = new Headers(init?.headers).get("authorization") ?? undefined;
+			return new Response(
+				JSON.stringify({
+					data: [{ b64_json: Buffer.from("env-agnes-image").toString("base64") }],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: undefined as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-agnes-env", { subject: "a dog" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(authorization).toBe("Bearer env-agnes-key");
+		expect(result.details?.provider).toBe("agnes");
+		expect(result.details?.imageCount).toBe(1);
+	});
+
+	it("maps Agnes aspect ratios to correct ratio and tier size", async () => {
+		setImageProviderOrder(["agnes"]);
+		const bodies: Array<{ size: string; ratio: string }> = [];
+
+		const fetchMock: typeof fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			bodies.push({ size: body.size as string, ratio: body.ratio as string });
+			return new Response(
+				JSON.stringify({
+					data: [{ b64_json: Buffer.from("aspect-image").toString("base64") }],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "agnes" ? "test-agnes-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { hasNonEnvCredential: () => false, rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-agnes-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		await imageGenTool.execute("call-agnes-1-1", { subject: "x", aspect_ratio: "1:1" }, undefined, ctx);
+		generatedImagePaths.push(...[]);
+
+		await imageGenTool.execute("call-agnes-16-9", { subject: "x", aspect_ratio: "16:9" }, undefined, ctx);
+		generatedImagePaths.push(...[]);
+
+		await imageGenTool.execute("call-agnes-9-16", { subject: "x", aspect_ratio: "9:16" }, undefined, ctx);
+		generatedImagePaths.push(...[]);
+
+		await imageGenTool.execute("call-agnes-3-2", { subject: "x", aspect_ratio: "3:2" }, undefined, ctx);
+		generatedImagePaths.push(...[]);
+
+		await imageGenTool.execute("call-agnes-2-3", { subject: "x", aspect_ratio: "2:3" }, undefined, ctx);
+		generatedImagePaths.push(...[]);
+
+		expect(bodies).toEqual([
+			{ size: "1K", ratio: "1:1" },
+			{ size: "1K", ratio: "16:9" },
+			{ size: "1K", ratio: "9:16" },
+			{ size: "1K", ratio: "3:2" },
+			{ size: "1K", ratio: "2:3" },
+		]);
+	});
+
+	it("throws ProviderHttpError on Agnes API failure with parsed error message", async () => {
+		setImageProviderOrder(["agnes"]);
+
+		const fetchMock: typeof fetch = (async () => {
+			return new Response(JSON.stringify({ error: { message: "rate limit exceeded" } }), {
+				status: 429,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "agnes" ? "test-agnes-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { hasNonEnvCredential: () => false, rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-agnes-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		await expect(imageGenTool.execute("call-agnes-error", { subject: "x" }, undefined, ctx)).rejects.toThrow(
+			/Image generation failed for all credentialed providers: agnes/,
+		);
+	});
+
+	it("handles Agnes URL-based image response fallback", async () => {
+		setImageProviderOrder(["agnes"]);
+		let agnesRequestUrl: string | undefined;
+		let downloadUrl: string | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, _init?: RequestInit) => {
+			const url = input.toString();
+			if (url.includes("apihub.agnes-ai.com")) {
+				agnesRequestUrl = url;
+				return new Response(
+					JSON.stringify({
+						data: [{ url: "https://example.com/agnes-result.webp" }],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://example.com/agnes-result.webp") {
+				downloadUrl = url;
+				return new Response(Buffer.from("url-image-bytes"), {
+					status: 200,
+					headers: { "content-type": "image/webp" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "agnes" ? "test-agnes-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { hasNonEnvCredential: () => false, rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-agnes-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-agnes-url", { subject: "a landscape" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(agnesRequestUrl).toBe("https://apihub.agnes-ai.com/v1/images/generations");
+		expect(downloadUrl).toBe("https://example.com/agnes-result.webp");
+		expect(result.details?.provider).toBe("agnes");
+		expect(result.details?.imageCount).toBe(1);
+		const savedPath = result.details?.imagePaths[0];
+		if (!savedPath) throw new Error("Expected generated image path");
+		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("url-image-bytes"));
+	});
+
+	it("returns 'No image data' when Agnes returns empty data array", async () => {
+		setImageProviderOrder(["agnes"]);
+
+		const fetchMock: typeof fetch = (async () => {
+			return new Response(JSON.stringify({ data: [] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "agnes" ? "test-agnes-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { hasNonEnvCredential: () => false, rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-agnes-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-agnes-empty", { subject: "x" }, undefined, ctx);
+
+		expect(result.details?.imageCount).toBe(0);
+		expect(result.details?.imagePaths).toEqual([]);
+		expect("text" in result.content[0] ? result.content[0].text : "").toContain("No image data returned from Agnes");
+	});
+
+	it("falls back to Agnes after an earlier provider HTTP failure", async () => {
+		const requestUrls: string[] = [];
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url.startsWith("https://api.openai.com/")) {
+				return new Response(JSON.stringify({ error: { message: "model unavailable" } }), {
+					status: 404,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("fallback-agnes-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+		const model = {
+			api: "openai-responses",
+			provider: "openai",
+			id: "gpt-5.5",
+			name: "GPT 5.5",
+			baseUrl: "https://api.openai.com/v1",
+		} as Model;
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => "test-openai-key",
+				getApiKeyForProvider: async (provider: string) => (provider === "agnes" ? "test-agnes-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: (provider: string) => async () => (provider === "agnes" ? "test-agnes-key" : "test-openai-key"),
+			} as unknown as ModelRegistry,
+			model,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-openai-fallback-agnes", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual([
+			"https://api.openai.com/v1/responses",
+			"https://apihub.agnes-ai.com/v1/images/generations",
+		]);
+		expect(result.details?.provider).toBe("agnes");
+	});
+
+	it("prefers Agnes when explicitly set as provider override", async () => {
+		const requestUrls: string[] = [];
+		const fetchMock = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("override-agnes-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+		const model = {
+			api: "openai-responses",
+			provider: "openai",
+			id: "gpt-5.5",
+			name: "GPT 5.5",
+			baseUrl: "https://api.openai.com/v1",
+		} as Model;
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => "test-openai-key",
+				getApiKeyForProvider: async (provider: string) => {
+					if (provider === "agnes") return "test-agnes-key";
+					return undefined;
+				},
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { hasNonEnvCredential: () => false, rotateSessionCredential: async () => false },
+				resolver: (provider: string) => async () => (provider === "agnes" ? "test-agnes-key" : "test-openai-key"),
+			} as unknown as ModelRegistry,
+			model,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-agnes-override",
+			{ subject: "a cat", provider: "agnes" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual(["https://apihub.agnes-ai.com/v1/images/generations"]);
+		expect(result.details?.provider).toBe("agnes");
+	});
+	it("sends input images to Agnes via extra_body.image", async () => {
+		setImageProviderOrder(["agnes"]);
+
+		let requestBody: Record<string, unknown> | undefined;
+
+		const fakeImageData = Buffer.from("fake-input-image").toString("base64");
+		const fakeInputDataUrl = `data:image/png;base64,${fakeImageData}`;
+		const fakeOutputData = Buffer.from("fake-agnes-output").toString("base64");
+
+		const fetchMock: typeof fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(
+				JSON.stringify({
+					data: [{ b64_json: fakeOutputData }],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "agnes" ? "test-agnes-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { hasNonEnvCredential: () => false, rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-agnes-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-agnes-input-images",
+			{
+				subject: "edit this",
+				input: [{ data: fakeInputDataUrl }],
+			},
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestBody).toBeDefined();
+		const extraBody = (requestBody as Record<string, unknown>).extra_body as Record<string, unknown>;
+		expect(extraBody).toBeDefined();
+		expect(extraBody.image).toEqual([fakeInputDataUrl]);
+		expect(extraBody.response_format).toBe("b64_json");
+		expect((requestBody as Record<string, unknown>).return_base64).toBe(true);
+		expect(result.details?.provider).toBe("agnes");
+		expect(result.details?.imageCount).toBe(1);
 	});
 });

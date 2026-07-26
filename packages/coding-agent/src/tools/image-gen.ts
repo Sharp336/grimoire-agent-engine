@@ -34,6 +34,7 @@ const DEFAULT_MODEL = "gemini-3-pro-image-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-image-preview";
 const DEFAULT_ANTIGRAVITY_MODEL = "gemini-3-pro-image";
 const DEFAULT_XAI_IMAGE_MODEL = "grok-imagine-image";
+const DEFAULT_AGNES_IMAGE_MODEL = "agnes-image-2.1-flash";
 const IMAGE_TIMEOUT = 3 * 60 * 1000; // 3 minutes
 const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -53,6 +54,7 @@ interface ImageApiKey {
 	apiKey: ApiKey;
 	projectId?: string;
 	model?: Model;
+	baseUrl?: string;
 }
 
 const COMMON_IMAGE_ASPECT_RATIOS = ["1:1", "3:4", "4:3", "9:16", "16:9"] as const;
@@ -451,11 +453,15 @@ export function setImageProviderOrder(providers: readonly string[]): void {
 	configuredImageProviderOrder = providers.filter(isImageProviderId);
 }
 function assertImageAspectRatioSupported(provider: ImageProvider, aspectRatio: ImageGenParams["aspect_ratio"]): void {
-	if (!aspectRatio || provider === "xai" || COMMON_IMAGE_ASPECT_RATIO_SET.has(aspectRatio)) {
+	const supported =
+		provider === "xai" ||
+		provider === "agnes" ||
+		(aspectRatio !== undefined && COMMON_IMAGE_ASPECT_RATIO_SET.has(aspectRatio));
+	if (!aspectRatio || supported) {
 		return;
 	}
 	throw new Error(
-		`Aspect ratio ${aspectRatio} is only supported by xAI image generation. Set providers.image to xai or use one of ${COMMON_IMAGE_ASPECT_RATIOS.join(", ")}.`,
+		`Aspect ratio ${aspectRatio} is not supported by ${provider} image generation. Use one of ${COMMON_IMAGE_ASPECT_RATIOS.join(", ")}.`,
 	);
 }
 
@@ -539,6 +545,41 @@ async function findGeminiImageCredentials(
 	return null;
 }
 
+const DEFAULT_AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1";
+
+function resolveAgnesImageBaseUrl(modelRegistry: ModelRegistry | undefined, modelId?: string): string {
+	if (!modelRegistry) return DEFAULT_AGNES_BASE_URL;
+	const registryWithFind = modelRegistry as ModelRegistry & {
+		find?: (provider: string, modelId: string) => Model | undefined;
+	};
+	if (modelId) {
+		const model = registryWithFind.find?.("agnes", modelId);
+		if (model?.baseUrl) return model.baseUrl.replace(/\/+$/, "");
+	}
+	const providerBaseUrl = modelRegistry.getProviderBaseUrl("agnes");
+	return (providerBaseUrl ?? DEFAULT_AGNES_BASE_URL).replace(/\/+$/, "");
+}
+
+async function findAgnesImageCredentials(
+	modelRegistry?: ModelRegistry,
+	sessionId?: string,
+	modelId?: string,
+): Promise<ImageApiKey | null> {
+	if (modelRegistry) {
+		const effectiveModelId = modelId ?? DEFAULT_AGNES_IMAGE_MODEL;
+		const baseUrl = resolveAgnesImageBaseUrl(modelRegistry, effectiveModelId);
+		const apiKey = await modelRegistry.getApiKeyForProvider("agnes", sessionId, {
+			baseUrl,
+			modelId: effectiveModelId,
+		});
+		if (apiKey) return { provider: "agnes", apiKey, baseUrl };
+		return null;
+	}
+	const apiKey = getEnvApiKey("agnes");
+	if (apiKey) return { provider: "agnes", apiKey };
+	return null;
+}
+
 async function findOpenAIHostedImageCredentials(
 	modelRegistry: ModelRegistry | undefined,
 	activeModel: Model | undefined,
@@ -604,6 +645,8 @@ function activeImageProvider(model: Model | undefined): Exclude<ImageProviderPre
 			return "openai";
 		case "google-antigravity":
 			return "antigravity";
+		case "agnes":
+			return "agnes";
 		case "xai":
 		case "xai-oauth":
 			return "xai";
@@ -641,6 +684,12 @@ async function findImageApiKey(
 	sessionId?: string,
 ): Promise<ImageApiKey | null> {
 	switch (provider) {
+		case "agnes":
+			return findAgnesImageCredentials(
+				modelRegistry,
+				sessionId,
+				activeModel?.provider === "agnes" ? activeModel.id : undefined,
+			);
 		case "openai":
 			return findOpenAIHostedImageCredentials(modelRegistry, activeModel, sessionId);
 		case "openai-codex":
@@ -1135,11 +1184,14 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 									? DEFAULT_OPENROUTER_MODEL
 									: provider === "xai"
 										? DEFAULT_XAI_IMAGE_MODEL
-										: DEFAULT_MODEL;
+										: provider === "agnes"
+											? DEFAULT_AGNES_IMAGE_MODEL
+											: DEFAULT_MODEL;
 					const resolvedModel = provider === "openrouter" ? resolveOpenRouterModel(model) : model;
 					if (
 						params.aspect_ratio &&
 						provider !== "xai" &&
+						provider !== "agnes" &&
 						!COMMON_IMAGE_ASPECT_RATIO_SET.has(params.aspect_ratio)
 					) {
 						unsupportedAspectRatioProvider ??= provider;
@@ -1455,6 +1507,116 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								imageCount: xaiInlineImages.length,
 								imagePaths: xaiImagePaths,
 								images: xaiInlineImages,
+							},
+						};
+					}
+
+					if (provider === "agnes") {
+						const promptText = assemblePrompt(params);
+						const agnesModel = resolvedModel || DEFAULT_AGNES_IMAGE_MODEL;
+						const agnesBaseUrl = apiKey.baseUrl ?? resolveAgnesImageBaseUrl(ctx.modelRegistry, agnesModel);
+						const agnesApiKey: ApiKey = ctx.modelRegistry
+							? ctx.modelRegistry.resolver("agnes", {
+									sessionId,
+									baseUrl: agnesBaseUrl,
+									modelId: agnesModel,
+								})
+							: apiKey.apiKey;
+
+						// Agnes Image 2.1 uses `ratio` + tiered `size` instead of exact pixel dimensions.
+						const agnesSize =
+							params.image_size === "1024x1536" || params.image_size === "1536x1024" ? "2K" : "1K";
+						const agnesRatio =
+							params.aspect_ratio ??
+							(params.image_size === "1536x1024" ? "3:2" : params.image_size === "1024x1536" ? "2:3" : "1:1");
+
+						// Agnes Image 2.1 uses `return_base64: true` for text-to-image Base64 output.
+						// Image-to-image passes reference images via `extra_body.image` (Data URI Base64).
+						const agnesBody: Record<string, unknown> = {
+							model: agnesModel,
+							prompt: promptText,
+							n: 1,
+							size: agnesSize,
+							ratio: agnesRatio,
+							return_base64: true,
+						};
+						if (resolvedImages.length > 0) {
+							agnesBody.extra_body = {
+								image: resolvedImages.map(img => toDataUrl(img)),
+								response_format: "b64_json",
+							};
+						}
+
+						const rawText = await withAuth(
+							agnesApiKey,
+							async key => {
+								const resp = await fetchImpl(`${agnesBaseUrl}/images/generations`, {
+									method: "POST",
+									headers: {
+										"Content-Type": "application/json",
+										Authorization: `Bearer ${key}`,
+									},
+									body: JSON.stringify(agnesBody),
+									signal: requestSignal,
+								});
+								const text = await resp.text();
+								if (!resp.ok) {
+									let message = text;
+									try {
+										const parsed = JSON.parse(text) as { error?: { message?: string } };
+										message = parsed.error?.message ?? message;
+									} catch {
+										// Keep raw text.
+									}
+									throw new ProviderHttpError(
+										`Agnes image request failed (${resp.status}): ${message}`,
+										resp.status,
+										{ headers: resp.headers },
+									);
+								}
+								return text;
+							},
+							{ signal: requestSignal },
+						);
+
+						const data = JSON.parse(rawText) as { data: Array<{ b64_json?: string; url?: string }> };
+						const agnesInlineImages: InlineImageData[] = [];
+						for (const item of data.data ?? []) {
+							if (item.b64_json) {
+								agnesInlineImages.push({
+									data: item.b64_json,
+									mimeType: parseImageMetadata(Buffer.from(item.b64_json, "base64"))?.mimeType ?? "image/png",
+								});
+							} else if (item.url) {
+								agnesInlineImages.push(await loadImageFromUrl(item.url, fetchImpl, requestSignal));
+							}
+						}
+
+						if (agnesInlineImages.length === 0) {
+							return {
+								content: [{ type: "text", text: "No image data returned from Agnes." }],
+								details: {
+									provider,
+									model: agnesModel,
+									imageCount: 0,
+									imagePaths: [],
+									images: [],
+								},
+							};
+						}
+
+						const agnesImagePaths = await saveImagesToTemp(agnesInlineImages);
+
+						return {
+							content: [
+								{ type: "text", text: buildResponseSummary(provider, agnesModel, agnesImagePaths, undefined) },
+							],
+							details: {
+								provider,
+								model: agnesModel,
+								imageCount: agnesInlineImages.length,
+								imagePaths: agnesImagePaths,
+								images: agnesInlineImages,
 							},
 						};
 					}

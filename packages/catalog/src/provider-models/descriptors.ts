@@ -9,6 +9,7 @@ import type { ModelManagerConfig, ProviderCatalogEntry, ProviderDescriptor } fro
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
+	agnesModelManagerOptions,
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
 	alibabaTokenPlanModelManagerOptions,
@@ -69,6 +70,14 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => aimlApiModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "AIML API" },
+	},
+	{
+		id: "agnes",
+		defaultModel: "agnes-2.0-flash",
+		envVars: ["AGNES_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => agnesModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Agnes AI" },
 	},
 	{
 		id: "alibaba-coding-plan",

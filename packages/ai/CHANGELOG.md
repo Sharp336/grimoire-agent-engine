@@ -102,6 +102,9 @@
 - Improved connection error handling by classifying generic connection failures as transient, allowing them to be retried, while keeping explicit authentication rejections non-retryable.
 - Fixed custom Anthropic base URLs losing native thinking signatures during continuation requests.
 - Fixed Alibaba Coding Plan Custom login rejecting valid API keys on endpoints that do not serve the default validation model by validating against the model catalog instead.
+### Added
+
+- Added Agnes AI provider definition (`agnes`) with `AGNES_API_KEY` env key. Registered in the provider registry for `/login` discovery and model resolution.
 
 ## [17.0.6] - 2026-07-20
 

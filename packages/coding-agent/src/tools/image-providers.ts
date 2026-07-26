@@ -7,7 +7,7 @@
  */
 
 /** Image generation backends, in settings/tool vocabulary. */
-export type ImageProvider = "antigravity" | "gemini" | "openai" | "openai-codex" | "openrouter" | "xai";
+export type ImageProvider = "agnes" | "antigravity" | "gemini" | "openai" | "openai-codex" | "openrouter" | "xai";
 
 /** Auto-resolution fallback order when no configured entry or session provider matches. */
 export const AUTO_IMAGE_PROVIDER_ORDER: readonly ImageProvider[] = [
@@ -17,6 +17,7 @@ export const AUTO_IMAGE_PROVIDER_ORDER: readonly ImageProvider[] = [
 	"xai",
 	"openrouter",
 	"gemini",
+	"agnes",
 ];
 
 /** Settings choices for `providers.imageOrder` (labels shared with the retired single-preference enum). */
@@ -42,6 +43,7 @@ export const IMAGE_PROVIDER_CHOICES = [
 		description: "Requires xAI Grok OAuth or XAI_API_KEY",
 	},
 	{ value: "gemini", label: "Gemini", description: "Requires GEMINI_API_KEY" },
+	{ value: "agnes", label: "Agnes AI", description: "Requires AGNES_API_KEY" },
 	{ value: "openrouter", label: "OpenRouter", description: "Requires OPENROUTER_API_KEY" },
 ] as const satisfies ReadonlyArray<{ value: ImageProvider; label: string; description: string }>;
 

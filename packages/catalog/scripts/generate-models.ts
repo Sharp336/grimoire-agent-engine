@@ -363,6 +363,28 @@ function dropXiaomiAudioOnlyIds(models: readonly ModelSpec[]): ModelSpec[] {
 		return !isXiaomiProvider || (!model.id.includes("-tts") && !model.id.includes("-asr"));
 	});
 }
+/**
+ * Agnes `/v1/models` advertises image and video model ids alongside chat
+ * models. Runtime discovery filters them via `isAgnesChatModelId`, but
+ * models.dev and previous bundled snapshots can still surface those
+ * non-chat ids. Drop them so the committed catalog matches the runtime
+ * chat surface.
+ */
+const AGNES_NON_CHAT_MODEL_ID_PATTERNS = [/(^|[/:._-])image([/:._-]|$)/i, /(^|[/:._-])video([/:._-]|$)/i] as const;
+
+function dropAgnesNonChatModels(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.filter(model => {
+		if (model.provider !== "agnes") return true;
+		return !AGNES_NON_CHAT_MODEL_ID_PATTERNS.some(pattern => pattern.test(model.id));
+	});
+}
+/** Agnes uses `chat_template_kwargs.enable_thinking` / `thinking`, not `reasoning_effort`. Set omitReasoningEffort compat to prevent the wire param. */
+function setAgnesOmitReasoningEffort(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model => {
+		if (model.provider !== "agnes") return model;
+		return { ...model, compat: { ...model.compat, omitReasoningEffort: true } };
+	});
+}
 
 function normalizeAntigravityEndpoint(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
@@ -634,6 +656,7 @@ async function generateModels() {
 	allModels = dropFireworksWireIds(allModels);
 	allModels = dropUnusableZaiContextTierIds(allModels);
 	allModels = dropXiaomiAudioOnlyIds(allModels);
+	allModels = dropAgnesNonChatModels(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and
@@ -647,6 +670,7 @@ async function generateModels() {
 	// policy re-bake so the aliases get the same baked thinking metadata.
 	allModels = projectOpenAIProReasoningAliases(allModels);
 	applyGeneratedModelPolicies(allModels);
+	allModels = setAgnesOmitReasoningEffort(allModels);
 	linkOpenAIPromotionTargets(allModels);
 	// Collapse effort-tier variants AFTER the policy re-bake: live-discovery
 	// entries are already collapsed (rebake skips them); this pass folds

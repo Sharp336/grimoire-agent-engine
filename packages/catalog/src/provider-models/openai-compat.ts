@@ -1086,6 +1086,46 @@ export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelMan
 	return createSimpleOpenAICompletionsOptions("xai", "https://api.x.ai/v1", config);
 }
 
+export interface AgnesModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const AGNES_NON_CHAT_MODEL_ID_PATTERNS = [/(^|[/:._-])image([/:._-]|$)/i, /(^|[/:._-])video([/:._-]|$)/i] as const;
+
+function isAgnesChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	return !AGNES_NON_CHAT_MODEL_ID_PATTERNS.some(pattern => pattern.test(normalized));
+}
+
+export function agnesModelManagerOptions(config?: AgnesModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const options = createSimpleOpenAICompletionsOptions("agnes", "https://apihub.agnes-ai.com/v1", config);
+	return {
+		...options,
+		dynamicModelsAuthoritative: true,
+		...(options.fetchDynamicModels
+			? {
+					fetchDynamicModels: async () => {
+						const models = await options.fetchDynamicModels?.();
+						return (
+							models
+								?.filter(model => isAgnesChatModelId(model.id))
+								.map(model => ({
+									...model,
+									// Agnes uses `chat_template_kwargs.enable_thinking` / `thinking`,
+									// not the standard `reasoning_effort` wire param. Set
+									// omitReasoningEffort to prevent the openai-completions transport
+									// from emitting `reasoning_effort` on the wire.
+									compat: { ...model.compat, omitReasoningEffort: true },
+								})) ?? null
+						);
+					},
+				}
+			: undefined),
+	};
+}
+
 export interface XaiOAuthModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;

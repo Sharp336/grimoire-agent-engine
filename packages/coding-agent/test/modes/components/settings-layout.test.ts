@@ -108,6 +108,16 @@ describe("settings layout", () => {
 		});
 	});
 
+	it("exposes Agnes as a selectable option in the providers image multiselect", () => {
+		const def = getSettingsForTab("providers").find(item => item.path === "providers.imageOrder");
+		expect(def).toBeDefined();
+		if (!def) throw new Error("providers.imageOrder setting definition missing");
+		expect(def.type).toBe("multiselect");
+		if (def.type !== "multiselect") throw new Error("providers.imageOrder should render as a multiselect");
+		const values = def.options.map(option => option.value);
+		expect(values).toContain("agnes");
+	});
+
 	it("exposes retry fallback chains as editable JSON in the model settings", () => {
 		const def = getSettingsForTab("model").find(item => item.path === "retry.fallbackChains");
 

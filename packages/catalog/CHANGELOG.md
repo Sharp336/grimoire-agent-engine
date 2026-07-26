@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Agnes AI (`agnes`) as a supported provider with bundled fallback model (`agnes-2.0-flash`), catalog descriptor, and OpenAI-completions model manager factory. API key via `AGNES_API_KEY`. Catalog discovery with `dynamicModelsAuthoritative: true` for runtime model enumeration via `/v1/models`.
 
 ## [17.1.3] - 2026-07-24
 
@@ -67,9 +70,6 @@
 
 - Removed several deprecated model families from the devin catalog, including Claude Fable 5, Claude Opus 4.6/4.7, Claude Sonnet 4.6/5, DeepSeek V4 Pro, Gemini 3.1 Pro, Gemini 3.5 Flash, GLM-5.2, SWE-1.6, and Nemotron 3 Ultra.
 - Removed GPT-5 through GPT-5.3 Codex variants and GPT-5.4 nano from the openai-codex catalog.
-
-## [17.0.6] - 2026-07-20
-
 ### Added
 
 - Added static fallback seed for Devin's `swe-1-7` model so it is bundled even when catalog generation runs without a Devin session token.

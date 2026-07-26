@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Agnes AI (`agnes-ai.com`) as a first-class image generation and chat provider. `providers.imageOrder` routes `generate_image` to Agnes's `/v1/images/generations` endpoint with `return_base64` for text-to-image and `extra_body.image` for image-to-image. Credentials via `AGNES_API_KEY` env var. Default model: `agnes-image-2.1-flash`.
 
 ### Added
 
