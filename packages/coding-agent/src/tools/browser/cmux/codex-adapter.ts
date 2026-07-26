@@ -1832,7 +1832,10 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			return [...this.#frameSelectors(descriptor.parent), ...this.#frameSelectors(descriptor.child)];
 		}
 		if (descriptor.kind === "and" || descriptor.kind === "or") {
-			return [...this.#frameSelectors(descriptor.left), ...this.#frameSelectors(descriptor.right)];
+			const left = this.#frameSelectors(descriptor.left);
+			const right = this.#frameSelectors(descriptor.right);
+			if (left.length === right.length && left.every((selector, index) => selector === right[index])) return left;
+			throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.FRAME_LOCATOR_NESTED_NATIVE_ACTION);
 		}
 		if (descriptor.kind === "filter") {
 			return [

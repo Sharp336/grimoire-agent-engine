@@ -3828,12 +3828,18 @@ describe("cmux Codex browser review regressions", () => {
 			const frameText = "line\n🧑‍💻";
 			await frame.locator("#button").click();
 			await frame.locator("#editor").type(frameText);
+			await frame.locator("#button").and(frame.getByText("Save")).click();
+			await frame.locator("#editor").or(frame.getByLabel("Editor")).type(" combined");
 			const nestedError = await caughtError(() => frame.frameLocator("#nested-frame").locator("#button").click());
 
-			expect({ clicked, typed }).toEqual({ clicked: false, typed: frameText });
-			expect(nativeActions).toEqual(["click", `type:${frameText}`]);
+			expect({ clicked, typed }).toEqual({ clicked: false, typed: `${frameText} combined` });
+			expect(nativeActions).toEqual(["click", `type:${frameText}`, "click", "type: combined"]);
 			expect(syntheticActions).toBe(0);
 			expect(frameCalls).toEqual([
+				"browser.frame.select:#frame",
+				"browser.frame.main:main",
+				"browser.frame.select:#frame",
+				"browser.frame.main:main",
 				"browser.frame.select:#frame",
 				"browser.frame.main:main",
 				"browser.frame.select:#frame",
