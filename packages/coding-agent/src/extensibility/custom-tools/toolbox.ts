@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isValidJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { CONFIG_DIR_NAME, logger, ptree, tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../../capability";
 import { type CustomTool as CustomToolDescriptor, toolCapability } from "../../capability/tool";
@@ -22,8 +23,8 @@ const DISPLAY_NAME = "Toolbox";
 const DESCRIPTION = "Executable tools from .omp/toolbox/ and ~/.omp/toolbox/";
 const PRIORITY = 80;
 const DESCRIBE_DEADLINE_MS = 5_000;
-/** Owner-execute bit (S_IXUSR). Non-executable files are ignored silently. */
-const OWNER_EXECUTE = 0o100;
+const EXECUTE_DEADLINE_MS = 30_000;
+const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 interface LoadToolResult {
 	tools: LoadedCustomTool[];
@@ -42,11 +43,8 @@ type SpawnOutcome =
 	| { kind: "ok"; stdout: string; stderr: string }
 	| { kind: "nonzero"; exitCode: number; stdout: string; stderr: string }
 	| { kind: "timeout"; stderr: string }
-	| { kind: "killed"; stderr: string };
-
-function isOwnerExecutable(mode: number): boolean {
-	return (mode & OWNER_EXECUTE) !== 0;
-}
+	| { kind: "killed"; stderr: string }
+	| { kind: "output-limit"; stderr: string };
 
 function basenameWithoutExtension(fileName: string): string {
 	const dot = fileName.lastIndexOf(".");
@@ -107,6 +105,9 @@ function parseDescribePayload(stdout: string, defaultName: string): ToolboxDescr
 	if (parameters === null || typeof parameters !== "object" || Array.isArray(parameters)) {
 		return "describe JSON missing parameters object";
 	}
+	if (!isValidJsonSchema(parameters)) {
+		return "describe JSON has invalid parameters schema";
+	}
 
 	const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : defaultName;
 
@@ -128,21 +129,54 @@ function skipTool(resolvedPath: string, reason: string, source?: ToolboxSource):
 async function runToolboxAction(
 	resolvedPath: string,
 	action: "describe" | "execute",
-	options: { input?: string; timeout?: number; signal?: AbortSignal } = {},
+	options: { cwd?: string; input?: string; timeout?: number; signal?: AbortSignal } = {},
 ): Promise<SpawnOutcome> {
-	const result = await ptree.exec([resolvedPath], {
+	using child = ptree.spawn([resolvedPath], {
+		cwd: options.cwd,
 		env: { ...Bun.env, OMP_TOOLBOX_ACTION: action },
-		input: options.input,
+		stdin: options.input === undefined ? "ignore" : Buffer.from(options.input),
 		timeout: options.timeout,
 		signal: options.signal,
-		allowNonZero: true,
-		allowAbort: true,
-		stderr: "full",
 	});
-	return classifyExecResult(result);
+	const exited = child.exited.catch(() => undefined);
+
+	const decoder = new TextDecoder();
+	let stdout = "";
+	let outputBytes = 0;
+	let exceededOutputLimit = false;
+	for await (const chunk of child.stdout) {
+		if (outputBytes >= MAX_OUTPUT_BYTES) {
+			exceededOutputLimit = true;
+			child.kill();
+			continue;
+		}
+		const remaining = MAX_OUTPUT_BYTES - outputBytes;
+		const captured = chunk.subarray(0, remaining);
+		stdout += decoder.decode(captured, { stream: captured.byteLength === chunk.byteLength });
+		outputBytes += captured.byteLength;
+		if (captured.byteLength !== chunk.byteLength) {
+			exceededOutputLimit = true;
+			child.kill();
+		}
+	}
+	stdout += decoder.decode();
+
+	try {
+		await exited;
+	} catch {}
+
+	const stderr = child.peekStderr();
+	if (exceededOutputLimit) return { kind: "output-limit", stderr };
+	return classifyExecResult({
+		stdout,
+		stderr,
+		exitCode: child.exitCode,
+		ok: child.exitCode === 0,
+		exitError: child.exitReason,
+	});
 }
 
-function synthesizeToolboxTool(resolvedPath: string, desc: ToolboxDescribePayload): CustomTool {
+function synthesizeToolboxTool(resolvedPath: string, desc: ToolboxDescribePayload, cwd?: string): CustomTool {
 	const name = desc.name;
 	const parameters = Type.Unsafe(desc.parameters);
 
@@ -155,7 +189,9 @@ function synthesizeToolboxTool(resolvedPath: string, desc: ToolboxDescribePayloa
 		strict: true,
 		async execute(_toolCallId, params, _onUpdate, _ctx, signal) {
 			const outcome = await runToolboxAction(resolvedPath, "execute", {
+				cwd,
 				input: JSON.stringify(params),
+				timeout: EXECUTE_DEADLINE_MS,
 				signal,
 			});
 
@@ -172,6 +208,8 @@ function synthesizeToolboxTool(resolvedPath: string, desc: ToolboxDescribePayloa
 					return toolResult().text("Toolbox tool timed out").error().done();
 				case "killed":
 					return toolResult().text("Toolbox tool was killed before completion").error().done();
+				case "output-limit":
+					return toolResult().text("Toolbox tool output exceeded the 1 MiB limit").error().done();
 			}
 		},
 	};
@@ -184,7 +222,7 @@ function synthesizeToolboxTool(resolvedPath: string, desc: ToolboxDescribePayloa
 export async function loadToolboxTool(
 	resolvedPath: string,
 	source?: ToolboxSource,
-	options?: { describeTimeoutMs?: number },
+	options?: { cwd?: string; describeTimeoutMs?: number },
 ): Promise<LoadToolResult> {
 	const defaultName = basenameWithoutExtension(path.basename(resolvedPath));
 
@@ -192,6 +230,7 @@ export async function loadToolboxTool(
 	try {
 		// Overridable so the deadline path is provable without sleeping the real 5s.
 		outcome = await runToolboxAction(resolvedPath, "describe", {
+			cwd: options?.cwd,
 			timeout: options?.describeTimeoutMs ?? DESCRIBE_DEADLINE_MS,
 		});
 	} catch (err) {
@@ -204,6 +243,8 @@ export async function loadToolboxTool(
 			return skipTool(resolvedPath, "describe exceeded 5s deadline", source);
 		case "killed":
 			return skipTool(resolvedPath, "describe process was killed", source);
+		case "output-limit":
+			return skipTool(resolvedPath, "describe exceeded 1 MiB output limit", source);
 		case "nonzero":
 			return skipTool(resolvedPath, `describe exited with code ${outcome.exitCode}`, source);
 		case "ok": {
@@ -212,7 +253,7 @@ export async function loadToolboxTool(
 				return skipTool(resolvedPath, parsed, source);
 			}
 
-			const tool = synthesizeToolboxTool(resolvedPath, parsed);
+			const tool = synthesizeToolboxTool(resolvedPath, parsed, options?.cwd);
 			return {
 				tools: [
 					{
@@ -249,7 +290,11 @@ async function scanToolboxDir(dir: string, level: "user" | "project"): Promise<C
 			continue;
 		}
 		if (!stats.isFile()) continue;
-		if (!isOwnerExecutable(stats.mode)) continue;
+		try {
+			await fs.promises.access(filePath, fs.constants.X_OK);
+		} catch {
+			continue;
+		}
 
 		const name = basenameWithoutExtension(entry.name);
 		items.push({

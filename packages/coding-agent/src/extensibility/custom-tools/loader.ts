@@ -76,7 +76,7 @@ async function loadTool(
 	}
 
 	if (source?.provider === TOOLBOX_PROVIDER_ID) {
-		return loadToolboxTool(resolvedPath, source);
+		return loadToolboxTool(resolvedPath, source, { cwd: sharedApi.cwd });
 	}
 
 	try {

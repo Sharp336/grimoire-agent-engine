@@ -28,7 +28,9 @@ export const toolCapability = defineCapability<CustomTool>({
 	id: "tools",
 	displayName: "Custom Tools",
 	description: "User-defined tools that extend agent capabilities",
-	key: tool => tool.name,
+	// Toolbox descriptors only know their filename until the executable describe handshake.
+	// CustomToolLoader deduplicates them by the declared name after that handshake.
+	key: tool => (tool._source.provider === "toolbox" ? undefined : tool.name),
 	toExtensionId: tool => `tool:${tool.name}`,
 	validate: tool => {
 		if (!tool.name) return "Missing name";

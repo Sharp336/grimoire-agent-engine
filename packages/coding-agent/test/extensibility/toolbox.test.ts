@@ -29,7 +29,7 @@ const TOOLBOX_SOURCE = {
 const STUB_CTX = {} as CustomToolContext;
 
 const tempRoots: string[] = [];
-const homedirSpies: Array<ReturnType<typeof spyOn>> = [];
+const homedirSpies: Array<{ mockRestore(): void }> = [];
 
 afterEach(async () => {
 	while (homedirSpies.length > 0) {
@@ -164,6 +164,30 @@ describe("toolbox tools", () => {
 		}
 	});
 
+	it("runs describe and execute in the session workspace", async () => {
+		const dir = await makeTemp("omp-toolbox-cwd-");
+		const scriptPath = await writeScript(
+			dir,
+			"cwd.sh",
+			[
+				"#!/bin/sh",
+				'if [ "$OMP_TOOLBOX_ACTION" = "describe" ]; then',
+				`if [ "$(pwd)" != "${dir}" ]; then exit 2; fi`,
+				`printf '%s\n' '{"name":"cwd","description":"prints cwd","parameters":{"type":"object","properties":{}}}'`,
+				"exit 0",
+				"fi",
+				"pwd",
+			].join("\n"),
+		);
+
+		const loaded = await loadCustomTools([{ path: scriptPath, source: TOOLBOX_SOURCE }], dir, []);
+		expect(loaded.errors).toEqual([]);
+		const result = await first(loaded.tools).tool.execute("call-cwd", {}, undefined, STUB_CTX);
+		const text = result.content.find(c => c.type === "text");
+		expect(text?.type).toBe("text");
+		if (text?.type === "text") expect(text.text.trim()).toBe(dir);
+	});
+
 	it("silently ignores files without the owner-execute bit during discovery", async () => {
 		const project = await makeTemp("omp-toolbox-project-");
 		const home = await makeTemp("omp-toolbox-home-");
@@ -256,6 +280,25 @@ describe("toolbox tools", () => {
 		}
 	});
 
+	it("rejects an invalid parameters JSON Schema", async () => {
+		const dir = await makeTemp("omp-toolbox-invalid-schema-");
+		const scriptPath = await writeScript(
+			dir,
+			"invalid_schema.sh",
+			goodFixture(
+				JSON.stringify({ name: "invalid_schema", description: "bad schema", parameters: { type: "bogus" } }),
+			),
+		);
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const result = await loadToolboxTool(scriptPath, TOOLBOX_SOURCE);
+			expect(result.tools).toEqual([]);
+			expect(first(result.errors).error).toContain("invalid parameters schema");
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("surfaces non-zero execute exit as a tool error carrying stderr (not a crash)", async () => {
 		const dir = await makeTemp("omp-toolbox-exec-err-");
 		const scriptPath = await writeScript(
@@ -289,27 +332,48 @@ describe("toolbox tools", () => {
 		}
 	});
 
-	it("lets project .omp/toolbox/ shadow user ~/.omp/toolbox/ for the same tool name", async () => {
+	it("terminates execute when stdout exceeds the output limit", async () => {
+		const dir = await makeTemp("omp-toolbox-output-limit-");
+		const scriptPath = await writeScript(
+			dir,
+			"large_output.sh",
+			[
+				"#!/bin/sh",
+				'if [ "$OMP_TOOLBOX_ACTION" = "describe" ]; then',
+				`printf '%s\n' '{"name":"large_output","description":"prints too much","parameters":{"type":"object","properties":{}}}'`,
+				"exit 0",
+				"fi",
+				"yes x | head -c 1048577",
+			].join("\n"),
+		);
+		const loaded = await loadToolboxTool(scriptPath, TOOLBOX_SOURCE);
+		const result = await first(loaded.tools).tool.execute("call-large", {}, undefined, STUB_CTX);
+		expect(result.isError).toBe(true);
+		const text = result.content.find(c => c.type === "text");
+		expect(text?.type).toBe("text");
+		if (text?.type === "text") expect(text.text).toContain("output exceeded");
+	});
+
+	it("deduplicates toolbox tools by their declared name after discovery", async () => {
 		const project = await makeTemp("omp-toolbox-shadow-project-");
 		const home = await makeTemp("omp-toolbox-shadow-home-");
-
-		await writeScript(
+		const projectPath = await writeScript(
 			path.join(project, ".omp", "toolbox"),
 			"shared.sh",
 			goodFixture(
 				JSON.stringify({
-					name: "shared",
+					name: "project_tool",
 					description: "project copy",
 					parameters: { type: "object", properties: {} },
 				}),
 			),
 		);
-		await writeScript(
+		const userPath = await writeScript(
 			path.join(home, ".omp", "toolbox"),
 			"shared.sh",
 			goodFixture(
 				JSON.stringify({
-					name: "shared",
+					name: "user_tool",
 					description: "user copy",
 					parameters: { type: "object", properties: {} },
 				}),
@@ -317,20 +381,15 @@ describe("toolbox tools", () => {
 		);
 
 		const items = await discoverToolboxDescriptors(project, home);
-		const shared = items.filter(i => i.name === "shared");
-		expect(shared).toHaveLength(1);
-		expect(first(shared).level).toBe("project");
-		expect(first(shared).path).toBe(path.join(project, ".omp", "toolbox", "shared.sh"));
+		expect(items.map(item => item.path).sort()).toEqual([projectPath, userPath].sort());
 
-		// Full load path: project executable wins; describe description confirms which binary ran.
 		const loaded = await loadCustomTools(
-			[{ path: first(shared).path, source: { ...TOOLBOX_SOURCE, level: "project" } }],
+			items.map(item => ({ path: item.path, source: { ...TOOLBOX_SOURCE, level: item.level } })),
 			project,
 			[],
 		);
 		expect(loaded.errors).toEqual([]);
-		expect(loaded.tools).toHaveLength(1);
-		expect(first(loaded.tools).tool.description).toBe("project copy");
+		expect(loaded.tools.map(item => item.tool.name).sort()).toEqual(["project_tool", "user_tool"]);
 	});
 
 	it("skips a tool whose describe exceeds the deadline, without throwing", async () => {
