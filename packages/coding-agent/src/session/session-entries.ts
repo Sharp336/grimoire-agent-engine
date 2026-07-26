@@ -142,6 +142,16 @@ export interface LabelEntry extends SessionEntryBase {
 	label: string | undefined;
 }
 
+/**
+ * Namespace for session-level tags stored as {@link LabelEntry} rows.
+ *
+ * A tag is a label whose `targetId` is this prefix plus the tag name, so a session
+ * carries a SET of tags: `SessionEntryIndex` keeps one label per `targetId`, and a
+ * single shared sentinel target would collapse every tag into the newest one.
+ * Clearing a tag appends the same `targetId` with an empty label.
+ */
+export const SESSION_TAG_PREFIX = "__session_tag__:";
+
 /** Append-only audit entry recording a session title change. */
 export interface TitleChangeEntry extends SessionEntryBase {
 	type: typeof TITLE_CHANGE_ENTRY_TYPE;

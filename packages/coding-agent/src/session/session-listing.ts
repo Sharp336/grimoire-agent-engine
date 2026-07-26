@@ -65,7 +65,7 @@ const SESSION_LIST_SUFFIX_BYTES = 32_768;
 const SESSION_LIST_PARALLEL_THRESHOLD = 64;
 const SESSION_LIST_MAX_WORKERS = 16;
 
-function sanitizeSessionName(value: string | undefined): string | undefined {
+export function sanitizeSessionName(value: string | undefined): string | undefined {
 	if (!value) return undefined;
 	const firstLine = value.split(/\r?\n/)[0] ?? "";
 	const stripped = firstLine.replace(/[\x00-\x1F\x7F]/g, "");
@@ -93,7 +93,7 @@ function formatTimeAgo(date: Date): string {
  * then a timestamp-based label. The raw UUID `id` is intentionally never used —
  * it is unfriendly and indistinguishable from neighboring sessions in the UI.
  */
-function sessionDisplayName(info: SessionInfo): string {
+export function sessionDisplayName(info: SessionInfo): string {
 	const title = sanitizeSessionName(info.title);
 	if (title) return title;
 	const first =

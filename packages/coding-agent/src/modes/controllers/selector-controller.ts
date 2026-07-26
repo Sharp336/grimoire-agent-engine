@@ -87,7 +87,8 @@ import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
-import { SessionSelectorComponent } from "../components/session-selector";
+import { SessionMapComponent } from "../components/session-map";
+import { createSessionRankingMatcher, SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
@@ -1348,7 +1349,10 @@ export class SelectorController {
 		// invites the user to Tab into all-projects rather than silently surfacing
 		// every project's history when the cwd has nothing to resume. See #3099.
 		const historyStorage = this.ctx.historyStorage;
-		const historyMatcher = historyStorage ? (query: string) => historyStorage.matchingSessionIds(query) : undefined;
+		const historyMatcher = createSessionRankingMatcher(
+			historyStorage ? (query: string) => historyStorage.matchingSessionIds(query) : undefined,
+			this.ctx.sessionManager.getSessionDir(),
+		);
 		// Keep the fullscreen picker on the alternate buffer while a selected
 		// session is loaded and its transcript is rebuilt. Closing it first exposes
 		// the stale normal buffer for the entire async switch on terminals without
@@ -1415,6 +1419,56 @@ export class SelectorController {
 			fullscreen: true,
 		});
 		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+	}
+
+	async showSessionMap(): Promise<void> {
+		const sessions = await SessionManager.list(
+			this.ctx.sessionManager.getCwd(),
+			this.ctx.sessionManager.getSessionDir(),
+		);
+		let overlayHandle: OverlayHandle | undefined;
+		const done = () => {
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const map = new SessionMapComponent(
+			sessions,
+			async (session: SessionInfo) => {
+				map.lockInput();
+				let keepOpen = false;
+				try {
+					const success = await this.handleResumeSession(session.path);
+					if (!success) {
+						keepOpen = true;
+						map.unlockInput();
+						this.ctx.ui.requestRender();
+					}
+				} finally {
+					if (!keepOpen) done();
+				}
+			},
+			() => done(),
+			() => {
+				done();
+				void this.ctx.shutdown();
+			},
+			{
+				loadAllSessions: () => SessionManager.listAll(),
+				getTerminalRows: () => this.ctx.ui.terminal.rows,
+				fillHeight: true,
+			},
+		);
+		map.setOnRequestRender(() => this.ctx.ui.requestRender());
+		overlayHandle = this.ctx.ui.showOverlay(map, {
+			anchor: "top-left",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.ctx.ui.setFocus(map);
 		this.ctx.ui.requestRender();
 	}
 

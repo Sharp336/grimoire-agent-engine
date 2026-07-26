@@ -6,6 +6,10 @@
 
 - `omp usage` now surfaces auto-disabled credentials as red `✗` tombstone rows (identity, how long ago, the shortened upstream cause — e.g. `Refresh token expired` — and a re-login hint), including a provider section when no active credential remains. User-driven tombstones (`replaced by newer credential`, `deleted by user`) and API-key rows stay hidden. Requires a broker with `GET /v1/credentials/disabled`; older brokers degrade to no tombstone rows.
 - `omp usage` warns about Anthropic's ~30-day OAuth grant lifetime: accounts whose interactive login (`authorizedAt`) is within a week of the deadline get a yellow `⚠ re-login within <time>` line, and past-deadline accounts a red one. Grants die server-side exactly ~30 days after login regardless of refresh rotation, so this is the only warning before the broker auto-disables the row.
+- Added `/qa`, an evidence-first verification pass that inventories the affected surface, exercises real checks, and reports findings with reproductions — making no edits unless asked afterwards.
+- Added a full-transcript search index. `/session search <question>` builds a lazy SQLite/FTS5 index over past session transcripts on first use and spawns a bundled `session-search` agent that answers with `{sessionId, entryId, quote}` citations. Once the index exists, the `/resume` picker also matches on full transcript content instead of only the first 4 KB of each session.
+- Added session tags: `/session tag`, `/session untag`, and `/session tags`.
+- Added `/session map`, an interactive lineage tree of session forks and handoffs with tags, project scope switching, and direct resume selection; ACP and RPC render the same map as plain text.
 
 ### Fixed
 
