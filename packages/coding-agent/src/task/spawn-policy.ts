@@ -56,3 +56,16 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 		allowedPromptText: allowedAgents.map(agent => `\`${agent}\``).join(", "),
 	};
 }
+
+/**
+ * Whether the `reviewer` agent is an allowed spawn target under a parent
+ * session's `spawns` policy: spawning enabled AND the policy is unrestricted
+ * (`*`/null → `allowedAgents === null`) OR `reviewer` is explicitly listed.
+ * Synchronous (pure string parse of {@link resolveSpawnPolicy}) so it can gate
+ * prompt rendering; mirrors the runtime check in `assertDepthAndSpawnAllowed`
+ * so the prompt-side gate agrees with the actual spawn gate.
+ */
+export function spawnPolicyAllowsReviewer(parentSpawns: string | boolean | null | undefined): boolean {
+	const policy = resolveSpawnPolicy(parentSpawns);
+	return policy.enabled && (policy.allowedAgents === null || policy.allowedAgents.includes("reviewer"));
+}

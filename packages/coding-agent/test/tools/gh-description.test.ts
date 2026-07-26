@@ -5,14 +5,19 @@ import { GithubTool } from "@oh-my-pi/pi-coding-agent/tools/gh";
 
 /**
  * Minimal session stub. The description getter reads `session.settings`
- * (reviewer.enabled + task.disabledAgents via isReviewerActive) and
- * `session.isToolActive` (task availability). `activeTools` defaults to a set
- * containing "task" so the block renders under normal conditions.
+ * (reviewer.enabled + task.disabledAgents via isReviewerActive),
+ * `session.isToolActive` (task availability), and `session.getSessionSpawns()`
+ * (spawn policy via spawnPolicyAllowsReviewer). Defaults render the block.
  */
-function makeToolSession(settings: Settings, activeTools: ReadonlySet<string> = new Set(["task"])): ToolSession {
+function makeToolSession(
+	settings: Settings,
+	activeTools: ReadonlySet<string> = new Set(["task"]),
+	spawns: string | null = null,
+): ToolSession {
 	return {
 		settings,
 		isToolActive: (name: string) => activeTools.has(name),
+		getSessionSpawns: () => spawns,
 	} as unknown as ToolSession;
 }
 
@@ -43,5 +48,19 @@ describe("GithubTool description reviewer gating", () => {
 
 		expect(tool.description).not.toContain("<review-before-pr>");
 		expect(tool.description).not.toContain("Before `pr_create`");
+	});
+
+	it("omits the block when the spawn policy excludes reviewer", () => {
+		const tool = new GithubTool(makeToolSession(Settings.isolated(), new Set(["task"]), "scout"));
+
+		expect(tool.description).not.toContain("<review-before-pr>");
+		expect(tool.description).not.toContain("Before `pr_create`");
+	});
+
+	it("renders the block when the spawn policy explicitly lists reviewer", () => {
+		const tool = new GithubTool(makeToolSession(Settings.isolated(), new Set(["task"]), "reviewer"));
+
+		expect(tool.description).toContain("<review-before-pr>");
+		expect(tool.description).toContain("Before `pr_create`");
 	});
 });

@@ -15,6 +15,7 @@ import { type } from "arktype";
 import { isReviewerActive } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
+import { spawnPolicyAllowsReviewer } from "../task/spawn-policy";
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
 import { formatShortSha } from "./gh-format";
@@ -2463,7 +2464,8 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 	readonly label = "GitHub";
 	get description() {
 		return prompt.render(githubDescription, {
-			reviewerEnabled: isReviewerActive(this.session.settings),
+			reviewerEnabled:
+				isReviewerActive(this.session.settings) && spawnPolicyAllowsReviewer(this.session.getSessionSpawns()),
 			taskAvailable: this.session.isToolActive?.("task") ?? true,
 		});
 	}
