@@ -235,7 +235,9 @@ export class SessionMemory {
 		if (!this.#memoryEnabled || this.#host.isDisposed()) return undefined;
 		return await this.#runBackendTransition(async () => {
 			const previousBackend = this.#host.getMemoryBackend();
-			if (!previousBackend || previousBackend.id === this.#host.settings.get("memory.backend")) return undefined;
+			if (!previousBackend) return undefined;
+			await previousBackend.beforeTranscriptReplace?.(this.#host.memoryBackendSession());
+			if (previousBackend.id === this.#host.settings.get("memory.backend")) return undefined;
 			await this.#disposeMemoryBackendState();
 			return { previousBackend };
 		});

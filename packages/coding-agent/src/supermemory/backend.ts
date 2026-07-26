@@ -831,6 +831,20 @@ async function waitForRetention(state: SupermemorySessionState, bounded = false)
 	}
 }
 
+async function flushRetentionTail(state: SupermemorySessionState, session: AgentSession, cwd: string): Promise<void> {
+	if (!state.automatic || state.disposed) return;
+	const scope = await refreshStateForOperation(state, cwd, session);
+	if (!scope || state.disposed) return;
+	requestAutomaticRetention(state, session, true);
+	for (;;) {
+		const clearing = containerState(scope.coordinatorKey).clearing;
+		if (!clearing) break;
+		await clearing.catch(() => undefined);
+	}
+	await waitForRetention(state);
+	if (state.retainForceTail) throw new Error(state.lastError ?? "Supermemory retention failed.");
+}
+
 function statusForState(state: SupermemorySessionState): MemoryBackendStatus {
 	return {
 		backend: "supermemory",
@@ -857,6 +871,7 @@ export const supermemoryBackend: MemoryBackend &
 			| "beforeAgentStartPrompt"
 			| "commitBeforeAgentStartPrompt"
 			| "preCompactionContext"
+			| "beforeTranscriptReplace"
 			| "resetSession"
 			| "disposeSession"
 		>
@@ -1033,24 +1048,8 @@ export const supermemoryBackend: MemoryBackend &
 
 	async enqueue(_agentDir, cwd, session): Promise<void> {
 		const state = session && sessionStates.get(session);
-		if (!state?.automatic || !session || state.disposed) return;
-		// Explicit enqueue is a scope boundary too: reconcile before choosing the
-		// clear coordinator so a moved session never waits on its old project.
-		const scope = await refreshStateForOperation(state, cwd || session.sessionManager.getCwd(), session);
-		if (!scope || state.disposed) return;
-		// Record the force request before awaiting a clear. Retention observes the
-		// closed admission boundary, preserves this flag, and clear's finally
-		// replays it after either outcome (also when auto-retain is disabled).
-		requestAutomaticRetention(state, session, true);
-		for (;;) {
-			const clearing = containerState(scope.coordinatorKey).clearing;
-			if (!clearing) break;
-			await clearing.catch(() => undefined);
-		}
-		await waitForRetention(state);
-		if (state.retainForceTail) {
-			throw new Error(state.lastError ?? "Supermemory retention failed.");
-		}
+		if (!state || !session) return;
+		await flushRetentionTail(state, session, cwd || session.sessionManager.getCwd());
 	},
 
 	async status(context: MemoryBackendOperationContext): Promise<MemoryBackendStatus> {
@@ -1118,6 +1117,12 @@ export const supermemoryBackend: MemoryBackend &
 			return "## Supermemory\n\nNo active session state. Set `SUPERMEMORY_API_KEY` and restart the session.";
 		await refreshStateForOperation(state, cwd, session);
 		return `## Supermemory\n\n- API key: configured (not displayed)\n- Scope: \`${state.containerTag}\`\n- Automatic recall/retention: ${state.automatic ? "primary session only" : "disabled for this subagent"}\n- Last request error: ${state.lastError ?? "none"}`;
+	},
+
+	async beforeTranscriptReplace(session: AgentSession): Promise<void> {
+		const state = sessionStates.get(session);
+		if (!state) return;
+		await flushRetentionTail(state, session, session.sessionManager.getCwd());
 	},
 
 	resetSession(session: AgentSession): boolean {

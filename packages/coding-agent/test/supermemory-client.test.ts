@@ -75,18 +75,15 @@ describe("Supermemory configuration", () => {
 				SUPERMEMORY_BASE_URL: "http://localhost:6767/",
 			}).baseUrl,
 		).toBe("http://localhost:6767");
-		expect(
-			loadSupermemoryConfig(fakeSettings(), {
+		for (const rejectedOrigin of ["http://memory.example", "http://127.evil.com", "not a URL"]) {
+			const config = loadSupermemoryConfig(fakeSettings(), {
 				SUPERMEMORY_API_KEY: "secret",
-				SUPERMEMORY_BASE_URL: "http://memory.example",
-			}).baseUrl,
-		).toBe("https://api.supermemory.ai");
-		expect(
-			loadSupermemoryConfig(fakeSettings(), {
-				SUPERMEMORY_API_KEY: "secret",
-				SUPERMEMORY_BASE_URL: "http://127.evil.com",
-			}).baseUrl,
-		).toBe("https://api.supermemory.ai");
+				SUPERMEMORY_BASE_URL: rejectedOrigin,
+			});
+			expect(config.baseUrl).toBe("");
+			expect(config.apiKey).toBeNull();
+			expect(isSupermemoryConfigured(config)).toBe(false);
+		}
 	});
 
 	it("uses stable opaque project tags and a stable global tag", async () => {

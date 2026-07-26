@@ -6831,6 +6831,7 @@ export class AgentSession {
 			}
 		} finally {
 			this.#sessionReplacementInProgress = false;
+			this.#reconnectToAgent();
 		}
 		return true;
 	}
@@ -7823,15 +7824,21 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
-		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
+		let preparedMemoryBackend: PreparedMemoryBackendTransition | undefined;
+		try {
+			await this.abort({ goalReason: "internal" });
+			await this.#sessionBeforeSwitchReconciler?.();
 
-		await this.#bash.flushPending();
-		// Flush pending writes before switching so restore snapshots reflect committed state.
-		await this.sessionManager.flush();
-		const preparedMemoryBackend = switchingToDifferentSession
-			? await this.#prepareMemoryBackendForNewTranscript()
-			: undefined;
+			await this.#bash.flushPending();
+			// Flush pending writes before switching so restore snapshots reflect committed state.
+			await this.sessionManager.flush();
+			preparedMemoryBackend = switchingToDifferentSession
+				? await this.#prepareMemoryBackendForNewTranscript()
+				: undefined;
+		} catch (error) {
+			this.#reconnectToAgent();
+			throw error;
+		}
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect

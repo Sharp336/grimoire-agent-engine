@@ -41,7 +41,7 @@ function pickSearchMode(value: unknown): SupermemorySearchMode {
 	return value === "memories" || value === "hybrid" ? value : "hybrid";
 }
 
-function resolveBaseUrl(env: NodeJS.ProcessEnv): string {
+function resolveBaseUrl(env: NodeJS.ProcessEnv): string | undefined {
 	const override = nonEmptyString(env.SUPERMEMORY_BASE_URL);
 	if (!override) return DEFAULT_BASE_URL;
 	try {
@@ -53,16 +53,17 @@ function resolveBaseUrl(env: NodeJS.ProcessEnv): string {
 			url.hostname === "[::1]";
 		return url.protocol === "https:" || (url.protocol === "http:" && isLoopback)
 			? url.toString().replace(/\/+$/, "")
-			: DEFAULT_BASE_URL;
+			: undefined;
 	} catch {
-		return DEFAULT_BASE_URL;
+		return undefined;
 	}
 }
 
 /** Resolves settings plus process-only API origin and credential without persisting either secret-bearing value. */
 export function loadSupermemoryConfig(settings: Settings, env: NodeJS.ProcessEnv = process.env): SupermemoryConfig {
+	const baseUrl = resolveBaseUrl(env);
 	return {
-		baseUrl: resolveBaseUrl(env),
+		baseUrl: baseUrl ?? "",
 		scoping: pickScoping(settings.get("supermemory.scoping")),
 		autoRecall: settings.get("supermemory.autoRecall") ?? true,
 		autoRetain: settings.get("supermemory.autoRetain") ?? true,
@@ -72,12 +73,12 @@ export function loadSupermemoryConfig(settings: Settings, env: NodeJS.ProcessEnv
 		recallLimit: Math.floor(finiteNumber(settings.get("supermemory.recallLimit"), DEFAULT_RECALL_LIMIT, 1, 50)),
 		threshold: finiteNumber(settings.get("supermemory.threshold"), DEFAULT_THRESHOLD, 0, 1),
 		searchMode: pickSearchMode(settings.get("supermemory.searchMode")),
-		apiKey: nonEmptyString(env.SUPERMEMORY_API_KEY) ?? null,
+		apiKey: baseUrl ? (nonEmptyString(env.SUPERMEMORY_API_KEY) ?? null) : null,
 	};
 }
 
 export function isSupermemoryConfigured(config: SupermemoryConfig): config is SupermemoryConfig & { apiKey: string } {
-	return config.apiKey !== null;
+	return config.apiKey !== null && config.baseUrl !== "";
 }
 
 /**

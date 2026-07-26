@@ -249,6 +249,60 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "retain", "memory_edit"]));
 	});
 
+	it("flushes the active backend before an unchanged-backend new session replaces its transcript", async () => {
+		const events: string[] = [];
+		const backend: MemoryBackend = {
+			id: "mnemopi",
+			async start() {},
+			async beforeTranscriptReplace(activeSession) {
+				events.push(`flush:${activeSession.sessionId}`);
+			},
+			async buildDeveloperInstructions() {
+				return undefined;
+			},
+			async clear() {},
+			async enqueue() {},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+		const current = createSession(async () => []);
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+		const previousSessionId = current.sessionId;
+
+		await current.newSession();
+
+		expect(current.sessionId).not.toBe(previousSessionId);
+		expect(events).toEqual([`flush:${previousSessionId}`]);
+	});
+
+	it("restores agent event delivery when transcript preparation fails", async () => {
+		const backend: MemoryBackend = {
+			id: "mnemopi",
+			async start() {},
+			async beforeTranscriptReplace() {
+				throw new Error("retention failed");
+			},
+			async buildDeveloperInstructions() {
+				return undefined;
+			},
+			async clear() {},
+			async enqueue() {},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+		const current = createSession(async () => []);
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+		const previousSessionId = current.sessionId;
+		const eventTypes: string[] = [];
+		current.subscribe(event => eventTypes.push(event.type));
+
+		await expect(current.newSession()).rejects.toThrow("retention failed");
+		expect(current.sessionId).toBe(previousSessionId);
+		await current.sendUserMessage("still connected");
+
+		expect(eventTypes).toContain("agent_end");
+	});
+
 	it("cancels a displaced local startup generation", async () => {
 		const current = createSession(async () => []);
 		const localStartup = current.beginLocalMemoryStartup();

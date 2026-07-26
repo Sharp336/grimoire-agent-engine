@@ -135,6 +135,9 @@ export interface MemoryBackend {
 	 */
 	resetSession?(session: AgentSession): boolean | void | Promise<boolean | undefined> | Promise<void>;
 
+	/** Flush transcript-scoped work before the session manager replaces or deletes the current transcript. */
+	beforeTranscriptReplace?(session: AgentSession): void | Promise<void>;
+
 	/** Release session-scoped resources during AgentSession disposal. */
 	disposeSession?(session: AgentSession): void | Promise<void>;
 
