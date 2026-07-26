@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { runCommentChecker, spawnProcess } from "../../src/comment-checker/cli";
 import {
 	extractCommentCheckRequests,
@@ -331,7 +334,7 @@ describe("extractCommentCheckRequests", () => {
 		]);
 	});
 
-	it("skips per-file results with pruned snapshots in extractFromOmpEditDetails", () => {
+	it("re-reads or falls back to input when per-file result has snapshotsPruned", () => {
 		const details = {
 			perFileResults: [
 				{
@@ -342,6 +345,43 @@ describe("extractCommentCheckRequests", () => {
 				{
 					path: "src/b.ts",
 					snapshotsPruned: true,
+				},
+			],
+		};
+		const input = {
+			new_string: "const b = 2;\n",
+		};
+
+		const results = extractFromOmpEditDetails(details, input);
+
+		expect(results).toEqual([
+			{
+				filePath: "src/a.ts",
+				movePath: undefined,
+				oldText: "const a = 1;\n",
+				newText: "const a = 2;\n",
+				success: true,
+				op: "edit",
+			},
+			{
+				filePath: "src/b.ts",
+				movePath: undefined,
+				oldText: "",
+				newText: "const b = 2;\n",
+				success: true,
+				op: "write",
+			},
+		]);
+	});
+
+	it("does not drop files when top-level snapshotsPruned is true in extractFromOmpEditDetails", () => {
+		const details = {
+			snapshotsPruned: true,
+			perFileResults: [
+				{
+					path: "src/a.ts",
+					oldText: "const a = 1;\n",
+					newText: "const a = 2;\n",
 				},
 			],
 		};
@@ -358,23 +398,6 @@ describe("extractCommentCheckRequests", () => {
 				op: "edit",
 			},
 		]);
-	});
-
-	it("returns empty array if top-level snapshotsPruned is true in extractFromOmpEditDetails", () => {
-		const details = {
-			snapshotsPruned: true,
-			perFileResults: [
-				{
-					path: "src/a.ts",
-					oldText: "const a = 1;\n",
-					newText: "const a = 2;\n",
-				},
-			],
-		};
-
-		const results = extractFromOmpEditDetails(details);
-
-		expect(results).toEqual([]);
 	});
 
 	it("falls back to input when edit details snapshots are pruned", () => {
@@ -410,6 +433,34 @@ describe("extractCommentCheckRequests", () => {
 					old_string: "const value = 1;",
 					new_string: "const value = 2;",
 				},
+			},
+		]);
+	});
+
+	it("re-reads updated content from disk when edit details snapshots are pruned and file exists", () => {
+		using tempDir = TempDir.createSync("@omp-comment-checker-test-");
+		const filePath = join(tempDir.path(), "pruned.ts");
+		writeFileSync(filePath, "const diskValue = 42;\n", "utf-8");
+
+		const details = {
+			perFileResults: [
+				{
+					path: filePath,
+					snapshotsPruned: true,
+				},
+			],
+		};
+
+		const results = extractFromOmpEditDetails(details);
+
+		expect(results).toEqual([
+			{
+				filePath,
+				movePath: undefined,
+				oldText: "",
+				newText: "const diskValue = 42;\n",
+				op: "write",
+				success: true,
 			},
 		]);
 	});
@@ -523,7 +574,7 @@ describe("createCommentCheckerToolResultHandler UI status update and warning cle
 		});
 
 		await cleanHandler(event, mockCtx);
-		expect(clearedFiles).toEqual([["src/foo.ts"]]);
+		expect(clearedFiles).toEqual([["src/foo.ts"], ["src/foo.ts"]]);
 	});
 });
 

@@ -8,6 +8,7 @@ import type {
 	ToolResultEventResult,
 } from "../extensibility/extensions";
 import selfHealPrompt from "../prompts/comment-checker-self-heal.md" with { type: "text" };
+import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { type CommentCheckerRunResult, resolveCommentCheckerBinary, runCommentChecker } from "./cli";
 import {
 	type CommentCheckerHookInput,
@@ -136,10 +137,8 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 			}
 		}
 
-		const warnedFilePaths = new Set(warnings.map(w => w.filePath));
-		const cleanFiles = checkedFiles.filter(p => !warnedFilePaths.has(p));
-		if (cleanFiles.length > 0) {
-			deps.onClearWarnings?.(cleanFiles);
+		if (checkedFiles.length > 0) {
+			deps.onClearWarnings?.(checkedFiles);
 		}
 
 		for (const warning of warnings) {
@@ -245,7 +244,13 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 				ctx.ui.notify("omp-comment-checker: no pending warnings.", "info");
 				return;
 			}
-			const summary = unfired.map(w => `${w.filePath}: ${w.message}`).join("\n");
+			const summary = unfired
+				.map(w => {
+					const displayPath = replaceTabs(shortenPath(w.filePath));
+					const preview = truncateToWidth(replaceTabs(w.message.trim()), TRUNCATE_LENGTHS.CONTENT);
+					return `${displayPath}: ${preview}`;
+				})
+				.join("\n");
 			ctx.ui.notify(`${unfired.length} pending warning(s):\n${summary}`, "warning");
 		},
 	});

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { $which } from "@oh-my-pi/pi-utils";
 import type { CommentCheckerHookInput } from "./core";
 
 export type ProcessResult = {
@@ -87,7 +88,7 @@ export function resolveCommentCheckerBinary(): string | undefined {
 	if (fromPackageApi) return fromPackageApi;
 	const fromPackage = resolvePackageBinary(binaryName);
 	if (fromPackage) return fromPackage;
-	return undefined;
+	return $which(binaryName) ?? undefined;
 }
 
 function resolvePackageApiBinary(): string | undefined {
@@ -170,7 +171,7 @@ export async function spawnProcess(
 	const outputByteLimit = Number.isFinite(maxOutputBytes) && maxOutputBytes > 0 ? Math.floor(maxOutputBytes) : 0;
 	const timeoutLimit = Number.isFinite(processTimeoutMs) && processTimeoutMs > 0 ? Math.floor(processTimeoutMs) : 0;
 
-	let proc: ReturnType<typeof Bun.spawn>;
+	let proc: Bun.Subprocess;
 	try {
 		proc = Bun.spawn([command, ...args], {
 			stdin: Buffer.from(stdin, "utf-8"),

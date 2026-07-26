@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 
 export type CheckerToolName = "Write" | "Edit" | "MultiEdit";
@@ -65,23 +66,42 @@ type ApplyPatchFileMetadata = {
 	type?: string;
 };
 
-export function extractFromOmpEditDetails(details: unknown): Array<OmpPerFileEditResult & { op: "write" | "edit" }> {
+export function extractFromOmpEditDetails(
+	details: unknown,
+	input?: Record<string, unknown>,
+): Array<OmpPerFileEditResult & { op: "write" | "edit" }> {
 	if (!isRecord(details)) return [];
-	if (details.snapshotsPruned === true) return [];
 	if (details.isError === true) return [];
 	const source = details.perFileResults ?? details.files;
 	const results: Array<OmpPerFileEditResult & { op: "write" | "edit" }> = [];
 	if (Array.isArray(source)) {
 		for (const item of source) {
 			if (!isRecord(item)) continue;
-			if (item.snapshotsPruned === true) continue;
 			if (item.isError === true) continue;
 			const typeOp = getString(item, ["type", "op", "operation"]);
 			if (typeOp === "delete") continue;
 			const filePath = getString(item, ["path", "filePath", "file_path"]) ?? "";
 			const movePath = getString(item, ["move", "movePath", "move_path"]);
-			const oldText = getString(item, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
-			const newText = getString(item, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
+			let oldText = getString(item, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
+			let newText = getString(item, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
+			const targetPath = movePath ?? filePath;
+
+			if (item.snapshotsPruned === true || details.snapshotsPruned === true || newText.length === 0) {
+				if (targetPath && existsSync(targetPath)) {
+					try {
+						newText = readFileSync(targetPath, "utf-8");
+					} catch {
+						// ignore
+					}
+				}
+				if (newText.length === 0 && input) {
+					newText = getString(input, ["content", "new_string", "newString", "newText", "after", "new"]) ?? "";
+					if (oldText.length === 0) {
+						oldText = getString(input, ["old_string", "oldString", "oldText", "before", "old"]) ?? "";
+					}
+				}
+			}
+
 			if (typeof filePath !== "string" || filePath.length === 0) continue;
 			if (oldText.length > 0 && newText.length === 0) continue;
 			results.push({
@@ -99,8 +119,26 @@ export function extractFromOmpEditDetails(details: unknown): Array<OmpPerFileEdi
 			const filePath = getString(details, ["path", "filePath", "file_path"]) ?? "";
 			if (typeof filePath !== "string" || filePath.length === 0) return [];
 			const movePath = getString(details, ["move", "movePath", "move_path"]);
-			const oldText = getString(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
-			const newText = getString(details, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
+			let oldText = getString(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
+			let newText = getString(details, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
+			const targetPath = movePath ?? filePath;
+
+			if (details.snapshotsPruned === true || newText.length === 0) {
+				if (targetPath && existsSync(targetPath)) {
+					try {
+						newText = readFileSync(targetPath, "utf-8");
+					} catch {
+						// ignore
+					}
+				}
+				if (newText.length === 0 && input) {
+					newText = getString(input, ["content", "new_string", "newString", "newText", "after", "new"]) ?? "";
+					if (oldText.length === 0) {
+						oldText = getString(input, ["old_string", "oldString", "oldText", "before", "old"]) ?? "";
+					}
+				}
+			}
+
 			if (oldText.length === 0 || newText.length > 0) {
 				results.push({
 					filePath,
@@ -150,7 +188,7 @@ function ompEditResultsToCommentCheckRequests(
 }
 
 export function extractCommentCheckRequests(event: ToolResultLike): CommentCheckRequest[] {
-	const ompResults = extractFromOmpEditDetails(event.details);
+	const ompResults = extractFromOmpEditDetails(event.details, event.input);
 	const ompRequests = ompEditResultsToCommentCheckRequests(event.toolName, ompResults);
 	if (ompRequests.length > 0) return ompRequests;
 
