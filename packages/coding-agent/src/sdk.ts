@@ -1902,6 +1902,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
+			if (settings.get("commentChecker.enabled")) {
+				inlineExtensions.push((await import("./comment-checker")).createCommentCheckerExtension);
+			}
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools));
 			}
@@ -1910,14 +1913,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// re-bind under their own `CustomToolAPI` while skipping the FS scan.
 		toolSession.customToolPaths = customToolPaths;
 
-		const inlineExtensions: ExtensionFactory[] = options.extensions ? [...options.extensions] : [];
-		inlineExtensions.push((await import("./autoresearch")).createAutoresearchExtension);
-		if (settings.get("commentChecker.enabled")) {
-			inlineExtensions.push((await import("./comment-checker")).createCommentCheckerExtension);
-		}
-		if (customTools.length > 0) {
-			inlineExtensions.push(createCustomToolsExtension(customTools));
-		}
 		// Load extensions. Three paths:
 		//   1. `preloadedExtensions` (CLI): caller already loaded — reuse the
 		//      Extension instances. Shallow-clone `extensions` so the inline

@@ -84,6 +84,11 @@ export type CommentCheckerHandlerDeps = {
 	onWarning?: (warning: { filePath: string; message: string; sourceToolName: string }) => void;
 };
 
+function syncUi(ctx: ExtensionContext, state: CommentCheckerUiState): void {
+	syncCommentCheckerWidget(ctx.ui.setWidget, state);
+	ctx.ui.setStatus(COMMENT_CHECKER_WIDGET_KEY, formatFooterStatus(state));
+}
+
 export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandlerDeps) {
 	return async (event: ToolResultEvent, ctx: ExtensionContext): Promise<ToolResultEventResult | undefined> => {
 		const requests = extractCommentCheckRequests(toToolResultLike(event));
@@ -97,11 +102,11 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 			const input = toHookInput(request, { sessionId: getSessionId(ctx), cwd: ctx.cwd });
 			const result = await runner(input);
 			if (result.status === "missing") {
-				syncCommentCheckerWidget(ctx.ui.setWidget, { status: "missing", checkedFiles, warnings });
+				syncUi(ctx, { status: "missing", checkedFiles, warnings });
 				return undefined;
 			}
 			if (result.status === "error") {
-				syncCommentCheckerWidget(ctx.ui.setWidget, {
+				syncUi(ctx, {
 					status: "error",
 					checkedFiles,
 					warnings,
@@ -124,11 +129,11 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 		}
 
 		if (warnings.length === 0) {
-			syncCommentCheckerWidget(ctx.ui.setWidget, { status: "clean", checkedFiles, warnings });
+			syncUi(ctx, { status: "clean", checkedFiles, warnings });
 			return undefined;
 		}
 
-		syncCommentCheckerWidget(ctx.ui.setWidget, { status: "warning", checkedFiles, warnings });
+		syncUi(ctx, { status: "warning", checkedFiles, warnings });
 		const appended: (TextContent | ImageContent)[] = [
 			...(event.content ?? []),
 			...warnings.map(warning => ({ type: "text" as const, text: `\n\n${warning.message}` })),
@@ -143,8 +148,7 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 
 	const setState = (ctx: ExtensionContext, nextState: CommentCheckerUiState): void => {
 		state = nextState;
-		syncCommentCheckerWidget(ctx.ui.setWidget, state);
-		ctx.ui.setStatus(COMMENT_CHECKER_WIDGET_KEY, formatFooterStatus(state));
+		syncUi(ctx, state);
 	};
 
 	api.on("session_start", async (_event, ctx) => {

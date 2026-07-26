@@ -67,11 +67,13 @@ type ApplyPatchFileMetadata = {
 
 export function extractFromOmpEditDetails(details: unknown): Array<OmpPerFileEditResult & { op: "write" | "edit" }> {
 	if (!isRecord(details)) return [];
+	if (details.snapshotsPruned === true) return [];
 	const source = details.perFileResults ?? details.files;
 	if (!Array.isArray(source)) return [];
 	const results: Array<OmpPerFileEditResult & { op: "write" | "edit" }> = [];
 	for (const item of source) {
 		if (!isRecord(item)) continue;
+		if (item.snapshotsPruned === true) continue;
 		const filePath = getString(item, ["path", "filePath", "file_path"]) ?? "";
 		const movePath = getString(item, ["move", "movePath", "move_path"]);
 		const oldText = getString(item, ["oldText", "old_text", "oldString", "old_string"]) ?? "";

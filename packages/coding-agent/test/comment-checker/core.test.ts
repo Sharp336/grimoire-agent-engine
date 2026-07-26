@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createCommentCheckerToolResultHandler } from "../../src/comment-checker/index";
 import {
 	extractCommentCheckRequests,
 	extractFromOmpEditDetails,
@@ -267,6 +268,89 @@ describe("extractCommentCheckRequests", () => {
 			},
 		]);
 	});
+
+	it("skips per-file results with pruned snapshots in extractFromOmpEditDetails", () => {
+		const details = {
+			perFileResults: [
+				{
+					path: "src/a.ts",
+					oldText: "const a = 1;\n",
+					newText: "const a = 2;\n",
+				},
+				{
+					path: "src/b.ts",
+					snapshotsPruned: true,
+				},
+			],
+		};
+
+		const results = extractFromOmpEditDetails(details);
+
+		expect(results).toEqual([
+			{
+				filePath: "src/a.ts",
+				movePath: undefined,
+				oldText: "const a = 1;\n",
+				newText: "const a = 2;\n",
+				success: true,
+				op: "edit",
+			},
+		]);
+	});
+
+	it("returns empty array if top-level snapshotsPruned is true in extractFromOmpEditDetails", () => {
+		const details = {
+			snapshotsPruned: true,
+			perFileResults: [
+				{
+					path: "src/a.ts",
+					oldText: "const a = 1;\n",
+					newText: "const a = 2;\n",
+				},
+			],
+		};
+
+		const results = extractFromOmpEditDetails(details);
+
+		expect(results).toEqual([]);
+	});
+
+	it("falls back to input when edit details snapshots are pruned", () => {
+		const event: ToolResultLike = {
+			toolName: "edit",
+			input: {
+				path: "src/example.ts",
+				old_string: "const value = 1;",
+				new_string: "const value = 2;",
+			},
+			details: {
+				snapshotsPruned: true,
+				perFileResults: [
+					{
+						path: "src/example.ts",
+						snapshotsPruned: true,
+					},
+				],
+			},
+			content: [{ type: "text", text: "edited src/example.ts" }],
+			isError: false,
+		};
+
+		const requests = extractCommentCheckRequests(event);
+
+		expect(requests).toEqual([
+			{
+				sourceToolName: "edit",
+				toolName: "Edit",
+				filePath: "src/example.ts",
+				toolInput: {
+					file_path: "src/example.ts",
+					old_string: "const value = 1;",
+					new_string: "const value = 2;",
+				},
+			},
+		]);
+	});
 });
 
 describe("toHookInput", () => {
@@ -308,5 +392,48 @@ describe("isToolFailureOutput", () => {
 
 	it("does not flag clean tool output", () => {
 		expect(isToolFailureOutput("wrote src/example.ts")).toBe(false);
+	});
+});
+
+describe("createCommentCheckerToolResultHandler UI status update", () => {
+	it("updates ctx.ui.setStatus when warnings are found", async () => {
+		const setStatusCalls: Array<{ key: string; text?: string }> = [];
+		const setWidgetCalls: Array<{ key: string; lines?: string[] }> = [];
+
+		const mockCtx = {
+			sessionManager: { getSessionId: () => "sess-1", getHeader: () => null },
+			cwd: "/root",
+			ui: {
+				setStatus: (key: string, text?: string) => {
+					setStatusCalls.push({ key, text });
+				},
+				setWidget: (key: string, lines?: string[]) => {
+					setWidgetCalls.push({ key, lines });
+				},
+			},
+		};
+
+		const handler = createCommentCheckerToolResultHandler({
+			run: async () => ({
+				status: "warning",
+				message: "Avoid vague comments",
+			}),
+		});
+
+		const result = await handler(
+			{
+				toolName: "write",
+				input: { filePath: "src/foo.ts", content: "// TODO fix\nconst x = 1;" },
+				content: [{ type: "text", text: "wrote src/foo.ts" }],
+			} as any,
+			mockCtx as any,
+		);
+
+		expect(result).toBeDefined();
+		expect(setStatusCalls.length).toBe(1);
+		expect(setStatusCalls[0]).toEqual({
+			key: "omp-comment-checker",
+			text: "⚠ comment-checker: 1 warning(s) in src/foo.ts",
+		});
 	});
 });
