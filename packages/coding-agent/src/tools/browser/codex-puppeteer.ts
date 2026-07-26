@@ -158,6 +158,7 @@ interface PageScrollableElement {
 
 interface PageEditableElement {
 	contains(node: unknown): boolean;
+	contentDocument?: PageDocumentLike | null;
 	disabled?: boolean;
 	getAttribute(name: string): string | null;
 	isContentEditable: boolean;
@@ -2735,7 +2736,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const before = await this.#page.evaluate(() => {
 			const pageDocument = document as unknown as PageDocumentLike;
 			let active = pageDocument.activeElement;
-			while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+			while (active) {
+				const nestedActive = active.shadowRoot?.activeElement ?? active.contentDocument?.activeElement;
+				if (!nestedActive) break;
+				active = nestedActive;
+			}
 			if (!active) return null;
 			const tag = active.tagName.toLowerCase();
 			const target = active as unknown as PageEditableElement;
@@ -2775,7 +2780,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const after = await this.#page.evaluate(() => {
 			const pageDocument = document as unknown as PageDocumentLike;
 			let active = pageDocument.activeElement;
-			while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+			while (active) {
+				const nestedActive = active.shadowRoot?.activeElement ?? active.contentDocument?.activeElement;
+				if (!nestedActive) break;
+				active = nestedActive;
+			}
 			if (!active) return null;
 			const target = active as unknown as PageEditableElement;
 			return target.isContentEditable ? (target.textContent ?? "") : target.value;

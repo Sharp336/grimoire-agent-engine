@@ -462,6 +462,7 @@ const CLICK_OPTION_KEYS: Readonly<Record<string, true>> = {
 	force: true,
 	timeoutMs: true,
 };
+const SET_CHECKED_OPTION_KEYS: Readonly<Record<string, true>> = { force: true, timeoutMs: true };
 const SELECT_OPTION_KEYS: Readonly<Record<string, true>> = { value: true, label: true, index: true };
 
 function assertAllowedKeys(
@@ -827,6 +828,7 @@ export class CodexLocator {
 	async setChecked(checked: boolean, options: CodexLocatorCheckedOptions = {}): Promise<void> {
 		if (typeof checked !== "boolean") throw new Error("locator.setChecked requires a boolean");
 		const value = requireObject(options, "locator.setChecked");
+		assertAllowedKeys(value, "locator.setChecked", SET_CHECKED_OPTION_KEYS);
 		if (value.force !== undefined && typeof value.force !== "boolean")
 			throw new Error("locator.setChecked force must be a boolean");
 		await this.#adapter.invoke<void>(

@@ -2437,31 +2437,45 @@ describe("cmux Codex browser review regressions", () => {
 		await adapter.dispose();
 	});
 
-	it("types into the deepest active editor inside shadow roots", async () => {
-		const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
-		const host = document.getElementById("host");
-		if (!host) throw new Error("Expected shadow host");
-		const shadowRoot = host.attachShadow({ mode: "open" });
-		const input = document.createElement("input");
-		shadowRoot.append(input);
-		Object.defineProperty(document, "activeElement", { configurable: true, value: host });
-		Object.defineProperty(shadowRoot, "activeElement", { configurable: true, value: input });
+	it("types through same-origin iframe and shadow boundaries and removes native action tokens", async () => {
+		const { document, window } = parseHTML('<html><body><div id="outer-host"></div></body></html>');
+		const outerHost = document.getElementById("outer-host");
+		if (!outerHost) throw new Error("Expected outer shadow host");
+		const outerShadow = outerHost.attachShadow({ mode: "open" });
+		const frame = document.createElement("iframe");
+		outerShadow.append(frame);
+		const { document: frameDocument } = parseHTML('<html><body><div id="inner-host"></div></body></html>');
+		const innerHost = frameDocument.getElementById("inner-host");
+		if (!innerHost) throw new Error("Expected iframe shadow host");
+		const innerShadow = innerHost.attachShadow({ mode: "open" });
+		const input = frameDocument.createElement("input");
+		innerShadow.append(input);
+		Object.defineProperty(frame, "contentDocument", { configurable: true, value: frameDocument });
+		Object.defineProperty(document, "activeElement", { configurable: true, value: outerHost });
+		Object.defineProperty(outerShadow, "activeElement", { configurable: true, value: frame });
+		Object.defineProperty(frameDocument, "activeElement", { configurable: true, value: innerHost });
+		Object.defineProperty(innerShadow, "activeElement", { configurable: true, value: input });
 		const nativeCalls: Array<{ selector: string; text: string }> = [];
+		const tokenPresentDuringType: boolean[] = [];
 		const evaluate = (source: string, args: unknown[]) => runPageEvaluator(source, args, { document, window });
 		const { adapter, browser } = adapterAndFacadeFor({
 			codexEvaluate: evaluate,
 			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
 			async type(selector: string, text: string) {
 				nativeCalls.push({ selector, text });
-				expect(input.matches(selector)).toBe(true);
+				tokenPresentDuringType.push(input.matches(selector));
 				input.value += text;
 			},
 		});
 
 		try {
-			await (await selectedTab(browser)).cua.type({ text: "shadow text" });
-			expect(input.value).toBe("shadow text");
-			expect(nativeCalls).toHaveLength(1);
+			const current = await selectedTab(browser);
+			await current.cua.type({ text: "frame " });
+			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
+			await current.dom_cua.type({ text: "text" });
+			expect(input.value).toBe("frame text");
+			expect(nativeCalls).toHaveLength(2);
+			expect(tokenPresentDuringType).toEqual([true, true]);
 			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
 		} finally {
 			await adapter.dispose();

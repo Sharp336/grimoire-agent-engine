@@ -218,6 +218,20 @@ describe("Codex browser public facade closed vocabularies", () => {
 		expect(adapter.calls.some(call => call.operation === "locator.selectOption")).toBe(false);
 	});
 
+	it("rejects unknown setChecked option keys before adapter dispatch", async () => {
+		const adapter = new RecordingAdapter();
+		const { tab } = await selectedTab(adapter);
+		const locator = tab.playwright.locator("#terms");
+
+		const outcome = await captureError(() => locator.setChecked(true, { froce: true } as never));
+
+		expect(outcome).toEqual({
+			name: "Error",
+			message: "locator.setChecked does not accept froce",
+		});
+		expect(adapter.calls.some(call => call.operation === "locator.setChecked")).toBe(false);
+	});
+
 	it("rejects unknown locator.filter option keys", async () => {
 		const adapter = new RecordingAdapter();
 		const { tab } = await selectedTab(adapter);

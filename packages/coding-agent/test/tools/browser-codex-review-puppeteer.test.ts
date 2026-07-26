@@ -1183,16 +1183,23 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
-	it("types into the deepest focused editor inside an open shadow root", async () => {
+	it("types through same-origin iframe and shadow boundaries into the deepest focused editor", async () => {
 		await withPuppeteerTool(async (tool, name) => {
 			const result = await runBrowserCode(
 				tool,
 				name,
 				`const t=await agent.browser.tabs.selected();
-				 await page.evaluate(()=>{ const host=document.createElement("div"); host.id="editor-host"; document.body.append(host); const input=host.attachShadow({mode:"open"}).appendChild(document.createElement("input")); input.focus(); });
+				 await page.evaluate(async()=>{
+				   const host=document.createElement("div"); host.id="editor-host"; document.body.append(host);
+				   const frame=document.createElement("iframe"); frame.srcdoc="<div id='inner-host'></div>";
+				   const {promise,resolve}=Promise.withResolvers(); frame.addEventListener("load",resolve,{once:true}); host.attachShadow({mode:"open"}).append(frame); await promise;
+				   const innerHost=frame.contentDocument.querySelector("#inner-host");
+				   const input=innerHost.attachShadow({mode:"open"}).appendChild(frame.contentDocument.createElement("input"));
+				   input.focus();
+				 });
 				 await t.cua.type({text:"A"});
 				 await t.dom_cua.type({text:"B"});
-				 return {value:await page.evaluate(()=>document.querySelector("#editor-host").shadowRoot.activeElement.value)};`,
+				 return {value:await page.evaluate(()=>{ const frame=document.querySelector("#editor-host").shadowRoot.querySelector("iframe"); return frame.contentDocument.querySelector("#inner-host").shadowRoot.activeElement.value; })};`,
 			);
 			expect(result).toEqual({ value: "AB" });
 		});

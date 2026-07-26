@@ -325,6 +325,7 @@ const DISPOSE_NATIVE_ACTION_TOKEN_SOURCE = `(token) => {
 		for (const element of root.querySelectorAll("*")) {
 			if (element.getAttribute?.("data-omp-codex-action-token") === token) element.removeAttribute("data-omp-codex-action-token");
 			if (element.shadowRoot) roots.push(element.shadowRoot);
+			if (element.contentDocument) roots.push(element.contentDocument);
 		}
 	}
 	return true;
@@ -539,7 +540,11 @@ const VISIBLE_DOM_SOURCE = `() => {
 
 const PREPARE_ACTIVE_NATIVE_TYPE_SOURCE = `(token, label) => {
 	let target = document.activeElement;
-	while (target?.shadowRoot?.activeElement) target = target.shadowRoot.activeElement;
+	while (target) {
+		const nestedTarget = target.shadowRoot?.activeElement ?? target.contentDocument?.activeElement;
+		if (!nestedTarget) break;
+		target = nestedTarget;
+	}
 	if (!target || typeof target !== "object") throw new Error(label + " requires an editable active element");
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
 	const composedParent = element => element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
@@ -625,6 +630,7 @@ const CLEANUP_PAGE_OBSERVERS_SOURCE = `(tokenNamespace) => {
 			if (String(element.getAttribute?.("data-omp-codex-file-token") || "").startsWith("file-" + tokenNamespace + "-")) element.removeAttribute("data-omp-codex-file-token");
 			if (String(element.getAttribute?.("data-omp-codex-action-token") || "").startsWith(tokenNamespace)) element.removeAttribute("data-omp-codex-action-token");
 			if (element.shadowRoot) roots.push(element.shadowRoot);
+			if (element.contentDocument) roots.push(element.contentDocument);
 		}
 	}
 	const transfers = globalThis.__ompCodexMediaTransfers;
