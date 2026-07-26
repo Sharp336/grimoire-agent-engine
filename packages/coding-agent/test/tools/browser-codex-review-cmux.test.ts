@@ -256,22 +256,22 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 	let frameClickCapture = false;
 	class ElementProbe {
 		readonly attributes = new Map<string, string>();
-		readonly kind: "file" | "anchor";
+		readonly kind: "file" | "button";
 		readonly multiple: boolean;
-		readonly tagName: "INPUT" | "A";
+		readonly tagName: "INPUT" | "BUTTON";
 		shadowRoot?: { querySelectorAll(selector: string): ElementProbe[] };
 		ownerDocument?: unknown;
 		root?: unknown;
 
-		constructor(kind: "file" | "anchor") {
+		constructor(kind: "file" | "button") {
 			this.kind = kind;
 			this.multiple = kind === "file" && multiple;
-			this.tagName = kind === "file" ? "INPUT" : "A";
+			this.tagName = kind === "file" ? "INPUT" : "BUTTON";
 		}
 
 		closest(selector: string): ElementProbe | null {
 			if (selector === 'input[type="file"]') return this.kind === "file" ? this : null;
-			if (selector === "a[href]") return this.kind === "anchor" ? this : null;
+			if (selector === "button") return this.kind === "button" ? this : null;
 			return null;
 		}
 
@@ -293,7 +293,7 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 	const file = new ElementProbe("file");
 	file.setAttribute("id", "upload");
 	file.setAttribute("type", "file");
-	const anchor = new ElementProbe("anchor");
+	const anchor = new ElementProbe("button");
 	if (inShadowRoot) {
 		anchor.shadowRoot = {
 			querySelectorAll(selector: string) {
@@ -371,8 +371,8 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 	Reflect.set(frame, "getRootNode", () => document);
 	file.ownerDocument = inFrame ? frameDocument : document;
 	file.root = inShadowRoot ? anchor.shadowRoot : file.ownerDocument;
-	anchor.ownerDocument = document;
-	anchor.root = document;
+	anchor.ownerDocument = inFrame ? frameDocument : document;
+	anchor.root = anchor.ownerDocument;
 	const fire = (
 		target: ElementProbe,
 		cancelled = false,
@@ -389,8 +389,9 @@ function observerProbe(multiple = false, inShadowRoot = false, inFrame = false) 
 				this.defaultPrevented = true;
 			},
 		};
-		if (!stopped || (inFrame && target === file ? frameClickCapture : clickCapture)) {
-			(inFrame && target === file ? frameClickListener : clickListener)?.(event);
+		const inObservedFrame = inFrame && target.ownerDocument === frameDocument;
+		if (!stopped || (inObservedFrame ? frameClickCapture : clickCapture)) {
+			(inObservedFrame ? frameClickListener : clickListener)?.(event);
 		}
 	};
 	return { document, frameDocument, frame, ElementProbe, file, anchor, fire };
@@ -1725,6 +1726,22 @@ describe("cmux Codex browser review regressions", () => {
 		expect(presses[0]?.timeoutMs).toBeGreaterThan(0);
 	});
 
+	it("dispatches CUA key arrays as one normalized native chord", async () => {
+		const presses: string[] = [];
+		const current = await selectedTab(
+			facadeFor({
+				async press(key: string) {
+					presses.push(key);
+				},
+			}),
+		);
+
+		await current.cua.keypress({ keys: ["Control", "L"] });
+		await current.cua.keypress({ keys: ["ControlOrMeta", "K"] });
+
+		expect(presses).toEqual(["Control+L", `${process.platform === "darwin" ? "Meta" : "Control"}+K`]);
+	});
+
 	it("routes locator clicks through native input and rejects unrepresentable options", async () => {
 		const commands: string[] = [];
 		const nativeClicks: string[] = [];
@@ -2120,6 +2137,71 @@ describe("cmux Codex browser review regressions", () => {
 			expect(frameCalls[3]).toBe("browser.frame.main:main");
 		} finally {
 			await adapter.dispose();
+		}
+	});
+
+	it("scopes a button-delegated iframe file chooser to the accepted input frame", async () => {
+		const probe = observerProbe(false, false, true);
+		const frameCalls: string[] = [];
+		let selectedFrame = false;
+		let fired = false;
+		const uploadSelectors: string[] = [];
+		const requestAdapter = new CmuxCodexBrowserAdapter({
+			surfaceId: "surface-observer",
+			codexEvaluate: (source: string, args: unknown[]) =>
+				runPageEvaluator(source, args, { document: probe.document, window: {}, Element: probe.ElementProbe }),
+			async codexEvaluateCleanup(source: string, args: unknown[]) {
+				return runPageEvaluator(source, args, {
+					document: probe.document,
+					window: {},
+					Element: probe.ElementProbe,
+				});
+			},
+			async codexWait() {
+				if (fired) return;
+				fired = true;
+				probe.fire(probe.anchor, false, false, true);
+				probe.fire(probe.file, false, false, false);
+				await Promise.resolve();
+			},
+			async codexRequest(method: string, params: Readonly<Record<string, unknown>>) {
+				frameCalls.push(`${method}:${String(params.selector ?? "")}`);
+				selectedFrame = true;
+				return {};
+			},
+			async codexCleanupRequest(method: string) {
+				frameCalls.push(`${method}:main`);
+				selectedFrame = false;
+				return {};
+			},
+			async codexUploadFile(selector: string) {
+				expect(selectedFrame).toBe(true);
+				uploadSelectors.push(selector);
+			},
+		} as never);
+
+		await requestAdapter.beginRun();
+		try {
+			const chooser = await requestAdapter.invoke<{ token: string }>("playwright.waitForEvent", {
+				tabId: "1",
+				event: "filechooser",
+				timeoutMs: 250,
+			});
+			await requestAdapter.invoke("playwright.fileChooser.setFiles", {
+				tabId: "1",
+				token: chooser.token,
+				files: ["fixture.txt"],
+				timeoutMs: 250,
+			});
+
+			expect(uploadSelectors).toEqual([expect.stringMatching(/^pierce\/input\[data-omp-codex-file-token=/)]);
+			expect(frameCalls).toEqual([
+				expect.stringMatching(/^browser\.frame\.select:\[data-omp-codex-file-frame-token=/),
+				"browser.frame.main:main",
+			]);
+			expect(probe.frame.getAttribute("data-omp-codex-file-frame-token")).toBeNull();
+		} finally {
+			await requestAdapter.dispose();
 		}
 	});
 
@@ -2887,24 +2969,16 @@ describe("cmux Codex browser review regressions", () => {
 		await adapter.dispose();
 	});
 
-	it("types through same-origin iframe and shadow boundaries and removes native action tokens", async () => {
-		const { document, window } = parseHTML('<html><body><div id="outer-host"></div></body></html>');
-		const outerHost = document.getElementById("outer-host");
-		if (!outerHost) throw new Error("Expected outer shadow host");
-		const outerShadow = outerHost.attachShadow({ mode: "open" });
-		const frame = document.createElement("iframe");
-		outerShadow.append(frame);
-		const { document: frameDocument } = parseHTML('<html><body><div id="inner-host"></div></body></html>');
-		const innerHost = frameDocument.getElementById("inner-host");
-		if (!innerHost) throw new Error("Expected iframe shadow host");
-		const innerShadow = innerHost.attachShadow({ mode: "open" });
-		const input = frameDocument.createElement("input");
-		innerShadow.append(input);
+	it("types through a same-origin iframe and removes native action tokens", async () => {
+		const { document, window } = parseHTML('<html><body><iframe id="frame"></iframe></body></html>');
+		const frame = document.getElementById("frame");
+		if (!frame) throw new Error("Expected iframe");
+		const { document: frameDocument } = parseHTML('<html><body><input id="field"></body></html>');
+		const input = frameDocument.getElementById("field");
+		if (!input) throw new Error("Expected iframe input");
 		Object.defineProperty(frame, "contentDocument", { configurable: true, value: frameDocument });
-		Object.defineProperty(document, "activeElement", { configurable: true, value: outerHost });
-		Object.defineProperty(outerShadow, "activeElement", { configurable: true, value: frame });
-		Object.defineProperty(frameDocument, "activeElement", { configurable: true, value: innerHost });
-		Object.defineProperty(innerShadow, "activeElement", { configurable: true, value: input });
+		Object.defineProperty(document, "activeElement", { configurable: true, value: frame });
+		Object.defineProperty(frameDocument, "activeElement", { configurable: true, value: input });
 		const nativeCalls: Array<{ selector: string; text: string }> = [];
 		const tokenPresentDuringType: boolean[] = [];
 		const frameCalls: string[] = [];
@@ -2937,7 +3011,6 @@ describe("cmux Codex browser review regressions", () => {
 		try {
 			const current = await selectedTab(browser);
 			await current.cua.type({ text: "frame " });
-			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
 			await current.dom_cua.type({ text: "text" });
 			expect(input.value).toBe("frame text");
 			expect(nativeCalls).toHaveLength(2);
@@ -2948,7 +3021,48 @@ describe("cmux Codex browser review regressions", () => {
 				"browser.frame.select",
 				"browser.frame.main",
 			]);
+			expect(frame.hasAttribute("data-omp-codex-action-token")).toBe(false);
 			expect(input.hasAttribute("data-omp-codex-action-token")).toBe(false);
+		} finally {
+			await adapter.dispose();
+		}
+	});
+
+	it("rejects active shadow typing before token mutation or a native call", async () => {
+		const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
+		const host = document.getElementById("host");
+		if (!host) throw new Error("Expected shadow host");
+		const shadowRoot = host.attachShadow({ mode: "open" });
+		const input = document.createElement("input");
+		shadowRoot.append(input);
+		Object.defineProperty(document, "activeElement", { configurable: true, value: host });
+		Object.defineProperty(shadowRoot, "activeElement", { configurable: true, value: input });
+		let tokenMutations = 0;
+		let nativeCalls = 0;
+		for (const element of [host, input]) {
+			const setAttribute = element.setAttribute.bind(element);
+			Reflect.set(element, "setAttribute", (name: string, value: string) => {
+				if (name === "data-omp-codex-action-token") tokenMutations++;
+				setAttribute(name, value);
+			});
+		}
+		const evaluate = (source: string, args: unknown[]) => runPageEvaluator(source, args, { document, window });
+		const { adapter, browser } = adapterAndFacadeFor({
+			codexEvaluate: evaluate,
+			codexEvaluateCleanup: async (source: string, args: unknown[]) => evaluate(source, args),
+			async type() {
+				nativeCalls++;
+			},
+		});
+
+		try {
+			const current = await selectedTab(browser);
+			expect(await caughtError(() => current.cua.type({ text: "impossible" }))).toEqual({
+				name: "BrowserCapabilityError",
+				message: "Browser capability is unavailable: dom_cua framed shadow action",
+			});
+			expect(tokenMutations).toBe(0);
+			expect(nativeCalls).toBe(0);
 		} finally {
 			await adapter.dispose();
 		}

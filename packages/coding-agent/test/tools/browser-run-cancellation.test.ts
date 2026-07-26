@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { CmuxTab, runCmuxCode } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
+import type { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
+import type { SessionSnapshot } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { JsRuntime, type RuntimeHooks } from "../../src/eval/js/shared/runtime";
 import {
@@ -23,6 +27,14 @@ async function collectUnhandledRejections(action: () => void | Promise<void>): P
 	} finally {
 		process.off("unhandledRejection", onUnhandled);
 	}
+}
+function makeSession(cwd: string): ToolSession {
+	return {
+		cwd,
+		hasUI: false,
+		settings: { get: () => undefined },
+		getSessionFile: () => null,
+	} as unknown as ToolSession;
 }
 
 describe("browser run cancellation", () => {
@@ -220,5 +232,72 @@ describe("browser run cancellation", () => {
 
 		expect(state.lateNavigation).toBeUndefined();
 		expect(state.displays).toEqual([]);
+	});
+	it("aborts fire-and-forget cmux navigation before adapter cleanup can be undone", async () => {
+		const navigateEntered = Promise.withResolvers<void>();
+		const releaseNavigation = Promise.withResolvers<void>();
+		const cleanupEntered = Promise.withResolvers<void>();
+		const releaseCleanup = Promise.withResolvers<void>();
+		const navigationSettled = Promise.withResolvers<void>();
+		const controlKey = Symbol.for("omp.browser-run-cancellation.cmux-navigation");
+		const globals = globalThis as unknown as Record<PropertyKey, unknown>;
+		globals[controlKey] = navigationSettled;
+		let cleanupStarted = false;
+		let observerReinstalls = 0;
+		const client = {
+			request: async (method: string, params: Record<string, unknown>) => {
+				if (method === "browser.navigate") {
+					navigateEntered.resolve();
+					await releaseNavigation.promise;
+					return { url: params.url };
+				}
+				if (method === "browser.url.get") return { url: "https://before.example" };
+				if (method === "browser.wait") return {};
+				if (method !== "browser.eval") throw new Error(`Unexpected cmux request: ${method}`);
+				const script = typeof params.script === "string" ? params.script : "";
+				if (script.includes("delete globalThis.__ompCodexBrowserState")) {
+					cleanupStarted = true;
+					cleanupEntered.resolve();
+					await releaseCleanup.promise;
+					return { value: true };
+				}
+				if (script.includes("Browser adapter page observer is owned by another run")) {
+					if (cleanupStarted) {
+						observerReinstalls++;
+					}
+					return { value: 0 };
+				}
+				if (script.includes("document.title")) return { value: "Before" };
+				return { value: true };
+			},
+		} as unknown as CmuxSocketClient;
+		const snapshot: SessionSnapshot = { cwd: process.cwd() };
+		const tab = new CmuxTab({ client, surfaceId: "abort-before-cleanup" });
+		const run = runCmuxCode(tab, {
+			code: `const control = globalThis[Symbol.for("omp.browser-run-cancellation.cmux-navigation")];
+				const selected = await agent.browser.tabs.selected();
+				void selected.goto("https://late.example").then(control.resolve, control.resolve);
+				return "run complete";`,
+			timeoutMs: 5_000,
+			session: makeSession(snapshot.cwd),
+			snapshot,
+		});
+
+		try {
+			await navigateEntered.promise;
+			await cleanupEntered.promise;
+			releaseNavigation.resolve();
+			await navigationSettled.promise;
+			releaseCleanup.resolve();
+
+			await expect(run).resolves.toMatchObject({ returnValue: "run complete" });
+			expect(observerReinstalls).toBe(0);
+		} finally {
+			releaseNavigation.resolve();
+			releaseCleanup.resolve();
+			await run.catch(() => undefined);
+			tab.ensureRuntime(snapshot).dispose();
+			delete globals[controlKey];
+		}
 	});
 });

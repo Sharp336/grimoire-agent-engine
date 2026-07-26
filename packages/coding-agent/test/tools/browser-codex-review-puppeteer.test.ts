@@ -3011,6 +3011,132 @@ describe("Puppeteer final parity blockers", () => {
 		await adapter.dispose();
 	});
 
+	it("releases a held modifier promptly and once when abort interrupts a stalled key press", async () => {
+		const controller = new AbortController();
+		const pressStarted = Promise.withResolvers<void>();
+		const releasePress = Promise.withResolvers<void>();
+		const activeKeys = new Set<string>();
+		const releasedKeys: string[] = [];
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				keyboard: {
+					down: async (key: string) => {
+						activeKeys.add(key);
+					},
+					press: async () => {
+						pressStarted.resolve();
+						await releasePress.promise;
+					},
+					up: async (key: string) => {
+						releasedKeys.push(key);
+						activeKeys.delete(key);
+					},
+				},
+			} as never,
+			browser: {} as never,
+			signal: controller.signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		const pressing = adapter.invoke("cua.keypress", { tabId: "1", keys: ["Shift", "A"] });
+		let settled = false;
+		void pressing.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await pressStarted.promise;
+		expect([...activeKeys]).toEqual(["Shift"]);
+
+		const abortReason = new Error("run aborted during key press");
+		controller.abort(abortReason);
+		await flushMicrotasks();
+		expect(releasedKeys).toEqual(["Shift"]);
+		expect([...activeKeys]).toEqual([]);
+		expect(settled).toBe(false);
+
+		releasePress.resolve();
+		await expect(pressing).rejects.toMatchObject({ name: "ToolAbortError", cause: abortReason });
+		await flushMicrotasks();
+		expect(releasedKeys).toEqual(["Shift"]);
+		await adapter.dispose();
+	});
+
+	it("releases a held mouse button promptly and once when abort interrupts a stalled drag move", async () => {
+		const controller = new AbortController();
+		const moveStarted = Promise.withResolvers<void>();
+		const releaseMove = Promise.withResolvers<void>();
+		let moveCount = 0;
+		let mouseDown = false;
+		let mouseUpCalls = 0;
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "about:blank",
+				keyboard: {
+					down: async () => undefined,
+					up: async () => undefined,
+				},
+				mouse: {
+					move: async () => {
+						if (++moveCount === 1) return;
+						moveStarted.resolve();
+						await releaseMove.promise;
+					},
+					down: async () => {
+						mouseDown = true;
+					},
+					up: async () => {
+						mouseUpCalls++;
+						mouseDown = false;
+					},
+				},
+			} as never,
+			browser: {} as never,
+			signal: controller.signal,
+			cwd: "/tmp/browser-contract",
+			captureScreenshot: async () => "",
+		});
+
+		const dragging = adapter.invoke("cua.drag", {
+			tabId: "1",
+			path: [
+				{ x: 1, y: 2 },
+				{ x: 3, y: 4 },
+			],
+		});
+		let settled = false;
+		void dragging.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await moveStarted.promise;
+		expect(mouseDown).toBe(true);
+
+		const abortReason = new Error("run aborted during drag");
+		controller.abort(abortReason);
+		await flushMicrotasks();
+		expect(mouseUpCalls).toBe(1);
+		expect(mouseDown).toBe(false);
+		expect(settled).toBe(false);
+
+		releaseMove.resolve();
+		await expect(dragging).rejects.toMatchObject({ name: "ToolAbortError", cause: abortReason });
+		await flushMicrotasks();
+		expect(mouseUpCalls).toBe(1);
+		await adapter.dispose();
+	});
+
 	it("prefers responsive currentSrc for media downloads with or without an src attribute", async () => {
 		const requested: string[] = [];
 		const fetchMock: typeof globalThis.fetch = Object.assign(

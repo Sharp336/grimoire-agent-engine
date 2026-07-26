@@ -2990,21 +2990,46 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const pressed: string[] = [];
 		let failure: unknown;
 		let cleanupFailure: unknown;
+		let releasePromise: Promise<void> | undefined;
+		const release = (): Promise<void> => {
+			if (releasePromise) return releasePromise;
+			releasePromise = (async () => {
+				let releaseFailure: unknown;
+				for (let index = pressed.length - 1; index >= 0; index--) {
+					try {
+						await this.#page.keyboard.up(pressed[index]! as KeyInput);
+					} catch (error) {
+						releaseFailure ??= error;
+					}
+				}
+				if (releaseFailure !== undefined) throw releaseFailure;
+			})();
+			void releasePromise.catch(() => undefined);
+			return releasePromise;
+		};
+		const aborted = () => {
+			queueMicrotask(() => {
+				void release().catch(() => undefined);
+			});
+		};
+		this.#signal.addEventListener("abort", aborted, { once: true });
 		try {
+			throwIfAborted(this.#signal);
 			for (const key of keys) {
 				pressed.push(key);
 				await this.#page.keyboard.down(key as KeyInput);
+				throwIfAborted(this.#signal);
 			}
 			await action();
+			throwIfAborted(this.#signal);
 		} catch (error) {
 			failure = error;
 		} finally {
-			for (let index = pressed.length - 1; index >= 0; index--) {
-				try {
-					await this.#page.keyboard.up(pressed[index]! as KeyInput);
-				} catch (error) {
-					cleanupFailure ??= error;
-				}
+			this.#signal.removeEventListener("abort", aborted);
+			try {
+				await release();
+			} catch (error) {
+				cleanupFailure = error;
 			}
 		}
 		if (failure !== undefined) throw failure;
@@ -3023,23 +3048,37 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			let mouseDownAttempted = false;
 			let failure: unknown;
 			let cleanupFailure: unknown;
+			let releasePromise: Promise<void> | undefined;
+			const release = (): Promise<void> => {
+				if (releasePromise) return releasePromise;
+				releasePromise = mouseDownAttempted ? this.#page.mouse.up() : Promise.resolve();
+				void releasePromise.catch(() => undefined);
+				return releasePromise;
+			};
+			const aborted = () => {
+				void release().catch(() => undefined);
+			};
 			try {
 				await this.#page.mouse.move(points[0].x, points[0].y);
+				throwIfAborted(this.#signal);
 				mouseDownAttempted = true;
+				this.#signal.addEventListener("abort", aborted, { once: true });
+				if (this.#signal.aborted) aborted();
 				await this.#page.mouse.down();
+				throwIfAborted(this.#signal);
 				for (let index = 1; index < points.length; index++) {
 					const point = points[index]!;
 					await this.#page.mouse.move(point.x, point.y);
 				}
+				throwIfAborted(this.#signal);
 			} catch (error) {
 				failure = error;
 			} finally {
-				if (mouseDownAttempted) {
-					try {
-						await this.#page.mouse.up();
-					} catch (error) {
-						cleanupFailure = error;
-					}
+				this.#signal.removeEventListener("abort", aborted);
+				try {
+					await release();
+				} catch (error) {
+					cleanupFailure = error;
 				}
 			}
 			if (failure !== undefined) throw failure;

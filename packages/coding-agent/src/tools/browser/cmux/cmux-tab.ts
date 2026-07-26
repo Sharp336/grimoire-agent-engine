@@ -1797,11 +1797,11 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 				else Reflect.deleteProperty(attachedAgent, "browser");
 			}
 		} finally {
+			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
 			try {
 				if (codexRunStarted) await codexAdapter?.endRun();
 			} finally {
 				signal.removeEventListener("abort", onAbort);
-				runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
 				if (ownsRunContext) tab.clearRunContext();
 			}
 		}

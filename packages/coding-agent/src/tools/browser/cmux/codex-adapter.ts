@@ -672,19 +672,26 @@ const DOM_REF_OPERATION_SOURCE = `(nodeId, operation, payload) => {
 const PREPARE_ACTIVE_NATIVE_TYPE_SOURCE = `(token, label) => {
 	if (!/^[A-Za-z0-9-]+$/.test(token)) throw new Error("Invalid native action token");
 	let target = document.activeElement;
-	const frameSelectors = [];
+	const frames = [];
+	let crossedShadowBoundary = false;
 	while (target) {
 		const shadowTarget = target.shadowRoot?.activeElement;
 		if (shadowTarget) {
+			crossedShadowBoundary = true;
 			target = shadowTarget;
 			continue;
 		}
 		const frameTarget = target.contentDocument?.activeElement;
 		if (!frameTarget) break;
-		const frameToken = token + "-frame-" + frameSelectors.length;
-		target.setAttribute("data-omp-codex-action-token", frameToken);
-		frameSelectors.push('[data-omp-codex-action-token="' + frameToken + '"]');
+		frames.push(target);
 		target = frameTarget;
+	}
+	if (
+		crossedShadowBoundary ||
+		target?.getRootNode?.()?.host ||
+		frames.some(frame => frame.getRootNode?.()?.host)
+	) {
+		return { unsupported: "${CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION}" };
 	}
 	if (!target || typeof target !== "object") throw new Error(label + " requires an editable active element");
 	const trueState = value => String(value ?? "").trim().toLocaleLowerCase() === "true";
@@ -703,6 +710,11 @@ const PREPARE_ACTIVE_NATIVE_TYPE_SOURCE = `(token, label) => {
 	if (!editableInput && !(tag === "textarea" && !disabled(target) && !readOnly) && !(target.isContentEditable === true && !readOnly)) {
 		throw new Error(label + " requires an editable active element");
 	}
+	const frameSelectors = frames.map((frame, index) => {
+		const frameToken = token + "-frame-" + index;
+		frame.setAttribute("data-omp-codex-action-token", frameToken);
+		return '[data-omp-codex-action-token="' + frameToken + '"]';
+	});
 	target.setAttribute("data-omp-codex-action-token", token);
 	return { selector: '[data-omp-codex-action-token="' + token + '"]', frameSelectors };
 }`;
@@ -740,9 +752,6 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 			const input = composedTarget?.closest('input[type="file"]') ?? target?.closest('input[type="file"]');
 			if (!input) return;
 			const nativeActivation = state.nativeActivationTarget === input;
-			const nativeActivationFrames = nativeActivation && Array.isArray(state.nativeActivationFrames)
-				? state.nativeActivationFrames.slice()
-				: [];
 			if (nativeActivation) {
 				state.nativeActivationTarget = null;
 				state.nativeActivationFrames = null;
@@ -751,7 +760,16 @@ const INSTALL_PAGE_OBSERVERS_SOURCE = `(_preparation) => {
 			queueMicrotask(() => {
 				if (state.active !== true || (!event.isTrusted && !nativeActivation && !delegatedActivation) || event.defaultPrevented || input.disabled === true || input.isConnected === false) return;
 				const token = "file-" + state.tokenNamespace + "-" + state.nextToken++;
-				const frameSelectors = nativeActivationFrames.map((frame, index) => {
+				const frames = [];
+				let ownerDocument = input.ownerDocument;
+				while (ownerDocument && ownerDocument !== document) {
+					const frame = ownerDocument.defaultView?.frameElement;
+					if (!frame || frame.isConnected === false) return;
+					frames.unshift(frame);
+					ownerDocument = frame.ownerDocument;
+				}
+				if (ownerDocument !== document) return;
+				const frameSelectors = frames.map((frame, index) => {
 					const frameToken = token + "-frame-" + index;
 					frame.setAttribute("data-omp-codex-file-frame-token", frameToken);
 					return '[data-omp-codex-file-frame-token="' + frameToken + '"]';
@@ -1526,6 +1544,12 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 						isRecord(prepared) && Array.isArray(prepared.frameSelectors)
 							? prepared.frameSelectors.filter((value): value is string => typeof value === "string")
 							: [];
+					if (
+						isRecord(prepared) &&
+						prepared.unsupported === CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION
+					) {
+						throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.DOM_CUA_FRAME_SHADOW_ACTION);
+					}
 					if (typeof selector !== "string") throw new ToolError(`${operation} returned an invalid native target`);
 					await this.#withNativeFrameSelectors(frameSelectors, operationDeadline, operation, async () => {
 						await this.#tab.type(selector, stringArg(args, "text"), remainingMs(operationDeadline, operation));
@@ -2332,7 +2356,11 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async #pressKeys(keys: string[], deadline: number, operation: string): Promise<void> {
-		for (const key of keys) await this.#tab.press(key, { timeoutMs: remainingMs(deadline, operation) });
+		if (keys.length === 0) return;
+		const chord = keys
+			.map(key => (key === "ControlOrMeta" ? (process.platform === "darwin" ? "Meta" : "Control") : key))
+			.join("+");
+		await this.#tab.press(chord, { timeoutMs: remainingMs(deadline, operation) });
 	}
 
 	async #coordinateAction(operation: CodexBrowserOperation, _args: Readonly<Record<string, unknown>>): Promise<void> {
