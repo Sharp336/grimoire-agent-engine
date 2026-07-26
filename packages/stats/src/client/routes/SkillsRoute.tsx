@@ -133,11 +133,13 @@ function SkillsSummaryPanel({ bySkill }: { bySkill: SkillUsageStats[] }) {
 // ---------------------------------------------------------------------------
 
 const TOP_SKILLS = 6;
+const OVERFLOW_SKILL_KEY = Symbol("skills-overflow");
+type SkillBucketKey = string | typeof OVERFLOW_SKILL_KEY;
 
-function buildSkillInvocationSeries(points: SkillTimeSeriesPoint[]): {
+export function buildSkillInvocationSeries(points: SkillTimeSeriesPoint[]): {
 	buckets: number[];
-	skills: string[];
-	data: Map<number, Record<string, number>>;
+	skills: SkillBucketKey[];
+	data: Map<number, Map<SkillBucketKey, number>>;
 } {
 	const totals = new Map<string, number>();
 	for (const point of points) totals.set(point.skill, (totals.get(point.skill) ?? 0) + point.calls);
@@ -145,15 +147,15 @@ function buildSkillInvocationSeries(points: SkillTimeSeriesPoint[]): {
 	const top = ranked.slice(0, TOP_SKILLS).map(([skill]) => skill);
 	const topSet = new Set(top);
 	const hasOther = ranked.length > top.length;
-	const skills = hasOther ? [...top, "Other"] : top;
+	const skills: SkillBucketKey[] = hasOther ? [...top, OVERFLOW_SKILL_KEY] : top;
 
 	const buckets = [...new Set(points.map(point => point.timestamp))].sort((a, b) => a - b);
-	const data = new Map<number, Record<string, number>>();
-	for (const bucket of buckets) data.set(bucket, {});
+	const data = new Map<number, Map<SkillBucketKey, number>>();
+	for (const bucket of buckets) data.set(bucket, new Map());
 	for (const point of points) {
-		const label = topSet.has(point.skill) ? point.skill : "Other";
+		const bucket = topSet.has(point.skill) ? point.skill : OVERFLOW_SKILL_KEY;
 		const row = data.get(point.timestamp);
-		if (row) row[label] = (row[label] ?? 0) + point.calls;
+		if (row) row.set(bucket, (row.get(bucket) ?? 0) + point.calls);
 	}
 	return { buckets, skills, data };
 }
@@ -169,8 +171,8 @@ function SkillInvocationsChart({ series, timeRange }: { series: SkillTimeSeriesP
 		() => ({
 			labels: chartSeries.buckets.map(timestamp => formatRangeTick(timestamp, timeRange)),
 			datasets: chartSeries.skills.map((skill, index) => ({
-				label: skill,
-				data: chartSeries.buckets.map(bucket => chartSeries.data.get(bucket)?.[skill] ?? 0),
+				label: skill === OVERFLOW_SKILL_KEY ? "Other" : skill,
+				data: chartSeries.buckets.map(bucket => chartSeries.data.get(bucket)?.get(skill) ?? 0),
 				borderColor: MODEL_COLORS[index % MODEL_COLORS.length],
 				backgroundColor: `${MODEL_COLORS[index % MODEL_COLORS.length]}30`,
 				fill: true,

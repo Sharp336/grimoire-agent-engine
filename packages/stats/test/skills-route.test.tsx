@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { parseHTML } from "linkedom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { SkillsRoute } from "../src/client/routes/SkillsRoute";
+import { buildSkillInvocationSeries, SkillsRoute } from "../src/client/routes/SkillsRoute";
 import type { SkillDashboardStats } from "../src/shared-types";
+
 
 type FetchInput = string | URL | Request;
 type FetchInit = RequestInit | BunFetchRequestInit;
@@ -68,12 +69,38 @@ const dashboard: SkillDashboardStats = {
 	series: [],
 };
 
+const collisionSkills = [
+	["Other", 10],
+	["alpha", 9],
+	["beta", 8],
+	["gamma", 7],
+	["delta", 6],
+	["epsilon", 5],
+	["zeta", 4],
+] as const;
+
+const collisionDashboard: SkillDashboardStats = {
+	...dashboard,
+	bySkill: collisionSkills.map(([skill, calls]) => ({
+		...dashboard.bySkill[0],
+		skill,
+		calls,
+	})),
+	series: collisionSkills.map(([skill, calls]) => ({
+		timestamp: Date.parse("2026-06-24T10:00:00.000Z"),
+		skill,
+		calls,
+		errors: 0,
+	})),
+};
+
 describe("SkillsRoute", () => {
 	it("fetches the selected range and renders average invocation cost", async () => {
 		const domWindow = parseHTML('<html><body><div id="root"></div></body></html>').window;
 		installGlobal("window", domWindow);
 		installGlobal("document", domWindow.document);
 		installGlobal("navigator", domWindow.navigator);
+
 		installGlobal("Node", domWindow.Node);
 		installGlobal("Element", domWindow.Element);
 		installGlobal("HTMLElement", domWindow.HTMLElement);
@@ -107,5 +134,29 @@ describe("SkillsRoute", () => {
 			root?.render(<SkillsRoute active range="7d" refreshTrigger={0} />);
 		});
 		expect(requestedUrls).toEqual(["/api/stats/skills?range=24h", "/api/stats/skills?range=7d"]);
+	});
+
+	it("keeps a real Other skill separate from the overflow series", () => {
+		const chartSeries = buildSkillInvocationSeries(collisionDashboard.series);
+		const bucket = chartSeries.buckets[0];
+		if (bucket === undefined) throw new Error("Expected a chart bucket");
+		const datasets = chartSeries.skills.map(skill => ({
+			label: typeof skill === "symbol" ? "Other" : skill,
+			data: [chartSeries.data.get(bucket)?.get(skill) ?? 0],
+		}));
+
+		expect(datasets).toEqual([
+			{ label: "Other", data: [10] },
+			{ label: "alpha", data: [9] },
+			{ label: "beta", data: [8] },
+			{ label: "gamma", data: [7] },
+			{ label: "delta", data: [6] },
+			{ label: "epsilon", data: [5] },
+			{ label: "Other", data: [4] },
+		]);
+		expect(datasets.reduce((total, dataset) => total + dataset.data[0], 0)).toBe(
+			collisionDashboard.series.reduce((total, point) => total + point.calls, 0),
+		);
+		expect(datasets.filter(dataset => dataset.label === "Other").map(dataset => dataset.data)).toEqual([[10], [4]]);
 	});
 });
