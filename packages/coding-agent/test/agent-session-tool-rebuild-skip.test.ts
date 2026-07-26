@@ -11,7 +11,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { XdevRegistry } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
+import xdevMountNoticePrompt from "../src/prompts/system/xdev-mount-notice.md" with { type: "text" };
 
 // Cache-stability invariant: when MCP servers reconnect with byte-identical tool
 // definitions, `refreshMCPTools` must not rebuild the system prompt. A rebuild
@@ -620,6 +622,71 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices[0]).not.toContain("TAIL");
 	});
 
+	it("keeps the rendered mount notice within one shared budget across inventory and inline docs", async () => {
+		// With `tools.xdevDocs = "inline"` and a 4000-char cap, 150 long
+		// descriptions would produce a ~96,000-char notice if the inventory and
+		// the inline docs each spent their own 48,000-char allowance. The notice
+		// must share a single budget across both sections.
+		const registry = new XdevRegistry([], 4000);
+		const tools = Array.from({ length: 150 }, (_, index) =>
+			createMcpCustomTool(
+				`mcp__large_tool_${index}`,
+				"large",
+				`tool_${index}`,
+				`Tool ${index}. ${"x".repeat(5000)}`,
+			),
+		);
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdevRegistry: registry,
+			responses: [{ content: ["ok"] }],
+		});
+		session.settings.set("tools.xdevDocs", "inline");
+
+		await session.refreshMCPTools(tools);
+		await session.prompt("hello");
+
+		const notices = mountNoticesIn(contexts[0]);
+		expect(notices).toHaveLength(1);
+		const notice = notices[0]!;
+		// Only the variable content is budgeted; measure the fixed template
+		// boilerplate by rendering the same branches with 1-char markers.
+		const marker = prompt.render(xdevMountNoticePrompt, {
+			added: [{ name: "n", summary: "s" }],
+			removed: [],
+			docs: "d",
+			omitted_line: undefined,
+		});
+		const overhead = marker.length - "- xd://n — s".length - "d".length;
+		expect(notice.length).toBeLessThanOrEqual(XdevRegistry.DOCS_TOTAL_BUDGET + overhead);
+		// Name-slot reservation: every device is still announced by name.
+		expect(notice).toContain("- xd://mcp__large_tool_149");
+		// No device leaks its full 5000-char description into the notice.
+		expect(notice).not.toContain("x".repeat(4500));
+		// Rows whose summary was budgeted away must not emit a dangling separator.
+		expect(notice).not.toMatch(/—\s*\n/);
+	});
+
+	it("announces omitted devices in the mount notice when name rows exhaust the budget", async () => {
+		// With `tools.xdevDocs = "builtins"`, external devices contribute no docs,
+		// so devices dropped from an oversized inventory would be invisible to the
+		// model without an omission line pointing at `read xd://`.
+		const registry = new XdevRegistry([]);
+		const tools = Array.from({ length: 300 }, (_, index) =>
+			createMcpCustomTool(`mcp__${"n".repeat(180)}_${index}`, "longnames", `tool_${index}`, `Tool ${index}`),
+		);
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdevRegistry: registry,
+			responses: [{ content: ["ok"] }],
+		});
+
+		await session.refreshMCPTools(tools);
+		await session.prompt("hello");
+
+		const notices = mountNoticesIn(contexts[0]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toMatch(/\d+ more devices omitted — read xd:\/\/ for the complete inventory\./);
+	});
+
 	it("applies a settings description-cap change to the active xd prompt", async () => {
 		const registry = new XdevRegistry([], 50);
 		const description = `Search ${"x".repeat(400)} TAIL`;
@@ -660,13 +727,110 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 
 		await session.refreshMCPTools([search]);
 		// First apply starts a slow rebuild; second supersedes before it finishes.
+		// The settings UI persists before notifying, so mirror that ordering.
+		session.settings.set("tools.xdevExternalDescriptionCap", 100);
 		const first = session.applyXdevExternalDescriptionCap(100);
+		session.settings.set("tools.xdevExternalDescriptionCap", 1000);
 		const second = session.applyXdevExternalDescriptionCap(1000);
 		await Promise.all([first, second]);
 
 		expect(session.agent.state.systemPrompt.join("\n")).toContain(description);
 		// At least one rebuild for the final value; supersession may skip an intermediate.
 		expect(rebuilds).toBeGreaterThanOrEqual(1);
+	});
+
+	it("converges the registry cap to the effective setting on prompt refresh (project settings reload)", async () => {
+		// `/move` reloads project settings without running the selector's
+		// setting-change handler; the next prompt refresh (which the /move flow
+		// triggers via refreshSkillState) must re-sync the registry from the
+		// effective setting instead of keeping the construction-time cap.
+		const registry = new XdevRegistry([], 50);
+		const description = `Search ${"x".repeat(400)} TAIL`;
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", description);
+		const { session } = newSession(async () => registry.docsAll("inline"), { xdevRegistry: registry });
+
+		session.settings.set("tools.xdevExternalDescriptionCap", 50);
+		await session.refreshMCPTools([search]);
+		expect(session.agent.state.systemPrompt.join("\n")).not.toContain(description);
+
+		// Simulates Settings.reloadForCwd landing a different project value.
+		session.settings.set("tools.xdevExternalDescriptionCap", 1000);
+		await session.refreshBaseSystemPrompt();
+
+		expect(session.agent.state.systemPrompt.join("\n")).toContain(description);
+	});
+
+	it("never lets a stale in-flight rebuild overwrite a newer description cap", async () => {
+		// Race from the review: a tool-refresh rebuild snapshots the prompt with
+		// the old cap and finishes after the cap-apply rebuild, clobbering the
+		// new cap's prompt while the registry keeps the new value. All prompt
+		// applications must serialize so the last scheduled rebuild wins.
+		const registry = new XdevRegistry([], 50);
+		const description = `Search ${"x".repeat(400)} TAIL`;
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", description);
+		const readTool = createBasicTool("read", "Read");
+		const writeTool = createBasicTool("write", "Write");
+		// A top-level tool with a mutable description: flipping it changes the
+		// tool signature, forcing a rebuild on the next MCP refresh while the
+		// mounted xd:// device (whose inventory is deliberately not signed) stays.
+		const bashState = { version: "v1" };
+		const bashTool = createBasicTool("bash", "Bash");
+		Object.defineProperty(bashTool, "description", {
+			get: () => `bash ${bashState.version}`,
+			enumerable: true,
+			configurable: true,
+		});
+		const staleRebuildGate = Promise.withResolvers<void>();
+		let rebuilds = 0;
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: ["initial"],
+				tools: [readTool, writeTool, bashTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: { getApiKey: async () => "test-key" } as never,
+			toolRegistry: new Map<string, AgentTool>([
+				[readTool.name, readTool],
+				[writeTool.name, writeTool],
+				[bashTool.name, bashTool],
+			]),
+			builtInToolNames: ["read", "write", "bash"],
+			xdevRegistry: registry,
+			rebuildSystemPrompt: async () => {
+				rebuilds++;
+				// Snapshot first (with the cap active at build start), then park the
+				// second rebuild so the cap change lands mid-flight.
+				const snapshot = registry.docsAll("inline");
+				if (rebuilds === 2) await staleRebuildGate.promise;
+				return { systemPrompt: [snapshot] };
+			},
+		});
+		sessions.push(session);
+
+		session.settings.set("tools.xdevExternalDescriptionCap", 50);
+		await session.refreshMCPTools([search]);
+		expect(session.agent.state.systemPrompt.join("\n")).not.toContain("TAIL");
+
+		// Force rebuild 2, which snapshots with the old cap and stalls mid-flight.
+		bashState.version = "v2";
+		const slowRefresh = session.refreshMCPTools([search]);
+		await Bun.sleep(10);
+		expect(rebuilds).toBe(2);
+
+		// The cap changes while rebuild 2 is in flight; its own rebuild must apply last.
+		session.settings.set("tools.xdevExternalDescriptionCap", 1000);
+		const capApply = session.applyXdevExternalDescriptionCap(1000);
+		staleRebuildGate.resolve();
+		await Promise.all([slowRefresh, capApply]);
+
+		expect(session.agent.state.systemPrompt.join("\n")).toContain("TAIL");
+		expect(rebuilds).toBe(3);
 	});
 
 	it("inlines configured late xd:// device docs in mount notices", async () => {

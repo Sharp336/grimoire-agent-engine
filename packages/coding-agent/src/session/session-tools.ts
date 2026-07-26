@@ -95,6 +95,15 @@ export class SessionTools {
 	/** Serializes {@link applyXdevExternalDescriptionCap}; generation discards stale rebuilds. */
 	#xdevCapApplyChain: Promise<void> = Promise.resolve();
 	#xdevCapApplyGen = 0;
+	/**
+	 * Serializes base-prompt rebuild→apply across every refresh path
+	 * ({@link refreshBaseSystemPrompt}, {@link applyActiveToolsByName}). A rebuild
+	 * that started before a concurrent change (cap apply, MCP/tool refresh) can
+	 * snapshot pre-change state; without mutual exclusion it could finish last and
+	 * overwrite the prompt with stale content. Rebuilding inside the chain makes
+	 * the last scheduled rebuild read the latest registry state and apply last.
+	 */
+	#promptApplyChain: Promise<void> = Promise.resolve();
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
@@ -173,6 +182,33 @@ export class SessionTools {
 			() => undefined,
 		);
 		await run;
+	}
+
+	/**
+	 * Converges the live xd:// registry cap to the effective setting. The setting
+	 * is the source of truth; project-settings reloads (`/move` →
+	 * `Settings.reloadForCwd`) bypass the selector's setting-change handler, so
+	 * every prompt rebuild re-syncs instead of trusting the registry's
+	 * construction-time snapshot.
+	 */
+	#syncXdevExternalDescriptionCap(): void {
+		this.#xdevRegistry?.setExternalDescriptionCap(
+			this.#host.settings.get("tools.xdevExternalDescriptionCap") ?? XdevRegistry.EXTERNAL_DESCRIPTION_CAP,
+		);
+	}
+
+	/**
+	 * Runs `run` after every previously scheduled prompt application settles, so
+	 * rebuild→apply sections across all refresh paths are mutually exclusive.
+	 */
+	#serializePromptApply<T>(run: () => Promise<T>): Promise<T> {
+		const result = this.#promptApplyChain.then(run);
+		// Keep the chain unbroken if a rebuild throws.
+		this.#promptApplyChain = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
 	}
 
 	/** Skills currently rendered into the system prompt. */
@@ -529,34 +565,40 @@ export class SessionTools {
 		this.#xdevRegistry?.reconcile(mountedTools);
 		this.#setActiveToolNames?.(validToolNames);
 
-		let rebuiltSystemPrompt: string[] | undefined;
-		let rebuiltSignature: string | undefined;
-		try {
-			if (this.#rebuildSystemPrompt) {
-				const signature = this.#computeAppliedToolSignature(validToolNames, tools);
-				if (signature !== this.#lastAppliedToolSignature) {
-					const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
-					rebuiltSystemPrompt = built.systemPrompt;
-					rebuiltSignature = signature;
+		// Serialize rebuild→apply with every other prompt refresh (cap applies,
+		// skill reloads): a rebuild that snapshotted pre-change state must not
+		// finish after a concurrent refresh and overwrite its newer prompt.
+		await this.#serializePromptApply(async () => {
+			this.#syncXdevExternalDescriptionCap();
+			let rebuiltSystemPrompt: string[] | undefined;
+			let rebuiltSignature: string | undefined;
+			try {
+				if (this.#rebuildSystemPrompt) {
+					const signature = this.#computeAppliedToolSignature(validToolNames, tools);
+					if (signature !== this.#lastAppliedToolSignature) {
+						const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
+						rebuiltSystemPrompt = built.systemPrompt;
+						rebuiltSignature = signature;
+					}
 				}
+			} catch (error) {
+				this.#mountedXdevToolNames = previousMounted;
+				this.#xdevRegistry?.reconcile(previousMountedTools);
+				this.#setActiveToolNames?.(previousActiveToolNames);
+				throw error;
 			}
-		} catch (error) {
-			this.#mountedXdevToolNames = previousMounted;
-			this.#xdevRegistry?.reconcile(previousMountedTools);
-			this.#setActiveToolNames?.(previousActiveToolNames);
-			throw error;
-		}
 
-		this.#notifyXdevMountDelta(previousMounted);
-		this.#host.agent.setTools(tools);
-		if (rebuiltSystemPrompt && rebuiltSignature) {
-			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
-			this.#baseSystemPrompt = rebuiltSystemPrompt;
-			this.#host.clearMemoryPromotionSnapshot();
-			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
-			this.#lastAppliedToolSignature = rebuiltSignature;
-			this.#promptModelKey = this.#currentPromptModelKey();
-		}
+			this.#notifyXdevMountDelta(previousMounted);
+			this.#host.agent.setTools(tools);
+			if (rebuiltSystemPrompt && rebuiltSignature) {
+				if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
+				this.#baseSystemPrompt = rebuiltSystemPrompt;
+				this.#host.clearMemoryPromotionSnapshot();
+				this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
+				this.#lastAppliedToolSignature = rebuiltSignature;
+				this.#promptModelKey = this.#currentPromptModelKey();
+			}
+		});
 	}
 
 	/**
@@ -781,28 +823,32 @@ export class SessionTools {
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	async refreshBaseSystemPrompt(): Promise<void> {
 		if (this.#host.isDisposed() || !this.#rebuildSystemPrompt) return;
-		const activeToolNames = this.getActiveToolNames();
-		this.#setActiveToolNames?.(activeToolNames);
-		const previousBaseSystemPrompt = this.#baseSystemPrompt;
-		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
-		if (this.#host.isDisposed()) return;
-		this.#baseSystemPrompt = built.systemPrompt;
-		this.#host.clearMemoryPromotionSnapshot();
-		if (
-			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
-			previousBaseSystemPrompt.some((part, index) => part !== this.#baseSystemPrompt[index])
-		) {
-			this.#host.clearInheritedProviderPromptCacheKey();
-		}
-		this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
-		this.#promptModelKey = this.#currentPromptModelKey();
-		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
-		// the same tool set does not re-rebuild on top of the explicit refresh we
-		// just performed (and conversely, a different set forces a fresh rebuild).
-		const activeTools = activeToolNames
-			.map(name => this.#toolRegistry.get(name))
-			.filter((tool): tool is AgentTool => tool != null);
-		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(activeToolNames, activeTools);
+		await this.#serializePromptApply(async () => {
+			if (this.#host.isDisposed()) return;
+			this.#syncXdevExternalDescriptionCap();
+			const activeToolNames = this.getActiveToolNames();
+			this.#setActiveToolNames?.(activeToolNames);
+			const previousBaseSystemPrompt = this.#baseSystemPrompt;
+			const built = await this.#rebuildSystemPrompt!(activeToolNames, this.#toolRegistry);
+			if (this.#host.isDisposed()) return;
+			this.#baseSystemPrompt = built.systemPrompt;
+			this.#host.clearMemoryPromotionSnapshot();
+			if (
+				previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
+				previousBaseSystemPrompt.some((part, index) => part !== this.#baseSystemPrompt[index])
+			) {
+				this.#host.clearInheritedProviderPromptCacheKey();
+			}
+			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
+			this.#promptModelKey = this.#currentPromptModelKey();
+			// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
+			// the same tool set does not re-rebuild on top of the explicit refresh we
+			// just performed (and conversely, a different set forces a fresh rebuild).
+			const activeTools = activeToolNames
+				.map(name => this.#toolRegistry.get(name))
+				.filter((tool): tool is AgentTool => tool != null);
+			this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(activeToolNames, activeTools);
+		});
 	}
 
 	/** Applies one-turn memory prompt injection before an agent run. */
