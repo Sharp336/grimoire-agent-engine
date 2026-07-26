@@ -482,10 +482,18 @@ whether a credential is configured is user state, not schema metadata.
 `default` is omitted when a setting has no default, so the wire has one shape.
 
 Rendering metadata is carried so a client does not have to duplicate the
-schema: `ui.options` for a setting whose choices are a fixed list, the literal
-string `"runtime"` when the choices come from a runtime registry such as the
-theme list, and `ui.ordered` when selection order is meaningful. A setting with
-no panel entry keeps its prose in a top-level `description`.
+schema. `tabs` preserves the canonical tab order, labels, icons, and ordered
+section groups; settings with no group render before those sections.
+`ui.control` is the canonical built-in control kind (`boolean`, `enum`,
+`submenu`, `text`, `providerLimits`, or `multiselect`), and is `null` for
+config-only entries. `ui.renderable` is true exactly when `ui.control` is
+non-null. Entries without `ui` metadata are also non-renderable.
+`ui.visible` reports current panel visibility after the server evaluates any
+private condition, and is `false` when the setting is not renderable. Condition
+names are not exposed on the wire. `ui.options` holds a fixed choice list or the
+literal string `"runtime"` when choices come from a runtime registry such as
+the theme list. `ui.ordered` marks selections whose order is meaningful. A
+setting with no UI metadata keeps its prose in a top-level `description`.
 
 ```json
 {
@@ -494,6 +502,14 @@ no panel entry keeps its prose in a top-level `description`.
   "command": "get_settings",
   "success": true,
   "data": {
+    "tabs": [
+      {
+        "id": "appearance",
+        "label": "Appearance",
+        "icon": "tab.appearance",
+        "groups": ["Theme", "Status Line", "Display", "Images"]
+      }
+    ],
     "settings": [
       {
         "path": "colorBlindMode",
@@ -503,10 +519,12 @@ no panel entry keeps its prose in a top-level `description`.
         "configured": true,
         "ui": {
           "tab": "appearance",
-          "group": "Display",
-          "label": "Color Blind Mode",
-          "description": "Use a color-blind-safe palette",
-          "secret": false
+          "group": "Theme",
+          "label": "Color-Blind Mode",
+          "description": "Use blue instead of green for diff additions",
+          "renderable": true,
+          "control": "boolean",
+          "visible": true
         }
       },
       {
@@ -518,8 +536,10 @@ no panel entry keeps its prose in a top-level `description`.
           "tab": "appearance",
           "group": "Theme",
           "label": "Dark Theme",
-          "description": "Theme used in dark terminals",
-          "secret": false,
+          "description": "Theme used when the terminal has a dark background",
+          "renderable": true,
+          "control": "submenu",
+          "visible": true,
           "options": "runtime"
         }
       },

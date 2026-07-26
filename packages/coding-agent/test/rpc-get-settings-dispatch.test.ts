@@ -33,6 +33,9 @@ describe("get_settings over the RPC server", () => {
 
 		let unscoped: Record<string, unknown> | undefined;
 		let scoped: Record<string, unknown> | undefined;
+		// This bounds a real child-process stream; aborting the read also cancels
+		// its reader so the finally block can terminate the child immediately.
+		const responseSignal = AbortSignal.timeout(10_000);
 		// A parse error or a timeout inside the read loop must not leave the child
 		// or its directory behind for the rest of the run.
 		try {
@@ -40,11 +43,14 @@ describe("get_settings over the RPC server", () => {
 			child.stdin.write(`${JSON.stringify({ type: "get_settings", id: "tab-probe", tab: "appearance" })}\n`);
 			await child.stdin.flush();
 
-			for await (const frame of readJsonl<unknown>(child.stdout as ReadableStream<Uint8Array>)) {
+			for await (const frame of readJsonl<unknown>(child.stdout as ReadableStream<Uint8Array>, responseSignal)) {
 				if (!isRecord(frame) || frame.type !== "response") continue;
 				if (frame.id === "settings-probe") unscoped = frame;
 				if (frame.id === "tab-probe") scoped = frame;
 				if (unscoped && scoped) break;
+			}
+			if (!unscoped || !scoped) {
+				throw new Error("the RPC server did not answer both get_settings probes before the response deadline");
 			}
 		} finally {
 			child.stdin.end();
@@ -63,7 +69,11 @@ describe("get_settings over the RPC server", () => {
 			ui?: { tab?: string; options?: unknown; ordered?: boolean };
 		}
 		if (!unscoped) throw new Error("the server never answered the unscoped get_settings frame");
-		const settings = (unscoped.data as { settings: Entry[] }).settings;
+		const data = unscoped.data as {
+			settings: Entry[];
+			tabs: Array<{ id: string; label: string; icon: string; groups: string[] }>;
+		};
+		const settings = data.settings;
 		expect(settings.length).toBeGreaterThan(0);
 
 		const byPath = new Map(settings.map(entry => [entry.path, entry]));
@@ -78,6 +88,12 @@ describe("get_settings over the RPC server", () => {
 		expect(byPath.get("theme.dark")?.ui?.options).toBe("runtime");
 		expect(byPath.get("providers.webSearchOrder")?.ui?.ordered).toBe(true);
 		expect(byPath.get("tui.maxInlineImageColumns")?.description).toContain("inline images");
+		expect(data.tabs.find(tab => tab.id === "appearance")).toEqual({
+			id: "appearance",
+			label: "Appearance",
+			icon: "tab.appearance",
+			groups: ["Theme", "Status Line", "Display", "Images"],
+		});
 
 		// The tab argument reaches the server rather than being dropped.
 		expect(scoped).toMatchObject({ success: true });

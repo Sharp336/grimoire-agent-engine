@@ -5631,6 +5631,9 @@ export function isCredential(path: SettingPath): boolean {
 	// both here keeps ONE accessor, so the two spellings cannot produce
 	// different behaviour on different surfaces.
 	return getUi(path)?.secret === true;
+}
+
+/**
  * Whether a setting's VALUE may be disclosed to an external client.
  *
  * Explicit opt-in only: an unannotated setting is withheld, so a new setting

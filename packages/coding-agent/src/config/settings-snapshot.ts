@@ -7,6 +7,12 @@
  * configured value is not, and is emitted only for settings explicitly marked
  * `rpcReadable`.
  */
+import {
+	getSettingPanelControlKind,
+	isSettingPanelRenderable,
+	isSettingPanelVisible,
+	type SettingPanelControlKind,
+} from "../modes/components/settings-defs";
 import type { Settings } from "./settings";
 import {
 	getDefault,
@@ -14,12 +20,15 @@ import {
 	getEnumValues,
 	getType,
 	getUi,
+	isCredential,
 	isRpcReadable,
 	SETTING_TABS,
 	SETTINGS_SCHEMA,
 	type SettingPath,
 	type SettingTab,
 	type SubmenuOption,
+	TAB_GROUPS,
+	TAB_METADATA,
 } from "./settings-schema";
 
 /**
@@ -42,7 +51,7 @@ export interface SettingSnapshotEntry {
 	 * wire never produces.
 	 */
 	default?: unknown;
-	/** Present only when the setting is `rpcReadable` and not `secret`. */
+	/** Present only when the setting is `rpcReadable` and not credential-marked. */
 	value?: unknown;
 	/** True when the value was withheld. Absent when `value` is present. */
 	redacted?: true;
@@ -59,14 +68,23 @@ export interface SettingSnapshotEntry {
 	 * the top level rather than inside `ui`.
 	 */
 	description?: string;
-	/** Present only for settings the settings panel can display. */
+	/**
+	 * Schema UI metadata. Absence means no panel control. When present,
+	 * `renderable` is authoritative: some config-only number and array settings
+	 * retain this metadata but have no panel control.
+	 */
 	ui?: {
 		tab: SettingTab;
 		group?: string;
 		label: string;
 		description: string;
-		condition?: string;
-		secret: boolean;
+		/** Exact control variant used by the built-in settings panel, or null when config-only. */
+		control: SettingPanelControlKind | null;
+		renderable: boolean;
+		/** Whether that control is currently visible after evaluating its condition. */
+		visible: boolean;
+		/** Present only when the panel treats the setting value as secret. */
+		secret?: true;
 		/**
 		 * Choice metadata. `"runtime"` is preserved verbatim rather than resolved:
 		 * the choices come from a runtime registry this layer cannot see, and a
@@ -78,24 +96,34 @@ export interface SettingSnapshotEntry {
 	};
 }
 
+/** Canonical tab and section order needed to reproduce the built-in panel layout. */
+export interface SettingsTabSnapshot {
+	id: SettingTab;
+	label: string;
+	icon: `tab.${string}`;
+	/** Ordered named sections. Ungrouped settings render before these sections. */
+	groups: readonly string[];
+}
+
 export interface SettingsSnapshot {
+	tabs: SettingsTabSnapshot[];
 	settings: SettingSnapshotEntry[];
 }
 
 /**
- * A value may be disclosed only when the schema opts it in. `secret` is
- * honored as a second, independent veto so a setting cannot be disclosed by
- * annotating it and forgetting the masking flag.
+ * A value may be disclosed only when the schema opts it in. The canonical
+ * credential marker is an independent veto, so adding `rpcReadable` can never
+ * weaken the redaction invariant.
  */
 function disclosesValue(path: SettingPath): boolean {
-	if (!isRpcReadable(path)) return false;
-	return getUi(path)?.secret !== true;
+	return isRpcReadable(path) && !isCredential(path);
 }
 
 export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): SettingsSnapshot {
 	const entries: SettingSnapshotEntry[] = [];
 	for (const path of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		const ui = getUi(path);
+		const renderable = isSettingPanelRenderable(path);
 		if (tab !== undefined && ui?.tab !== tab) continue;
 		const values = getEnumValues(path);
 		const description = getDescription(path);
@@ -112,8 +140,10 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 							...(ui.group === undefined ? {} : { group: ui.group }),
 							label: ui.label,
 							description: ui.description,
-							...(ui.condition === undefined ? {} : { condition: ui.condition }),
-							secret: ui.secret === true,
+							renderable,
+							control: getSettingPanelControlKind(path),
+							visible: renderable && isSettingPanelVisible(path, settings),
+							...(isCredential(path) ? { secret: true } : {}),
 							...(ui.options === undefined ? {} : { options: ui.options }),
 							...(ui.ordered === undefined ? {} : { ordered: ui.ordered }),
 						},
@@ -126,5 +156,10 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 		} else entry.redacted = true;
 		entries.push(entry);
 	}
-	return { settings: entries };
+	const tabs = (tab === undefined ? SETTING_TABS : [tab]).map(id => ({
+		id,
+		...TAB_METADATA[id],
+		groups: TAB_GROUPS[id],
+	}));
+	return { tabs, settings: entries };
 }
