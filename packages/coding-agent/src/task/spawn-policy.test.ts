@@ -3,6 +3,7 @@ import { Settings } from "../config/settings";
 import type { ToolSession } from "../tools";
 import * as taskDiscovery from "./discovery";
 import { TaskTool } from "./index";
+import { spawnPolicyAllowsReviewer } from "./spawn-policy";
 import type { AgentDefinition } from "./types";
 import { getTaskSchema } from "./types";
 
@@ -58,5 +59,30 @@ describe("task spawn policy surfaces", () => {
 
 		expect(description).toContain("### fact-finder");
 		expect(description).not.toContain("### oracle");
+	});
+});
+
+describe("spawnPolicyAllowsReviewer", () => {
+	it("allows reviewer when the policy is unrestricted", () => {
+		expect(spawnPolicyAllowsReviewer(null)).toBe(true);
+		expect(spawnPolicyAllowsReviewer(undefined)).toBe(true);
+		expect(spawnPolicyAllowsReviewer("*")).toBe(true);
+		expect(spawnPolicyAllowsReviewer(true)).toBe(true);
+	});
+
+	it("allows reviewer when explicitly listed", () => {
+		expect(spawnPolicyAllowsReviewer("reviewer")).toBe(true);
+		expect(spawnPolicyAllowsReviewer("reviewer,scout")).toBe(true);
+		expect(spawnPolicyAllowsReviewer("scout,reviewer")).toBe(true);
+	});
+
+	it("denies reviewer when an explicit list omits it", () => {
+		expect(spawnPolicyAllowsReviewer("scout")).toBe(false);
+		expect(spawnPolicyAllowsReviewer("scout,designer")).toBe(false);
+	});
+
+	it("denies reviewer when spawning is disabled", () => {
+		expect(spawnPolicyAllowsReviewer(false)).toBe(false);
+		expect(spawnPolicyAllowsReviewer("")).toBe(false);
 	});
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { getRoleInfo } from "@oh-my-pi/pi-coding-agent/config/model-roles";
+import { getRoleInfo, isReviewerActive } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 describe("getRoleInfo", () => {
@@ -62,5 +62,23 @@ describe("getRoleInfo", () => {
 			name: "My Smol",
 			color: "success",
 		});
+	});
+});
+
+describe("isReviewerActive", () => {
+	test("is true by default", () => {
+		expect(isReviewerActive(Settings.isolated())).toBe(true);
+	});
+
+	test("is false when reviewer.enabled is false", () => {
+		expect(isReviewerActive(Settings.isolated({ "reviewer.enabled": false }))).toBe(false);
+	});
+
+	test("is false when the reviewer agent is disabled via task.disabledAgents", () => {
+		expect(isReviewerActive(Settings.isolated({ "task.disabledAgents": ["reviewer"] }))).toBe(false);
+	});
+
+	test("stays true when a different agent is disabled", () => {
+		expect(isReviewerActive(Settings.isolated({ "task.disabledAgents": ["scout"] }))).toBe(true);
 	});
 });

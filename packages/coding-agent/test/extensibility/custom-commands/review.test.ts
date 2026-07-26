@@ -591,6 +591,65 @@ describe("ReviewCommand", () => {
 		expect(result!).toContain("src/pr.ts");
 		expect(showSpy).toHaveBeenCalledWith(dir, "abc1234", { format: "" });
 	});
+	it("resolves a bare PR number to the current repo and reviews it", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["#23", "focus", "auth"], ctx);
+
+		expect(gh.resolveDefaultRepoMemoized).toHaveBeenCalledWith(dir);
+		expect(gh.getOrFetchPrDiff).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 23 });
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#23");
+		expect(result!).toContain("focus auth");
+	});
+
+	it("resolves a bare PR number without a # prefix to the current repo", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["23"], ctx);
+
+		expect(gh.resolveDefaultRepoMemoized).toHaveBeenCalledWith(dir);
+		expect(gh.getOrFetchPrDiff).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 23 });
+		expect(result!).toContain("PR owner/repo#23");
+	});
+
+	it("prefers a fully-qualified GitHub URL over a bare PR number", async () => {
+		const dir = await createTempDir();
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const resolveSpy = spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["https://github.com/owner/repo/pull/99", "42"], ctx);
+
+		// The URL's PR is reviewed; the bare number never triggers a repo resolve.
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 99 });
+		expect(resolveSpy).not.toHaveBeenCalled();
+		expect(result!).toContain("PR owner/repo#99");
+	});
+
+	it("surfaces a repo-resolution failure for a bare PR number in headless mode", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockRejectedValue(new Error("no git remote"));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["23"], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("Could not resolve current repository for PR #23");
+		expect(result!).toContain("no git remote");
+		expect(result!).toContain("pr://owner/repo/23");
+	});
+
 	it("renders headless review requests through the reviewer task prompt", async () => {
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
 		const ctx = { hasUI: false } as unknown as HookCommandContext;

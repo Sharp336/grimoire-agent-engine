@@ -143,6 +143,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Grep & Browser",
 		"Computer",
 		"GitHub",
+		"Reviewer",
 		"Output Limits",
 		"Execution",
 		"Discovery & MCP",
@@ -3935,6 +3936,18 @@ export const SETTINGS_SCHEMA = {
 			label: "GitHub CLI",
 			description:
 				"Enable the github tool (op-based dispatch for repository, issue, pull request, diff, search, checkout, push, and Actions watch workflows)",
+		},
+	},
+
+	"reviewer.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Reviewer",
+			label: "Proactive Code Review",
+			description:
+				"Gate the proactive reviewer guidance: the review-before-PR instruction on the github tool and the natural-language 'review' / 'code review' / 'review pr #N' routing. When off, the /review command and the @reviewer model role remain available; only automatic review is suppressed.",
 		},
 	},
 

@@ -55,11 +55,13 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 } from "./config/model-resolver";
+import { isReviewerActive } from "./config/model-roles";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
+import { spawnPolicyAllowsReviewer } from "./task/spawn-policy";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
@@ -2687,6 +2689,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						settings.get("tools.xdevInlineDevices"),
 					) ?? "",
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
+				reviewerEnabled: isReviewerActive(settings) && spawnPolicyAllowsReviewer(toolSession.getSessionSpawns()),
 				resolvedCustomPrompt: options.customSystemPrompt,
 				skills: session?.skills ?? skills,
 				contextFiles,

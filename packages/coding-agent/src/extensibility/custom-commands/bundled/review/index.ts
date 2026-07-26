@@ -50,11 +50,13 @@ interface ReviewPrRef {
 	repo: string;
 	number: number;
 	raw: string;
-	kind: "github-url" | "pr-url";
+	kind: "github-url" | "pr-url" | "bare";
 }
 
 interface ParsedReviewArgs {
 	prRef: ReviewPrRef | undefined;
+	/** Bare PR number token (`23` / `#23`) with no owner/repo; resolved to the current checkout's repo at call time. */
+	barePrNumber: number | undefined;
 	extraInstructions: string;
 }
 
@@ -344,19 +346,36 @@ function buildPrContextInstruction(ref: ReviewPrRef): string {
 
 function extractReviewPrRefFromArgs(args: string[]): ParsedReviewArgs {
 	let prRef: ReviewPrRef | undefined;
-	let prRefIndex = -1;
+	let barePrNumber: number | undefined;
+	let consumedIndex = -1;
 	for (const [idx, arg] of args.entries()) {
 		const parsed = parseReviewPrRef(arg);
 		if (parsed) {
 			prRef = parsed;
-			prRefIndex = idx;
+			consumedIndex = idx;
 			break;
+		}
+	}
+	// A fully-qualified ref (GitHub URL or pr://owner/repo/N) wins. Otherwise,
+	// ONLY a leading token that is a lone positive integer (optionally
+	// `#`-prefixed) is treated as a PR number in the current checkout's repo —
+	// resolved to owner/repo at the call site. A number elsewhere in the args
+	// (e.g. `/review look at line 42`) is left as an instruction, not a PR ref.
+	if (prRef === undefined) {
+		const first = args[0];
+		if (first !== undefined) {
+			const number = parsePositivePrNumber(first.replace(/^#/, ""));
+			if (number !== undefined) {
+				barePrNumber = number;
+				consumedIndex = 0;
+			}
 		}
 	}
 
 	return {
 		prRef,
-		extraInstructions: args.filter((_, idx) => idx !== prRefIndex).join(" "),
+		barePrNumber,
+		extraInstructions: args.filter((_, idx) => idx !== consumedIndex).join(" "),
 	};
 }
 
@@ -482,6 +501,25 @@ export class ReviewCommand implements CustomCommand {
 		const parsedArgs = extractReviewPrRefFromArgs(args);
 		if (parsedArgs.prRef) {
 			return buildPrReviewPrompt(this.api, ctx, parsedArgs.prRef, parsedArgs.extraInstructions);
+		}
+		if (parsedArgs.barePrNumber !== undefined) {
+			const number = parsedArgs.barePrNumber;
+			let repo: string;
+			try {
+				repo = await gh.resolveDefaultRepoMemoized(this.api.cwd);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				const failure =
+					`Could not resolve current repository for PR #${number}: ${message}. ` +
+					`Use a full ref like \`/review pr://owner/repo/${number}\` or a GitHub PR URL.`;
+				if (ctx.hasUI) {
+					ctx.ui.notify(failure, "error");
+					return undefined;
+				}
+				return failure;
+			}
+			const ref: ReviewPrRef = { repo, number, raw: `#${number}`, kind: "bare" };
+			return buildPrReviewPrompt(this.api, ctx, ref, parsedArgs.extraInstructions);
 		}
 
 		const extraInstructions = parsedArgs.extraInstructions || undefined;

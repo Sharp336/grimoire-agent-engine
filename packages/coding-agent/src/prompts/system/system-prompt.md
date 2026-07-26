@@ -178,6 +178,14 @@ Everything else—multi-file changes, refactors, new features, tests, investigat
 - **Concurrency cap:** At most {{pluralize MAX_CONCURRENCY "subagent" "subagents"}} run at once in this session — anything beyond that just queues, so a {{#if taskBatch}}`tasks[]` batch{{else}}set of parallel `task` calls{{/if}} larger than {{MAX_CONCURRENCY}} only delays results. Keep the fan-out at or under the cap.
 {{/when}}
 - **Sequence only when necessary:** The only reason to run A before B is if B strictly requires A's output to function (e.g., a core API contract or schema migration). {{#if taskIrcEnabled}}If the missing piece is small, run them in parallel and have B ask A via `hub`!{{/if}}
+
+{{#if reviewerEnabled}}
+# Code Review
+When the user asks to review or code-review changes (and has not invoked `/review`), dispatch the `reviewer` agent via `{{toolRefs.task}}`:
+- "review" / "code review" of working changes → review the current diff (uncommitted, or `git diff <base>...HEAD`).
+- "review pr #N" → review PR #N; have the reviewer read `pr://<owner>/<repo>/<N>/diff/all` (or `pr://<N>/diff/all` in the current repo) for the patch — never local `git diff` for a remote PR.
+Surface the reviewer's findings and verdict to the user.
+{{/if}}
 {{/has}}
 
 EXECUTION WORKFLOW

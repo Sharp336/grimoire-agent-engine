@@ -29,7 +29,8 @@ export type ModelRole =
 	| "commit"
 	| "tiny"
 	| "task"
-	| "advisor";
+	| "advisor"
+	| "reviewer";
 
 export interface ModelRoleInfo {
 	tag?: string;
@@ -50,6 +51,7 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	tiny: { tag: "TINY", name: "Tiny", color: "dim" },
 	task: { tag: "TASK", name: "Subtask", color: "muted" },
 	advisor: { tag: "ADVISOR", name: "Advisor", color: "accent" },
+	reviewer: { tag: "REVIEWER", name: "Reviewer", color: "accent" },
 };
 
 export const MODEL_ROLE_IDS: ModelRole[] = [
@@ -63,6 +65,7 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"tiny",
 	"task",
 	"advisor",
+	"reviewer",
 ];
 
 export type RoleInfo = ModelRoleInfo;
@@ -110,4 +113,15 @@ export function getRoleInfo(role: string, settings: Settings): RoleInfo {
 	if (builtIn) return builtIn;
 
 	return { name: role, color: "muted" };
+}
+
+/**
+ * Whether the reviewer is effectively active: the `reviewer.enabled` setting is
+ * on (default) AND the `reviewer` agent has not been disabled via
+ * `task.disabledAgents`. Single source of truth for gating the proactive
+ * reviewer guidance (review-before-PR + Code Review routing).
+ */
+export function isReviewerActive(settings: Settings): boolean {
+	const disabledAgents = settings.get("task.disabledAgents") as string[];
+	return (settings.get("reviewer.enabled") ?? true) && !disabledAgents.includes("reviewer");
 }

@@ -12,7 +12,7 @@ describe("bundled agent parsing", () => {
 
 		expect(reviewer).toBeDefined();
 		expect(reviewer?.source).toBe("bundled");
-		expect(reviewer?.model).toEqual(["@slow"]);
+		expect(reviewer?.model).toEqual(["@reviewer"]);
 		expect(reviewer?.thinkingLevel).toBeUndefined();
 	});
 
@@ -24,12 +24,12 @@ describe("bundled agent parsing", () => {
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
 	});
 
-	// Issue #4761: with `modelRoles.slow: ...:xhigh`, the role's explicit effort
-	// suffix must survive agent-pattern expansion and model resolution for the
-	// bundled agents routed at that role. The executor prefers an explicit
-	// resolved suffix over the agent-definition default (task/executor.ts), so
-	// the resolved level below is what the subagent runs at.
-	it("resolves the configured slow-role effort suffix for reviewer", () => {
+	// Issue #4761: with `modelRoles.reviewer: ...:xhigh`, the role's explicit
+	// effort suffix must survive agent-pattern expansion and model resolution.
+	// The reviewer agent is routed at `@reviewer`, so the configured reviewer-role
+	// suffix is what the subagent runs at (the executor prefers an explicit
+	// resolved suffix over the agent-definition default, task/executor.ts).
+	it("resolves the configured reviewer-role effort suffix for reviewer", () => {
 		const gpt55 = buildModel({
 			id: "gpt-5.5",
 			name: "GPT-5.5 Codex",
@@ -44,7 +44,7 @@ describe("bundled agent parsing", () => {
 			maxTokens: 128000,
 		});
 		const settings = Settings.isolated({
-			modelRoles: { slow: "openai-codex/gpt-5.5:xhigh" },
+			modelRoles: { reviewer: "openai-codex/gpt-5.5:xhigh" },
 		});
 		const registry = { getAvailable: () => [gpt55] } as Parameters<typeof resolveModelOverride>[1];
 
