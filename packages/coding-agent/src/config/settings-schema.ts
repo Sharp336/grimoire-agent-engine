@@ -1565,6 +1565,42 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"retry.poolSelection": {
+		type: "enum",
+		values: ["ordered", "weighted"] as const,
+		default: "ordered",
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Pool Selection",
+			description:
+				"How to pick among the comma-separated candidates of a model role. Weighted spreads subagent spawns, and sessions started with --model <role>, across the candidates instead of always starting on the first one. A resumed session keeps its model.",
+			options: [
+				{
+					value: "ordered",
+					label: "Ordered",
+					description: "First available candidate, current behavior",
+				},
+				{
+					value: "weighted",
+					label: "Weighted",
+					description: "Deterministic weighted spread across a role's candidates",
+				},
+			],
+		},
+	},
+	"retry.poolWeights": {
+		type: "record",
+		default: {} as Record<string, number>,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Pool Weights",
+			description:
+				'JSON object mapping model selectors ("provider/model-id") or provider wildcards ("provider/*") to non-negative draw weights, e.g. {"anthropic/claude-opus-5":2,"openai-codex/gpt-5.5-codex":1}. A candidate without an entry weighs 1; weight 0 keeps the candidate as ordered fallback but never draws it.',
+			condition: "poolSelectionWeighted",
+		},
+	},
 	"retry.fallbackChains": {
 		type: "record",
 		default: {} as Record<string, string[]>,
@@ -5518,6 +5554,8 @@ export interface RetrySettings {
 	usageAwareFallback: boolean;
 	usageReservePct: number;
 	usageReservePolicy: "confirm" | "auto" | "fail-closed";
+	poolSelection: "ordered" | "weighted";
+	poolWeights: Record<string, number>;
 }
 
 export interface MemoriesSettings {
