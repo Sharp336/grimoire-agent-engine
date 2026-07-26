@@ -2460,7 +2460,11 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 	readonly summary = "Interact with GitHub repositories, files, pull requests, and Actions";
 	readonly loadMode = "discoverable";
 	readonly label = "GitHub";
-	readonly description = prompt.render(githubDescription);
+	get description() {
+		return prompt.render(githubDescription, {
+			reviewerEnabled: this.session.settings.get("reviewer.enabled") ?? true,
+		});
+	}
 	readonly parameters = githubSchema;
 	readonly strict = true;
 

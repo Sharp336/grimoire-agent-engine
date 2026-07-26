@@ -13,9 +13,11 @@ Pick op via `op`. Beyond the field descriptions, per op:
 - `run_watch` — omit `run` to watch every run for the current HEAD (`branch` falls back to current). Fast-fails on the first job failure.
 </instruction>
 
+{{#if reviewerEnabled}}
 <review-before-pr>
 Before `pr_create`, run a code review of the changes that will become the PR: dispatch the `reviewer` agent via `task` against the working diff (e.g. `git diff <base>...HEAD`, or uncommitted changes if nothing is pushed yet). Surface any **P0/P1** findings to the user. Only call `pr_create` once those are resolved or the user explicitly confirms to proceed. Skip this only when the user asks to open the PR without review.
 </review-before-pr>
+{{/if}}
 
 <output>
 Concise summary per op. `run_watch` failures save full logs to a session artifact.

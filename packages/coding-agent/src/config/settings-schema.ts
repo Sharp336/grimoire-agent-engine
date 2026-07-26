@@ -3938,6 +3938,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"reviewer.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Reviewer",
+			label: "Proactive Code Review",
+			description:
+				"Gate the proactive reviewer guidance: the review-before-PR instruction on the github tool and the natural-language 'review' / 'code review' / 'review pr #N' routing. When off, the /review command and the @reviewer model role remain available; only automatic review is suppressed.",
+		},
+	},
+
 	"github.cache.enabled": {
 		type: "boolean",
 		default: true,

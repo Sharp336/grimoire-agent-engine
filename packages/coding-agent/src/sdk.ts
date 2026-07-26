@@ -2687,6 +2687,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						settings.get("tools.xdevInlineDevices"),
 					) ?? "",
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
+				reviewerEnabled: settings.get("reviewer.enabled"),
 				resolvedCustomPrompt: options.customSystemPrompt,
 				skills: session?.skills ?? skills,
 				contextFiles,

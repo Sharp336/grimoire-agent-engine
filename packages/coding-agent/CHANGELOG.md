@@ -9,6 +9,7 @@
 - The `github` tool now instructs the agent to run a code review before opening a PR: before `pr_create`, the agent dispatches the `reviewer` agent via `task` against the working diff that will become the PR (e.g. `git diff <base>...HEAD`), surfaces any P0/P1 findings, and only creates the PR once they are resolved or the user confirms. The guidance ships only when the `github` tool is enabled.
 - `/review` now accepts a bare PR number in the current checkout's repo: `/review 23` and `/review #23` resolve to PR #23 via the existing cwd→`owner/repo` resolver (the same one backing `pr://<N>`), so a full `owner/repo/N` ref or GitHub URL is no longer required to review a PR by number.
 - Added a first-class `reviewer` model role, assignable under `/model` alongside `default`/`smol`/`slow`/`advisor`/etc. The bundled code-review agent resolves through it.
+- Added a `reviewer.enabled` setting (default **true**, under Tools → Reviewer) that gates the proactive reviewer guidance: the review-before-PR instruction on the `github` tool and the natural-language "review" / "code review" / "review pr #N" routing in the system prompt. The `/review` command and the `@reviewer` model role remain available regardless; only automatic review is suppressed when off.
 
 ### Changed
 
