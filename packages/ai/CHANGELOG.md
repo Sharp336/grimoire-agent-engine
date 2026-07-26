@@ -8,6 +8,10 @@
 - Added `GET /v1/credentials/disabled` to the auth broker and `AuthBrokerClient.listDisabledCredentials`: disabled-credential tombstones (`DisabledCredentialSummary` — identity, verbatim disable cause, disable timestamp; never token material) so auto-disabled accounts stay visible to clients instead of silently vanishing from the snapshot. `AuthStorage.listDisabledCredentials` serves the same data locally from SQLite; clients of brokers predating the endpoint get an empty list (404 mapped, no error).
 - Added `AuthStorage.revalidateCredentials()` and the optional `AuthCredentialStore.refreshSnapshot` hook: remote broker stores re-fetch `GET /v1/snapshot` on demand so callers pairing live per-credential data with stored identities (`omp usage`) never render against the up-to-an-hour-stale disk-cached snapshot; local SQLite stores are always current and only reload.
 
+### Fixed
+
+- Fixed parallel package initialization crashing on an Anthropic provider/OAuth import cycle by moving shared Claude fingerprint constants into a dependency-free module.
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed
