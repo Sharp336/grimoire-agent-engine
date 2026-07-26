@@ -4,7 +4,7 @@
 
 ### Added
 - Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
-\n- Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
+- Mission launch flags now start the persisted runtime, and active missions guard destructive session transitions while preserving owner-scoped child revival.
 
 - Added crash-recoverable mission workspaces: feature workers receive isolated branches and validators detached checkouts, with ownership checks, reconciliation after interrupted setup, and CAS-protected integration advancement.
 - Added fixed-workspace mission child sessions with owner-scoped revival and parent-mediated approvals.

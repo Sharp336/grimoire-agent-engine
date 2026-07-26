@@ -44,6 +44,7 @@ export interface SessionHandoffHost {
 	sessionFile(): string | undefined;
 	baseSystemPrompt(): string[];
 	assertVibeSessionTransitionAllowed(action: string): void;
+	assertMissionTransitionAllowed(action: string): void;
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	deobfuscateFromProvider(text: string): string;
@@ -99,6 +100,7 @@ export class SessionHandoff {
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
 	async handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		this.#host.assertMissionTransitionAllowed("handoff to a new session");
 		this.#host.assertVibeSessionTransitionAllowed("handoff to a new session");
 		const entries = this.#host.sessionManager.getBranch();
 		const messageCount = entries.filter(e => e.type === "message").length;

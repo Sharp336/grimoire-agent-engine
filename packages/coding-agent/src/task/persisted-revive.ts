@@ -71,7 +71,7 @@ export function createPersistedSubagentReviverFactory(
 			// Fixed mission children must revive only under their owning top-level
 			// session and only at the recorded worktree cwd — never the parent
 			// checkout or a foreign ACP session.
-			if (!missionOwner || missionOwner.ownerSessionId !== ctx.session.sessionId) {
+			if (!missionOwner || missionOwner.ownerSessionId !== ctx.session.sessionManager.getSessionId()) {
 				return undefined;
 			}
 		}

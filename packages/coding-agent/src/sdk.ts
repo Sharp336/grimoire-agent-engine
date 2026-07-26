@@ -3105,6 +3105,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionManager,
 			settings,
 			autoApprove: options.autoApprove,
+			toolSession,
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global

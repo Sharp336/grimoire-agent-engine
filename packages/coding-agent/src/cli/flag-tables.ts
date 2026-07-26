@@ -149,6 +149,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--plan-yolo-into": (result, value) => {
 		result.planYoloInto = value;
 	},
+	"--mission-worker-model": (result, value) => {
+		result.missionWorkerModel = value;
+	},
+	"--mission-validator-model": (result, value) => {
+		result.missionValidatorModel = value;
+	},
 	"--max-time": (result, value) => {
 		result.maxTime = parseMaxTimeSeconds(value);
 	},
@@ -299,6 +305,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--prewalk",
 	"--no-prewalk",
 	"--plan-yolo",
+	"--mission",
 	"--print",
 	"--print-thoughts",
 	"--no-extensions",

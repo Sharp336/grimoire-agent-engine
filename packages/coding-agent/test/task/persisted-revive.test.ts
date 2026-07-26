@@ -90,11 +90,12 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, sessionId?: string) {
+function createFactory(cwd: string, persistedSessionId = "", providerSessionId = "provider-session") {
 	const parentSession = {
-		sessionId,
+		sessionId: providerSessionId,
 		sessionManager: {
 			getCwd: () => cwd,
+			getSessionId: () => persistedSessionId,
 			getArtifactManager: () => undefined,
 		},
 	} as unknown as AgentSession;

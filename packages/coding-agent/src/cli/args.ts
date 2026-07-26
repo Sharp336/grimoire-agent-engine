@@ -35,6 +35,9 @@ export interface Args {
 	prewalkInto?: string;
 	planYolo?: boolean;
 	planYoloInto?: string;
+	mission?: boolean;
+	missionWorkerModel?: string;
+	missionValidatorModel?: string;
 	maxTime?: number;
 	apiKey?: string;
 	systemPrompt?: string;
@@ -245,6 +248,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPrewalk = true;
 		} else if (arg === "--plan-yolo") {
 			result.planYolo = true;
+		} else if (arg === "--mission") {
+			result.mission = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 		} else if (arg === "--print-thoughts") {
@@ -292,7 +297,35 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 	}
 
+	assertMissionLaunchFlags(result);
 	return result;
+}
+
+function assertMissionLaunchFlags(result: Args): void {
+	const used = [
+		...(result.mission ? ["--mission"] : []),
+		...(result.missionWorkerModel !== undefined ? ["--mission-worker-model"] : []),
+		...(result.missionValidatorModel !== undefined ? ["--mission-validator-model"] : []),
+	];
+	if (used.length === 0) return;
+	if (!result.mission)
+		throw new CliUsageError("--mission-worker-model and --mission-validator-model require --mission");
+	if (result.mode === "rpc" || result.mode === "rpc-ui" || result.mode === "acp") {
+		throw new CliUsageError(`${used.join(", ")} cannot be used with --mode ${result.mode}`);
+	}
+	if (result.noSession) throw new CliUsageError(`${used.join(", ")} cannot be used with --no-session`);
+	if (result.print) throw new CliUsageError(`${used.join(", ")} cannot be used with --print`);
+	const existingSessionFlag = result.continue
+		? "--continue"
+		: result.resume !== undefined
+			? "--resume"
+			: result.fork !== undefined
+				? "--fork"
+				: undefined;
+	if (existingSessionFlag) throw new CliUsageError(`${used.join(", ")} cannot be used with ${existingSessionFlag}`);
+	if (result.messages.join(" ").trim().length === 0) {
+		throw new CliUsageError("--mission requires a goal");
+	}
 }
 
 /**

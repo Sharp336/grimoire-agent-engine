@@ -179,6 +179,15 @@ export default class Index extends Command {
 			options: ["always-ask", "write", "yolo"],
 			description: "Override tools.approvalMode for this session (always-ask|write|yolo)",
 		}),
+		mission: Flags.boolean({
+			description: "Start a mission using the initial prompt as its goal",
+		}),
+		"mission-worker-model": Flags.string({
+			description: "Model override for mission implementation workers",
+		}),
+		"mission-validator-model": Flags.string({
+			description: "Model override for mission validation workers",
+		}),
 	};
 
 	static examples = [

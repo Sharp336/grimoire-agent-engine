@@ -23,8 +23,10 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ToolSession } from "../tools";
 import type { XdevRegistry } from "../tools/xdev";
 import type { SessionManager } from "./session-manager";
 
@@ -218,6 +220,12 @@ export interface AgentSessionConfig {
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
+	/** Tool session retained for mission worker construction. */
+	toolSession?: ToolSession;
+	/** Session-scoped factory used to revive persisted mission children by id. */
+	persistedSubagentReviverFactory?: PersistedSubagentReviverFactory;
+	/** Idle TTL applied to revived mission children. */
+	missionIdleTtlMs?: number;
 }
 
 /** Options for AgentSession.prompt(). */

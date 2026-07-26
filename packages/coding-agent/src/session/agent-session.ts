@@ -97,7 +97,12 @@ import type { AdvisorConfig, AdvisorRuntimeStatus } from "../advisor";
 import { type AsyncJob, AsyncJobManager } from "../async";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import { type ResolvedModelRoleValue, resolveModelOverride } from "../config/model-resolver";
+import {
+	getModelMatchPreferences,
+	type ResolvedModelRoleValue,
+	resolveModelOverride,
+	resolveModelScope,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -139,6 +144,8 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
+import { MissionRuntime, type MissionRuntimeHost } from "../missions/runtime";
+import type { MissionState } from "../missions/types";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
@@ -162,6 +169,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
+import { AgentLifecycleManager, type PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -169,6 +177,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
+import type { ParentApprovalDelegate } from "../task/structured-subagent";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -177,6 +186,7 @@ import {
 	toReasoningEffort,
 } from "../thinking";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
+import type { ToolSession } from "../tools";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
@@ -481,6 +491,9 @@ export class AgentSession {
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
+	readonly #missionRuntime: MissionRuntime;
+	#missionPersistedReviverFactory: PersistedSubagentReviverFactory | undefined;
+	#missionIdleTtlMs = 0;
 	/**
 	 * Dedicated timer pool for session schedules. Deliberately NOT the extension
 	 * runner's `ManagedTimers`: its `clearAll()` runs on extension teardown, which
@@ -1273,6 +1286,7 @@ export class AgentSession {
 				);
 			},
 		});
+		this.#missionRuntime = new MissionRuntime(this.#missionHost(config));
 		this.#rearmSessionSchedules();
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
@@ -1405,6 +1419,7 @@ export class AgentSession {
 			sessionFile: () => this.sessionFile,
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
 			assertVibeSessionTransitionAllowed: action => this.#assertVibeSessionTransitionAllowed(action),
+			assertMissionTransitionAllowed: action => this.#assertMissionTransitionAllowed(action),
 			setSkipPostTurnMaintenance: timestamp => {
 				this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = timestamp;
 			},
@@ -4247,6 +4262,89 @@ export class AgentSession {
 		return this.#goalRuntime;
 	}
 
+	get missionRuntime(): MissionRuntime {
+		return this.#missionRuntime;
+	}
+
+	async restoreMission(): Promise<MissionState | null> {
+		return this.#missionRuntime.restore();
+	}
+
+	async startMission(
+		goal: string,
+		options?: { workerModel?: string | string[]; validatorModel?: string | string[]; autoAccept?: boolean },
+	): Promise<MissionState> {
+		return this.#missionRuntime.start(goal, options);
+	}
+
+	setMissionPersistedReviverFactory(factory: PersistedSubagentReviverFactory, idleTtlMs: number): void {
+		this.#missionPersistedReviverFactory = factory;
+		this.#missionIdleTtlMs = idleTtlMs;
+	}
+
+	#missionHost(config: AgentSessionConfig): MissionRuntimeHost {
+		return {
+			ownerSessionId: () => this.sessionManager.getSessionId(),
+			cwd: () => this.sessionManager.getCwd(),
+			sessionManager: this.sessionManager,
+			emitUpdated: () => {},
+			emitProgress: () => {},
+			sendHiddenMessage: async message => {
+				await this.sendCustomMessage(
+					{ customType: message.customType, content: message.content, display: false, attribution: "agent" },
+					{ deliverAs: message.deliverAs },
+				);
+			},
+			getEnabledToolNames: () => this.getEnabledToolNames(),
+			setActiveToolsByName: names => this.setActiveToolsByName(names),
+			parentApprovalDelegate: (): ParentApprovalDelegate | undefined => {
+				const uiContext = this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined;
+				return uiContext || this.#clientBridge
+					? { kind: "parent", uiContext, clientBridge: this.#clientBridge }
+					: undefined;
+			},
+			resolveChildModels: async (worker, validator) => {
+				for (const model of [worker, validator]) {
+					const patterns = model === undefined ? [] : Array.isArray(model) ? model : [model];
+					if (
+						patterns.length > 0 &&
+						(
+							await resolveModelScope(
+								patterns,
+								this.#modelRegistry,
+								getModelMatchPreferences(this.settings),
+								this.settings,
+							)
+						).length === 0
+					) {
+						throw new Error(`Unknown mission model: ${patterns.join(", ")}`);
+					}
+				}
+			},
+			assertSkillsExist: names => {
+				const available = new Set(this.skills.map(skill => skill.name));
+				for (const name of names) if (!available.has(name)) throw new Error(`Unknown mission skill: ${name}`);
+			},
+			getToolSession: () => config.toolSession as ToolSession,
+			isPlanModeActive: () => this.#planModeState?.enabled === true,
+			isGoalModeActive: () => this.#goalModeState?.enabled === true,
+			isVibeModeActive: () => this.#vibeModeState?.enabled === true,
+			registerPersistedReviver: agentId => {
+				const factory = this.#missionPersistedReviverFactory;
+				return factory
+					? AgentLifecycleManager.global().registerPersistedReviver(agentId, factory, this.#missionIdleTtlMs)
+					: undefined;
+			},
+			agentLifecycle: () => AgentLifecycleManager.global(),
+		};
+	}
+
+	#assertMissionTransitionAllowed(action: string): void {
+		if (this.#missionRuntime.isBusy() || this.#missionRuntime.hasActiveMission()) {
+			throw new Error(`MISSION_BUSY: Cannot ${action} while a mission is active.`);
+		}
+	}
+
 	/** Deliver an agent-authored message that stays hidden from the transcript. */
 	async #sendHiddenMessage(message: {
 		customType: string;
@@ -5954,6 +6052,7 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
+		this.#assertMissionTransitionAllowed("start a new session");
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
@@ -5970,6 +6069,7 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
+		await this.#missionRuntime.prepareToSuspend();
 		await this.abort();
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
@@ -6039,6 +6139,7 @@ export class AgentSession {
 			});
 		}
 
+		await this.#missionRuntime.restore();
 		return true;
 	}
 
@@ -6057,6 +6158,7 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
 	async fork(): Promise<boolean> {
+		this.#assertMissionTransitionAllowed("fork the session");
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 
@@ -6128,11 +6230,13 @@ export class AgentSession {
 			});
 		}
 
+		await this.#missionRuntime.restore();
 		return true;
 	}
 
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
+		this.#assertMissionTransitionAllowed("move the session");
 		this.#assertVibeSessionTransitionAllowed("move the session");
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
@@ -6300,6 +6404,7 @@ export class AgentSession {
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
 	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		this.#assertMissionTransitionAllowed("handoff the session");
 		return this.#handoff.handoff(customInstructions, options);
 	}
 
@@ -6949,6 +7054,7 @@ export class AgentSession {
 	 * @returns true if switch completed, false if cancelled by hook
 	 */
 	async switchSession(sessionPath: string): Promise<boolean> {
+		this.#assertMissionTransitionAllowed("switch sessions");
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -6967,6 +7073,7 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
+		await this.#missionRuntime.prepareToSuspend();
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
 
@@ -7137,6 +7244,7 @@ export class AgentSession {
 				this.#clearSessionScopedToolState();
 			}
 			this.#reconnectToAgent();
+			await this.#missionRuntime.restore();
 			try {
 				await this.#sessionSwitchReconciler?.();
 			} catch (error) {
@@ -7211,6 +7319,7 @@ export class AgentSession {
 		selectedText: string;
 		cancelled: boolean;
 	}> {
+		this.#assertMissionTransitionAllowed("branch the session");
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -7293,6 +7402,7 @@ export class AgentSession {
 		question: string,
 		assistantMessage: AssistantMessage,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		this.#assertMissionTransitionAllowed("branch the session");
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");

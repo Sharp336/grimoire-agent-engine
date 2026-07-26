@@ -1506,16 +1506,24 @@ export async function runRootCommand(
 		// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
 		// bootstrap: ACP keeps several concurrent top-level sessions and a single
 		// process-global factory must not be clobbered by the most recent one.
-		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
-			createPersistedSubagentReviverFactory({
-				session,
-				authStorage,
-				modelRegistry,
-				settings: settingsInstance,
-				enableLsp: sessionOptions.enableLsp ?? true,
-			}),
-			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
-		);
+		const persistedReviverFactory = createPersistedSubagentReviverFactory({
+			session,
+			authStorage,
+			modelRegistry,
+			settings: settingsInstance,
+			enableLsp: sessionOptions.enableLsp ?? true,
+		});
+		const persistedReviveTtlMs = Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0);
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(persistedReviverFactory, persistedReviveTtlMs);
+		session.setMissionPersistedReviverFactory(persistedReviverFactory, persistedReviveTtlMs);
+		await session.restoreMission();
+		if (parsedArgs.mission) {
+			const missionGoal = initialMessage ?? initialArgs.messages.join(" ");
+			await session.startMission(missionGoal, {
+				workerModel: parsedArgs.missionWorkerModel,
+				validatorModel: parsedArgs.missionValidatorModel,
+			});
+		}
 		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
 		}
