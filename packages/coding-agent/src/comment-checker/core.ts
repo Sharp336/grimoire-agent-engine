@@ -231,7 +231,11 @@ export function isToolFailureOutput(text: string): boolean {
 }
 
 function extractWriteRequest(event: ToolResultLike): CommentCheckRequest[] {
-	const filePath = getString(event.input, ["filePath", "file_path", "path"]);
+	const detailPath = isRecord(event.details)
+		? getString(event.details, ["resolvedPath", "path", "filePath", "file_path"])
+		: undefined;
+	const rawPath = getString(event.input, ["filePath", "file_path", "path"]);
+	const filePath = detailPath ?? rawPath;
 	const content = getString(event.input, ["content"]);
 	if (!filePath || content === undefined) return [];
 	return [
@@ -248,7 +252,11 @@ function extractWriteRequest(event: ToolResultLike): CommentCheckRequest[] {
 }
 
 function extractEditRequest(event: ToolResultLike): CommentCheckRequest[] {
-	const filePath = getString(event.input, ["filePath", "file_path", "path"]);
+	const detailPath = isRecord(event.details)
+		? getString(event.details, ["resolvedPath", "path", "filePath", "file_path"])
+		: undefined;
+	const rawPath = getString(event.input, ["filePath", "file_path", "path"]);
+	const filePath = detailPath ?? rawPath;
 	const oldString = getString(event.input, ["oldString", "old_string"]);
 	const newString = getString(event.input, ["newString", "new_string"]);
 	if (!filePath || (oldString === undefined && newString === undefined)) return [];
@@ -266,7 +274,11 @@ function extractEditRequest(event: ToolResultLike): CommentCheckRequest[] {
 }
 
 function extractMultiEditRequest(event: ToolResultLike): CommentCheckRequest[] {
-	const filePath = getString(event.input, ["filePath", "file_path", "path"]);
+	const detailPath = isRecord(event.details)
+		? getString(event.details, ["resolvedPath", "path", "filePath", "file_path"])
+		: undefined;
+	const rawPath = getString(event.input, ["filePath", "file_path", "path"]);
+	const filePath = detailPath ?? rawPath;
 	const edits = getEdits(event.input.edits);
 	if (!filePath || edits.length === 0) return [];
 	return [

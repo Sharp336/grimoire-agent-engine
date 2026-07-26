@@ -9,7 +9,7 @@ import type {
 	ToolResultEventResult,
 } from "../extensibility/extensions";
 import selfHealPrompt from "../prompts/comment-checker-self-heal.md" with { type: "text" };
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import { replaceTabs, shortenPath } from "../tools/render-utils";
 import { type CommentCheckerRunResult, resolveCommentCheckerBinary, runCommentChecker } from "./cli";
 import {
 	type CommentCheckerHookInput,
@@ -22,6 +22,7 @@ import {
 	COMMENT_CHECKER_WIDGET_KEY,
 	type CommentCheckerUiState,
 	formatFooterStatus,
+	formatPreview,
 	syncCommentCheckerWidget,
 } from "./ui";
 
@@ -196,14 +197,7 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 		const handler = createCommentCheckerToolResultHandler({
 			run: input => runCommentChecker(input, { customPrompt: Settings.instance.get("commentChecker.prompt") }),
 			onWarning: warning => {
-				const record = store.record(warning);
-				api.appendEntry(OMP_WARNING_ENTRY_TYPE, {
-					filePath: record.filePath,
-					message: record.message,
-					sourceToolName: record.sourceToolName,
-					ts: record.ts,
-					id: record.id,
-				});
+				store.record(warning);
 			},
 			onClearWarnings: cleanFiles => {
 				store.clearFiles(cleanFiles);
@@ -250,7 +244,7 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 			const summary = unfired
 				.map(w => {
 					const displayPath = replaceTabs(shortenPath(w.filePath));
-					const preview = truncateToWidth(replaceTabs(w.message.trim()), TRUNCATE_LENGTHS.CONTENT);
+					const preview = formatPreview(w.message);
 					return `${displayPath}: ${preview}`;
 				})
 				.join("\n");

@@ -22,8 +22,9 @@ export type WidgetSetter = (
 	options?: { placement?: "aboveEditor" | "belowEditor" },
 ) => void;
 
-function formatPreview(message: string): string {
-	return truncateToWidth(replaceTabs(message.trim()), TRUNCATE_LENGTHS.CONTENT);
+export function formatPreview(message: string): string {
+	const singleLine = message.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+	return truncateToWidth(replaceTabs(singleLine), TRUNCATE_LENGTHS.CONTENT);
 }
 
 export function getCommentCheckerWidgetLines(state: CommentCheckerUiState): string[] | undefined {

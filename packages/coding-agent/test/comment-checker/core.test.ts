@@ -11,6 +11,7 @@ import {
 	toHookInput,
 } from "../../src/comment-checker/core";
 import { createCommentCheckerToolResultHandler } from "../../src/comment-checker/index";
+import { formatPreview, getCommentCheckerWidgetLines } from "../../src/comment-checker/ui";
 import type { ExtensionContext, ToolResultEvent } from "../../src/extensibility/extensions";
 import type { ExtensionUIContext } from "../../src/extensibility/extensions/types";
 import type { ReadonlySessionManager } from "../../src/session/session-manager";
@@ -678,5 +679,55 @@ describe("runCommentChecker and spawnProcess executor seam", () => {
 		const res = await spawnProcess("echo", ["hello"], "");
 		expect(res.exitCode).toBe(0);
 		expect(res.stdout.trim()).toBe("hello");
+	});
+});
+
+describe("formatPreview and getCommentCheckerWidgetLines", () => {
+	it("collapses multi-line warning messages into a single preview line", () => {
+		const multiLineMessage = "Avoid vague comments.\n  - Line 1\n  - Line 2";
+		const preview = formatPreview(multiLineMessage);
+		expect(preview).not.toContain("\n");
+		expect(preview).toBe("Avoid vague comments. - Line 1 - Line 2");
+
+		const lines = getCommentCheckerWidgetLines({
+			status: "warning",
+			checkedFiles: ["src/foo.ts"],
+			warnings: [{ filePath: "src/foo.ts", message: multiLineMessage }],
+		});
+
+		expect(lines).toBeDefined();
+		expect(lines?.length).toBe(3);
+		expect(lines?.[2]).toContain("Avoid vague comments. - Line 1 - Line 2");
+	});
+});
+
+describe("extractWriteRequest with resolved detail path", () => {
+	it("prefers resolved detail path over raw input path for write requests", () => {
+		const event: ToolResultLike = {
+			toolName: "write",
+			input: {
+				filePath: "[src/foo.ts#ABCD]",
+				content: "const x = 1;\n",
+			},
+			details: {
+				resolvedPath: "src/foo.ts",
+			},
+			content: [{ type: "text", text: "wrote src/foo.ts" }],
+			isError: false,
+		};
+
+		const requests = extractCommentCheckRequests(event);
+
+		expect(requests).toEqual([
+			{
+				sourceToolName: "write",
+				toolName: "Write",
+				filePath: "src/foo.ts",
+				toolInput: {
+					file_path: "src/foo.ts",
+					content: "const x = 1;\n",
+				},
+			},
+		]);
 	});
 });
