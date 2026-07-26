@@ -1466,6 +1466,48 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("normalizes text-like input types and rejects picker inputs before Puppeteer CUA keyboard events", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{
+				   globalThis.__pickerKeyEvents=[];
+				   for (const [name,type] of [["empty",""],["unknown","unsupported-input"],["range","range"],["color","color"]]) {
+				     const input=document.createElement("input"); input.id="input-"+name; input.setAttribute("type",type);
+				     if (name==="range" || name==="color") input.addEventListener("keydown",event=>globalThis.__pickerKeyEvents.push(name+":"+event.key));
+				     document.body.append(input);
+				   }
+				 });
+				 const acceptedErrors=[];
+				 for (const name of ["empty","unknown"]) {
+				   await page.evaluate(name=>document.querySelector("#input-"+name).focus(),name);
+				   try { await t.cua.type({text:"typed"}); } catch(error) { acceptedErrors.push(name+":"+String(error)); }
+				 }
+				 const pickerErrors=[];
+				 for (const name of ["range","color"]) {
+				   await page.evaluate(name=>document.querySelector("#input-"+name).focus(),name);
+				   try { await t.cua.type({text:"changed"}); } catch(error) { pickerErrors.push(name+":"+String(error)); }
+				 }
+				 const inputState=await page.evaluate(()=>({
+				   keyEvents:globalThis.__pickerKeyEvents,
+				   values:Object.fromEntries(["empty","unknown","range","color"].map(name=>[name,document.querySelector("#input-"+name).value]))
+				 }));
+				 return {acceptedErrors,pickerErrors,...inputState};`,
+			);
+			expect(result).toEqual({
+				acceptedErrors: [],
+				pickerErrors: [
+					expect.stringContaining("range:Error: cua.type requires an editable active element"),
+					expect.stringContaining("color:Error: cua.type requires an editable active element"),
+				],
+				keyEvents: [],
+				values: { empty: "typed", unknown: "typed", range: "50", color: "#000000" },
+			});
+		});
+	}, 20_000);
+
 	it("uses the active frame selection when typing into focused contenteditable text", async () => {
 		await withPuppeteerTool(async (tool, name) => {
 			const result = await runBrowserCode(
@@ -1620,9 +1662,9 @@ describe("Puppeteer final parity blockers", () => {
 				name,
 				`const t=await agent.browser.tabs.selected();
 				 await page.evaluate(async()=>{
-				   const frame=document.createElement("iframe");
+				   const frame=document.createElement("iframe"); frame.id="element-info-frame";
 				   Object.assign(frame.style,{position:"fixed",left:"520px",top:"120px",width:"140px",height:"60px",border:"0"});
-				   frame.srcdoc='<button aria-label="Framed action" style="position:absolute;left:30px;top:20px;width:40px;height:20px">Go</button>';
+				   frame.srcdoc='<button id="frame-action" aria-label="Framed action" style="position:absolute;left:30px;top:20px;width:40px;height:20px">Go</button>';
 				   const {promise,resolve}=Promise.withResolvers(); frame.addEventListener("load",resolve,{once:true}); document.body.append(frame); await promise;
 				 });
 				 return await t.playwright.elementInfo({x:560,y:150});`,
@@ -1633,6 +1675,10 @@ describe("Puppeteer final parity blockers", () => {
 					role: "button",
 					ariaName: "Framed action",
 					boundingBox: { x: 550, y: 140, width: 40, height: 20 },
+					selector: expect.objectContaining({
+						primary: "#frame-action",
+						frameSelectors: ["#element-info-frame"],
+					}),
 				}),
 			]);
 		});
@@ -3275,6 +3321,78 @@ describe("Puppeteer final parity blockers", () => {
 		}
 		expect(requested).toEqual(["https://fixture.test/deep-shadow.png"]);
 	});
+
+	it("resolves an enclosing composed media link for coordinate downloads", async () => {
+		const requested: string[] = [];
+		const fetchMock: typeof globalThis.fetch = Object.assign(
+			async (input: string | URL | Request) => {
+				requested.push(String(input));
+				return new Response(new Uint8Array([65]), { headers: { "content-type": "image/png" } });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+		spyOn(fs, "open").mockResolvedValue({
+			writeFile: async () => undefined,
+			sync: async () => undefined,
+			close: async () => undefined,
+		} as never);
+		spyOn(fs, "rename").mockResolvedValue(undefined);
+		const mediaLink = {
+			tagName: "A",
+			href: "https://fixture.test/enclosing-link.png",
+			getAttribute: (name: string) => (name === "href" ? "https://fixture.test/enclosing-link.png" : null),
+			parentElement: null,
+			getRootNode: () => ({}),
+			querySelector: () => null,
+		};
+		const descendant = {
+			tagName: "SPAN",
+			getAttribute: () => null,
+			parentElement: mediaLink,
+			getRootNode: () => ({}),
+			querySelector: () => null,
+		};
+		const globals = globalThis as unknown as Record<string, unknown>;
+		const documentDescriptor = Object.getOwnPropertyDescriptor(globals, "document");
+		Object.defineProperty(globals, "document", {
+			value: { baseURI: "https://fixture.test/", elementFromPoint: () => descendant },
+			configurable: true,
+		});
+		try {
+			const page = {
+				url: () => "about:blank",
+				evaluateHandle: async (callback: (x: number, y: number) => unknown, x: number, y: number) => {
+					const target = callback(x, y) as typeof descendant;
+					const handle: Record<string, unknown> = {
+						asElement: () => handle,
+						dispose: async () => undefined,
+						evaluate: async (
+							pageCallback: (element: typeof descendant, timeoutMs: number, label: string) => Promise<unknown>,
+							timeoutMs: number,
+							label: string,
+						) => await pageCallback(target, timeoutMs, label),
+					};
+					return handle;
+				},
+			};
+			const adapter = new PuppeteerCodexBrowserAdapter({
+				currentTabId: "1",
+				page: page as never,
+				browser: {} as never,
+				signal: new AbortController().signal,
+				cwd: "/tmp/browser-contract",
+				captureScreenshot: async () => "",
+			});
+			await adapter.invoke("cua.downloadMedia", { tabId: "1", x: 10, y: 20, timeoutMs: 1_000 });
+			await adapter.dispose();
+		} finally {
+			if (documentDescriptor) Object.defineProperty(globals, "document", documentDescriptor);
+			else delete globals.document;
+		}
+		expect(requested).toEqual(["https://fixture.test/enclosing-link.png"]);
+	});
+
 	it("parses locator press chords and releases modifiers around the final key", async () => {
 		const events: string[] = [];
 		const handle: Record<string, unknown> = {

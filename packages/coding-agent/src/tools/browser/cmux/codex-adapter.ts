@@ -395,7 +395,18 @@ const COORDINATE_MEDIA_URL_SOURCE = `(x, y) => {
 	${FRAME_AWARE_POINT_DESCENT_SOURCE}
 	const element = deepestElementFromPoint(x, y).element;
 	if (!element || String(element.tagName || "").toLowerCase() === "iframe") return "";
-	return String(element.currentSrc || element.src || element.href || element.getAttribute?.("src") || element.getAttribute?.("href") || "");
+	const sourceOf = candidate => String(candidate?.currentSrc || candidate?.src || candidate?.href || candidate?.getAttribute?.("src") || candidate?.getAttribute?.("href") || "");
+	const composedParent = candidate => {
+		const root = candidate?.getRootNode?.();
+		return candidate?.assignedSlot ?? candidate?.parentElement ?? root?.host ?? root?.defaultView?.frameElement ?? null;
+	};
+	let source = sourceOf(element);
+	for (let current = composedParent(element); !source && current; current = composedParent(current)) {
+		const tag = String(current.tagName || "").toLowerCase();
+		if (["img", "video", "audio", "source"].includes(tag) || (tag === "a" && current.getAttribute?.("href") != null)) source = sourceOf(current);
+	}
+	if (source) return source;
+	return sourceOf(element.querySelector?.("img,video,audio,source,a[href]"));
 }`;
 
 const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {

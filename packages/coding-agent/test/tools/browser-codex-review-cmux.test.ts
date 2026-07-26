@@ -1513,6 +1513,57 @@ describe("cmux Codex browser review regressions", () => {
 		expect(requestedUrls).toHaveLength(1);
 	});
 
+	it("resolves an enclosing composed media link for cmux coordinate downloads", async () => {
+		const payload = Buffer.from("composed-ancestor-media");
+		const requestedUrls: string[] = [];
+		const writes: Uint8Array[] = [];
+		const mediaLink = {
+			tagName: "A",
+			href: "https://fixture.test/enclosing-link.png",
+			getAttribute: (name: string) => (name === "href" ? "https://fixture.test/enclosing-link.png" : null),
+			parentElement: null,
+			getRootNode: () => ({}),
+		};
+		const descendant = {
+			tagName: "SPAN",
+			parentElement: mediaLink,
+			getRootNode: () => ({}),
+			getAttribute: () => null,
+		};
+		const document = { elementFromPoint: () => descendant };
+		const current = await selectedTab(
+			facadeFor({
+				codexCwd: () => "/tmp/codex-media-contract",
+				async codexEvaluate(source: string, args: unknown[]) {
+					if (source.includes("deepestElementFromPoint"))
+						return runPageEvaluator(source, args, { document, window: {} });
+					if (source.includes("__ompCodexMediaTransfers") && args.length === 2) {
+						requestedUrls.push(String(args[0]));
+						return true;
+					}
+					if (source.includes("__ompCodexMediaTransfers") && args.length === 1) {
+						return {
+							url: requestedUrls.at(-1),
+							contentType: "image/png",
+							base64Chunks: [payload.toString("base64")],
+						};
+					}
+					throw new Error("Unexpected page evaluation");
+				},
+				async codexEvaluateCleanup() {
+					return true;
+				},
+				async codexPersistFile(_path: string, data: Uint8Array) {
+					writes.push(data);
+				},
+			}),
+		);
+
+		await current.cua.downloadMedia({ x: 12, y: 24, timeoutMs: 250 });
+		expect(requestedUrls).toEqual([mediaLink.href]);
+		expect(writes.map(data => Buffer.from(data))).toEqual([payload]);
+	});
+
 	it("downloads framed coordinate media with border-adjusted shadow traversal and stops at inaccessible frames", async () => {
 		const payload = Buffer.from("framed-shadow-media");
 		const frameUrl = "https://fixture.test/frame.html";

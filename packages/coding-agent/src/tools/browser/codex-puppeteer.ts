@@ -172,6 +172,7 @@ interface PageEditableElement {
 	selectionStart: number | null;
 	tagName: string;
 	textContent: string | null;
+	type: string;
 	value: string;
 }
 
@@ -1267,18 +1268,47 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 					let x = rect.x;
 					let y = rect.y;
 					type FrameElement = Element & { clientLeft: number; clientTop: number };
+					const css = (globalThis as unknown as { CSS: { escape(value: string): string } }).CSS;
+					const preferredSelector = (candidate: Element): string | null => {
+						const candidateId = candidate.getAttribute("id");
+						if (candidateId) return `#${css.escape(candidateId)}`;
+						const candidateTestId = candidate.getAttribute("data-testid");
+						return candidateTestId ? `[data-testid=${css.escape(candidateTestId)}]` : null;
+					};
+					const frameSelector = (candidate: Element): string => {
+						const preferred = preferredSelector(candidate);
+						if (preferred) return preferred;
+						const parts: string[] = [];
+						let current: Element | null = candidate;
+						while (current) {
+							const tag = current.tagName.toLowerCase();
+							const parent: Element | null = current.parentElement;
+							if (!parent) {
+								parts.unshift(tag);
+								break;
+							}
+							const currentTag = current.tagName;
+							const siblings: Element[] = Array.from(parent.children).filter(
+								(sibling: Element) => sibling.tagName === currentTag,
+							);
+							const suffix = siblings.length > 1 ? `:nth-of-type(${siblings.indexOf(current) + 1})` : "";
+							parts.unshift(`${tag}${suffix}`);
+							current = parent;
+						}
+						return parts.join(" > ");
+					};
+					const frameSelectors: string[] = [];
 					let frame = (target as Element).ownerDocument.defaultView?.frameElement;
 					while (frame) {
+						frameSelectors.unshift(frameSelector(frame));
 						const frameRect = frame.getBoundingClientRect();
 						const frameElement = frame as FrameElement;
 						x += frameRect.x + frameElement.clientLeft;
 						y += frameRect.y + frameElement.clientTop;
 						frame = frame.ownerDocument.defaultView?.frameElement;
 					}
-					const id = pageElement.getAttribute("id");
 					const testId = pageElement.getAttribute("data-testid");
-					const css = (globalThis as unknown as { CSS: { escape(value: string): string } }).CSS;
-					const primary = id ? `#${css.escape(id)}` : testId ? `[data-testid=${css.escape(testId)}]` : null;
+					const primary = preferredSelector(target as Element);
 					return {
 						tagName,
 						nativelyInteractable,
@@ -1286,7 +1316,11 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 						testId,
 						boundingBox: { x, y, width: rect.width, height: rect.height },
 						preview: pageElement.outerHTML.slice(0, 500),
-						selector: { primary, candidates: primary ? [primary, tagName] : [tagName] },
+						selector: {
+							primary,
+							candidates: primary ? [primary, tagName] : [tagName],
+							...(frameSelectors.length > 0 ? { frameSelectors } : {}),
+						},
 					};
 				}),
 				getAriaElementState(element),
@@ -2917,10 +2951,23 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			if (!active) return null;
 			const tag = active.tagName.toLowerCase();
 			const target = active as unknown as PageEditableElement;
-			const type = tag === "input" ? (active.getAttribute("type") ?? "text").toLowerCase() : "";
+			const type = tag === "input" ? target.type.toLowerCase() : "";
 			const editableInput =
 				tag === "input" &&
-				!["button", "checkbox", "file", "hidden", "image", "radio", "reset", "submit"].includes(type);
+				[
+					"date",
+					"datetime-local",
+					"email",
+					"month",
+					"number",
+					"password",
+					"search",
+					"tel",
+					"text",
+					"time",
+					"url",
+					"week",
+				].includes(type);
 			const control = target;
 			const contentEditable = target.isContentEditable;
 			const ariaReadonly = active.getAttribute("aria-readonly")?.trim().toLowerCase() === "true";
@@ -3124,25 +3171,59 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const media = (await this.#runBeforeDeadline(deadline, () =>
 			handle.evaluate(
 				async (element, timeoutMs, label) => {
-					const nestedMedia = element.querySelector("img,video,audio,source");
-					const elementCurrentSrc = "currentSrc" in element ? element.currentSrc : undefined;
-					const nestedCurrentSrc = nestedMedia && "currentSrc" in nestedMedia ? nestedMedia.currentSrc : undefined;
-					const source =
-						(typeof elementCurrentSrc === "string" && elementCurrentSrc ? elementCurrentSrc : null) ??
-						element.getAttribute("src") ??
-						element.getAttribute("href") ??
-						(typeof nestedCurrentSrc === "string" && nestedCurrentSrc ? nestedCurrentSrc : null) ??
-						nestedMedia?.getAttribute("src") ??
-						element.querySelector("a")?.getAttribute("href");
+					const sourceOf = (candidate: Element): string | null => {
+						const currentSrc = "currentSrc" in candidate ? candidate.currentSrc : undefined;
+						return (
+							(typeof currentSrc === "string" && currentSrc ? currentSrc : null) ??
+							candidate.getAttribute("src") ??
+							candidate.getAttribute("href")
+						);
+					};
+					const composedParent = (candidate: Element): Element | null => {
+						const pageCandidate = candidate as Element & { assignedSlot?: Element | null };
+						const root = candidate.getRootNode?.() as
+							| { defaultView?: { frameElement?: Element | null }; host?: Element }
+							| undefined;
+						return (
+							pageCandidate.assignedSlot ??
+							candidate.parentElement ??
+							root?.host ??
+							root?.defaultView?.frameElement ??
+							null
+						);
+					};
+					let sourceElement: Element | null = element;
+					let source = sourceOf(sourceElement);
+					for (let current = composedParent(element); !source && current; current = composedParent(current)) {
+						const tagName = current.tagName.toLowerCase();
+						if (
+							tagName === "img" ||
+							tagName === "video" ||
+							tagName === "audio" ||
+							tagName === "source" ||
+							(tagName === "a" && current.getAttribute("href") !== null)
+						) {
+							source = sourceOf(current);
+							if (source) sourceElement = current;
+						}
+					}
+					if (!source) {
+						const nestedMedia = element.querySelector("img,video,audio,source,a[href]");
+						source = nestedMedia ? sourceOf(nestedMedia) : null;
+						if (source) sourceElement = nestedMedia;
+					}
 					if (!source) return null;
 					const controller = new AbortController();
 					const timer = setTimeout(() => controller.abort(new Error(`${label} media fetch timed out`)), timeoutMs);
 					try {
 						const pageDocument = document as unknown as PageDocumentLike;
-						const response = await fetch(new URL(source, pageDocument.baseURI), {
-							credentials: "include",
-							signal: controller.signal,
-						});
+						const response = await fetch(
+							new URL(source, sourceElement?.ownerDocument?.baseURI ?? pageDocument.baseURI),
+							{
+								credentials: "include",
+								signal: controller.signal,
+							},
+						);
 						if (!response.ok) throw new Error(`${label} media fetch failed with HTTP ${response.status}`);
 						const maxBytes = 32 * 1024 * 1024;
 						const contentLengthHeader = response.headers.get("content-length");
