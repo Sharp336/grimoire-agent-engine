@@ -61,6 +61,55 @@ export function resetActiveSkillsForTests(): void {
 	activeSkills = [];
 }
 
+/** Sentence-ending punctuation (ASCII + CJK) a truncated description may stop after. */
+const SENTENCE_BOUNDARY_CHARS: Record<string, true> = {
+	".": true,
+	"!": true,
+	"?": true,
+	";": true,
+	"\n": true,
+	"。": true,
+	"．": true,
+	"！": true,
+	"？": true,
+	"；": true,
+	"…": true,
+};
+
+/**
+ * Cap a skill description for system prompt rendering
+ * (`skills.promptDescriptionMaxChars`). Prefers the last sentence boundary
+ * inside the budget so routing cues stay whole, falls back to the last space,
+ * then to a hard cut (CJK text has no spaces; its characters self-delimit).
+ * `maxChars <= 0` disables the cap. Never splits a surrogate pair. The full
+ * description remains reachable via `skill://<name>`.
+ */
+export function truncateSkillDescription(description: string, maxChars: number): string {
+	if (maxChars <= 0) return description;
+	const text = description.trim();
+	if (text.length <= maxChars) return text;
+
+	const window = text.slice(0, maxChars);
+	const minKeep = Math.ceil(maxChars / 2);
+	let cut = 0;
+	for (let i = window.length - 1; i >= minKeep; i--) {
+		if (window[i] in SENTENCE_BOUNDARY_CHARS) {
+			cut = i + 1;
+			break;
+		}
+	}
+	if (cut === 0) {
+		const lastSpace = window.lastIndexOf(" ");
+		cut = lastSpace >= minKeep ? lastSpace : maxChars;
+	}
+
+	let sliced = window.slice(0, cut).trimEnd();
+	// A hard cut can land between the halves of a surrogate pair.
+	const lastCode = sliced.charCodeAt(sliced.length - 1);
+	if (lastCode >= 0xd800 && lastCode <= 0xdbff) sliced = sliced.slice(0, -1);
+	return `${sliced}…`;
+}
+
 /**
  * Whether `name` is already claimed by an active authored (non-managed) skill.
  *

@@ -656,4 +656,30 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("<skills>");
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
+
+	it("caps skill descriptions at skills.promptDescriptionMaxChars while keeping full text off-prompt", async () => {
+		const longTail = "This second sentence overflows the budget and must not render.";
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "frontend-design",
+					description: `Frontend UI workflow. ${longTail}`,
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			skillsSettings: { promptDescriptionMaxChars: 30 },
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("- frontend-design: Frontend UI workflow.…");
+		expect(text).not.toContain(longTail);
+	});
 });

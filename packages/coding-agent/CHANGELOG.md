@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tools.xdevTopLevelDevices`, a glob allowlist that keeps matching discoverable tools (built-in, MCP, or extension) mounted top-level instead of behind `xd://` dispatch, trading prompt tokens for zero docs-read/write round-trips on hot devices.
+- Added `skills.promptDescriptionMaxChars` to cap each skill description rendered into the system prompt's `<skills>` listing (sentence-aware, CJK-safe cut; 0 keeps full descriptions). Full skill instructions remain reachable via `skill://<name>`.
+
+### Fixed
+
+- Fixed one MCP server registered under two names — typically a Claude-plugin-shipped alias (`context7:context7`) next to a direct entry — connecting twice and mounting every tool under two `mcp__` prefixes. Server configs now dedupe by connection identity (command+args+env+cwd, or url+headers), preferring the plain name, and final minted tool-name collisions from lossy sanitization are dropped deterministically with a warning instead of silently overwriting the tool registry ([#6786](https://github.com/can1357/oh-my-pi/issues/6786)).
+
 ## [17.1.5] - 2026-07-27
 
 ### Added

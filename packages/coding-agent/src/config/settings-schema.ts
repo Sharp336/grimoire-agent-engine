@@ -4224,6 +4224,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.xdevTopLevelDevices": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "xd:// Top-Level Devices",
+			description:
+				"Keep discoverable tools whose names match these glob patterns top-level (schema shipped with every request, called directly) instead of mounting them behind xd:// dispatch. Spends prompt tokens to remove the docs-read/write round-trip for hot devices (for example lsp or mcp__linear_*).",
+		},
+	},
+
 	// MCP
 	"mcp.enableProjectConfig": {
 		type: "boolean",
@@ -4677,6 +4689,18 @@ export const SETTINGS_SCHEMA = {
 	"skills.ignoredSkills": { type: "array", default: [] as string[] },
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
+
+	"skills.promptDescriptionMaxChars": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skill Description Budget",
+			description:
+				"Cap each skill description rendered into the system prompt at this many characters (sentence-aware cut). 0 keeps full descriptions. Full instructions stay available via skill://<name>.",
+		},
+	},
 
 	// Commands
 	"commands.enableClaudeUser": {
@@ -5593,6 +5617,7 @@ export interface SkillsSettings {
 	customDirectories?: string[];
 	ignoredSkills?: string[];
 	includeSkills?: string[];
+	promptDescriptionMaxChars?: number;
 	disabledExtensions?: string[];
 }
 
