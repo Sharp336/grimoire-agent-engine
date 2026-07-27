@@ -729,6 +729,39 @@ describe("Cursor MCP resource frames answer from the host's servers", () => {
 		expect(results).toHaveLength(0);
 	});
 
+	it("records a handled listing as a block with a paired result", async () => {
+		// The model consumes this catalog: without a block and a paired result
+		// the listing is invisible in the UI and stripped from rebuilt history.
+		const { output, results } = await dispatchExec(
+			buildExecMessage({
+				case: "listMcpResourcesExecArgs",
+				value: create(ListMcpResourcesExecArgsSchema, { server: "docs" }),
+			}),
+			{
+				execHandlers: {
+					listMcpResources: async () => [
+						{ uri: "docs://readme", name: "README", mimeType: "text/markdown", server: "docs" },
+					],
+				},
+			},
+		);
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].name).toBe("list_mcp_resources");
+		expect(results.map(r => r.toolCallId)).toEqual([blocks[0].id]);
+		expect(results[0].isError).toBe(false);
+	});
+
+	it("leaves no block for a listing no handler answered", async () => {
+		// The no-handler fallback is a fixed empty catalog: nothing executed, so
+		// a block would claim work that never happened.
+		const { output, results } = await dispatchExec(
+			buildExecMessage({ case: "listMcpResourcesExecArgs", value: create(ListMcpResourcesExecArgsSchema, {}) }),
+		);
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+		expect(results).toHaveLength(0);
+	});
+
 	it("reports a failing list as an error, not an empty catalog", async () => {
 		// An empty success says "asked, none exist" — a lie when the lookup
 		// failed, and one the model cannot retry.
@@ -1007,6 +1040,40 @@ describe("Cursor modern exec frames: Pi tools", () => {
 		const answer = soleResult(frames);
 		if (answer.case !== "piGrepResult") throw new Error(`got ${answer.case}`);
 		expect(answer.value.result.case).toBe("error");
+	});
+
+	it("answers an unavailable edit or write with the protocol's rejected variant", async () => {
+		// These two results model refusal and failure as separate oneof cases.
+		// A denial answered as `error` reads as "the tool ran and broke", which
+		// invites a retry of an operation that was never permitted.
+		const edit = soleResult(
+			(
+				await dispatchExec(
+					buildExecMessage({
+						case: "piEditArgs",
+						value: create(PiEditExecArgsSchema, {
+							path: "/a.ts",
+							edits: [create(PiEditReplacementSchema, { oldText: "x", newText: "y" })],
+						}),
+					}),
+				)
+			).frames,
+		);
+		if (edit.case !== "piEditResult") throw new Error(`got ${edit.case}`);
+		expect(edit.value.result.case).toBe("rejected");
+
+		const write = soleResult(
+			(
+				await dispatchExec(
+					buildExecMessage({
+						case: "piWriteArgs",
+						value: create(PiWriteExecArgsSchema, { path: "/a.ts", content: "x" }),
+					}),
+				)
+			).frames,
+		);
+		if (write.case !== "piWriteResult") throw new Error(`got ${write.case}`);
+		expect(write.value.result.case).toBe("rejected");
 	});
 
 	it("carries a truncation summary onto the Pi success payload", async () => {

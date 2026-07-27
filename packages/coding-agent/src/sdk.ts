@@ -60,7 +60,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
-import { CursorExecHandlers } from "./cursor";
+import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
@@ -2672,6 +2672,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (!device) return undefined;
 			return device instanceof ExtensionToolWrapper ? device : new ExtensionToolWrapper(device, extensionRunner);
 		};
+		// Cursor's resource frames ask what THIS client's servers advertise; only
+		// live connections have any. Built once: the advisor bridges answer from
+		// the same connections the primary does.
+		const cursorMcpResources: CursorMcpResourceAdapter | undefined = mcpManager && {
+			serverNames: () => mcpManager.getConnectedServers(),
+			getServerResources: async name => {
+				// The manager registers a server's tools before its background
+				// resource load finishes, so a frame arriving in that window
+				// would read an empty cache and report "advertises nothing".
+				await mcpManager.ensureServerResources(name);
+				return mcpManager.getServerResources(name);
+			},
+			readServerResource: (name, uri) => mcpManager.readServerResource(name, uri),
+		};
 		const cursorExecHandlers = new CursorExecHandlers({
 			cwd,
 			tools: toolRegistry,
@@ -2681,19 +2695,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// this session did not start on Cursor.
 			getEditReplaceTool: getCursorBridgeEditTool,
 			getToolContext: () => toolContextStore.getContext(),
-			// Cursor's resource frames ask what THIS client's servers advertise;
-			// only live connections have any.
-			mcpResources: mcpManager && {
-				serverNames: () => mcpManager.getConnectedServers(),
-				getServerResources: async name => {
-					// The manager registers a server's tools before its background
-					// resource load finishes, so a frame arriving in that window
-					// would read an empty cache and report "advertises nothing".
-					await mcpManager.ensureServerResources(name);
-					return mcpManager.getServerResources(name);
-				},
-				readServerResource: (name, uri) => mcpManager.readServerResource(name, uri),
-			},
+			mcpResources: cursorMcpResources,
 			emitEvent: event => cursorEventEmitter?.(event),
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
@@ -3312,6 +3314,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// reads the mode and per-tool policies only from the execute-time
 			// context — the primary bridge passes the same store.
 			advisorGetToolContext: () => toolContextStore.getContext(),
+			// Same live connections the primary bridge reads; an advisor's
+			// resource frame would otherwise report every server as empty.
+			advisorMcpResources: cursorMcpResources,
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;

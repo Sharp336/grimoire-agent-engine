@@ -1270,6 +1270,7 @@ export class AgentSession {
 			createGrepTool: config.advisorCreateGrepTool,
 			createEditTool: config.advisorCreateEditTool,
 			getToolContext: config.advisorGetToolContext,
+			mcpResources: config.advisorMcpResources,
 			watchdogPrompt: config.advisorWatchdogPrompt,
 			sharedInstructions: config.advisorSharedInstructions,
 			contextPrompt: config.advisorContextPrompt,

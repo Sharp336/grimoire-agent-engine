@@ -30,6 +30,7 @@ import {
 	PiBashExecResultSchema,
 	PiBashExecSuccessSchema,
 	PiEditExecErrorSchema,
+	PiEditExecRejectedSchema,
 	type PiEditExecResult,
 	PiEditExecResultSchema,
 	PiEditExecSuccessSchema,
@@ -52,6 +53,7 @@ import {
 	type PiTruncation,
 	PiTruncationSchema,
 	PiWriteExecErrorSchema,
+	PiWriteExecRejectedSchema,
 	type PiWriteExecResult,
 	PiWriteExecResultSchema,
 	PiWriteExecSuccessSchema,
@@ -241,6 +243,18 @@ export function buildPiEditError(error: string): PiEditExecResult {
 	});
 }
 
+/**
+ * A refusal is not an execution failure: `PiEditExecResult` models them as
+ * separate variants, and answering a denied call with `error` reads as "the
+ * edit ran and broke", which invites a retry of an operation that was never
+ * permitted.
+ */
+export function buildPiEditRejected(reason: string): PiEditExecResult {
+	return create(PiEditExecResultSchema, {
+		result: { case: "rejected", value: create(PiEditExecRejectedSchema, { reason }) },
+	});
+}
+
 export function buildPiWriteResult(toolResult: ToolResultMessage): PiWriteExecResult {
 	const text = piOutputText(toolResult);
 	if (toolResult.isError) return buildPiWriteError(text || "Write failed");
@@ -252,6 +266,13 @@ export function buildPiWriteResult(toolResult: ToolResultMessage): PiWriteExecRe
 export function buildPiWriteError(error: string): PiWriteExecResult {
 	return create(PiWriteExecResultSchema, {
 		result: { case: "error", value: create(PiWriteExecErrorSchema, { error }) },
+	});
+}
+
+/** Same variant split as {@link buildPiEditRejected}. */
+export function buildPiWriteRejected(reason: string): PiWriteExecResult {
+	return create(PiWriteExecResultSchema, {
+		result: { case: "rejected", value: create(PiWriteExecRejectedSchema, { reason }) },
 	});
 }
 

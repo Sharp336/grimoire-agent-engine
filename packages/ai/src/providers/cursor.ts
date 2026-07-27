@@ -189,6 +189,7 @@ import {
 	buildPiBashError,
 	buildPiBashResult,
 	buildPiEditError,
+	buildPiEditRejected,
 	buildPiEditResult,
 	buildPiFindError,
 	buildPiFindResult,
@@ -199,6 +200,7 @@ import {
 	buildPiReadError,
 	buildPiReadResult,
 	buildPiWriteError,
+	buildPiWriteRejected,
 	buildPiWriteResult,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -1588,6 +1590,16 @@ async function handleExecServerMessage(
 			// unset-oneof result would read as "the call produced nothing".
 			const args = execMsg.message.value;
 			let execResult: ListMcpResourcesExecResult;
+			// The model consumes this catalog, so it needs a block and a paired
+			// result or the listing is invisible in the UI and gone from every
+			// rebuilt history. Only synthesized when a handler exists: without
+			// one the frame is a fixed empty answer that executed nothing.
+			const toolCallId = execHandlers?.listMcpResources ? crypto.randomUUID() : undefined;
+			if (toolCallId) {
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "list_mcp_resources", {
+					server: args.server,
+				});
+			}
 			try {
 				const resources = (await execHandlers?.listMcpResources?.({ server: args.server })) ?? [];
 				execResult = create(ListMcpResourcesExecResultSchema, {
@@ -1615,6 +1627,25 @@ async function handleExecServerMessage(
 						}),
 					},
 				});
+			}
+			if (toolCallId) {
+				// Derived from the answer that goes on the wire, so the block can
+				// never disagree with what the model was told.
+				const settled = execResult.result;
+				const text =
+					settled.case === "success"
+						? `Listed ${settled.value.resources.length} MCP resource(s)`
+						: settled.case === "error"
+							? settled.value.error || "Failed to list MCP resources"
+							: (settled.value?.reason ?? "Failed to list MCP resources");
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"list_mcp_resources",
+					text,
+					settled.case !== "success",
+				);
 			}
 			sendExecClientMessage(h2Request, execMsg, "listMcpResourcesExecResult", execResult);
 			return;
@@ -1787,7 +1818,7 @@ async function handleExecServerMessage(
 				execHandlers?.piEdit?.bind(execHandlers),
 				onToolResult,
 				buildPiEditResult,
-				buildPiEditError,
+				buildPiEditRejected,
 				buildPiEditError,
 				{ toolCallId, toolName: "edit" },
 			);
@@ -1806,7 +1837,7 @@ async function handleExecServerMessage(
 				execHandlers?.piWrite?.bind(execHandlers),
 				onToolResult,
 				buildPiWriteResult,
-				buildPiWriteError,
+				buildPiWriteRejected,
 				buildPiWriteError,
 				{ toolCallId, toolName: "write" },
 			);
@@ -2973,8 +3004,9 @@ function selectMcpCall(toolCall: CursorMcpToolCallCarrier | undefined): CursorMc
  * The streamed `ToolCall` variants whose block the exec channel owns.
  *
  * Each of these is announced on the interaction stream AND dispatched as its
- * own `ExecServerMessage` frame (45-51), so the block is synthesized once — by
- * the exec handler, which is the side that has the result.
+ * own `ExecServerMessage` frame — the Pi family (45-51), plus the two MCP
+ * resource frames — so the block is synthesized once, by the exec handler,
+ * which is the side that has the result.
  *
  * `connect_scm` is deliberately NOT here: `ExecServerMessage` has no
  * connect-SCM case at all (field 44 is `git_diff_request`), so nothing on the
@@ -2991,6 +3023,8 @@ const EXEC_OWNED_TOOL_CALL_CASES: ReadonlySet<string> = new Set([
 	"piGrepToolCall",
 	"piFindToolCall",
 	"piLsToolCall",
+	"listMcpResourcesToolCall",
+	"readMcpResourceToolCall",
 ]);
 
 function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined): boolean {

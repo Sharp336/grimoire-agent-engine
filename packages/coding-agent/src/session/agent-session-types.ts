@@ -24,6 +24,7 @@ import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async"
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
+import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -235,6 +236,14 @@ export interface AgentSessionConfig {
 	 * run a native frame the user configured `ask` or `deny` for.
 	 */
 	advisorGetToolContext?: () => AgentToolContext | undefined;
+	/**
+	 * The live MCP connections the advisor's Cursor resource frames answer from.
+	 *
+	 * Advisors share the session's connections and may be granted tools from
+	 * those same servers; without this their `list_mcp_resources` reports an
+	 * empty catalog and every `read_mcp_resource` a `not_found`.
+	 */
+	advisorMcpResources?: CursorMcpResourceAdapter;
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */

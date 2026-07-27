@@ -43,6 +43,20 @@ const CURSOR_TODO_PHASE = "Tasks";
  */
 type CursorBridgeTool = AgentTool<any, any, any>;
 
+/**
+ * The live MCP connections Cursor's resource frames are answered from.
+ *
+ * Named so every construction site can hand over the same adapter; a session
+ * and its advisors share one set of connections.
+ */
+export interface CursorMcpResourceAdapter {
+	serverNames(): string[];
+	getServerResources(
+		name: string,
+	): Promise<{ resources: { uri: string; name?: string; description?: string; mimeType?: string }[] } | undefined>;
+	readServerResource(name: string, uri: string): Promise<MCPResourceReadResult | undefined>;
+}
+
 interface CursorExecBridgeOptions {
 	cwd: string;
 	getCwd?: () => string;
@@ -118,13 +132,7 @@ interface CursorExecBridgeOptions {
 	 * otherwise read the not-yet-populated cache and report an empty catalog,
 	 * which is indistinguishable from a server that advertises nothing.
 	 */
-	mcpResources?: {
-		serverNames(): string[];
-		getServerResources(
-			name: string,
-		): Promise<{ resources: { uri: string; name?: string; description?: string; mimeType?: string }[] } | undefined>;
-		readServerResource(name: string, uri: string): Promise<MCPResourceReadResult | undefined>;
-	};
+	mcpResources?: CursorMcpResourceAdapter;
 }
 
 /**
