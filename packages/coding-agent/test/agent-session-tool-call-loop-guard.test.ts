@@ -94,6 +94,8 @@ describe("AgentSession tool-call loop guard", () => {
 			"todo.enabled": false,
 			"model.toolCallLoopGuard.enabled": true,
 			"model.toolCallLoopGuard.threshold": 5,
+			"model.toolCallLoopGuard.noProgressThreshold": 0,
+			"model.toolCallLoopGuard.wanderingThreshold": 0,
 			"model.toolCallLoopGuard.exemptTools": ["hub"],
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
@@ -117,5 +119,96 @@ describe("AgentSession tool-call loop guard", () => {
 		);
 		expect(redirects).toHaveLength(1);
 		expect(redirects[0]!.display).toBe(false);
+	});
+
+	it("blocks a stuck tool call via beforeToolCall veto when no-progress threshold is hit", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const modelRegistry = new ModelRegistry(authStorage);
+		const contexts: Context[] = [];
+		let executeCount = 0;
+		const bashTool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Mock bash tool",
+			parameters: type({ "command?": "string" }),
+			execute: async () => {
+				executeCount++;
+				return { content: [{ type: "text" as const, text: "same output" }] };
+			},
+		};
+		let callCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [bashTool], messages: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				const toolCallTurn = callCount < 8;
+				const toolCallId = `tc-${callCount}`;
+				callCount++;
+				const message: AssistantMessage = toolCallTurn
+					? {
+							role: "assistant",
+							content: [
+								{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "echo stuck" } },
+							],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: zeroUsage,
+							stopReason: "toolUse",
+							timestamp: Date.now(),
+						}
+					: {
+							role: "assistant",
+							content: [{ type: "text", text: "Done." }],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: zeroUsage,
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: toolCallTurn ? "toolUse" : "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 99,
+			"model.toolCallLoopGuard.noProgressThreshold": 3,
+			"model.toolCallLoopGuard.wanderingThreshold": 0,
+			"model.toolCallLoopGuard.exemptTools": ["hub"],
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map([[bashTool.name, bashTool]]),
+		});
+
+		await session.prompt("run checks");
+		await session.waitForIdle();
+
+		// With noProgressThreshold=3 (default breakerVetoStreak=3):
+		//   Turns 0-2: bash executes (executeCount=3), builds the no-progress streak.
+		//   Turn 3: veto (critical, consecutiveVetoes=1) — tool never runs.
+		//   Turn 4: veto (critical, consecutiveVetoes=2) — tool never runs.
+		//   Turn 5: veto (breaker, consecutiveVetoes=3) — agent.abort() ends the turn.
+		// The breaker force-aborts before the mock's full 8 tool-call turns run.
+		expect(executeCount).toBe(3);
+		expect(callCount).toBeLessThan(8);
+		// At least one tool result should contain the veto reason.
+		const messages = JSON.stringify(session.agent.state.messages);
+		expect(messages).toContain("tool-call loop guard");
+		expect(messages).toContain("loop breaker");
 	});
 });

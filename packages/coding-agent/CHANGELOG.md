@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- The tool-call loop guard now vetoes stuck no-progress loops before the tool executes: `beforeToolCall` consults the guard's `check()` and returns `{ block: true }` when identical args AND identical results repeat past `model.toolCallLoopGuard.noProgressThreshold` (default 5). The tool never runs, saving tokens and avoiding the wasted call. A breaker (`breakerVetoStreak`, default 3 consecutive vetoes) ends the turn gracefully — session stays pending, no hard failure.
+- Added a wandering detector for prone tools (`web.fetch`, `http.request`, `browser.*`): warns at `model.toolCallLoopGuard.wanderingThreshold` (default 6 distinct argument sets) and escalates to a veto at `wanderingEscalation` (default 12). Bulk reads over distinct files are not prone. A dedicated `tool-call-wandering-redirect` prompt steers the model toward web search or yielding.
+- Added settings: `model.toolCallLoopGuard.noProgressThreshold`, `.wanderingThreshold`, `.wanderingEscalation`, `.breakerVetoStreak`, `.proneTools`.
+
 ## [17.1.4] - 2026-07-26
 
 ### Added
