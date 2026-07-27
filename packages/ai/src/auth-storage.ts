@@ -373,6 +373,11 @@ export interface CredentialRefreshLeaseFence {
 
 export interface AuthCredentialStore {
 	close(): void;
+	/**
+	 * Stateful probe for commits made by another process to the backing store.
+	 * Returns true once per observed change.
+	 */
+	pollExternalChanges?(): boolean;
 	/** Optional hook to notify the underlying store that usage report cache is stale. */
 	invalidateUsageCache?(signal?: AbortSignal): Promise<void>;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
@@ -1344,6 +1349,19 @@ export class AuthStorage {
 
 	getGeneration(): number {
 		return this.#generation;
+	}
+
+	/**
+	 * Reload state after another process commits to the backing store, then
+	 * notify snapshot consumers even when only credential blocks changed.
+	 */
+	async pollExternalChanges(): Promise<boolean> {
+		const pollExternalChanges = this.#store.pollExternalChanges?.bind(this.#store);
+		if (!pollExternalChanges?.()) return false;
+		const previousGeneration = this.#generation;
+		await this.reload();
+		if (this.#generation === previousGeneration) this.#bumpGeneration("external-store");
+		return true;
 	}
 
 	onGenerationChanged(listener: (generation: number) => void): () => void {
@@ -6669,11 +6687,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#lastUsageHistoryStmt: Statement;
 	#listUsageHistoryStmt: Statement;
 	#updateUsageHistoryStmt: Statement;
+	#dataVersion: number;
 	#closed = false;
 
 	constructor(db: Database) {
 		this.#db = db;
 		this.#initializeSchema();
+		this.#dataVersion = this.#readDataVersion();
 
 		this.#listActiveStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
@@ -8178,6 +8198,22 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	deleteProvider(provider: string): void {
 		this.deleteAuthCredentialsForProvider(provider, "deleted by user");
+	}
+
+	/**
+	 * SQLite increments `data_version` when another connection commits. Own
+	 * writes leave it unchanged and already notify AuthStorage directly.
+	 */
+	pollExternalChanges(): boolean {
+		const dataVersion = this.#readDataVersion();
+		if (dataVersion === this.#dataVersion) return false;
+		this.#dataVersion = dataVersion;
+		return true;
+	}
+
+	#readDataVersion(): number {
+		const row = this.#db.query("PRAGMA data_version").get() as { data_version?: number } | null;
+		return row?.data_version ?? 0;
 	}
 
 	close(): void {

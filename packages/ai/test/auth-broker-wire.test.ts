@@ -190,7 +190,9 @@ describe("auth-broker wire surface", () => {
 		expect(rawUnchanged.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 	});
 
-	test("projects Codex meter blocks to shared only for clients without the capability", async () => {
+	test("projects Codex meter blocks for legacy clients and observes writes from another connection", async () => {
+		await handle!.close();
+		handle = undefined;
 		const credential = storage!.upsertCredential("openai-codex", {
 			...mintOAuthCredential("codex-scopes", Date.now() + 60_000),
 		})[0];
@@ -225,6 +227,7 @@ describe("auth-broker wire surface", () => {
 		} finally {
 			db.close();
 		}
+		await storage!.pollExternalChanges();
 		expect(readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id)).toEqual([
 			{
 				block_scope: "chat",
@@ -242,6 +245,16 @@ describe("auth-broker wire surface", () => {
 				updated_at: sparkUpdatedAtSec,
 			},
 		]);
+
+		handle = startAuthBroker({
+			storage: storage!,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			externalChangePollMs: 10,
+			// This integration exercises the real server poll; fake timers do not
+			// drive Bun's HTTP stream lifecycle.
+		});
 
 		const currentClient = new AuthBrokerClient({ url: handle!.url, token });
 		const currentResult = await currentClient.fetchSnapshot();
@@ -292,12 +305,21 @@ describe("auth-broker wire surface", () => {
 			waitMs: 1000,
 		});
 		const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
-		storage!.upsertCredentialBlock({
-			credentialId: credential.id,
-			providerKey: "openai-codex:oauth",
-			blockScope: "chat",
-			blockedUntilMs: updatedChatBlockedUntilMs,
-		});
+		const legacyWriter = new Database(path.join(tempDir, "agent.db"));
+		try {
+			legacyWriter
+				.prepare(
+					`INSERT INTO auth_credential_blocks (
+						credential_id, provider_key, block_scope, blocked_until_ms, updated_at
+					) VALUES (?, 'openai-codex:oauth', 'shared', ?, ?)
+					ON CONFLICT(credential_id, provider_key, block_scope) DO UPDATE SET
+						blocked_until_ms = MAX(auth_credential_blocks.blocked_until_ms, excluded.blocked_until_ms),
+						updated_at = excluded.updated_at`,
+				)
+				.run(credential.id, updatedChatBlockedUntilMs, Math.floor(Date.now() / 1000));
+		} finally {
+			legacyWriter.close();
+		}
 		const changedLegacyResult = await pendingLegacySnapshot;
 		if (changedLegacyResult.status !== 200) throw new Error("expected legacy-client long-poll snapshot");
 		expect(

@@ -42,6 +42,8 @@ import {
 } from "./types";
 import { getAuthBrokerWireSchemas } from "./wire-schema-resource";
 
+const DEFAULT_EXTERNAL_CHANGE_POLL_MS = 250;
+
 export interface AuthBrokerServerOptions {
 	/** Underlying credential storage (wraps the local SQLite store on the broker). */
 	storage: AuthStorage;
@@ -63,6 +65,11 @@ export interface AuthBrokerServerOptions {
 	 * without long sleeps. Default {@link DEFAULT_STREAM_KEEPALIVE_MS}.
 	 */
 	streamKeepaliveMs?: number;
+	/**
+	 * Override cross-process SQLite change polling in milliseconds.
+	 * Internal-only — tests use a short interval. Default 250ms.
+	 */
+	externalChangePollMs?: number;
 }
 
 export interface AuthBrokerServerHandle {
@@ -183,11 +190,18 @@ function delayResult(ms: number): { promise: Promise<"timeout">; cancel: () => v
 class GenerationGate {
 	readonly #storage: AuthStorage;
 	readonly #unsubscribe: () => void;
+	readonly #pollTimer: NodeJS.Timeout;
+	#pollInFlight = false;
 	#waiters: Map<number, Set<() => void>> = new Map();
 
-	constructor(storage: AuthStorage) {
+	constructor(storage: AuthStorage, pollIntervalMs: number) {
 		this.#storage = storage;
 		this.#unsubscribe = storage.onGenerationChanged(generation => this.#wake(generation));
+		this.#pollTimer = setInterval(() => {
+			void this.#pollExternalChanges();
+		}, pollIntervalMs);
+		this.#pollTimer.unref?.();
+		void this.#pollExternalChanges();
 	}
 
 	waitForChange(afterGeneration: number, signal: AbortSignal): Promise<"changed" | "aborted"> {
@@ -219,11 +233,24 @@ class GenerationGate {
 	}
 
 	close(): void {
+		clearInterval(this.#pollTimer);
 		this.#unsubscribe();
 		for (const waiters of this.#waiters.values()) {
 			for (const resolve of waiters) resolve();
 		}
 		this.#waiters.clear();
+	}
+
+	async #pollExternalChanges(): Promise<void> {
+		if (this.#pollInFlight) return;
+		this.#pollInFlight = true;
+		try {
+			await this.#storage.pollExternalChanges();
+		} catch (error) {
+			logger.debug("Auth broker external store change poll failed", { error: String(error) });
+		} finally {
+			this.#pollInFlight = false;
+		}
 	}
 
 	#wake(generation: number): void {
@@ -617,6 +644,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 	const tokens = new Set<string>(opts.bearerTokens);
 	const version = opts.version;
 	const streamKeepaliveMs = opts.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
+	const externalChangePollMs = opts.externalChangePollMs ?? DEFAULT_EXTERNAL_CHANGE_POLL_MS;
 
 	const refresher = opts.disableRefresher
 		? undefined
@@ -626,7 +654,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				refreshIntervalMs: opts.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS,
 			});
 	refresher?.start();
-	const generationGate = new GenerationGate(opts.storage);
+	const generationGate = new GenerationGate(opts.storage, externalChangePollMs);
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
