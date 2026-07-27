@@ -22,6 +22,17 @@ export interface AgentState {
 	startedAt?: number;
 	completedAt?: number;
 	error?: string;
+	/** Resolved model id (expanded provider/id, not raw alias) after a run. */
+	resolvedModel?: string;
+	/** Human-in-the-loop gate state for this agent. */
+	gateStatus?: GateStatus;
+}
+
+export interface GateStatus {
+	/** Whether the gate is currently paused awaiting human input. */
+	paused: boolean;
+	/** The action the human chose when the gate resolved. */
+	resolvedAction?: string;
 }
 
 export interface SwarmState {
