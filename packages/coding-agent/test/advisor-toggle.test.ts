@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -417,6 +418,61 @@ describe("AgentSession advisor toggle", () => {
 		await session.newSession();
 
 		expect(session.getAdvisorCost()).toBe(0);
+	});
+	it("keeps advisor cost across a fork of the same conversation", async () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.toggleAdvisorEnabled();
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to exist");
+		sessionManager.appendMessage({ role: "user", content: "keep me", timestamp: 1 });
+		appendAdvisorCost(advisor, 0.5, 1);
+		const previousSessionFile = sessionManager.getSessionFile();
+
+		expect(await session.fork()).toBe(true);
+
+		// A fork copies the entries and artifacts and keeps the messages, so the
+		// conversation continues under a new file and its spend continues with it.
+		expect(sessionManager.getSessionFile()).not.toBe(previousSessionFile);
+		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
+	});
+	it("clears advisor cost when a handoff opens the replacement session", async () => {
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
+		try {
+			session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+			session.toggleAdvisorEnabled();
+			const advisor = session.getAdvisorAgent();
+			if (!advisor) throw new Error("Expected advisor agent to exist");
+			sessionManager.appendMessage({ role: "user", content: "work to hand off", timestamp: 1 });
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				api: "anthropic-messages",
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 2,
+			});
+			session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+			appendAdvisorCost(advisor, 0.5, 1);
+			const previousSessionFile = session.sessionFile;
+
+			await session.handoff();
+
+			// The handoff hands the work over to a fresh conversation, so the spend of
+			// the one it summarizes must not follow it.
+			expect(session.sessionFile).not.toBe(previousSessionFile);
+			expect(session.getAdvisorCost()).toBe(0);
+		} finally {
+			vi.restoreAllMocks();
+		}
 	});
 	it("clears advisor cost when a branch skips conversation restore", async () => {
 		const extensionRunner = {

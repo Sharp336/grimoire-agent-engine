@@ -65,6 +65,7 @@ export interface SessionHandoffHost {
 	resetTodoCycle(): void;
 	buildDisplaySessionContext(): SessionContext;
 	resetAdvisorRuntimes(): void;
+	clearAdvisorCost(): void;
 	syncTodoPhasesFromBranch(): void;
 }
 
@@ -232,6 +233,10 @@ export class SessionHandoff {
 					previousSessionFile ? { parentSession: previousSessionFile } : undefined,
 				);
 				this.#host.markBashSessionTransition(bashTransition);
+				// The handoff opens a fresh conversation, so the spend of the one it
+				// summarizes stays with it. Clearing here, at the commit point, keeps the
+				// status line honest even if a later step throws.
+				this.#host.clearAdvisorCost();
 				sessionTransitioned = true;
 			} finally {
 				this.#host.finishBashSessionTransition(bashTransition, sessionTransitioned);

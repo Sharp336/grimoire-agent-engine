@@ -1379,6 +1379,7 @@ export class AgentSession {
 			resetTodoCycle: () => this.#todo.resetCycle(),
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
+			clearAdvisorCost: () => this.#advisors.clearCost(),
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
