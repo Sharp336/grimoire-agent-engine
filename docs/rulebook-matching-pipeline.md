@@ -185,11 +185,12 @@ Effective rule provider order is currently:
 
 1. `native` (100)
 2. `omp-plugins` (90)
-3. `agents` (70)
-4. `cursor` (50)
-5. `windsurf` (50)
-6. `cline` (40)
-7. `github` (30)
+3. `claude-plugins` (70)
+4. `agents` (70)
+5. `cursor` (50)
+6. `windsurf` (50)
+7. `cline` (40)
+8. `github` (30)
 8. `builtin-defaults` (1)
 
 ### Intra-provider ordering caveat
@@ -200,6 +201,7 @@ Notable source-order differences:
 
 - `native` appends project `.omp/rules`, user `~/.omp/agent/rules`, user `RULES.md`, then nearest project `RULES.md`.
 - `omp-plugins` appends `rules/` results per configured extension package root.
+- `claude-plugins` appends `rules/` results per installed marketplace plugin root.
 - `agents` appends project-walk `.agent`/`.agents` rule dirs before user home dirs.
 - `cursor` appends user then project results.
 - `windsurf` appends user `global_rules` first, then project rules.

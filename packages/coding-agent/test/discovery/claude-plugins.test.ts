@@ -14,6 +14,7 @@ import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
 
@@ -1284,6 +1285,167 @@ describe("listClaudePluginRoots", () => {
 		expect(result.warnings).toEqual([]);
 		expect(result.all.find(c => c.name === "manifest-commands-replace:admin")).toBeDefined();
 		expect(result.all.find(c => c.name === "manifest-commands-replace:default")).toBeUndefined();
+	});
+
+	test("loads rules from plugin rules/ directory", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "rule-pack");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "rules"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"rule-pack@market": [
+					{
+						scope: "user",
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(
+			path.join(pluginPath, "rules", "style.md"),
+			"---\ndescription: Style rule\nalwaysApply: true\n---\nUse tabs.\n",
+		);
+
+		const result = await loadCapability<Rule>("rules", { cwd: tempDir });
+		expect(result.warnings).toEqual([]);
+		const found = result.all.find(rule => rule.name === "style");
+		expect(found).toBeDefined();
+		expect(found?.content.trim()).toBe("Use tabs.");
+		expect(found?.alwaysApply).toBe(true);
+		expect(found?.description).toBe("Style rule");
+	});
+
+	test("loads .mdc rules and parses globs frontmatter", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "mdc-pack");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "rules"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"mdc-pack@market": [
+					{
+						scope: "user",
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(
+			path.join(pluginPath, "rules", "typescript.mdc"),
+			'---\nglobs:\n  - "**/*.ts"\n---\nPrefer const.\n',
+		);
+
+		const result = await loadCapability<Rule>("rules", { cwd: tempDir });
+		expect(result.warnings).toEqual([]);
+		const found = result.all.find(rule => rule.name === "typescript");
+		expect(found).toBeDefined();
+		expect(found?.globs).toEqual(["**/*.ts"]);
+	});
+
+	test("preserves plugin scope on discovered rules", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "scoped-rules");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "rules"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"scoped-rules@market": [
+					{
+						scope: "project",
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(path.join(pluginPath, "rules", "scoped.md"), "Scoped body\n");
+
+		const result = await loadCapability<Rule>("rules", { cwd: tempDir });
+		expect(result.warnings).toEqual([]);
+		const found = result.all.find(rule => rule.name === "scoped");
+		expect(found).toBeDefined();
+		expect(found?._source?.provider).toBe("claude-plugins");
+	});
+
+	test("ignores non-markdown files in rules/", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "mixed-rules");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "rules"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"mixed-rules@market": [
+					{
+						scope: "user",
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(path.join(pluginPath, "rules", "keep.md"), "Kept\n");
+		await fs.writeFile(path.join(pluginPath, "rules", "notes.txt"), "Ignored\n");
+		await fs.writeFile(path.join(pluginPath, "rules", "config.json"), "{}\n");
+
+		const result = await loadCapability<Rule>("rules", { cwd: tempDir });
+		expect(result.warnings).toEqual([]);
+		expect(result.all.find(rule => rule.name === "keep")).toBeDefined();
+		expect(result.all.find(rule => rule.name === "notes")).toBeUndefined();
+		expect(result.all.find(rule => rule.name === "config")).toBeUndefined();
+	});
+
+	test("produces no rules and no warnings when plugin has no rules/ directory", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "no-rules");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "skills", "solo"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"no-rules@market": [
+					{
+						scope: "user",
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(
+			path.join(pluginPath, "skills", "solo", "SKILL.md"),
+			"---\nname: solo\ndescription: Solo skill\n---\nBody\n",
+		);
+
+		const result = await loadCapability<Rule>("rules", { cwd: tempDir });
+		expect(result.warnings).toEqual([]);
+		expect(result.all.find(rule => rule._source?.provider === "claude-plugins")).toBeUndefined();
 	});
 });
 
