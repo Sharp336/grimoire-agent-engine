@@ -4702,6 +4702,27 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"skills.promptDescriptionMode": {
+		type: "enum",
+		values: ["full", "brief"] as const,
+		default: "full",
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skill Listing Style",
+			description:
+				"How the system prompt's <skills> listing describes each skill. Brief renders the author's frontmatter summary (else the first sentence of the description); full instructions stay available via skill://<name>.",
+			options: [
+				{ value: "full", label: "Full Description", description: "Render the whole frontmatter description." },
+				{
+					value: "brief",
+					label: "Brief",
+					description: "Render the frontmatter summary, else the first sentence.",
+				},
+			],
+		},
+	},
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -5618,6 +5639,7 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	promptDescriptionMaxChars?: number;
+	promptDescriptionMode?: "full" | "brief";
 	disabledExtensions?: string[];
 }
 

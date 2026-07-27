@@ -6,6 +6,7 @@
 
 - Added `tools.xdevTopLevelDevices`, a glob allowlist that keeps matching discoverable tools (built-in, MCP, or extension) mounted top-level instead of behind `xd://` dispatch, trading prompt tokens for zero docs-read/write round-trips on hot devices.
 - Added `skills.promptDescriptionMaxChars` to cap each skill description rendered into the system prompt's `<skills>` listing (sentence-aware, CJK-safe cut; 0 keeps full descriptions). Full skill instructions remain reachable via `skill://<name>`.
+- Added `skills.promptDescriptionMode` (`full`/`brief`) and skill frontmatter `summary`: brief mode renders the author's one-line summary (else the first sentence of the description) in the `<skills>` listing, keeping it a compact routing index while `skill://<name>` serves the full text.
 
 ### Fixed
 

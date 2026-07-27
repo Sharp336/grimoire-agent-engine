@@ -12,6 +12,12 @@ import type { SourceMeta } from "./types";
 export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
+	/**
+	 * Optional one-line routing summary rendered instead of `description` in
+	 * the system prompt's `<skills>` listing when
+	 * `skills.promptDescriptionMode` is `"brief"`.
+	 */
+	summary?: string;
 	globs?: string[];
 	alwaysApply?: boolean;
 	/**

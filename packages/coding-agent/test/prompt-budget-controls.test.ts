@@ -12,7 +12,11 @@
  *   round-trips) while non-matching tools still mount.
  */
 import { describe, expect, it } from "bun:test";
-import { truncateSkillDescription } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import {
+	firstSentenceOfDescription,
+	renderSkillPromptDescription,
+	truncateSkillDescription,
+} from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { compileXdevDeviceGlobs, isMountableUnderXdev } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 
 describe("truncateSkillDescription", () => {
@@ -41,6 +45,38 @@ describe("truncateSkillDescription", () => {
 		expect([...result].every(ch => ch.length <= 2)).toBe(true);
 		expect(result).not.toMatch(/[\uD800-\uDBFF]$/);
 		expect([...result.slice(0, -1)].every(ch => ch === "𝕏")).toBe(true);
+	});
+});
+
+describe("renderSkillPromptDescription (skills.promptDescriptionMode)", () => {
+	const skill = {
+		description: "飞书多维表格操作。建表、字段、记录、视图、统计、公式，遇到多维表格链接时使用。",
+		summary: "多维表格 Base 增删改查",
+	};
+
+	it("full mode renders the whole description", () => {
+		expect(renderSkillPromptDescription(skill, {})).toBe(skill.description);
+		expect(renderSkillPromptDescription(skill, { mode: "full" })).toBe(skill.description);
+	});
+
+	it("brief mode prefers the author's frontmatter summary", () => {
+		expect(renderSkillPromptDescription(skill, { mode: "brief" })).toBe("多维表格 Base 增删改查");
+	});
+
+	it("brief mode falls back to the first sentence when no summary exists", () => {
+		expect(renderSkillPromptDescription({ description: skill.description }, { mode: "brief" })).toBe(
+			"飞书多维表格操作。",
+		);
+		expect(firstSentenceOfDescription("no boundary at all")).toBe("no boundary at all");
+	});
+
+	it("applies the maxChars cap on top of brief mode", () => {
+		expect(
+			renderSkillPromptDescription(
+				{ description: "x", summary: "多维表格 Base 增删改查全家桶超长摘要" },
+				{ mode: "brief", maxChars: 8 },
+			),
+		).toBe("多维表格…");
 	});
 });
 

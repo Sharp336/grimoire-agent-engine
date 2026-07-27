@@ -6,7 +6,7 @@ import {
 	MANAGED_SKILLS_PROVIDER_ID,
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
-import { skillCapability } from "../capability/skill";
+import { type SkillFrontmatter, skillCapability } from "../capability/skill";
 import type { SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
@@ -27,6 +27,12 @@ export interface Skill {
 	 * prompt's `<skills>` listing.
 	 */
 	hide?: boolean;
+	/**
+	 * Author-provided one-line routing summary (frontmatter `summary`).
+	 * Rendered instead of `description` in the system prompt's `<skills>`
+	 * listing when `skills.promptDescriptionMode` is `"brief"`.
+	 */
+	summary?: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
 }
@@ -110,6 +116,42 @@ export function truncateSkillDescription(description: string, maxChars: number):
 	return `${sliced}…`;
 }
 
+/** Non-empty trimmed frontmatter `summary`, else `undefined`. */
+function frontmatterSummary(frontmatter: SkillFrontmatter | undefined): string | undefined {
+	const value = frontmatter?.summary;
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** First sentence of a description (ASCII+CJK boundaries); the whole text when boundary-free. */
+export function firstSentenceOfDescription(description: string): string {
+	const text = description.trim();
+	for (let i = 0; i < text.length; i++) {
+		if (text[i] in SENTENCE_BOUNDARY_CHARS) {
+			const sentence = text.slice(0, i + 1).trim();
+			if (sentence.length > 0) return sentence;
+		}
+	}
+	return text;
+}
+
+/**
+ * The description string rendered into the system prompt's `<skills>`
+ * listing. `"brief"` mode prefers the author's frontmatter `summary`, else
+ * falls back to the first sentence of the description; the
+ * `skills.promptDescriptionMaxChars` cap applies on top in either mode. The
+ * full skill text always stays reachable via `skill://<name>`.
+ */
+export function renderSkillPromptDescription(
+	skill: Pick<Skill, "description" | "summary">,
+	options: { mode?: "full" | "brief"; maxChars?: number },
+): string {
+	const base =
+		options.mode === "brief" ? (skill.summary ?? firstSentenceOfDescription(skill.description)) : skill.description;
+	return truncateSkillDescription(base, options.maxChars ?? 0);
+}
+
 /**
  * Whether `name` is already claimed by an active authored (non-managed) skill.
  *
@@ -154,6 +196,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			summary: frontmatterSummary(capSkill.frontmatter),
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -289,6 +332,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+				summary: frontmatterSummary(capSkill.frontmatter),
 				_source: capSkill._source,
 			});
 			realPathSet.add(resolvedPath);
@@ -326,6 +370,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+					summary: frontmatterSummary(capSkill.frontmatter),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -415,6 +460,10 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			summary: (() => {
+				const summary = frontmatterSummary(capSkill.frontmatter);
+				return summary === undefined ? undefined : sanitizeManagedDescription(summary);
+			})(),
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);
