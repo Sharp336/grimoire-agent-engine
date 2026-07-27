@@ -1,4 +1,11 @@
-import type { Agent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type {
+	Agent,
+	AgentMessage,
+	AgentTool,
+	AgentToolContext,
+	StreamFn,
+	ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
 	Effort,
@@ -219,6 +226,15 @@ export interface AgentSessionConfig {
 	 * configured `edit.mode` and rejects the frame's `old_text`/`new_text` pairs.
 	 */
 	advisorCreateEditTool?(): AgentTool | undefined;
+	/**
+	 * The execute-time context the advisor's bridge tools resolve approval from.
+	 *
+	 * `ExtensionToolWrapper` reads `tools.approvalMode`, per-tool
+	 * `tools.approval.<tool>` policies and `autoApprove` only from this context;
+	 * with none it defaults to `yolo` with empty policies, so a bridge tool would
+	 * run a native frame the user configured `ask` or `deny` for.
+	 */
+	advisorGetToolContext?: () => AgentToolContext | undefined;
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */

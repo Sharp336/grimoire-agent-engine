@@ -2,6 +2,7 @@ import {
 	Agent,
 	type AgentMessage,
 	type AgentTool,
+	type AgentToolContext,
 	AppendOnlyContextManager,
 	type CompactionSummaryMessage,
 	countTokens,
@@ -193,6 +194,14 @@ export interface SessionAdvisorsOptions {
 	 * match, so without this every native advisor edit fails validation.
 	 */
 	createEditTool?(): AgentTool | undefined;
+	/**
+	 * The execute-time context the bridge's tools resolve approval from.
+	 *
+	 * `ExtensionToolWrapper` reads the approval mode, per-tool policies and
+	 * `autoApprove` only from here; with none it falls back to `yolo` and empty
+	 * policies, so a native frame would run past a configured `ask` or `deny`.
+	 */
+	getToolContext?: () => AgentToolContext | undefined;
 	watchdogPrompt?: string;
 	sharedInstructions?: string;
 	contextPrompt?: string;
@@ -262,6 +271,7 @@ export class SessionAdvisors {
 	#advisorTools: AgentTool[] | undefined;
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
 	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
+	#advisorGetToolContext: SessionAdvisorsOptions["getToolContext"];
 	#advisorWatchdogPrompt: string | undefined;
 	#advisorSharedInstructions: string | undefined;
 	#advisorContextPrompt: string | undefined;
@@ -286,6 +296,7 @@ export class SessionAdvisors {
 		this.#advisorTools = options.tools;
 		this.#advisorCreateGrepTool = options.createGrepTool;
 		this.#advisorCreateEditTool = options.createEditTool;
+		this.#advisorGetToolContext = options.getToolContext;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
 		this.#advisorSharedInstructions = options.sharedInstructions;
 		this.#advisorContextPrompt = options.contextPrompt;
@@ -719,6 +730,9 @@ export class SessionAdvisors {
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
 				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
+				// Approval mode, per-tool policies and `autoApprove` live only on
+				// this context; without it every bridge tool resolves as `yolo`.
+				getToolContext: this.#advisorGetToolContext,
 				allowNativeDelete: advisorCanMutateFiles,
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster

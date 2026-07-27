@@ -139,7 +139,7 @@ function cursorAssistantMessage(): AssistantMessage {
 	};
 }
 
-function newBlockState(): BlockState {
+function newBlockState(overrides: Partial<BlockState> = {}): BlockState {
 	let textBlock: BlockState["currentTextBlock"] = null;
 	let thinkingBlock: BlockState["currentThinkingBlock"] = null;
 	let toolCall: ToolCallState | null = null;
@@ -166,6 +166,7 @@ function newBlockState(): BlockState {
 			toolCall = t;
 		},
 		setFirstTokenTime: () => {},
+		...overrides,
 	};
 }
 
@@ -270,6 +271,75 @@ describe("Cursor stream teardown", () => {
 		flushOpenToolCalls(output, stream, state);
 
 		expect(block.arguments).toEqual({ path: "/repo/a.ts" });
+	});
+
+	it("pairs a server-owned call the transport cut short", async () => {
+		// `connect_scm` and native todo blocks are stamped `kCursorExecResolved`
+		// at start, so `agent-loop.ts` synthesizes no placeholder for them and
+		// only their completion frame pairs a result. A transport that dies
+		// first left the call unpaired, and `buildSessionContext` strips a
+		// dangling call — the whole interaction vanished from replay.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const paired: ToolResultMessage[] = [];
+		const state = newBlockState({ onToolResult: result => void paired.push(result) });
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallStarted",
+					value: {
+						callId: "envelope-todo",
+						toolCall: { tool: { case: "updateTodosToolCall", value: { args: { todos: [] } } } },
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+
+		const block = output.content.find((b): b is ToolCallState => b.type === "toolCall");
+		if (!block) throw new Error("expected an open tool-call block");
+		expect(paired).toHaveLength(0);
+
+		flushOpenToolCalls(output, stream, state);
+
+		expect(paired).toHaveLength(1);
+		expect(paired[0].toolCallId).toBe(block.id);
+		expect(paired[0].isError).toBe(true);
+	});
+
+	it("leaves an exec-settled MCP call to the dispatch that owns its result", async () => {
+		// MCP blocks are also marked resolved, but by the exec dispatch, which
+		// already emitted their result and is awaited before teardown. Pairing
+		// one here too would file a duplicate against the same `toolCallId`.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const paired: ToolResultMessage[] = [];
+		const state = newBlockState({ onToolResult: result => void paired.push(result) });
+		state.resolvedMcpToolCallIds.add("mcp-1");
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallStarted",
+					value: {
+						callId: "envelope-mcp",
+						toolCall: { tool: { case: "mcpToolCall", value: { args: { toolCallId: "mcp-1" } } } },
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+
+		flushOpenToolCalls(output, stream, state);
+
+		expect(paired).toEqual([]);
 	});
 });
 

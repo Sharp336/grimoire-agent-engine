@@ -3259,6 +3259,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Same `replace`-mode requirement as the primary bridge; the advisor
 			// path gates it on the advisor's own `edit` grant.
 			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner),
+			// The advisor's bridge tools are wrapped for approval, but the wrapper
+			// reads the mode and per-tool policies only from the execute-time
+			// context — the primary bridge passes the same store.
+			advisorGetToolContext: () => toolContextStore.getContext(),
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;

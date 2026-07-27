@@ -478,6 +478,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let h2Settled = false;
 		let sawTurnEnded = false;
 		let endStreamError: Error | null = null;
+		// Reachable from the catch: a stream that dies mid-turn must still close
+		// and pair the blocks it left open, and `state` itself is scoped to the
+		// try below.
+		let openBlockState: BlockState | undefined;
 		const settleH2 = (error?: unknown): void => {
 			if (h2Settled) return;
 			h2Settled = true;
@@ -597,6 +601,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
 				onToolResult: options?.onToolResult,
 			};
+			openBlockState = state;
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
 				conversationStateCache.set(conversationId, checkpoint);
@@ -754,6 +759,19 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			// (handlers have no cancellation contract and must not delay the
 			// terminal error the user asked for).
 			await drainInFlightDispatches();
+			// A stream that dies mid-turn leaves blocks open, and this is the path
+			// it takes: `settleH2` rejects when the transport closes without
+			// `turnEnded`, so the success-path flush above never runs. Closing
+			// them here settles their live cards and pairs the server-owned calls
+			// (`connect_scm`, native todo) that nothing else answers — an
+			// unpaired call is stripped from every rebuilt transcript.
+			// Undefined only when the failure predates the state's construction,
+			// in which case no block was ever opened.
+			if (openBlockState) {
+				endCurrentTextBlock(output, stream, openBlockState);
+				endCurrentThinkingBlock(output, stream, openBlockState);
+				flushOpenToolCalls(output, stream, openBlockState);
+			}
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
@@ -2821,6 +2839,18 @@ function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined)
  * never set the partial buffer; `parseStreamingJson(undefined)` returns `{}`,
  * so reparsing unconditionally would erase the arguments of every such block
  * caught open by a truncated stream.
+ *
+ * Server-owned blocks are also paired here. `connect-scm` and `todo` are
+ * stamped {@link kCursorExecResolved} the moment they open, so `agent-loop.ts`
+ * synthesizes no placeholder for them and only their `toolCallCompleted` frame
+ * pairs a result. A transport that closes before that frame would leave the
+ * call unpaired, and `buildSessionContext` strips a dangling call from every
+ * rebuilt transcript — the interaction disappears. An interrupted result is
+ * emitted instead.
+ *
+ * MCP blocks are excluded even when resolved: the exec dispatch that marked
+ * them owns their result, and `drainInFlightDispatches` awaits it before this
+ * runs, so pairing here would duplicate one against the same `toolCallId`.
  */
 export function flushOpenToolCalls(
 	output: AssistantMessage,
@@ -2835,6 +2865,17 @@ export function flushOpenToolCalls(
 		if (partialJson !== undefined) {
 			block.arguments = parseStreamingJson(partialJson);
 			clearStreamingPartialJson(block);
+		}
+		const kind = block[kStreamingBlockKind];
+		if (kind === "connect-scm" || kind === "todo") {
+			state.onToolResult?.({
+				role: "toolResult",
+				toolCallId: block.id,
+				toolName: block.name,
+				content: [{ type: "text", text: "The connection to Cursor closed before this call completed." }],
+				isError: true,
+				timestamp: Date.now(),
+			});
 		}
 		stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
 	}

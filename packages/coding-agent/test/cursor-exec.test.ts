@@ -344,6 +344,55 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(result.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("not available");
 	});
 
+	it("denies a native pi_edit frame the user's policy blocks", async () => {
+		// The bridge's `edit` is wrapped, but `ExtensionToolWrapper` reads the
+		// approval mode and per-tool policies only from the execute-time
+		// context — with none it resolves as `yolo` with empty policies and the
+		// frame edits the file regardless of what the user configured.
+		const target = path.join(cwd, "denied.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const settings = Settings.isolated({ "tools.approval": { edit: "deny" } });
+		const session = createTestSession(cwd, { settings });
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: bridgeToolMap(new Map<string, Tool>([["edit", new EditTool(session)]]), () =>
+				createBridgeEditTool(session, passthroughRunner()),
+			),
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+
+		const result = await handlers.piEdit({
+			toolCallId: "e5",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
+	});
+
+	it("denies a scoped pi_grep frame the user's policy blocks", async () => {
+		// Same gate on the other bridge-only tool: the per-call `grep` the
+		// factory builds for a frame carrying `context`/`limit` must answer to
+		// `tools.approval.grep` like every registry call.
+		await Bun.write(path.join(cwd, "hit.txt"), "needle\n");
+		const settings = Settings.isolated({ "tools.approval": { grep: "deny" } });
+		const session = createTestSession(cwd, { settings });
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			createGrepTool: createBridgeGrepFactory(session, passthroughRunner()),
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+
+		const result = await handlers.piGrep({
+			toolCallId: "g2",
+			args: { pattern: "needle", path: cwd, context: 1, limit: 5 },
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(result.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("blocked by user policy");
+	});
+
 	it("wraps the per-call grep the real bridge factory builds", async () => {
 		// The reviewed bypass was in the factory the session hands the bridge,
 		// not in the bridge: a raw `new GrepTool(...)` there skips the approval
