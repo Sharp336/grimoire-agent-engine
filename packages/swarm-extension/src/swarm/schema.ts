@@ -2,6 +2,14 @@
 // Raw YAML shape (snake_case, optional fields)
 // ============================================================================
 
+interface RawGateConfig {
+	prompt: string;
+	actions: string[];
+	timeout?: number;
+	on_timeout?: "fail" | "default_action";
+	default_action?: string;
+}
+
 interface RawSwarmAgentConfig {
 	role: string;
 	task: string;
@@ -9,6 +17,9 @@ interface RawSwarmAgentConfig {
 	reports_to?: string[];
 	waits_for?: string[];
 	model?: string;
+	agent?: string;
+	workspace?: string;
+	gate?: RawGateConfig;
 }
 
 interface RawSwarmConfig {
@@ -26,6 +37,14 @@ interface RawSwarmConfig {
 
 export type SwarmMode = "pipeline" | "parallel" | "sequential";
 
+export interface GateConfig {
+	prompt: string;
+	actions: string[];
+	timeout?: number;
+	onTimeout?: "fail" | "default_action";
+	defaultAction?: string;
+}
+
 export interface SwarmAgent {
 	name: string;
 	role: string;
@@ -34,6 +53,12 @@ export interface SwarmAgent {
 	reportsTo: string[];
 	waitsFor: string[];
 	model?: string;
+	/** Specific agent type to use (e.g. "reviewer", "librarian"). Shape-validated only. */
+	agent?: string;
+	/** Workspace sub-path for this agent. */
+	workspace?: string;
+	/** Human-in-the-loop gate configuration. */
+	gate?: GateConfig;
 }
 
 export interface SwarmDefinition {
@@ -90,6 +115,50 @@ export function parseSwarmYaml(content: string): SwarmDefinition {
 			throw new Error(`Agent '${name}': 'task' is required`);
 		}
 
+		// Validate agent field (shape only — non-empty string)
+		if (config.agent !== undefined && typeof config.agent !== "string") {
+			throw new Error(`Agent '${name}': 'agent' must be a string`);
+		}
+		const agentTrimmed = typeof config.agent === "string" ? config.agent.trim() : undefined;
+		if (agentTrimmed === "") {
+			throw new Error(`Agent '${name}': 'agent' must not be empty when provided`);
+		}
+
+		// Validate workspace field
+		if (config.workspace !== undefined && typeof config.workspace !== "string") {
+			throw new Error(`Agent '${name}': 'workspace' must be a string`);
+		}
+		const workspaceTrimmed = typeof config.workspace === "string" ? config.workspace.trim() : undefined;
+
+		// Parse gate config
+		let gate: GateConfig | undefined;
+		if (config.gate) {
+			if (typeof config.gate !== "object" || config.gate === null) {
+				throw new Error(`Agent '${name}': 'gate' must be an object`);
+			}
+			if (!config.gate.prompt || typeof config.gate.prompt !== "string") {
+				throw new Error(`Agent '${name}': gate.prompt is required`);
+			}
+			if (!Array.isArray(config.gate.actions) || config.gate.actions.length === 0) {
+				throw new Error(`Agent '${name}': gate.actions is required and must be non-empty`);
+			}
+			// Validate on_timeout enum if provided
+			if (config.gate.on_timeout !== undefined && !["fail", "default_action"].includes(config.gate.on_timeout)) {
+				throw new Error(`Agent '${name}': gate.on_timeout must be 'fail' or 'default_action'`);
+			}
+			// timeout must be a number if provided
+			if (config.gate.timeout !== undefined && typeof config.gate.timeout !== "number") {
+				throw new Error(`Agent '${name}': gate.timeout must be a number`);
+			}
+			gate = {
+				prompt: config.gate.prompt,
+				actions: config.gate.actions,
+				timeout: config.gate.timeout,
+				onTimeout: config.gate.on_timeout,
+				defaultAction: config.gate.default_action,
+			};
+		}
+
 		agentOrder.push(name);
 		agents.set(name, {
 			name,
@@ -99,6 +168,9 @@ export function parseSwarmYaml(content: string): SwarmDefinition {
 			reportsTo: Array.isArray(config.reports_to) ? config.reports_to : [],
 			model: typeof config.model === "string" ? config.model.trim() : undefined,
 			waitsFor: Array.isArray(config.waits_for) ? config.waits_for : [],
+			agent: agentTrimmed || undefined,
+			workspace: workspaceTrimmed || undefined,
+			gate,
 		});
 	}
 
