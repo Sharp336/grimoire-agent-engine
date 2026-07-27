@@ -4,6 +4,7 @@ import {
 	buildAgentTokenShare,
 	buildModelPerformanceLookup,
 	buildSkillRows,
+	resolveAvailableSelection,
 } from "../src/client/data/view-models";
 import type { AgentTypeStats, ModelPerformancePoint, SkillUsageStats } from "../src/shared-types";
 
@@ -35,6 +36,13 @@ describe("client view models", () => {
 		expect(series?.data.map(point => point.timestamp)).toEqual([DAY, DAY * 10]);
 		expect(series?.data.map(point => point.requests)).toEqual([1, 2]);
 		expect(series?.data.map(point => point.avgTtftSeconds)).toEqual([0.25, 0.5]);
+	});
+});
+
+describe("resolveAvailableSelection", () => {
+	it("keeps available selections and clears removed ones", () => {
+		expect(resolveAvailableSelection("review", ["review", "lint"])).toBe("review");
+		expect(resolveAvailableSelection("review", ["lint"])).toBeNull();
 	});
 });
 

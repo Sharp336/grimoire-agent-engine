@@ -5,7 +5,7 @@ import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
 import { formatCompact, formatCost, formatInteger, formatPercent, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
-import { buildToolRows, type ToolRowView } from "../data/view-models";
+import { buildToolRows, resolveAvailableSelection, type ToolRowView } from "../data/view-models";
 import type { TimeRange, ToolModelStats, ToolTimeSeriesPoint, ToolUsageStats } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -368,14 +368,15 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 	const [tool, setTool] = useState<string | null>(null);
 
 	const tools = useMemo(() => [...new Set(byToolModel.map(row => row.tool))].sort(), [byToolModel]);
+	const effectiveTool = resolveAvailableSelection(tool, tools);
 
 	const rows = useMemo(() => {
-		const filtered = tool ? byToolModel.filter(row => row.tool === tool) : byToolModel;
+		const filtered = effectiveTool ? byToolModel.filter(row => row.tool === effectiveTool) : byToolModel;
 		return filtered.map(row => ({
 			...row,
 			errorRate: row.calls > 0 ? row.errors / row.calls : 0,
 		}));
-	}, [byToolModel, tool]);
+	}, [byToolModel, effectiveTool]);
 
 	const columns = useMemo(
 		() => [
@@ -440,7 +441,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 				</span>
 				<select
 					className="stats-select"
-					value={tool ?? ""}
+					value={effectiveTool ?? ""}
 					onChange={e => setTool(e.target.value || null)}
 					style={{ maxWidth: "320px", flex: 1 }}
 				>

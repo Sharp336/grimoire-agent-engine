@@ -14,10 +14,12 @@ import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStats,
+	ProvisionalSkillInvocationStats,
+	ResultSkillInvocationStats,
 	SessionEntry,
+	SessionHeader,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
-	SkillInvocationStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
@@ -342,7 +344,7 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
  * Extract authoritative executed-skill targets from a `read` result.
  * `displayReadTargets` is presentation metadata and is intentionally ignored.
  */
-function extractResultSkillInvocations(sessionFile: string, entry: SessionMessageEntry): SkillInvocationStats[] {
+function extractResultSkillInvocations(sessionFile: string, entry: SessionMessageEntry): ResultSkillInvocationStats[] {
 	const msg = entry.message as ToolResultMessage;
 	if (
 		msg.role !== "toolResult" ||
@@ -356,7 +358,7 @@ function extractResultSkillInvocations(sessionFile: string, entry: SessionMessag
 	const skillTargets = details.skillTargets;
 	if (!Array.isArray(skillTargets)) return [];
 
-	const invocations: SkillInvocationStats[] = [];
+	const invocations: ResultSkillInvocationStats[] = [];
 	for (const candidate of skillTargets) {
 		if (!candidate || typeof candidate !== "object") continue;
 		if (!("target" in candidate) || !("skill" in candidate)) continue;
@@ -387,6 +389,28 @@ function parseJsonLine(bytes: Uint8Array, start: number, end: number): SessionEn
 	} catch {
 		return null;
 	}
+}
+
+function isSessionHeader(entry: SessionEntry | null): entry is SessionHeader {
+	return entry?.type === "session" && typeof (entry as Partial<SessionHeader>).id === "string";
+}
+
+async function readSessionHeader(sessionFile: string): Promise<SessionHeader | null> {
+	try {
+		for await (const line of readLines(Bun.file(sessionFile).stream())) {
+			const entry = parseJsonLine(line, 0, line.length);
+			if (isSessionHeader(entry) && entry.id.length > 0) {
+				return entry;
+			}
+		}
+	} catch {
+		// A later parse will surface unreadable files; discovery remains deterministic.
+	}
+	return null;
+}
+
+function compareSessionFiles(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry) => void): number {
@@ -446,8 +470,8 @@ export interface ParseSessionResult {
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
-	skillInvocations: SkillInvocationStats[];
-	resultSkillInvocations: SkillInvocationStats[];
+	skillInvocations: ProvisionalSkillInvocationStats[];
+	resultSkillInvocations: ResultSkillInvocationStats[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
 }
@@ -477,8 +501,8 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
-	const skillInvocations: SkillInvocationStats[] = [];
-	const resultSkillInvocations: SkillInvocationStats[] = [];
+	const skillInvocations: ProvisionalSkillInvocationStats[] = [];
+	const resultSkillInvocations: ResultSkillInvocationStats[] = [];
 	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
@@ -593,7 +617,97 @@ export async function listAllSessionFiles(): Promise<string[]> {
 		allFiles.push(...files);
 	}
 
-	return allFiles;
+	const files = await Promise.all(
+		allFiles.map(async file => ({
+			file,
+			absoluteFile: path.resolve(file),
+			header: await readSessionHeader(file),
+		})),
+	);
+	files.sort((left, right) => compareSessionFiles(left.absoluteFile, right.absoluteFile));
+
+	const fileByPath = new Map(files.map(file => [file.absoluteFile, file]));
+	const fileBySessionId = new Map<string, (typeof files)[number]>();
+	for (const file of files) {
+		if (file.header && !fileBySessionId.has(file.header.id)) {
+			fileBySessionId.set(file.header.id, file);
+		}
+	}
+
+	const children = new Map<string, string[]>();
+	const indegree = new Map(files.map(file => [file.absoluteFile, 0]));
+	const fallback = new Set<string>();
+	for (const file of files) {
+		if (!file.header) {
+			fallback.add(file.absoluteFile);
+			continue;
+		}
+
+		const parentSession = file.header.parentSession;
+		if (parentSession === undefined) continue;
+		const parent =
+			(typeof parentSession === "string" && fileBySessionId.get(parentSession)) ||
+			(typeof parentSession === "string" && path.isAbsolute(parentSession)
+				? fileByPath.get(path.resolve(parentSession))
+				: undefined) ||
+			(typeof parentSession === "string"
+				? fileByPath.get(path.resolve(path.dirname(file.file), parentSession))
+				: undefined);
+		if (!parent) {
+			fallback.add(file.absoluteFile);
+			continue;
+		}
+
+		const parentChildren = children.get(parent.absoluteFile);
+		if (parentChildren) parentChildren.push(file.file);
+		else children.set(parent.absoluteFile, [file.file]);
+		indegree.set(file.absoluteFile, (indegree.get(file.absoluteFile) ?? 0) + 1);
+	}
+
+	for (const childFiles of children.values()) {
+		childFiles.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
+	}
+
+	const pendingFallback = [...fallback];
+	while (pendingFallback.length > 0) {
+		const parent = pendingFallback.pop();
+		if (!parent) break;
+		for (const child of children.get(parent) ?? []) {
+			const absoluteChild = path.resolve(child);
+			if (fallback.has(absoluteChild)) continue;
+			fallback.add(absoluteChild);
+			pendingFallback.push(absoluteChild);
+		}
+	}
+
+	const ready = files
+		.filter(file => indegree.get(file.absoluteFile) === 0 && !fallback.has(file.absoluteFile))
+		.map(file => file.file);
+	ready.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
+
+	const remaining = new Set(files.map(file => file.absoluteFile));
+	const ordered: string[] = [];
+	while (ready.length > 0) {
+		const file = ready.shift();
+		if (!file) break;
+		const absoluteFile = path.resolve(file);
+		if (!remaining.delete(absoluteFile)) continue;
+		ordered.push(file);
+
+		for (const child of children.get(absoluteFile) ?? []) {
+			const absoluteChild = path.resolve(child);
+			const childIndegree = (indegree.get(absoluteChild) ?? 0) - 1;
+			indegree.set(absoluteChild, childIndegree);
+			if (childIndegree === 0 && !fallback.has(absoluteChild)) ready.push(child);
+		}
+		ready.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
+	}
+
+	const unordered = files
+		.filter(file => remaining.has(file.absoluteFile))
+		.map(file => file.file)
+		.toSorted((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
+	return [...ordered, ...unordered];
 }
 
 /**

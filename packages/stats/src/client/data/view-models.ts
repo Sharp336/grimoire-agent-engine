@@ -247,6 +247,11 @@ export function averageCostPerInvocation(costShare: number, calls: number): numb
 	return calls > 0 ? costShare / calls : 0;
 }
 
+/** Keep a selection only while the refreshed data still offers it. */
+export function resolveAvailableSelection(selected: string | null, options: readonly string[]): string | null {
+	return selected !== null && options.includes(selected) ? selected : null;
+}
+
 /** Table row for the Skills route: usage stats plus derived rates/shares. */
 export interface SkillRowView extends SkillUsageStats {
 	/** errors / calls (0 for zero calls). */

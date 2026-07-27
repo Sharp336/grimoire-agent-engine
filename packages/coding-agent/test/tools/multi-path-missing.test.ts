@@ -37,6 +37,7 @@ describe("multi-path tools tolerate missing entries", () => {
 		await fs.mkdir(path.join(tempDir, "src"), { recursive: true });
 		await Bun.write(path.join(tempDir, "src", "alpha.ts"), "shared-needle alpha\n");
 		await Bun.write(path.join(tempDir, "src", "beta.ts"), "shared-needle beta\n");
+		await Bun.write(path.join(tempDir, "README.md"), "ordinary read content\n");
 	});
 
 	afterEach(async () => {
@@ -71,6 +72,7 @@ describe("multi-path tools tolerate missing entries", () => {
 		const result = await tool.execute("read-skills-delimited", {
 			path: "README.md;skill://review:raw;skill://lint;skill://review",
 		});
+		const text = getText(result);
 		const details = result.details as { skillTargets?: Array<{ skill: string; target: string }> } | undefined;
 
 		expect(details?.skillTargets).toEqual([
@@ -78,6 +80,7 @@ describe("multi-path tools tolerate missing entries", () => {
 			{ skill: "lint", target: "skill://lint" },
 			{ skill: "review", target: "skill://review" },
 		]);
+		expect(text).toContain("ordinary read content");
 	});
 
 	it("attaches one canonical target to a direct skill read", async () => {

@@ -30,13 +30,15 @@ import {
 	getToolTimeSeries,
 	initDb,
 	insertMessageStats,
+	insertProvisionalSkillInvocations,
 	insertToolCalls,
 	insertUserMessageStats,
 	markSessionBackfillsComplete,
 	setFileOffset,
+	setSessionSyncOrder,
 	updateToolResults,
 	updateUserMessageLinks,
-	upsertSkillInvocations,
+	upsertResultSkillInvocations,
 } from "./db";
 import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
@@ -82,8 +84,8 @@ function applyParseResult(sessionFile: string, lastModified: number, result: Par
 	if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
 	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
 	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
-	if (result.skillInvocations.length > 0) upsertSkillInvocations(result.skillInvocations);
-	if (result.resultSkillInvocations.length > 0) upsertSkillInvocations(result.resultSkillInvocations);
+	if (result.skillInvocations.length > 0) insertProvisionalSkillInvocations(result.skillInvocations);
+	if (result.resultSkillInvocations.length > 0) upsertResultSkillInvocations(result.resultSkillInvocations);
 	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
 	setFileOffset(sessionFile, result.newOffset, lastModified);
 	return result.stats.length + result.userStats.length;
@@ -111,6 +113,12 @@ export interface SyncOptions {
 	 * force serial parsing without spawning workers.
 	 */
 	workers?: number;
+}
+
+interface PreparedSessionFile {
+	sessionFile: string;
+	lastModified: number | null;
+	result: ParseSessionResult | null;
 }
 
 function defaultWorkerCount(): number {
@@ -252,10 +260,10 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 	await initDb();
 
 	const files = await listAllSessionFiles();
+	setSessionSyncOrder(files);
 	let totalProcessed = 0;
 	let filesProcessed = 0;
 	let completed = 0;
-	let cursor = 0;
 	const finish = () => {
 		markSessionBackfillsComplete();
 		return { processed: totalProcessed, files: filesProcessed };
@@ -272,58 +280,63 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 		});
 	};
 
-	const processFile = async (
+	const prepareFile = async (
 		sessionFile: string,
 		parse: (sessionFile: string, fromOffset: number) => Promise<ParseSessionResult>,
-	): Promise<void> => {
+	): Promise<PreparedSessionFile> => {
 		let fileStats: fs.Stats;
 		try {
 			fileStats = await fs.promises.stat(sessionFile);
 		} catch {
-			report(sessionFile);
-			return;
+			return { sessionFile, lastModified: null, result: null };
 		}
 		const lastModified = fileStats.mtimeMs;
 		const stored = getFileOffset(sessionFile);
 		if (stored && stored.lastModified >= lastModified) {
-			report(sessionFile);
-			return;
+			return { sessionFile, lastModified: null, result: null };
 		}
 
-		const fromOffset = stored?.offset ?? 0;
-		const result = await parse(sessionFile, fromOffset);
-		const inserted = applyParseResult(sessionFile, lastModified, result);
-		if (inserted > 0) {
-			totalProcessed += inserted;
-			filesProcessed++;
+		const result = await parse(sessionFile, stored?.offset ?? 0);
+		return { sessionFile, lastModified, result };
+	};
+
+	const commitPreparedFile = (prepared: PreparedSessionFile): void => {
+		if (prepared.result && prepared.lastModified !== null) {
+			const inserted = applyParseResult(prepared.sessionFile, prepared.lastModified, prepared.result);
+			if (inserted > 0) {
+				totalProcessed += inserted;
+				filesProcessed++;
+			}
 		}
-		report(sessionFile);
+		report(prepared.sessionFile);
 	};
 
 	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
 	if (requestedWorkers === 1) {
 		for (const sessionFile of files) {
-			await processFile(sessionFile, parseSessionFile);
+			commitPreparedFile(await prepareFile(sessionFile, parseSessionFile));
 		}
 		return finish();
 	}
 
 	const poolSize = Math.min(files.length, requestedWorkers);
-
 	const handles: WorkerHandle[] = [];
 	for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
 
-	async function drain(handle: WorkerHandle): Promise<void> {
-		while (true) {
-			const idx = cursor++;
-			if (idx >= files.length) return;
-			const sessionFile = files[idx];
-			await processFile(sessionFile, (file, fromOffset) => dispatch(handle, { sessionFile: file, fromOffset }));
-		}
-	}
-
 	try {
-		await Promise.all(handles.map(drain));
+		for (let start = 0; start < files.length; start += poolSize) {
+			const wave = files.slice(start, start + poolSize);
+			const prepared = await Promise.all(
+				wave.map((sessionFile, index) =>
+					prepareFile(sessionFile, (file, fromOffset) =>
+						dispatch(handles[index]!, { sessionFile: file, fromOffset }),
+					),
+				),
+			);
+			for (const file of prepared) {
+				commitPreparedFile(file);
+			}
+		}
 	} finally {
 		for (const handle of handles) handle.worker.terminate();
 	}

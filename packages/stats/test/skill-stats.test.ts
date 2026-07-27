@@ -4,15 +4,18 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getSkillDashboardStats, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import {
-	closeDb,
 	getFileOffset,
 	getSkillStats,
 	getSkillStatsByModel,
 	getSkillTimeSeries,
 	initDb,
+	insertProvisionalSkillInvocations,
+	insertToolCalls,
+	setSessionSyncOrder,
+	upsertResultSkillInvocations,
 } from "@oh-my-pi/omp-stats/db";
 import { handleApi } from "@oh-my-pi/omp-stats/server";
-import type { SkillDashboardStats, SkillUsageStats } from "@oh-my-pi/omp-stats/types";
+import type { SkillDashboardStats, SkillUsageStats, ToolCallStats } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -92,7 +95,12 @@ function toolResultEntry(
 	};
 }
 
-async function writeSessionFile(fileName: string, id: string, entries: unknown[]): Promise<string> {
+async function writeSessionFile(
+	fileName: string,
+	id: string,
+	entries: unknown[],
+	parentSession?: string,
+): Promise<string> {
 	const sessionDir = path.join(getSessionsDir(), FOLDER_SLUG);
 	await fs.mkdir(sessionDir, { recursive: true });
 	const sessionFile = path.join(sessionDir, fileName);
@@ -102,6 +110,7 @@ async function writeSessionFile(fileName: string, id: string, entries: unknown[]
 		id,
 		timestamp: new Date().toISOString(),
 		cwd: "/tmp/project",
+		...(parentSession ? { parentSession } : {}),
 	};
 	const lines = [header, ...entries].map(entry => JSON.stringify(entry)).join("\n");
 	await Bun.write(sessionFile, `${lines}\n`);
@@ -112,6 +121,60 @@ function skillRow(rows: SkillUsageStats[], skill = "review"): SkillUsageStats {
 	const row = rows.find(candidate => candidate.skill === skill);
 	if (!row) throw new Error(`missing aggregate row for skill ${skill}`);
 	return row;
+}
+
+function toolCallFixture(
+	sessionFile: string,
+	entryId: string,
+	toolCallId: string,
+	skillName = "review",
+): ToolCallStats {
+	return {
+		sessionFile,
+		entryId,
+		toolCallId,
+		folder: FOLDER_SLUG,
+		toolName: "read",
+		skillName,
+		model: MODEL,
+		provider: PROVIDER,
+		timestamp: Date.parse(TS1),
+		agentType: "main",
+		callsInTurn: 1,
+		argsChars: 10,
+	};
+}
+
+async function createForkFiles(): Promise<{ parentFile: string; childFile: string }> {
+	const parentEntries = [
+		assistantEntry({
+			id: "fork-asst",
+			timestamp: TS1,
+			calls: [{ id: "fork-call", name: "read", arguments: { path: "skill://parent" } }],
+			totalTokens: 20,
+			outputTokens: 4,
+			cost: 0.002,
+		}),
+		toolResultEntry("parent-result", "fork-call", [{ skill: "parent", target: "parent.md" }]),
+	];
+	const parentFile = await writeSessionFile("99_parent.jsonl", "fork-parent-sess", parentEntries);
+	const childFile = await writeSessionFile(
+		"01_child.jsonl",
+		"fork-child-sess",
+		[
+			assistantEntry({
+				id: "fork-asst",
+				timestamp: TS1,
+				calls: [{ id: "fork-call", name: "read", arguments: { path: "skill://parent" } }],
+				totalTokens: 20,
+				outputTokens: 4,
+				cost: 0.002,
+			}),
+			toolResultEntry("child-result", "fork-call", [{ skill: "child", target: "child.md" }]),
+		],
+		"fork-parent-sess",
+	);
+	return { parentFile, childFile };
 }
 
 describe("skill usage stats pipeline", () => {
@@ -337,52 +400,124 @@ describe("skill usage stats pipeline", () => {
 		expect(getSkillStats()).toEqual(afterResult);
 	});
 
-	it("does not create a child invocation for a fork-skipped result", async () => {
-		await writeSessionFile("01-fork-parent.jsonl", "fork-parent-sess", [
-			assistantEntry({
-				id: "fork-asst",
-				timestamp: TS1,
-				calls: [{ id: "fork-call", name: "read", arguments: { path: "skill://parent" } }],
-				totalTokens: 20,
-				outputTokens: 4,
-				cost: 0.002,
-			}),
+	it("does not downgrade an executed target after a stale provisional write", async () => {
+		await initDb();
+		const call = toolCallFixture("/tmp/skill-target.jsonl", "target-entry", "target-call", "inferred");
+		setSessionSyncOrder([call.sessionFile]);
+		insertToolCalls([call]);
+		upsertResultSkillInvocations([
+			{
+				sessionFile: call.sessionFile,
+				toolCallId: call.toolCallId,
+				targetIndex: 0,
+				skillName: "executed",
+				target: "executed.md",
+			},
 		]);
-		await syncAllSessions({ workers: 1 });
-
-		await writeSessionFile("02-fork-child.jsonl", "fork-child-sess", [
-			assistantEntry({
-				id: "fork-asst",
-				timestamp: TS1,
-				calls: [{ id: "fork-call", name: "read", arguments: { path: "skill://parent" } }],
-				totalTokens: 20,
-				outputTokens: 4,
-				cost: 0.002,
-			}),
-			toolResultEntry("fork-result", "fork-call", [{ skill: "child", target: "child.md" }]),
+		insertProvisionalSkillInvocations([
+			{
+				sessionFile: call.sessionFile,
+				toolCallId: call.toolCallId,
+				targetIndex: 0,
+				skillName: "stale",
+				target: null,
+			},
 		]);
 
-		await syncAllSessions({ workers: 1 });
+		const database = new Database(getStatsDbPath(), { readonly: true });
+		const row = database
+			.prepare("SELECT skill_name, target FROM skill_invocations WHERE session_file = ? AND tool_call_id = ?")
+			.get(call.sessionFile, call.toolCallId) as { skill_name: string; target: string | null };
+		database.close();
+		expect(row).toEqual({ skill_name: "executed", target: "executed.md" });
+	});
+
+	it("assigns copied calls to the parent during a cold parallel replay", async () => {
+		const { parentFile } = await createForkFiles();
+
+		await syncAllSessions({ workers: 2 });
+		const database = new Database(getStatsDbPath(), { readonly: true });
+		const toolRows = database
+			.prepare("SELECT session_file FROM tool_calls WHERE tool_call_id = ?")
+			.all("fork-call") as Array<{ session_file: string }>;
+		const invocationRows = database
+			.prepare("SELECT session_file, skill_name, target FROM skill_invocations WHERE tool_call_id = ?")
+			.all("fork-call") as Array<{ session_file: string; skill_name: string; target: string | null }>;
+		database.close();
+		expect(toolRows).toEqual([{ session_file: parentFile }]);
+		expect(invocationRows).toEqual([{ session_file: parentFile, skill_name: "parent", target: "parent.md" }]);
+	});
+
+	it("replaces a stale child-owned duplicate with its parent", async () => {
+		const { parentFile, childFile } = await createForkFiles();
+
+		await initDb();
+		setSessionSyncOrder([childFile]);
+		insertToolCalls([toolCallFixture(childFile, "fork-asst", "fork-call", "child")]);
+		upsertResultSkillInvocations([
+			{
+				sessionFile: childFile,
+				toolCallId: "fork-call",
+				targetIndex: 0,
+				skillName: "child",
+				target: "child.md",
+			},
+		]);
+
+		await syncAllSessions({ workers: 2 });
+		const database = new Database(getStatsDbPath(), { readonly: true });
+		const toolRows = database
+			.prepare("SELECT session_file FROM tool_calls WHERE tool_call_id = ?")
+			.all("fork-call") as Array<{ session_file: string }>;
+		const invocationRows = database
+			.prepare("SELECT session_file, skill_name, target FROM skill_invocations WHERE tool_call_id = ?")
+			.all("fork-call") as Array<{ session_file: string; skill_name: string; target: string | null }>;
+		database.close();
+		expect(toolRows).toEqual([{ session_file: parentFile }]);
+		expect(invocationRows).toEqual([{ session_file: parentFile, skill_name: "parent", target: "parent.md" }]);
 		expect(skillRow(getSkillStats(), "parent").calls).toBe(1);
 		expect(getSkillStats().find(row => row.skill === "child")).toBeUndefined();
+
+		await syncAllSessions({ workers: 2 });
+		const afterResync = new Database(getStatsDbPath(), { readonly: true });
+		const rowsAfterResync = afterResync
+			.prepare("SELECT session_file, skill_name, target FROM skill_invocations WHERE tool_call_id = ?")
+			.all("fork-call") as Array<{ session_file: string; skill_name: string; target: string | null }>;
+		afterResync.close();
+		expect(rowsAfterResync).toEqual(invocationRows);
 	});
-	it("migrates a legacy tool_calls table and replays historical skill invocations", async () => {
-		const sessionFile = await writeSessionFile("migration.jsonl", "migration-sess", [
+
+	it("retains a duplicate owner that is absent from the current sync order", async () => {
+		await initDb();
+		const unavailable = toolCallFixture("/tmp/unavailable.jsonl", "retained-entry", "retained-call", "legacy");
+		const current = { ...unavailable, sessionFile: "/tmp/current.jsonl", skillName: "current" };
+		setSessionSyncOrder([unavailable.sessionFile]);
+		insertToolCalls([unavailable]);
+		setSessionSyncOrder([current.sessionFile]);
+		insertToolCalls([current]);
+
+		const database = new Database(getStatsDbPath(), { readonly: true });
+		const rows = database
+			.prepare("SELECT session_file, skill_name FROM tool_calls WHERE tool_call_id = ?")
+			.all(unavailable.toolCallId) as Array<{ session_file: string; skill_name: string | null }>;
+		database.close();
+		expect(rows).toEqual([{ session_file: unavailable.sessionFile, skill_name: "legacy" }]);
+	});
+	it("migrates a pre-skills tool_calls_v1 schema, preserves unavailable rows, and replays direct skills", async () => {
+		const sessionFile = await writeSessionFile("v1-migration.jsonl", "v1-migration-sess", [
 			assistantEntry({
-				id: "migration-asst",
+				id: "v1-asst",
 				timestamp: TS1,
-				calls: [{ id: "migration-call", name: "read", arguments: { path: "skill://legacy" } }],
+				calls: [{ id: "v1-call", name: "read", arguments: { path: "skill://legacy" } }],
 				totalTokens: 10,
 				outputTokens: 2,
 				cost: 0.001,
 			}),
-			toolResultEntry("migration-result", "migration-call", [{ skill: "legacy", target: "README.md" }]),
+			toolResultEntry("v1-result", "v1-call", [{ skill: "legacy", target: "README.md" }]),
 		]);
 
-		await initDb();
-		closeDb();
+		await fs.mkdir(path.dirname(getStatsDbPath()), { recursive: true });
 		const legacy = new Database(getStatsDbPath());
-		legacy.run("DROP TABLE tool_calls");
 		legacy.run(`
 			CREATE TABLE tool_calls (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -391,7 +526,6 @@ describe("skill usage stats pipeline", () => {
 				tool_call_id TEXT NOT NULL,
 				folder TEXT NOT NULL,
 				tool_name TEXT NOT NULL,
-				skill_name TEXT,
 				model TEXT NOT NULL,
 				provider TEXT NOT NULL,
 				timestamp INTEGER NOT NULL,
@@ -402,98 +536,62 @@ describe("skill usage stats pipeline", () => {
 				is_error INTEGER,
 				UNIQUE(session_file, tool_call_id)
 			);
+			CREATE TABLE meta (
+				key TEXT PRIMARY KEY,
+				value TEXT NOT NULL
+			);
 		`);
+		legacy.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run("tool_calls_v1", "complete");
 		const legacyInsert = legacy.prepare(`
 			INSERT INTO tool_calls (
-				session_file, entry_id, tool_call_id, folder, tool_name, skill_name,
+				session_file, entry_id, tool_call_id, folder, tool_name,
 				model, provider, timestamp, calls_in_turn, args_chars, result_chars, is_error
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		const legacyValues = [MODEL, PROVIDER, Date.parse(TS1), 1, 10, null, 0];
-		legacyInsert.run(sessionFile, "migration-asst", "migration-call", FOLDER_SLUG, "read", "legacy", ...legacyValues);
+		legacyInsert.run(sessionFile, "v1-asst", "v1-call", FOLDER_SLUG, "read", ...legacyValues);
 		legacyInsert.run(
 			"/tmp/unavailable.jsonl",
 			"unavailable-entry",
 			"unavailable-call",
 			FOLDER_SLUG,
 			"read",
-			"unavailable",
 			...legacyValues,
 		);
-		legacyInsert.run("/tmp/null.jsonl", "null-entry", "null-call", FOLDER_SLUG, "read", null, ...legacyValues);
-		legacy.run("DELETE FROM meta WHERE key IN ('tool_calls_v1', 'tool_calls_v2', 'skill_invocations_v1')");
-		legacy.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run("tool_calls_v1", "complete");
-		const fileStats = await fs.stat(sessionFile);
-		legacy
-			.prepare("INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified) VALUES (?, ?, ?)")
-			.run(sessionFile, fileStats.size, fileStats.mtimeMs);
 		legacy.close();
 
 		await initDb();
 		const migrated = new Database(getStatsDbPath(), { readonly: true });
 		const columns = migrated.prepare("PRAGMA table_info(tool_calls)").all() as Array<{ name: string }>;
-		const migratedToolCalls = migrated
-			.prepare("SELECT tool_call_id, skill_name FROM tool_calls ORDER BY tool_call_id")
-			.all() as Array<{ tool_call_id: string; skill_name: string | null }>;
-		expect(migratedToolCalls).toEqual([
-			{ tool_call_id: "migration-call", skill_name: "legacy" },
-			{ tool_call_id: "null-call", skill_name: null },
-			{ tool_call_id: "unavailable-call", skill_name: "unavailable" },
-		]);
-		expect(columns.some(column => column.name === "skill_name")).toBe(true);
-		const invocationColumns = migrated.prepare("PRAGMA table_info(skill_invocations)").all() as Array<{
-			name: string;
-		}>;
-		expect(invocationColumns.map(column => column.name)).toEqual([
-			"id",
-			"session_file",
-			"tool_call_id",
-			"target_index",
-			"target",
-			"skill_name",
-		]);
-		const seeded = migrated
-			.prepare("SELECT skill_name, target FROM skill_invocations ORDER BY skill_name")
-			.all() as Array<{ skill_name: string; target: string | null }>;
-		expect(seeded).toEqual([
-			{ skill_name: "legacy", target: null },
-			{ skill_name: "unavailable", target: null },
-		]);
+		const invocationTable = migrated
+			.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'skill_invocations'")
+			.get() as { name: string } | undefined;
+		const pending = migrated.prepare("SELECT value FROM meta WHERE key = ?").get("tool_calls_v2") as {
+			value: string;
+		};
 		migrated.close();
+		expect(columns.some(column => column.name === "skill_name")).toBe(true);
+		expect(invocationTable).toEqual({ name: "skill_invocations" });
+		expect(pending).toEqual({ value: "pending" });
 		expect(getFileOffset(sessionFile)).toBeNull();
 
 		await syncAllSessions({ workers: 1 });
 		const afterSync = new Database(getStatsDbPath(), { readonly: true });
-		const retainedToolCalls = afterSync
-			.prepare("SELECT tool_call_id, skill_name FROM tool_calls ORDER BY tool_call_id")
-			.all() as Array<{ tool_call_id: string; skill_name: string | null }>;
-		expect(retainedToolCalls).toEqual(migratedToolCalls);
-		const children = afterSync
-			.prepare("SELECT tool_call_id, skill_name, target FROM skill_invocations ORDER BY tool_call_id, target_index")
-			.all() as Array<{ tool_call_id: string; skill_name: string; target: string | null }>;
-		expect(children).toEqual([
-			{ tool_call_id: "migration-call", skill_name: "legacy", target: "README.md" },
-			{ tool_call_id: "unavailable-call", skill_name: "unavailable", target: null },
-		]);
-		const sentinels = afterSync
-			.prepare("SELECT key, value FROM meta WHERE key IN ('tool_calls_v2', 'skill_invocations_v1') ORDER BY key")
-			.all() as Array<{ key: string; value: string }>;
-		expect(sentinels).toEqual([
-			{ key: "skill_invocations_v1", value: "complete" },
-			{ key: "tool_calls_v2", value: "complete" },
-		]);
+		const child = afterSync
+			.prepare("SELECT skill_name, target FROM skill_invocations WHERE tool_call_id = ?")
+			.get("v1-call") as { skill_name: string; target: string | null };
+		const settled = afterSync.prepare("SELECT value FROM meta WHERE key = ?").get("tool_calls_v2") as {
+			value: string;
+		};
+		const toolRows = afterSync
+			.prepare("SELECT session_file, skill_name FROM tool_calls ORDER BY session_file")
+			.all() as Array<{ session_file: string; skill_name: string | null }>;
 		afterSync.close();
-		expect(skillRow(getSkillStats(), "legacy").calls).toBe(1);
-		expect(skillRow(getSkillStats(), "unavailable").calls).toBe(1);
-		expect(getSkillStats().find(row => row.skill === "null")).toBeUndefined();
-		expect(getFileOffset(sessionFile)).not.toBeNull();
-
-		await syncAllSessions({ workers: 1 });
-		const afterResync = new Database(getStatsDbPath(), { readonly: true });
-		const childrenAfterResync = afterResync
-			.prepare("SELECT tool_call_id, skill_name, target FROM skill_invocations ORDER BY tool_call_id, target_index")
-			.all() as Array<{ tool_call_id: string; skill_name: string; target: string | null }>;
-		expect(childrenAfterResync).toEqual(children);
-		afterResync.close();
+		expect(child).toEqual({ skill_name: "legacy", target: "README.md" });
+		expect(settled).toEqual({ value: "complete" });
+		expect(toolRows).toEqual([
+			{ session_file: "/tmp/unavailable.jsonl", skill_name: null },
+			{ session_file: sessionFile, skill_name: "legacy" },
+		]);
 	});
 });

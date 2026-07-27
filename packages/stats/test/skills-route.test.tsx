@@ -69,6 +69,12 @@ const dashboard: SkillDashboardStats = {
 	series: [],
 };
 
+const lintDashboard: SkillDashboardStats = {
+	bySkill: [{ ...dashboard.bySkill[0], skill: "lint" }],
+	bySkillModel: [{ ...dashboard.bySkillModel[0], skill: "lint" }],
+	series: [{ timestamp: Date.parse("2026-06-24T10:10:00.000Z"), skill: "lint", calls: 1, errors: 0 }],
+};
+
 const collisionSkills = [
 	["Other", 10],
 	["alpha", 9],
@@ -134,6 +140,53 @@ describe("SkillsRoute", () => {
 			root?.render(<SkillsRoute active range="7d" refreshTrigger={0} />);
 		});
 		expect(requestedUrls).toEqual(["/api/stats/skills?range=24h", "/api/stats/skills?range=7d"]);
+	});
+
+	it("clears a selected skill when a refreshed range removes it", async () => {
+		const domWindow = parseHTML('<html><body><div id="root"></div></body></html>').window;
+		installGlobal("window", domWindow);
+		installGlobal("document", domWindow.document);
+		installGlobal("navigator", domWindow.navigator);
+		installGlobal("Node", domWindow.Node);
+		installGlobal("Element", domWindow.Element);
+		installGlobal("HTMLElement", domWindow.HTMLElement);
+		installGlobal("HTMLIFrameElement", domWindow.HTMLIFrameElement);
+		installGlobal("SVGElement", domWindow.SVGElement);
+		installGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
+		const fetchStub = Object.assign(
+			async (input: FetchInput, _init?: FetchInit) => {
+				const url = input instanceof Request ? input.url : input.toString();
+				return Response.json(url.includes("range=7d") ? lintDashboard : dashboard);
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+
+		const container = domWindow.document.getElementById("root");
+		if (!container) throw new Error("Expected test root");
+		root = createRoot(container as unknown as Element);
+		await act(async () => {
+			root?.render(<SkillsRoute active range="24h" refreshTrigger={0} />);
+		});
+
+		const select = domWindow.document.querySelector("select");
+		if (!select) throw new Error("Expected skill filter");
+		const reviewOption = select.querySelector("option[value='review']") as HTMLOptionElement | null;
+		if (!reviewOption) throw new Error("Expected review option");
+		await act(async () => {
+			reviewOption.selected = true;
+			select.dispatchEvent(new domWindow.Event("change", { bubbles: true }));
+		});
+		expect(select.value).toBe("review");
+
+		await act(async () => {
+			root?.render(<SkillsRoute active range="7d" refreshTrigger={0} />);
+		});
+		const refreshedSelect = domWindow.document.querySelector("select");
+		if (!refreshedSelect) throw new Error("Expected refreshed skill filter");
+		expect(refreshedSelect.value).toBe("");
+		expect(domWindow.document.body.textContent).toContain("lint");
 	});
 
 	it("keeps a real Other skill separate from the overflow series", () => {

@@ -5,7 +5,12 @@ import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
 import { formatCompact, formatCost, formatInteger, formatPercent, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
-import { averageCostPerInvocation, buildSkillRows, type SkillRowView } from "../data/view-models";
+import {
+	averageCostPerInvocation,
+	buildSkillRows,
+	resolveAvailableSelection,
+	type SkillRowView,
+} from "../data/view-models";
 import type { SkillModelStats, SkillTimeSeriesPoint, SkillUsageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -394,15 +399,16 @@ function SkillModelPanel({ bySkillModel }: { bySkillModel: SkillModelStats[] }) 
 	const [skill, setSkill] = useState<string | null>(null);
 
 	const skills = useMemo(() => [...new Set(bySkillModel.map(row => row.skill))].sort(), [bySkillModel]);
+	const effectiveSkill = resolveAvailableSelection(skill, skills);
 
 	const rows = useMemo(() => {
-		const filtered = skill ? bySkillModel.filter(row => row.skill === skill) : bySkillModel;
+		const filtered = effectiveSkill ? bySkillModel.filter(row => row.skill === effectiveSkill) : bySkillModel;
 		return filtered.map(row => ({
 			...row,
 			errorRate: row.calls > 0 ? row.errors / row.calls : 0,
 			avgCostPerInvocation: averageCostPerInvocation(row.costShare, row.calls),
 		}));
-	}, [bySkillModel, skill]);
+	}, [bySkillModel, effectiveSkill]);
 
 	const columns = useMemo(
 		() => [
@@ -475,7 +481,7 @@ function SkillModelPanel({ bySkillModel }: { bySkillModel: SkillModelStats[] }) 
 				</span>
 				<select
 					className="stats-select"
-					value={skill ?? ""}
+					value={effectiveSkill ?? ""}
 					onChange={event => setSkill(event.target.value || null)}
 					style={{ maxWidth: "320px", flex: 1 }}
 				>
