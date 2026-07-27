@@ -195,6 +195,30 @@ describe("Editor Vim input mode", () => {
 		editor.handleInput("\u001b");
 		expect(editor.getVimMode()).toBe("normal");
 	});
+	it("keeps v characterwise while viw selects only the current word", () => {
+		const editor = createVimEditor();
+		editor.setText("one two");
+
+		typeText(editor, "0v");
+		expect(editor.getVimMode()).toBe("visual");
+		const characterRender = editor.render(40).join("\n");
+		expect(characterRender).toContain("\u001b[7mo\u001b[0mne two");
+		expect(characterRender).not.toContain("\u001b[7mone\u001b[0m");
+
+		editor.handleInput("d");
+		expect(editor.getText()).toBe("ne two");
+		expect(editor.getVimMode()).toBe("normal");
+
+		editor.setText("one two");
+		typeText(editor, "0viw");
+		const wordRender = editor.render(40).join("\n");
+		expect(wordRender).toContain("\u001b[7mone\u001b[0m two");
+
+		editor.handleInput("d");
+		expect(editor.getText()).toBe(" two");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
 	it("selects and highlights lines with Shift-V", () => {
 		const editor = createVimEditor();
 		editor.setText("one\ntwo\nthree");

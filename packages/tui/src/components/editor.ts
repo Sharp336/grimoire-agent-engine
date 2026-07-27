@@ -365,6 +365,7 @@ interface EditorState {
 interface LayoutLine {
 	text: string;
 	sourceLine: number;
+	sourceStart: number;
 	/** Exact `visibleWidth(text)` carried from wrap/layout, never re-derived. */
 	width: number;
 	hasCursor: boolean;
@@ -412,6 +413,10 @@ type VimPendingCommand =
 	| { kind: "operator"; operator: "d" | "c"; prefixCount: number; textObject?: "inner" | "around" }
 	| { kind: "g"; count: number | undefined }
 	| { kind: "visualTextObject"; textObject: "inner" | "around"; count: number };
+
+type VimVisualSelection =
+	| { kind: "line"; anchorLine: number; startLine: number; endLine: number }
+	| { kind: "character"; anchor: number; start: number; end: number };
 
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
@@ -508,8 +513,7 @@ export class Editor implements Component, Focusable {
 	#vimPending: VimPendingCommand | undefined;
 	#vimCount = "";
 	#vimInsertUndoActive = false;
-	#vimVisualAnchorLine = 0;
-	#vimVisualLineRange: { startLine: number; endLine: number } | undefined;
+	#vimVisualSelection: VimVisualSelection | undefined;
 
 	// Debounce timer for autocomplete updates
 	#autocompleteTimeout?: NodeJS.Timeout;
@@ -547,7 +551,7 @@ export class Editor implements Component, Focusable {
 		this.#inputMode = mode;
 		this.#vimPending = undefined;
 		this.#vimCount = "";
-		this.#vimVisualLineRange = undefined;
+		this.#vimVisualSelection = undefined;
 		if (mode === "vim") {
 			this.#vimMode = "normal";
 			this.#clampVimNormalCursor();
@@ -565,8 +569,8 @@ export class Editor implements Component, Focusable {
 		return this.#inputMode === "vim" ? this.#vimMode : undefined;
 	}
 
-	isVimInsertEscape(data: string): boolean {
-		return this.#inputMode === "vim" && this.#vimMode === "insert" && this.#isVimEscape(data);
+	isVimModeEscape(data: string): boolean {
+		return this.#inputMode === "vim" && this.#vimMode !== "normal" && this.#isVimEscape(data);
 	}
 
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
@@ -982,11 +986,21 @@ export class Editor implements Component, Focusable {
 			let displayText = layoutLine.text;
 			let displayWidth = layoutLine.width;
 			let cursorPaddingOverflow = 0;
-			const visualSelected =
-				this.#vimMode === "visual" &&
-				this.#vimVisualLineRange !== undefined &&
-				layoutLine.sourceLine >= this.#vimVisualLineRange.startLine &&
-				layoutLine.sourceLine < this.#vimVisualLineRange.endLine;
+			const visualSelection = this.#vimMode === "visual" ? this.#vimVisualSelection : undefined;
+			const visualLineSelected =
+				visualSelection?.kind === "line" &&
+				layoutLine.sourceLine >= visualSelection.startLine &&
+				layoutLine.sourceLine < visualSelection.endLine;
+			const visualCharacterStart =
+				visualSelection?.kind === "character"
+					? Math.max(0, Math.min(displayText.length, visualSelection.start - layoutLine.sourceStart))
+					: 0;
+			const visualCharacterEnd =
+				visualSelection?.kind === "character"
+					? Math.max(0, Math.min(displayText.length, visualSelection.end - layoutLine.sourceStart))
+					: 0;
+			const visualCharacterSelected = visualCharacterStart < visualCharacterEnd;
+			const visualSelected = visualLineSelected || visualCharacterSelected;
 			let decorated = false;
 			let imeSafeCursorTail = false;
 			const showPromptGutter = promptGutter !== undefined && visibleIndex === 0;
@@ -1124,8 +1138,14 @@ export class Editor implements Component, Focusable {
 				}
 			}
 
-			if (visualSelected) {
+			if (visualLineSelected) {
 				displayText = `\x1b[7m${displayText}\x1b[0m`;
+				decorated = true;
+			} else if (visualCharacterSelected) {
+				const before = displayText.slice(0, visualCharacterStart);
+				const selected = displayText.slice(visualCharacterStart, visualCharacterEnd);
+				const after = displayText.slice(visualCharacterEnd);
+				displayText = `${this.#decorate(before)}\x1b[7m${selected}\x1b[0m${this.#decorate(after)}`;
 				decorated = true;
 			}
 
@@ -1212,7 +1232,7 @@ export class Editor implements Component, Focusable {
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey === undefined ? undefined : canonicalKeyId(parsedKey);
 
-		if (this.isVimInsertEscape(data)) {
+		if (this.isVimModeEscape(data)) {
 			if (this.#autocompleteState) this.#cancelAutocomplete(true);
 			this.#enterVimNormalMode();
 			return;
@@ -1655,6 +1675,7 @@ export class Editor implements Component, Focusable {
 			layoutLines.push({
 				text: "",
 				sourceLine: 0,
+				sourceStart: 0,
 				width: 0,
 				hasCursor: true,
 				cursorPos: 0,
@@ -1663,6 +1684,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		// Process each logical line
+		let sourceLineStart = 0;
 		for (let i = 0; i < this.#state.lines.length; i++) {
 			const line = this.#state.lines[i] || "";
 			const isCurrentLine = i === this.#state.cursorLine;
@@ -1674,6 +1696,7 @@ export class Editor implements Component, Focusable {
 					layoutLines.push({
 						text: line,
 						sourceLine: i,
+						sourceStart: sourceLineStart,
 						width: lineVisibleWidth,
 						hasCursor: true,
 						cursorPos: this.#state.cursorCol,
@@ -1682,6 +1705,7 @@ export class Editor implements Component, Focusable {
 					layoutLines.push({
 						text: line,
 						sourceLine: i,
+						sourceStart: sourceLineStart,
 						width: lineVisibleWidth,
 						hasCursor: false,
 					});
@@ -1724,6 +1748,7 @@ export class Editor implements Component, Focusable {
 						layoutLines.push({
 							text: chunk.text,
 							sourceLine: i,
+							sourceStart: sourceLineStart + chunk.startIndex,
 							width: chunk.width,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
@@ -1732,12 +1757,14 @@ export class Editor implements Component, Focusable {
 						layoutLines.push({
 							text: chunk.text,
 							sourceLine: i,
+							sourceStart: sourceLineStart + chunk.startIndex,
 							width: chunk.width,
 							hasCursor: false,
 						});
 					}
 				}
 			}
+			sourceLineStart += line.length + 1;
 		}
 
 		return layoutLines;
@@ -3390,7 +3417,7 @@ export class Editor implements Component, Focusable {
 	#enterVimNormalMode(): void {
 		this.#finishVimInsertUndo();
 		this.#vimPending = undefined;
-		this.#vimVisualLineRange = undefined;
+		this.#vimVisualSelection = undefined;
 		this.#vimCount = "";
 		const changed = this.#vimMode !== "normal";
 		this.#vimMode = "normal";
@@ -3402,7 +3429,7 @@ export class Editor implements Component, Focusable {
 		if (col !== undefined) this.#setCursorCol(col);
 		this.#vimPending = undefined;
 		this.#vimCount = "";
-		this.#vimVisualLineRange = undefined;
+		this.#vimVisualSelection = undefined;
 		if (existingUndo) {
 			this.#vimInsertUndoActive = true;
 			this.#suspendUndo = true;
@@ -3411,12 +3438,29 @@ export class Editor implements Component, Focusable {
 		this.#vimMode = "insert";
 		if (changed) this.onInputModeChange?.("insert");
 	}
+	#enterVimVisualCharacterMode(): void {
+		this.#finishVimInsertUndo();
+		this.#vimPending = undefined;
+		this.#vimCount = "";
+		const anchor = this.#vimAbsoluteCursor();
+		this.#vimVisualSelection = {
+			kind: "character",
+			anchor,
+			start: anchor,
+			end: this.#vimGraphemeEndAt(this.getText(), anchor),
+		};
+		const changed = this.#vimMode !== "visual";
+		this.#vimMode = "visual";
+		if (changed) this.onInputModeChange?.("visual");
+	}
+
 	#enterVimVisualLineMode(): void {
 		this.#finishVimInsertUndo();
 		this.#vimPending = undefined;
 		this.#vimCount = "";
-		this.#vimVisualAnchorLine = this.#state.cursorLine;
-		this.#vimVisualLineRange = {
+		this.#vimVisualSelection = {
+			kind: "line",
+			anchorLine: this.#state.cursorLine,
 			startLine: this.#state.cursorLine,
 			endLine: this.#state.cursorLine + 1,
 		};
@@ -3425,11 +3469,23 @@ export class Editor implements Component, Focusable {
 		if (changed) this.onInputModeChange?.("visual");
 	}
 
-	#updateVimVisualLineRange(): void {
-		this.#vimVisualLineRange = {
-			startLine: Math.min(this.#vimVisualAnchorLine, this.#state.cursorLine),
-			endLine: Math.max(this.#vimVisualAnchorLine, this.#state.cursorLine) + 1,
-		};
+	#updateVimVisualSelection(): void {
+		const selection = this.#vimVisualSelection;
+		if (selection?.kind === "line") {
+			this.#vimVisualSelection = {
+				...selection,
+				startLine: Math.min(selection.anchorLine, this.#state.cursorLine),
+				endLine: Math.max(selection.anchorLine, this.#state.cursorLine) + 1,
+			};
+		} else if (selection?.kind === "character") {
+			const text = this.getText();
+			const cursor = this.#vimAbsoluteCursor();
+			this.#vimVisualSelection = {
+				...selection,
+				start: Math.min(selection.anchor, cursor),
+				end: Math.max(this.#vimGraphemeEndAt(text, selection.anchor), this.#vimGraphemeEndAt(text, cursor)),
+			};
+		}
 	}
 
 	#prepareVimInsertInput(data: string, kb: KeybindingsManager): void {
@@ -3593,6 +3649,8 @@ export class Editor implements Component, Focusable {
 				this.#vimPending = { kind: "g", count: this.#takeOptionalVimCount() };
 				return true;
 			case "v":
+				this.#enterVimVisualCharacterMode();
+				return true;
 			case "V":
 				this.#enterVimVisualLineMode();
 				return true;
@@ -3648,9 +3706,25 @@ export class Editor implements Component, Focusable {
 			this.#vimPending = undefined;
 			if (char === "p") {
 				const range = this.#vimParagraphLineRange(pending.count, pending.textObject === "around");
-				this.#vimVisualAnchorLine = range.startLine;
-				this.#vimVisualLineRange = range;
+				this.#vimVisualSelection = {
+					kind: "line",
+					anchorLine: range.startLine,
+					...range,
+				};
 				this.#setVimCursor(range.endLine - 1, 0);
+			} else if (char === "w" || char === "W") {
+				const range = this.#vimWordTextObjectRange(
+					this.#vimAbsoluteCursor(),
+					pending.count,
+					char === "W",
+					pending.textObject === "around",
+				);
+				this.#vimVisualSelection = {
+					kind: "character",
+					anchor: range.start,
+					...range,
+				};
+				this.#setVimAbsoluteCursor(this.#vimPreviousGraphemeStart(this.getText(), range.end));
 			}
 			return true;
 		}
@@ -3669,21 +3743,42 @@ export class Editor implements Component, Focusable {
 					count: this.#takeVimCount(),
 				};
 				return true;
+			case "h":
+				this.#moveVimHorizontal(-1, this.#takeVimCount());
+				this.#updateVimVisualSelection();
+				return true;
 			case "j":
 				this.#moveVimVertical(1, this.#takeVimCount());
-				this.#updateVimVisualLineRange();
+				this.#updateVimVisualSelection();
 				return true;
 			case "k":
 				this.#moveVimVertical(-1, this.#takeVimCount());
-				this.#updateVimVisualLineRange();
+				this.#updateVimVisualSelection();
+				return true;
+			case "l":
+				this.#moveVimHorizontal(1, this.#takeVimCount());
+				this.#updateVimVisualSelection();
+				return true;
+			case "v":
+				if (this.#vimVisualSelection?.kind === "character") this.#enterVimNormalMode();
+				else this.#enterVimVisualCharacterMode();
+				return true;
+			case "V":
+				if (this.#vimVisualSelection?.kind === "line") this.#enterVimNormalMode();
+				else this.#enterVimVisualLineMode();
 				return true;
 			case "d": {
-				const range = this.#vimVisualLineRange;
-				if (!range) return true;
-				this.#state.cursorLine = range.startLine;
-				this.#setCursorCol(0);
-				this.#enterVimNormalMode();
-				this.#deleteVimLines(range.endLine - range.startLine, false);
+				const selection = this.#vimVisualSelection;
+				if (!selection) return true;
+				if (selection.kind === "line") {
+					this.#state.cursorLine = selection.startLine;
+					this.#setCursorCol(0);
+					this.#enterVimNormalMode();
+					this.#deleteVimLines(selection.endLine - selection.startLine, false);
+				} else {
+					this.#enterVimNormalMode();
+					this.#deleteVimRange(selection.start, selection.end, false);
+				}
 				return true;
 			}
 			default:

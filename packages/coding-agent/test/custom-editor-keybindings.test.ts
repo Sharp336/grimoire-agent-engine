@@ -78,6 +78,24 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("\x1b");
 		expect(onEscape).toHaveBeenCalledTimes(1);
 	});
+	it("lets Escape leave Vim visual mode before interrupting the app", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onEscape = vi.fn();
+		editor.setInputMode("vim");
+		editor.setText("one\ntwo");
+		editor.onEscape = onEscape;
+
+		editor.handleInput("V");
+		expect(editor.getVimMode()).toBe("visual");
+
+		editor.handleInput("\x1b");
+		expect(editor.getVimMode()).toBe("normal");
+		expect(onEscape).not.toHaveBeenCalled();
+
+		editor.handleInput("\x1b");
+		expect(onEscape).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not start push-to-talk from Vim normal-mode spaces", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onSpaceHoldStart = vi.fn();

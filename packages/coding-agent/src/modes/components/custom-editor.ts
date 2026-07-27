@@ -941,13 +941,13 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Escape leaves Vim insert mode before it can act as the app interrupt.
+			// Escape leaves Vim insert or visual mode before it can act as the app interrupt.
 			// Autocomplete still closes on the same key in the base editor.
 			if (
 				this.#matchesAction(canonical, "app.interrupt") &&
 				this.onEscape &&
 				!this.isShowingAutocomplete() &&
-				!this.isVimInsertEscape(data)
+				!this.isVimModeEscape(data)
 			) {
 				this.onEscape();
 				return;
