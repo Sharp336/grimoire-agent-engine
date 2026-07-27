@@ -19,6 +19,16 @@ const heapProbePath = path.resolve(import.meta.dir, "..", "fixtures", "changelog
 const bundleProbePath = path.resolve(import.meta.dir, "..", "fixtures", "changelog-bundle-fallback-probe.ts");
 const utilsStubPath = path.resolve(import.meta.dir, "..", "fixtures", "changelog-utils-stub.ts");
 
+const changelogUtilsStubPlugin: Bun.BunPlugin = {
+	name: "changelog-utils-stub",
+	setup(build) {
+		build.onResolve({ filter: /^@oh-my-pi\/pi-utils$/ }, () => ({ path: utilsStubPath }));
+		build.onResolve({ filter: /^\.\.\/config$/ }, args =>
+			args.importer.endsWith("/utils/changelog.ts") ? { path: utilsStubPath } : undefined,
+		);
+	},
+};
+
 async function runProbe(command: string[], cwd?: string): Promise<BundleProbeResult> {
 	const proc = Bun.spawn(command, {
 		cwd,
@@ -77,23 +87,14 @@ describe("changelog static import resources", () => {
 			await fs.mkdir(unrelatedCwd);
 			const sourceResult = await runProbe([process.execPath, bundleProbePath, missingPackageChangelogPath]);
 
-			const buildProc = Bun.spawn(
-				[
-					process.execPath,
-					"build",
-					bundleProbePath,
-					"--target=bun",
-					"--external=omp-legacy-pi-modules",
-					`--outdir=${bundleDir}`,
-				],
-				{ stderr: "pipe", stdout: "pipe" },
-			);
-			const [buildStdout, buildStderr, buildExitCode] = await Promise.all([
-				new Response(buildProc.stdout).text(),
-				new Response(buildProc.stderr).text(),
-				buildProc.exited,
-			]);
-			expect(buildExitCode, buildStdout + buildStderr).toBe(0);
+			const buildOutput = await Bun.build({
+				entrypoints: [bundleProbePath],
+				external: ["omp-legacy-pi-modules"],
+				outdir: bundleDir,
+				plugins: [changelogUtilsStubPlugin],
+				target: "bun",
+			});
+			expect(buildOutput.success, buildOutput.logs.map(log => log.message).join("\n")).toBe(true);
 
 			const outputs = await fs.readdir(bundleDir);
 			expect(outputs.some(output => output.endsWith(".md"))).toBe(true);
@@ -124,17 +125,7 @@ describe("changelog static import resources", () => {
 				entrypoints: [bundleProbePath],
 				root: repoRoot,
 				external: ["omp-legacy-pi-modules"],
-				plugins: [
-					{
-						name: "changelog-utils-stub",
-						setup(build) {
-							build.onResolve({ filter: /^@oh-my-pi\/pi-utils$/ }, () => ({ path: utilsStubPath }));
-							build.onResolve({ filter: /^\.\.\/config$/ }, args =>
-								args.importer.endsWith("/utils/changelog.ts") ? { path: utilsStubPath } : undefined,
-							);
-						},
-					},
-				],
+				plugins: [changelogUtilsStubPlugin],
 				compile: {
 					outfile: binaryPath,
 					autoloadBunfig: false,
