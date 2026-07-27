@@ -134,6 +134,10 @@ export async function getExchangeRate(): Promise<number> {
 		await saveCache(rate);
 		return rate;
 	} catch (error) {
+		if (currentRate !== FALLBACK_RATE) {
+			logger.warn("Failed to cache exchange rate, using last known rate", { error });
+			return currentRate;
+		}
 		logger.warn("Failed to fetch exchange rate, using fallback", { error });
 		logger.warn("Set i18n.exchangeRate in settings to use a manual rate and avoid network calls");
 		return FALLBACK_RATE;

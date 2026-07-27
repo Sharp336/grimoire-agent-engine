@@ -112,7 +112,7 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 				render: (item: FolderRowView) => formatDurationMs(item.avgDuration),
 			},
 		],
-		[t],
+		[t, locale, formatCost],
 	);
 
 	const renderMobileCard = (item: FolderRowView) => (

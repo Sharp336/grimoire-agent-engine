@@ -182,7 +182,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				),
 			},
 		],
-		[t, locale],
+		[t, locale, formatCost],
 	);
 
 	const renderMobileCard = (item: MessageStats, onClick?: () => void) => (

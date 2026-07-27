@@ -23,37 +23,20 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 	const closeButtonRef = useRef<HTMLButtonElement>(null);
 
 	useEffect(() => {
-		if (id === null) {
-			setDetails(null);
-			return;
+		if (id !== null) {
+			// Save the element that was active before the drawer opened
+			previousActiveElement.current = document.activeElement as HTMLElement;
 		}
-
-		previousActiveElement.current = document.activeElement as HTMLElement | null;
-		setLoading(true);
-		setError(null);
-		setDetails(null);
-
-		const controller = new AbortController();
-		getRequestDetails(id, controller.signal)
-			.then(data => {
-				if (controller.signal.aborted) return;
-				setDetails(data);
-				// Focus the close button for accessibility
-				setTimeout(() => closeButtonRef.current?.focus(), 50);
-			})
-			.catch(err => {
-				if (controller.signal.aborted) return;
-				setError(err instanceof Error ? err : new Error(String(err)));
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) setLoading(false);
-			});
-
-		return () => controller.abort();
 	}, [id]);
 
 	useEffect(() => {
-		if (id === null) return;
+		if (id === null) {
+			// Restore focus only when the drawer fully closes
+			if (previousActiveElement.current) {
+				previousActiveElement.current.focus();
+			}
+			return;
+		}
 
 		const handleKeyDown = (e: KeyboardEvent) => {
 			if (e.key === "Escape") {
@@ -64,11 +47,9 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 		window.addEventListener("keydown", handleKeyDown);
 		return () => {
 			window.removeEventListener("keydown", handleKeyDown);
-			if (previousActiveElement.current) {
-				previousActiveElement.current.focus();
-			}
 		};
 	}, [id, onClose]);
+
 
 	if (id === null) return null;
 

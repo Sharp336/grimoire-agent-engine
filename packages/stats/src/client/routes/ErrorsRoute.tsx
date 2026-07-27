@@ -95,7 +95,7 @@ export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: E
 				render: (item: MessageStats) => formatCost(item.usage.cost.total, 4, locale),
 			},
 		],
-		[t, locale],
+		[t, locale, formatCost],
 	);
 
 	const renderMobileCard = (item: MessageStats, onClick?: () => void) => (

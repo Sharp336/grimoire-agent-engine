@@ -330,7 +330,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 				),
 			},
 		],
-		[t, locale],
+		[t, locale, formatCost],
 	);
 
 	const renderMobileCard = (item: ToolRowView) => (
@@ -448,7 +448,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 				),
 			},
 		],
-		[t, locale],
+		[t, locale, formatCost],
 	);
 
 	return (
