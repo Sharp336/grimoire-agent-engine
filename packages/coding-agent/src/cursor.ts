@@ -14,13 +14,26 @@ import type {
 	CursorExecHandlers as ICursorExecHandlers,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
-import { piEscapeRegexLiteral, piJoinPath, piLimit, piReadPath } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+import {
+	piEscapeRegexLiteral,
+	piJoinPath,
+	piLimit,
+	piLsPath,
+	piReadPath,
+} from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { resolveToCwd } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "./tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
+
+/**
+ * A tool instance the bridge can run, matching the erased shape the session's
+ * tool registry stores. The concrete tools have narrower `execute` parameter
+ * types than the default `AgentTool`, which only unify through this alias.
+ */
+type CursorBridgeTool = AgentTool<any, any, any>;
 
 interface CursorExecBridgeOptions {
 	cwd: string;
@@ -50,6 +63,15 @@ interface CursorExecBridgeOptions {
 	 * Cursor emits no local `todo` toolResult, so nothing else records it.
 	 */
 	persistTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Build a `grep` tool honoring a frame's own context width and match cap.
+	 *
+	 * The modern `pi_grep` frame carries both, and the shared `grep` instance
+	 * is fixed to the session settings at construction — so without this the
+	 * two fields are silently dropped. Callers that cannot supply it keep the
+	 * shared instance and the session's defaults.
+	 */
+	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): CursorBridgeTool | undefined;
 }
 
 function createToolResultMessage(
@@ -81,8 +103,9 @@ async function executeTool(
 	toolName: string,
 	toolCallId: string,
 	args: Record<string, unknown>,
+	overrideTool?: CursorBridgeTool,
 ): Promise<ToolResultMessage> {
-	const tool = options.tools.get(toolName) ?? options.getTool?.(toolName);
+	const tool = overrideTool ?? options.tools.get(toolName) ?? options.getTool?.(toolName);
 	if (!tool) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
@@ -459,20 +482,35 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	/**
 	 * `literal` makes the pattern a fixed string; the local tool is regex-only,
 	 * so the pattern is escaped on the way in (same translation the legacy pi
-	 * shim does). `context` and `limit` have no tool-level equivalent — context
-	 * width comes from `grep.contextBefore`/`grep.contextAfter` settings and the
-	 * result count is bounded by the tool's own file/match caps.
+	 * shim does).
+	 *
+	 * `context` and `limit` are not expressible in the model-facing schema —
+	 * context width comes from settings fixed at tool construction — so the
+	 * frame's values are honored by building a per-call `grep` through
+	 * {@link CursorExecBridgeOptions.createGrepTool}. Both are `optional int32`,
+	 * so a present `0` context means "no context lines", not "use the default".
+	 * Without the factory the shared instance runs with session defaults.
 	 */
 	async piGrep(call: Parameters<NonNullable<ICursorExecHandlers["piGrep"]>>[0]) {
-		const { pattern, path, glob, ignoreCase, literal } = call.args;
+		const { pattern, path, glob, ignoreCase, literal, context, limit } = call.args;
+		const scoped =
+			context !== undefined || limit !== undefined
+				? this.options.createGrepTool?.({ context, totalMatchLimit: piLimit(limit) })
+				: undefined;
 		// Same arg mapping as the legacy `grep` handler: the local tool takes one
 		// path spec, and its `case` flag is case-SENSITIVITY, the inverse of the
 		// frame's `ignore_case`.
-		return await executeTool(this.options, "grep", call.toolCallId, {
-			pattern: literal === true ? piEscapeRegexLiteral(pattern) : pattern,
-			path: glob ? piJoinPath(path, glob) : path || ".",
-			case: ignoreCase === true ? false : undefined,
-		});
+		return await executeTool(
+			this.options,
+			"grep",
+			call.toolCallId,
+			{
+				pattern: literal === true ? piEscapeRegexLiteral(pattern) : pattern,
+				path: glob ? piJoinPath(path, glob) : path || ".",
+				case: ignoreCase === true ? false : undefined,
+			},
+			scoped,
+		);
 	}
 
 	/**
@@ -494,11 +532,10 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	/**
 	 * Redirected to `read`, which lists directories — same as the legacy `ls`.
-	 * `limit` has no tool-level equivalent; the listing is bounded by `read`'s
-	 * own directory-entry caps.
+	 * The frame's entry `limit` is not mapped; see {@link piLsPath}.
 	 */
 	async piLs(call: Parameters<NonNullable<ICursorExecHandlers["piLs"]>>[0]) {
-		return await executeTool(this.options, "read", call.toolCallId, { path: call.args.path || "." });
+		return await executeTool(this.options, "read", call.toolCallId, { path: piLsPath(call.args.path) });
 	}
 
 	/**

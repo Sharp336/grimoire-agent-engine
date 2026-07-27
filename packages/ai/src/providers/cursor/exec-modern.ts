@@ -113,6 +113,21 @@ export function piJoinPath(basePath: string | undefined, pattern: string): strin
 	return path.join(basePath, pattern);
 }
 
+/**
+ * The path a `pi_ls` frame lists.
+ *
+ * The frame's `limit` is deliberately NOT mapped. It caps directory *entries*
+ * (the reference does a flat `readdir` and slices the entry array), while the
+ * local `read` tool renders a depth-2 tree with per-directory caps and elision
+ * summaries and applies a selector as a *rendered line* slice. Nested rows,
+ * headers and "N more" lines all count toward that slice, so `:1+K` would cap
+ * a different unit while looking honored — worse than leaving it unset, which
+ * at least reports the local listing's own truncation faithfully.
+ */
+export function piLsPath(basePath: string | undefined): string {
+	return basePath || ".";
+}
+
 /** Escape a literal string so the regex-only local `grep` tool matches it verbatim. */
 export function piEscapeRegexLiteral(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

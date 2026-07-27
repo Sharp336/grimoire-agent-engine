@@ -20,7 +20,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { GrepTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { GrepTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { AdviseTool } from "../src/advisor/advise-tool";
@@ -81,6 +81,58 @@ describe("CursorExecHandlers.grep bridge", () => {
 			caseInsensitive: false,
 		} as any);
 		expect((sensitiveResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
+	});
+
+	it("honors pi_grep's requested match limit against real files", async () => {
+		// The frame's `limit` caps total surfaced matches. The model-facing schema
+		// has no such parameter, so without a per-call tool the cap is dropped and
+		// the search returns everything it found.
+		await Bun.write(path.join(cwd, "many.txt"), Array.from({ length: 10 }, (_, i) => `needle ${i}`).join("\n"));
+		const scopedHandlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["grep", searchTool]]),
+			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
+		});
+
+		const capped = await scopedHandlers.piGrep({
+			toolCallId: "c1",
+			args: { pattern: "needle", path: cwd, limit: 3 },
+		} as never);
+		expect((capped.details as { matchCount?: number } | undefined)?.matchCount).toBe(3);
+
+		const uncapped = await scopedHandlers.piGrep({
+			toolCallId: "c2",
+			args: { pattern: "needle", path: cwd },
+		} as never);
+		expect((uncapped.details as { matchCount?: number } | undefined)?.matchCount).toBe(10);
+	});
+
+	it("honors pi_grep's requested context width against real files", async () => {
+		// `context` has no schema parameter either: the width is read from
+		// settings fixed at tool construction, so the frame's value only lands
+		// through a per-call instance.
+		await Bun.write(path.join(cwd, "ctx.txt"), "before line\nneedle here\nafter line\n");
+		const scopedHandlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["grep", searchTool]]),
+			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
+		});
+
+		const noContext = await scopedHandlers.piGrep({
+			toolCallId: "c1",
+			args: { pattern: "needle here", path: path.join(cwd, "ctx.txt"), context: 0 },
+		} as never);
+		const noContextText = noContext.content.map(c => (c.type === "text" ? c.text : "")).join("");
+		expect(noContextText).not.toContain("before line");
+		expect(noContextText).not.toContain("after line");
+
+		const withContext = await scopedHandlers.piGrep({
+			toolCallId: "c2",
+			args: { pattern: "needle here", path: path.join(cwd, "ctx.txt"), context: 1 },
+		} as never);
+		const withContextText = withContext.content.map(c => (c.type === "text" ? c.text : "")).join("");
+		expect(withContextText).toContain("before line");
+		expect(withContextText).toContain("after line");
 	});
 });
 

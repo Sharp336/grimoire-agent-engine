@@ -195,6 +195,7 @@ import {
 	piEscapeRegexLiteral,
 	piJoinPath,
 	piLimit,
+	piLsPath,
 	piReadPath,
 } from "./cursor/exec-modern";
 
@@ -1669,7 +1670,7 @@ async function handleExecServerMessage(
 			// Same mapping as the legacy `lsArgs` frame: the local `read` tool lists
 			// directories, so the synthesized block must name `read` to match the
 			// bridge's own `toolResult`.
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", { path: args.path || "." });
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", { path: piLsPath(args.path) });
 			const { execResult } = await resolveExecHandler(
 				{ args, toolCallId },
 				execHandlers?.piLs?.bind(execHandlers),

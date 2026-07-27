@@ -884,6 +884,22 @@ export interface GrepToolDetails {
 
 type SearchParams = typeof searchSchema.infer;
 
+/**
+ * Construction-time overrides for callers that are not the model.
+ *
+ * The model-facing schema deliberately does not grow these: they exist for
+ * wire bridges (the Cursor `pi_grep` frame) whose protocol carries an explicit
+ * context width and total match cap, and which would otherwise have to drop
+ * them. Unset means "use the session settings / built-in caps" — the behavior
+ * every model-issued call keeps.
+ */
+export interface GrepToolOptions {
+	/** Overrides `grep.contextBefore`/`grep.contextAfter` for every call on this instance. */
+	context?: number;
+	/** Caps total surfaced matches. Applied on top of the built-in per-file and file-window caps, never above them. */
+	totalMatchLimit?: number;
+}
+
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
 	readonly name = "grep";
 	readonly approval = (args: unknown): ToolTier => {
@@ -897,7 +913,17 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly parameters = searchSchema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {
+	readonly #contextOverride?: number;
+	readonly #totalMatchLimit?: number;
+
+	constructor(
+		private readonly session: ToolSession,
+		options?: GrepToolOptions,
+	) {
+		const context = options?.context;
+		this.#contextOverride = context !== undefined ? Math.max(0, Math.floor(context)) : undefined;
+		const total = options?.totalMatchLimit;
+		this.#totalMatchLimit = total !== undefined ? Math.max(1, Math.floor(total)) : undefined;
 		const displayMode = resolveFileDisplayMode(session);
 		this.description = prompt.render(grepDescription, {
 			IS_HL_MODE: displayMode.hashLines,
@@ -978,8 +1004,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							`or pass a UTF-8 text member.`,
 					);
 				}
-				const normalizedContextBefore = this.session.settings.get("grep.contextBefore");
-				const normalizedContextAfter = this.session.settings.get("grep.contextAfter");
+				const normalizedContextBefore = this.#contextOverride ?? this.session.settings.get("grep.contextBefore");
+				const normalizedContextAfter = this.#contextOverride ?? this.session.settings.get("grep.contextAfter");
 				const ignoreCase = !(caseSensitive ?? true);
 				const useGitignore = gitignore ?? true;
 				const patternHasNewline = normalizedPattern.includes("\n") || normalizedPattern.includes("\\n");
@@ -1300,6 +1326,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const windowFiles = canPaginate ? fileOrder.slice(skipFiles, skipFiles + DEFAULT_FILE_LIMIT) : fileOrder;
 				const fileLimitReached = canPaginate && totalFiles > skipFiles + DEFAULT_FILE_LIMIT;
 				const selectedMatches: GrepMatch[] = [];
+				let totalMatchLimitReached = false;
 				if (windowFiles.length > 0) {
 					const lists = windowFiles.map(file => matchesByPath.get(file) ?? []);
 					const cursors = new Array<number>(lists.length).fill(0);
@@ -1312,6 +1339,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								anyAdded = true;
 							}
 						}
+					}
+					// Round-robin above interleaves files for diversity, so the cap is
+					// applied after selection rather than as a per-list bound: trimming
+					// mid-rotation would silently favour whichever files sort first.
+					const cap = this.#totalMatchLimit;
+					if (cap !== undefined && selectedMatches.length > cap) {
+						selectedMatches.length = cap;
+						totalMatchLimitReached = true;
 					}
 				}
 				const nextSkip = skipFiles + windowFiles.length;
@@ -1503,7 +1538,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const output = truncation.content;
 				const displayText = displayLines.join("\n");
 				const truncated = Boolean(
-					fileLimitReached || perFileLimitReached || result.limitReached || truncation.truncated || linesTruncated,
+					fileLimitReached ||
+						perFileLimitReached ||
+						totalMatchLimitReached ||
+						result.limitReached ||
+						truncation.truncated ||
+						linesTruncated,
 				);
 				const details: GrepToolDetails = {
 					scopePath,
@@ -1518,7 +1558,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					})),
 					truncated,
 					fileLimitReached: fileLimitReached ? DEFAULT_FILE_LIMIT : undefined,
-					perFileLimitReached: perFileLimitReached ? perFileMatchCap : undefined,
+					perFileLimitReached: totalMatchLimitReached
+						? this.#totalMatchLimit
+						: perFileLimitReached
+							? perFileMatchCap
+							: undefined,
 					displayContent: displayText,
 					missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 				};

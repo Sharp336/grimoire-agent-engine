@@ -2636,6 +2636,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			persistTodoPhases: phases => sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases }),
+			// `pi_grep` carries its own context width and match cap, which the
+			// shared grep instance fixed at construction cannot express.
+			createGrepTool: grepOptions => new GrepTool(toolSession, grepOptions),
 		});
 
 		// Resolve the inline-descriptors setting against the session-start model.
