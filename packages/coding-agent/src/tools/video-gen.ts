@@ -5,7 +5,7 @@ import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { ModelRegistry } from "../config/model-registry";
 import type { AgentToolUpdateCallback, CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
-import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
+import { isXAIHttpCompatProvider, ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import videoGenDescription from "../prompts/tools/video-gen.md" with { type: "text" };
 import { MAX_INLINE_IMAGE_SIZE, resolveImageReferenceUrl, resolveVideoReferenceUrl } from "./media-input";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
@@ -166,15 +166,10 @@ export function setVideoProviderOrder(providers: readonly string[]): void {
 }
 
 function activeVideoProvider(model: Model | undefined): VideoProvider | null {
-	switch (model?.provider) {
-		case "xai":
-		case "xai-oauth":
-			return "xai";
-		case "openrouter":
-			return "openrouter";
-		default:
-			return null;
-	}
+	if (!model?.provider) return null;
+	if (isXAIHttpCompatProvider(model.provider)) return "xai";
+	if (model.provider === "openrouter") return "openrouter";
+	return null;
 }
 
 /**

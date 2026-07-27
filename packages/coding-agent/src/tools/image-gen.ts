@@ -16,7 +16,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
+import { isXAIHttpCompatProvider, ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { AUTO_IMAGE_PROVIDER_ORDER, type ImageProvider, isImageProviderId } from "./image-providers";
 import { type InlineMediaData, loadImageFromPath, normalizeDataUrl, toDataUrl } from "./media-input";
@@ -573,20 +573,20 @@ async function findCodexSubscriptionImageCredentials(
 }
 
 function activeImageProvider(model: Model | undefined): Exclude<ImageProviderPreference, "auto"> | null {
-	switch (model?.provider) {
+	if (!model?.provider) return null;
+	switch (model.provider) {
 		case "openai":
 		case "openai-codex":
 			return "openai";
 		case "google-antigravity":
 			return "antigravity";
-		case "xai":
-		case "xai-oauth":
-			return "xai";
 		case "openrouter":
 			return "openrouter";
 		case "google":
 			return "gemini";
 		default:
+			// Check for xai, xai-oauth, or plugin-registered xaiHttpCompat providers
+			if (isXAIHttpCompatProvider(model.provider)) return "xai";
 			return null;
 	}
 }

@@ -175,6 +175,8 @@ export function getOAuthProviders(): OAuthProviderInfo[] {
 		name: provider.name,
 		available: true,
 		storeCredentialsAs: provider.storeCredentialsAs,
+		xaiHttpCompat: provider.xaiHttpCompat,
+		xaiHttpBaseUrl: provider.xaiHttpBaseUrl,
 	}));
 	return [...builtInOAuthProviders, ...customProviders];
 }

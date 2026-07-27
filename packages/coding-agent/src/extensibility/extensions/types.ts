@@ -1333,6 +1333,17 @@ export interface ProviderConfig {
 		getApiKey?(credentials: OAuthCredentials): string;
 		/** Optional model rewrite hook for credential-aware routing (e.g., enterprise URLs). */
 		modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
+		/**
+		 * When true, this provider's credentials can authenticate xAI HTTP tool
+		 * endpoints (image gen, video gen, TTS, web search). Lets plugin-supplied
+		 * OAuth providers slot into xAI tool credential resolution.
+		 */
+		xaiHttpCompat?: boolean;
+		/**
+		 * Base URL for xAI HTTP tools when xaiHttpCompat is true. Defaults to
+		 * "https://api.x.ai/v1" if omitted.
+		 */
+		xaiHttpBaseUrl?: string;
 	};
 	/**
 	 * Async factory that fetches the live model list from the provider endpoint.
