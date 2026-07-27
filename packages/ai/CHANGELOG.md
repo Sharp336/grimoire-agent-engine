@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed legacy Codex usage blocks continuing to gate every model after per-meter backoff shipped. SQLite now splits the old `shared` scope into independent `chat` and `spark` blocks while preserving their expiry and age, so live usage reconciliation can release a healthy meter without releasing an exhausted one.
+
 ## [17.1.4] - 2026-07-26
 
 ### Added
