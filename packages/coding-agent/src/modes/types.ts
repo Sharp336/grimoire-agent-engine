@@ -360,6 +360,8 @@ export interface InteractiveModeContext {
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;
+	handleUndoCommand(howMuchRaw?: string): Promise<void>;
+	handleRedoCommand(): Promise<void>;
 	handleSTTToggle(): Promise<void>;
 	/** Start or stop the Codex-backed realtime voice session. */
 	handleLiveCommand(): Promise<void>;

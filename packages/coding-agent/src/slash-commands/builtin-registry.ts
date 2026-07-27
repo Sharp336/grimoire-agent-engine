@@ -1457,6 +1457,24 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "undo",
+		description: "Revert the last assistant turn and restore files",
+		inlineHint: "[n]",
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			void runtime.ctx.handleUndoCommand(command.args?.trim());
+		},
+	},
+	{
+		name: "redo",
+		description: "Re-apply the last undone turn (not yet implemented)",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleRedoCommand();
+		},
+	},
+	{
 		name: "login",
 		description: "Login with OAuth provider",
 		inlineHint: "[provider|redirect URL]",

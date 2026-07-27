@@ -99,7 +99,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
-	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
+	/** Whether per-turn workspace snapshots and `/undo` are enabled. Defaults to true when supported. */
+	undoEnabled?: boolean;
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag). */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;

@@ -740,6 +740,14 @@ For example, the default `{ exit: 10 }` ensures that typing `/ex` offers `/exit`
 
 Keys may match either a command's canonical name or any of its aliases; aliases are resolved per-command so an alias override affects that command's ranking, not other commands.
 
+### Undo and redo
+
+`/undo [n]` rolls back the last `n` user→assistant turns, restoring workspace files and branching the session so the reverted user message is ready to edit and resend. `/redo` is reserved for re-applying undone turns; it is not yet implemented.
+
+Snapshots are captured automatically at the start of each user turn in a hidden git repository under the agent data directory, keeping the user's project history untouched. Undo only restores files that actually changed, requires confirmation before destructive restore, and is automatically disabled when git is unavailable or the project directory does not exist.
+
+There is currently no user-facing setting to toggle snapshots; the feature runs by default when supported.
+
 ### Other groups
 
 `omp config list` exposes many more grouped settings, including: `task.*` (subagent concurrency, isolation, model overrides), `skills.*` and `commands.*` (discovery toggles), `mcp.*`, `github.*`, `async.*`, `goal.*`, `loop.*`, `todo.*`, `magicKeywords.*`, `ttsr.*` (time-traveling stream rules), `display.*`, `startup.*`, `share.*`, `collab.*`, `stt.*`/`tts.*`, `memories.*`/`hindsight.*`/`mnemopi.*` (memory backends), and `bashInterceptor.*`. Each follows the same type/default rules shown above.
