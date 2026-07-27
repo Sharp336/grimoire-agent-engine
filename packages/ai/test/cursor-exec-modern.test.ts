@@ -581,6 +581,40 @@ describe("Cursor MCP resource frames answer from the host's servers", () => {
 		expect(answer.value.result.value.content).toEqual({ case: "text", value: "# Title" });
 	});
 
+	it("forwards a download request and answers with the path, not the content", async () => {
+		// `download_path` is a different contract: the host writes the resource
+		// to that workspace-relative path and the model is told where it landed.
+		// Returning content anyway would put the payload back in context, which
+		// is exactly what the download mode exists to avoid.
+		let sawDownloadPath: string | undefined;
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, {
+					server: "files",
+					uri: "files://logo",
+					downloadPath: "assets/logo.png",
+				}),
+			}),
+			{
+				execHandlers: {
+					readMcpResource: async ({ uri, downloadPath }) => {
+						sawDownloadPath = downloadPath;
+						// A host that also has the bytes on hand must still not have
+						// them forwarded: the download path is the whole answer.
+						return { uri, mimeType: "image/png", downloadPath, text: "inline payload" };
+					},
+				},
+			},
+		);
+		expect(sawDownloadPath).toBe("assets/logo.png");
+		const answer = soleResult(frames);
+		if (answer.case !== "readMcpResourceExecResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.downloadPath).toBe("assets/logo.png");
+		expect(answer.value.result.value.content.case).toBeUndefined();
+	});
+
 	it("distinguishes a missing resource from a failing host", async () => {
 		// `null` is "no such server or uri", which is `not_found`. A throw is a
 		// real failure and must not masquerade as a missing resource — the model

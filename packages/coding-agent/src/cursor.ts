@@ -619,19 +619,43 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * blob. Text items are joined, since a multi-part text resource is one
 	 * document; otherwise the first blob stands in. `blob` arrives base64 and
 	 * the wire wants bytes.
+	 *
+	 * A `downloadPath` frame is a different contract: write the bytes to that
+	 * workspace-relative path and answer with the path alone, so a large binary
+	 * lands on disk instead of in the model's context.
 	 */
-	async readMcpResource({ server, uri }: { server: string; uri: string }): Promise<CursorMcpResourceContent | null> {
+	async readMcpResource({
+		server,
+		uri,
+		downloadPath,
+	}: {
+		server: string;
+		uri: string;
+		downloadPath?: string;
+	}): Promise<CursorMcpResourceContent | null> {
 		const mcp = this.options.mcpResources;
 		if (!mcp) return null;
 		const read = await mcp.readServerResource(server, uri);
 		if (!read) return null;
+		const mimeType = read.contents[0]?.mimeType;
 		const texts = read.contents.filter(item => item.text !== undefined).map(item => item.text as string);
-		if (texts.length > 0) {
-			return { uri, mimeType: read.contents[0]?.mimeType, text: texts.join("\n") };
-		}
 		const blob = read.contents.find(item => item.blob !== undefined)?.blob;
+
+		if (downloadPath) {
+			// Text resources download as their own bytes; a blob decodes first.
+			const payload =
+				texts.length > 0 ? texts.join("\n") : blob !== undefined ? Buffer.from(blob, "base64") : undefined;
+			if (payload === undefined) return null;
+			const absolutePath = resolveToCwd(downloadPath, this.options.getCwd?.() ?? this.options.cwd);
+			await Bun.write(absolutePath, payload);
+			// The path echoed back is the one the frame asked for: it is
+			// workspace-relative by contract, and the model addresses it that way.
+			return { uri, mimeType, downloadPath };
+		}
+
+		if (texts.length > 0) return { uri, mimeType, text: texts.join("\n") };
 		if (blob === undefined) return null;
-		return { uri, mimeType: read.contents[0]?.mimeType, blob: Buffer.from(blob, "base64") };
+		return { uri, mimeType, blob: Buffer.from(blob, "base64") };
 	}
 
 	/**

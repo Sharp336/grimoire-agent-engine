@@ -690,6 +690,41 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect(await handlers.readMcpResource({ server: "files", uri: "files://missing" })).toBeNull();
 	});
 
+	it("writes a download to the workspace path and returns no content", async () => {
+		// The frame's `download_path` means "put it on disk, don't hand me the
+		// bytes". Reporting success without creating the file leaves the model
+		// pointing at nothing.
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-download-"));
+		try {
+			const handlers = new CursorExecHandlers({
+				cwd: workspace,
+				tools: new Map(),
+				mcpResources: {
+					serverNames: () => ["files"],
+					getServerResources: () => undefined,
+					readServerResource: async (_name, uri) => ({
+						contents: [{ uri, mimeType: "image/png", blob: Buffer.from("PNG-BYTES").toString("base64") }],
+					}),
+				},
+			});
+
+			const read = await handlers.readMcpResource({
+				server: "files",
+				uri: "files://logo",
+				downloadPath: "assets/logo.png",
+			});
+
+			expect(read?.downloadPath).toBe("assets/logo.png");
+			// No content: that is the whole point of the download mode.
+			expect(read?.text).toBeUndefined();
+			expect(read?.blob).toBeUndefined();
+			// The file is really there, decoded from base64, under the workspace.
+			expect(await Bun.file(path.join(workspace, "assets/logo.png")).text()).toBe("PNG-BYTES");
+		} finally {
+			await removeWithRetries(workspace);
+		}
+	});
+
 	it("answers nothing when the session has no MCP manager", async () => {
 		// A host without MCP must still answer truthfully rather than throwing:
 		// an empty catalog and `not_found` are the honest responses.

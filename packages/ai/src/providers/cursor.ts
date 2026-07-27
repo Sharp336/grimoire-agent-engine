@@ -1582,7 +1582,11 @@ async function handleExecServerMessage(
 				// `null` is the handler's "no such server or uri", which is exactly
 				// `not_found`; a throw is a real failure and must not masquerade as
 				// a missing resource.
-				const content = await execHandlers?.readMcpResource?.({ server: args.server, uri: args.uri });
+				const content = await execHandlers?.readMcpResource?.({
+					server: args.server,
+					uri: args.uri,
+					downloadPath: args.downloadPath,
+				});
 				execResult = content
 					? create(ReadMcpResourceExecResultSchema, {
 							result: {
@@ -1592,14 +1596,19 @@ async function handleExecServerMessage(
 									name: content.name,
 									description: content.description,
 									mimeType: content.mimeType,
-									// The wire's content oneof carries one of the two; text
-									// wins when a host supplies both.
+									downloadPath: content.downloadPath,
+									// A download returns no content to the model: the file is
+									// on disk and the path is the answer. Otherwise the wire's
+									// content oneof carries one of the two, text winning when
+									// a host supplies both.
 									content:
-										content.text !== undefined
-											? { case: "text", value: content.text }
-											: content.blob !== undefined
-												? { case: "blob", value: content.blob }
-												: { case: undefined },
+										content.downloadPath !== undefined
+											? { case: undefined }
+											: content.text !== undefined
+												? { case: "text", value: content.text }
+												: content.blob !== undefined
+													? { case: "blob", value: content.blob }
+													: { case: undefined },
 								}),
 							},
 						})

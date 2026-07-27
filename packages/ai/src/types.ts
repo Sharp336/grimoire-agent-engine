@@ -1032,7 +1032,9 @@ export interface CursorMcpResource {
  * The content of one resource read.
  *
  * `text` and `blob` are the wire's content oneof: exactly one is sent, with
- * `text` winning when a host supplies both.
+ * `text` winning when a host supplies both. A download instead sets
+ * `downloadPath` and no content at all — the model is told where the file
+ * landed rather than being handed its bytes.
  */
 export interface CursorMcpResourceContent {
 	uri: string;
@@ -1041,6 +1043,12 @@ export interface CursorMcpResourceContent {
 	mimeType?: string;
 	text?: string;
 	blob?: Uint8Array;
+	/**
+	 * Where the host wrote the resource, workspace-relative, when the frame
+	 * asked for a download. Set this INSTEAD of `text`/`blob`: the wire
+	 * contract is that a download returns no content to the model.
+	 */
+	downloadPath?: string;
 }
 
 export interface CursorExecHandlers {
@@ -1078,7 +1086,15 @@ export interface CursorExecHandlers {
 	 * Read one resource. `null` means the server or uri is genuinely unknown,
 	 * which the provider answers as `not_found`; throwing surfaces as `error`.
 	 */
-	readMcpResource?: (args: { server: string; uri: string }) => Promise<CursorMcpResourceContent | null>;
+	readMcpResource?: (args: {
+		server: string;
+		uri: string;
+		/**
+		 * When set, write the resource here (workspace-relative) and return
+		 * `downloadPath` instead of content.
+		 */
+		downloadPath?: string;
+	}) => Promise<CursorMcpResourceContent | null>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
 	onToolResult?: CursorToolResultHandler;
