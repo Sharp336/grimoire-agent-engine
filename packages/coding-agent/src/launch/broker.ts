@@ -1148,29 +1148,27 @@ class DaemonBroker {
 					socket.write(JSON.stringify({ ok: true, cmd: "kill", daemon: targetName }) + "\n");
 					break;
 				}
-				case "pause": {
-					const targetName = typeof msg.payload?.daemon === "string" ? msg.payload.daemon : undefined;
-					if (targetName) {
-						const record = this.#records.get(targetName);
-						if (record?.process) {
-							record.process.pause();
-						}
-					}
-					socket.write(JSON.stringify({ ok: true, cmd: "pause", daemon: targetName }) + "\n");
-					break;
+			case "pause": {
+				const targetName = typeof msg.payload?.daemon === "string" ? msg.payload.daemon : undefined;
+				if (targetName) {
+					const record = this.#records.get(targetName);
+					const pid = record?.snapshot?.pid;
+					if (pid) process.kill(pid, "SIGSTOP");
 				}
-				case "resume": {
-					const targetName = typeof msg.payload?.daemon === "string" ? msg.payload.daemon : undefined;
-					if (targetName) {
-						const record = this.#records.get(targetName);
-						if (record?.process) {
-							record.process.resume();
-						}
-					}
-					socket.write(JSON.stringify({ ok: true, cmd: "resume", daemon: targetName }) + "\n");
-					break;
-				}
+				socket.write(JSON.stringify({ ok: true, cmd: "pause", daemon: targetName }) + "\n");
+				break;
 			}
+			case "resume": {
+				const targetName = typeof msg.payload?.daemon === "string" ? msg.payload.daemon : undefined;
+				if (targetName) {
+					const record = this.#records.get(targetName);
+					const pid = record?.snapshot?.pid;
+					if (pid) process.kill(pid, "SIGCONT");
+				}
+				socket.write(JSON.stringify({ ok: true, cmd: "resume", daemon: targetName }) + "\n");
+				break;
+			}
+		}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			socket.write(JSON.stringify({ ok: false, error: message }) + "\n");

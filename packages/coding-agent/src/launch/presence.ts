@@ -82,10 +82,11 @@ async function canonicalProjectDir(projectDir: string): Promise<string> {
 /** Register this omp process so project daemons survive while it remains alive. */
 export async function registerDaemonProjectPresence(
 	projectDir: string,
-	options: RegisterPresenceOptions = {},
+	options: RegisterPresenceOptions | string = {},
 ): Promise<DaemonProjectPresence> {
+	const opts: RegisterPresenceOptions = typeof options === "string" ? { runtimeDir: options } : options;
 	const canonical = await canonicalProjectDir(projectDir);
-	const runtimeDir = options.runtimeDir ?? daemonRuntimeDir(canonical);
+	const runtimeDir = opts.runtimeDir ?? daemonRuntimeDir(canonical);
 	const clientsDir = path.join(runtimeDir, CLIENTS_DIR);
 	await fs.mkdir(clientsDir, { recursive: true, mode: 0o700 });
 	const id = `${process.pid}-${crypto.randomUUID()}`;
@@ -94,8 +95,8 @@ export async function registerDaemonProjectPresence(
 		pid: process.pid,
 		id,
 		projectDir: canonical,
-		relayLink: options.relayLink,
-		roomKey: options.roomKey,
+		relayLink: opts.relayLink,
+		roomKey: opts.roomKey,
 	};
 	await Bun.write(presencePath, JSON.stringify(record));
 	await fs.chmod(presencePath, 0o600);

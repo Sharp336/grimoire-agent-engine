@@ -158,7 +158,7 @@ describe("relay-link registry + command socket", () => {
 
 		try {
 			const result = await sendCommand(socketPath, {
-				cmd: "invalid-cmd",
+				cmd: "invalid-cmd" as "kill",
 				payload: {},
 			});
 			expect(result.ok).toBe(false);
