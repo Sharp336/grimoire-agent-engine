@@ -10,6 +10,7 @@
  */
 
 import type { AgentSession } from "../session/agent-session";
+import { rebasePathWithinRoot } from "../session/session-paths";
 import { oneLineLabel } from "../task/types";
 
 export const MAIN_AGENT_ID = "Main";
@@ -234,6 +235,19 @@ export class AgentRegistry {
 		if (sessionFile !== undefined) ref.sessionFile = sessionFile;
 		ref.lastActivity = Date.now();
 		return true;
+	}
+
+	/** Rebase transcript refs and live managers moved with an owning session's artifact tree. */
+	async rebaseSessionFiles(oldRoot: string, newRoot: string): Promise<void> {
+		for (const ref of this.#refs.values()) {
+			if (!ref.sessionFile) continue;
+			const rebasedFile = rebasePathWithinRoot(ref.sessionFile, oldRoot, newRoot);
+			if (rebasedFile === ref.sessionFile) continue;
+			if (ref.session) {
+				await ref.session.sessionManager.rebaseMovedSessionFile(oldRoot, newRoot);
+			}
+			ref.sessionFile = rebasedFile;
+		}
 	}
 
 	detachSession(id: string, expected?: AgentRefExpectation): boolean {

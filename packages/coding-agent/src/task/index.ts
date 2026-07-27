@@ -46,6 +46,7 @@ import type { AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
+import { spawnedAgentSessionLinkPath } from "./link-path";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
@@ -840,6 +841,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const policy = policies[index]!;
 			const agentSource = policy.agent.source;
 			const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
+			const sessionFile = spawnedAgentSessionLinkPath(this.session.getSessionFile(), agentId);
 			const assignment = (item.task ?? "").trim();
 			spawns.push({
 				agentId,
@@ -852,6 +854,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agent: agentType,
 					agentSource,
 					modelRole: policy.modelRole,
+					sessionFile,
 					status: "pending",
 					task: renderSubagentUserPrompt(assignment),
 					assignment,
@@ -887,7 +890,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			totalDurationMs: Date.now() - callStartedAt,
 			usage: syncUsage,
 			outputPaths: syncOutputPaths,
-			progress: spawns.map(spawn => ({ ...spawn.progress })),
+			progress: spawns.map(spawn => ({
+				...spawn.progress,
+				sessionFile:
+					spawnedAgentSessionLinkPath(this.session.getSessionFile(), spawn.agentId) ?? spawn.progress.sessionFile,
+			})),
 			async: {
 				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
 				jobId: primaryJobId,
@@ -1139,6 +1146,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							progress.resolvedModel = nextProgress.resolvedModel;
 							progress.resolvedModelIsFallback =
 								nextProgress.resolvedModelIsFallback ?? progress.resolvedModelIsFallback;
+							progress.sessionFile = nextProgress.sessionFile;
 							progress.tokens = nextProgress.tokens;
 							progress.requests = nextProgress.requests;
 							progress.contextTokens = nextProgress.contextTokens;
@@ -1222,6 +1230,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agentId,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
+				linkPath: progress.sessionFile,
 				onProgress: text => {
 					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
 				},

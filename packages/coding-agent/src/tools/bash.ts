@@ -817,8 +817,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const jobId = manager.register(
 			"bash",
 			label,
-			async ({ jobId, signal: runSignal, reportProgress }) => {
+			async ({ jobId, signal: runSignal, reportProgress, setLinkPath, getLinkPath }) => {
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+				setLinkPath(artifactPath);
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 				const wallTimeStart = performance.now();
 				try {
@@ -828,7 +829,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						env: options.resolvedEnv,
-						artifactPath,
+						artifactPath: getLinkPath,
 						artifactId,
 						onChunk: chunk => {
 							tailBuffer.append(chunk);

@@ -27,7 +27,7 @@ export interface BashExecutorOptions {
 	/** Run through the configured user shell instead of brush parsing directly. */
 	useUserShell?: boolean;
 	/** Artifact path/id for full output storage */
-	artifactPath?: string;
+	artifactPath?: string | (() => string | undefined);
 	artifactId?: string;
 	/**
 	 * Invoked when the native minimizer rewrote the command's output, giving

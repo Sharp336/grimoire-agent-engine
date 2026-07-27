@@ -15,6 +15,7 @@ import {
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { fileHyperlink } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { TranscriptBlock } from "../components/transcript-container";
 import { theme } from "../theme/theme";
@@ -34,7 +35,14 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
 			type?: "bash" | "task";
 			label?: string;
 			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: "bash" | "task"; label?: string; durationMs?: number }>;
+			linkPath?: string;
+			jobs?: Array<{
+				jobId?: string;
+				type?: "bash" | "task";
+				label?: string;
+				durationMs?: number;
+				linkPath?: string;
+			}>;
 		}>
 	).details;
 	const jobs =
@@ -46,6 +54,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
 						type: details?.type,
 						label: details?.label,
 						durationMs: details?.durationMs,
+						linkPath: details?.linkPath,
 					},
 				];
 	const block = new TranscriptBlock();
@@ -56,7 +65,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
 		const line = [
 			theme.fg("success", `${theme.status.done} Background job completed`),
 			theme.fg("dim", typeLabel),
-			theme.fg("accent", jobId),
+			theme.fg("accent", job.linkPath ? fileHyperlink(job.linkPath, jobId) : jobId),
 			duration ? theme.fg("dim", `(${duration})`) : undefined,
 		]
 			.filter(Boolean)
