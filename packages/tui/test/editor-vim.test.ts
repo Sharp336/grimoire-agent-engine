@@ -11,6 +11,51 @@ function createVimEditor(): Editor {
 function typeText(editor: Editor, text: string): void {
 	for (const char of text) editor.handleInput(char);
 }
+const VIM_TERMINAL_ENV_KEYS = ["TERM", "TMUX", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"] as const;
+
+const VIM_TERMINAL_ENVIRONMENTS: ReadonlyArray<{
+	name: string;
+	env: Partial<Record<(typeof VIM_TERMINAL_ENV_KEYS)[number], string>>;
+}> = [
+	{
+		name: "tmux",
+		env: { TERM: "tmux-256color", TMUX: "/tmp/tmux-1000/default,1234,0" },
+	},
+	{
+		name: "SSH",
+		env: {
+			TERM: "xterm-256color",
+			SSH_CONNECTION: "192.0.2.10 54321 192.0.2.20 22",
+			SSH_TTY: "/dev/pts/7",
+			SSH_CLIENT: "192.0.2.10 54321 22",
+		},
+	},
+	{
+		name: "tmux over SSH",
+		env: {
+			TERM: "tmux-256color",
+			TMUX: "/tmp/tmux-1000/default,1234,0",
+			SSH_CONNECTION: "192.0.2.10 54321 192.0.2.20 22",
+			SSH_TTY: "/dev/pts/7",
+			SSH_CLIENT: "192.0.2.10 54321 22",
+		},
+	},
+];
+
+function withVimTerminalEnvironment(env: (typeof VIM_TERMINAL_ENVIRONMENTS)[number]["env"], run: () => void): void {
+	const saved = Object.fromEntries(VIM_TERMINAL_ENV_KEYS.map(key => [key, process.env[key]]));
+	try {
+		for (const key of VIM_TERMINAL_ENV_KEYS) delete process.env[key];
+		for (const [key, value] of Object.entries(env)) process.env[key] = value;
+		run();
+	} finally {
+		for (const key of VIM_TERMINAL_ENV_KEYS) {
+			const value = saved[key];
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
 
 describe("Editor Vim input mode", () => {
 	it("leaves default input behavior unchanged", () => {
@@ -46,6 +91,16 @@ describe("Editor Vim input mode", () => {
 
 		expect(editor.getText()).toBe("");
 	});
+	it("redoes an undone change with Ctrl-R in normal mode", () => {
+		const editor = createVimEditor();
+
+		typeText(editor, "ihello world\u001bu");
+		expect(editor.getText()).toBe("");
+
+		editor.handleInput("\u0012");
+		expect(editor.getText()).toBe("hello world");
+		expect(editor.getVimMode()).toBe("normal");
+	});
 
 	it("keeps change-word whitespace and folds replacement text into one undo", () => {
 		const editor = createVimEditor();
@@ -61,6 +116,100 @@ describe("Editor Vim input mode", () => {
 
 		editor.handleInput("u");
 		expect(editor.getText()).toBe("one two");
+	});
+
+	it("changes the inner word under the cursor and groups replacement undo", () => {
+		const editor = createVimEditor();
+		editor.setText("one target two");
+
+		typeText(editor, "0wllciw");
+		expect(editor.getText()).toBe("one  two");
+		expect(editor.getVimMode()).toBe("insert");
+
+		typeText(editor, "replacement\u001b");
+		expect(editor.getText()).toBe("one replacement two");
+
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("one target two");
+	});
+
+	it("deletes the inner word under the cursor", () => {
+		const editor = createVimEditor();
+		editor.setText("one target two");
+
+		typeText(editor, "0wlldiw");
+
+		expect(editor.getText()).toBe("one  two");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("deletes a word together with its trailing whitespace", () => {
+		const editor = createVimEditor();
+		editor.setText("one target two");
+
+		typeText(editor, "0wlldaw");
+
+		expect(editor.getText()).toBe("one two");
+	});
+
+	it("deletes paragraphs at the start, middle, and end of the prompt", () => {
+		const first = createVimEditor();
+		first.setText("one\ntwo\n\nthree\nfour");
+		typeText(first, "ggdap");
+		expect(first.getText()).toBe("three\nfour");
+
+		const middle = createVimEditor();
+		middle.setText("one\n\ntwo\n\nthree");
+		typeText(middle, "gg2jdap");
+		expect(middle.getText()).toBe("one\n\nthree");
+
+		const last = createVimEditor();
+		last.setText("one\ntwo\n\nthree\nfour");
+		typeText(last, "Gdap");
+		expect(last.getText()).toBe("one\ntwo");
+	});
+
+	it("changes a paragraph linewise and groups replacement undo", () => {
+		const editor = createVimEditor();
+		editor.setText("one\n\ntwo\n\nthree");
+
+		typeText(editor, "gg2jcap");
+		expect(editor.getVimMode()).toBe("insert");
+		typeText(editor, "replacement\u001b");
+		expect(editor.getText()).toBe("one\n\nreplacement\nthree");
+
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("one\n\ntwo\n\nthree");
+	});
+	it("selects the inner paragraph with vip", () => {
+		const editor = createVimEditor();
+		editor.setText("one\n\ntwo\nthree\n\nfour");
+
+		typeText(editor, "gg2jvip");
+
+		expect(editor.getVimMode()).toBe("visual");
+		const rendered = editor.render(40).join("\n");
+		expect(rendered).toContain("\u001b[7mtwo\u001b[0m");
+		expect(rendered).toContain("\u001b[7mthree\u001b[0m");
+
+		editor.handleInput("\u001b");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+	it("selects and highlights lines with Shift-V", () => {
+		const editor = createVimEditor();
+		editor.setText("one\ntwo\nthree");
+
+		typeText(editor, "ggVj");
+
+		expect(editor.getVimMode()).toBe("visual");
+		const rendered = editor.render(40).join("\n");
+		expect(rendered).toContain("\u001b[7mone\u001b[0m");
+		expect(rendered).toContain("\u001b[7mtwo\u001b[0m");
+		expect(rendered).not.toContain("\u001b[7mthree\u001b[0m");
+
+		editor.handleInput("d");
+		expect(editor.getText()).toBe("three");
+		expect(editor.getVimMode()).toBe("normal");
 	});
 
 	it("treats punctuation as a small-word motion target", () => {
@@ -445,4 +594,50 @@ describe("Editor Vim input mode", () => {
 		editor.handleInput("u");
 		expect(editor.getText()).toBe("");
 	});
+	for (const fixture of VIM_TERMINAL_ENVIRONMENTS) {
+		it(`preserves Vim text objects, redo, and visual selections under ${fixture.name}`, () => {
+			withVimTerminalEnvironment(fixture.env, () => {
+				const changedWord = createVimEditor();
+				changedWord.setText("one target two");
+				typeText(changedWord, "0wllciwreplacement\u001bu\u0012");
+				expect(changedWord.getText()).toBe("one replacement two");
+
+				const innerWord = createVimEditor();
+				innerWord.setText("one target two");
+				typeText(innerWord, "0wlldiw");
+				expect(innerWord.getText()).toBe("one  two");
+
+				const aroundWord = createVimEditor();
+				aroundWord.setText("one target two");
+				typeText(aroundWord, "0wlldaw");
+				expect(aroundWord.getText()).toBe("one two");
+
+				const deletedParagraph = createVimEditor();
+				deletedParagraph.setText("one\n\ntwo\n\nthree");
+				typeText(deletedParagraph, "gg2jdap");
+				expect(deletedParagraph.getText()).toBe("one\n\nthree");
+
+				const changedParagraph = createVimEditor();
+				changedParagraph.setText("one\n\ntwo\n\nthree");
+				typeText(changedParagraph, "gg2jcapreplacement\u001b");
+				expect(changedParagraph.getText()).toBe("one\n\nreplacement\nthree");
+
+				const innerParagraph = createVimEditor();
+				innerParagraph.setText("one\n\ntwo\nthree\n\nfour");
+				typeText(innerParagraph, "gg2jvip");
+				const paragraphRender = innerParagraph.render(40).join("\n");
+				expect(paragraphRender).toContain("\u001b[7mtwo\u001b[0m");
+				expect(paragraphRender).toContain("\u001b[7mthree\u001b[0m");
+
+				const visualLines = createVimEditor();
+				visualLines.setText("one\ntwo\nthree");
+				typeText(visualLines, "ggVj");
+				const visualRender = visualLines.render(40).join("\n");
+				expect(visualRender).toContain("\u001b[7mone\u001b[0m");
+				expect(visualRender).toContain("\u001b[7mtwo\u001b[0m");
+				visualLines.handleInput("d");
+				expect(visualLines.getText()).toBe("three");
+			});
+		});
+	}
 });

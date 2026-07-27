@@ -69,7 +69,7 @@
 
 ### Added
 
-- Added an opt-in Vim input mode to the editor with normal/insert state, grapheme-safe motions and edits, counts, operators, and shared undo history ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
+- Added an opt-in Vim input mode to the editor with normal/insert/visual states, highlighted line selection, grapheme-safe motions and edits, counts, inner/around word and paragraph text objects, and shared undo/redo history ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
 
 ## [17.1.4] - 2026-07-26
 

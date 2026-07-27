@@ -364,6 +364,7 @@ interface EditorState {
 
 interface LayoutLine {
 	text: string;
+	sourceLine: number;
 	/** Exact `visibleWidth(text)` carried from wrap/layout, never re-derived. */
 	width: number;
 	hasCursor: boolean;
@@ -405,11 +406,12 @@ interface HistoryStorage {
 type HistoryCursorAnchor = "start" | "end";
 
 export type EditorInputMode = "default" | "vim";
-export type VimEditorMode = "normal" | "insert";
+export type VimEditorMode = "normal" | "insert" | "visual";
 
 type VimPendingCommand =
-	| { kind: "operator"; operator: "d" | "c"; prefixCount: number }
-	| { kind: "g"; count: number | undefined };
+	| { kind: "operator"; operator: "d" | "c"; prefixCount: number; textObject?: "inner" | "around" }
+	| { kind: "g"; count: number | undefined }
+	| { kind: "visualTextObject"; textObject: "inner" | "around"; count: number };
 
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
@@ -498,6 +500,7 @@ export class Editor implements Component, Focusable {
 
 	// Undo stack for editor state changes
 	#undoStack: EditorState[] = [];
+	#redoStack: EditorState[] = [];
 	#suspendUndo = false;
 
 	#inputMode: EditorInputMode = "default";
@@ -505,6 +508,8 @@ export class Editor implements Component, Focusable {
 	#vimPending: VimPendingCommand | undefined;
 	#vimCount = "";
 	#vimInsertUndoActive = false;
+	#vimVisualAnchorLine = 0;
+	#vimVisualLineRange: { startLine: number; endLine: number } | undefined;
 
 	// Debounce timer for autocomplete updates
 	#autocompleteTimeout?: NodeJS.Timeout;
@@ -542,6 +547,7 @@ export class Editor implements Component, Focusable {
 		this.#inputMode = mode;
 		this.#vimPending = undefined;
 		this.#vimCount = "";
+		this.#vimVisualLineRange = undefined;
 		if (mode === "vim") {
 			this.#vimMode = "normal";
 			this.#clampVimNormalCursor();
@@ -720,6 +726,7 @@ export class Editor implements Component, Focusable {
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
 		this.#undoStack.length = 0;
+		this.#redoStack.length = 0;
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
 		if (cursorAnchor === "start") {
@@ -975,6 +982,11 @@ export class Editor implements Component, Focusable {
 			let displayText = layoutLine.text;
 			let displayWidth = layoutLine.width;
 			let cursorPaddingOverflow = 0;
+			const visualSelected =
+				this.#vimMode === "visual" &&
+				this.#vimVisualLineRange !== undefined &&
+				layoutLine.sourceLine >= this.#vimVisualLineRange.startLine &&
+				layoutLine.sourceLine < this.#vimVisualLineRange.endLine;
 			let decorated = false;
 			let imeSafeCursorTail = false;
 			const showPromptGutter = promptGutter !== undefined && visibleIndex === 0;
@@ -982,7 +994,7 @@ export class Editor implements Component, Focusable {
 				promptGutter === undefined ? "" : showPromptGutter ? promptGutter.firstLine : promptGutter.continuation;
 
 			// Add cursor if this line has it
-			const hasCursor = layoutLine.hasCursor && layoutLine.cursorPos !== undefined;
+			const hasCursor = !visualSelected && layoutLine.hasCursor && layoutLine.cursorPos !== undefined;
 			const marker = emitCursorMarker ? CURSOR_MARKER : "";
 
 			if (!borderVisible && displayWidth > lineContentWidth) {
@@ -1110,6 +1122,11 @@ export class Editor implements Component, Focusable {
 						cursorPaddingOverflow = displayWidth - lineContentWidth;
 					}
 				}
+			}
+
+			if (visualSelected) {
+				displayText = `\x1b[7m${displayText}\x1b[0m`;
+				decorated = true;
 			}
 
 			// No cursor on this line, or a branch that left the user text intact: decorate
@@ -1408,7 +1425,7 @@ export class Editor implements Component, Focusable {
 			// Let them fall through to normal character handling
 		}
 
-		if (this.#inputMode === "vim" && this.#vimMode === "normal" && this.#handleVimNormalInput(data, kb)) {
+		if (this.#inputMode === "vim" && this.#vimMode !== "insert" && this.#handleVimNormalInput(data, kb)) {
 			return;
 		}
 		if (this.#inputMode === "vim" && this.#vimMode === "insert") {
@@ -1637,6 +1654,7 @@ export class Editor implements Component, Focusable {
 			// Empty editor
 			layoutLines.push({
 				text: "",
+				sourceLine: 0,
 				width: 0,
 				hasCursor: true,
 				cursorPos: 0,
@@ -1655,6 +1673,7 @@ export class Editor implements Component, Focusable {
 				if (isCurrentLine) {
 					layoutLines.push({
 						text: line,
+						sourceLine: i,
 						width: lineVisibleWidth,
 						hasCursor: true,
 						cursorPos: this.#state.cursorCol,
@@ -1662,6 +1681,7 @@ export class Editor implements Component, Focusable {
 				} else {
 					layoutLines.push({
 						text: line,
+						sourceLine: i,
 						width: lineVisibleWidth,
 						hasCursor: false,
 					});
@@ -1703,6 +1723,7 @@ export class Editor implements Component, Focusable {
 					if (hasCursorInChunk) {
 						layoutLines.push({
 							text: chunk.text,
+							sourceLine: i,
 							width: chunk.width,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
@@ -1710,6 +1731,7 @@ export class Editor implements Component, Focusable {
 					} else {
 						layoutLines.push({
 							text: chunk.text,
+							sourceLine: i,
 							width: chunk.width,
 							hasCursor: false,
 						});
@@ -1937,7 +1959,7 @@ export class Editor implements Component, Focusable {
 
 	/** Apply terminal paste semantics to text from non-bracketed paste transports. */
 	pasteText(text: string): void {
-		if (this.#inputMode === "vim" && this.#vimMode === "normal") return;
+		if (this.#inputMode === "vim" && this.#vimMode !== "insert") return;
 		if (this.#inputMode === "vim" && !this.#vimInsertUndoActive) {
 			this.#recordUndoState();
 			this.#vimInsertUndoActive = true;
@@ -2207,6 +2229,7 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = -1;
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
+		this.#redoStack.length = 0;
 
 		if (this.onChange) this.onChange("");
 		if (this.onSubmit) this.onSubmit(result);
@@ -2472,6 +2495,7 @@ export class Editor implements Component, Focusable {
 
 	#recordUndoState(): void {
 		if (this.#suspendUndo) return;
+		this.#redoStack.length = 0;
 		this.#undoStack.push(structuredClone(this.#state));
 		if (this.#undoStack.length > MAX_UNDO_STACK) {
 			this.#undoStack.shift();
@@ -2481,7 +2505,20 @@ export class Editor implements Component, Focusable {
 	#applyUndo(): void {
 		const snapshot = this.#undoStack.pop();
 		if (!snapshot) return;
+		this.#redoStack.push(structuredClone(this.#state));
+		if (this.#redoStack.length > MAX_UNDO_STACK) this.#redoStack.shift();
+		this.#restoreUndoState(snapshot);
+	}
+	#applyRedo(): void {
+		const snapshot = this.#redoStack.pop();
+		if (!snapshot) return;
 
+		this.#undoStack.push(structuredClone(this.#state));
+		if (this.#undoStack.length > MAX_UNDO_STACK) this.#undoStack.shift();
+		this.#restoreUndoState(snapshot);
+	}
+
+	#restoreUndoState(snapshot: EditorState): void {
 		this.#historyIndex = -1;
 		this.#resetKillSequence();
 		this.#preferredVisualCol = null;
@@ -3353,6 +3390,7 @@ export class Editor implements Component, Focusable {
 	#enterVimNormalMode(): void {
 		this.#finishVimInsertUndo();
 		this.#vimPending = undefined;
+		this.#vimVisualLineRange = undefined;
 		this.#vimCount = "";
 		const changed = this.#vimMode !== "normal";
 		this.#vimMode = "normal";
@@ -3364,6 +3402,7 @@ export class Editor implements Component, Focusable {
 		if (col !== undefined) this.#setCursorCol(col);
 		this.#vimPending = undefined;
 		this.#vimCount = "";
+		this.#vimVisualLineRange = undefined;
 		if (existingUndo) {
 			this.#vimInsertUndoActive = true;
 			this.#suspendUndo = true;
@@ -3371,6 +3410,26 @@ export class Editor implements Component, Focusable {
 		const changed = this.#vimMode !== "insert";
 		this.#vimMode = "insert";
 		if (changed) this.onInputModeChange?.("insert");
+	}
+	#enterVimVisualLineMode(): void {
+		this.#finishVimInsertUndo();
+		this.#vimPending = undefined;
+		this.#vimCount = "";
+		this.#vimVisualAnchorLine = this.#state.cursorLine;
+		this.#vimVisualLineRange = {
+			startLine: this.#state.cursorLine,
+			endLine: this.#state.cursorLine + 1,
+		};
+		const changed = this.#vimMode !== "visual";
+		this.#vimMode = "visual";
+		if (changed) this.onInputModeChange?.("visual");
+	}
+
+	#updateVimVisualLineRange(): void {
+		this.#vimVisualLineRange = {
+			startLine: Math.min(this.#vimVisualAnchorLine, this.#state.cursorLine),
+			endLine: Math.max(this.#vimVisualAnchorLine, this.#state.cursorLine) + 1,
+		};
 	}
 
 	#prepareVimInsertInput(data: string, kb: KeybindingsManager): void {
@@ -3408,12 +3467,21 @@ export class Editor implements Component, Focusable {
 
 	#handleVimNormalInput(data: string, kb: KeybindingsManager): boolean {
 		if (this.#isVimEscape(data)) {
-			this.#vimPending = undefined;
-			this.#vimCount = "";
+			if (this.#vimMode === "visual") this.#enterVimNormalMode();
+			else {
+				this.#vimPending = undefined;
+				this.#vimCount = "";
+			}
 			return true;
 		}
 		if (data === "\n") return true;
 		if (matchesKey(data, "enter") || matchesKey(data, "return")) return false;
+		if (matchesKey(data, "ctrl+r")) {
+			const count = this.#takeVimCount();
+			for (let i = 0; i < count; i++) this.#applyRedo();
+			this.#clampVimNormalCursor();
+			return true;
+		}
 		if (
 			kb.matches(data, "tui.input.tab") ||
 			kb.matches(data, "tui.input.newLine") ||
@@ -3440,6 +3508,7 @@ export class Editor implements Component, Focusable {
 		if (graphemes.length !== 1) return printable !== undefined;
 		const char = graphemes[0]?.segment;
 		if (!char) return false;
+		if (this.#vimMode === "visual") return this.#handleVimVisualInput(char);
 
 		if (this.#vimPending?.kind === "operator") return this.#handleVimOperatorInput(char);
 		if (this.#vimPending?.kind === "g") {
@@ -3523,6 +3592,10 @@ export class Editor implements Component, Focusable {
 			case "g":
 				this.#vimPending = { kind: "g", count: this.#takeOptionalVimCount() };
 				return true;
+			case "v":
+			case "V":
+				this.#enterVimVisualLineMode();
+				return true;
 			case "i":
 				this.#vimCount = "";
 				this.#enterVimInsertMode();
@@ -3569,6 +3642,56 @@ export class Editor implements Component, Focusable {
 				return true;
 		}
 	}
+	#handleVimVisualInput(char: string): boolean {
+		const pending = this.#vimPending;
+		if (pending?.kind === "visualTextObject") {
+			this.#vimPending = undefined;
+			if (char === "p") {
+				const range = this.#vimParagraphLineRange(pending.count, pending.textObject === "around");
+				this.#vimVisualAnchorLine = range.startLine;
+				this.#vimVisualLineRange = range;
+				this.#setVimCursor(range.endLine - 1, 0);
+			}
+			return true;
+		}
+
+		if (/[1-9]/u.test(char) || (char === "0" && this.#vimCount.length > 0)) {
+			this.#vimCount += char;
+			return true;
+		}
+
+		switch (char) {
+			case "i":
+			case "a":
+				this.#vimPending = {
+					kind: "visualTextObject",
+					textObject: char === "i" ? "inner" : "around",
+					count: this.#takeVimCount(),
+				};
+				return true;
+			case "j":
+				this.#moveVimVertical(1, this.#takeVimCount());
+				this.#updateVimVisualLineRange();
+				return true;
+			case "k":
+				this.#moveVimVertical(-1, this.#takeVimCount());
+				this.#updateVimVisualLineRange();
+				return true;
+			case "d": {
+				const range = this.#vimVisualLineRange;
+				if (!range) return true;
+				this.#state.cursorLine = range.startLine;
+				this.#setCursorCol(0);
+				this.#enterVimNormalMode();
+				this.#deleteVimLines(range.endLine - range.startLine, false);
+				return true;
+			}
+			default:
+				this.#vimPending = undefined;
+				this.#vimCount = "";
+				return true;
+		}
+	}
 
 	#handleVimOperatorInput(char: string): boolean {
 		const pending = this.#vimPending;
@@ -3579,9 +3702,29 @@ export class Editor implements Component, Focusable {
 			return true;
 		}
 
+		if ((char === "i" || char === "a") && pending.textObject === undefined) {
+			this.#vimPending = { ...pending, textObject: char === "i" ? "inner" : "around" };
+			return true;
+		}
+
 		this.#vimPending = undefined;
 		const count = pending.prefixCount * this.#takeVimCount();
 		const enterInsert = pending.operator === "c";
+		if (pending.textObject !== undefined) {
+			if (char === "w" || char === "W") {
+				const range = this.#vimWordTextObjectRange(
+					this.#vimAbsoluteCursor(),
+					count,
+					char === "W",
+					pending.textObject === "around",
+				);
+				this.#deleteVimRange(range.start, range.end, enterInsert);
+			} else if (char === "p" && pending.textObject === "around") {
+				this.#deleteVimParagraphs(count, enterInsert);
+			}
+			return true;
+		}
+
 		if (char === pending.operator) {
 			this.#deleteVimLines(count, enterInsert);
 			return true;
@@ -3795,6 +3938,44 @@ export class Editor implements Component, Focusable {
 		}
 		return segments.length;
 	}
+	#vimWordTextObjectRange(
+		start: number,
+		count: number,
+		bigWord: boolean,
+		around: boolean,
+	): { start: number; end: number } {
+		const text = this.getText();
+		const segments = this.#vimSegments(text, bigWord);
+		let first = this.#vimSegmentIndexAt(segments, start);
+		if (first >= segments.length) return { start, end: start };
+
+		const firstKind = segments[first]?.kind;
+		while (first > 0 && segments[first - 1]?.kind === firstKind) first--;
+
+		let end = first;
+		const consumeGroup = (): void => {
+			const kind = segments[end]?.kind;
+			while (end < segments.length && segments[end]?.kind === kind) end++;
+		};
+		consumeGroup();
+		for (let step = 1; step < count && end < segments.length; step++) {
+			while (end < segments.length && segments[end]?.kind === "whitespace") end++;
+			if (end < segments.length) consumeGroup();
+		}
+
+		if (around) {
+			const innerEnd = end;
+			while (end < segments.length && segments[end]?.kind === "whitespace") end++;
+			if (end === innerEnd) {
+				while (first > 0 && segments[first - 1]?.kind === "whitespace") first--;
+			}
+		}
+
+		return {
+			start: segments[first]?.index ?? start,
+			end: segments[end]?.index ?? text.length,
+		};
+	}
 
 	#vimWordForwardPosition(start: number, count: number, bigWord: boolean): number {
 		const text = this.getText();
@@ -3872,6 +4053,57 @@ export class Editor implements Component, Focusable {
 		this.#resetKillSequence();
 		this.#recordUndoState();
 		const deleted = this.#state.lines.slice(startLine, startLine + deleteCount).join("\n");
+		if (enterInsert) this.#state.lines.splice(startLine, deleteCount, "");
+		else this.#state.lines.splice(startLine, deleteCount);
+		if (this.#state.lines.length === 0) this.#state.lines.push("");
+		this.#state.cursorLine = Math.min(startLine, this.#state.lines.length - 1);
+		this.#setCursorCol(0);
+		this.#recordKill(deleted, "forward");
+		this.#notifyVimMutation();
+		if (enterInsert) this.#enterVimInsertMode(true, 0);
+		else this.#clampVimNormalCursor();
+	}
+	#vimParagraphLineRange(count: number, around: boolean): { startLine: number; endLine: number } {
+		const isBlank = (line: string): boolean => line.trim().length === 0;
+		let paragraphLine = this.#state.cursorLine;
+		if (isBlank(this.#state.lines[paragraphLine] ?? "")) {
+			while (paragraphLine < this.#state.lines.length && isBlank(this.#state.lines[paragraphLine] ?? "")) {
+				paragraphLine++;
+			}
+			if (paragraphLine >= this.#state.lines.length) {
+				paragraphLine = this.#state.cursorLine;
+				while (paragraphLine > 0 && isBlank(this.#state.lines[paragraphLine] ?? "")) paragraphLine--;
+			}
+		}
+
+		let startLine = paragraphLine;
+		while (startLine > 0 && !isBlank(this.#state.lines[startLine - 1] ?? "")) startLine--;
+		let endLine = paragraphLine + 1;
+		while (endLine < this.#state.lines.length && !isBlank(this.#state.lines[endLine] ?? "")) endLine++;
+
+		for (let step = 1; step < count; step++) {
+			while (endLine < this.#state.lines.length && isBlank(this.#state.lines[endLine] ?? "")) endLine++;
+			while (endLine < this.#state.lines.length && !isBlank(this.#state.lines[endLine] ?? "")) endLine++;
+		}
+
+		if (around) {
+			const paragraphEnd = endLine;
+			while (endLine < this.#state.lines.length && isBlank(this.#state.lines[endLine] ?? "")) endLine++;
+			if (endLine === paragraphEnd) {
+				while (startLine > 0 && isBlank(this.#state.lines[startLine - 1] ?? "")) startLine--;
+			}
+		}
+		return { startLine, endLine };
+	}
+
+	#deleteVimParagraphs(count: number, enterInsert: boolean): void {
+		const { startLine, endLine } = this.#vimParagraphLineRange(count, true);
+
+		const deleteCount = Math.max(1, endLine - startLine);
+		this.#historyIndex = -1;
+		this.#resetKillSequence();
+		this.#recordUndoState();
+		const deleted = this.#state.lines.slice(startLine, endLine).join("\n");
 		if (enterInsert) this.#state.lines.splice(startLine, deleteCount, "");
 		else this.#state.lines.splice(startLine, deleteCount);
 		if (this.#state.lines.length === 0) this.#state.lines.push("");
