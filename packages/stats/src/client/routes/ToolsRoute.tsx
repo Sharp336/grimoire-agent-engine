@@ -326,7 +326,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 				header: t("tools.table.column.lastUsed"),
 				numeric: true,
 				render: (item: ToolRowView) => (
-					<span className="stats-text-secondary">{formatRelativeTime(item.lastUsed)}</span>
+					<span className="stats-text-secondary">{formatRelativeTime(item.lastUsed, locale)}</span>
 				),
 			},
 		],

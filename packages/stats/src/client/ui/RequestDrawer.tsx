@@ -24,28 +24,44 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 
 	useEffect(() => {
 		if (id !== null) {
-			// Save the element that was active before the drawer opened
 			previousActiveElement.current = document.activeElement as HTMLElement;
 		}
 	}, [id]);
 
 	useEffect(() => {
 		if (id === null) {
-			// Restore focus only when the drawer fully closes
 			if (previousActiveElement.current) {
 				previousActiveElement.current.focus();
 			}
 			return;
 		}
 
+		setLoading(true);
+		setError(null);
+		setDetails(null);
+
+		const controller = new AbortController();
+		getRequestDetails(id, controller.signal)
+			.then(data => {
+				setDetails(data);
+				setLoading(false);
+			})
+			.catch(err => {
+				if (err.name !== "AbortError") {
+					setError(err instanceof Error ? err : new Error(String(err)));
+				}
+				setLoading(false);
+			});
+
 		const handleKeyDown = (e: KeyboardEvent) => {
 			if (e.key === "Escape") {
 				onClose();
 			}
 		};
-
 		window.addEventListener("keydown", handleKeyDown);
+
 		return () => {
+			controller.abort();
 			window.removeEventListener("keydown", handleKeyDown);
 		};
 	}, [id, onClose]);
