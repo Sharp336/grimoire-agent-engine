@@ -36,6 +36,9 @@
 - Fixed omp worktree clear prematurely deleting active task-isolation sandboxes owned by running subagents.
 - Fixed /vibe mode preventing the director from completing parent tasks after verifying worker results by keeping the built-in todo tool active.
 - Fixed numeric GitHub issue and pull request autocomplete being suppressed inside skill slash-command arguments.
+### Changed
+
+- Live CLI and SDK session startup now reuses the `AgentStorage`-owned local credential store instead of opening a second `agent.db` connection; standalone discovery and remote broker ownership are unchanged.
 
 ## [17.1.7] - 2026-07-27
 

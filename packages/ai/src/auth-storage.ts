@@ -567,7 +567,16 @@ export interface CredentialDisabledEvent {
 	disabledCause: string;
 }
 
+export type AuthCredentialStoreOwnership = "owned" | "borrowed";
+
 export type AuthStorageOptions = {
+	/**
+	 * Lifecycle of the injected credential store. Owned stores are closed with
+	 * AuthStorage; borrowed stores remain the caller's responsibility.
+	 *
+	 * @default "owned"
+	 */
+	storeOwnership?: AuthCredentialStoreOwnership;
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
 	usageFetch?: typeof fetch;
@@ -1264,6 +1273,7 @@ export class AuthStorage {
 	#usageLogger?: UsageLogger;
 	#fallbackResolver?: (provider: string) => string | undefined;
 	#store: AuthCredentialStore;
+	#storeOwnership: AuthCredentialStoreOwnership;
 	#configValueResolver: (config: string) => Promise<string | undefined>;
 	#refreshOAuthCredentialOverride?: AuthStorageOptions["refreshOAuthCredential"];
 	#fetchUsageReportsOverride?: AuthStorageOptions["fetchUsageReports"];
@@ -1286,6 +1296,7 @@ export class AuthStorage {
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
 		this.#store = store;
+		this.#storeOwnership = options.storeOwnership ?? "owned";
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
@@ -1328,18 +1339,19 @@ export class AuthStorage {
 	 */
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		return new AuthStorage(store, options);
+		return new AuthStorage(store, { ...options, storeOwnership: "owned" });
 	}
 
 	/**
-	 * Close the underlying credential store.
+	 * Close this storage instance and its credential store when owned.
 	 *
-	 * After calling this, the instance must not be reused.
+	 * Borrowed stores remain open for their owner. After calling this, the
+	 * AuthStorage instance must not be reused.
 	 */
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		this.#store.close();
+		if (this.#storeOwnership === "owned") this.#store.close();
 	}
 
 	getGeneration(): number {

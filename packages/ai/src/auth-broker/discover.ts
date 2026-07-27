@@ -15,7 +15,7 @@ import {
 	MAIN_CONFIG_FILENAMES,
 } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { AuthStorage } from "../auth-storage";
+import { type AuthCredentialStore, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { AuthBrokerClient, AuthBrokerError } from "./client";
 import { type AuthBrokerAccountPool, RemoteAuthCredentialStore } from "./remote-store";
@@ -37,6 +37,11 @@ export interface DiscoverAuthStorageOptions {
 	configValueResolver?: (config: string) => Promise<string | undefined>;
 	cachePath?: string;
 	sourceLabel?: string;
+	/**
+	 * Lazily open a local credential store after broker resolution selects the
+	 * local branch. Factory-provided stores are borrowed from their caller.
+	 */
+	localStoreFactory?: () => Promise<AuthCredentialStore>;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
 	accountPool?: AuthBrokerAccountPool;
 }
@@ -300,6 +305,16 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	}
 
 	const dbPath = getAgentDbPath(agentDir);
+	if (options.localStoreFactory) {
+		const store = await options.localStoreFactory();
+		const storage = new AuthStorage(store, {
+			configValueResolver: options.configValueResolver,
+			sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
+			storeOwnership: "borrowed",
+		});
+		await storage.reload();
+		return storage;
+	}
 	const storage = await AuthStorage.create(dbPath, {
 		configValueResolver: options.configValueResolver,
 		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,

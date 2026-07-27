@@ -68,10 +68,10 @@ import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
 	createAgentSession,
-	discoverAuthStorage,
 	loadSessionExtensions,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
+import { discoverSessionAuthStorage } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
@@ -1116,7 +1116,7 @@ export async function buildSessionOptions(
 
 interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
-	discoverAuthStorage?: typeof discoverAuthStorage;
+	discoverAuthStorage?: typeof discoverSessionAuthStorage;
 	selectSession?: typeof selectSession;
 	runAcpMode?: RunAcpMode;
 	settings?: Settings;
@@ -1142,7 +1142,7 @@ export async function runRootCommand(
 	const notifs: (InteractiveModeNotify | null)[] = [];
 
 	// Create AuthStorage and ModelRegistry upfront
-	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
+	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverSessionAuthStorage);
 	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 
 	if (parsedArgs.version) {

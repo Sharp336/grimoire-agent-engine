@@ -28,8 +28,9 @@ import {
 	getAuthBrokerTokenFilePath,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
-import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir } from "@oh-my-pi/pi-utils";
 import { resolveConfigValue } from "../config/resolve-config-value";
+import { AgentStorage } from "./agent-storage";
 import type { AuthStorage } from "./auth-storage";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
@@ -88,5 +89,25 @@ export function discoverAuthStorage(
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
+	});
+}
+
+/**
+ * Discover auth storage for a live session.
+ *
+ * Local discovery borrows the auth store owned by AgentStorage so auth and
+ * settings share one agent.db connection. Broker discovery remains remote and
+ * never opens AgentStorage.
+ */
+export function discoverSessionAuthStorage(
+	agentDir: string = getAgentDir(),
+	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver" | "localStoreFactory">,
+): Promise<AuthStorage> {
+	const dbPath = getAgentDbPath(agentDir);
+	return discoverAuthStorageShared({
+		...options,
+		agentDir,
+		configValueResolver: resolveConfigValue,
+		localStoreFactory: async () => (await AgentStorage.open(dbPath)).authStore,
 	});
 }

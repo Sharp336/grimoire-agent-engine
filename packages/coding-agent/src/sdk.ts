@@ -128,7 +128,10 @@ import {
 	secretEntriesNeedPlaceholderKey,
 } from "./secrets";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
-import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
+import {
+	discoverAuthStorage as discoverAuthStorageFromConfig,
+	discoverSessionAuthStorage as discoverSessionAuthStorageFromConfig,
+} from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
@@ -345,7 +348,10 @@ export interface CreateAgentSessionOptions {
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
 
-	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
+	/**
+	 * Auth storage for credentials. By default, a live session borrows the
+	 * AgentStorage-owned local store or owns the discovered remote broker store.
+	 */
 	authStorage?: AuthStorage;
 	/** Model registry. Default: discoverModels(authStorage, agentDir) */
 	modelRegistry?: ModelRegistry;
@@ -635,6 +641,8 @@ export {
  * Create an AuthStorage instance.
  *
  * Default: local SQLite store at `<agentDir>/agent.db`.
+ * Local results are standalone: the returned AuthStorage owns and closes its
+ * local connection. Live session defaults use the internal shared path instead.
  *
  * Broker mode: when `OMP_AUTH_BROKER_URL` is set, credentials are pulled from
  * a remote auth-broker over the wire. Refresh tokens never leave the broker;
@@ -1198,7 +1206,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// / session would silently miss credential_disabled events.
 	const modelRegistry =
 		options.modelRegistry ??
-		new ModelRegistry(options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir)));
+		new ModelRegistry(
+			options.authStorage ?? (await logger.time("discoverModels", discoverSessionAuthStorageFromConfig, agentDir)),
+		);
 	// Track whether we internally created the authStorage so we can close it
 	// if construction fails before the session takes ownership.
 	const ownsAuthStorage = !options.authStorage && !options.modelRegistry;
