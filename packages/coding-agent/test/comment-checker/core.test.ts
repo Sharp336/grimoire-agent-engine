@@ -11,7 +11,7 @@ import {
 	toHookInput,
 } from "../../src/comment-checker/core";
 import { createCommentCheckerToolResultHandler } from "../../src/comment-checker/index";
-import { formatPreview, getCommentCheckerWidgetLines } from "../../src/comment-checker/ui";
+import { formatFooterStatus, formatPreview, getCommentCheckerWidgetLines } from "../../src/comment-checker/ui";
 import type { ExtensionContext, ToolResultEvent } from "../../src/extensibility/extensions";
 import type { ExtensionUIContext } from "../../src/extensibility/extensions/types";
 import type { ReadonlySessionManager } from "../../src/session/session-manager";
@@ -795,6 +795,98 @@ describe("createCommentCheckerToolResultHandler UI status update and warning cle
 		await handler(deleteEvent, mockCtx);
 		expect(clearedFiles).toEqual(["/workspace/src/deleted.ts"]);
 	});
+
+	it("clears warnings when an edit empties a file", async () => {
+		let clearedFiles: string[] = [];
+
+		const mockSessionManager = {
+			getSessionId: () => "sess-1",
+			getHeader: () => null,
+		} as unknown as ReadonlySessionManager;
+
+		const mockUI = {
+			setStatus: () => {},
+			setWidget: () => {},
+		} as unknown as ExtensionUIContext;
+
+		const mockCtx: ExtensionContext = {
+			sessionManager: mockSessionManager,
+			cwd: "/workspace",
+			ui: mockUI,
+		} as unknown as ExtensionContext;
+
+		const handler = createCommentCheckerToolResultHandler({
+			onClearWarnings: cleanFiles => {
+				clearedFiles = cleanFiles;
+			},
+		});
+
+		const emptyFileEvent: ToolResultEvent = {
+			type: "tool_result",
+			toolCallId: "call_empty",
+			toolName: "edit",
+			input: {},
+			details: {
+				perFileResults: [
+					{
+						path: "src/emptied.ts",
+						oldText: "// TODO: old comment\nconst x = 1;\n",
+						newText: "",
+					},
+				],
+			},
+			content: [{ type: "text", text: "emptied src/emptied.ts" }],
+			isError: false,
+		};
+
+		await handler(emptyFileEvent, mockCtx);
+		expect(clearedFiles).toEqual(["/workspace/src/emptied.ts"]);
+	});
+
+	it("notifies UI when runner returns status=error", async () => {
+		const notifications: Array<{ message: string; type?: string }> = [];
+
+		const mockSessionManager = {
+			getSessionId: () => "sess-1",
+			getHeader: () => null,
+		} as unknown as ReadonlySessionManager;
+
+		const mockUI = {
+			setStatus: () => {},
+			setWidget: () => {},
+			notify: (message: string, type?: "info" | "warning" | "error") => {
+				notifications.push({ message, type });
+			},
+		} as unknown as ExtensionUIContext;
+
+		const mockCtx: ExtensionContext = {
+			sessionManager: mockSessionManager,
+			cwd: "/workspace",
+			ui: mockUI,
+		} as unknown as ExtensionContext;
+
+		const handler = createCommentCheckerToolResultHandler({
+			run: async () => ({
+				status: "error",
+				message: "process crashed unexpectedly",
+			}),
+		});
+
+		const event: ToolResultEvent = {
+			type: "tool_result",
+			toolCallId: "call_err",
+			toolName: "write",
+			input: { filePath: "src/foo.ts", content: "const x = 1;" },
+			content: [{ type: "text", text: "wrote src/foo.ts" }],
+			isError: false,
+			details: undefined,
+		};
+
+		await handler(event, mockCtx);
+		expect(notifications).toEqual([
+			{ message: "omp-comment-checker error: process crashed unexpectedly", type: "error" },
+		]);
+	});
 });
 
 describe("runCommentChecker and spawnProcess executor seam", () => {
@@ -869,7 +961,6 @@ describe("formatPreview and getCommentCheckerWidgetLines", () => {
 			"  Install @code-yeongyu/comment-checker",
 		]);
 
-		const { formatFooterStatus } = require("../../src/comment-checker/ui");
 		expect(formatFooterStatus(errorState)).toBe("✖ comment-checker error: process crashed");
 		expect(formatFooterStatus(missingState)).toBe("comment-checker: missing binary");
 	});

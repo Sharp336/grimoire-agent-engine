@@ -133,6 +133,7 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 					warnings,
 					errorMessage: result.message,
 				});
+				ctx.ui.notify(`omp-comment-checker error: ${result.message}`, "error");
 				return undefined;
 			}
 			if (result.status === "warning" && result.message.trim().length > 0) {
@@ -218,8 +219,8 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 		const unfired = store.unfired();
 		if (unfired.length === 0) return;
 		const summary = unfired
-			.map(w => `• ${replaceTabs(shortenPath(w.filePath))}: ${formatPreview(w.message)}`)
-			.join("\n");
+			.map(w => `• ${replaceTabs(shortenPath(w.filePath))}:\n${replaceTabs(w.message)}`)
+			.join("\n\n");
 		const content = prompt.render(selfHealPrompt, { count: unfired.length, summary });
 		api.sendMessage(
 			{

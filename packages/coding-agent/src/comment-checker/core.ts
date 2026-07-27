@@ -116,7 +116,17 @@ export function extractFromOmpEditDetails(
 			}
 
 			if (typeof filePath !== "string" || filePath.length === 0) continue;
-			if (oldText.length > 0 && newText.length === 0) continue;
+			if (oldText.length > 0 && newText.length === 0) {
+				results.push({
+					filePath,
+					movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+					oldText,
+					newText: "",
+					op: "delete",
+					success: true,
+				});
+				continue;
+			}
 			results.push({
 				filePath,
 				movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
@@ -167,7 +177,16 @@ export function extractFromOmpEditDetails(
 			return [];
 		}
 
-		if (oldText.length === 0 || newText.length > 0) {
+		if (oldText.length > 0 && newText.length === 0) {
+			results.push({
+				filePath,
+				movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+				oldText,
+				newText: "",
+				op: "delete",
+				success: true,
+			});
+		} else {
 			results.push({
 				filePath,
 				movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
