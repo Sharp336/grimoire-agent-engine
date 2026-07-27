@@ -329,8 +329,10 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// For Cursor the session drops `edit` from the tool registry so the model
 		// is steered to full-file `write`. The native `pi_edit` frame arrives
 		// regardless of the advertised catalog, so the bridge must still reach a
-		// real edit tool through the `getTool` fallback — otherwise every modern
+		// real edit tool through `getEditReplaceTool` — otherwise every modern
 		// edit answers "Tool \"edit\" not available" and the file is untouched.
+		// (Not the `getTool` fallback: that resolver also serves the agent loop's
+		// unadvertised calls, so it stays device-only.)
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
 		// Build it exactly as the session does. Both bridge callsites go through
@@ -342,7 +344,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const withheld = new CursorExecHandlers({
 			cwd,
 			tools: new Map<string, Tool>(),
-			getTool: name => (name === "edit" ? editTool : undefined),
+			getEditReplaceTool: () => editTool,
 		});
 		const result = await withheld.piEdit({
 			toolCallId: "e1",
@@ -390,6 +392,55 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
 		// The advisor's own loop must keep the exact instance it was handed.
 		expect(granted.get("edit")).toBe(advisorEdit);
+	});
+
+	it("runs the replace-mode instance even when the registry still holds another mode", async () => {
+		// The state a session reaches by starting on a non-Cursor provider and
+		// switching to Cursor: `edit` was never deleted from the registry (that
+		// only happens for a session created on Cursor) and the roster is not
+		// rebuilt on switch, so the configured-mode instance is still there.
+		// `executeTool` prefers the map over the `getTool` fallback, so without
+		// an explicit replace-mode accessor every native edit after the switch
+		// fails validation against the wrong schema.
+		const target = path.join(cwd, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const session = createTestSession(cwd);
+		const configuredEdit = new EditTool(session);
+		expect(configuredEdit.mode).not.toBe("replace");
+
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["edit", configuredEdit]]),
+			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
+		});
+		const result = await handlers.piEdit({
+			toolCallId: "e5",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBeFalsy();
+		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
+	});
+
+	it("still refuses a pi_edit frame when the session granted no edit tool", async () => {
+		// The accessor carries the grant: a restricted roster returns undefined
+		// from it, and no other resolution path may substitute a mutating tool
+		// (issue #5680). Building the instance provider-independently must not
+		// weaken that.
+		const target = path.join(cwd, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			getEditReplaceTool: () => undefined,
+		});
+		const result = await handlers.piEdit({
+			toolCallId: "e6",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
 	});
 
 	it("leaves an ungranted tool map without an edit tool", async () => {

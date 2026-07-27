@@ -2,6 +2,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { CursorExecHandlers, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,6 +16,7 @@ import {
 	discoverAuthStorage,
 	type ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -512,5 +516,158 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		} finally {
 			await session.dispose();
 		}
+	});
+
+	// A session created on another provider keeps its configured-mode `edit` in
+	// the registry (only a Cursor-created session moves it out) and the tool
+	// roster is built once, at creation — switching to Cursor later does not
+	// rebuild it. These two cover both directions of that wiring: the granted
+	// session must still reach a replace-mode instance for `pi_edit` (whose
+	// `old_text`/`new_text` args do not validate against the default `hashline`
+	// schema), and the restricted one must still be refused.
+	//
+	// The handlers are internal to the session; `streamFn` is where they are
+	// handed to the provider, which is the externally observable seam.
+	const captureCursorExecHandlers = async (session: AgentSession, cursorModel: Model): Promise<CursorExecHandlers> => {
+		let handlers: CursorExecHandlers | undefined;
+		const streamFn: StreamFn = (_model, _context, options) => {
+			handlers = options?.cursorExecHandlers;
+			throw new Error("captured");
+		};
+		vi.spyOn(session.agent, "streamFn").mockImplementation(streamFn);
+
+		await session.setModel(cursorModel);
+		// Not wrapped in a catch: `prompt` resolves even when the turn fails (the
+		// loop records the stream error), so a rejection here is a genuine setup
+		// failure and must surface rather than be mistaken for the capture.
+		await session.prompt("hi");
+		if (!handlers) throw new Error("no exec handlers reached the provider");
+		return handlers;
+	};
+
+	// `setModel` and `prompt` both refuse a provider with no configured auth.
+	// Granted on the suite's isolated storage rather than through the provider's
+	// env var — an env mutation would outlive this file — and removed after,
+	// since the storage is shared by every test here.
+	const withProviderAuth = async (providers: string[], run: () => Promise<void>): Promise<void> => {
+		for (const provider of providers) modelRegistry.authStorage.setRuntimeApiKey(provider, "test-key");
+		try {
+			await run();
+		} finally {
+			for (const provider of providers) modelRegistry.authStorage.removeRuntimeApiKey(provider);
+		}
+	};
+
+	it("answers a native pi_edit after a session switches onto Cursor", async () => {
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+		const target = path.join(tempDir, "sample.txt");
+		fs.writeFileSync(target, "alpha\nbeta\n");
+
+		await withProviderAuth(["cursor"], async () => {
+			const { session } = await createAgentSession(baseOptions(tempDir));
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+				const result = await handlers.piEdit({
+					toolCallId: "sdk-switch-1",
+					args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+				} as never);
+
+				expect(result.isError).toBeFalsy();
+				expect(fs.readFileSync(target, "utf8")).toBe("alpha\ngamma\n");
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("refuses a native pi_edit after a read-only session switches onto Cursor", async () => {
+		// The bridge instance is constructed, not looked up, so building it for
+		// a roster that was never granted `edit` would hand a read-only session
+		// a mutating tool the native frames reach regardless of the advertised
+		// catalog (issue #5680). Making the construction provider-independent
+		// must not widen it.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+		const target = path.join(tempDir, "sample.txt");
+		fs.writeFileSync(target, "alpha\nbeta\n");
+
+		await withProviderAuth(["cursor"], async () => {
+			const { session } = await createAgentSession({ ...baseOptions(tempDir), toolNames: ["read"] });
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+				const result = await handlers.piEdit({
+					toolCallId: "sdk-switch-2",
+					args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+				} as never);
+
+				expect(result.isError).toBe(true);
+				expect(fs.readFileSync(target, "utf8")).toBe("alpha\nbeta\n");
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("does not execute an unadvertised edit call through the fallback resolver", async () => {
+		// One resolver serves two roles: the session's device resolver is passed
+		// to the bridge as `getTool` AND installed as the agent loop's
+		// `resolveFallbackTool`, which runs for ANY call the advertised set does
+		// not contain. It must stay device-only: routing `edit` through it would
+		// execute a replace-mode edit for a call the model was never offered —
+		// a hallucinated one, or a tool the session deselected after startup.
+		// `pi_edit` gets its instance from `getEditReplaceTool` instead.
+		const tempDir = makeTempDir();
+		const target = path.join(tempDir, "sample.txt");
+		fs.writeFileSync(target, "alpha\nbeta\n");
+
+		await withProviderAuth(["openai"], async () => {
+			// Granted at startup, so an `edit` instance exists to leak, then
+			// deselected — the exact state that makes the fallback dangerous.
+			const { session } = await createAgentSession(baseOptions(tempDir));
+			try {
+				await session.setActiveToolsByName(session.getActiveToolNames().filter(name => name !== "edit"));
+				expect(session.getActiveToolNames()).not.toContain("edit");
+
+				// A real mock provider, not a hand-rolled stream: the loop builds
+				// the assistant message from the full event sequence, and an
+				// incomplete one is dropped before tool dispatch ever runs.
+				const toolCallId = "unadvertised-edit-1";
+				const mock = createMockModel({
+					responses: [
+						{
+							content: [
+								{
+									type: "toolCall",
+									id: toolCallId,
+									name: "edit",
+									arguments: { path: target, edits: [{ old_text: "beta", new_text: "gamma" }] },
+								},
+							],
+						},
+						{ content: [{ type: "text", text: "done" }] },
+					],
+				});
+				vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+
+				await session.prompt("hi");
+
+				// The surfaced result, not just the file: an unchanged file alone
+				// would also pass if the fallback HAD resolved the tool and the
+				// edit then failed validation or approval. Only "not found"
+				// proves the resolver refused to hand one over.
+				const result = session.messages.find(
+					(message): message is ToolResultMessage =>
+						message.role === "toolResult" && message.toolCallId === toolCallId,
+				);
+				expect(result?.isError).toBe(true);
+				expect(JSON.stringify(result?.content)).toContain("Tool edit not found");
+				expect(fs.readFileSync(target, "utf8")).toBe("alpha\nbeta\n");
+			} finally {
+				await session.dispose();
+			}
+		});
 	});
 });

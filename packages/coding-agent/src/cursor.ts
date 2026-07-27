@@ -47,6 +47,18 @@ interface CursorExecBridgeOptions {
 	getCwd?: () => string;
 	tools: Map<string, AgentTool>;
 	getTool?: (name: string) => AgentTool | undefined;
+	/**
+	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
+	 * granted `edit` at all.
+	 *
+	 * `PiEditExecArgs` is that mode's schema verbatim, and the session's own
+	 * `edit` may be in any mode — `hashline` by default — whose schema rejects
+	 * `old_text`/`new_text` outright. {@link tools} therefore cannot be trusted
+	 * for this one frame: a session that starts on another provider keeps its
+	 * configured instance in the map (only Cursor sessions move `edit` out), and
+	 * switching to Cursor later does not rebuild the roster.
+	 */
+	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
 	emitEvent?: (event: AgentEvent) => void;
 	/**
@@ -59,8 +71,9 @@ interface CursorExecBridgeOptions {
 	 * This is a grant, not a policy: it answers "did the session hand this
 	 * channel a file-writing tool", which callers derive from their own roster
 	 * before any bridge-specific rewriting. The primary Cursor session moves
-	 * `edit` out of {@link tools} and serves it through {@link getTool}, so
-	 * reading the map here would deny an edit-only session. Defaults to allowed
+	 * `edit` out of {@link tools} and serves it through
+	 * {@link getEditReplaceTool}, so reading the map here would deny an
+	 * edit-only session. Defaults to allowed
 	 * to preserve the primary agent's behavior; callers with a restricted tool
 	 * set (advisors) opt out. The user's approval policy is resolved separately,
 	 * per call.
@@ -586,12 +599,22 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * `PiEditExecArgs` is the local `edit` tool's replace mode verbatim: a path
 	 * plus `old_text`/`new_text` pairs. The tool's schema is snake_case, so the
 	 * proto's camelCase accessors are mapped back on the way in.
+	 *
+	 * The replace-mode instance is requested explicitly rather than resolved
+	 * from {@link CursorExecBridgeOptions.tools}: the registry's `edit` is in
+	 * the session's configured mode, whose schema rejects these arguments.
 	 */
 	async piEdit(call: Parameters<NonNullable<ICursorExecHandlers["piEdit"]>>[0]) {
-		return await executeTool(this.options, "edit", call.toolCallId, {
-			path: call.args.path,
-			edits: call.args.edits.map(edit => ({ old_text: edit.oldText, new_text: edit.newText })),
-		});
+		return await executeTool(
+			this.options,
+			"edit",
+			call.toolCallId,
+			{
+				path: call.args.path,
+				edits: call.args.edits.map(edit => ({ old_text: edit.oldText, new_text: edit.newText })),
+			},
+			this.options.getEditReplaceTool?.(),
+		);
 	}
 
 	async piWrite(call: Parameters<NonNullable<ICursorExecHandlers["piWrite"]>>[0]) {

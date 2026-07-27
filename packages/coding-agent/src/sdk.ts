@@ -2592,32 +2592,35 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// nothing else's — under the default `hashline` mode the frame's args do
 		// not match the tool's parameters at all. The registry instance follows
 		// the session's configured mode, so the bridge builds its own.
-		let cursorBridgeEditTool: AgentTool | undefined;
-		// Whether this session granted a file-writing tool, captured HERE because
-		// both inputs are about to move: `edit` is deleted from the registry for
-		// Cursor just below, and `write` may be auto-registered further down as
-		// an xdev transport. The exec bridge answers native `delete` and
-		// resource-download frames that mutate files without running a registry
-		// tool, so it needs the grant as the session actually made it.
 		//
-		// Unconditional, not inside the Cursor branch below: the bridge is
-		// installed for every session, and a session that starts on another
-		// provider can switch to Cursor later — defaulting to "allowed" outside
-		// this branch would hand a restricted read-only session native delete and
-		// download the moment it switched.
-		const cursorCanMutateFiles = toolRegistry.has("edit") || toolRegistry.has("write");
-		if (model?.provider === "cursor") {
+		// The grant is captured HERE, before the Cursor branch below deletes
+		// `edit` from the registry, and independently of the session's provider:
+		// a session that starts on another provider can switch to Cursor later,
+		// and the roster is built once, at session creation. Reading the registry
+		// at frame time would see the switched-to state, not the grant.
+		const editWasGranted = toolRegistry.has("edit");
+		// Built on first use rather than eagerly: a session that never reaches
+		// Cursor never constructs it.
+		let cursorBridgeEditTool: AgentTool | undefined;
+		const getCursorBridgeEditTool = (): AgentTool | undefined => {
 			// Only when the session actually granted `edit`. `createTools` omits
 			// it entirely for a restricted tool set, and the bridge answers native
 			// frames that arrive regardless of the advertised catalog — so
 			// building one unconditionally would hand a read-only agent a
 			// mutating tool it was denied (the issue #5680 escalation).
-			const editWasGranted = toolRegistry.has("edit");
+			if (!editWasGranted) return undefined;
+			cursorBridgeEditTool ??= createBridgeEditTool(toolSession, extensionRunner);
+			return cursorBridgeEditTool;
+		};
+		// Whether this session granted a file-writing tool. Same capture-early
+		// reasoning, plus `write` may be auto-registered further down as an xdev
+		// transport. The exec bridge answers native `delete` and
+		// resource-download frames that mutate files without running a registry
+		// tool, so it needs the grant as the session actually made it.
+		const cursorCanMutateFiles = editWasGranted || toolRegistry.has("write");
+		if (model?.provider === "cursor") {
 			toolRegistry.delete("edit");
 			builtInRegistryToolNames.delete("edit");
-			if (editWasGranted) {
-				cursorBridgeEditTool = createBridgeEditTool(toolSession, extensionRunner);
-			}
 		}
 
 		let writeRegistration: Promise<boolean> | undefined;
@@ -2657,10 +2660,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// devices the model called by their top-level name — so wrap unwrapped
 		// devices here to keep the approval/deny/prompt gate. Dynamic mounts
 		// (custom/MCP) already come from the wrapped registry.
+		//
+		// Device-only, deliberately: this same resolver is installed as the agent
+		// loop's `resolveFallbackTool`, which runs for ANY call the advertised
+		// set does not contain. Routing `edit` through it would execute a
+		// replace-mode edit for an unadvertised `edit` call — a model that
+		// hallucinated one, or a session that deselected the tool after startup.
+		// `pi_edit` asks for its instance through `getEditReplaceTool` instead.
 		const resolveDeviceTool = (name: string): AgentTool | undefined => {
-			// `edit` is withheld from the model-facing registry for Cursor but the
-			// native `pi_edit` frame still needs it; see the retention above.
-			if (name === "edit" && cursorBridgeEditTool) return cursorBridgeEditTool;
 			const device = toolSession.xdevRegistry?.get(name);
 			if (!device) return undefined;
 			return device instanceof ExtensionToolWrapper ? device : new ExtensionToolWrapper(device, extensionRunner);
@@ -2669,6 +2676,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			tools: toolRegistry,
 			getTool: resolveDeviceTool,
+			// `pi_edit` needs the `replace`-mode instance specifically, and the
+			// registry may still hold the session's own `edit` (any mode) when
+			// this session did not start on Cursor.
+			getEditReplaceTool: getCursorBridgeEditTool,
 			getToolContext: () => toolContextStore.getContext(),
 			// Cursor's resource frames ask what THIS client's servers advertise;
 			// only live connections have any.
