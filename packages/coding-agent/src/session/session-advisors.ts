@@ -69,6 +69,7 @@ import { MODEL_ROLES } from "../config/model-roles";
 import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { CursorExecHandlers } from "../cursor";
+import { bridgeToolMap } from "../cursor-bridge-tools";
 import { estimateToolSchemaTokens } from "../modes/utils/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -185,6 +186,13 @@ export interface SessionAdvisorsOptions {
 	 * drops both fields — the same gap the primary bridge closes.
 	 */
 	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
+	/**
+	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs. The
+	 * advisor's own instance follows the configured `edit.mode` (`hashline` by
+	 * default), whose schema the frame's `old_text`/`new_text` pairs do not
+	 * match, so without this every native advisor edit fails validation.
+	 */
+	createEditTool?(): AgentTool | undefined;
 	watchdogPrompt?: string;
 	sharedInstructions?: string;
 	contextPrompt?: string;
@@ -253,6 +261,7 @@ export class SessionAdvisors {
 	#advisorEnabled: boolean;
 	#advisorTools: AgentTool[] | undefined;
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
+	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
 	#advisorWatchdogPrompt: string | undefined;
 	#advisorSharedInstructions: string | undefined;
 	#advisorContextPrompt: string | undefined;
@@ -276,6 +285,7 @@ export class SessionAdvisors {
 		this.#advisorEnabled = options.enabled;
 		this.#advisorTools = options.tools;
 		this.#advisorCreateGrepTool = options.createGrepTool;
+		this.#advisorCreateEditTool = options.createEditTool;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
 		this.#advisorSharedInstructions = options.sharedInstructions;
 		this.#advisorContextPrompt = options.contextPrompt;
@@ -699,10 +709,16 @@ export class SessionAdvisors {
 			// to delete workspace files it was never granted (issue #5680 review).
 			const advisorCanMutateFiles = advisorToolMap.has("write") || advisorToolMap.has("edit");
 			if (advisorCanMutateFiles) availableAdvisorToolNames.add("delete");
+			// `pi_edit` speaks `replace`'s `old_text`/`new_text` schema, which the
+			// advisor's ordinary `EditTool` (built at the session's configured
+			// `edit.mode`, `hashline` by default) does not accept. The bridge map
+			// swaps in a `replace` instance for the exec channel only — the
+			// advisor's own loop keeps the tool it was given — and only when
+			// `edit` was actually granted.
 			const advisorCursorExecHandlers = new CursorExecHandlers({
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
-				tools: advisorToolMap,
+				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
 				allowNativeDelete: advisorCanMutateFiles,
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster

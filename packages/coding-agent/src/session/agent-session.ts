@@ -1268,6 +1268,7 @@ export class AgentSession {
 			enabled: this.settings.get("advisor.enabled"),
 			tools: config.advisorTools,
 			createGrepTool: config.advisorCreateGrepTool,
+			createEditTool: config.advisorCreateEditTool,
 			watchdogPrompt: config.advisorWatchdogPrompt,
 			sharedInstructions: config.advisorSharedInstructions,
 			contextPrompt: config.advisorContextPrompt,

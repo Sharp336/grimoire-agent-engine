@@ -61,7 +61,7 @@ import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
-import { createBridgeGrepFactory } from "./cursor-bridge-tools";
+import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
@@ -2603,8 +2603,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			toolRegistry.delete("edit");
 			builtInRegistryToolNames.delete("edit");
 			if (editWasGranted) {
-				const bridgeEdit: Tool = new EditTool(toolSession, "replace");
-				cursorBridgeEditTool = new ExtensionToolWrapper(bridgeEdit, extensionRunner);
+				cursorBridgeEditTool = createBridgeEditTool(toolSession, extensionRunner);
 			}
 		}
 
@@ -3257,6 +3256,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// advisor's own tool session so a `pi_grep` frame's context width and
 			// match cap are honored there too.
 			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner),
+			// Same `replace`-mode requirement as the primary bridge; the advisor
+			// path gates it on the advisor's own `edit` grant.
+			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner),
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;

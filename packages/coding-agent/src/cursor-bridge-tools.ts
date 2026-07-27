@@ -9,6 +9,7 @@
  */
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { EditTool } from "./edit";
 import type { ExtensionRunner } from "./extensibility/extensions";
 import { ExtensionToolWrapper } from "./extensibility/extensions";
 import type { GrepToolOptions, Tool, ToolSession } from "./tools";
@@ -33,4 +34,46 @@ export function createBridgeGrepFactory(
 		const grepTool: Tool = new GrepTool(session, options);
 		return new ExtensionToolWrapper(grepTool, extensionRunner);
 	};
+}
+
+/**
+ * Build the `replace`-mode `edit` the bridge answers `pi_edit` with.
+ *
+ * `PiEditExecArgs` carries `old_text`/`new_text` pairs, which is exactly
+ * `replace`'s schema and nothing else's. The session's own instance follows the
+ * configured `edit.mode` — `hashline` by default, whose schema is a single
+ * `input` string — so a frame handed that instance fails validation instead of
+ * editing the file.
+ *
+ * Callers MUST gate this on the session having actually granted `edit`: the
+ * tool is constructed rather than looked up, so building one unconditionally
+ * hands a restricted agent a mutating tool it was denied (issue #5680).
+ */
+export function createBridgeEditTool(session: ToolSession, extensionRunner: ExtensionRunner): AgentTool {
+	const editTool: Tool = new EditTool(session, "replace");
+	return new ExtensionToolWrapper(editTool, extensionRunner);
+}
+
+/**
+ * The tool map the exec bridge should run, given the map a caller granted.
+ *
+ * `pi_edit` needs a `replace`-mode instance, but only when `edit` was granted:
+ * the tool is constructed rather than looked up, so substituting
+ * unconditionally would hand a restricted roster a mutating tool it was denied
+ * (issue #5680). The granted map is never mutated: an unsubstituted result is a
+ * copy, so a caller without an `edit` grant cannot accidentally gain one.
+ *
+ * The advisor roster passes its granted map here; the primary session keeps its
+ * instance out of the registry entirely (Cursor does not advertise `edit`) and
+ * serves it through the bridge's `getTool` fallback instead.
+ */
+export function bridgeToolMap(
+	granted: ReadonlyMap<string, AgentTool>,
+	createEditTool: (() => AgentTool | undefined) | undefined,
+): Map<string, AgentTool> {
+	const bridged = new Map(granted);
+	if (!granted.has("edit") || !createEditTool) return bridged;
+	const bridgeEdit = createEditTool();
+	if (bridgeEdit) bridged.set("edit", bridgeEdit);
+	return bridged;
 }

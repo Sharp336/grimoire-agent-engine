@@ -19,7 +19,11 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
-import { createBridgeGrepFactory } from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
+import {
+	bridgeToolMap,
+	createBridgeEditTool,
+	createBridgeGrepFactory,
+} from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -39,6 +43,24 @@ function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): T
 		settings: Settings.isolated(),
 		...overrides,
 	};
+}
+
+/**
+ * An `ExtensionRunner` that intercepts nothing but records that it ran.
+ *
+ * The bridge's per-call tools must carry the same wrapper as registry tools;
+ * seeing a name arrive here proves the wrapper is present, since an unwrapped
+ * tool never announces.
+ */
+function passthroughRunner(seen: string[] = []): ExtensionRunner {
+	return {
+		hasHandlers: () => true,
+		emitToolCall: async (event: { toolName: string }) => {
+			seen.push(event.toolName);
+			return undefined;
+		},
+		emitToolResult: async () => undefined,
+	} as unknown as ExtensionRunner;
 }
 
 describe("CursorExecHandlers.grep bridge", () => {
@@ -223,10 +245,11 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// edit answers "Tool \"edit\" not available" and the file is untouched.
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
-		const session = createTestSession(cwd);
-		// `replace` is the mode `pi_edit`'s `old_text`/`new_text` pairs speak;
-		// the session default is `hashline`, whose schema they do not match.
-		const editTool: Tool = new EditTool(session, "replace");
+		// Build it exactly as the session does. Both bridge callsites go through
+		// this factory, so a regression in it — the wrong mode, a missing
+		// approval wrapper — fails here rather than passing against a
+		// hand-constructed stand-in.
+		const editTool = createBridgeEditTool(createTestSession(cwd), passthroughRunner());
 
 		const withheld = new CursorExecHandlers({
 			cwd,
@@ -248,6 +271,57 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const unreachable = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>() });
 		const result = await unreachable.piEdit({
 			toolCallId: "e2",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
+	});
+
+	it("substitutes a replace-mode edit into a granted advisor tool map", async () => {
+		// The advisor roster hands the bridge the instances it built for the
+		// advisor's own loop — default `hashline` mode, whose schema is a single
+		// `input` string. A `pi_edit` frame's `old_text`/`new_text` pairs fail
+		// validation against it, so the file goes unmodified. This is the
+		// substitution the advisor path applies before constructing handlers.
+		const target = path.join(cwd, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const session = createTestSession(cwd);
+		const advisorEdit = new EditTool(session);
+		expect(advisorEdit.mode).not.toBe("replace");
+		const granted = new Map<string, Tool>([["edit", advisorEdit]]);
+
+		const bridged = bridgeToolMap(granted, () => createBridgeEditTool(session, passthroughRunner()));
+		const handlers = new CursorExecHandlers({ cwd, tools: bridged });
+		const result = await handlers.piEdit({
+			toolCallId: "e3",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBeFalsy();
+		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
+		// The advisor's own loop must keep the exact instance it was handed.
+		expect(granted.get("edit")).toBe(advisorEdit);
+	});
+
+	it("leaves an ungranted tool map without an edit tool", async () => {
+		// The bridge tool is constructed, not looked up, so substituting for a
+		// roster that was never granted `edit` would hand a read-only advisor a
+		// mutating tool (issue #5680). The frame must fail instead.
+		const target = path.join(cwd, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const session = createTestSession(cwd);
+		let built = 0;
+		const withheld = bridgeToolMap(new Map<string, Tool>(), () => {
+			built++;
+			return createBridgeEditTool(session, passthroughRunner());
+		});
+		expect(withheld.has("edit")).toBe(false);
+		expect(built).toBe(0);
+
+		const handlers = new CursorExecHandlers({ cwd, tools: withheld });
+		const result = await handlers.piEdit({
+			toolCallId: "e4",
 			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
 		} as never);
 
@@ -277,16 +351,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// both callsites use, so a regression in it fails here.
 		await Bun.write(path.join(cwd, "hit.txt"), "needle\n");
 		const intercepted: string[] = [];
-		const runner = {
-			hasHandlers: () => true,
-			emitToolCall: async (event: { toolName: string }) => {
-				intercepted.push(event.toolName);
-				return undefined;
-			},
-			emitToolResult: async () => undefined,
-		} as unknown as ExtensionRunner;
-
-		const factory = createBridgeGrepFactory(createTestSession(cwd), runner);
+		const factory = createBridgeGrepFactory(createTestSession(cwd), passthroughRunner(intercepted));
 		const built = factory({ context: 0, totalMatchLimit: 5 });
 		expect(built).toBeInstanceOf(ExtensionToolWrapper);
 

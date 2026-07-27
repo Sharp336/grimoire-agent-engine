@@ -213,6 +213,12 @@ export interface AgentSessionConfig {
 	 * running on Cursor silently drops both fields.
 	 */
 	advisorCreateGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
+	/**
+	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs, against the
+	 * advisor-scoped tool session. The advisor's ordinary instance follows the
+	 * configured `edit.mode` and rejects the frame's `old_text`/`new_text` pairs.
+	 */
+	advisorCreateEditTool?(): AgentTool | undefined;
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */
