@@ -1,0 +1,1062 @@
+import { describe, expect, it } from "bun:test";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import {
+	type BlockState,
+	handleServerMessage,
+	processInteractionUpdate,
+	type ToolCallState,
+} from "@oh-my-pi/pi-ai/providers/cursor";
+import type { AssistantMessage, CursorExecHandlers, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import {
+	type AgentClientMessage,
+	AgentClientMessageSchema,
+	AgentServerMessageSchema,
+	AgentStoreConflictArgsSchema,
+	CanvasDiagnosticsArgsSchema,
+	ComputerUseArgsSchema,
+	ConnectScmArgsSchema,
+	ConnectScmErrorSchema,
+	ConnectScmGithubRepositorySchema,
+	ConnectScmGithubSchema,
+	ConnectScmRejectedSchema,
+	ConnectScmResultSchema,
+	ConnectScmSuccessSchema,
+	ConnectScmToolCallSchema,
+	ConversationSearchArgsSchema,
+	type ExecServerMessage,
+	ExecServerMessageSchema,
+	ExecuteHookArgsSchema,
+	ExecuteHookRequestSchema,
+	ForceBackgroundShellArgsSchema,
+	ForceBackgroundShellStatus,
+	ForceBackgroundSubagentArgsSchema,
+	ForceBackgroundSubagentStatus,
+	GetDiffRequestSchema,
+	ListMcpResourcesExecArgsSchema,
+	McpAllowlistPrecheckArgsSchema,
+	McpStateExecArgsSchema,
+	type McpToolDefinition,
+	McpToolDefinitionSchema,
+	PiBashExecArgsSchema,
+	PiEditExecArgsSchema,
+	PiEditReplacementSchema,
+	PiFindExecArgsSchema,
+	PiGrepExecArgsSchema,
+	PiLsExecArgsSchema,
+	PiReadExecArgsSchema,
+	PiWriteExecArgsSchema,
+	PostToolUseRequestQuerySchema,
+	ReadArgsSchema,
+	ReadMcpResourceExecArgsSchema,
+	RecordScreenArgsSchema,
+	ShellAllowlistPrecheckArgsSchema,
+	ShellArgsSchema,
+	SmartModeClassifierArgsSchema,
+	SubagentArgsSchema,
+	SubagentAwaitArgsSchema,
+	ToolCallSchema,
+	WebFetchAllowlistPrecheckArgsSchema,
+} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+
+/**
+ * Drive one `ExecServerMessage` through the real dispatcher and decode every
+ * frame it wrote back.
+ *
+ * The frames are decoded from the actual wire bytes rather than intercepted as
+ * objects: the whole point of these cases is what the SERVER receives, and an
+ * `ExecClientMessage` whose oneof never got set still looks like a populated
+ * object in memory.
+ */
+async function dispatchExec(
+	message: ExecServerMessage,
+	options: { execHandlers?: CursorExecHandlers; requestContextTools?: McpToolDefinition[] } = {},
+): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
+	const output = cursorAssistantMessage();
+	const stream = new AssistantMessageEventStream();
+	const state = newBlockState();
+	const written: Buffer[] = [];
+	const h2Request = {
+		write: (chunk: Buffer) => {
+			written.push(chunk);
+			return true;
+		},
+	} as unknown as Parameters<typeof handleServerMessage>[5];
+	const results: ToolResultMessage[] = [];
+
+	await handleServerMessage(
+		create(AgentServerMessageSchema, { message: { case: "execServerMessage", value: message } }),
+		output,
+		stream,
+		state,
+		new Map(),
+		h2Request,
+		options.execHandlers,
+		result => {
+			results.push(result);
+			return result;
+		},
+		{ sawTokenDelta: false },
+		options.requestContextTools ?? [],
+	);
+
+	return { frames: written.map(decodeClientFrame), output, results };
+}
+
+/** Strip the 5-byte Connect envelope (flags + big-endian length) and decode. */
+function decodeClientFrame(frame: Buffer): AgentClientMessage {
+	const length = frame.readUInt32BE(1);
+	return fromBinary(AgentClientMessageSchema, frame.subarray(5, 5 + length));
+}
+
+function buildExecMessage(message: ExecServerMessage["message"]): ExecServerMessage {
+	return create(ExecServerMessageSchema, { id: 7, execId: "exec-modern", message });
+}
+
+function mcpTool(name: string, providerIdentifier: string) {
+	return create(McpToolDefinitionSchema, { name, toolName: name, providerIdentifier, description: `${name} tool` });
+}
+
+function cursorAssistantMessage(): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: "cursor-agent",
+		provider: "cursor",
+		model: "cursor-composer-2.5",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+}
+
+function newBlockState(): BlockState {
+	let textBlock: BlockState["currentTextBlock"] = null;
+	let thinkingBlock: BlockState["currentThinkingBlock"] = null;
+	let toolCall: ToolCallState | null = null;
+	return {
+		get currentTextBlock() {
+			return textBlock;
+		},
+		get currentThinkingBlock() {
+			return thinkingBlock;
+		},
+		get currentToolCall() {
+			return toolCall;
+		},
+		openToolCalls: new Map(),
+		resolvedMcpToolCallIds: new Set(),
+		firstTokenTime: undefined,
+		setTextBlock: b => {
+			textBlock = b;
+		},
+		setThinkingBlock: b => {
+			thinkingBlock = b;
+		},
+		setToolCall: t => {
+			toolCall = t;
+		},
+		setFirstTokenTime: () => {},
+	};
+}
+
+function toolResult(text: string, extra?: Partial<ToolResultMessage>): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: "unused",
+		toolName: "unused",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp: 1,
+		...extra,
+	};
+}
+
+/** The single `execClientMessage` a dispatch produced, or a failure if it produced anything else. */
+function soleResult(frames: AgentClientMessage[]) {
+	expect(frames).toHaveLength(1);
+	const frame = frames[0].message;
+	if (frame.case !== "execClientMessage") throw new Error(`expected execClientMessage, got ${frame.case}`);
+	return frame.value.message;
+}
+
+describe("Cursor modern exec frames: failure channel", () => {
+	it("throws on a frame whose oneof this build does not model, instead of stranding the exec id", async () => {
+		// A oneof number absent from agent.proto decodes into unknown fields and
+		// leaves `message.case` unset. The old code returned silently, so the
+		// server waited on a reply that never arrived.
+		const message = create(ExecServerMessageSchema, { id: 11, execId: "exec-unknown" });
+
+		const { frames } = await dispatchExec(message);
+
+		const control = frames[0].message;
+		expect(control.case).toBe("execClientControlMessage");
+		if (control.case !== "execClientControlMessage") throw new Error("unreachable");
+		expect(control.value.message.case).toBe("throw");
+		if (control.value.message.case !== "throw") throw new Error("unreachable");
+		expect(control.value.message.value.id).toBe(11);
+		expect(control.value.message.value.errorCode).toBe("unknown_exec_variant");
+
+		// A throw must be followed by a stream close, or the exec stays open.
+		const close = frames[1].message;
+		expect(close.case).toBe("execClientControlMessage");
+		if (close.case !== "execClientControlMessage") throw new Error("unreachable");
+		expect(close.value.message.case).toBe("streamClose");
+	});
+
+	it("throws for gitDiffRequest, whose response type has no error variant", async () => {
+		// `GetDiffResponse` models five output formats and no failure, so any
+		// in-band answer claims a diff was computed.
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "gitDiffRequest",
+				value: create(GetDiffRequestSchema, { cwd: "/repo", ref: "HEAD" }),
+			}),
+		);
+
+		const control = frames[0].message;
+		if (control.case !== "execClientControlMessage") throw new Error(`got ${control.case}`);
+		expect(control.value.message.case).toBe("throw");
+		if (control.value.message.case !== "throw") throw new Error("unreachable");
+		expect(control.value.message.value.errorCode).toBe("exec_variant_unsupported");
+	});
+});
+
+describe("Cursor modern exec frames: no answer carries an unset oneof", () => {
+	// A result whose `result` oneof is unset is indistinguishable from "the tool
+	// ran and produced nothing". Every one of these frames was previously
+	// answered that way, or is newly handled and must not regress into it.
+	const cases: [name: string, message: ExecServerMessage, resultCase: string][] = [
+		[
+			"listMcpResourcesExecArgs",
+			buildExecMessage({
+				case: "listMcpResourcesExecArgs",
+				value: create(ListMcpResourcesExecArgsSchema, {}),
+			}),
+			"success",
+		],
+		[
+			"readMcpResourceExecArgs",
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, { uri: "file:///nope" }),
+			}),
+			"notFound",
+		],
+		[
+			"recordScreenArgs",
+			buildExecMessage({ case: "recordScreenArgs", value: create(RecordScreenArgsSchema, {}) }),
+			"failure",
+		],
+		[
+			"computerUseArgs",
+			buildExecMessage({ case: "computerUseArgs", value: create(ComputerUseArgsSchema, {}) }),
+			"error",
+		],
+		[
+			"subagentArgs",
+			buildExecMessage({
+				case: "subagentArgs",
+				value: create(SubagentArgsSchema, { toolCallId: "c1", subagentType: "explore", prompt: "go" }),
+			}),
+			"error",
+		],
+		[
+			"subagentAwaitArgs",
+			buildExecMessage({
+				case: "subagentAwaitArgs",
+				value: create(SubagentAwaitArgsSchema, { agentId: "agent-1", timeoutMs: 10 }),
+			}),
+			"notFound",
+		],
+		[
+			"smartModeClassifierArgs",
+			buildExecMessage({
+				case: "smartModeClassifierArgs",
+				value: create(SmartModeClassifierArgsSchema, { toolCallId: "c1" }),
+			}),
+			"error",
+		],
+		[
+			"canvasDiagnosticsArgs",
+			buildExecMessage({
+				case: "canvasDiagnosticsArgs",
+				value: create(CanvasDiagnosticsArgsSchema, { path: "/a.ts", toolCallId: "c1" }),
+			}),
+			"error",
+		],
+		[
+			"conversationSearchArgs",
+			buildExecMessage({
+				case: "conversationSearchArgs",
+				value: create(ConversationSearchArgsSchema, { query: "chess", toolCallId: "c1" }),
+			}),
+			"error",
+		],
+		[
+			"agentStoreConflictArgs",
+			buildExecMessage({
+				case: "agentStoreConflictArgs",
+				value: create(AgentStoreConflictArgsSchema, {}),
+			}),
+			"error",
+		],
+	];
+
+	for (const [name, message, resultCase] of cases) {
+		it(`answers ${name} with a set '${resultCase}' variant`, async () => {
+			const { frames } = await dispatchExec(message);
+			const answer = soleResult(frames);
+			expect(answer.case).toBeDefined();
+			const value = answer.value;
+			expect(value).toHaveProperty("result");
+			const result = (value as { result: { case?: string } }).result;
+			expect(result.case).toBe(resultCase);
+		});
+	}
+
+	it("reports the requested uri back on a not-found MCP resource read", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, { uri: "mcp://server/thing" }),
+			}),
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "readMcpResourceExecResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "notFound") throw new Error("expected notFound");
+		expect(answer.value.result.value.uri).toBe("mcp://server/thing");
+	});
+
+	it("echoes the requested path on a canvas diagnostics error", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "canvasDiagnosticsArgs",
+				value: create(CanvasDiagnosticsArgsSchema, { path: "/canvas/a.ts", toolCallId: "c1" }),
+			}),
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "canvasDiagnosticsResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "error") throw new Error("expected error");
+		expect(answer.value.result.value.path).toBe("/canvas/a.ts");
+	});
+
+	it("reports the awaited agent id back as not found", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "subagentAwaitArgs",
+				value: create(SubagentAwaitArgsSchema, { agentId: "agent-42", timeoutMs: 5 }),
+			}),
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "subagentAwaitResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "notFound") throw new Error("expected notFound");
+		expect(answer.value.result.value.agentId).toBe("agent-42");
+	});
+});
+
+describe("Cursor modern exec frames: status and precheck answers", () => {
+	it("reports NOT_FOUND for force-background requests, since nothing runs in the background", async () => {
+		const shell = await dispatchExec(
+			buildExecMessage({
+				case: "forceBackgroundShellArgs",
+				value: create(ForceBackgroundShellArgsSchema, { toolCallId: "c1" }),
+			}),
+		);
+		const shellAnswer = soleResult(shell.frames);
+		if (shellAnswer.case !== "forceBackgroundShellResult") throw new Error(`got ${shellAnswer.case}`);
+		expect(shellAnswer.value.status).toBe(ForceBackgroundShellStatus.NOT_FOUND);
+
+		const subagent = await dispatchExec(
+			buildExecMessage({
+				case: "forceBackgroundSubagentArgs",
+				value: create(ForceBackgroundSubagentArgsSchema, { toolCallId: "c1" }),
+			}),
+		);
+		const subagentAnswer = soleResult(subagent.frames);
+		if (subagentAnswer.case !== "forceBackgroundSubagentResult") throw new Error(`got ${subagentAnswer.case}`);
+		expect(subagentAnswer.value.status).toBe(ForceBackgroundSubagentStatus.NOT_FOUND);
+	});
+
+	it("declines every allowlist precheck, since no allowlist is configured", async () => {
+		// `true` here would grant an approval bypass that was never configured.
+		const shell = await dispatchExec(
+			buildExecMessage({
+				case: "shellAllowlistPrecheckArgs",
+				value: create(ShellAllowlistPrecheckArgsSchema, { command: "rm -rf /", workingDirectory: "/" }),
+			}),
+		);
+		const shellAnswer = soleResult(shell.frames);
+		if (shellAnswer.case !== "shellAllowlistPrecheckResult") throw new Error(`got ${shellAnswer.case}`);
+		expect(shellAnswer.value.allowlisted).toBe(false);
+
+		const mcp = await dispatchExec(
+			buildExecMessage({
+				case: "mcpAllowlistPrecheckArgs",
+				value: create(McpAllowlistPrecheckArgsSchema, { providerIdentifier: "pi-agent", toolName: "task" }),
+			}),
+		);
+		const mcpAnswer = soleResult(mcp.frames);
+		if (mcpAnswer.case !== "mcpAllowlistPrecheckResult") throw new Error(`got ${mcpAnswer.case}`);
+		expect(mcpAnswer.value.allowlisted).toBe(false);
+
+		const web = await dispatchExec(
+			buildExecMessage({
+				case: "webFetchAllowlistPrecheckArgs",
+				value: create(WebFetchAllowlistPrecheckArgsSchema, { url: "https://example.com" }),
+			}),
+		);
+		const webAnswer = soleResult(web.frames);
+		if (webAnswer.case !== "webFetchAllowlistPrecheckResult") throw new Error(`got ${webAnswer.case}`);
+		expect(webAnswer.value.allowlisted).toBe(false);
+	});
+});
+
+describe("Cursor modern exec frames: hooks", () => {
+	it("answers a hook query with the matching response case and an empty payload", async () => {
+		// The request and response oneofs are parallel; a response of the wrong
+		// case is read as a different hook entirely.
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "executeHookArgs",
+				value: create(ExecuteHookArgsSchema, {
+					request: create(ExecuteHookRequestSchema, {
+						request: { case: "postToolUse", value: create(PostToolUseRequestQuerySchema, {}) },
+					}),
+				}),
+			}),
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "executeHookResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.response?.response.case).toBe("postToolUse");
+		if (answer.value.response?.response.case !== "postToolUse") throw new Error("unreachable");
+		// Every field is optional; this client runs no hooks, so it contributes none.
+		expect(answer.value.response.response.value.additionalContext).toBeUndefined();
+	});
+
+	it("throws for a hook request whose case this build does not model", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "executeHookArgs",
+				value: create(ExecuteHookArgsSchema, { request: create(ExecuteHookRequestSchema, {}) }),
+			}),
+		);
+
+		const control = frames[0].message;
+		if (control.case !== "execClientControlMessage") throw new Error(`got ${control.case}`);
+		expect(control.value.message.case).toBe("throw");
+		if (control.value.message.case !== "throw") throw new Error("unreachable");
+		expect(control.value.message.value.errorCode).toBe("unknown_hook_request");
+	});
+});
+
+describe("Cursor modern exec frames: MCP state", () => {
+	it("regroups the advertised tool catalog by provider identifier", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "mcpStateExecArgs", value: create(McpStateExecArgsSchema, {}) }),
+			{
+				requestContextTools: [
+					mcpTool("task", "pi-agent"),
+					mcpTool("hub", "pi-agent"),
+					mcpTool("mcp__fixture_report", "fixture"),
+				],
+			},
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpStateExecResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error("expected success");
+		const servers = answer.value.result.value.servers;
+		expect(servers.map(server => server.serverIdentifier).sort()).toEqual(["fixture", "pi-agent"]);
+		const piAgent = servers.find(server => server.serverIdentifier === "pi-agent");
+		expect(piAgent?.tools.map(t => t.name)).toEqual(["task", "hub"]);
+	});
+
+	it("restricts the answer to the requested server identifiers", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpStateExecArgs",
+				value: create(McpStateExecArgsSchema, { serverIdentifiers: ["fixture"] }),
+			}),
+			{ requestContextTools: [mcpTool("task", "pi-agent"), mcpTool("mcp__fixture_report", "fixture")] },
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpStateExecResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error("expected success");
+		expect(answer.value.result.value.servers.map(s => s.serverIdentifier)).toEqual(["fixture"]);
+	});
+});
+
+describe("Cursor modern exec frames: redacted read", () => {
+	it("refuses redactedRead rather than serving the unredacted file", async () => {
+		// The frame exists so the client can strip secrets first. No redaction is
+		// implemented, so answering with a plain read would leak exactly what the
+		// frame withholds.
+		const readHandler: CursorExecHandlers = {
+			async read() {
+				return toolResult("SECRET=hunter2");
+			},
+		};
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "redactedReadArgs",
+				value: create(ReadArgsSchema, { path: "/repo/.env", toolCallId: "c1" }),
+			}),
+			{ execHandlers: readHandler },
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "redactedReadResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("error");
+		if (answer.value.result.case !== "error") throw new Error("unreachable");
+		expect(answer.value.result.value.error).toContain("redaction");
+		expect(JSON.stringify(answer.value)).not.toContain("hunter2");
+	});
+});
+
+describe("Cursor modern exec frames: Pi tools", () => {
+	it("round-trips piRead through its handler into a typed success", async () => {
+		const { frames, output, results } = await dispatchExec(
+			buildExecMessage({
+				case: "piReadArgs",
+				value: create(PiReadExecArgsSchema, { path: "/repo/a.ts", offset: 5, limit: 20 }),
+			}),
+			{
+				execHandlers: {
+					async piRead(call) {
+						expect(call.args.path).toBe("/repo/a.ts");
+						expect(call.args.offset).toBe(5);
+						// The Pi frames carry no tool_call_id; the dispatcher mints one.
+						expect(call.toolCallId).toBeTruthy();
+						// Like the real bridge, the handler files its result under the id
+						// it was handed.
+						return toolResult("line one\nline two", { toolCallId: call.toolCallId, toolName: "read" });
+					},
+				},
+			},
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "piReadResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error("expected success");
+		expect(answer.value.result.value.output).toBe("line one\nline two");
+
+		// The synthesized block and its paired result must share the minted id, or
+		// the call is stripped as dangling on replay.
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].name).toBe("read");
+		expect(results.map(r => r.toolCallId)).toEqual([blocks[0].id]);
+	});
+
+	it("maps a failing Pi handler onto the frame's own error variant", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "piReadArgs", value: create(PiReadExecArgsSchema, { path: "/nope" }) }),
+			{
+				execHandlers: {
+					async piRead(call) {
+						return toolResult("ENOENT: /nope", { isError: true, toolCallId: call.toolCallId });
+					},
+				},
+			},
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "piReadResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "error") throw new Error("expected error");
+		expect(answer.value.result.value.error).toBe("ENOENT: /nope");
+	});
+
+	it("rejects a Pi frame with no handler installed instead of faking a success", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "piGrepArgs", value: create(PiGrepExecArgsSchema, { pattern: "foo" }) }),
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "piGrepResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("error");
+	});
+
+	it("carries a truncation summary onto the Pi success payload", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "piBashArgs", value: create(PiBashExecArgsSchema, { command: "yes" }) }),
+			{
+				execHandlers: {
+					async piBash() {
+						return toolResult("out", {
+							details: {
+								truncation: {
+									truncated: true,
+									truncatedBy: "lines",
+									totalLines: 5000,
+									outputLines: 300,
+									outputBytes: 4096,
+								},
+							},
+						});
+					},
+				},
+			},
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "piBashResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error("expected success");
+		expect(answer.value.result.value.truncation?.truncated).toBe(true);
+		expect(answer.value.result.value.truncation?.truncatedBy).toBe("lines");
+		expect(answer.value.result.value.truncation?.totalLines).toBe(5000);
+	});
+
+	it("omits truncation entirely when nothing was truncated", async () => {
+		// `optional PiTruncation` — a zeroed message would claim the output was
+		// trimmed to nothing.
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "piBashArgs", value: create(PiBashExecArgsSchema, { command: "echo hi" }) }),
+			{
+				execHandlers: {
+					async piBash() {
+						return toolResult("hi", { details: { truncation: { truncated: false, totalLines: 1 } } });
+					},
+				},
+			},
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "piBashResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error("expected success");
+		expect(answer.value.result.value.truncation).toBeUndefined();
+	});
+
+	it("passes edit replacements through to the handler and surfaces diff/patch", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "piEditArgs",
+				value: create(PiEditExecArgsSchema, {
+					path: "/repo/a.ts",
+					edits: [create(PiEditReplacementSchema, { oldText: "before", newText: "after" })],
+				}),
+			}),
+			{
+				execHandlers: {
+					async piEdit(call) {
+						expect(call.args.edits[0].oldText).toBe("before");
+						return toolResult("edited", { details: { diff: "-before\n+after", patch: "@@" } });
+					},
+				},
+			},
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "piEditResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error("expected success");
+		expect(answer.value.result.value.diff).toBe("-before\n+after");
+		expect(answer.value.result.value.patch).toBe("@@");
+
+		// The synthesized display block must use the local edit tool's snake_case
+		// replace schema, or the rebuilt transcript renders empty edits.
+		const block = output.content.find((b): b is ToolCallState => b.type === "toolCall");
+		expect(block?.name).toBe("edit");
+		expect(block?.arguments).toEqual({ path: "/repo/a.ts", edits: [{ old_text: "before", new_text: "after" }] });
+	});
+
+	it("answers each remaining Pi frame with its own matching result case", async () => {
+		const handlers: CursorExecHandlers = {
+			async piWrite() {
+				return toolResult("wrote");
+			},
+			async piGrep() {
+				return toolResult("a.ts:1:hit");
+			},
+			async piFind() {
+				return toolResult("a.ts");
+			},
+			async piLs() {
+				return toolResult("a.ts\nb.ts");
+			},
+		};
+
+		const write = soleResult(
+			(
+				await dispatchExec(
+					buildExecMessage({
+						case: "piWriteArgs",
+						value: create(PiWriteExecArgsSchema, { path: "/a.ts", content: "x" }),
+					}),
+					{ execHandlers: handlers },
+				)
+			).frames,
+		);
+		expect(write.case).toBe("piWriteResult");
+
+		const grep = soleResult(
+			(
+				await dispatchExec(
+					buildExecMessage({ case: "piGrepArgs", value: create(PiGrepExecArgsSchema, { pattern: "hit" }) }),
+					{ execHandlers: handlers },
+				)
+			).frames,
+		);
+		expect(grep.case).toBe("piGrepResult");
+
+		const find = soleResult(
+			(
+				await dispatchExec(
+					buildExecMessage({ case: "piFindArgs", value: create(PiFindExecArgsSchema, { pattern: "*.ts" }) }),
+					{ execHandlers: handlers },
+				)
+			).frames,
+		);
+		expect(find.case).toBe("piFindResult");
+
+		const ls = soleResult(
+			(
+				await dispatchExec(buildExecMessage({ case: "piLsArgs", value: create(PiLsExecArgsSchema, {}) }), {
+					execHandlers: handlers,
+				})
+			).frames,
+		);
+		expect(ls.case).toBe("piLsResult");
+	});
+
+	it("serves miniSweAgentBash from the existing shell handler under its own frame", async () => {
+		// Frame 52 carries the same ShellArgs/ShellResult pair as `shellArgs`, so
+		// the shell handler answers it unchanged — under result field 55.
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "miniSweAgentBashArgs",
+				value: create(ShellArgsSchema, { command: "echo hi", workingDirectory: "/repo", toolCallId: "c1" }),
+			}),
+			{
+				execHandlers: {
+					async shell(args) {
+						expect(args.command).toBe("echo hi");
+						return toolResult("hi", { toolCallId: "c1", toolName: "bash" });
+					},
+				},
+			},
+		);
+
+		const answer = soleResult(frames);
+		expect(answer.case).toBe("miniSweAgentBashResult");
+		if (answer.case !== "miniSweAgentBashResult") throw new Error("unreachable");
+		expect(answer.value.result.case).toBe("success");
+	});
+});
+
+describe("Cursor modern exec frames: server-resolved tool calls leave a paired block", () => {
+	// `buildSessionContext` strips a `toolCall` with no matching `toolResult`,
+	// taking the whole interaction out of every rebuilt transcript. Both of these
+	// variants are refused, but a refusal still has to settle its block.
+
+	it("pairs the conversationSearch block the exec frame synthesizes", async () => {
+		const { output, results } = await dispatchExec(
+			buildExecMessage({
+				case: "conversationSearchArgs",
+				value: create(ConversationSearchArgsSchema, { query: "chess", toolCallId: "call-search-1", limit: 5 }),
+			}),
+		);
+
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0]).toMatchObject({ id: "call-search-1", name: "search_conversations" });
+		// Resolved => agent-loop emits no placeholder, so the pair must come from here.
+		expect(blocks[0][kCursorExecResolved]).toBe(true);
+		expect(results.map(result => result.toolCallId)).toEqual(["call-search-1"]);
+		expect(results[0].isError).toBe(true);
+	});
+
+	/**
+	 * Drive a streamed `connect_scm` pair through the interaction decoder.
+	 *
+	 * The `ToolCall` is built with the generated schema and re-decoded from its
+	 * own wire bytes, so the `target` / `result` oneofs carry the real
+	 * `{ case, value }` shape the server sends — a hand-shaped literal would
+	 * silently pass against a selector reading the wrong field.
+	 */
+	function runConnectScm(
+		args: { toolCallId?: string; repository?: { owner: string; repo: string } },
+		result: { case: "success" | "error" | "rejected"; value: Record<string, string> } | undefined,
+		options: { envelopeId?: string; completionCarriesCall?: boolean } = {},
+	): { output: AssistantMessage; results: ToolResultMessage[]; resultsAfterStart: number } {
+		const wire = create(ToolCallSchema, {
+			tool: {
+				case: "connectScmToolCall",
+				value: create(ConnectScmToolCallSchema, {
+					args: create(ConnectScmArgsSchema, {
+						toolCallId: args.toolCallId ?? "",
+						target: args.repository
+							? {
+									case: "github",
+									value: create(ConnectScmGithubSchema, {
+										repository: create(ConnectScmGithubRepositorySchema, args.repository),
+									}),
+								}
+							: { case: undefined },
+					}),
+					result: result
+						? create(ConnectScmResultSchema, {
+								result:
+									result.case === "success"
+										? { case: "success", value: create(ConnectScmSuccessSchema, {}) }
+										: result.case === "error"
+											? { case: "error", value: create(ConnectScmErrorSchema, result.value) }
+											: { case: "rejected", value: create(ConnectScmRejectedSchema, result.value) },
+							})
+						: undefined,
+				}),
+			},
+		});
+		const toolCall = fromBinary(ToolCallSchema, toBinary(ToolCallSchema, wire));
+
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const results: ToolResultMessage[] = [];
+		state.onToolResult = toolResultMessage => {
+			results.push(toolResultMessage);
+			return toolResultMessage;
+		};
+
+		const usage = { sawTokenDelta: false };
+		processInteractionUpdate(
+			{ message: { case: "toolCallStarted", value: { callId: options.envelopeId ?? "", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+		const resultsAfterStart = results.length;
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallCompleted",
+					value: options.completionCarriesCall === false ? {} : { toolCall },
+				},
+			},
+			output,
+			stream,
+			state,
+			usage,
+		);
+		return { output, results, resultsAfterStart };
+	}
+
+	function soleBlock(output: AssistantMessage): ToolCallState {
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		return blocks[0];
+	}
+
+	it("reads the connectScm repository out of the target oneof, not a flat field", async () => {
+		const { output, results } = runConnectScm(
+			{ toolCallId: "call-scm-1", repository: { owner: "can1357", repo: "oh-my-pi" } },
+			{ case: "success", value: {} },
+		);
+
+		const block = soleBlock(output);
+		expect(block).toMatchObject({
+			id: "call-scm-1",
+			name: "connect_scm",
+			arguments: { owner: "can1357", repo: "oh-my-pi" },
+		});
+		// Resolved => agent-loop runs no local tool, so the decoder owes the pair.
+		expect(block[kCursorExecResolved]).toBe(true);
+		expect(results.map(result => result.toolCallId)).toEqual(["call-scm-1"]);
+	});
+
+	it("settles connectScm from the completion's result, never from the announcement", async () => {
+		// The start frame carries no verdict. Answering there would persist a
+		// fabricated outcome before the server reported one.
+		const success = runConnectScm({ toolCallId: "c1" }, { case: "success", value: {} });
+		const failed = runConnectScm({ toolCallId: "c2" }, { case: "error", value: { error: "token expired" } });
+		const rejected = runConnectScm({ toolCallId: "c3" }, { case: "rejected", value: { reason: "user declined" } });
+
+		// The bug this guards: settling at start persisted a hard-coded failure
+		// for every call, including the ones the server went on to accept.
+		expect([success, failed, rejected].map(run => run.resultsAfterStart)).toEqual([0, 0, 0]);
+		expect(success.results.map(r => r.isError)).toEqual([false]);
+		expect(failed.results[0].isError).toBe(true);
+		expect(failed.results[0].content).toEqual([{ type: "text", text: "token expired" }]);
+		expect(rejected.results[0].isError).toBe(true);
+		expect(rejected.results[0].content).toEqual([{ type: "text", text: "user declined" }]);
+	});
+
+	it("still pairs connectScm when the completion carries no tool call at all", async () => {
+		// An unpaired resolved block is stripped along with its whole interaction,
+		// so a resultless completion must settle as a failure rather than stay open.
+		const { output, results } = runConnectScm({ toolCallId: "c4" }, undefined, {
+			completionCarriesCall: false,
+		});
+
+		expect(soleBlock(output).id).toBe("c4");
+		expect(results.map(result => result.toolCallId)).toEqual(["c4"]);
+		expect(results[0].isError).toBe(true);
+	});
+
+	it("falls back to the envelope call id when connectScm args carry none", async () => {
+		const { output, results } = runConnectScm(
+			{ repository: { owner: "o", repo: "r" } },
+			{ case: "success", value: {} },
+			{
+				envelopeId: "envelope-id",
+			},
+		);
+
+		expect(soleBlock(output).id).toBe("envelope-id");
+		expect(results.map(result => result.toolCallId)).toEqual(["envelope-id"]);
+	});
+
+	it("ignores a completion whose envelope id belongs to a different call", async () => {
+		// Server-resolved and parallel calls interleave: a completion for an
+		// unrelated call would otherwise close whichever block is current and pair
+		// it with the wrong verdict — here, marking a pending connect as rejected.
+		//
+		// Correlation is on the envelope id, which is deliberately NOT the block
+		// id: the block persists under the inner `tool_call_id` the transcript
+		// files it under.
+		const wire = create(ToolCallSchema, {
+			tool: {
+				case: "connectScmToolCall",
+				value: create(ConnectScmToolCallSchema, {
+					args: create(ConnectScmArgsSchema, { toolCallId: "inner-id" }),
+					result: create(ConnectScmResultSchema, {
+						result: { case: "rejected", value: create(ConnectScmRejectedSchema, { reason: "other call" }) },
+					}),
+				}),
+			},
+		});
+		const toolCall = fromBinary(ToolCallSchema, toBinary(ToolCallSchema, wire));
+
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const results: ToolResultMessage[] = [];
+		state.onToolResult = result => {
+			results.push(result);
+			return result;
+		};
+		const usage = { sawTokenDelta: false };
+
+		processInteractionUpdate(
+			{ message: { case: "toolCallStarted", value: { callId: "envelope-a", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: "envelope-b", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+
+		// The block stays open and unpaired; only its own completion settles it.
+		expect(results).toEqual([]);
+
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: "envelope-a", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+
+		expect(results.map(result => result.toolCallId)).toEqual(["inner-id"]);
+		expect(results[0].content).toEqual([{ type: "text", text: "other call" }]);
+	});
+
+	it("settles two interleaved calls independently, each with its own result", async () => {
+		// `start A, start B, complete A, complete B` is legal wire order. With a
+		// single "current block" slot, B's start orphaned A: A's completion then
+		// settled B, and A was never paired — so the transcript rebuild dropped
+		// the whole interaction.
+		function scmCall(toolCallId: string, reason: string) {
+			const wire = create(ToolCallSchema, {
+				tool: {
+					case: "connectScmToolCall",
+					value: create(ConnectScmToolCallSchema, {
+						args: create(ConnectScmArgsSchema, { toolCallId }),
+						result: create(ConnectScmResultSchema, {
+							result: { case: "rejected", value: create(ConnectScmRejectedSchema, { reason }) },
+						}),
+					}),
+				},
+			});
+			return fromBinary(ToolCallSchema, toBinary(ToolCallSchema, wire));
+		}
+
+		const callA = scmCall("inner-a", "reason A");
+		const callB = scmCall("inner-b", "reason B");
+
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const results: ToolResultMessage[] = [];
+		state.onToolResult = result => {
+			results.push(result);
+			return result;
+		};
+		const usage = { sawTokenDelta: false };
+		const send = (updateCase: string, callId: string, toolCall: unknown) =>
+			processInteractionUpdate(
+				{ message: { case: updateCase, value: { callId, toolCall } } },
+				output,
+				stream,
+				state,
+				usage,
+			);
+
+		send("toolCallStarted", "envelope-a", callA);
+		send("toolCallStarted", "envelope-b", callB);
+		send("toolCallCompleted", "envelope-a", callA);
+		send("toolCallCompleted", "envelope-b", callB);
+
+		// Both blocks exist, and each is paired with its OWN verdict.
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks.map(block => block.id)).toEqual(["inner-a", "inner-b"]);
+		expect(results.map(result => result.toolCallId)).toEqual(["inner-a", "inner-b"]);
+		expect(results.map(result => result.content)).toEqual([
+			[{ type: "text", text: "reason A" }],
+			[{ type: "text", text: "reason B" }],
+		]);
+	});
+
+	it("does not double-create a block for a Pi call the exec channel already synthesized", async () => {
+		// Modern builds stream a `pi_*_tool_call` envelope alongside the exec
+		// frame. The exec side owns that block; a second one here would render the
+		// same call twice and leave the duplicate unpaired.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallStarted",
+					value: {
+						callId: "call-pi-read",
+						toolCall: { tool: { case: "piReadToolCall", value: { args: { path: "/a.ts" } } } },
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+	});
+});

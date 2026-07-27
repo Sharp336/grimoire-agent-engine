@@ -239,6 +239,7 @@ function newBlockState(): BlockState {
 			return toolCall;
 		},
 		firstTokenTime: undefined,
+		openToolCalls: new Map<string, ToolCallState>(),
 		resolvedMcpToolCallIds: new Set<string>(),
 		setTextBlock: b => {
 			textBlock = b;
@@ -423,5 +424,98 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		expect(result.isError).toBe(false);
 		expect(await Bun.file(originalTarget).exists()).toBe(true);
 		expect(await Bun.file(movedTarget).exists()).toBe(false);
+	});
+});
+
+// The Pi frames (`ExecServerMessage` 45-51) are a separate wire family from the
+// legacy `read`/`shell`/`grep` args, with different field names and different
+// semantics. Each bridge handler therefore performs a real translation, and a
+// wrong one silently searches the wrong thing instead of failing.
+describe("CursorExecHandlers Pi frame translation", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-pi-test-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	/** Captures the args one local tool was invoked with. */
+	function recordingHandlers(toolName: string): { handlers: CursorExecHandlers; calls: unknown[] } {
+		const calls: unknown[] = [];
+		const tool: AgentTool = {
+			name: toolName,
+			label: toolName,
+			description: "records its args",
+			parameters: type({}),
+			execute: async (_toolCallId: string, params: unknown) => {
+				calls.push(params);
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			},
+		};
+		const handlers = new CursorExecHandlers({ cwd, tools: new Map([[toolName, tool]]) });
+		return { handlers, calls };
+	}
+
+	it("inverts pi_grep's ignore_case into the local tool's case-sensitivity flag", async () => {
+		// `ignore_case` and `case` are opposites. Passing the frame's value
+		// straight through would flip every search's matching.
+		const { handlers, calls } = recordingHandlers("grep");
+
+		await handlers.piGrep({ toolCallId: "c1", args: { pattern: "x", ignoreCase: true } } as never);
+		await handlers.piGrep({ toolCallId: "c2", args: { pattern: "x", ignoreCase: false } } as never);
+
+		expect(calls).toEqual([
+			{ pattern: "x", path: ".", case: false },
+			// Case-sensitive is the local default, so `false` maps to "unset",
+			// not to `case: true`.
+			{ pattern: "x", path: ".", case: undefined },
+		]);
+	});
+
+	it("folds pi_grep's separate glob onto the local tool's single path spec", async () => {
+		const { handlers, calls } = recordingHandlers("grep");
+
+		await handlers.piGrep({ toolCallId: "c1", args: { pattern: "x", path: "src", glob: "**/*.ts" } } as never);
+		await handlers.piGrep({ toolCallId: "c2", args: { pattern: "x", glob: "**/*.ts" } } as never);
+
+		expect((calls[0] as { path: string }).path).toBe("src/**/*.ts");
+		expect((calls[1] as { path: string }).path).toBe("./**/*.ts");
+	});
+
+	it("routes pi_find to glob, not grep, joining its pattern onto the path", async () => {
+		// `pi_find` searches filenames. Routing it to `grep` would search file
+		// contents for the glob text and return nothing.
+		const { handlers, calls } = recordingHandlers("glob");
+
+		await handlers.piFind({ toolCallId: "c1", args: { pattern: "*.ts", path: "src", limit: 10 } } as never);
+		await handlers.piFind({ toolCallId: "c2", args: { pattern: "*.ts", limit: 0 } } as never);
+
+		expect(calls).toEqual([
+			{ path: "src/*.ts", limit: 10 },
+			// A zero limit is protobuf's unset, not a request for zero results.
+			{ path: "*.ts", limit: undefined },
+		]);
+	});
+
+	it("renames pi_edit's camelCase replacements to the local tool's snake_case pairs", async () => {
+		const { handlers, calls } = recordingHandlers("edit");
+
+		await handlers.piEdit({
+			toolCallId: "c1",
+			args: { path: "a.ts", edits: [{ oldText: "before", newText: "after" }] },
+		} as never);
+
+		expect(calls[0]).toEqual({ path: "a.ts", edits: [{ old_text: "before", new_text: "after" }] });
+	});
+
+	it("lists directories for pi_ls through read, defaulting an empty path to cwd", async () => {
+		const { handlers, calls } = recordingHandlers("read");
+
+		await handlers.piLs({ toolCallId: "c1", args: { path: "" } } as never);
+
+		expect(calls[0]).toEqual({ path: "." });
 	});
 });

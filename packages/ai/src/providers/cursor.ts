@@ -10,11 +10,18 @@ import {
 	AgentRunRequestSchema,
 	type AgentServerMessage,
 	AgentServerMessageSchema,
+	AgentStoreConflictErrorSchema,
+	AgentStoreConflictResultSchema,
 	AssistantMessageSchema,
 	BackgroundShellSpawnResultSchema,
+	CanvasDiagnosticsErrorSchema,
+	CanvasDiagnosticsResultSchema,
 	ClientHeartbeatSchema,
+	ComputerUseErrorSchema,
 	ComputerUseResultSchema,
 	ConversationActionSchema,
+	ConversationSearchErrorSchema,
+	ConversationSearchResultSchema,
 	type ConversationStateStructure,
 	ConversationStateStructureSchema,
 	ConversationStepSchema,
@@ -31,9 +38,14 @@ import {
 	type ExecClientMessage,
 	ExecClientMessageSchema,
 	ExecClientStreamCloseSchema,
+	ExecClientThrowSchema,
 	type ExecServerMessage,
 	FetchErrorSchema,
 	FetchResultSchema,
+	ForceBackgroundShellResultSchema,
+	ForceBackgroundShellStatus,
+	ForceBackgroundSubagentResultSchema,
+	ForceBackgroundSubagentStatus,
 	GetBlobResultSchema,
 	GrepContentMatchSchema,
 	GrepContentResultSchema,
@@ -50,6 +62,7 @@ import {
 	KvClientMessageSchema,
 	type KvServerMessage,
 	ListMcpResourcesExecResultSchema,
+	ListMcpResourcesSuccessSchema,
 	type LsDirectoryTreeNode,
 	type LsDirectoryTreeNode_File,
 	LsDirectoryTreeNode_FileSchema,
@@ -58,6 +71,7 @@ import {
 	LsRejectedSchema,
 	LsResultSchema,
 	LsSuccessSchema,
+	McpAllowlistPrecheckResultSchema,
 	McpErrorSchema,
 	McpImageContentSchema,
 	McpResultSchema,
@@ -69,9 +83,11 @@ import {
 	ModelDetailsSchema,
 	ReadErrorSchema,
 	ReadMcpResourceExecResultSchema,
+	ReadMcpResourceNotFoundSchema,
 	ReadRejectedSchema,
 	ReadResultSchema,
 	ReadSuccessSchema,
+	RecordScreenFailureSchema,
 	RecordScreenResultSchema,
 	RequestContextResultSchema,
 	RequestContextSchema,
@@ -81,6 +97,7 @@ import {
 	SelectedContextSchema,
 	SelectedImageSchema,
 	SetBlobResultSchema,
+	ShellAllowlistPrecheckResultSchema,
 	type ShellArgs,
 	ShellFailureSchema,
 	ShellRejectedSchema,
@@ -93,8 +110,15 @@ import {
 	ShellStreamStderrSchema,
 	ShellStreamStdoutSchema,
 	ShellSuccessSchema,
+	SmartModeClassifierErrorSchema,
+	SmartModeClassifierResultSchema,
+	SubagentAwaitNotFoundSchema,
+	SubagentAwaitResultSchema,
+	SubagentErrorSchema,
+	SubagentResultSchema,
 	UserMessageActionSchema,
 	UserMessageSchema,
+	WebFetchAllowlistPrecheckResultSchema,
 	WriteErrorSchema,
 	WriteRejectedSchema,
 	WriteResultSchema,
@@ -142,6 +166,7 @@ import {
 	kCursorExecResolved,
 	kStreamingBlockIndex,
 	kStreamingBlockKind,
+	kStreamingEnvelopeId,
 	kStreamingLastParseLen,
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
@@ -150,11 +175,37 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
+import {
+	buildMcpStateResult,
+	buildNeutralHookResult,
+	buildPiBashError,
+	buildPiBashResult,
+	buildPiEditError,
+	buildPiEditResult,
+	buildPiFindError,
+	buildPiFindResult,
+	buildPiGrepError,
+	buildPiGrepResult,
+	buildPiLsError,
+	buildPiLsResult,
+	buildPiReadError,
+	buildPiReadResult,
+	buildPiWriteError,
+	buildPiWriteResult,
+} from "./cursor/exec-modern";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
 
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
+
+/**
+ * Text for a recognised frame this client answers with its own typed error
+ * variant. Phrased as a client capability statement, not a tool failure: the
+ * model reads it and should route around the capability, not retry the call.
+ */
+const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
+const NOT_IMPLEMENTED = `Not implemented by this client`;
 
 const conversationStateCache = new Map<string, ConversationStateStructure>();
 const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
@@ -520,6 +571,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				get currentToolCall() {
 					return currentToolCall;
 				},
+				openToolCalls: new Map<string, ToolCallState>(),
 				resolvedMcpToolCallIds,
 				get firstTokenTime() {
 					return firstTokenTime;
@@ -675,17 +727,20 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
-			if (state.currentToolCall) {
-				const idx = output.content.indexOf(state.currentToolCall);
-				state.currentToolCall.arguments = parseStreamingJson(state.currentToolCall[kStreamingPartialJson]);
-				clearStreamingPartialJson(state.currentToolCall);
-				stream.push({
-					type: "toolcall_end",
-					contentIndex: idx,
-					toolCall: state.currentToolCall,
-					partial: output,
-				});
+			// Every block still open when the transport ends must be closed, not
+			// just the last one started: with interleaved calls several can be
+			// open at once, and an unclosed block leaves its live card animating
+			// and its call unpaired.
+			const openBlocks = new Set<ToolCallState>(state.openToolCalls.values());
+			if (state.currentToolCall) openBlocks.add(state.currentToolCall);
+			for (const block of openBlocks) {
+				const idx = output.content.indexOf(block);
+				block.arguments = parseStreamingJson(block[kStreamingPartialJson]);
+				clearStreamingPartialJson(block);
+				stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
 			}
+			state.openToolCalls.clear();
+			state.setToolCall(null);
 
 			calculateCost(model, output.usage);
 
@@ -734,7 +789,8 @@ export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
 	[kStreamingPartialJson]?: string;
 	[kStreamingLastParseLen]?: number;
-	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec";
+	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "connect-scm";
+	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
 };
 
@@ -742,6 +798,17 @@ export interface BlockState {
 	currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null;
 	currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null;
 	currentToolCall: ToolCallState | null;
+	/**
+	 * Open streamed tool-call blocks, keyed by the interaction envelope's
+	 * `call_id`.
+	 *
+	 * Cursor interleaves calls: two `toolCallStarted` frames can arrive before
+	 * either completes. A single "current" slot would let the second overwrite
+	 * the first, orphaning a block that nothing then settles. Every keyed block
+	 * stays reachable until its own completion, and `currentToolCall` remains
+	 * only as the fallback for frames that carry no `call_id`.
+	 */
+	openToolCalls: Map<string, ToolCallState>;
 	/** MCP call IDs synthesized from exec frames before their redundant streamed block arrives. */
 	resolvedMcpToolCallIds: Set<string>;
 	firstTokenTime: number | undefined;
@@ -1193,6 +1260,14 @@ async function handleExecServerMessage(
 	}
 
 	if (!execCase) {
+		// A frame carrying a oneof number this build's `agent.proto` does not
+		// model at all: protobuf decodes it into unknown fields and leaves
+		// `message.case` unset, so the client cannot even name what was asked.
+		// Returning silently strands the exec id — the server waits on a reply
+		// that never comes. Distinct from the `default:` branch below, which
+		// names a frame it recognises but cannot serve.
+		log("warn", "unknownExecVariant", { id: execMsg.id, execId: execMsg.execId });
+		sendExecClientThrow(h2Request, execMsg, "Unknown exec message variant", "unknown_exec_variant");
 		return;
 	}
 
@@ -1447,54 +1522,412 @@ async function handleExecServerMessage(
 			return;
 		}
 		case "listMcpResourcesExecArgs": {
-			const execResult = create(ListMcpResourcesExecResultSchema, {});
+			// This client hosts no MCP servers, so it exposes no resources. An
+			// unset-oneof `ListMcpResourcesExecResult` would read as "the call
+			// produced nothing"; an explicit empty success says "asked, none exist".
+			const execResult = create(ListMcpResourcesExecResultSchema, {
+				result: { case: "success", value: create(ListMcpResourcesSuccessSchema, { resources: [] }) },
+			});
 			sendExecClientMessage(h2Request, execMsg, "listMcpResourcesExecResult", execResult);
 			return;
 		}
 		case "readMcpResourceExecArgs": {
-			const execResult = create(ReadMcpResourceExecResultSchema, {});
+			const args = execMsg.message.value;
+			// No resources are advertised, so every uri is genuinely not found.
+			const execResult = create(ReadMcpResourceExecResultSchema, {
+				result: { case: "notFound", value: create(ReadMcpResourceNotFoundSchema, { uri: args.uri }) },
+			});
 			sendExecClientMessage(h2Request, execMsg, "readMcpResourceExecResult", execResult);
 			return;
 		}
 		case "recordScreenArgs": {
-			const execResult = create(RecordScreenResultSchema, {});
+			const execResult = create(RecordScreenResultSchema, {
+				result: { case: "failure", value: create(RecordScreenFailureSchema, { error: NOT_IMPLEMENTED }) },
+			});
 			sendExecClientMessage(h2Request, execMsg, "recordScreenResult", execResult);
 			return;
 		}
 		case "computerUseArgs": {
-			const execResult = create(ComputerUseResultSchema, {});
+			const execResult = create(ComputerUseResultSchema, {
+				result: { case: "error", value: create(ComputerUseErrorSchema, { error: NOT_IMPLEMENTED }) },
+			});
 			sendExecClientMessage(h2Request, execMsg, "computerUseResult", execResult);
 			return;
 		}
+		case "piReadArgs": {
+			const args = execMsg.message.value;
+			const toolCallId = crypto.randomUUID();
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", { path: args.path });
+			const { execResult } = await resolveExecHandler(
+				{ args, toolCallId },
+				execHandlers?.piRead?.bind(execHandlers),
+				onToolResult,
+				buildPiReadResult,
+				buildPiReadError,
+				buildPiReadError,
+				{ toolCallId, toolName: "read" },
+			);
+			sendExecClientMessage(h2Request, execMsg, "piReadResult", execResult);
+			return;
+		}
+		case "piBashArgs": {
+			const args = execMsg.message.value;
+			const toolCallId = crypto.randomUUID();
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "bash", {
+				command: args.command,
+				timeout: args.timeout && args.timeout > 0 ? args.timeout : undefined,
+			});
+			const { execResult } = await resolveExecHandler(
+				{ args, toolCallId },
+				execHandlers?.piBash?.bind(execHandlers),
+				onToolResult,
+				buildPiBashResult,
+				buildPiBashError,
+				buildPiBashError,
+				{ toolCallId, toolName: "bash" },
+			);
+			sendExecClientMessage(h2Request, execMsg, "piBashResult", execResult);
+			return;
+		}
+		case "piEditArgs": {
+			const args = execMsg.message.value;
+			const toolCallId = crypto.randomUUID();
+			// `PiEditReplacement` is the local `edit` tool's replace mode verbatim:
+			// snake_case `old_text`/`new_text` entries against one path.
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "edit", {
+				path: args.path,
+				edits: args.edits.map(edit => ({ old_text: edit.oldText, new_text: edit.newText })),
+			});
+			const { execResult } = await resolveExecHandler(
+				{ args, toolCallId },
+				execHandlers?.piEdit?.bind(execHandlers),
+				onToolResult,
+				buildPiEditResult,
+				buildPiEditError,
+				buildPiEditError,
+				{ toolCallId, toolName: "edit" },
+			);
+			sendExecClientMessage(h2Request, execMsg, "piEditResult", execResult);
+			return;
+		}
+		case "piWriteArgs": {
+			const args = execMsg.message.value;
+			const toolCallId = crypto.randomUUID();
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "write", {
+				path: args.path,
+				content: args.content,
+			});
+			const { execResult } = await resolveExecHandler(
+				{ args, toolCallId },
+				execHandlers?.piWrite?.bind(execHandlers),
+				onToolResult,
+				buildPiWriteResult,
+				buildPiWriteError,
+				buildPiWriteError,
+				{ toolCallId, toolName: "write" },
+			);
+			sendExecClientMessage(h2Request, execMsg, "piWriteResult", execResult);
+			return;
+		}
+		case "piGrepArgs": {
+			const args = execMsg.message.value;
+			const toolCallId = crypto.randomUUID();
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "grep", {
+				pattern: args.pattern,
+				path: args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".",
+				case: args.ignoreCase === true ? false : undefined,
+			});
+			const { execResult } = await resolveExecHandler(
+				{ args, toolCallId },
+				execHandlers?.piGrep?.bind(execHandlers),
+				onToolResult,
+				buildPiGrepResult,
+				buildPiGrepError,
+				buildPiGrepError,
+				{ toolCallId, toolName: "grep" },
+			);
+			sendExecClientMessage(h2Request, execMsg, "piGrepResult", execResult);
+			return;
+		}
+		case "piFindArgs": {
+			const args = execMsg.message.value;
+			const toolCallId = crypto.randomUUID();
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "glob", {
+				path: args.path ? `${args.path}/${args.pattern}` : args.pattern,
+				limit: args.limit,
+			});
+			const { execResult } = await resolveExecHandler(
+				{ args, toolCallId },
+				execHandlers?.piFind?.bind(execHandlers),
+				onToolResult,
+				buildPiFindResult,
+				buildPiFindError,
+				buildPiFindError,
+				{ toolCallId, toolName: "glob" },
+			);
+			sendExecClientMessage(h2Request, execMsg, "piFindResult", execResult);
+			return;
+		}
+		case "piLsArgs": {
+			const args = execMsg.message.value;
+			const toolCallId = crypto.randomUUID();
+			// Same mapping as the legacy `lsArgs` frame: the local `read` tool lists
+			// directories, so the synthesized block must name `read` to match the
+			// bridge's own `toolResult`.
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", { path: args.path || "." });
+			const { execResult } = await resolveExecHandler(
+				{ args, toolCallId },
+				execHandlers?.piLs?.bind(execHandlers),
+				onToolResult,
+				buildPiLsResult,
+				buildPiLsError,
+				buildPiLsError,
+				{ toolCallId, toolName: "read" },
+			);
+			sendExecClientMessage(h2Request, execMsg, "piLsResult", execResult);
+			return;
+		}
+		case "miniSweAgentBashArgs": {
+			// Same `ShellArgs`/`ShellResult` pair as `shellArgs`, under its own frame
+			// number, so the existing shell handler answers it unchanged.
+			const args = execMsg.message.value;
+			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const normalizedArgs: ShellArgs = { ...args, workingDirectory: args.workingDirectory || process.cwd() };
+			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
+				command: args.command,
+				cwd: args.workingDirectory || undefined,
+				timeout: args.timeout && args.timeout > 0 ? args.timeout : undefined,
+			});
+			const { execResult } = await resolveExecHandler(
+				normalizedArgs,
+				execHandlers?.shell?.bind(execHandlers),
+				onToolResult,
+				toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
+				reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
+				error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
+				{ toolCallId: args.toolCallId, toolName: "bash" },
+			);
+			sendExecClientMessage(h2Request, execMsg, "miniSweAgentBashResult", sanitizeShellExecResult(execResult));
+			return;
+		}
+		case "redactedReadArgs": {
+			// Same `ReadArgs`/`ReadResult` pair as `readArgs`, but the server expects
+			// the client to strip secrets from the content first. No redaction is
+			// implemented here, and serving a plain read would hand back exactly the
+			// unredacted bytes the frame exists to withhold.
+			const args = execMsg.message.value;
+			sendExecClientMessage(
+				h2Request,
+				execMsg,
+				"redactedReadResult",
+				buildReadErrorResult(args.path, "Secret redaction is not implemented by this client"),
+			);
+			return;
+		}
+		case "mcpStateExecArgs": {
+			const args = execMsg.message.value;
+			sendExecClientMessage(
+				h2Request,
+				execMsg,
+				"mcpStateExecResult",
+				buildMcpStateResult(requestContextTools, args.serverIdentifiers),
+			);
+			return;
+		}
+		case "executeHookArgs": {
+			const args = execMsg.message.value;
+			const execResult = buildNeutralHookResult(args.request);
+			if (!execResult) {
+				sendExecClientThrow(
+					h2Request,
+					execMsg,
+					`Unsupported hook request: ${args.request?.request.case ?? "unset"}`,
+					"unknown_hook_request",
+				);
+				return;
+			}
+			sendExecClientMessage(h2Request, execMsg, "executeHookResult", execResult);
+			return;
+		}
+		case "subagentArgs": {
+			const args = execMsg.message.value;
+			const execResult = create(SubagentResultSchema, {
+				result: {
+					case: "error",
+					value: create(SubagentErrorSchema, { error: `Subagents are ${NOT_IMPLEMENTED_SUFFIX}` }),
+				},
+			});
+			log("exec", "subagentRejected", { subagentType: args.subagentType });
+			sendExecClientMessage(h2Request, execMsg, "subagentResult", execResult);
+			return;
+		}
+		case "subagentAwaitArgs": {
+			// No subagent was ever spawned, so every awaited id is genuinely unknown.
+			const args = execMsg.message.value;
+			const execResult = create(SubagentAwaitResultSchema, {
+				result: {
+					case: "notFound",
+					value: create(SubagentAwaitNotFoundSchema, { agentId: args.agentId }),
+				},
+			});
+			sendExecClientMessage(h2Request, execMsg, "subagentAwaitResult", execResult);
+			return;
+		}
+		case "forceBackgroundShellArgs": {
+			// Backgrounding targets a running tool call by id. This client runs every
+			// shell to completion in band, so there is never one to move.
+			const execResult = create(ForceBackgroundShellResultSchema, {
+				status: ForceBackgroundShellStatus.NOT_FOUND,
+			});
+			sendExecClientMessage(h2Request, execMsg, "forceBackgroundShellResult", execResult);
+			return;
+		}
+		case "forceBackgroundSubagentArgs": {
+			const execResult = create(ForceBackgroundSubagentResultSchema, {
+				status: ForceBackgroundSubagentStatus.NOT_FOUND,
+			});
+			sendExecClientMessage(h2Request, execMsg, "forceBackgroundSubagentResult", execResult);
+			return;
+		}
+		case "smartModeClassifierArgs": {
+			// The classifier decides whether a risky action needs approval. Answering
+			// `ALLOW` would silently wave through actions the server asked us to
+			// judge, so the honest answer is that no classifier exists here.
+			const execResult = create(SmartModeClassifierResultSchema, {
+				result: {
+					case: "error",
+					value: create(SmartModeClassifierErrorSchema, {
+						error: `Smart-mode classification is ${NOT_IMPLEMENTED_SUFFIX}`,
+					}),
+				},
+			});
+			sendExecClientMessage(h2Request, execMsg, "smartModeClassifierResult", execResult);
+			return;
+		}
+		case "canvasDiagnosticsArgs": {
+			const args = execMsg.message.value;
+			const execResult = create(CanvasDiagnosticsResultSchema, {
+				result: {
+					case: "error",
+					value: create(CanvasDiagnosticsErrorSchema, {
+						path: args.path,
+						error: `Canvas diagnostics are ${NOT_IMPLEMENTED_SUFFIX}`,
+					}),
+				},
+			});
+			sendExecClientMessage(h2Request, execMsg, "canvasDiagnosticsResult", execResult);
+			return;
+		}
+		case "shellAllowlistPrecheckArgs": {
+			// The prechecks ask "is this pre-approved, so may it skip the approval
+			// prompt?". This client keeps no allowlist, so the answer is always no:
+			// `false` costs an approval round-trip, `true` would grant one that was
+			// never configured.
+			sendExecClientMessage(
+				h2Request,
+				execMsg,
+				"shellAllowlistPrecheckResult",
+				create(ShellAllowlistPrecheckResultSchema, { allowlisted: false }),
+			);
+			return;
+		}
+		case "mcpAllowlistPrecheckArgs": {
+			sendExecClientMessage(
+				h2Request,
+				execMsg,
+				"mcpAllowlistPrecheckResult",
+				create(McpAllowlistPrecheckResultSchema, { allowlisted: false }),
+			);
+			return;
+		}
+		case "webFetchAllowlistPrecheckArgs": {
+			sendExecClientMessage(
+				h2Request,
+				execMsg,
+				"webFetchAllowlistPrecheckResult",
+				create(WebFetchAllowlistPrecheckResultSchema, { allowlisted: false }),
+			);
+			return;
+		}
+		case "conversationSearchArgs": {
+			// Cursor conversation history lives server-side; this client keeps no
+			// local index of it to search.
+			//
+			// The streamed `search_conversations_tool_call` envelope announces this
+			// call but the interaction decoder builds no block for it, so the block
+			// and its paired result are synthesized here — exactly like every other
+			// exec frame. Without the pair, `buildSessionContext` strips the whole
+			// interaction on replay. The frame carries its own `tool_call_id`, so
+			// the streamed announcement and this block agree on the key.
+			const args = execMsg.message.value;
+			const toolCallId = args.toolCallId || crypto.randomUUID();
+			const error = `Conversation search is ${NOT_IMPLEMENTED_SUFFIX}`;
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "search_conversations", {
+				query: args.query,
+				limit: args.limit,
+			});
+			await pairSynthesizedExecResult(state, onToolResult, toolCallId, "search_conversations", error);
+			const execResult = create(ConversationSearchResultSchema, {
+				result: { case: "error", value: create(ConversationSearchErrorSchema, { error }) },
+			});
+			sendExecClientMessage(h2Request, execMsg, "conversationSearchResult", execResult);
+			return;
+		}
+		case "agentStoreConflictArgs": {
+			// The agent store is Cursor's own on-disk journal; this client never
+			// writes one, so it has no conflict events to replay.
+			const execResult = create(AgentStoreConflictResultSchema, {
+				result: {
+					case: "error",
+					value: create(AgentStoreConflictErrorSchema, {
+						error: `Agent store conflicts are ${NOT_IMPLEMENTED_SUFFIX}`,
+					}),
+				},
+			});
+			sendExecClientMessage(h2Request, execMsg, "agentStoreConflictResult", execResult);
+			return;
+		}
+		case "gitDiffRequest": {
+			// `GetDiffResponse` has no error variant: it models five output formats
+			// plus before/after file contents and nothing else. Any in-band answer is
+			// therefore a claim that a diff was computed, so a `throw` is the only
+			// truthful reply.
+			sendExecClientThrow(h2Request, execMsg, `Git diff is ${NOT_IMPLEMENTED_SUFFIX}`, "exec_variant_unsupported");
+			return;
+		}
 		default: {
+			// A frame number this build recognises structurally but has no answer
+			// for. Distinct from the unset-case path above: there the client cannot
+			// even name the frame.
 			log("warn", "unhandledExecMessage", { execCase });
-			// Send a bare ExecClientMessage (id + execId only, no typed result) so the
-			// server gets an acknowledgement and doesn't hang waiting forever.
-			const ack = create(ExecClientMessageSchema, {
-				id: execMsg.id,
-				execId: execMsg.execId,
-			});
-			const clientMessage = create(AgentClientMessageSchema, {
-				message: { case: "execClientMessage", value: ack },
-			});
-			h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+			sendExecClientThrow(
+				h2Request,
+				execMsg,
+				`No handler for exec message of type ${execCase}`,
+				"exec_variant_unsupported",
+			);
 		}
 	}
 }
 
-function sendExecClientMessage<T>(
+/**
+ * Send one typed answer on the exec channel.
+ *
+ * `ExecClientMessage["message"]` is a discriminated union pairing each case
+ * with its own result type, so the generic is keyed on the case: passing a
+ * `ReadResult` under `"shellResult"` is a compile error rather than a wire
+ * message the server rejects at runtime.
+ */
+function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["message"]["case"]>>(
 	h2Request: http2.ClientHttp2Stream,
 	execMsg: ExecServerMessage,
-	messageCase: ExecClientMessage["message"]["case"],
-	value: T,
+	messageCase: TCase,
+	value: Extract<ExecClientMessage["message"], { case: TCase }>["value"],
 ): void {
 	const execClientMessage = create(ExecClientMessageSchema, {
 		id: execMsg.id,
 		execId: execMsg.execId,
-		message: {
-			case: messageCase,
-			value: value as any,
-		},
+		message: { case: messageCase, value } as ExecClientMessage["message"],
 	});
 
 	const clientMessage = create(AgentClientMessageSchema, {
@@ -1505,6 +1938,42 @@ function sendExecClientMessage<T>(
 	h2Request.write(frameConnectMessage(responseBytes));
 
 	log("execClientMessage", messageCase, value);
+}
+
+/**
+ * Fail one exec frame in band.
+ *
+ * `ExecClientThrow` is the protocol's failure channel for a frame that cannot
+ * be answered at all — as opposed to a frame answered with its own typed error
+ * variant, which means "the tool ran and failed". Cursor's own executor sends
+ * exactly this for a frame no handler claims
+ * (`agent-exec/dist/index.js`: `No handler found for server message of type …`
+ * → `case: 'throw'` then `streamClose`), so the server already knows how to
+ * recover from it: it surfaces the error to the model instead of blocking on a
+ * reply that never comes.
+ *
+ * The alternative this replaces — writing an `ExecClientMessage` whose `message`
+ * oneof is unset — is not a valid answer: the server sees a reply carrying no
+ * result and cannot tell it apart from a malformed frame.
+ */
+function sendExecClientThrow(
+	h2Request: http2.ClientHttp2Stream,
+	execMsg: ExecServerMessage,
+	error: string,
+	errorCode?: string,
+): void {
+	const controlMessage = create(ExecClientControlMessageSchema, {
+		message: {
+			case: "throw",
+			value: create(ExecClientThrowSchema, { id: execMsg.id, error, errorCode }),
+		},
+	});
+	const clientMessage = create(AgentClientMessageSchema, {
+		message: { case: "execClientControlMessage", value: controlMessage },
+	});
+	h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+	log("execClientControl", "throw", { id: execMsg.id, execId: execMsg.execId, error, errorCode });
+	sendExecClientStreamClose(h2Request, execMsg);
 }
 
 function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: ExecServerMessage): void {
@@ -2303,6 +2772,146 @@ function selectMcpCall(toolCall: CursorMcpToolCallCarrier | undefined): CursorMc
 }
 
 /**
+ * The streamed `ToolCall` variants whose block the exec channel owns.
+ *
+ * Each of these is announced on the interaction stream AND dispatched as its
+ * own `ExecServerMessage` frame (45-51), so the block is synthesized once — by
+ * the exec handler, which is the side that has the result.
+ *
+ * `connect_scm` is deliberately NOT here: `ExecServerMessage` has no
+ * connect-SCM case at all (field 44 is `git_diff_request`), so nothing on the
+ * exec channel ever answers it and the streamed announcement is the only
+ * signal. `search_conversations` is not here either: frame 53 answers it, but
+ * it carries its own `tool_call_id` on the streamed envelope and pairs there,
+ * so the exec branch does not synthesize a block for it.
+ */
+const EXEC_OWNED_TOOL_CALL_CASES: ReadonlySet<string> = new Set([
+	"piReadToolCall",
+	"piBashToolCall",
+	"piEditToolCall",
+	"piWriteToolCall",
+	"piGrepToolCall",
+	"piFindToolCall",
+	"piLsToolCall",
+]);
+
+function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined): boolean {
+	const variant = toolCall?.tool?.case;
+	return variant !== undefined && EXEC_OWNED_TOOL_CALL_CASES.has(variant);
+}
+
+/**
+ * Retain a freshly opened streamed tool-call block.
+ *
+ * Keyed by the interaction envelope's `call_id`, which is the only key every
+ * `ToolCall*Update` for that call shares. The block's own `id` is deliberately
+ * not the key: MCP, Pi and connect-SCM blocks are filed under the id carried
+ * inside the call's `args`, because that is what the exec channel pairs its
+ * result under and what the transcript files the visible block under.
+ *
+ * `currentToolCall` is still set, as the fallback for frames that carry no
+ * `call_id` (proto3-optional, and unset on what older builds send).
+ */
+function retainStreamedCall(state: BlockState, block: ToolCallState, envelopeId: string | undefined): void {
+	if (envelopeId) state.openToolCalls.set(envelopeId, block);
+	state.setToolCall(block);
+}
+
+/**
+ * The open block a streamed update addresses, or `null` to ignore the update.
+ *
+ * Cursor interleaves calls: `start A, start B, complete A` is legal, so the
+ * update must reach block A even though B opened last. An id naming no open
+ * block is ignored rather than misapplied — settling the wrong block would pair
+ * it with another call's result.
+ *
+ * A missing id falls back to the current block: the correlation key is
+ * optional, and dropping those updates would strand a block stamped
+ * {@link kCursorExecResolved}, which nothing else settles and whose whole
+ * interaction is then stripped from every rebuilt transcript.
+ */
+function resolveStreamedCall(state: BlockState, envelopeId: string | undefined): ToolCallState | null {
+	if (!envelopeId) return state.currentToolCall;
+	const keyed = state.openToolCalls.get(envelopeId);
+	if (keyed) return keyed;
+	// Blocks opened before this build tracked envelope ids, and blocks opened
+	// from a frame that carried none, are only reachable as `currentToolCall`.
+	const current = state.currentToolCall;
+	return current && current[kStreamingEnvelopeId] === undefined ? current : null;
+}
+
+/** Release a settled block from both the keyed map and the current slot. */
+function releaseStreamedCall(state: BlockState, block: ToolCallState): void {
+	const envelopeId = block[kStreamingEnvelopeId];
+	if (envelopeId) state.openToolCalls.delete(envelopeId);
+	if (state.currentToolCall === block) state.setToolCall(null);
+}
+
+interface CursorConnectScmRepository {
+	owner?: string;
+	repo?: string;
+}
+
+interface CursorConnectScmCall {
+	args?: {
+		toolCallId?: string;
+		/** `ConnectScmArgs.target` oneof; `github` is its only member today. */
+		target?: { case?: string; value?: { repository?: CursorConnectScmRepository } };
+		github?: { repository?: CursorConnectScmRepository };
+	};
+	/** `ConnectScmResult.result` oneof: `success` | `error` | `rejected`. */
+	result?: { result?: { case?: string; value?: { error?: string; reason?: string } } };
+}
+
+interface CursorConnectScmCarrier {
+	tool?: { case?: string; value?: unknown };
+	connectScmToolCall?: CursorConnectScmCall;
+}
+
+/**
+ * The streamed `connect_scm_tool_call` variant, if this update carries one.
+ *
+ * Same oneof-vs-flattened handling as {@link selectMcpCall}: a wire-decoded
+ * `ToolCall` exposes its variant as `{ case, value }`, while hand-shaped test
+ * fixtures use the flat property.
+ */
+function selectConnectScmCall(toolCall: CursorConnectScmCarrier | undefined): CursorConnectScmCall | undefined {
+	const oneof = toolCall?.tool;
+	if (oneof?.case === "connectScmToolCall") return oneof.value as CursorConnectScmCall;
+	return toolCall?.connectScmToolCall;
+}
+
+/** The repository a connect-SCM call targets, across the `target` oneof. */
+function selectConnectScmRepository(call: CursorConnectScmCall | undefined): CursorConnectScmRepository | undefined {
+	const target = call?.args?.target;
+	if (target?.case === "github") return target.value?.repository;
+	return call?.args?.github?.repository;
+}
+
+/**
+ * Render a settled `ConnectScmResult` as the text of its paired tool result.
+ *
+ * Returns `isError` because the three outcomes are not interchangeable: only
+ * `success` means the repository was connected, and reporting a rejection as
+ * success would tell the model to proceed against a repo it cannot reach.
+ */
+function describeConnectScmResult(call: CursorConnectScmCall | undefined): { text: string; isError: boolean } {
+	const result = call?.result?.result;
+	switch (result?.case) {
+		case "success":
+			return { text: "SCM connected", isError: false };
+		case "error":
+			return { text: result.value?.error || "SCM connection failed", isError: true };
+		case "rejected":
+			return { text: result.value?.reason || "SCM connection rejected", isError: true };
+		default:
+			// A completion carrying no result settles the block anyway: it is
+			// stamped resolved, so nothing downstream would ever pair it.
+			return { text: "SCM connection reported no result", isError: true };
+	}
+}
+
+/**
  * Extract the authoritative full todo list from a completed native todo call.
  *
  * Cursor owns this list server-side: `update_todos` / `read_todos` are resolved
@@ -2635,6 +3244,37 @@ export function synthesizeCursorExecToolCall(
 	stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
 }
 
+/**
+ * Pair a `toolResult` for a synthesized block the client answered itself,
+ * without ever consulting a handler.
+ *
+ * {@link resolveExecHandler} does this for every frame backed by a local tool.
+ * Frames answered from a fixed verdict — no handler, no local execution — still
+ * need the pair for the same reason: the block was stamped
+ * {@link kCursorExecResolved}, so `agent-loop.ts` emits no placeholder for it
+ * and `buildSessionContext` strips an unpaired call, taking the whole
+ * interaction out of every rebuilt transcript.
+ */
+async function pairSynthesizedExecResult(
+	state: BlockState,
+	onToolResult: CursorToolResultHandler | undefined,
+	toolCallId: string,
+	toolName: string,
+	text: string,
+): Promise<void> {
+	const synthesized: ToolResultMessage = {
+		role: "toolResult",
+		toolCallId,
+		toolName,
+		content: [{ type: "text", text }],
+		isError: true,
+		timestamp: Date.now(),
+	};
+	const sink = onToolResult ?? state.onToolResult;
+	if (!sink) return;
+	await sink(synthesized);
+}
+
 /** Exported for tests: drives one Cursor interaction update through the streaming state machine. */
 export function processInteractionUpdate(
 	update: any,
@@ -2681,6 +3321,43 @@ export function processInteractionUpdate(
 		stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingCompleted") {
 		endCurrentThinkingBlock(output, stream, state);
+	} else if (updateCase === "toolCallStarted" && selectConnectScmCall(update.message.value.toolCall)) {
+		// `connect_scm` is resolved entirely server-side and has NO exec frame:
+		// `ExecServerMessage` carries no connect-SCM case (field 44 is
+		// `git_diff_request`), so the streamed pair is the only signal this client
+		// sees. The authoritative outcome rides on the COMPLETION's `result`
+		// oneof, so the block is opened here and settled there — answering now
+		// would persist a verdict before the server has given one.
+		//
+		// Stamped resolved so `agent-loop.ts` runs no local tool for it: there is
+		// no local `connect_scm`, and the completion pairs the result itself.
+		endCurrentTextBlock(output, stream, state);
+		endCurrentThinkingBlock(output, stream, state);
+		const scmCall = selectConnectScmCall(update.message.value.toolCall);
+		const repository = selectConnectScmRepository(scmCall);
+		const block: ToolCallState = {
+			type: "toolCall",
+			id: scmCall?.args?.toolCallId || update.message.value.callId || crypto.randomUUID(),
+			name: "connect_scm",
+			arguments: repository ? { owner: repository.owner, repo: repository.repo } : {},
+			[kStreamingBlockIndex]: output.content.length,
+			[kStreamingBlockKind]: "connect-scm",
+			[kStreamingEnvelopeId]: update.message.value.callId || undefined,
+			[kCursorExecResolved]: true,
+		};
+		output.content.push(block);
+		retainStreamedCall(state, block, update.message.value.callId);
+		stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+	} else if (updateCase === "toolCallStarted" && isExecOwnedToolCall(update.message.value.toolCall)) {
+		// The exec channel already synthesized this block (and marked it resolved)
+		// when it ran the tool locally, so the streamed announcement must not
+		// create a second one. Modern builds stream a `pi_*_tool_call` envelope
+		// alongside every `ExecServerMessage` 45-51 frame; before this branch the
+		// duplicate was avoided only because the decoder recognised neither, which
+		// would silently start double-rendering the moment a variant was added.
+		endCurrentTextBlock(output, stream, state);
+		endCurrentThinkingBlock(output, stream, state);
+		log("exec", "streamedToolCallOwnedByExec", { case: update.message.value.toolCall?.tool?.case });
 	} else if (updateCase === "toolCallStarted") {
 		endCurrentTextBlock(output, stream, state);
 		endCurrentThinkingBlock(output, stream, state);
@@ -2705,12 +3382,13 @@ export function processInteractionUpdate(
 					[kStreamingBlockIndex]: output.content.length,
 					[kStreamingPartialJson]: "",
 					[kStreamingBlockKind]: "mcp",
+					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
 				};
 				if (resolvedByExec) {
 					markCursorExecResolved(block);
 				}
 				output.content.push(block);
-				state.setToolCall(block);
+				retainStreamedCall(state, block, update.message.value.callId);
 				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 				return;
 			}
@@ -2731,54 +3409,92 @@ export function processInteractionUpdate(
 					arguments: buildTodoDisplayArgs(toolCall),
 					[kStreamingBlockIndex]: output.content.length,
 					[kStreamingBlockKind]: "todo",
+					// Only the real envelope id is a correlation key; the minted
+					// fallback below names no frame the server will ever send back.
+					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
 					[kCursorExecResolved]: true,
 				};
 				output.content.push(block);
-				state.setToolCall(block);
+				retainStreamedCall(state, block, update.message.value.callId);
 				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 			}
 		}
 	} else if (updateCase === "toolCallDelta" || updateCase === "partialToolCall") {
-		if (state.currentToolCall?.[kStreamingBlockKind] === "mcp") {
+		// Same correlation rule as the completion path below: an argument delta
+		// belonging to a different call must not be appended to this block's
+		// buffer, which would corrupt the JSON both of them parse.
+		const target = resolveStreamedCall(state, update.message.value.callId);
+		if (target?.[kStreamingBlockKind] === "mcp") {
 			// Cursor's `args_text_delta` is "aggregated args text so far" per agent.proto: each
 			// delta is a cumulative snapshot of the JSON-text args. Strip the prefix we already
 			// have to recover the new suffix; fall back to treating the value as an incremental
 			// fragment when it doesn't extend the buffer.
 			const snapshot: string = update.message.value.argsTextDelta || "";
-			const current = state.currentToolCall[kStreamingPartialJson] ?? "";
+			const current = target[kStreamingPartialJson] ?? "";
 			const chunk = snapshot.startsWith(current) ? snapshot.slice(current.length) : snapshot;
 			if (chunk.length === 0) {
 				return;
 			}
 			const nextBuffer = current + chunk;
-			state.currentToolCall[kStreamingPartialJson] = nextBuffer;
+			target[kStreamingPartialJson] = nextBuffer;
 			// Throttle mid-stream parses to keep total parse work O(N) instead of O(N²)
 			// in the argument-buffer length; the authoritative full parse runs in
 			// `toolCallCompleted` (mcp branch) and the fallback end-of-stream path.
-			const throttled = parseStreamingJsonThrottled(nextBuffer, state.currentToolCall[kStreamingLastParseLen] ?? 0);
+			const throttled = parseStreamingJsonThrottled(nextBuffer, target[kStreamingLastParseLen] ?? 0);
 			if (throttled) {
-				state.currentToolCall.arguments = throttled.value;
-				state.currentToolCall[kStreamingLastParseLen] = throttled.parsedLen;
+				target.arguments = throttled.value;
+				target[kStreamingLastParseLen] = throttled.parsedLen;
 			}
-			const idx = output.content.indexOf(state.currentToolCall);
+			const idx = output.content.indexOf(target);
 			stream.push({ type: "toolcall_delta", contentIndex: idx, delta: chunk, partial: output });
 		}
 	} else if (updateCase === "toolCallCompleted") {
-		if (state.currentToolCall) {
+		// Correlate on the envelope's `call_id`, NOT the block id: MCP, Pi and SCM
+		// blocks are filed under the id inside the call's `args` (which is what
+		// the exec channel pairs its result under), and that need not equal the
+		// envelope id. Cursor also interleaves calls, so the block this settles
+		// is looked up by id rather than assumed to be the last one opened —
+		// otherwise an unrelated completion closes whichever block is current and
+		// pairs it with the wrong result.
+		const settled = resolveStreamedCall(state, update.message.value.callId);
+		if (settled) {
 			const toolCall = update.message.value.toolCall;
-			if (state.currentToolCall[kStreamingBlockKind] === "mcp") {
+			if (settled[kStreamingBlockKind] === "mcp") {
 				// Authoritative full parse of the accumulated argument buffer; the delta
 				// path throttles mid-stream parses, so `arguments` may lag the buffer.
-				const partial = state.currentToolCall[kStreamingPartialJson];
+				const partial = settled[kStreamingPartialJson];
 				if (partial !== undefined) {
-					state.currentToolCall.arguments = parseStreamingJson(partial);
+					settled.arguments = parseStreamingJson(partial);
 				}
 				const decodedArgs = decodeMcpArgsMap(selectMcpCall(toolCall)?.args?.args);
-				state.currentToolCall.arguments = mergeCursorMcpToolCallArgs(
-					state.currentToolCall.arguments as Record<string, unknown> | undefined,
+				settled.arguments = mergeCursorMcpToolCallArgs(
+					settled.arguments as Record<string, unknown> | undefined,
 					decodedArgs,
 				);
-			} else if (state.currentToolCall[kStreamingBlockKind] === "todo") {
+			} else if (settled[kStreamingBlockKind] === "connect-scm") {
+				// The authoritative outcome arrives only here, on the completion's
+				// `ConnectScmResult` oneof. The block was stamped resolved at start,
+				// so nothing downstream pairs it: settling is this branch's job, and
+				// a completion with no `toolCall` still settles rather than leaking a
+				// dangling call into every rebuilt transcript.
+				//
+				// Late args are merged too — a start frame may announce the call
+				// before the target repository is known.
+				const scmCall = selectConnectScmCall(toolCall);
+				const repository = selectConnectScmRepository(scmCall);
+				if (repository) {
+					settled.arguments = { owner: repository.owner, repo: repository.repo };
+				}
+				const { text, isError } = describeConnectScmResult(scmCall);
+				state.onToolResult?.({
+					role: "toolResult",
+					toolCallId: settled.id,
+					toolName: "connect_scm",
+					content: [{ type: "text", text }],
+					isError,
+					timestamp: Date.now(),
+				});
+			} else if (settled[kStreamingBlockKind] === "todo") {
 				// Only the server's success snapshot is authoritative: the request args
 				// may differ from what was actually stored after a merge, and on
 				// `UpdateTodosError` nothing was stored at all. No snapshot => leave
@@ -2792,7 +3508,7 @@ export function processInteractionUpdate(
 				const snapshot = toolCall ? extractTodoSnapshot(toolCall) : null;
 				const error = toolCall ? extractTodoError(toolCall) : null;
 				if (snapshot) {
-					state.currentToolCall.arguments = { todos: snapshot.todos, merged: snapshot.merged };
+					settled.arguments = { todos: snapshot.todos, merged: snapshot.merged };
 				}
 				// The host settles EVERY completed native todo call, successful or
 				// not: the interactive card only resolves on a matching
@@ -2808,7 +3524,7 @@ export function processInteractionUpdate(
 				let persisted: ToolResultMessage | undefined;
 				let hostError: string | null = null;
 				try {
-					persisted = state.onTodoSnapshot?.(snapshot, state.currentToolCall.id, error) ?? undefined;
+					persisted = state.onTodoSnapshot?.(snapshot, settled.id, error) ?? undefined;
 				} catch (callbackError) {
 					// A throwing host callback (e.g. session persistence failing on
 					// disk error) must not leave the resolved block unpaired: the
@@ -2818,14 +3534,12 @@ export function processInteractionUpdate(
 					hostError = callbackError instanceof Error ? callbackError.message : String(callbackError);
 					log("error", "onTodoSnapshot", { error: hostError });
 				}
-				state.onToolResult?.(
-					persisted ?? buildTodoToolResult(state.currentToolCall.id, snapshot, hostError ?? error),
-				);
+				state.onToolResult?.(persisted ?? buildTodoToolResult(settled.id, snapshot, hostError ?? error));
 			}
-			const idx = output.content.indexOf(state.currentToolCall);
-			clearStreamingPartialJson(state.currentToolCall);
-			stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: state.currentToolCall, partial: output });
-			state.setToolCall(null);
+			const idx = output.content.indexOf(settled);
+			clearStreamingPartialJson(settled);
+			stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: settled, partial: output });
+			releaseStreamedCall(state, settled);
 		}
 	} else if (updateCase === "turnEnded") {
 		output.stopReason = "stop";
@@ -2875,7 +3589,18 @@ function readCursorBlob(blobStore: Map<string, Uint8Array>, blobId: Uint8Array):
 	return data;
 }
 
-const CURSOR_NATIVE_TOOL_NAMES = new Set(["bash", "read", "write", "delete", "ls", "grep", "lsp", "todo"]);
+/**
+ * Local tools Cursor already drives natively over the exec channel, so
+ * advertising them again as MCP tools would give the model two ways to call the
+ * same thing.
+ *
+ * `lsp` is deliberately NOT here. The native `diagnosticsArgs` frame covers
+ * exactly one of the tool's actions (`action: "diagnostics"`); the rest —
+ * `definition`, `references`, `rename`, `code_actions`, `hover`,
+ * `implementation`, `type_definition`, `symbols`, ... — have no native frame at
+ * all, so filtering the whole tool out hid every one of them from the model.
+ */
+const CURSOR_NATIVE_TOOL_NAMES = new Set(["bash", "read", "write", "delete", "ls", "grep", "todo"]);
 
 export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefinition[] {
 	if (!tools || tools.length === 0) {

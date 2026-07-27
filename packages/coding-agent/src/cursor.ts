@@ -400,6 +400,75 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		});
 		return toolResultMessage;
 	}
+	/**
+	 * Modern Cursor CLI Pi tool frames (`ExecServerMessage` 45-51).
+	 *
+	 * These are a separate frame family from the legacy `read`/`shell`/... set,
+	 * not aliases: different args, different result oneofs, and no `tool_call_id`
+	 * (the provider mints one and passes it in `call.toolCallId`). Each maps onto
+	 * the local tool with matching semantics, so the same approval, sandboxing
+	 * and event plumbing applies as for a model-issued call.
+	 */
+	async piRead(call: Parameters<NonNullable<ICursorExecHandlers["piRead"]>>[0]) {
+		return await executeTool(this.options, "read", call.toolCallId, { path: call.args.path });
+	}
+
+	async piBash(call: Parameters<NonNullable<ICursorExecHandlers["piBash"]>>[0]) {
+		const { timeout } = call.args;
+		return await executeTool(this.options, "bash", call.toolCallId, {
+			command: call.args.command,
+			timeout: timeout && timeout > 0 ? timeout : undefined,
+		});
+	}
+
+	/**
+	 * `PiEditExecArgs` is the local `edit` tool's replace mode verbatim: a path
+	 * plus `old_text`/`new_text` pairs. The tool's schema is snake_case, so the
+	 * proto's camelCase accessors are mapped back on the way in.
+	 */
+	async piEdit(call: Parameters<NonNullable<ICursorExecHandlers["piEdit"]>>[0]) {
+		return await executeTool(this.options, "edit", call.toolCallId, {
+			path: call.args.path,
+			edits: call.args.edits.map(edit => ({ old_text: edit.oldText, new_text: edit.newText })),
+		});
+	}
+
+	async piWrite(call: Parameters<NonNullable<ICursorExecHandlers["piWrite"]>>[0]) {
+		return await executeTool(this.options, "write", call.toolCallId, {
+			path: call.args.path,
+			content: call.args.content,
+		});
+	}
+
+	async piGrep(call: Parameters<NonNullable<ICursorExecHandlers["piGrep"]>>[0]) {
+		const { pattern, path, glob, ignoreCase } = call.args;
+		// Same arg mapping as the legacy `grep` handler: the local tool takes one
+		// path spec, and its `case` flag is case-SENSITIVITY, the inverse of the
+		// frame's `ignore_case`.
+		return await executeTool(this.options, "grep", call.toolCallId, {
+			pattern,
+			path: glob ? `${path || "."}/${glob}` : path || ".",
+			case: ignoreCase === true ? false : undefined,
+		});
+	}
+
+	/**
+	 * `pi_find` is a filename search, which is the local `glob` tool — not
+	 * `grep`. Its `pattern` is a glob, joined onto `path` because `glob` takes a
+	 * single combined path spec.
+	 */
+	async piFind(call: Parameters<NonNullable<ICursorExecHandlers["piFind"]>>[0]) {
+		const { pattern, path, limit } = call.args;
+		return await executeTool(this.options, "glob", call.toolCallId, {
+			path: path ? `${path}/${pattern}` : pattern,
+			limit: limit && limit > 0 ? limit : undefined,
+		});
+	}
+
+	/** Redirected to `read`, which lists directories — same as the legacy `ls`. */
+	async piLs(call: Parameters<NonNullable<ICursorExecHandlers["piLs"]>>[0]) {
+		return await executeTool(this.options, "read", call.toolCallId, { path: call.args.path || "." });
+	}
 
 	/**
 	 * Settle a completed native Cursor todo call, mirroring its list when the

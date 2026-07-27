@@ -417,7 +417,21 @@ message ToolCall {
       TruncatedToolCall truncated_tool_call = 34;
       StartGrindExecutionToolCall start_grind_execution_tool_call = 35;
       StartGrindPlanningToolCall start_grind_planning_tool_call = 36;
+      PiReadToolCall pi_read_tool_call = 61;
+      PiBashToolCall pi_bash_tool_call = 62;
+      PiEditToolCall pi_edit_tool_call = 63;
+      PiWriteToolCall pi_write_tool_call = 64;
+      PiGrepToolCall pi_grep_tool_call = 65;
+      PiFindToolCall pi_find_tool_call = 66;
+      PiLsToolCall pi_ls_tool_call = 67;
+      ConnectScmToolCall connect_scm_tool_call = 68;
+      SearchConversationsToolCall search_conversations_tool_call = 69;
    }
+   // Modern builds carry the call id on the envelope instead of inside each
+   // variant's args. Fields 37-53, 55, 56, 58 (further tool variants) and 54
+   // (hook_additional_contexts), 59/60 (started_at_ms/completed_at_ms) are not
+   // modelled and decode into unknown fields; do not reuse those numbers.
+   optional string tool_call_id = 57;
 }
 
 message TruncatedToolCallArgs {
@@ -4425,4 +4439,95 @@ message GetDiffResponse {
    optional string patch_id = 3;
    optional string head_sha = 4;
    optional bool has_uncommitted_changes = 5;
+}
+
+// ===== Pi tool calls (ToolCall 61-67) =====
+//
+// The streamed `ToolCall` wrappers for the Pi exec frames. Their `args`/`result`
+// payloads are field-identical to the `Pi*Exec*` messages above (verified against
+// the modern CLI's `pi_*_tool_pb.js`), and the exec channel is binary protobuf,
+// so field numbers — not type names — define wire compatibility. Reusing the
+// exec messages keeps one shape per Pi tool instead of two that must stay in sync.
+
+message PiReadToolCall {
+   PiReadExecArgs args = 1;
+   PiReadExecResult result = 2;
+}
+
+message PiBashToolCall {
+   PiBashExecArgs args = 1;
+   PiBashExecResult result = 2;
+}
+
+message PiEditToolCall {
+   PiEditExecArgs args = 1;
+   PiEditExecResult result = 2;
+}
+
+message PiWriteToolCall {
+   PiWriteExecArgs args = 1;
+   PiWriteExecResult result = 2;
+}
+
+message PiGrepToolCall {
+   PiGrepExecArgs args = 1;
+   PiGrepExecResult result = 2;
+}
+
+message PiFindToolCall {
+   PiFindExecArgs args = 1;
+   PiFindExecResult result = 2;
+}
+
+message PiLsToolCall {
+   PiLsExecArgs args = 1;
+   PiLsExecResult result = 2;
+}
+
+// ===== Conversation search / SCM tool calls (ToolCall 68-69) =====
+
+message SearchConversationsToolCall {
+   ConversationSearchArgs args = 1;
+   ConversationSearchResult result = 2;
+}
+
+message ConnectScmGithubRepository {
+   string owner = 1;
+   string repo = 2;
+}
+
+message ConnectScmGithub {
+   ConnectScmGithubRepository repository = 1;
+   optional string ghe_application = 2;
+}
+
+message ConnectScmArgs {
+   string tool_call_id = 1;
+   oneof target {
+      ConnectScmGithub github = 2;
+   }
+}
+
+message ConnectScmSuccess {
+}
+
+message ConnectScmError {
+   string error = 1;
+}
+
+message ConnectScmRejected {
+   string reason = 1;
+}
+
+message ConnectScmResult {
+   oneof result {
+      ConnectScmSuccess success = 1;
+      ConnectScmError error = 2;
+      ConnectScmRejected rejected = 3;
+   }
+}
+
+message ConnectScmToolCall {
+   ConnectScmArgs args = 1;
+   ConnectScmResult result = 2;
 }
