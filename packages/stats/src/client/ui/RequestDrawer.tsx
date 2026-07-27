@@ -43,10 +43,12 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 		const controller = new AbortController();
 		getRequestDetails(id, controller.signal)
 			.then(data => {
+				if (controller.signal.aborted) return;
 				setDetails(data);
 				setLoading(false);
 			})
 			.catch(err => {
+				if (controller.signal.aborted) return;
 				if (err.name !== "AbortError") {
 					setError(err instanceof Error ? err : new Error(String(err)));
 				}

@@ -183,9 +183,12 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 	}
 
 	if (schemaType === "number") {
-		// Numbers without options are intentionally hidden from the UI.
-		if (!options || options === "runtime") return null;
-		return { ...base, type: "submenu", options };
+		if (options === "runtime") return null;
+		if (options) {
+			return { ...base, type: "submenu", options };
+		}
+		// Numbers without options render as a numeric text input
+		return { ...base, type: "text", secret: false };
 	}
 
 	if (schemaType === "string") {
