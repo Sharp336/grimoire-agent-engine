@@ -8,12 +8,12 @@ export function formatInteger(value: number): string {
 	return value.toLocaleString();
 }
 
-export function formatCompact(value: number, locale: "en" | "zh" = "en"): string {
+export function formatCompact(value: number, locale: Locale = "en"): string {
 	const displayLocale = locale === "zh" ? "zh-CN" : "en-US";
 	return value.toLocaleString(displayLocale, { notation: "compact" });
 }
 
-export function formatCost(value: number, digits?: number, locale: "en" | "zh" = "en"): string {
+export function formatCost(value: number, digits?: number, locale: Locale = "en"): string {
 	const isCny = locale === "zh";
 	const rate = isCny ? getExchangeRate() : 1;
 	const converted = value * rate;
