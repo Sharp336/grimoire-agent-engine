@@ -82,7 +82,12 @@ async function saveCache(rate: number): Promise<void> {
  * Get user-configured exchange rate, if set.
  */
 function getUserConfiguredRate(): number | undefined {
-	return settings.get("i18n.exchangeRate");
+	try {
+		return settings.get("i18n.exchangeRate");
+	} catch {
+		// Settings not initialized (e.g., `omp stats --summary`)
+		return undefined;
+	}
 }
 
 /**
