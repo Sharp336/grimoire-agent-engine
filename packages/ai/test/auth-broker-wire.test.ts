@@ -47,6 +47,22 @@ function credentialBlocks(snapshot: SnapshotResponse, credentialId: number) {
 	return snapshot.credentials.find(entry => entry.id === credentialId)?.blocks ?? [];
 }
 
+function readRawCodexCredentialBlocks(
+	dbPath: string,
+	credentialId: number,
+): Array<{ block_scope: string; blocked_until_ms: number; updated_at: number }> {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		return db
+			.prepare(
+				"SELECT block_scope, blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' ORDER BY block_scope",
+			)
+			.all(credentialId) as Array<{ block_scope: string; blocked_until_ms: number; updated_at: number }>;
+	} finally {
+		db.close();
+	}
+}
+
 describe("auth-broker wire surface", () => {
 	let tempDir = "";
 	let store: SqliteAuthCredentialStore | undefined;
@@ -193,6 +209,10 @@ describe("auth-broker wire surface", () => {
 			blockScope: "spark",
 			blockedUntilMs: sparkBlockedUntilMs,
 		});
+		expect(
+			readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id).map(row => row.block_scope),
+		).toEqual(["chat", "shared", "spark"]);
+
 		const sparkUpdatedAtSec = Math.floor(Date.now() / 1000) - 20;
 		const chatUpdatedAtSec = sparkUpdatedAtSec + 10;
 		const db = new Database(path.join(tempDir, "agent.db"));
@@ -200,24 +220,46 @@ describe("auth-broker wire surface", () => {
 			const updateTimestamp = db.prepare(
 				"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
 			);
-			const chatResult = updateTimestamp.run(chatUpdatedAtSec, credential.id, "openai-codex:oauth", "chat") as {
-				changes: number;
-			};
-			const sparkResult = updateTimestamp.run(sparkUpdatedAtSec, credential.id, "openai-codex:oauth", "spark") as {
-				changes: number;
-			};
-			expect([chatResult.changes, sparkResult.changes]).toEqual([1, 1]);
+			updateTimestamp.run(chatUpdatedAtSec, credential.id, "openai-codex:oauth", "chat");
+			updateTimestamp.run(sparkUpdatedAtSec, credential.id, "openai-codex:oauth", "spark");
 		} finally {
 			db.close();
 		}
+		expect(readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id)).toEqual([
+			{
+				block_scope: "chat",
+				blocked_until_ms: chatBlockedUntilMs,
+				updated_at: chatUpdatedAtSec,
+			},
+			{
+				block_scope: "shared",
+				blocked_until_ms: sparkBlockedUntilMs,
+				updated_at: chatUpdatedAtSec,
+			},
+			{
+				block_scope: "spark",
+				blocked_until_ms: sparkBlockedUntilMs,
+				updated_at: sparkUpdatedAtSec,
+			},
+		]);
 
 		const currentClient = new AuthBrokerClient({ url: handle!.url, token });
 		const currentResult = await currentClient.fetchSnapshot();
 		if (currentResult.status !== 200) throw new Error("expected current-client snapshot");
 		const currentBlocks = credentialBlocks(currentResult.snapshot, credential.id);
-		expect(currentBlocks.map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
-			["chat", chatBlockedUntilMs],
-			["spark", sparkBlockedUntilMs],
+		expect(currentBlocks).toEqual([
+			{
+				providerKey: "openai-codex:oauth",
+				blockScope: "chat",
+				blockedUntilMs: chatBlockedUntilMs,
+				updatedAtMs: chatUpdatedAtSec * 1000,
+			},
+			{
+				providerKey: "openai-codex:oauth",
+				blockScope: "spark",
+				blockedUntilMs: sparkBlockedUntilMs,
+				updatedAtMs: sparkUpdatedAtSec * 1000,
+			},
 		]);
 		const maxUpdatedAtMs = Math.max(...currentBlocks.map(block => block.updatedAtMs ?? 0));
 		expect(maxUpdatedAtMs).toBe(chatUpdatedAtSec * 1000);

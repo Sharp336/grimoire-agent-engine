@@ -49,6 +49,20 @@ function insertLegacyCodexSharedBlock(
 	}
 }
 
+function readLegacyCodexSharedBlock(dbPath: string, credentialId: number): number | undefined {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const row = db
+			.prepare(
+				"SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' AND block_scope = 'shared' AND blocked_until_ms > ?",
+			)
+			.get(credentialId, Date.now()) as { blocked_until_ms?: number } | undefined;
+		return row?.blocked_until_ms;
+	} finally {
+		db.close();
+	}
+}
+
 type UsageWindowSpec = {
 	usedFraction: number;
 	resetInMs: number;
@@ -1050,12 +1064,15 @@ describe("AuthStorage codex oauth ranking", () => {
 			const initialUpdatedAtSec = Math.floor(Date.now() / 1000) - 1;
 			const db = new Database(dbPath);
 			try {
-				const result = db
+				db.prepare(
+					"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+				).run(initialUpdatedAtSec, blockedRow.id, "openai-codex:oauth", "chat");
+				const updated = db
 					.prepare(
-						"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+						"SELECT updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
 					)
-					.run(initialUpdatedAtSec, blockedRow.id, "openai-codex:oauth", "chat") as { changes: number };
-				if (result.changes !== 1) throw new Error("expected to age the broker block update timestamp");
+					.get(blockedRow.id, "openai-codex:oauth", "chat") as { updated_at?: number } | undefined;
+				expect(updated?.updated_at).toBe(initialUpdatedAtSec);
 			} finally {
 				db.close();
 			}
@@ -2400,6 +2417,7 @@ describe("AuthStorage codex oauth ranking", () => {
 			expect(store.listCredentialBlocks([row.id]).map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
 				[remainingBlockScope, blockedUntilMs],
 			]);
+			expect(readLegacyCodexSharedBlock(dbPath, row.id)).toBe(blockedUntilMs);
 		},
 	);
 
@@ -2447,6 +2465,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		);
 		expect(store.getCredentialBlock(row.id, "openai-codex:oauth", "chat")).toBeUndefined();
 		expect(store.getCredentialBlock(row.id, "openai-codex:oauth", "spark")).toBe(blockedUntilMs);
+		expect(readLegacyCodexSharedBlock(dbPath, row.id)).toBe(blockedUntilMs);
 	});
 
 	test("keeps a stale Spark block when live usage omits the Spark meter", async () => {
