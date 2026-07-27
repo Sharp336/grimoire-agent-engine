@@ -12,7 +12,7 @@ import type { ToolSession } from "../sdk";
 import type { SessionEntry } from "../session/session-entries";
 import { framedBlock, renderStatusLine, renderTreeList } from "../tui";
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
-import { formatErrorDetail, formatMoreItems, PREVIEW_LIMITS, pluralize, replaceTabs } from "./render-utils";
+import { formatErrorDetail, formatMoreItems, pluralize, replaceTabs } from "./render-utils";
 
 // =============================================================================
 // Types
@@ -1016,68 +1016,6 @@ function formatTodoLine(
 	}
 }
 
-/**
- * Phases the latest update touched, plus the active (in_progress) phase.
- * Returns `null` when there is no usable signal, meaning "render every phase
- * fully" — this preserves the legacy view and the manual-expand path.
- */
-function computeTouchedPhases(
-	args: TodoRenderArgs | undefined,
-	phases: TodoPhase[],
-	completedTasks: TodoCompletionTransition[],
-): Set<string> | null {
-	const touched = new Set<string>();
-	// The phase holding the in_progress task is where attention sits after the
-	// auto-promotion that follows every completion.
-	for (const phase of phases) {
-		if (phase.tasks.some(task => task.status === "in_progress")) touched.add(phase.name);
-	}
-	// Phases with a task that just transitioned to completed in this update.
-	for (const transition of completedTasks) touched.add(transition.phase);
-	// Phases explicitly named by the ops that ran. `init` replaces the whole
-	// list, so the entire plan is fresh and every phase counts as touched.
-	const ops = normalizeTodoArg(args);
-	for (const op of ops) {
-		if (!op || typeof op !== "object") continue;
-		if (op.op === "init") {
-			for (const phase of phases) touched.add(phase.name);
-			break;
-		}
-		if (typeof op.phase === "string" && op.phase) {
-			const named = phases.find(phase => phase.name === op.phase);
-			if (named) touched.add(named.name);
-		}
-		if (typeof op.task === "string" && op.task) {
-			const located = findTaskByContent(phases, op.task);
-			if (located) touched.add(located.phase.name);
-		}
-	}
-	return touched.size > 0 ? touched : null;
-}
-
-/** One-line summary for a collapsed (untouched) phase: dim header + progress. */
-function formatPhaseSummary(phase: TodoPhase, oneBasedIndex: number, uiTheme: Theme): string {
-	const total = phase.tasks.length;
-	const done = phase.tasks.filter(task => task.status === "completed").length;
-	const name = uiTheme.fg("dim", chalk.bold(formatPhaseDisplayName(phase.name, oneBasedIndex)));
-	return `${name}${uiTheme.fg("dim", `  ${done}/${total}`)}`;
-}
-
-/**
- * Live subagent descriptions the transient tool result uses to detect
- * pending todos being executed by an in-flight subagent, so its collapsed
- * viewport surfaces the same active work the sticky HUD does (#5873). Wired
- * once by interactive mode from its observer registry; returns `[]` outside an
- * interactive session (tests, SDK, transcript rebuilds), where only literal
- * `in_progress` counts as active.
- */
-let activeTodoDescriptionsProvider: () => readonly string[] = () => [];
-
-/** Wire the live-subagent description source for {@link todoToolRenderer}. */
-export function setActiveTodoDescriptionsProvider(provider: () => readonly string[]): void {
-	activeTodoDescriptionsProvider = provider;
-}
-
 export const todoToolRenderer = {
 	renderCall(args: TodoRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		// `args` is the raw partially-parsed JSON from the streaming tool-call
@@ -1114,7 +1052,6 @@ export const todoToolRenderer = {
 		result: { content: Array<{ type: string; text?: string }>; details?: TodoToolDetails; isError?: boolean },
 		options: RenderResultOptions,
 		uiTheme: Theme,
-		args?: TodoRenderArgs,
 	): Component {
 		if (result.isError) {
 			const errorText = result.content?.find(content => content.type === "text")?.text ?? "Todo operation failed";
@@ -1129,22 +1066,13 @@ export const todoToolRenderer = {
 		}
 
 		const phases = (result.details?.phases ?? []).filter(phase => phase.tasks.length > 0);
-		const completedTasks = result.details?.completedTasks ?? [];
-		const completionKeysByPhase = new Map<string, Set<string>>();
-		for (const task of completedTasks) {
-			let keys = completionKeysByPhase.get(task.phase);
-			if (!keys) {
-				keys = new Set<string>();
-				completionKeysByPhase.set(task.phase, keys);
-			}
-			keys.add(task.content);
-		}
 		const allTasks = phases.flatMap(phase => phase.tasks);
+		const completedCount = allTasks.filter(task => task.status === "completed").length;
 		const header = renderStatusLine(
 			{
 				iconOverride: uiTheme.styledSymbol("tool.todo", "accent"),
 				title: "Todo",
-				meta: [`${allTasks.length} tasks`],
+				meta: [`${allTasks.length} ${pluralize("task", allTasks.length)}`, `${completedCount} complete`],
 			},
 			uiTheme,
 		);
@@ -1155,58 +1083,38 @@ export const todoToolRenderer = {
 			const fallback = forDisplay(result.content?.find(content => content.type === "text")?.text ?? "No todos");
 			return new Text(`${header}\n  ${uiTheme.fg("dim", fallback)}`, 0, 0);
 		}
+		if (!options.expanded) return new Text(header, 0, 0);
 
+		const completedTasks = result.details?.completedTasks ?? [];
+		const completionKeysByPhase = new Map<string, Set<string>>();
+		for (const task of completedTasks) {
+			let keys = completionKeysByPhase.get(task.phase);
+			if (!keys) {
+				keys = new Set<string>();
+				completionKeysByPhase.set(task.phase, keys);
+			}
+			keys.add(task.content);
+		}
 		return framedBlock(uiTheme, width => {
-			const { expanded, spinnerFrame } = options;
+			const { spinnerFrame } = options;
 			const multiPhase = phases.length > 1;
 			const indent = multiPhase ? "  " : "";
-			// Collapse phases this update didn't touch down to a one-line summary so
-			// a single task flip doesn't redraw every phase's full task list. The
-			// manual expand toggle (and the no-signal fallback) still shows all.
-			const touched = expanded || !multiPhase ? null : computeTouchedPhases(args, phases, completedTasks);
-			// A pending todo counts as active work when an in-flight subagent is
-			// executing it — the transient result surfaces the same active set the
-			// sticky HUD does (#5873). Empty outside an interactive session.
-			const activeDescs = expanded ? [] : activeTodoDescriptionsProvider();
-			const isMatched = (task: TodoItem): boolean =>
-				activeDescs.length > 0 && todoMatchesAnyDescription(task.content, activeDescs);
 			const bodyLines: string[] = [];
 			for (let p = 0; p < phases.length; p++) {
 				const phase = phases[p];
-				if (touched && !touched.has(phase.name)) {
-					bodyLines.push(formatPhaseSummary(phase, p + 1, uiTheme));
-					continue;
-				}
 				if (multiPhase) {
 					bodyLines.push(uiTheme.fg("accent", chalk.bold(formatPhaseDisplayName(phase.name, p + 1))));
 				}
 				const completionKeys = completionKeysByPhase.get(phase.name) ?? EMPTY_COMPLETION_KEYS;
-				// Collapsed: walking viewport — completed/abandoned omitted, active
-				// work (in-progress / subagent-matched) pulled to the head, then
-				// following pending tasks (#5873). Expanded: every task in order.
-				const treeLines = expanded
-					? renderTreeList(
-							{
-								items: phase.tasks,
-								expanded,
-								itemType: "todo",
-								renderItem: todo => formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame),
-							},
-							uiTheme,
-						)
-					: (() => {
-							const selection = selectCollapsedTodos(phase.tasks, isMatched, PREVIEW_LIMITS.COLLAPSED_ITEMS);
-							return renderTreeList(
-								{
-									items: selection.items,
-									itemType: "todo",
-									trailingSummary: selection.summary,
-									renderItem: todo =>
-										formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame, isMatched(todo)),
-								},
-								uiTheme,
-							);
-						})();
+				const treeLines = renderTreeList(
+					{
+						items: phase.tasks,
+						expanded: true,
+						itemType: "todo",
+						renderItem: todo => formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame),
+					},
+					uiTheme,
+				);
 				for (const line of treeLines) {
 					bodyLines.push(`${indent}${line}`);
 				}
