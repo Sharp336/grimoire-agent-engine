@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { createAbortSourceTracker } from "@oh-my-pi/pi-ai/utils/abort";
+import { createAbortSourceTracker, raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 
 /**
  * Defends the contract `AssistantMessageEventStream` providers depend on: caller
@@ -85,5 +85,30 @@ describe("createAbortSourceTracker", () => {
 		tracker.abortLocally(reason);
 
 		expect(tracker.requestSignal.aborted).toBe(true);
+	});
+});
+
+describe("raceWithSignal", () => {
+	it("observes a shared rejection when the caller signal is already aborted", async () => {
+		const proc = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`
+					import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
+					const shared = Promise.reject(new Error("shared failure"));
+					await raceWithSignal(shared, AbortSignal.abort()).catch(() => undefined);
+				`,
+			],
+			{ stderr: "pipe", stdout: "pipe" },
+		);
+		const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+
+		expect(exitCode, stderr).toBe(0);
+	});
+
+	it("still rejects the caller with the abort reason", async () => {
+		const reason = new Error("caller aborted");
+		await expect(raceWithSignal(Promise.resolve("unused"), AbortSignal.abort(reason))).rejects.toBe(reason);
 	});
 });
