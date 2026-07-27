@@ -733,7 +733,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
-		this.editor.setInputMode(settings.get("inputMode"));
+		this.editor.setInputMode(this.settings.get("inputMode"));
 		this.editor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
 		};

@@ -105,6 +105,55 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("\x1bp");
 		expect(onPasteImage).toHaveBeenCalledTimes(1);
 	});
+	it("keeps configured app shortcuts reachable from Vim normal mode", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onRetry = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.retry", ["alt+r"]);
+		editor.onRetry = onRetry;
+
+		editor.handleInput("\x1br");
+
+		expect(onRetry).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("routes fragmented bracketed paste through Vim insert-mode undo", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setInputMode("vim");
+
+		editor.handleInput("\x1b[200~");
+		editor.handleInput("ignored");
+		editor.handleInput("\x1b[201~");
+		expect(editor.getText()).toBe("");
+
+		editor.handleInput("i");
+		editor.handleInput("\x1b[200~");
+		editor.handleInput("pasted");
+		editor.handleInput("\x1b[201~");
+		editor.handleInput("!");
+		editor.handleInput("\x1b");
+		expect(editor.getText()).toBe("pasted!");
+
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
+	});
+
+	it("allows configured raw-text paste only from Vim insert mode", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onPasteTextRaw = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.clipboard.pasteTextRaw", ["alt+t"]);
+		editor.onPasteTextRaw = onPasteTextRaw;
+
+		editor.handleInput("\x1bt");
+		expect(onPasteTextRaw).not.toHaveBeenCalled();
+
+		editor.handleInput("i");
+		editor.handleInput("\x1bt");
+		expect(onPasteTextRaw).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("shipped dequeue defaults", () => {

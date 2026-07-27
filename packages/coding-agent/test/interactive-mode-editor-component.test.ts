@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -44,7 +45,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 				},
 			}),
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ inputMode: "vim" }),
 			modelRegistry,
 		});
 		mode = new InteractiveMode(session, "test");
@@ -67,10 +68,23 @@ describe("InteractiveMode.setEditorComponent", () => {
 		mode.setEditorComponent((_tui, editorTheme) => new TestModalEditor(editorTheme));
 
 		expect(mode.editor).toBeInstanceOf(TestModalEditor);
+		expect(mode.editor.getVimMode()).toBe("normal");
+		expect(stripVTControlCharacters(mode.editor.render(80).join("\n"))).toContain("NORMAL");
 		expect(mode.editor).not.toBe(previousEditor);
 		expect(mode.editor.getText()).toBe("draft prompt");
 		expect(mode.editor.onSubmit).toBeDefined();
 		expect(mode.editor.onEscape).toBeDefined();
 		expect(refreshSpy).toHaveBeenCalled();
+	});
+	it("renders live Vim mode transitions in the editor border", () => {
+		const normal = stripVTControlCharacters(mode.editor.render(80).join("\n"));
+		expect(normal).toContain("NORMAL");
+		expect(normal).not.toContain("INSERT");
+
+		mode.editor.handleInput("i");
+
+		const insert = stripVTControlCharacters(mode.editor.render(80).join("\n"));
+		expect(insert).toContain("INSERT");
+		expect(insert).not.toContain("NORMAL");
 	});
 });

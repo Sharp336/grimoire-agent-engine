@@ -3872,7 +3872,8 @@ export class Editor implements Component, Focusable {
 		this.#resetKillSequence();
 		this.#recordUndoState();
 		const deleted = this.#state.lines.slice(startLine, startLine + deleteCount).join("\n");
-		this.#state.lines.splice(startLine, deleteCount);
+		if (enterInsert) this.#state.lines.splice(startLine, deleteCount, "");
+		else this.#state.lines.splice(startLine, deleteCount);
 		if (this.#state.lines.length === 0) this.#state.lines.push("");
 		this.#state.cursorLine = Math.min(startLine, this.#state.lines.length - 1);
 		this.#setCursorCol(0);

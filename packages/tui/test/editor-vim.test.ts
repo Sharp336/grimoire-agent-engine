@@ -217,4 +217,232 @@ describe("Editor Vim input mode", () => {
 		expect(onInputModeChange).toHaveBeenNthCalledWith(1, "insert");
 		expect(onInputModeChange).toHaveBeenNthCalledWith(2, "normal");
 	});
+	it("distinguishes small-word and WORD motions", () => {
+		const editor = createVimEditor();
+		editor.setText("foo.bar baz");
+
+		typeText(editor, "0e");
+		expect(editor.getCursor().col).toBe(2);
+		editor.handleInput("e");
+		expect(editor.getCursor().col).toBe(3);
+
+		editor.handleInput("0");
+		editor.handleInput("E");
+		expect(editor.getCursor().col).toBe(6);
+		editor.handleInput("W");
+		expect(editor.getCursor().col).toBe(8);
+		editor.handleInput("B");
+		expect(editor.getCursor().col).toBe(0);
+	});
+
+	it("supports backward, inclusive-end, line-start, and line-end delete motions", () => {
+		const backward = createVimEditor();
+		backward.setText("one two");
+		typeText(backward, "0wdb");
+		expect(backward.getText()).toBe("two");
+
+		const inclusiveEnd = createVimEditor();
+		inclusiveEnd.setText("one two");
+		typeText(inclusiveEnd, "0de");
+		expect(inclusiveEnd.getText()).toBe(" two");
+
+		const lineStart = createVimEditor();
+		lineStart.setText("one two");
+		typeText(lineStart, "0wd0");
+		expect(lineStart.getText()).toBe("two");
+
+		const lineEnd = createVimEditor();
+		lineEnd.setText("one two");
+		typeText(lineEnd, "0wd$");
+		expect(lineEnd.getText()).toBe("one ");
+	});
+
+	it("multiplies counts before and after operators", () => {
+		const editor = createVimEditor();
+		editor.setText("one two three four five six");
+
+		typeText(editor, "02d2w");
+
+		expect(editor.getText()).toBe("five six");
+	});
+
+	it("changes whole lines without joining the following line", () => {
+		const editor = createVimEditor();
+		editor.setText("one\ntwo\nthree");
+
+		typeText(editor, "ggcc");
+		typeText(editor, "replacement");
+		editor.handleInput("\x1b");
+
+		expect(editor.getText()).toBe("replacement\ntwo\nthree");
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("one\ntwo\nthree");
+	});
+
+	it("supports insert-at-cursor, first-nonblank, and line-end entry points", () => {
+		const afterCursor = createVimEditor();
+		afterCursor.setText("one");
+		typeText(afterCursor, "0aX\u001b");
+		expect(afterCursor.getText()).toBe("oXne");
+
+		const firstNonBlank = createVimEditor();
+		firstNonBlank.setText("  one");
+		typeText(firstNonBlank, "IX\u001b");
+		expect(firstNonBlank.getText()).toBe("  Xone");
+
+		const lineEnd = createVimEditor();
+		lineEnd.setText("one");
+		typeText(lineEnd, "AX\u001b");
+		expect(lineEnd.getText()).toBe("oneX");
+	});
+
+	it("opens lines above and below and undoes each insert session atomically", () => {
+		const below = createVimEditor();
+		below.setText("one\ntwo");
+		typeText(below, "ggo");
+		typeText(below, "middle");
+		below.handleInput("\x1b");
+		expect(below.getText()).toBe("one\nmiddle\ntwo");
+		below.handleInput("u");
+		expect(below.getText()).toBe("one\ntwo");
+
+		const above = createVimEditor();
+		above.setText("one\ntwo");
+		typeText(above, "ggO");
+		typeText(above, "top");
+		above.handleInput("\x1b");
+		expect(above.getText()).toBe("top\none\ntwo");
+	});
+
+	it("applies first-nonblank and counted line-end motions", () => {
+		const editor = createVimEditor();
+		editor.setText("  one\n x");
+
+		typeText(editor, "gg^");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 2 });
+
+		typeText(editor, "2$");
+		expect(editor.getCursor()).toEqual({ line: 1, col: 1 });
+	});
+
+	it("undoes direct normal-mode edits through the shared undo stack", () => {
+		const editor = createVimEditor();
+		editor.setText("abc");
+
+		typeText(editor, "0x");
+		expect(editor.getText()).toBe("bc");
+		editor.handleInput("u");
+
+		expect(editor.getText()).toBe("abc");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("keeps history navigation usable from normal mode", () => {
+		const editor = createVimEditor();
+		editor.addToHistory("recalled");
+		editor.setText("");
+
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("recalled");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+		editor.handleInput("x");
+
+		expect(editor.getText()).toBe("ecalled");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("cancels autocomplete before leaving Vim insert mode", async () => {
+		const editor = createVimEditor();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			async getSuggestions() {
+				return { items: [{ label: "/help", value: "/help" }], prefix: "/" };
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		editor.onAutocompleteUpdate = resolve;
+
+		typeText(editor, "i/");
+		await promise;
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		editor.handleInput("\x1b");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.getVimMode()).toBe("normal");
+		expect(editor.getText()).toBe("/");
+	});
+
+	it("cleanly switches back to default editing behavior", () => {
+		const editor = createVimEditor();
+		editor.setText("ab");
+
+		editor.setInputMode("default");
+		editor.handleInput("X");
+
+		expect(editor.getVimMode()).toBeUndefined();
+		expect(editor.getText()).toBe("aXb");
+	});
+
+	it("expands operator ranges over host-owned atomic placeholders", () => {
+		const editor = createVimEditor();
+		editor.atomicTokenPattern = /\[Image #[^\]]+\]/g;
+		editor.setText("[Image #1] rest");
+
+		typeText(editor, "0dw");
+
+		expect(editor.getText()).toBe(" rest");
+	});
+	it("supports counted D and C across logical lines", () => {
+		const deleted = createVimEditor();
+		deleted.setText("abc\ndef\nghi");
+		typeText(deleted, "ggl2D");
+		expect(deleted.getText()).toBe("a\nghi");
+
+		const changed = createVimEditor();
+		changed.setText("abc\ndef\nghi");
+		typeText(changed, "ggl2C");
+		typeText(changed, "X");
+		changed.handleInput("\x1b");
+		expect(changed.getText()).toBe("aX\nghi");
+		changed.handleInput("u");
+		expect(changed.getText()).toBe("abc\ndef\nghi");
+	});
+
+	it("submits unchanged drafts directly from normal mode", () => {
+		const editor = createVimEditor();
+		const onSubmit = vi.fn();
+		editor.setText("send");
+		editor.onSubmit = onSubmit;
+
+		editor.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith("send");
+		expect(editor.getText()).toBe("");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("applies autocomplete in insert mode and undoes it with the typed prefix", async () => {
+		const editor = createVimEditor();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			async getSuggestions() {
+				return { items: [{ label: "/help", value: "/help" }], prefix: "/" };
+			},
+			applyCompletion() {
+				return { lines: ["/help"], cursorLine: 0, cursorCol: 5 };
+			},
+		});
+		editor.onAutocompleteUpdate = resolve;
+
+		typeText(editor, "i/");
+		await promise;
+		editor.handleInput("\t");
+		editor.handleInput("\x1b");
+		expect(editor.getText()).toBe("/help");
+
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
+	});
 });
