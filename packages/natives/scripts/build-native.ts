@@ -416,6 +416,16 @@ if (!napiBin) {
 	throw new Error("Could not locate @napi-rs/cli `napi` binary in node_modules/.bin");
 }
 
+/** Last `maxLines` lines of a stream capture, so failure output stays readable
+ *  without dropping the cause (cargo/napi put the error at the end). */
+function tailLines(text: string, maxLines = 60): string {
+	const trimmed = text.trim();
+	if (!trimmed) return "";
+	const lines = trimmed.split("\n");
+	if (lines.length <= maxLines) return trimmed;
+	return `[… ${lines.length - maxLines} earlier lines omitted]\n${lines.slice(-maxLines).join("\n")}`;
+}
+
 // The package declares Bun as its build runtime. Invoke napi's JavaScript entry
 // through this Bun process instead of its `#!/usr/bin/env node` shim so an old
 // host Node installation cannot make an otherwise supported Bun build fail.
@@ -445,7 +455,16 @@ async function runNapiBuildWithSccacheFallback() {
 try {
 	const { buildResult, stderr } = await runNapiBuildWithSccacheFallback();
 	if (buildResult.exitCode !== 0) {
-		throw new Error(`napi build failed${stderr ? `:\n${stderr}` : ""}`);
+		// napi/cargo report most failures on stdout; stderr alone is often empty,
+		// which used to reduce this error to a bare "napi build failed".
+		const stdout = buildResult.stdout?.toString("utf-8") ?? "";
+		const detail = [
+			stderr.trim() && `--- stderr ---\n${tailLines(stderr)}`,
+			stdout.trim() && `--- stdout ---\n${tailLines(stdout)}`,
+		]
+			.filter(Boolean)
+			.join("\n");
+		throw new Error(`napi build failed (exit code ${buildResult.exitCode})${detail ? `:\n${detail}` : ""}`);
 	}
 
 	const builtAddonPath = await resolveBuiltAddonPath(buildOutputDir, canonicalAddonFilename);
