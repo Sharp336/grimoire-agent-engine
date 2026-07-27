@@ -38,6 +38,7 @@ import {
 	GrepArgsSchema,
 	ListMcpResourcesExecArgsSchema,
 	McpAllowlistPrecheckArgsSchema,
+	McpArgsSchema,
 	McpStateExecArgsSchema,
 	type McpToolDefinition,
 	McpToolDefinitionSchema,
@@ -1612,5 +1613,72 @@ describe("Cursor legacy grep frame: offset reporting", () => {
 		if (firstUnion?.case !== "content") throw new Error(`got ${firstUnion?.case}`);
 		// Absent, not 0: no offset was requested, so none was applied.
 		expect(firstUnion.value.offsetApplied).toBeUndefined();
+	});
+});
+
+describe("Cursor MCP frame: approval-only probes", () => {
+	it("answers an approval-only frame without running the tool", async () => {
+		// The server sends this to resolve a smart-mode permission decision
+		// BEFORE the real call. Running the tool here fires a side effect the
+		// user has not been asked about, and fires it again when the real frame
+		// arrives.
+		let invocations = 0;
+		const handlers: CursorExecHandlers = {
+			async mcp() {
+				invocations += 1;
+				return toolResult("ran");
+			},
+		};
+
+		const { frames, output, results } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "deploy",
+					toolName: "deploy",
+					toolCallId: "c1",
+					providerIdentifier: "ops",
+					smartModeApprovalOnly: true,
+				}),
+			}),
+			{ execHandlers: handlers },
+		);
+
+		expect(invocations).toBe(0);
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("approved");
+		// Nothing ran, so nothing may appear in the transcript either.
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+		expect(results).toHaveLength(0);
+	});
+
+	it("still runs an ordinary MCP frame", async () => {
+		// The guard keys on the flag alone: a normal call must be unaffected.
+		let invocations = 0;
+		const handlers: CursorExecHandlers = {
+			async mcp() {
+				invocations += 1;
+				return toolResult("ran");
+			},
+		};
+
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "deploy",
+					toolName: "deploy",
+					toolCallId: "c2",
+					providerIdentifier: "ops",
+				}),
+			}),
+			{ execHandlers: handlers },
+		);
+
+		expect(invocations).toBe(1);
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("success");
 	});
 });

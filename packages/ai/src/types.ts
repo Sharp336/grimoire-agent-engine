@@ -952,6 +952,14 @@ export interface CursorMcpCall {
 	toolCallId: string;
 	args: Record<string, unknown>;
 	rawArgs: Record<string, Uint8Array>;
+	/**
+	 * The frame asks only whether this call would be permitted — it must not
+	 * run. The server sends it to resolve a smart-mode approval decision ahead
+	 * of the real invocation, and answers with the dedicated `approved`
+	 * variant, so executing here would fire a side-effecting tool the user has
+	 * not yet been asked about (and fire it twice once the real call arrives).
+	 */
+	approvalOnly?: boolean;
 }
 
 export interface CursorTodoSnapshotItem {

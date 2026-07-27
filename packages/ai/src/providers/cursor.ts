@@ -75,6 +75,7 @@ import {
 	LsResultSchema,
 	LsSuccessSchema,
 	McpAllowlistPrecheckResultSchema,
+	McpApprovedSchema,
 	McpErrorSchema,
 	McpImageContentSchema,
 	McpResultSchema,
@@ -1513,6 +1514,22 @@ async function handleExecServerMessage(
 		case "mcpArgs": {
 			const args = execMsg.message.value;
 			const mcpCall = decodeMcpCall(args);
+			// An approval probe, not an invocation: the server is resolving a
+			// smart-mode permission decision before the real call and answers
+			// with the dedicated `approved` variant. Executing here would fire a
+			// side-effecting MCP tool the user has not been asked about yet —
+			// and fire it a second time when the real frame follows. No block is
+			// synthesized either: nothing ran, so a transcript entry would claim
+			// work that never happened.
+			if (mcpCall.approvalOnly) {
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"mcpResult",
+					create(McpResultSchema, { result: { case: "approved", value: create(McpApprovedSchema, {}) } }),
+				);
+				return;
+			}
 			if (execHandlers?.mcp) {
 				const existingBlock = output.content.find(
 					block => block.type === "toolCall" && block.id === mcpCall.toolCallId,
@@ -2807,6 +2824,7 @@ function decodeMcpCall(args: {
 	toolCallId: string;
 	providerIdentifier: string;
 	toolName: string;
+	smartModeApprovalOnly?: boolean;
 }): CursorMcpCall {
 	const decodedArgs: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(args.args ?? {})) {
@@ -2819,6 +2837,7 @@ function decodeMcpCall(args: {
 		toolCallId: args.toolCallId,
 		args: decodedArgs,
 		rawArgs: args.args ?? {},
+		approvalOnly: args.smartModeApprovalOnly === true,
 	};
 }
 
