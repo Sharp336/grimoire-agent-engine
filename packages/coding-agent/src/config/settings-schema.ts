@@ -4690,39 +4690,6 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
-	"skills.promptDescriptionMaxChars": {
-		type: "number",
-		default: 0,
-		ui: {
-			tab: "tasks",
-			group: "Commands & Skills",
-			label: "Skill Description Budget",
-			description:
-				"Cap each skill description rendered into the system prompt at this many characters (sentence-aware cut). 0 keeps full descriptions. Full instructions stay available via skill://<name>.",
-		},
-	},
-
-	"skills.promptDescriptionMode": {
-		type: "enum",
-		values: ["full", "brief"] as const,
-		default: "full",
-		ui: {
-			tab: "tasks",
-			group: "Commands & Skills",
-			label: "Skill Listing Style",
-			description:
-				"How the system prompt's <skills> listing describes each skill. Brief renders the author's frontmatter summary (else the first sentence of the description); full instructions stay available via skill://<name>.",
-			options: [
-				{ value: "full", label: "Full Description", description: "Render the whole frontmatter description." },
-				{
-					value: "brief",
-					label: "Brief",
-					description: "Render the frontmatter summary, else the first sentence.",
-				},
-			],
-		},
-	},
-
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -5638,8 +5605,6 @@ export interface SkillsSettings {
 	customDirectories?: string[];
 	ignoredSkills?: string[];
 	includeSkills?: string[];
-	promptDescriptionMaxChars?: number;
-	promptDescriptionMode?: "full" | "brief";
 	disabledExtensions?: string[];
 }
 

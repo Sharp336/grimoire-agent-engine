@@ -14,7 +14,7 @@ import { findConfigFile } from "./config";
 import type { Personality, SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
-import { loadSkills, renderSkillPromptDescription, type Skill } from "./extensibility/skills";
+import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
@@ -815,19 +815,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
-	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>);
-	// - render descriptions per `skills.promptDescriptionMode` and cap them at
-	//   `skills.promptDescriptionMaxChars` (0 = full) — the listing is a routing
-	//   index, the full text stays behind skill://<name>.
+	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasRead = toolNames.includes("read");
-	const skillDescriptionOptions = {
-		mode: skillsSettings?.promptDescriptionMode,
-		maxChars: skillsSettings?.promptDescriptionMaxChars,
-	};
-	const filteredSkills = (hasRead ? skills.filter(skill => skill.hide !== true) : []).map(skill => {
-		const description = renderSkillPromptDescription(skill, skillDescriptionOptions);
-		return description === skill.description ? skill : { ...skill, description };
-	});
+	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,

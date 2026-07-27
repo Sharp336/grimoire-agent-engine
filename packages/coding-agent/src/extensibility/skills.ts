@@ -6,7 +6,7 @@ import {
 	MANAGED_SKILLS_PROVIDER_ID,
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
-import { type SkillFrontmatter, skillCapability } from "../capability/skill";
+import { skillCapability } from "../capability/skill";
 import type { SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
@@ -27,12 +27,6 @@ export interface Skill {
 	 * prompt's `<skills>` listing.
 	 */
 	hide?: boolean;
-	/**
-	 * Author-provided one-line routing summary (frontmatter `summary`).
-	 * Rendered instead of `description` in the system prompt's `<skills>`
-	 * listing when `skills.promptDescriptionMode` is `"brief"`.
-	 */
-	summary?: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
 }
@@ -65,91 +59,6 @@ export function setActiveSkills(value: readonly Skill[]): void {
 /** Reset the active skill snapshot. Test-only. */
 export function resetActiveSkillsForTests(): void {
 	activeSkills = [];
-}
-
-/** Sentence-ending punctuation (ASCII + CJK) a truncated description may stop after. */
-const SENTENCE_BOUNDARY_CHARS: Record<string, true> = {
-	".": true,
-	"!": true,
-	"?": true,
-	";": true,
-	"\n": true,
-	"。": true,
-	"．": true,
-	"！": true,
-	"？": true,
-	"；": true,
-	"…": true,
-};
-
-/**
- * Cap a skill description for system prompt rendering
- * (`skills.promptDescriptionMaxChars`). Prefers the last sentence boundary
- * inside the budget so routing cues stay whole, falls back to the last space,
- * then to a hard cut (CJK text has no spaces; its characters self-delimit).
- * `maxChars <= 0` disables the cap. Never splits a surrogate pair. The full
- * description remains reachable via `skill://<name>`.
- */
-export function truncateSkillDescription(description: string, maxChars: number): string {
-	if (maxChars <= 0) return description;
-	const text = description.trim();
-	if (text.length <= maxChars) return text;
-
-	const window = text.slice(0, maxChars);
-	const minKeep = Math.ceil(maxChars / 2);
-	let cut = 0;
-	for (let i = window.length - 1; i >= minKeep; i--) {
-		if (window[i] in SENTENCE_BOUNDARY_CHARS) {
-			cut = i + 1;
-			break;
-		}
-	}
-	if (cut === 0) {
-		const lastSpace = window.lastIndexOf(" ");
-		cut = lastSpace >= minKeep ? lastSpace : maxChars;
-	}
-
-	let sliced = window.slice(0, cut).trimEnd();
-	// A hard cut can land between the halves of a surrogate pair.
-	const lastCode = sliced.charCodeAt(sliced.length - 1);
-	if (lastCode >= 0xd800 && lastCode <= 0xdbff) sliced = sliced.slice(0, -1);
-	return `${sliced}…`;
-}
-
-/** Non-empty trimmed frontmatter `summary`, else `undefined`. */
-function frontmatterSummary(frontmatter: SkillFrontmatter | undefined): string | undefined {
-	const value = frontmatter?.summary;
-	if (typeof value !== "string") return undefined;
-	const trimmed = value.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
-}
-
-/** First sentence of a description (ASCII+CJK boundaries); the whole text when boundary-free. */
-export function firstSentenceOfDescription(description: string): string {
-	const text = description.trim();
-	for (let i = 0; i < text.length; i++) {
-		if (text[i] in SENTENCE_BOUNDARY_CHARS) {
-			const sentence = text.slice(0, i + 1).trim();
-			if (sentence.length > 0) return sentence;
-		}
-	}
-	return text;
-}
-
-/**
- * The description string rendered into the system prompt's `<skills>`
- * listing. `"brief"` mode prefers the author's frontmatter `summary`, else
- * falls back to the first sentence of the description; the
- * `skills.promptDescriptionMaxChars` cap applies on top in either mode. The
- * full skill text always stays reachable via `skill://<name>`.
- */
-export function renderSkillPromptDescription(
-	skill: Pick<Skill, "description" | "summary">,
-	options: { mode?: "full" | "brief"; maxChars?: number },
-): string {
-	const base =
-		options.mode === "brief" ? (skill.summary ?? firstSentenceOfDescription(skill.description)) : skill.description;
-	return truncateSkillDescription(base, options.maxChars ?? 0);
 }
 
 /**
@@ -196,7 +105,6 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-			summary: frontmatterSummary(capSkill.frontmatter),
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -332,7 +240,6 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-				summary: frontmatterSummary(capSkill.frontmatter),
 				_source: capSkill._source,
 			});
 			realPathSet.add(resolvedPath);
@@ -370,7 +277,6 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-					summary: frontmatterSummary(capSkill.frontmatter),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -460,10 +366,6 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-			summary: (() => {
-				const summary = frontmatterSummary(capSkill.frontmatter);
-				return summary === undefined ? undefined : sanitizeManagedDescription(summary);
-			})(),
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);
