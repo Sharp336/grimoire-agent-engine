@@ -83,6 +83,7 @@ export async function executeSwarmAgent(
 			status,
 			completedAt: Date.now(),
 			error: result.error,
+			resolvedModel: result.resolvedModel,
 		});
 		await stateTracker.appendLog(
 			agent.name,
