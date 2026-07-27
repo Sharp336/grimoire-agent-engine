@@ -28,7 +28,7 @@ import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
-import type { SubagentExecutor } from "../../task/subagent-executor";
+import type { SubagentExecutor, SubagentExecutorRegistry } from "../../task/subagent-executor";
 import { EventBus } from "../../utils/event-bus";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
@@ -73,6 +73,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	subagentExecutorRegistry?: SubagentExecutorRegistry;
 
 	sendMessage(): void {
 		throw new ExtensionRuntimeNotInitializedError();
@@ -182,6 +183,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			extensionPath: this.extension.path,
 		};
 		this.extension.subagentExecutors.set(executor.id, registered);
+	}
+
+	getSubagentExecutorRegistry(): SubagentExecutorRegistry {
+		const registry = this.runtime.subagentExecutorRegistry;
+		if (!registry) throw new ExtensionRuntimeNotInitializedError();
+		return registry;
 	}
 
 	registerCommand(

@@ -2501,9 +2501,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settings,
 			localProtocolOptions,
 		);
-		toolSession.subagentExecutorRegistry = new SubagentExecutorRegistry(
+		const subagentExecutorRegistry = new SubagentExecutorRegistry(
 			extensionRunner.getAllRegisteredSubagentExecutors().map(registered => registered.definition),
 		);
+		toolSession.subagentExecutorRegistry = subagentExecutorRegistry;
+		extensionsResult.runtime.subagentExecutorRegistry = subagentExecutorRegistry;
 
 		credentialDisabledTarget = extensionRunner;
 		for (const event of startupCredentialDisabledEvents.splice(0)) {

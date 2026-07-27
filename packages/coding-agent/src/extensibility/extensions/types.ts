@@ -52,7 +52,7 @@ import type { Theme } from "../../modes/theme/theme";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
-import type { SubagentExecutor } from "../../task/subagent-executor";
+import type { SubagentExecutor, SubagentExecutorRegistry } from "../../task/subagent-executor";
 import type {
 	BashToolDetails,
 	BashToolInput,
@@ -1146,6 +1146,9 @@ export interface ExtensionAPI {
 	/** Register a backend for the agent definitions it explicitly claims. */
 	registerSubagentExecutor(executor: SubagentExecutor): void;
 
+	/** Access this session's finalized executor registry after extension loading completes. */
+	getSubagentExecutorRegistry(): SubagentExecutorRegistry;
+
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
@@ -1449,6 +1452,7 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	subagentExecutorRegistry?: SubagentExecutorRegistry;
 }
 
 /** Action implementations for ExtensionAPI methods. */

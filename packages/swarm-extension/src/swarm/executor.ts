@@ -12,6 +12,7 @@ import type {
 	ModelRegistry,
 	Settings,
 	SingleResult,
+	SubagentExecutorRegistry,
 } from "@oh-my-pi/pi-coding-agent";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent";
 import type { SwarmAgent } from "./schema";
@@ -27,6 +28,7 @@ export interface SwarmExecutorOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	stateTracker: StateTracker;
+	subagentExecutorRegistry?: SubagentExecutorRegistry;
 }
 
 /**
@@ -43,8 +45,18 @@ export async function executeSwarmAgent(
 	index: number,
 	options: SwarmExecutorOptions,
 ): Promise<SingleResult> {
-	const { workspace, swarmName, iteration, modelOverride, signal, onProgress, modelRegistry, settings, stateTracker } =
-		options;
+	const {
+		workspace,
+		swarmName,
+		iteration,
+		modelOverride,
+		signal,
+		onProgress,
+		modelRegistry,
+		settings,
+		stateTracker,
+		subagentExecutorRegistry,
+	} = options;
 
 	const agentId = `swarm-${swarmName}-${agent.name}-${iteration}`;
 
@@ -63,7 +75,8 @@ export async function executeSwarmAgent(
 	await stateTracker.appendLog(agent.name, `Starting iteration ${iteration}`);
 
 	try {
-		const result = await runSubprocess({
+		const execute = subagentExecutorRegistry?.resolve(agentDef)?.execute ?? runSubprocess;
+		const result = await execute({
 			cwd: workspace,
 			agent: agentDef,
 			task: agent.task,

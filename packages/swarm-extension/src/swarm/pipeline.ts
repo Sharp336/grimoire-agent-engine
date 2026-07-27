@@ -6,7 +6,13 @@
  * - Waves execute sequentially (wave N+1 starts after wave N completes)
  * - For pipeline mode, iterations repeat the full DAG execution
  */
-import type { AgentSource, ModelRegistry, Settings, SingleResult } from "@oh-my-pi/pi-coding-agent";
+import type {
+	AgentSource,
+	ModelRegistry,
+	Settings,
+	SingleResult,
+	SubagentExecutorRegistry,
+} from "@oh-my-pi/pi-coding-agent";
 import { executeSwarmAgent } from "./executor";
 import type { SwarmDefinition } from "./schema";
 import type { StateTracker } from "./state";
@@ -21,6 +27,7 @@ export interface PipelineOptions {
 	onProgress?: (state: PipelineProgress) => void;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	subagentExecutorRegistry?: SubagentExecutorRegistry;
 }
 
 export interface PipelineProgress {
@@ -54,7 +61,7 @@ export class PipelineController {
 	}
 
 	async run(options: PipelineOptions): Promise<PipelineResult> {
-		const { workspace, signal, onProgress, modelRegistry, settings } = options;
+		const { workspace, signal, onProgress, modelRegistry, settings, subagentExecutorRegistry } = options;
 		const allResults = new Map<string, SingleResult[]>();
 		const errors: string[] = [];
 
@@ -94,6 +101,7 @@ export class PipelineController {
 					emitProgress,
 					modelRegistry,
 					settings,
+					subagentExecutorRegistry,
 				});
 
 				for (const [agentName, result] of iterationResults) {
@@ -127,6 +135,7 @@ export class PipelineController {
 			emitProgress: (currentWave: number) => void;
 			modelRegistry?: ModelRegistry;
 			settings?: Settings;
+			subagentExecutorRegistry?: SubagentExecutorRegistry;
 		},
 	): Promise<Map<string, SingleResult>> {
 		const results = new Map<string, SingleResult>();
@@ -168,6 +177,7 @@ export class PipelineController {
 							},
 							modelRegistry: options.modelRegistry,
 							settings: options.settings,
+							subagentExecutorRegistry: options.subagentExecutorRegistry,
 							stateTracker: this.#stateTracker,
 						});
 						return { agentName, result };

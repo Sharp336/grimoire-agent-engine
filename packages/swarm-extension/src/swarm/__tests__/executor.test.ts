@@ -65,4 +65,46 @@ describe("executeSwarmAgent", () => {
 		expect(authStorage).toBeUndefined();
 		expect(modelRegistry).toBe(mockModelRegistry);
 	});
+
+	it("routes claimed swarm agents through the session executor registry", async () => {
+		const runSubprocessSpy = vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(mockResult);
+		const execute = vi.fn(async options => ({
+			...mockResult,
+			id: options.id,
+			agent: options.agent.name,
+			task: options.task,
+			output: "external",
+		}));
+		const subagentExecutorRegistry = new taskExecutor.SubagentExecutorRegistry([
+			{
+				id: "external",
+				claim: agent => agent.name === "test-agent",
+				execute,
+			},
+		]);
+		const stateTracker = new StateTracker(workspace, "test-swarm");
+		await stateTracker.init(["test-agent"], 1, "parallel");
+
+		const result = await executeSwarmAgent(
+			{
+				name: "test-agent",
+				role: "tester",
+				task: "do something",
+				reportsTo: [],
+				waitsFor: [],
+			},
+			0,
+			{
+				workspace,
+				swarmName: "test-swarm",
+				iteration: 0,
+				stateTracker,
+				subagentExecutorRegistry,
+			},
+		);
+
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(runSubprocessSpy).not.toHaveBeenCalled();
+		expect(result.output).toBe("external");
+	});
 });

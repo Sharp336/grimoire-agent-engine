@@ -149,6 +149,7 @@ async function handleRun(yamlPath: string, ctx: ExtensionCommandContext, pi: Ext
 		onProgress: () => updateWidget(),
 		modelRegistry: ctx.modelRegistry,
 		settings: pi.pi.settings,
+		subagentExecutorRegistry: pi.getSubagentExecutorRegistry(),
 	});
 
 	// 10. Clear widget and show summary
