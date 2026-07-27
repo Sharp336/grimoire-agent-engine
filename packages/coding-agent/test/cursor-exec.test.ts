@@ -602,6 +602,62 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect(executed).toBe(false);
 		expect(result.content.find(block => block.type === "text")?.text).toContain("blocked by user policy");
 	});
+
+	it("lists resources from the session's live MCP servers", async () => {
+		// The provider used to answer an empty catalog unconditionally, hiding
+		// resources the session holds live connections to. Every entry must
+		// carry the server name, since that is how Cursor addresses the read.
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map(),
+			mcpResources: {
+				serverNames: () => ["docs", "issues"],
+				getServerResources: name =>
+					name === "docs"
+						? { resources: [{ uri: "docs://readme", name: "README", mimeType: "text/markdown" }] }
+						: { resources: [{ uri: "issues://open" }] },
+				readServerResource: async () => undefined,
+			},
+		});
+
+		expect(await handlers.listMcpResources({})).toEqual([
+			{ uri: "docs://readme", name: "README", description: undefined, mimeType: "text/markdown", server: "docs" },
+			{ uri: "issues://open", name: undefined, description: undefined, mimeType: undefined, server: "issues" },
+		]);
+		// A server filter narrows to that server alone.
+		expect((await handlers.listMcpResources({ server: "issues" })).map(r => r.uri)).toEqual(["issues://open"]);
+	});
+
+	it("reads a resource and decodes a blob payload into wire bytes", async () => {
+		// MCP hands back a list of content items with base64 blobs; the wire
+		// carries one text or one byte payload.
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map(),
+			mcpResources: {
+				serverNames: () => ["files"],
+				getServerResources: () => undefined,
+				readServerResource: async (name, uri) =>
+					name === "files" && uri === "files://logo"
+						? { contents: [{ uri, mimeType: "image/png", blob: Buffer.from("PNG").toString("base64") }] }
+						: undefined,
+			},
+		});
+
+		const read = await handlers.readMcpResource({ server: "files", uri: "files://logo" });
+		expect(read?.mimeType).toBe("image/png");
+		expect(read?.blob && Buffer.from(read.blob).toString()).toBe("PNG");
+		// An unknown uri is genuinely not found, not an error.
+		expect(await handlers.readMcpResource({ server: "files", uri: "files://missing" })).toBeNull();
+	});
+
+	it("answers nothing when the session has no MCP manager", async () => {
+		// A host without MCP must still answer truthfully rather than throwing:
+		// an empty catalog and `not_found` are the honest responses.
+		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map() });
+		expect(await handlers.listMcpResources({})).toEqual([]);
+		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://x" })).toBeNull();
+	});
 });
 
 function cursorAssistantMessage(): AssistantMessage {
@@ -824,6 +880,48 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		expect(result.isError).toBe(false);
 		expect(await Bun.file(originalTarget).exists()).toBe(true);
 		expect(await Bun.file(movedTarget).exists()).toBe(false);
+	});
+
+	it("refuses a native delete the user's policy blocks", async () => {
+		// `allowNativeDelete` answers "was a mutating tool granted", not "does
+		// policy allow this call". The frame removes the file with `fs.rmSync`
+		// instead of running a registry tool, so no approval wrapper sits in
+		// front of it — a configured `deny` still lost the file.
+		const target = path.join(cwd, "protected.txt");
+		await Bun.write(target, "keep me\n");
+		const settings = Settings.isolated({ "tools.approval": { delete: "deny" } });
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map(),
+			allowNativeDelete: true,
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+
+		const result = await handlers.delete(
+			create(DeleteArgsSchema, { toolCallId: "call-deny", path: "protected.txt" }),
+		);
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).exists()).toBe(true);
+	});
+
+	it("refuses a native delete in always-ask mode, which has no prompt channel", async () => {
+		// The exec channel cannot raise an interactive approval, so a mode that
+		// demands one must fail closed rather than silently auto-approving.
+		const target = path.join(cwd, "asked.txt");
+		await Bun.write(target, "keep me\n");
+		const settings = Settings.isolated({ "tools.approvalMode": "always-ask" });
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map(),
+			allowNativeDelete: true,
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+
+		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-ask", path: "asked.txt" }));
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).exists()).toBe(true);
 	});
 });
 

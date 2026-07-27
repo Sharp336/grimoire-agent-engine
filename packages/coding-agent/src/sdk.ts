@@ -2657,6 +2657,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: toolRegistry,
 			getTool: resolveDeviceTool,
 			getToolContext: () => toolContextStore.getContext(),
+			// Cursor's resource frames ask what THIS client's servers advertise;
+			// only live connections have any.
+			mcpResources: mcpManager && {
+				serverNames: () => mcpManager.getConnectedServers(),
+				getServerResources: name => mcpManager.getServerResources(name),
+				readServerResource: (name, uri) => mcpManager.readServerResource(name, uri),
+			},
 			emitEvent: event => cursorEventEmitter?.(event),
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),

@@ -9,6 +9,8 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	CursorMcpCall,
+	CursorMcpResource,
+	CursorMcpResourceContent,
 	CursorShellStreamCallbacks,
 	CursorTodoSnapshot,
 	CursorExecHandlers as ICursorExecHandlers,
@@ -23,6 +25,9 @@ import {
 	piTimeout,
 } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import type { MCPResourceReadResult } from "./mcp/types";
+import type { ApprovalMode } from "./tools/approval";
+import { resolveApproval } from "./tools/approval";
 import { resolveToCwd } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "./tools/todo";
 
@@ -78,6 +83,20 @@ interface CursorExecBridgeOptions {
 	 * goes through.
 	 */
 	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): CursorBridgeTool | undefined;
+	/**
+	 * The session's live MCP connections, for Cursor's resource frames.
+	 *
+	 * `list_mcp_resources` / `read_mcp_resource` ask what this client's servers
+	 * advertise. Without this the bridge answers an empty catalog and
+	 * `not_found`, hiding resources the session is in fact connected to.
+	 */
+	mcpResources?: {
+		serverNames(): string[];
+		getServerResources(
+			name: string,
+		): { resources: { uri: string; name?: string; description?: string; mimeType?: string }[] } | undefined;
+		readServerResource(name: string, uri: string): Promise<MCPResourceReadResult | undefined>;
+	};
 }
 
 function createToolResultMessage(
@@ -167,6 +186,31 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 
 	if (options.allowNativeDelete === false) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
+		return createToolResultMessage(toolCallId, toolName, result, true);
+	}
+
+	// Unlike every other frame, this one mutates the filesystem directly instead
+	// of running a registry tool, so no approval wrapper sits in front of it.
+	// `allowNativeDelete` answers "was a mutating tool granted", which is a
+	// different question from "does the user's policy allow this call" — without
+	// this, a configured `deny` or an `always-ask` session still lost the file.
+	// `write` is the tier a file removal belongs to.
+	const context = options.getToolContext?.();
+	const settings = context?.settings;
+	const approvalMode: ApprovalMode =
+		context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+	const approval = resolveApproval(
+		{ name: toolName, approval: "write" },
+		{ path: pathArg },
+		approvalMode,
+		(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+	);
+	if (approval.policy !== "allow") {
+		const detail =
+			approval.policy === "deny"
+				? `Tool "${toolName}" is blocked by user policy.`
+				: `Tool "${toolName}" requires approval, which this channel cannot request.`;
+		const result = buildToolErrorResult(detail);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
 
@@ -541,6 +585,53 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async piLs(call: Parameters<NonNullable<ICursorExecHandlers["piLs"]>>[0]) {
 		return await executeTool(this.options, "read", call.toolCallId, { path: piLsPath(call.args.path) });
+	}
+
+	/**
+	 * The resources this client's MCP servers advertise.
+	 *
+	 * Cursor addresses a later read by `server`, so every entry carries the name
+	 * it came from. An absent `server` filter means "all of them".
+	 */
+	async listMcpResources({ server }: { server?: string }): Promise<CursorMcpResource[]> {
+		const mcp = this.options.mcpResources;
+		if (!mcp) return [];
+		const names = server ? [server] : mcp.serverNames();
+		const listed: CursorMcpResource[] = [];
+		for (const name of names) {
+			for (const resource of mcp.getServerResources(name)?.resources ?? []) {
+				listed.push({
+					uri: resource.uri,
+					name: resource.name,
+					description: resource.description,
+					mimeType: resource.mimeType,
+					server: name,
+				});
+			}
+		}
+		return listed;
+	}
+
+	/**
+	 * Read one resource, or `null` when the server or uri is unknown.
+	 *
+	 * MCP returns a list of content items; the wire carries exactly one text or
+	 * blob. Text items are joined, since a multi-part text resource is one
+	 * document; otherwise the first blob stands in. `blob` arrives base64 and
+	 * the wire wants bytes.
+	 */
+	async readMcpResource({ server, uri }: { server: string; uri: string }): Promise<CursorMcpResourceContent | null> {
+		const mcp = this.options.mcpResources;
+		if (!mcp) return null;
+		const read = await mcp.readServerResource(server, uri);
+		if (!read) return null;
+		const texts = read.contents.filter(item => item.text !== undefined).map(item => item.text as string);
+		if (texts.length > 0) {
+			return { uri, mimeType: read.contents[0]?.mimeType, text: texts.join("\n") };
+		}
+		const blob = read.contents.find(item => item.blob !== undefined)?.blob;
+		if (blob === undefined) return null;
+		return { uri, mimeType: read.contents[0]?.mimeType, blob: Buffer.from(blob, "base64") };
 	}
 
 	/**

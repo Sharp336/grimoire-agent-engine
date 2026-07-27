@@ -61,6 +61,9 @@ import {
 	GrepUnionResultSchema,
 	KvClientMessageSchema,
 	type KvServerMessage,
+	ListMcpResourcesErrorSchema,
+	type ListMcpResourcesExecResult,
+	ListMcpResourcesExecResult_McpResourceSchema,
 	ListMcpResourcesExecResultSchema,
 	ListMcpResourcesSuccessSchema,
 	type LsDirectoryTreeNode,
@@ -82,8 +85,11 @@ import {
 	McpToolResultContentItemSchema,
 	ModelDetailsSchema,
 	ReadErrorSchema,
+	ReadMcpResourceErrorSchema,
+	type ReadMcpResourceExecResult,
 	ReadMcpResourceExecResultSchema,
 	ReadMcpResourceNotFoundSchema,
+	ReadMcpResourceSuccessSchema,
 	ReadRejectedSchema,
 	ReadResultSchema,
 	ReadSuccessSchema,
@@ -1533,21 +1539,84 @@ async function handleExecServerMessage(
 			return;
 		}
 		case "listMcpResourcesExecArgs": {
-			// This client hosts no MCP servers, so it exposes no resources. An
-			// unset-oneof `ListMcpResourcesExecResult` would read as "the call
-			// produced nothing"; an explicit empty success says "asked, none exist".
-			const execResult = create(ListMcpResourcesExecResultSchema, {
-				result: { case: "success", value: create(ListMcpResourcesSuccessSchema, { resources: [] }) },
-			});
+			// A host holding live MCP connections answers from them; without a
+			// handler the honest answer is an explicit empty success. An
+			// unset-oneof result would read as "the call produced nothing".
+			const args = execMsg.message.value;
+			let execResult: ListMcpResourcesExecResult;
+			try {
+				const resources = (await execHandlers?.listMcpResources?.({ server: args.server })) ?? [];
+				execResult = create(ListMcpResourcesExecResultSchema, {
+					result: {
+						case: "success",
+						value: create(ListMcpResourcesSuccessSchema, {
+							resources: resources.map(resource =>
+								create(ListMcpResourcesExecResult_McpResourceSchema, {
+									uri: resource.uri,
+									name: resource.name,
+									description: resource.description,
+									mimeType: resource.mimeType,
+									server: resource.server,
+								}),
+							),
+						}),
+					},
+				});
+			} catch (error) {
+				execResult = create(ListMcpResourcesExecResultSchema, {
+					result: {
+						case: "error",
+						value: create(ListMcpResourcesErrorSchema, {
+							error: error instanceof Error ? error.message : String(error),
+						}),
+					},
+				});
+			}
 			sendExecClientMessage(h2Request, execMsg, "listMcpResourcesExecResult", execResult);
 			return;
 		}
 		case "readMcpResourceExecArgs": {
 			const args = execMsg.message.value;
-			// No resources are advertised, so every uri is genuinely not found.
-			const execResult = create(ReadMcpResourceExecResultSchema, {
-				result: { case: "notFound", value: create(ReadMcpResourceNotFoundSchema, { uri: args.uri }) },
-			});
+			let execResult: ReadMcpResourceExecResult;
+			try {
+				// `null` is the handler's "no such server or uri", which is exactly
+				// `not_found`; a throw is a real failure and must not masquerade as
+				// a missing resource.
+				const content = await execHandlers?.readMcpResource?.({ server: args.server, uri: args.uri });
+				execResult = content
+					? create(ReadMcpResourceExecResultSchema, {
+							result: {
+								case: "success",
+								value: create(ReadMcpResourceSuccessSchema, {
+									uri: content.uri,
+									name: content.name,
+									description: content.description,
+									mimeType: content.mimeType,
+									// The wire's content oneof carries one of the two; text
+									// wins when a host supplies both.
+									content:
+										content.text !== undefined
+											? { case: "text", value: content.text }
+											: content.blob !== undefined
+												? { case: "blob", value: content.blob }
+												: { case: undefined },
+								}),
+							},
+						})
+					: create(ReadMcpResourceExecResultSchema, {
+							result: { case: "notFound", value: create(ReadMcpResourceNotFoundSchema, { uri: args.uri }) },
+						});
+			} catch (error) {
+				execResult = create(ReadMcpResourceExecResultSchema, {
+					result: {
+						case: "error",
+						value: create(ReadMcpResourceErrorSchema, {
+							uri: args.uri,
+							error: error instanceof Error ? error.message : String(error),
+						}),
+					},
+				});
+			}
 			sendExecClientMessage(h2Request, execMsg, "readMcpResourceExecResult", execResult);
 			return;
 		}

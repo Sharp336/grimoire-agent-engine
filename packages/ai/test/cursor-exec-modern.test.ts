@@ -518,6 +518,123 @@ describe("Cursor modern exec frames: no answer carries an unset oneof", () => {
 	});
 });
 
+describe("Cursor MCP resource frames answer from the host's servers", () => {
+	it("returns the resources the host advertises, with their server names", async () => {
+		// The empty catalog above is the no-handler fallback. A host holding live
+		// MCP connections must answer from them, or its resources are invisible
+		// to Cursor even though the same session is connected to the servers.
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "listMcpResourcesExecArgs", value: create(ListMcpResourcesExecArgsSchema, {}) }),
+			{
+				execHandlers: {
+					listMcpResources: async () => [
+						{ uri: "docs://readme", name: "README", mimeType: "text/markdown", server: "docs" },
+					],
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "listMcpResourcesExecResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.resources).toHaveLength(1);
+		const [resource] = answer.value.result.value.resources;
+		expect(resource.uri).toBe("docs://readme");
+		// Cursor addresses the follow-up read by this name.
+		expect(resource.server).toBe("docs");
+		expect(resource.mimeType).toBe("text/markdown");
+	});
+
+	it("passes the frame's server filter through to the host", async () => {
+		let sawFilter: string | undefined;
+		await dispatchExec(
+			buildExecMessage({
+				case: "listMcpResourcesExecArgs",
+				value: create(ListMcpResourcesExecArgsSchema, { server: "issues" }),
+			}),
+			{
+				execHandlers: {
+					listMcpResources: async ({ server }) => {
+						sawFilter = server;
+						return [];
+					},
+				},
+			},
+		);
+		expect(sawFilter).toBe("issues");
+	});
+
+	it("answers a read with the host's text content", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, { server: "docs", uri: "docs://readme" }),
+			}),
+			{
+				execHandlers: {
+					readMcpResource: async ({ uri }) => ({ uri, mimeType: "text/markdown", text: "# Title" }),
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "readMcpResourceExecResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.content).toEqual({ case: "text", value: "# Title" });
+	});
+
+	it("distinguishes a missing resource from a failing host", async () => {
+		// `null` is "no such server or uri", which is `not_found`. A throw is a
+		// real failure and must not masquerade as a missing resource — the model
+		// would retry a different uri instead of surfacing the fault.
+		const missing = await dispatchExec(
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, { server: "docs", uri: "docs://gone" }),
+			}),
+			{ execHandlers: { readMcpResource: async () => null } },
+		);
+		const missingAnswer = soleResult(missing.frames);
+		if (missingAnswer.case !== "readMcpResourceExecResult") throw new Error(`got ${missingAnswer.case}`);
+		expect(missingAnswer.value.result.case).toBe("notFound");
+
+		const broken = await dispatchExec(
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, { server: "docs", uri: "docs://readme" }),
+			}),
+			{
+				execHandlers: {
+					readMcpResource: async () => {
+						throw new Error("server disconnected");
+					},
+				},
+			},
+		);
+		const brokenAnswer = soleResult(broken.frames);
+		if (brokenAnswer.case !== "readMcpResourceExecResult") throw new Error(`got ${brokenAnswer.case}`);
+		if (brokenAnswer.value.result.case !== "error") throw new Error(`got ${brokenAnswer.value.result.case}`);
+		expect(brokenAnswer.value.result.value.error).toContain("server disconnected");
+	});
+
+	it("reports a failing list as an error, not an empty catalog", async () => {
+		// An empty success says "asked, none exist" — a lie when the lookup
+		// failed, and one the model cannot retry.
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "listMcpResourcesExecArgs", value: create(ListMcpResourcesExecArgsSchema, {}) }),
+			{
+				execHandlers: {
+					listMcpResources: async () => {
+						throw new Error("registry unavailable");
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "listMcpResourcesExecResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "error") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.error).toContain("registry unavailable");
+	});
+});
+
 describe("Cursor modern exec frames: status and precheck answers", () => {
 	it("reports NOT_FOUND for force-background requests, since nothing runs in the background", async () => {
 		const shell = await dispatchExec(

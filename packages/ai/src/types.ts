@@ -1018,6 +1018,31 @@ export interface CursorPiCall<TArgs> {
 	toolCallId: string;
 }
 
+/** One resource a host's MCP servers advertise. */
+export interface CursorMcpResource {
+	uri: string;
+	name?: string;
+	description?: string;
+	mimeType?: string;
+	/** The server advertising it; Cursor addresses reads by this name. */
+	server: string;
+}
+
+/**
+ * The content of one resource read.
+ *
+ * `text` and `blob` are the wire's content oneof: exactly one is sent, with
+ * `text` winning when a host supplies both.
+ */
+export interface CursorMcpResourceContent {
+	uri: string;
+	name?: string;
+	description?: string;
+	mimeType?: string;
+	text?: string;
+	blob?: Uint8Array;
+}
+
 export interface CursorExecHandlers {
 	read?: (args: ReadArgs) => Promise<CursorExecHandlerResult<ReadResult>>;
 	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
@@ -1043,6 +1068,17 @@ export interface CursorExecHandlers {
 	piGrep?: (call: CursorPiCall<PiGrepExecArgs>) => Promise<CursorExecHandlerResult<PiGrepExecResult>>;
 	piFind?: (call: CursorPiCall<PiFindExecArgs>) => Promise<CursorExecHandlerResult<PiFindExecResult>>;
 	piLs?: (call: CursorPiCall<PiLsExecArgs>) => Promise<CursorExecHandlerResult<PiLsExecResult>>;
+	/**
+	 * The resources the host's MCP servers advertise, optionally filtered to one
+	 * server. Without a handler the provider answers an empty catalog, which
+	 * hides resources a host is in fact holding live connections to.
+	 */
+	listMcpResources?: (args: { server?: string }) => Promise<CursorMcpResource[]>;
+	/**
+	 * Read one resource. `null` means the server or uri is genuinely unknown,
+	 * which the provider answers as `not_found`; throwing surfaces as `error`.
+	 */
+	readMcpResource?: (args: { server: string; uri: string }) => Promise<CursorMcpResourceContent | null>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
 	onToolResult?: CursorToolResultHandler;
