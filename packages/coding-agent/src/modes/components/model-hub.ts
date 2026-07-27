@@ -12,7 +12,6 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import {
 	type Component,
@@ -28,10 +27,21 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
-import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
+import {
+	formatModelSelectorValue,
+	type ModelRoleLookup,
+	type ResolvedModelRoleValue,
+	resolveModelRoleValue,
+} from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import { parseRetryFallbackSelector, type RetryFallbackSelector } from "../../session/retry-fallback-chains";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	getConfiguredThinkingLevelsForModel,
+} from "../../thinking";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
@@ -135,6 +145,7 @@ type StripState =
 			index: number;
 			/** Where to land when a scope or thinking strip closes. */
 			returnToRoles: boolean;
+			fallbackTarget?: { role: string; index: number | null };
 	  }
 	| {
 			/** Footer text input naming a new custom role. */
@@ -754,7 +765,7 @@ export class ModelHubComponent implements Component {
 			} else if (target.kind === "fallbackKey") {
 				this.#openFallbackKeyStrip(item);
 			} else {
-				this.#commitFallback(item, target);
+				this.#openThinkingStrip(item, target.role, true, undefined, target);
 			}
 			return;
 		}
@@ -814,7 +825,7 @@ export class ModelHubComponent implements Component {
 	}
 
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
-		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+		return getConfiguredThinkingLevelsForModel(model);
 	}
 
 	#openRoleStrip(item: ModelBrowserItem): void {
@@ -873,12 +884,33 @@ export class ModelHubComponent implements Component {
 		role: string,
 		returnToRoles: boolean,
 		scope?: ModelRoleSelectionScope,
+		fallbackTarget?: { role: string; index: number | null },
 	): void {
-		const options = this.#thinkingOptionsFor(item.model);
-		const current =
-			this.#settings.get("modelRoleStorage") === "project" && scope !== undefined
-				? this.#thinkingLevelForScope(role, scope)
-				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit);
+		const options = fallbackTarget
+			? this.#thinkingOptionsFor(item.model).filter(level => {
+					if (level === AUTO_THINKING) return false;
+					if (level === ThinkingLevel.Inherit) return true;
+					return (
+						this.#parseFallbackSelector(formatModelSelectorValue(item.selector, level))?.thinkingLevel !==
+						undefined
+					);
+				})
+			: this.#thinkingOptionsFor(item.model);
+		let current: ConfiguredThinkingLevel;
+		if (fallbackTarget) {
+			const selector =
+				fallbackTarget.index === null
+					? undefined
+					: this.#fallbackChains()[fallbackTarget.role]?.[fallbackTarget.index];
+			current = selector
+				? (this.#parseFallbackSelector(selector)?.thinkingLevel ?? ThinkingLevel.Inherit)
+				: ThinkingLevel.Inherit;
+		} else {
+			current =
+				this.#settings.get("modelRoleStorage") === "project" && scope !== undefined
+					? this.#thinkingLevelForScope(role, scope)
+					: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit);
+		}
 		const chips: StripChip[] = options.map(level => {
 			const label = getConfiguredThinkingLevelMetadata(level).label;
 			const glyph = thinkingLevelGlyph(level);
@@ -898,6 +930,7 @@ export class ModelHubComponent implements Component {
 			chips,
 			index: preselect >= 0 ? preselect : 0,
 			returnToRoles,
+			fallbackTarget,
 		};
 	}
 
@@ -935,8 +968,8 @@ export class ModelHubComponent implements Component {
 				this.#closeStrip();
 				return;
 			case "fallback":
-				this.#appendFallback(strip.item, "default");
-				this.#closeStrip();
+				this.#strip = null;
+				this.#openThinkingStrip(strip.item, "default", true, undefined, { role: "default", index: null });
 				return;
 			case "fallbackModel":
 				this.#closeStrip();
@@ -953,15 +986,19 @@ export class ModelHubComponent implements Component {
 				}
 				return;
 			case "thinking":
-				if (strip.role && chip.thinkingLevel !== undefined) {
-					this.#callbacks.onAssign(
-						strip.item.model,
-						strip.role,
-						chip.thinkingLevel,
-						strip.item.selector,
-						strip.scope,
-					);
-					this.#refreshAfterMutation();
+				if (chip.thinkingLevel !== undefined) {
+					if (strip.fallbackTarget) {
+						this.#commitFallback(strip.item, strip.fallbackTarget, chip.thinkingLevel);
+					} else if (strip.role) {
+						this.#callbacks.onAssign(
+							strip.item.model,
+							strip.role,
+							chip.thinkingLevel,
+							strip.item.selector,
+							strip.scope,
+						);
+						this.#refreshAfterMutation();
+					}
 				}
 				this.#closeStrip();
 				return;
@@ -981,6 +1018,14 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
+	#parseFallbackSelector(selector: string): RetryFallbackSelector | undefined {
+		return parseRetryFallbackSelector(selector, {
+			find: (provider, id) =>
+				this.#availableItems.find(item => item.model.provider === provider && item.model.id === id)?.model ??
+				this.#registry.getAll().find(model => model.provider === provider && model.id === id),
+		});
+	}
+
 	/** Browse the catalog to fill a fallback-chain slot: `index` replaces an entry, `null` appends. */
 	#startAssignFallback(role: string, index: number | null): void {
 		this.#assigning = { kind: "fallback", role, index };
@@ -990,7 +1035,10 @@ export class ModelHubComponent implements Component {
 		this.#browser.setQuery("");
 		if (index !== null) {
 			const selector = this.#fallbackChains()[role]?.[index];
-			if (selector) this.#browser.selectSelector(selector);
+			if (selector) {
+				const parsed = this.#parseFallbackSelector(selector);
+				this.#browser.selectSelector(parsed ? `${parsed.provider}/${parsed.id}` : selector);
+			}
 		}
 	}
 
@@ -1020,17 +1068,33 @@ export class ModelHubComponent implements Component {
 		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
 	}
 
-	/** Write the picked model into the target chain slot, dedupe, and land back on its Roles row. */
-	#commitFallback(item: ModelBrowserItem, target: { role: string; index: number | null }): void {
+	/** Write the picked model and thinking level into the target chain slot, dedupe, and land back on its Roles row. */
+	#commitFallback(
+		item: ModelBrowserItem,
+		target: { role: string; index: number | null },
+		thinkingLevel: ConfiguredThinkingLevel,
+	): void {
 		const chain = [...(this.#fallbackChains()[target.role] ?? [])];
-		const selector = item.selector;
+		const selector = formatModelSelectorValue(item.selector, thinkingLevel);
+		const matchesItem = (entry: string): boolean => {
+			const parsed = this.#parseFallbackSelector(entry);
+			return parsed?.provider === item.model.provider && parsed.id === item.model.id;
+		};
 		if (target.index !== null && target.index < chain.length) {
 			chain[target.index] = selector;
 			for (let i = chain.length - 1; i >= 0; i--) {
-				if (i !== target.index && chain[i] === selector) chain.splice(i, 1);
+				if (i !== target.index && matchesItem(chain[i] ?? "")) chain.splice(i, 1);
 			}
-		} else if (!chain.includes(selector)) {
-			chain.push(selector);
+		} else {
+			const existingIndex = chain.findIndex(matchesItem);
+			if (existingIndex >= 0) {
+				chain[existingIndex] = selector;
+				for (let i = chain.length - 1; i >= 0; i--) {
+					if (i !== existingIndex && matchesItem(chain[i] ?? "")) chain.splice(i, 1);
+				}
+			} else {
+				chain.push(selector);
+			}
 		}
 		this.#setFallbackChain(target.role, chain);
 		this.#browser.setQuery("");
@@ -1046,14 +1110,6 @@ export class ModelHubComponent implements Component {
 	#setFallbackChain(role: string, chain: string[]): void {
 		this.#callbacks.onFallbackChainChange?.(role, chain);
 		this.#refreshAfterMutation();
-	}
-
-	/** Append `item` to `role`'s fallback chain (no-op when already present). */
-	#appendFallback(item: ModelBrowserItem, role: string): void {
-		const chain = [...(this.#fallbackChains()[role] ?? [])];
-		if (chain.includes(item.selector)) return;
-		chain.push(item.selector);
-		this.#setFallbackChain(role, chain);
 	}
 
 	/** Remove one chain entry; the cursor stays on the nearest surviving row. */
@@ -1636,6 +1692,20 @@ export class ModelHubComponent implements Component {
 	}
 
 	#statusRow(width: number): string {
+		const thinkingStrip = this.#strip?.kind === "thinking" ? this.#strip : undefined;
+		if (thinkingStrip) {
+			let subject: string;
+			if (thinkingStrip.fallbackTarget) {
+				subject = `fallback · ${thinkingStrip.item.id}`;
+			} else {
+				const role = getRoleInfo(thinkingStrip.role ?? "", this.#settings);
+				subject = `${theme.bold(role.tag ?? role.name ?? thinkingStrip.role ?? "")} · ${thinkingStrip.item.id}`;
+			}
+			return truncateToWidth(
+				theme.fg("accent", ` Final step · ↑/↓ choose · Enter apply · Esc back · ${subject}`),
+				width,
+			);
+		}
 		if (this.#assigning !== null) {
 			if (this.#assigning.kind === "fallbackKey") {
 				return truncateToWidth(
@@ -1920,7 +1990,7 @@ export class ModelHubComponent implements Component {
 			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
 		}
 
-		const prefix =
+		const rawPrefix =
 			strip.kind === "role"
 				? `${theme.fg("accent", strip.item.id)}${theme.fg("dim", " →")} `
 				: `${theme.fg(getRoleInfo(strip.role ?? "", this.#settings).color ?? "muted", (getRoleInfo(strip.role ?? "", this.#settings).tag ?? strip.role ?? "").toLowerCase())}${theme.fg("dim", ` · ${strip.item.id} →`)} `;
@@ -1928,11 +1998,13 @@ export class ModelHubComponent implements Component {
 		// Horizontal window: once the strip overflows, drop leading chips behind
 		// a dim ellipsis so the selected chip (plus one chip of lookahead when it
 		// fits) stays visible while cycling right.
-		const prefixWidth = visibleWidth(prefix);
-		const available = Math.max(1, width - prefixWidth);
 		const chipWidths = strip.chips.map(
 			(chip, i) => visibleWidth(` ${chip.styled} `) + (i === strip.index ? 2 : 0) + 1,
 		);
+		const selectedChipWidth = chipWidths[strip.index] ?? 1;
+		const prefix = truncateToWidth(rawPrefix, Math.max(0, width - selectedChipWidth - (strip.index > 0 ? 2 : 0)));
+		const prefixWidth = visibleWidth(prefix);
+		const available = Math.max(1, width - prefixWidth);
 		// Smallest start index whose window [start..target] (with its "… " lead-in
 		// when start > 0) fits in the available width; `target` itself may still
 		// overflow when a single chip is wider than the row.

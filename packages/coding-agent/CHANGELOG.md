@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit model-aware thinking-level selection to `/switch` and `/models` fallback assignments, with visible sequential-step controls and persisted fallback effort suffixes.
+
 ## [17.1.4] - 2026-07-26
 
 ### Added

@@ -209,6 +209,11 @@ export function getConfiguredThinkingLevelMetadata(level: ConfiguredThinkingLeve
 	return level === AUTO_THINKING ? AUTO_THINKING_METADATA : getThinkingLevelMetadata(level);
 }
 
+/** Thinking choices shown after selecting a model, ordered from inherited policy to explicit effort. */
+export function getConfiguredThinkingLevelsForModel(model: Model): ConfiguredThinkingLevel[] {
+	return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+}
+
 /**
  * Thinking selectors accepted by the `--thinking` CLI flag, in display order:
  * `off`, every concrete effort (`minimal`..`max`), then `auto`. Single source

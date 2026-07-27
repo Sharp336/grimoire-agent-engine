@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, type Mock, test, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -29,6 +30,14 @@ function makeModel(provider: string, id: string, contextWindow = 128_000): Model
 	});
 }
 
+function makeReasoningModel(provider: string, id: string, contextWindow = 128_000): Model {
+	return {
+		...makeModel(provider, id, contextWindow),
+		reasoning: true,
+		thinking: { mode: "effort", efforts: [ThinkingLevel.Low, ThinkingLevel.High] },
+	};
+}
+
 let testTheme = await getThemeByName("dark");
 
 function installTestTheme(): void {
@@ -44,7 +53,7 @@ interface RegistryOverrides {
 
 interface PickerHarness {
 	picker: ModelPickerComponent;
-	onPick: Mock<(model: Model, selector: string) => void>;
+	onPick: Mock<(model: Model, selector: string, thinkingLevel: ThinkingLevel) => void>;
 	onPickRole: Mock<(entry: ResolvedRoleModel) => void>;
 	onCancel: Mock<() => void>;
 }
@@ -103,7 +112,7 @@ describe("ModelPicker", () => {
 		const rendered = normalize(picker.render(220));
 		expect(rendered).toContain("a-small");
 		expect(rendered).toContain("context>4.1k");
-		expect(rendered).toContain("Session-only switch");
+		expect(rendered).toContain("Step 1 of 2");
 
 		picker.handleInput("\n");
 		expect(onPick).toHaveBeenCalledTimes(1);
@@ -148,7 +157,11 @@ describe("ModelPicker", () => {
 	});
 
 	test("highlights and preselects the session's current model", () => {
-		const models = [makeModel("test", "aa-model"), makeModel("test", "bb-model"), makeModel("test", "cc-model")];
+		const models = [
+			makeReasoningModel("test", "aa-model"),
+			makeReasoningModel("test", "bb-model"),
+			makeReasoningModel("test", "cc-model"),
+		];
 		const { picker, onPick } = createPicker({
 			models,
 			scoped: true,
@@ -158,9 +171,51 @@ describe("ModelPicker", () => {
 		// The detail block tags the selected (= current) model.
 		expect(normalize(picker.render(220))).toContain("current");
 
-		// Enter without navigation picks the preselected current model.
+		// Enter opens thinking selection without losing the preselected current model.
+		picker.handleInput("\n");
+		expect(onPick).not.toHaveBeenCalled();
+		expect(normalize(picker.render(220))).toContain("2/2 · ↑/↓ · Enter apply · Esc back · bb-model");
 		picker.handleInput("\n");
 		expect(onPick.mock.calls[0]?.[0]?.id).toBe("bb-model");
+	});
+
+	test("selects thinking immediately after the model and Esc returns to models", () => {
+		const model = makeReasoningModel("test", "thinking-model");
+		const { picker, onPick } = createPicker({ models: [model], scoped: true });
+
+		picker.handleInput("\n");
+		expect(normalize(picker.render(220))).toContain("[ inherit ] off auto");
+		picker.handleInput(DOWN);
+		picker.handleInput("\n");
+		expect(onPick).toHaveBeenCalledWith(model, "test/thinking-model", ThinkingLevel.Off);
+
+		const second = createPicker({ models: [model], scoped: true });
+		second.picker.handleInput("\n");
+		second.picker.handleInput(ESC);
+		expect(second.onPick).not.toHaveBeenCalled();
+		expect(second.onCancel).not.toHaveBeenCalled();
+		expect(normalize(second.picker.render(220))).toContain("Step 1 of 2");
+	});
+
+	test("applies a non-reasoning model without opening an empty thinking step", () => {
+		const model = makeModel("test", "non-reasoning-model");
+		const { picker, onPick } = createPicker({ models: [model], scoped: true });
+
+		picker.handleInput("\n");
+
+		expect(onPick).toHaveBeenCalledWith(model, "test/non-reasoning-model", ThinkingLevel.Inherit);
+		expect(normalize(picker.render(220))).not.toContain("2/2");
+	});
+
+	test("keeps the selected thinking choice visible beside a long model id on narrow terminals", () => {
+		const model = makeReasoningModel("test", "a-very-long-model-id-that-fills-the-picker-footer");
+		const { picker } = createPicker({ models: [model], scoped: true });
+
+		picker.handleInput("\n");
+		picker.handleInput(DOWN);
+		const rendered = normalize(picker.render(50));
+		expect(rendered).toContain("2/2 · ↑/↓ · Enter apply · Esc back");
+		expect(rendered).toContain("[ off ]");
 	});
 
 	test("shows and applies ctrl+p quick roles when search starts with @", () => {

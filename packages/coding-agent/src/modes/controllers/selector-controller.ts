@@ -684,11 +684,10 @@ export class SelectorController {
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{
-				onPick: async (model, selector) => {
+				onPick: async (model, selector, thinkingLevel) => {
 					try {
 						// Session-only: update agent state but don't persist the model to settings.
-						const roleThinkingLevel = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
-						await this.ctx.session.setModelTemporary(model, roleThinkingLevel);
+						await this.ctx.session.setModelTemporary(model, thinkingLevel);
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
@@ -722,6 +721,7 @@ export class SelectorController {
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
+				thinkingLevelForModel: model => this.ctx.session.resolveTemporaryModelThinkingLevel(model),
 			},
 		);
 		overlayHandle = this.ctx.ui.showOverlay(picker, {

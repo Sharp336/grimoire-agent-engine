@@ -382,6 +382,7 @@ describe("ModelHub", () => {
 			expect(thinking).toContain("inherit");
 			expect(thinking).toContain("xhigh");
 			expect(thinking).not.toContain("max");
+			expect(normalize(hub.render(80))).toContain("↑/↓ choose · Enter apply · Esc back");
 		});
 		test("project storage exposes project and global role actions with callback scopes", () => {
 			const model = makeModel("test", "scoped-role-model");
@@ -592,7 +593,7 @@ describe("ModelHub", () => {
 			expect(footerLine(hub.render(220))).not.toContain("inherit");
 		});
 
-		test("retry-fallback chip appends the model to the default chain without a thinking strip", () => {
+		test("retry-fallback chip appends the model with an explicit thinking level", () => {
 			const model = makeModel("test", "retry-fallback-model");
 			const { hub, onAssign, onFallbackChainChange } = createHub({ models: [model], scoped: true });
 			installTestTheme();
@@ -601,15 +602,20 @@ describe("ModelHub", () => {
 			hub.handleInput(LEFT); // wraps to the trailing retry-fallback chip
 			hub.handleInput("\n");
 
-			expect(onFallbackChainChange).toHaveBeenCalledWith("default", ["test/retry-fallback-model"]);
-			expect(onAssign).not.toHaveBeenCalled();
-			expect(footerLine(hub.render(220))).not.toContain("inherit");
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+			const thinking = normalize(hub.render(220));
+			expect(thinking).toContain("Final step");
+			expect(thinking).toContain("fallback · retry-fallback-model");
+			expect(footerLine(hub.render(220))).toContain("inherit");
+			expect(footerLine(hub.render(220))).toContain("off");
+			expect(footerLine(hub.render(220))).not.toContain("auto");
+			expect(footerLine(hub.render(50))).toContain("[ inherit ]");
 
-			// A second registration of the same model is a no-op, not a duplicate.
+			hub.handleInput(DOWN); // inherit → off
 			hub.handleInput("\n");
-			hub.handleInput(LEFT);
-			hub.handleInput("\n");
-			expect(onFallbackChainChange).toHaveBeenCalledTimes(1);
+			expect(onFallbackChainChange).toHaveBeenCalledWith("default", ["test/retry-fallback-model:off"]);
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(normalize(hub.render(220))).toContain("↳ test/retry-fallback-model:off");
 		});
 
 		test("overflowing role strip scrolls left so the selected chip stays visible", () => {
@@ -655,7 +661,7 @@ describe("ModelHub", () => {
 			expect(rendered).toContain("↳ test/model-b");
 		});
 
-		test("f on a role opens fallback assignment and Enter appends the picked model", () => {
+		test("f on a role selects fallback thinking before appending the model", () => {
 			const a = makeModel("test", "model-a");
 			const settings = Settings.isolated({});
 			const { hub, onFallbackChainChange, onAssign } = createHub({ models: [a], scoped: true, settings });
@@ -665,8 +671,11 @@ describe("ModelHub", () => {
 			expect(normalize(hub.render(220))).toContain("Adding fallback for");
 
 			hub.handleInput("\n"); // pick the only model
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+			expect(normalize(hub.render(220))).toContain("Final step");
+			hub.handleInput("\n"); // inherit preserves the primary thinking level
 			expect(onFallbackChainChange).toHaveBeenCalledWith("default", ["test/model-a"]);
-			expect(onAssign).not.toHaveBeenCalled(); // no role assignment, no thinking strip
+			expect(onAssign).not.toHaveBeenCalled();
 			expect(normalize(hub.render(220))).toContain("↳ test/model-a");
 		});
 
@@ -684,11 +693,95 @@ describe("ModelHub", () => {
 			expect(normalize(hub.render(220))).toContain("Replacing fallback of");
 			for (const ch of "model-b") hub.handleInput(ch); // search: arrows hop scopes in assign mode
 			hub.handleInput("\n");
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+			hub.handleInput("\n"); // preserve thinking for the replacement
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-b"]);
 
 			hub.handleInput("x"); // cursor landed on the replaced entry — remove it
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", []);
 			expect(normalize(hub.render(220))).not.toContain("↳");
+		});
+
+		test("editing a fallback preselects and preserves its configured thinking level", () => {
+			const model = makeModel("test", "model-a");
+			const settings = Settings.isolated({
+				"retry.fallbackChains": { default: ["test/model-a:off"] },
+			});
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → model-a:off
+			hub.handleInput("\n"); // replace this entry
+			hub.handleInput("\n"); // pick the preselected model
+			expect(footerLine(hub.render(220))).toContain("[ ⦸ off ]");
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a:off"]);
+		});
+
+		test("appending removes every duplicate of the same fallback model regardless of thinking suffix", () => {
+			const model = makeModel("test", "model-a");
+			const settings = Settings.isolated({
+				"retry.fallbackChains": { default: ["test/model-a:off", "test/model-a:high"] },
+			});
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+
+			hub.handleInput("\n");
+			hub.handleInput(LEFT); // retry-fallback
+			hub.handleInput("\n");
+			hub.handleInput(DOWN); // inherit → off
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a:off"]);
+		});
+
+		test("omits ambiguous effort choices that collide with a literal model id in the full registry", () => {
+			const base = buildModel({
+				id: "router",
+				name: "router",
+				api: "ollama-chat",
+				provider: "test",
+				baseUrl: "https://example.com",
+				reasoning: true,
+				thinking: { mode: "effort", efforts: [ThinkingLevel.Low, ThinkingLevel.High] },
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 1024,
+			});
+			const literal = makeModel("test", "router:low");
+			const { hub, onFallbackChainChange } = createHub({
+				models: [base],
+				scoped: true,
+				registry: { getAll: () => [base, literal] },
+			});
+
+			hub.handleInput("\n");
+			hub.handleInput(LEFT);
+			hub.handleInput("\n");
+			const footer = footerLine(hub.render(220));
+			expect(footer).not.toContain("◔ low");
+			expect(footer).toContain("◒ high");
+			hub.handleInput(DOWN); // inherit → off
+			hub.handleInput(DOWN); // off → high (low is omitted)
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/router:high"]);
+		});
+
+		test("editing an exact literal suffixed model id does not reinterpret it as fallback thinking", () => {
+			const base = makeModel("test", "router");
+			const literal = makeModel("test", "router:low");
+			const settings = Settings.isolated({
+				"retry.fallbackChains": { default: ["test/router:low"] },
+			});
+			const { hub, onFallbackChainChange } = createHub({ models: [base, literal], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → literal router:low fallback
+			hub.handleInput("\n");
+			hub.handleInput("\n"); // pick the exact preselected literal model
+			expect(normalize(hub.render(220))).toContain("fallback · router:low");
+			expect(footerLine(hub.render(220))).toContain("[ inherit ]");
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/router:low"]);
 		});
 
 		test("] moves a chain entry later and the cursor follows it", () => {
@@ -740,6 +833,7 @@ describe("ModelHub", () => {
 
 			for (const ch of "model-b") hub.handleInput(ch);
 			hub.handleInput("\n");
+			hub.handleInput("\n"); // preserve thinking for the fallback
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("test/model-a", ["test/model-b"]);
 			const rendered = normalize(hub.render(220));
 			expect(rendered).toContain("test/model-a");
@@ -760,6 +854,7 @@ describe("ModelHub", () => {
 
 			for (const ch of "model-b") hub.handleInput(ch);
 			hub.handleInput("\n");
+			hub.handleInput("\n"); // preserve thinking for the fallback
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("test/*", ["test/model-b"]);
 		});
 
@@ -783,6 +878,7 @@ describe("ModelHub", () => {
 			expect(normalize(hub.render(220))).toContain("Adding fallback for test/model-a");
 			for (const ch of "model-b") hub.handleInput(ch);
 			hub.handleInput("\n");
+			hub.handleInput("\n"); // preserve thinking for the fallback
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("test/model-a", ["test/model-b"]);
 		});
 
