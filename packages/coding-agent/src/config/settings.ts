@@ -553,6 +553,9 @@ export class Settings {
 		if (path === "modelRoles") {
 			modelRolesSignal.fire();
 		}
+		if (path === "commands.priorityOverrides") {
+			commandPriorityOverridesSignal.fire();
+		}
 	}
 
 	/** Set once this instance is discarded; background saves become no-ops. */
@@ -1800,6 +1803,28 @@ export class Settings {
 				: undefined,
 		);
 
+		// Sanitize commands.priorityOverrides: keep only finite numeric values
+		// so malformed user edits can't break autocomplete scoring.
+		const priorityOverrides = raw.commands as Record<string, unknown> | undefined;
+		if (priorityOverrides && isRecord(priorityOverrides.priorityOverrides)) {
+			const sanitized: Record<string, number> = {};
+			for (const [key, value] of Object.entries(priorityOverrides.priorityOverrides)) {
+				if (typeof value === "number" && Number.isFinite(value)) {
+					sanitized[key] = value;
+				}
+			}
+			priorityOverrides.priorityOverrides = sanitized;
+		}
+		if (isRecord(raw["commands.priorityOverrides"])) {
+			const sanitized: Record<string, number> = {};
+			for (const [key, value] of Object.entries(raw["commands.priorityOverrides"])) {
+				if (typeof value === "number" && Number.isFinite(value)) {
+					sanitized[key] = value;
+				}
+			}
+			raw["commands.priorityOverrides"] = sanitized;
+		}
+
 		return raw;
 	}
 
@@ -2228,6 +2253,16 @@ const appendOnlyModeSignal = new SettingSignal<[value: string]>("provider.append
  * can register independently without overwriting each other.
  */
 export const onAppendOnlyModeChanged = (cb: (value: string) => void) => appendOnlyModeSignal.on(cb);
+
+/** Fires when any `commands.priorityOverrides` value changes at runtime. */
+const commandPriorityOverridesSignal = new SettingSignal("command priority overrides");
+
+/**
+ * Subscribe to slash-command priority override changes. The callback receives
+ * no arguments; callers should re-read `settings.get("commands.priorityOverrides")`.
+ * Returns an unsubscribe function.
+ */
+export const onCommandPriorityOverridesChanged = (cb: () => void) => commandPriorityOverridesSignal.on(cb);
 
 /** Fires when any model role changes at runtime. */
 const modelRolesSignal = new SettingSignal("modelRoles");

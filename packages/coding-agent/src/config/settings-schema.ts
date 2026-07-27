@@ -4751,13 +4751,13 @@ export const SETTINGS_SCHEMA = {
 
 	"commands.priorityOverrides": {
 		type: "record",
-		default: { exit: 10 } as Record<string, number>,
+		default: {} as Record<string, number>,
 		ui: {
 			tab: "tasks",
 			group: "Commands & Skills",
 			label: "Slash Command Priority Overrides",
 			description:
-				"Numeric priority boosts for slash-command autocomplete. Higher values rank a command before others that share the same prefix. Keys match command names or aliases.",
+				"Numeric priority boosts for slash-command autocomplete (0-99). Higher values rank a command before others that share the same prefix. Keys match command names or aliases.",
 		},
 	},
 

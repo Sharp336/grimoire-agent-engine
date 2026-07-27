@@ -315,7 +315,8 @@ function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: str
 				return fullDescMemo;
 			};
 			let best: (AutocompleteItem & { score: number }) | undefined;
-			const priorityBoost = "priority" in cmd && typeof cmd.priority === "number" ? cmd.priority : 0;
+			const rawPriorityBoost = "priority" in cmd && typeof cmd.priority === "number" ? cmd.priority : 0;
+			const priorityBoost = Number.isFinite(rawPriorityBoost) ? Math.max(0, Math.min(99, rawPriorityBoost)) : 0;
 
 			const isSkillCommand = name.startsWith("skill:");
 			const nameScore =
@@ -323,7 +324,8 @@ function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: str
 			const lowerDesc = staticDesc.toLowerCase();
 			const descScore =
 				lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
-			const primaryScore = Math.max(nameScore, descScore) + priorityBoost;
+			const textualScore = Math.max(nameScore, descScore);
+			const primaryScore = textualScore > 0 ? textualScore + priorityBoost : 0;
 			if (primaryScore > 0) {
 				const fullDesc = resolveFullDesc();
 				best = {
@@ -337,7 +339,8 @@ function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: str
 			if (lowerPrefix.length > 0) {
 				for (const alias of getCommandAliases(cmd)) {
 					if (alias === name) continue;
-					const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase()) + priorityBoost;
+					const aliasTextualScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
+					const aliasScore = aliasTextualScore > 0 ? aliasTextualScore + priorityBoost : 0;
 					if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
 					const fullDesc = resolveFullDesc();
 					best = {
