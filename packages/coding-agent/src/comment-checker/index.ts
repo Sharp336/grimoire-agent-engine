@@ -173,18 +173,27 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 export const createCommentCheckerExtension: ExtensionFactory = api => {
 	const store = new SelfHealStore();
 	let state: CommentCheckerUiState = { status: "idle", checkedFiles: [], warnings: [] };
+	let cachedBinaryPath: string | undefined | null = null; // null = not yet resolved
 
 	const setState = (ctx: ExtensionContext, nextState: CommentCheckerUiState): void => {
 		state = nextState;
 		syncUi(ctx, state);
 	};
 
+	const getCachedBinary = (): string | undefined => {
+		if (cachedBinaryPath === null) {
+			cachedBinaryPath = resolveCommentCheckerBinary();
+		}
+		return cachedBinaryPath;
+	};
+
 	api.on("session_start", async (_event, ctx) => {
 		store.clear();
+		cachedBinaryPath = null;
 		if (!Settings.instance.get("commentChecker.enabled")) {
 			return;
 		}
-		if (!resolveCommentCheckerBinary()) {
+		if (!getCachedBinary()) {
 			setState(ctx, { status: "missing", checkedFiles: [], warnings: [] });
 			logger.warn("omp-comment-checker enabled in settings, but binary is not accessible on host system.");
 			return;
@@ -196,9 +205,8 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 		if (!Settings.instance.get("commentChecker.enabled")) {
 			return undefined;
 		}
-		if (!resolveCommentCheckerBinary()) {
+		if (!getCachedBinary()) {
 			setState(ctx, { status: "missing", checkedFiles: [], warnings: [] });
-			logger.warn("omp-comment-checker enabled in settings, but binary is not accessible on host system.");
 			return undefined;
 		}
 		const handler = createCommentCheckerToolResultHandler({
@@ -215,7 +223,7 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 
 	api.on("session_compact", async () => {
 		if (!Settings.instance.get("commentChecker.enabled")) return;
-		if (!resolveCommentCheckerBinary()) return;
+		if (!getCachedBinary()) return;
 		const unfired = store.unfired();
 		if (unfired.length === 0) return;
 		const summary = unfired
@@ -240,7 +248,9 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 				ctx.ui.notify("omp-comment-checker is currently disabled in settings.", "info");
 				return;
 			}
-			if (!resolveCommentCheckerBinary()) {
+			// Re-resolve for the command to handle late installations
+			cachedBinaryPath = resolveCommentCheckerBinary();
+			if (!cachedBinaryPath) {
 				setState(ctx, { status: "missing", checkedFiles: [], warnings: [] });
 				ctx.ui.notify("omp-comment-checker binary missing; install @code-yeongyu/comment-checker.", "warning");
 				return;
