@@ -161,12 +161,14 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 				const total = items.reduce((sum, item) => sum + (item.parsed.y ?? 0), 0);
 				return `${t("costs.total")}: ${formatCost(total, 2, locale)}`;
 			},
+		});
 	}, [chartTheme, byModel, t, locale, formatCost]);
 
 	const { sharedScaleBase, yScale } = useMemo(() => {
 		return buildSharedScales({
 			chartTheme,
 			formatY: v => formatCost(v, 0, locale),
+		});
 	}, [chartTheme, locale, formatCost]);
 
 	const barLabelPlugin = useMemo(() => {
