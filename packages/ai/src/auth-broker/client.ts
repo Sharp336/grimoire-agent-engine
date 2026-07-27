@@ -29,22 +29,21 @@ import type {
 	UsageStaleResponse,
 } from "./types";
 import { AUTH_BROKER_CAPABILITIES_HEADER, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES } from "./types";
-import {
-	clientUsageReportResponseSchema,
-	clientUsageSummaryResponseSchema,
-	credentialBlockResponseSchema,
-	credentialBlocksDeleteResponseSchema,
-	credentialDisableResponseSchema,
-	credentialRefreshResponseSchema,
-	credentialUploadResponseSchema,
-	disabledCredentialsResponseSchema,
-	healthzResponseSchema,
-	snapshotResponseSchema,
-	snapshotStreamEventSchema,
-	usageHistoryResponseSchema,
-	usageResponseSchema,
-	usageStaleResponseSchema,
-} from "./wire-schemas";
+import { getAuthBrokerWireSchemas } from "./wire-schema-resource";
+
+type AuthBrokerResponseSchemaName =
+	| "clientUsageReportResponseSchema"
+	| "clientUsageSummaryResponseSchema"
+	| "credentialBlockResponseSchema"
+	| "credentialBlocksDeleteResponseSchema"
+	| "credentialDisableResponseSchema"
+	| "credentialRefreshResponseSchema"
+	| "credentialUploadResponseSchema"
+	| "disabledCredentialsResponseSchema"
+	| "healthzResponseSchema"
+	| "usageHistoryResponseSchema"
+	| "usageResponseSchema"
+	| "usageStaleResponseSchema";
 
 export interface AuthBrokerClientOptions {
 	/** Base URL (e.g. `https://broker.tailnet:8765`). Trailing slashes are trimmed. */
@@ -124,7 +123,7 @@ export class AuthBrokerClient {
 
 	healthz(signal?: AbortSignal): Promise<HealthzResponse> {
 		return this.#request<HealthzResponse>("GET", "/v1/healthz", {
-			schema: healthzResponseSchema,
+			schema: "healthzResponseSchema",
 			auth: false,
 			signal,
 		});
@@ -155,7 +154,7 @@ export class AuthBrokerClient {
 		}
 		const text = await response.text();
 		const raw = this.#parseJson(text, response.status);
-		const validated = snapshotResponseSchema(raw);
+		const validated = getAuthBrokerWireSchemas().snapshotResponseSchema(raw);
 		if (validated instanceof type.errors) {
 			throw new AuthBrokerError("Auth broker response failed schema validation", {
 				status: response.status,
@@ -224,7 +223,7 @@ export class AuthBrokerClient {
 					cause: err,
 				});
 			}
-			const validated = snapshotStreamEventSchema(parsed);
+			const validated = getAuthBrokerWireSchemas().snapshotStreamEventSchema(parsed);
 			if (validated instanceof type.errors) {
 				throw new AuthBrokerError("Auth broker stream event failed schema validation", {
 					body: validated.summary,
@@ -254,7 +253,7 @@ export class AuthBrokerClient {
 		// `metadata`) but leaves provider-specific extension fields permissive so
 		// the broker can ship new shapes ahead of the client. `raw` is accepted
 		// but normally stripped by the broker before send.
-		return this.#request<UsageResponse>("GET", "/v1/usage", { schema: usageResponseSchema, signal });
+		return this.#request<UsageResponse>("GET", "/v1/usage", { schema: "usageResponseSchema", signal });
 	}
 
 	/** Recorded usage-limit snapshots from the broker host, oldest first. */
@@ -266,14 +265,14 @@ export class AuthBrokerClient {
 		if (query?.sinceMs !== undefined) params.set("sinceMs", String(query.sinceMs));
 		if (query?.provider) params.set("provider", query.provider);
 		const path = `/v1/usage/history${params.size > 0 ? `?${params.toString()}` : ""}`;
-		return this.#request<UsageHistoryResponse>("GET", path, { schema: usageHistoryResponseSchema, signal });
+		return this.#request<UsageHistoryResponse>("GET", path, { schema: "usageHistoryResponseSchema", signal });
 	}
 
 	/** Report this client's batched observed request usage for per-install burn tracking. */
 	reportClientUsage(report: ClientUsageReportRequest, signal?: AbortSignal): Promise<ClientUsageReportResponse> {
 		return this.#request<ClientUsageReportResponse>("POST", "/v1/usage/observed", {
 			body: report,
-			schema: clientUsageReportResponseSchema,
+			schema: "clientUsageReportResponseSchema",
 			signal,
 		});
 	}
@@ -284,21 +283,21 @@ export class AuthBrokerClient {
 		if (query?.sinceMs !== undefined) params.set("sinceMs", String(query.sinceMs));
 		const path = `/v1/usage/clients${params.size > 0 ? `?${params.toString()}` : ""}`;
 		return this.#request<ClientUsageSummaryResponse>("GET", path, {
-			schema: clientUsageSummaryResponseSchema,
+			schema: "clientUsageSummaryResponseSchema",
 			signal,
 		});
 	}
 
 	notifyUsageStale(signal?: AbortSignal): Promise<UsageStaleResponse> {
 		return this.#request<UsageStaleResponse>("POST", "/v1/usage/stale", {
-			schema: usageStaleResponseSchema,
+			schema: "usageStaleResponseSchema",
 			signal,
 		});
 	}
 
 	async refreshCredential(id: number, signal?: AbortSignal): Promise<CredentialRefreshResponse> {
 		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh`, {
-			schema: credentialRefreshResponseSchema,
+			schema: "credentialRefreshResponseSchema",
 			signal,
 		});
 	}
@@ -307,7 +306,7 @@ export class AuthBrokerClient {
 		const body: CredentialDisableRequest = { cause };
 		return this.#request<CredentialDisableResponse>("POST", `/v1/credential/${id}/disable`, {
 			body,
-			schema: credentialDisableResponseSchema,
+			schema: "credentialDisableResponseSchema",
 			signal,
 		});
 	}
@@ -323,7 +322,7 @@ export class AuthBrokerClient {
 		const path = `/v1/credentials/disabled${params.size > 0 ? `?${params.toString()}` : ""}`;
 		try {
 			const response = await this.#request<DisabledCredentialsResponse>("GET", path, {
-				schema: disabledCredentialsResponseSchema,
+				schema: "disabledCredentialsResponseSchema",
 				signal,
 			});
 			return response.disabled;
@@ -341,7 +340,7 @@ export class AuthBrokerClient {
 		const body: CredentialUploadRequest = { provider, credential };
 		return this.#request<CredentialUploadResponse>("POST", "/v1/credential", {
 			body,
-			schema: credentialUploadResponseSchema,
+			schema: "credentialUploadResponseSchema",
 			signal,
 		});
 	}
@@ -354,14 +353,14 @@ export class AuthBrokerClient {
 		const body: CredentialBlockRequest = block;
 		return this.#request<CredentialBlockResponse>("POST", `/v1/credential/${id}/block`, {
 			body,
-			schema: credentialBlockResponseSchema,
+			schema: "credentialBlockResponseSchema",
 			signal,
 		});
 	}
 
 	async deleteCredentialBlocks(id: number, signal?: AbortSignal): Promise<CredentialBlocksDeleteResponse> {
 		return this.#request<CredentialBlocksDeleteResponse>("DELETE", `/v1/credential/${id}/blocks`, {
-			schema: credentialBlocksDeleteResponseSchema,
+			schema: "credentialBlocksDeleteResponseSchema",
 			signal,
 		});
 	}
@@ -369,12 +368,12 @@ export class AuthBrokerClient {
 	async #request<t>(
 		method: "GET" | "POST" | "DELETE",
 		path: string,
-		opts: { schema: (input: unknown) => unknown; auth?: boolean; body?: unknown; signal?: AbortSignal },
+		opts: { schema: AuthBrokerResponseSchemaName; auth?: boolean; body?: unknown; signal?: AbortSignal },
 	): Promise<t> {
 		const response = await this.#fetchRaw(method, path, opts);
 		const text = await response.text();
 		const raw = this.#parseJson(text, response.status);
-		const validated = opts.schema(raw);
+		const validated = getAuthBrokerWireSchemas()[opts.schema](raw);
 		if (validated instanceof type.errors) {
 			throw new AuthBrokerError("Auth broker response failed schema validation", {
 				status: response.status,
@@ -435,7 +434,15 @@ export class AuthBrokerClient {
 					signal,
 				});
 				if (!response.ok && response.status !== 304) {
-					const text = await response.text();
+					let text = "";
+					try {
+						text = await response.text();
+					} catch (cause) {
+						throw new AuthBrokerError(`Auth broker request failed: ${response.status} ${response.statusText}`, {
+							status: response.status,
+							cause,
+						});
+					}
 					throw new AuthBrokerError(`Auth broker request failed: ${response.status} ${response.statusText}`, {
 						status: response.status,
 						body: text,
@@ -446,6 +453,7 @@ export class AuthBrokerClient {
 				lastError = error;
 				// Caller-driven abort wins over retry — the caller said stop.
 				if (opts.signal?.aborted) {
+					if (error instanceof AuthBrokerError && error.status !== undefined) throw error;
 					throw new AuthBrokerError("Auth broker request aborted", { cause: opts.signal.reason });
 				}
 				if (error instanceof AuthBrokerError && error.status !== undefined) {

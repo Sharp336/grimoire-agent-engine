@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed snapcompact resume guides reporting only the HQ grid width for mixed-width foveated archives ([#6712](https://github.com/can1357/oh-my-pi/issues/6712)).
+
 ## [17.1.0] - 2026-07-24
 
 ### Added

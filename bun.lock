@@ -76,7 +76,6 @@
       "dependencies": {
         "@agentclientprotocol/sdk": "catalog:",
         "@babel/parser": "catalog:",
-        "@babel/traverse": "catalog:",
         "@mozilla/readability": "catalog:",
         "@oh-my-pi/hashline": "catalog:",
         "@oh-my-pi/omp-stats": "catalog:",

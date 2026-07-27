@@ -15,6 +15,7 @@ export const EDIT_MODES = Object.keys(EDIT_MODE_IDS) as EditMode[];
 
 const HASHLINE_EXCLUDED_MODEL_MODES: Array<{ pattern: string; mode: EditMode }> = [
 	{ pattern: "kimi", mode: "replace" },
+	{ pattern: "mimo", mode: "replace" },
 ];
 
 function resolveHashlineExcludedModelMode(model: string | undefined): EditMode | null {
