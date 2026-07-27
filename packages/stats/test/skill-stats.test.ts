@@ -399,6 +399,43 @@ describe("skill usage stats pipeline", () => {
 		await syncAllSessions({ workers: 1 });
 		expect(getSkillStats()).toEqual(afterResult);
 	});
+	it("recovers a delayed legacy delimited read after an incremental sync", async () => {
+		const sessionFile = await writeSessionFile("late-legacy-result.jsonl", "late-legacy-result-sess", [
+			assistantEntry({
+				id: "late-legacy-asst",
+				timestamp: TS1,
+				calls: [{ id: "late-legacy-call", name: "read", arguments: { path: "README.md;skill://legacy" } }],
+				totalTokens: 20,
+				outputTokens: 4,
+				cost: 0.002,
+			}),
+		]);
+
+		await syncAllSessions({ workers: 1 });
+		expect(getSkillStats().find(row => row.skill === "legacy")).toBeUndefined();
+
+		await fs.appendFile(
+			sessionFile,
+			`${JSON.stringify({
+				type: "message",
+				id: "late-legacy-result",
+				timestamp: TS1,
+				message: {
+					role: "toolResult",
+					toolCallId: "late-legacy-call",
+					toolName: "read",
+					content: [{ type: "text", text: "result" }],
+					timestamp: Date.parse(TS1),
+				},
+			})}\n`,
+		);
+		await syncAllSessions({ workers: 1 });
+		expect(skillRow(getSkillStats(), "legacy").calls).toBe(1);
+
+		const afterResult = getSkillStats();
+		await syncAllSessions({ workers: 1 });
+		expect(getSkillStats()).toEqual(afterResult);
+	});
 
 	it("does not downgrade an executed target after a stale provisional write", async () => {
 		await initDb();
@@ -535,17 +572,28 @@ describe("skill usage stats pipeline", () => {
 		database.close();
 		expect(rows).toEqual([{ session_file: unavailable.sessionFile, skill_name: "legacy" }]);
 	});
-	it("migrates a pre-skills tool_calls_v1 schema, preserves unavailable rows, and replays direct skills", async () => {
+	it("migrates a pre-skills tool_calls_v1 schema and replays legacy delimited reads", async () => {
 		const sessionFile = await writeSessionFile("v1-migration.jsonl", "v1-migration-sess", [
 			assistantEntry({
 				id: "v1-asst",
 				timestamp: TS1,
-				calls: [{ id: "v1-call", name: "read", arguments: { path: "skill://legacy" } }],
+				calls: [{ id: "v1-call", name: "read", arguments: { path: "README.md;skill://legacy" } }],
 				totalTokens: 10,
 				outputTokens: 2,
 				cost: 0.001,
 			}),
-			toolResultEntry("v1-result", "v1-call", [{ skill: "legacy", target: "README.md" }]),
+			{
+				type: "message",
+				id: "v1-result",
+				timestamp: TS1,
+				message: {
+					role: "toolResult",
+					toolCallId: "v1-call",
+					toolName: "read",
+					content: [{ type: "text", text: "result" }],
+					timestamp: Date.parse(TS1),
+				},
+			},
 		]);
 
 		await fs.mkdir(path.dirname(getStatsDbPath()), { recursive: true });
@@ -619,11 +667,11 @@ describe("skill usage stats pipeline", () => {
 			.prepare("SELECT session_file, skill_name FROM tool_calls ORDER BY session_file")
 			.all() as Array<{ session_file: string; skill_name: string | null }>;
 		afterSync.close();
-		expect(child).toEqual({ skill_name: "legacy", target: "README.md" });
+		expect(child).toEqual({ skill_name: "legacy", target: "skill://legacy" });
 		expect(settled).toEqual({ value: "complete" });
 		expect(toolRows).toEqual([
 			{ session_file: "/tmp/unavailable.jsonl", skill_name: null },
-			{ session_file: sessionFile, skill_name: "legacy" },
+			{ session_file: sessionFile, skill_name: null },
 		]);
 	});
 });

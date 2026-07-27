@@ -4,9 +4,11 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
 import {
+	type DelimitedPathSplitMode,
 	isEnoent,
 	isEnotdir,
 	splitInternalUrlSel,
+	splitTopLevelDelimitedPath,
 	stripWindowsExtendedLengthPathPrefix,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
@@ -611,78 +613,8 @@ export function hasGlobPathChars(filePath: string): boolean {
 
 type PathEntrySplitter = (item: string) => { basePath: string };
 
-const TOP_LEVEL_WHITESPACE_RE = /\s/;
-
-type DelimitedPathSplitMode = "comma" | "semicolon" | "whitespace" | "mixed";
-
-function isDelimitedPathSeparator(ch: string, mode: DelimitedPathSplitMode): boolean {
-	if (mode === "comma") return ch === ",";
-	if (mode === "semicolon") return ch === ";";
-	if (mode === "whitespace") return TOP_LEVEL_WHITESPACE_RE.test(ch);
-	return ch === "," || ch === ";" || TOP_LEVEL_WHITESPACE_RE.test(ch);
-}
-
 function hasTopLevelPathDelimiter(entry: string): boolean {
-	let braceDepth = 0;
-	for (let i = 0; i < entry.length; i++) {
-		const ch = entry[i];
-		if (ch === "\\" && i + 1 < entry.length) {
-			i++;
-			continue;
-		}
-		if (ch === "{") {
-			braceDepth++;
-			continue;
-		}
-		if (ch === "}") {
-			if (braceDepth > 0) braceDepth--;
-			continue;
-		}
-		if (braceDepth === 0 && (ch === "," || ch === ";" || TOP_LEVEL_WHITESPACE_RE.test(ch))) {
-			return true;
-		}
-	}
-	return false;
-}
-
-function splitTopLevelDelimitedPath(entry: string, mode: DelimitedPathSplitMode): string[] {
-	const parts: string[] = [];
-	let braceDepth = 0;
-	let start = 0;
-	for (let i = 0; i < entry.length; i++) {
-		const ch = entry[i];
-		if (ch === "\\" && i + 1 < entry.length) {
-			i++;
-			continue;
-		}
-		if (ch === "{") {
-			braceDepth++;
-			continue;
-		}
-		if (ch === "}") {
-			if (braceDepth > 0) braceDepth--;
-			continue;
-		}
-		if (braceDepth !== 0 || !isDelimitedPathSeparator(ch, mode)) continue;
-		parts.push(entry.slice(start, i));
-		start = i + 1;
-	}
-	parts.push(entry.slice(start));
-	return parts;
-}
-
-async function delimitedPathPartResolves(entry: string, cwd: string, splitter: PathEntrySplitter): Promise<boolean> {
-	if (isInternalUrlPath(entry)) return true;
-	const peeled = splitPathAndSel(entry).path;
-	const { basePath } = splitter(peeled);
-	const absoluteBasePath = resolveToCwd(basePath, cwd);
-	try {
-		await fs.promises.stat(absoluteBasePath);
-		return true;
-	} catch (err) {
-		if (isEnoent(err)) return false;
-		throw err;
-	}
+	return splitTopLevelDelimitedPath(entry, "mixed").length > 1;
 }
 
 /**
@@ -716,6 +648,20 @@ async function tryDelimitedPathSplit(
 	return parts;
 }
 
+async function delimitedPathPartResolves(entry: string, cwd: string, splitter: PathEntrySplitter): Promise<boolean> {
+	if (isInternalUrlPath(entry)) return true;
+	const peeled = splitPathAndSel(entry).path;
+	const { basePath } = splitter(peeled);
+	const absoluteBasePath = resolveToCwd(basePath, cwd);
+	try {
+		await fs.promises.stat(absoluteBasePath);
+		return true;
+	} catch (err) {
+		if (isEnoent(err)) return false;
+		throw err;
+	}
+}
+
 /**
  * Split one path-like entry whose multiple targets were flattened into one
  * string. Existing paths are kept intact, so real filenames containing spaces,
@@ -729,11 +675,6 @@ export async function splitDelimitedPathEntry(
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!hasTopLevelPathDelimiter(normalizedEntry)) return null;
 	if (isInternalUrlPath(normalizedEntry)) return null;
-	// A real POSIX file may contain the delimiter and a selector-shaped tail
-	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
-	// resolves — or is only ambiguous — so downstream literal-preferring
-	// splitters see it before delimiter expansion peels or splits (issue #4618
-	// reviewer feedback: delimited expansion ran before the literal check).
 	if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
 	const splitter = options.splitter ?? parseSearchPath;
 	const peeledEntry = splitPathAndSel(normalizedEntry).path;
