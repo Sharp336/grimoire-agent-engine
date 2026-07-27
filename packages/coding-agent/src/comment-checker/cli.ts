@@ -1,6 +1,6 @@
-import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import * as fs from "node:fs";
+import * as module from "node:module";
+import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import type { CommentCheckerHookInput } from "./core";
 
@@ -93,11 +93,11 @@ export function resolveCommentCheckerBinary(): string | undefined {
 
 function resolvePackageApiBinary(): string | undefined {
 	try {
-		const require = createRequire(import.meta.url);
+		const require = module.createRequire(import.meta.url);
 		const packageExports: unknown = require("@code-yeongyu/comment-checker");
 		if (!isCommentCheckerPackage(packageExports)) return undefined;
 		const binaryPath = packageExports.getBinaryPath();
-		return existsSync(binaryPath) ? binaryPath : undefined;
+		return fs.existsSync(binaryPath) ? binaryPath : undefined;
 	} catch {
 		return undefined;
 	}
@@ -105,10 +105,21 @@ function resolvePackageApiBinary(): string | undefined {
 
 function resolvePackageBinary(binaryName: string): string | undefined {
 	try {
-		const require = createRequire(import.meta.url);
+		const require = module.createRequire(import.meta.url);
 		const packagePath = require.resolve("@code-yeongyu/comment-checker/package.json");
-		const binaryPath = join(dirname(packagePath), "bin", binaryName);
-		return existsSync(binaryPath) ? binaryPath : undefined;
+		const baseDir = path.dirname(packagePath);
+		const candidates =
+			process.platform === "win32"
+				? [
+						path.join(baseDir, "bin", "comment-checker.exe"),
+						path.join(baseDir, "bin", "comment-checker.cmd"),
+						path.join(baseDir, "bin", "comment-checker"),
+					]
+				: [path.join(baseDir, "bin", binaryName)];
+		for (const candidate of candidates) {
+			if (fs.existsSync(candidate)) return candidate;
+		}
+		return undefined;
 	} catch {
 		return undefined;
 	}

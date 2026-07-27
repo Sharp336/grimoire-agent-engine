@@ -1,6 +1,6 @@
-import { resolve } from "node:path";
+import * as path from "node:path";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import type {
 	ExtensionContext,
@@ -45,16 +45,16 @@ class SelfHealStore {
 	}
 
 	clearFiles(filePaths: string[]): void {
-		const filesSet = new Set(filePaths.map(filePath => resolve(filePath)));
+		const filesSet = new Set(filePaths.map(filePath => path.resolve(filePath)));
 		for (const [id, record] of this.#records) {
-			if (filesSet.has(resolve(record.filePath))) {
+			if (filesSet.has(path.resolve(record.filePath))) {
 				this.#records.delete(id);
 			}
 		}
 	}
 
 	record(warning: { filePath: string; message: string; sourceToolName: string }): WarningRecord {
-		const filePath = resolve(warning.filePath);
+		const filePath = path.resolve(warning.filePath);
 		const id = `${filePath}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 		const record: WarningRecord = {
 			id,
@@ -115,7 +115,11 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 		const runner = deps.run ?? ((input: CommentCheckerHookInput) => runCommentChecker(input));
 
 		for (const request of requests) {
-			const normalizedPath = resolve(ctx.cwd, request.filePath);
+			const normalizedPath = path.resolve(ctx.cwd, request.filePath);
+			checkedFiles.push(normalizedPath);
+			if (request.isDelete) {
+				continue;
+			}
 			const input = toHookInput(request, { sessionId: getSessionId(ctx), cwd: ctx.cwd });
 			const result = await runner(input);
 			if (result.status === "missing") {
@@ -131,7 +135,6 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 				});
 				return undefined;
 			}
-			checkedFiles.push(normalizedPath);
 			if (result.status === "warning" && result.message.trim().length > 0) {
 				warnings.push({
 					filePath: normalizedPath,
@@ -214,8 +217,10 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 		if (!resolveCommentCheckerBinary()) return;
 		const unfired = store.unfired();
 		if (unfired.length === 0) return;
-		const summary = unfired.map(w => `• ${w.filePath}: ${w.message}`).join("\n");
-		const content = selfHealPrompt.replace("{{count}}", String(unfired.length)).replace("{{summary}}", summary);
+		const summary = unfired
+			.map(w => `• ${replaceTabs(shortenPath(w.filePath))}: ${formatPreview(w.message)}`)
+			.join("\n");
+		const content = prompt.render(selfHealPrompt, { count: unfired.length, summary });
 		api.sendMessage(
 			{
 				customType: OMP_WARNING_ENTRY_TYPE,

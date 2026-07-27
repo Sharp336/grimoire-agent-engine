@@ -20,6 +20,7 @@ export type CommentCheckRequest = {
 	toolName: CheckerToolName;
 	filePath: string;
 	toolInput: CheckerToolInput;
+	isDelete?: boolean;
 };
 
 export type OmpPerFileEditResult = {
@@ -68,18 +69,29 @@ type ApplyPatchFileMetadata = {
 export function extractFromOmpEditDetails(
 	details: unknown,
 	input?: Record<string, unknown>,
-): Array<OmpPerFileEditResult & { op: "write" | "edit" }> {
+): Array<OmpPerFileEditResult & { op: "write" | "edit" | "delete" }> {
 	if (!isRecord(details)) return [];
 	if (details.isError === true || details.success === false || details.error !== undefined) return [];
 	const source = details.perFileResults ?? details.files;
-	const results: Array<OmpPerFileEditResult & { op: "write" | "edit" }> = [];
+	const results: Array<OmpPerFileEditResult & { op: "write" | "edit" | "delete" }> = [];
 	if (Array.isArray(source)) {
 		for (const item of source) {
 			if (!isRecord(item)) continue;
 			if (item.isError === true || item.success === false || item.error !== undefined) continue;
 			const typeOp = getString(item, ["type", "op", "operation"]);
-			if (typeOp === "delete") continue;
 			const filePath = getString(item, ["path", "filePath", "file_path"]) ?? "";
+			if (typeOp === "delete") {
+				if (filePath.length > 0) {
+					results.push({
+						filePath,
+						oldText: "",
+						newText: "",
+						op: "delete",
+						success: true,
+					});
+				}
+				continue;
+			}
 			const movePath = getString(item, ["move", "movePath", "move_path"]);
 			let oldText = getString(item, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
 			let newText = getString(item, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
@@ -116,42 +128,54 @@ export function extractFromOmpEditDetails(
 		}
 	} else {
 		const typeOp = getString(details, ["type", "op", "operation"]);
-		if (typeOp !== "delete") {
-			const filePath = getString(details, ["path", "filePath", "file_path"]) ?? "";
-			if (typeof filePath !== "string" || filePath.length === 0) return [];
-			const movePath = getString(details, ["move", "movePath", "move_path"]);
-			let oldText = getString(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
-			let newText = getString(details, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
+		const filePath = getString(details, ["path", "filePath", "file_path"]) ?? "";
+		if (typeOp === "delete") {
+			if (filePath.length > 0) {
+				return [
+					{
+						filePath,
+						oldText: "",
+						newText: "",
+						op: "delete",
+						success: true,
+					},
+				];
+			}
+			return [];
+		}
+		if (typeof filePath !== "string" || filePath.length === 0) return [];
+		const movePath = getString(details, ["move", "movePath", "move_path"]);
+		let oldText = getString(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
+		let newText = getString(details, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
 
-			const isPruned = details.snapshotsPruned === true;
-			const hasSnapshotText =
-				hasField(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ||
-				hasField(details, ["newText", "new_text", "newString", "new_string", "after", "new"]);
+		const isPruned = details.snapshotsPruned === true;
+		const hasSnapshotText =
+			hasField(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ||
+			hasField(details, ["newText", "new_text", "newString", "new_string", "after", "new"]);
 
-			if (isPruned) {
-				if (oldText.length === 0 && input) {
-					oldText = getString(input, ["old_string", "oldString", "oldText", "old_text", "before", "old"]) ?? "";
-				}
-				if (newText.length === 0 && input) {
-					newText = getString(input, ["new_string", "newString", "newText", "new_text", "after", "new"]) ?? "";
-				}
-				if (oldText.length === 0 || newText.length === 0) {
-					return [];
-				}
-			} else if (!hasSnapshotText) {
+		if (isPruned) {
+			if (oldText.length === 0 && input) {
+				oldText = getString(input, ["old_string", "oldString", "oldText", "old_text", "before", "old"]) ?? "";
+			}
+			if (newText.length === 0 && input) {
+				newText = getString(input, ["new_string", "newString", "newText", "new_text", "after", "new"]) ?? "";
+			}
+			if (oldText.length === 0 || newText.length === 0) {
 				return [];
 			}
+		} else if (!hasSnapshotText) {
+			return [];
+		}
 
-			if (oldText.length === 0 || newText.length > 0) {
-				results.push({
-					filePath,
-					movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
-					oldText,
-					newText,
-					op: oldText.length === 0 ? "write" : "edit",
-					success: true,
-				});
-			}
+		if (oldText.length === 0 || newText.length > 0) {
+			results.push({
+				filePath,
+				movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+				oldText,
+				newText,
+				op: oldText.length === 0 ? "write" : "edit",
+				success: true,
+			});
 		}
 	}
 	return results;
@@ -159,11 +183,21 @@ export function extractFromOmpEditDetails(
 
 function ompEditResultsToCommentCheckRequests(
 	sourceToolName: string,
-	results: Array<OmpPerFileEditResult & { op: "write" | "edit" }>,
+	results: Array<OmpPerFileEditResult & { op: "write" | "edit" | "delete" }>,
 ): CommentCheckRequest[] {
 	const requests: CommentCheckRequest[] = [];
 	for (const result of results) {
 		const targetPath = result.movePath ?? result.filePath;
+		if (result.op === "delete") {
+			requests.push({
+				sourceToolName,
+				toolName: "Edit",
+				filePath: targetPath,
+				toolInput: { file_path: targetPath },
+				isDelete: true,
+			});
+			continue;
+		}
 		if (result.op === "write") {
 			requests.push({
 				sourceToolName,
@@ -320,8 +354,17 @@ function extractApplyPatchMetadataRequests(details: unknown, sourceToolName: str
 
 	const requests: CommentCheckRequest[] = [];
 	for (const file of metadataFiles) {
-		if (file.type === "delete") continue;
 		const filePath = file.movePath ?? file.filePath;
+		if (file.type === "delete") {
+			requests.push({
+				sourceToolName,
+				toolName: "Edit",
+				filePath,
+				toolInput: { file_path: filePath },
+				isDelete: true,
+			});
+			continue;
+		}
 		if (file.before.length === 0) {
 			requests.push({
 				sourceToolName,
@@ -367,10 +410,10 @@ function readApplyPatchMetadataFiles(value: unknown): ApplyPatchFileMetadata[] {
 		if (!isRecord(item)) continue;
 		const filePath = getString(item, ["filePath", "file_path", "path"]);
 		const movePath = getString(item, ["movePath", "move_path"]);
-		const before = getString(item, ["before", "old", "oldString", "old_string"]);
-		const after = getString(item, ["after", "new", "newString", "new_string"]);
+		const before = getString(item, ["before", "old", "oldString", "old_string"]) ?? "";
+		const after = getString(item, ["after", "new", "newString", "new_string"]) ?? "";
 		const type = getString(item, ["type", "operation"]);
-		if (!filePath || before === undefined || after === undefined) continue;
+		if (!filePath) continue;
 		const file: ApplyPatchFileMetadata = { filePath, before, after };
 		if (movePath !== undefined) file.movePath = movePath;
 		if (type !== undefined) file.type = type;
@@ -385,6 +428,15 @@ export function parseApplyPatchRequests(patch: string, sourceToolName = "apply_p
 
 	const flush = (): void => {
 		if (!current) return;
+		if (current.operation === "delete") {
+			requests.push({
+				sourceToolName,
+				toolName: "Edit",
+				filePath: current.filePath,
+				toolInput: { file_path: current.filePath },
+				isDelete: true,
+			});
+		}
 		if (current.operation === "add") {
 			const content = joinPatchLines(current.newLines);
 			if (content.length > 0) {

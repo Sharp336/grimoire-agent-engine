@@ -28,6 +28,14 @@ export function formatPreview(message: string): string {
 }
 
 export function getCommentCheckerWidgetLines(state: CommentCheckerUiState): string[] | undefined {
+	if (state.status === "error") {
+		const header = "✖ omp-comment-checker error";
+		const detail = state.errorMessage ? `  ${formatPreview(state.errorMessage)}` : "  Checker execution failed";
+		return [header, detail];
+	}
+	if (state.status === "missing") {
+		return ["✖ omp-comment-checker missing binary", "  Install @code-yeongyu/comment-checker"];
+	}
 	if (state.status !== "warning") return undefined;
 	if (state.warnings.length === 0) return undefined;
 	const header = "⚠ omp-comment-checker";
@@ -47,6 +55,11 @@ export function getCommentCheckerWidgetLines(state: CommentCheckerUiState): stri
 
 export function formatFooterStatus(state: CommentCheckerUiState): string | undefined {
 	if (state.status === "clean") return "comment-checker: clean";
+	if (state.status === "missing") return "comment-checker: missing binary";
+	if (state.status === "error") {
+		const msg = state.errorMessage ? `: ${formatPreview(state.errorMessage)}` : "";
+		return `✖ comment-checker error${msg}`;
+	}
 	if (state.status !== "warning") return undefined;
 	if (state.warnings.length === 0) return undefined;
 	const maxFiles = 3;
