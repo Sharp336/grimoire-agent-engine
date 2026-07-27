@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseSwarmYaml, type GateConfig, type SwarmAgent } from "../schema";
+import { parseSwarmYaml } from "../schema";
 
 describe("parseSwarmYaml — agent/workspace/gate fields", () => {
 	it("parses agent, workspace, and gate into typed SwarmAgent fields", () => {

@@ -3,6 +3,8 @@
  *
  * Wraps `runSubprocess` to spawn individual swarm agents with full tool access.
  * Each agent runs in the swarm workspace with its task instructions as the user prompt.
+ * After execution, if the agent has a declared gate config, a gate file is written
+ * and the agent is marked as paused (§6.2).
  */
 import * as path from "node:path";
 import type {
@@ -16,6 +18,7 @@ import type {
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent";
 import type { SwarmAgent } from "./schema";
 import type { StateTracker } from "./state";
+import { writeGateFile } from "./gate";
 
 export interface SwarmExecutorOptions {
 	workspace: string;
@@ -37,6 +40,9 @@ export interface SwarmExecutorOptions {
  * - User prompt (task): the full task instructions from the YAML
  * - Working directory: the swarm workspace
  * - Full tool access (bash, python, read, write, edit, grep, find, fetch, web_search, browser)
+ *
+ * After execution, if the agent has a declared gate config, a gate file is written
+ * to state/gate-<agent>.json and the agent is marked as paused (§6.2).
  */
 export async function executeSwarmAgent(
 	agent: SwarmAgent,
@@ -89,6 +95,16 @@ export async function executeSwarmAgent(
 			agent.name,
 			`Iteration ${iteration} ${status}${result.error ? `: ${result.error}` : ""}`,
 		);
+
+		// Write gate file if agent has a declared gate (§6.2)
+		if (agent.gate) {
+			const stateDir = path.join(stateTracker.swarmDir, "state");
+			await writeGateFile(stateDir, agent.name, agent.gate);
+			await stateTracker.updateAgent(agent.name, {
+				gateStatus: { paused: true },
+			});
+			await stateTracker.appendLog(agent.name, `Gate paused: ${agent.gate.prompt}`);
+		}
 
 		return result;
 	} catch (err) {

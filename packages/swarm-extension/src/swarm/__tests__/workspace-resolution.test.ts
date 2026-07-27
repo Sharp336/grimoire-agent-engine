@@ -69,6 +69,7 @@ describe("per-agent workspace resolution in pipeline", () => {
 					},
 				],
 			]),
+			agentOrder: ["agent-a", "agent-b"],
 		};
 
 		const stateTracker = new StateTracker(swarmWorkspace, "test-swarm");

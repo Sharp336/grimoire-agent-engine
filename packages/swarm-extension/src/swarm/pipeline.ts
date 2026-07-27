@@ -11,6 +11,15 @@ import type { AgentSource, ModelRegistry, Settings, SingleResult } from "@oh-my-
 import { executeSwarmAgent } from "./executor";
 import type { SwarmDefinition } from "./schema";
 import type { StateTracker } from "./state";
+import {
+	createAmbientGate,
+	gateFileExists,
+	gateResponseExists,
+	handleGateTimeout,
+	readGateFile,
+	scanPendingQuestions,
+	waitForGateResponse,
+} from "./gate";
 
 // ============================================================================
 // Types
@@ -200,6 +209,33 @@ export class PipelineController {
 
 			for (const { agentName, result } of waveResults) {
 				results.set(agentName, result);
+			}
+
+			// Post-wave: ambient scan for pending-question-<agent>.md (§7.1)
+			const stateDir = path.join(this.#stateTracker.swarmDir, "state");
+			const pendingQuestions = await scanPendingQuestions(stateDir, wave);
+			for (const [agentName, question] of pendingQuestions) {
+				await createAmbientGate(stateDir, agentName, question);
+				await this.#stateTracker.updateAgent(agentName, { gateStatus: { paused: true } });
+				await this.#stateTracker.appendOrchestratorLog(`Ambient gate created for ${agentName}`);
+			}
+
+			// Post-wave: wait for gate responses for any paused agents (declared or ambient)
+			const gatedAgents = wave.filter(name => {
+				const agent = this.#def.agents.get(name)!;
+				return agent.gate || pendingQuestions.has(name);
+			});
+			for (const agentName of gatedAgents) {
+				const agent = this.#def.agents.get(agentName)!;
+				const gateFile = await readGateFile(stateDir, agentName);
+				if (!gateFile) continue;
+				const gateConfig = agent.gate ?? { prompt: gateFile.prompt, actions: gateFile.actions };
+				await this.#stateTracker.appendOrchestratorLog(`Waiting for gate response: ${agentName}`);
+				const response = await waitForGateResponse(stateDir, agentName, gateConfig, options.signal);
+				await this.#stateTracker.updateAgent(agentName, {
+					gateStatus: { paused: false, resolvedAction: response.decision },
+				});
+				await this.#stateTracker.appendOrchestratorLog(`Gate resolved: ${agentName} → ${response.decision}`);
 			}
 
 			options.emitProgress(waveIdx);

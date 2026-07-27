@@ -1,10 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import {
-	resolveSwarmYamlPath,
-	substituteVars,
-	discoverSwarmYaml,
-} from "../discovery";
+import { discoverSwarmYaml, resolveSwarmYamlPath, substituteVars } from "../discovery";
 
 // ============================================================================
 // A1 — Named-workflow → ~/.omp/agent/swarms/<name>.yaml
