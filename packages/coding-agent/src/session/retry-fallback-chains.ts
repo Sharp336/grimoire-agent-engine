@@ -69,6 +69,14 @@ export function parseRetryFallbackSelector(
 ): RetryFallbackSelector | undefined {
 	const trimmed = selector.trim();
 	if (!trimmed) return undefined;
+	const slashIndex = trimmed.indexOf("/");
+	if (slashIndex > 0) {
+		const provider = trimmed.slice(0, slashIndex);
+		const id = trimmed.slice(slashIndex + 1);
+		if (modelLookup?.find(provider, id)) {
+			return { raw: trimmed, provider, id, thinkingLevel: undefined };
+		}
+	}
 	const parsed = parseModelString(trimmed, {
 		allowMaxSuffix: true,
 		allowAutoAlias: true,

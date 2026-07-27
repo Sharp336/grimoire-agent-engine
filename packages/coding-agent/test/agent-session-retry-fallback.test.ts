@@ -485,6 +485,42 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 	});
 
+	it("preserves inherited thinking for a fallback whose literal model id ends in an effort suffix", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const literalFallback = getBundledModel("nanogpt", "nanogpt/coding-router:low");
+		if (!primaryModel || !literalFallback) {
+			throw new Error("Expected bundled primary and literal suffixed fallback models");
+		}
+		authStorage.setRuntimeApiKey("nanogpt", "nanogpt-test-key");
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				default: [`${literalFallback.provider}/${literalFallback.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.High,
+		});
+
+		await session.prompt("Recover on the literal suffixed fallback");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${literalFallback.provider}/${literalFallback.id}`,
+		]);
+		expect(session.model?.id).toBe(literalFallback.id);
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
 	it("continues a startup-owned role fallback chain from the active fallback", async () => {
 		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
 		const secondFallback = getBundledModel("openai", "gpt-4o");

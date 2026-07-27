@@ -4,11 +4,17 @@
  * Model entries switch the current session only; a search beginning with `@`
  * exposes the configured ctrl+p quick roles.
  */
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { Component, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ResolvedRoleModel } from "../../session/agent-session";
+import {
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	getConfiguredThinkingLevelsForModel,
+} from "../../thinking";
 import { theme } from "../theme/theme";
 import {
 	buildBrowserItems,
@@ -22,8 +28,8 @@ import { bottomBorder, row, topBorder } from "./overlay-box";
 import { resolveSegmentPalette } from "./segment-track";
 
 export interface ModelPickerCallbacks {
-	/** A model was chosen for a session-only switch. `selector` is `provider/id`. */
-	onPick: (model: Model, selector: string) => void;
+	/** A model and thinking level were chosen for a session-only switch. `selector` is `provider/id`. */
+	onPick: (model: Model, selector: string, thinkingLevel: ConfiguredThinkingLevel) => void;
 	/** A configured ctrl+p quick role was chosen. */
 	onPickRole?: (entry: ResolvedRoleModel) => void;
 	/** The picker was dismissed. */
@@ -41,6 +47,8 @@ export interface ModelPickerOptions {
 	quickRoleOrder?: ReadonlyArray<string>;
 	/** Active quick role, highlighted when the search begins with `@`. */
 	currentQuickRole?: string;
+	/** Resolve the thinking level to preselect for a candidate model. */
+	thinkingLevelForModel?: (model: Model) => ConfiguredThinkingLevel | undefined;
 }
 
 /** Fixed chrome rows: top border, status row, footer, bottom border. */
@@ -52,9 +60,9 @@ const MIN_VISIBLE = 5;
 /** Fraction of the terminal height the floating overlay occupies. */
 const HEIGHT_FRACTION = 0.4;
 
-const STATUS_HINT = "Session-only switch — role models stay unchanged";
+const STATUS_HINT = "Step 1 of 2 · Choose a session model — role models stay unchanged";
 const QUICK_ROLE_STATUS_HINT = "Quick role switch — applies its model and thinking for this session";
-const FOOTER_HINT = "↑/↓ models · Enter use for this session · type to search · @ quick roles · Esc close";
+const FOOTER_HINT = "↑/↓ models · Enter choose thinking · type to search · @ quick roles · Esc close";
 const QUICK_ROLE_FOOTER_HINT = "↑/↓ roles · Enter apply role model · type to search · Esc close";
 
 /**
@@ -68,6 +76,7 @@ export class ModelPickerComponent implements Component {
 	#registry: ModelRegistry;
 	#scopedModels: ReadonlyArray<ScopedModelItem>;
 	#browser: ModelBrowser;
+	#callbacks: ModelPickerCallbacks;
 	#configError: string | undefined;
 	#currentSelector: string | undefined;
 	#currentQuickRoleSelector: string | undefined;
@@ -75,6 +84,13 @@ export class ModelPickerComponent implements Component {
 	#quickRoleItems: ModelBrowserItem[] = [];
 	#quickRoles = new Map<string, ResolvedRoleModel>();
 	#roleMode = false;
+	#pendingPick:
+		| {
+				item: ModelBrowserItem;
+				levels: ConfiguredThinkingLevel[];
+				index: number;
+		  }
+		| undefined;
 
 	constructor(
 		tui: TUI,
@@ -88,6 +104,7 @@ export class ModelPickerComponent implements Component {
 		this.#settings = settings;
 		this.#registry = registry;
 		this.#scopedModels = scopedModels;
+		this.#callbacks = callbacks;
 		this.#currentSelector = options.currentSelector;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
 		this.#quickRoleItems = this.#buildQuickRoleItems(
@@ -106,7 +123,11 @@ export class ModelPickerComponent implements Component {
 				callbacks.onPickRole?.(quickRole);
 				return;
 			}
-			callbacks.onPick(item.model, item.selector);
+			const levels = getConfiguredThinkingLevelsForModel(item.model);
+			const current = options.thinkingLevelForModel?.(item.model) ?? ThinkingLevel.Inherit;
+			const currentIndex = levels.indexOf(current);
+			this.#pendingPick = { item, levels, index: currentIndex >= 0 ? currentIndex : 0 };
+			this.#tui.requestRender();
 		};
 		this.#browser.onCancel = () => callbacks.onCancel();
 		this.#browser.onQueryChange = query => this.#syncItemsForQuery(query);
@@ -207,18 +228,80 @@ export class ModelPickerComponent implements Component {
 		// Mouse tracking is off outside fullscreen overlays; drop any stray SGR
 		// reports instead of feeding them to the search input.
 		if (data.startsWith("\x1b[<")) return;
-		this.#browser.handleInput(data);
+		const pending = this.#pendingPick;
+		if (!pending) {
+			this.#browser.handleInput(data);
+			return;
+		}
+		if (matchesKey(data, "escape")) {
+			this.#pendingPick = undefined;
+			this.#tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "left") || matchesKey(data, "up") || matchesKey(data, "shift+tab")) {
+			pending.index = (pending.index - 1 + pending.levels.length) % pending.levels.length;
+			this.#tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "right") || matchesKey(data, "down") || matchesKey(data, "tab")) {
+			pending.index = (pending.index + 1) % pending.levels.length;
+			this.#tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			const level = pending.levels[pending.index];
+			if (level !== undefined) this.#callbacks.onPick(pending.item.model, pending.item.selector, level);
+		}
+	}
+
+	#renderThinkingFooter(width: number): string {
+		const pending = this.#pendingPick;
+		if (!pending) return "";
+		const labels = pending.levels.map(level => getConfiguredThinkingLevelMetadata(level).label);
+		const selectedLabel = labels[pending.index] ?? "";
+		const selectedChoiceWidth = visibleWidth(` [ ${selectedLabel} ] `);
+		const maxPrefixWidth = Math.max(0, width - selectedChoiceWidth - 3);
+		const prefix = truncateToWidth(`${theme.fg("accent", pending.item.id)}${theme.fg("dim", " →")} `, maxPrefixWidth);
+		const prefixWidth = visibleWidth(prefix);
+		const available = Math.max(1, width - prefixWidth);
+		const choiceWidths = labels.map(
+			(label, index) => visibleWidth(` ${label} `) + (index === pending.index ? 2 : 0) + 1,
+		);
+		let start = 0;
+		while (start < pending.index) {
+			let used = start > 0 ? 2 : 0;
+			for (let index = start; index <= pending.index; index++) used += choiceWidths[index] ?? 0;
+			if (used <= available) break;
+			start++;
+		}
+		let line = prefix;
+		if (start > 0) line += theme.fg("dim", "… ");
+		for (let index = start; index < labels.length; index++) {
+			const label = labels[index];
+			if (!label) continue;
+			const body = ` ${label} `;
+			line +=
+				index === pending.index
+					? theme.bg("selectedBg", `${theme.fg("accent", "[")}${body}${theme.fg("accent", "]")}`)
+					: body;
+			line += " ";
+		}
+		return truncateToWidth(line, width);
 	}
 
 	render(width: number): string[] {
 		const termRows = Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
 		const listBudget = Math.floor(termRows * HEIGHT_FRACTION) - CHROME_ROWS - BROWSER_FRAME_ROWS;
 		this.#browser.setMaxVisible(Math.max(MIN_VISIBLE, listBudget));
+		this.#browser.setFocused(this.#pendingPick === undefined);
 
 		const inner = Math.max(1, width - 4);
+		const pending = this.#pendingPick;
 		const status = this.#configError
 			? theme.fg("error", ` ${this.#configError}`)
-			: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
+			: pending
+				? theme.fg("muted", ` 2/2 · ↑/↓ · Enter apply · Esc back · ${pending.item.id}`)
+				: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
 
 		const out: string[] = [];
 		out.push(topBorder(width, "Switch Model"));
@@ -226,7 +309,14 @@ export class ModelPickerComponent implements Component {
 		for (const line of this.#browser.render(inner)) {
 			out.push(row(line, width));
 		}
-		out.push(row(theme.fg("dim", this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT), width));
+		out.push(
+			row(
+				pending
+					? this.#renderThinkingFooter(inner)
+					: theme.fg("dim", this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT),
+				width,
+			),
+		);
 		out.push(bottomBorder(width));
 		return out;
 	}

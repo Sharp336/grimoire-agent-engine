@@ -853,6 +853,7 @@ describe("selector setting side effects", () => {
 			expect(frame).toContain("retry-fallback");
 			hub.handleInput("\x1b[D");
 			hub.handleInput("\n");
+			hub.handleInput("\n"); // apply the preselected inherit fallback thinking level
 			await Promise.resolve();
 
 			expect(showError).not.toHaveBeenCalled();
