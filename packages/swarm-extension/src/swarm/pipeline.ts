@@ -6,6 +6,7 @@
  * - Waves execute sequentially (wave N+1 starts after wave N completes)
  * - For pipeline mode, iterations repeat the full DAG execution
  */
+import * as path from "node:path";
 import type { AgentSource, ModelRegistry, Settings, SingleResult } from "@oh-my-pi/pi-coding-agent";
 import { executeSwarmAgent } from "./executor";
 import type { SwarmDefinition } from "./schema";
@@ -156,9 +157,13 @@ export class PipelineController {
 				wave.map(async agentName => {
 					const agent = this.#def.agents.get(agentName)!;
 					const currentIndex = agentIndex++;
+					// Resolve per-agent workspace: agent.workspace is relative to swarm workspace
+					const agentWorkspace = agent.workspace
+						? path.resolve(options.workspace, agent.workspace)
+						: options.workspace;
 					try {
 						const result = await executeSwarmAgent(agent, currentIndex, {
-							workspace: options.workspace,
+							workspace: agentWorkspace,
 							swarmName: this.#def.name,
 							iteration,
 							modelOverride: agent.model ?? this.#def.model,
