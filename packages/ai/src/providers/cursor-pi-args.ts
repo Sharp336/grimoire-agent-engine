@@ -22,21 +22,29 @@
 import * as path from "node:path";
 
 /**
- * A `pi_read` range composed onto the path as `read`'s inline `:N+K` selector.
+ * A `pi_read` range composed onto the path as `read`'s inline `:raw:N+K`
+ * selector.
  *
  * `read` exposes no range kwargs, so an uncomposed range reads the whole file.
  * `offset` is a 1-indexed start clamped like the reference's
  * `Math.max(0, offset - 1)` over 0-indexed lines; `limit` is a line count.
  * `null` marks a present `limit: 0` — zero lines, which no selector expresses
  * and which must not degrade into a whole-file read.
+ *
+ * The range is `raw` because a plain `:N+K` deliberately pads with one leading
+ * and three trailing context lines: helpful for a human reading a snippet,
+ * wrong for a caller that asked for exactly `limit` lines from `offset`. The
+ * wire result is an opaque `output` string, so the hashline and line-number
+ * gutter that `raw` also drops carry nothing the frame's contract needs.
+ * A range-free read keeps the ordinary form — whole-file reads want them.
  */
 export function piReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	if (limit !== undefined && Math.floor(limit) <= 0) return null;
 	const start = offset !== undefined ? Math.max(1, Math.floor(offset)) : undefined;
 	const count = limit !== undefined ? Math.floor(limit) : undefined;
 	if (start === undefined && count === undefined) return readPath;
-	if (start === undefined) return `${readPath}:1+${count}`;
-	return count === undefined ? `${readPath}:${start}-` : `${readPath}:${start}+${count}`;
+	if (start === undefined) return `${readPath}:raw:1+${count}`;
+	return count === undefined ? `${readPath}:raw:${start}-` : `${readPath}:raw:${start}+${count}`;
 }
 
 /**

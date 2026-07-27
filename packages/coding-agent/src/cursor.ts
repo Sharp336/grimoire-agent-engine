@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type {
 	AgentEvent,
 	AgentTool,
@@ -89,14 +90,68 @@ interface CursorExecBridgeOptions {
 	 * `list_mcp_resources` / `read_mcp_resource` ask what this client's servers
 	 * advertise. Without this the bridge answers an empty catalog and
 	 * `not_found`, hiding resources the session is in fact connected to.
+	 *
+	 * `getServerResources` is async because a server's catalog loads in the
+	 * background after its tools register: a frame arriving in that window would
+	 * otherwise read the not-yet-populated cache and report an empty catalog,
+	 * which is indistinguishable from a server that advertises nothing.
 	 */
 	mcpResources?: {
 		serverNames(): string[];
 		getServerResources(
 			name: string,
-		): { resources: { uri: string; name?: string; description?: string; mimeType?: string }[] } | undefined;
+		): Promise<{ resources: { uri: string; name?: string; description?: string; mimeType?: string }[] } | undefined>;
 		readServerResource(name: string, uri: string): Promise<MCPResourceReadResult | undefined>;
 	};
+}
+
+/**
+ * Write a downloaded resource without following a link at the target.
+ *
+ * The containment check and the write are separate syscalls, so a link planted
+ * at the target in between would redirect the bytes — the check cannot close
+ * that window on its own. `O_NOFOLLOW` decides it atomically for symlinks.
+ *
+ * A hard link needs a second check: it is a regular file that passes both the
+ * containment check and `O_NOFOLLOW` while sharing its inode with a file
+ * anywhere else on the volume, so truncating it overwrites that file too.
+ * `nlink > 1` on the OPEN handle is the test — statting the path first would
+ * reintroduce the race the open just closed. Same reasoning, and the same
+ * refusal, as `autolearn/managed-skills.ts`.
+ *
+ * Truncation therefore happens after that check rather than through `O_TRUNC`,
+ * which would have already destroyed the contents by the time it ran.
+ *
+ * Scope: `O_NOFOLLOW` applies to the FINAL component only. A parent directory
+ * swapped for an outward symlink between the check and this open is still
+ * followed; refusing that needs an `openat`/dirfd walk of every segment, which
+ * this does not attempt — an attacker who can rewrite the workspace tree
+ * mid-download is already inside the boundary this guard defends.
+ *
+ * Parent directories are created first, since the frame may name a path whose
+ * directories do not exist yet.
+ */
+async function writeWithoutFollowingLinks(absolutePath: string, payload: string | Buffer): Promise<void> {
+	await fs.promises.mkdir(path.dirname(absolutePath), { recursive: true });
+	const handle = await fs.promises.open(
+		absolutePath,
+		fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW,
+	);
+	try {
+		const stat = await handle.stat();
+		if (!stat.isFile()) {
+			throw new Error(`Refusing to download onto a non-regular file: ${absolutePath}`);
+		}
+		if (stat.nlink > 1) {
+			throw new Error(
+				`Refusing to download onto a file with ${stat.nlink} hard links, which would overwrite its other names: ${absolutePath}`,
+			);
+		}
+		await handle.truncate(0);
+		await handle.writeFile(payload);
+	} finally {
+		await handle.close();
+	}
 }
 
 function createToolResultMessage(
@@ -597,9 +652,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const mcp = this.options.mcpResources;
 		if (!mcp) return [];
 		const names = server ? [server] : mcp.serverNames();
+		// Concurrently: each name may block on that server's first catalog load,
+		// and a slow server should not delay the rest of the listing.
+		const catalogs = await Promise.all(names.map(async name => [name, await mcp.getServerResources(name)] as const));
 		const listed: CursorMcpResource[] = [];
-		for (const name of names) {
-			for (const resource of mcp.getServerResources(name)?.resources ?? []) {
+		for (const [name, catalog] of catalogs) {
+			for (const resource of catalog?.resources ?? []) {
 				listed.push({
 					uri: resource.uri,
 					name: resource.name,
@@ -637,9 +695,16 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (!mcp) return null;
 		const read = await mcp.readServerResource(server, uri);
 		if (!read) return null;
-		const mimeType = read.contents[0]?.mimeType;
-		const texts = read.contents.filter(item => item.text !== undefined).map(item => item.text as string);
-		const blob = read.contents.find(item => item.blob !== undefined)?.blob;
+		// The mime type must describe the bytes actually sent, not whatever item
+		// happened to be first: an image blob followed by a text note would
+		// otherwise label the text `image/png` and mislead the model about what
+		// it is holding. Each branch below takes the type from its own producer.
+		const textItems = read.contents.filter(item => item.text !== undefined);
+		const texts = textItems.map(item => item.text as string);
+		const blobItem = read.contents.find(item => item.blob !== undefined);
+		const blob = blobItem?.blob;
+		const textMimeType = textItems[0]?.mimeType;
+		const blobMimeType = blobItem?.mimeType;
 
 		if (downloadPath) {
 			// Text resources download as their own bytes; a blob decodes first.
@@ -654,15 +719,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			const cwd = this.options.getCwd?.() ?? this.options.cwd;
 			const absolutePath = confineToWorkspace(downloadPath, cwd);
 			if (!absolutePath) throw new Error(`Refusing to download outside the workspace: ${downloadPath}`);
-			await Bun.write(absolutePath, payload);
+			await writeWithoutFollowingLinks(absolutePath, payload);
 			// The path echoed back is the one the frame asked for; the model
 			// addresses it the same relative way.
-			return { uri, mimeType, downloadPath };
+			return { uri, mimeType: texts.length > 0 ? textMimeType : blobMimeType, downloadPath };
 		}
 
-		if (texts.length > 0) return { uri, mimeType, text: texts.join("\n") };
+		if (texts.length > 0) return { uri, mimeType: textMimeType, text: texts.join("\n") };
 		if (blob === undefined) return null;
-		return { uri, mimeType, blob: Buffer.from(blob, "base64") };
+		return { uri, mimeType: blobMimeType, blob: Buffer.from(blob, "base64") };
 	}
 
 	/**

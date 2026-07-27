@@ -896,9 +896,9 @@ describe("Cursor modern exec frames: Pi tools", () => {
 		expect(blocks[0].name).toBe("read");
 		expect(results.map(r => r.toolCallId)).toEqual([blocks[0].id]);
 		// The displayed args must be the operation that actually runs. The bridge
-		// composes offset/limit into `read`'s `:N+K` selector, so a block showing
-		// the bare path claims a whole-file read that never happened.
-		expect(blocks[0].arguments).toEqual({ path: "/repo/a.ts:5+20" });
+		// composes offset/limit into `read`'s `:raw:N+K` selector, so a block
+		// showing the bare path claims a whole-file read that never happened.
+		expect(blocks[0].arguments).toEqual({ path: "/repo/a.ts:raw:5+20" });
 	});
 
 	it("maps a failing Pi handler onto the frame's own error variant", async () => {

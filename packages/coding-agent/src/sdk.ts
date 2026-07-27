@@ -2661,7 +2661,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// only live connections have any.
 			mcpResources: mcpManager && {
 				serverNames: () => mcpManager.getConnectedServers(),
-				getServerResources: name => mcpManager.getServerResources(name),
+				getServerResources: async name => {
+					// The manager registers a server's tools before its background
+					// resource load finishes, so a frame arriving in that window
+					// would read an empty cache and report "advertises nothing".
+					await mcpManager.ensureServerResources(name);
+					return mcpManager.getServerResources(name);
+				},
 				readServerResource: (name, uri) => mcpManager.readServerResource(name, uri),
 			},
 			emitEvent: event => cursorEventEmitter?.(event),

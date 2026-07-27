@@ -558,15 +558,13 @@ export function confineToWorkspace(filePath: string, cwd: string): string | null
 	if (realTarget) return isUnderRootLexical(realTarget, realRoot) ? resolved : null;
 
 	// `realpath` also fails on a *dangling* link, and a write follows that link
-	// to wherever it points. Resolving one level answers where the bytes would
-	// actually land; anything unresolvable stays refused.
-	const linkTarget = tryReadlink(resolved);
-	if (linkTarget !== null) {
-		const dest = path.resolve(path.dirname(resolved), linkTarget);
-		const realDest = tryRealpath(path.dirname(dest));
-		if (!realDest) return null;
-		return isUnderRootLexical(path.join(realDest, path.basename(dest)), realRoot) ? resolved : null;
-	}
+	// to wherever it points. Chasing the chain to decide would mean
+	// reimplementing symlink resolution (multi-hop, relative hops, loops, and
+	// a TOCTOU window against a link that can be re-pointed between the check
+	// and the write). A download names a file to create, so a path that is
+	// already an unresolvable link is refused outright — the one shape where
+	// "cannot tell where this lands" is the whole answer.
+	if (isSymlink(resolved)) return null;
 
 	// Otherwise walk up to the deepest ancestor that does exist and check that,
 	// then re-apply the segments below it. Those segments are `..`-free by the
@@ -601,12 +599,12 @@ function tryRealpath(target: string): string | null {
 	}
 }
 
-/** The immediate link target, or `null` when the path is not a symlink. */
-function tryReadlink(target: string): string | null {
+/** Whether the path itself is a symlink, without following it. */
+function isSymlink(target: string): boolean {
 	try {
-		return fs.readlinkSync(target);
+		return fs.lstatSync(target).isSymbolicLink();
 	} catch {
-		return null;
+		return false;
 	}
 }
 

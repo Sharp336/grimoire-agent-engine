@@ -651,7 +651,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			tools: new Map(),
 			mcpResources: {
 				serverNames: () => ["docs", "issues"],
-				getServerResources: name =>
+				getServerResources: async name =>
 					name === "docs"
 						? { resources: [{ uri: "docs://readme", name: "README", mimeType: "text/markdown" }] }
 						: { resources: [{ uri: "issues://open" }] },
@@ -667,6 +667,61 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect((await handlers.listMcpResources({ server: "issues" })).map(r => r.uri)).toEqual(["issues://open"]);
 	});
 
+	it("waits for a server's catalog instead of reporting it empty", async () => {
+		// A server registers its tools before its resource catalog finishes
+		// loading. A frame landing in that window must not read the empty cache
+		// and answer "this server advertises nothing" - that is a lie the model
+		// cannot distinguish from the truth, and it will not ask again.
+		// The load is gated on a promise this test resolves, so "did the listing
+		// wait" is answered by the gate rather than by a duration.
+		const discovery = Promise.withResolvers<void>();
+		let loaded = false;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map(),
+			mcpResources: {
+				serverNames: () => ["slow"],
+				getServerResources: async () => {
+					await discovery.promise;
+					loaded = true;
+					return { resources: [{ uri: "slow://ready" }] };
+				},
+				readServerResource: async () => undefined,
+			},
+		});
+
+		const listing = handlers.listMcpResources({});
+		// Nothing can have been reported yet: the catalog has not arrived.
+		expect(loaded).toBe(false);
+		discovery.resolve();
+		expect((await listing).map(r => r.uri)).toEqual(["slow://ready"]);
+		expect(loaded).toBe(true);
+	});
+
+	it("labels a mixed-content read with the mime type of the part it sends", async () => {
+		// An image blob followed by a text note: the wire carries one payload,
+		// and its mime type has to describe that payload rather than whichever
+		// item happened to come first, or the model is told plain text is a PNG.
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map(),
+			mcpResources: {
+				serverNames: () => ["files"],
+				getServerResources: async () => undefined,
+				readServerResource: async (_name, uri) => ({
+					contents: [
+						{ uri, mimeType: "image/png", blob: Buffer.from("PNG-BYTES").toString("base64") },
+						{ uri, mimeType: "text/plain", text: "a note about the image" },
+					],
+				}),
+			},
+		});
+
+		const read = await handlers.readMcpResource({ server: "files", uri: "files://mixed" });
+		expect(read?.text).toBe("a note about the image");
+		expect(read?.mimeType).toBe("text/plain");
+	});
+
 	it("reads a resource and decodes a blob payload into wire bytes", async () => {
 		// MCP hands back a list of content items with base64 blobs; the wire
 		// carries one text or one byte payload.
@@ -675,7 +730,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			tools: new Map(),
 			mcpResources: {
 				serverNames: () => ["files"],
-				getServerResources: () => undefined,
+				getServerResources: async () => undefined,
 				readServerResource: async (name, uri) =>
 					name === "files" && uri === "files://logo"
 						? { contents: [{ uri, mimeType: "image/png", blob: Buffer.from("PNG").toString("base64") }] }
@@ -701,7 +756,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 				tools: new Map(),
 				mcpResources: {
 					serverNames: () => ["files"],
-					getServerResources: () => undefined,
+					getServerResources: async () => undefined,
 					readServerResource: async (_name, uri) => ({
 						contents: [{ uri, mimeType: "image/png", blob: Buffer.from("PNG-BYTES").toString("base64") }],
 					}),
@@ -740,7 +795,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 				tools: new Map(),
 				mcpResources: {
 					serverNames: () => ["files"],
-					getServerResources: () => undefined,
+					getServerResources: async () => undefined,
 					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
 				},
 			});
@@ -760,7 +815,8 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 	it("refuses a download path that escapes through a symlink", async () => {
 		// A lexical check is not containment. `out/config` is relative and
 		// `..`-free, but with `ws/out` linked outside the workspace the write
-		// lands wherever the link points — as does a write to a dangling link.
+		// lands wherever the link points — as does a write to a dangling link,
+		// including one that only reaches outside through a second hop.
 		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-symlink-"));
 		try {
 			const inner = path.join(workspace, "ws");
@@ -773,17 +829,28 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			// real file out there rather than create anything new.
 			await Bun.write(path.join(outside, "existing.txt"), "original");
 			await fs.symlink(path.join(outside, "existing.txt"), path.join(inner, "existing.txt"));
+			// Two hops: the first link stays inside, so resolving one level reads
+			// as contained while the write still follows the chain out.
+			await fs.symlink(path.join(inner, "second.txt"), path.join(inner, "chain.txt"));
+			await fs.symlink(path.join(outside, "chained.txt"), path.join(inner, "second.txt"));
 			const handlers = new CursorExecHandlers({
 				cwd: inner,
 				tools: new Map(),
 				mcpResources: {
 					serverNames: () => ["files"],
-					getServerResources: () => undefined,
+					getServerResources: async () => undefined,
 					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
 				},
 			});
 
-			for (const escape of ["out/config", "out/deep/nested.txt", "link.txt", "existing.txt"]) {
+			for (const escape of [
+				"out/config",
+				"out/deep/nested.txt",
+				"link.txt",
+				"existing.txt",
+				"chain.txt",
+				"second.txt",
+			]) {
 				await expect(
 					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: escape }),
 				).rejects.toThrow(/outside the workspace/);
@@ -795,6 +862,67 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			// does not refuse every path whose parents do not exist yet.
 			await handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "deep/new/file.txt" });
 			expect(await Bun.file(path.join(inner, "deep/new/file.txt")).text()).toBe("payload");
+		} finally {
+			await removeWithRetries(workspace);
+		}
+	});
+
+	it("overwrites an existing download target in place", async () => {
+		// The download open is `O_NOFOLLOW`, which also drops the plain
+		// `Bun.write` path — so the ordinary case has to keep working: a
+		// re-download truncates the previous file rather than failing or
+		// appending to it.
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-rewrite-"));
+		try {
+			let payload = "a much longer first payload";
+			const handlers = new CursorExecHandlers({
+				cwd: workspace,
+				tools: new Map(),
+				mcpResources: {
+					serverNames: () => ["files"],
+					getServerResources: async () => undefined,
+					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: payload }] }),
+				},
+			});
+
+			await handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "out/doc.txt" });
+			payload = "second";
+			await handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "out/doc.txt" });
+
+			expect(await Bun.file(path.join(workspace, "out/doc.txt")).text()).toBe("second");
+		} finally {
+			await removeWithRetries(workspace);
+		}
+	});
+
+	it("refuses a download onto a hard link that shares its inode outside", async () => {
+		// A hard link is a regular file that lives inside the workspace and
+		// passes both containment and `O_NOFOLLOW`, yet writing through it
+		// overwrites every other name for the same inode — including one out of
+		// reach. Only the link count on the opened file reveals it.
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-hardlink-"));
+		try {
+			const inner = path.join(workspace, "ws");
+			const outside = path.join(workspace, "outside");
+			await fs.mkdir(inner);
+			await fs.mkdir(outside);
+			const victim = path.join(outside, "secret.txt");
+			await Bun.write(victim, "SECRET");
+			await fs.link(victim, path.join(inner, "innocent.txt"));
+			const handlers = new CursorExecHandlers({
+				cwd: inner,
+				tools: new Map(),
+				mcpResources: {
+					serverNames: () => ["files"],
+					getServerResources: async () => undefined,
+					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
+				},
+			});
+
+			await expect(
+				handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "innocent.txt" }),
+			).rejects.toThrow(/hard links/);
+			expect(await Bun.file(victim).text()).toBe("SECRET");
 		} finally {
 			await removeWithRetries(workspace);
 		}
@@ -1142,7 +1270,8 @@ describe("CursorExecHandlers Pi frame translation", () => {
 	it("composes pi_read's offset/limit onto the path as the read tool's range selector", async () => {
 		// `read` takes no range kwargs, so a dropped offset/limit silently returns
 		// the whole file. `offset` is a 1-indexed start and `limit` a line count,
-		// which is exactly the `:N+K` selector.
+		// which is exactly the `:N+K` selector — `raw`, since a plain range pads
+		// with context lines the frame never asked for.
 		const { handlers, calls } = recordingHandlers("read");
 
 		await handlers.piRead({ toolCallId: "c1", args: { path: "a.ts", offset: 5, limit: 20 } } as never);
@@ -1154,11 +1283,11 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		await handlers.piRead({ toolCallId: "c5", args: { path: "a.ts", offset: 0, limit: 20 } } as never);
 
 		expect(calls).toEqual([
-			{ path: "a.ts:5+20" },
-			{ path: "a.ts:5-" },
-			{ path: "a.ts:1+20" },
+			{ path: "a.ts:raw:5+20" },
+			{ path: "a.ts:raw:5-" },
+			{ path: "a.ts:raw:1+20" },
 			{ path: "a.ts" },
-			{ path: "a.ts:1+20" },
+			{ path: "a.ts:raw:1+20" },
 		]);
 	});
 
@@ -1173,6 +1302,38 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		expect(calls).toEqual([]);
 		expect(result.isError).toBe(false);
 		expect(result.content).toEqual([{ type: "text", text: "" }]);
+	});
+
+	it("returns exactly the lines a pi_read range asked for", async () => {
+		// Producer/consumer contract against the real `ReadTool`: a plain `:N+K`
+		// selector deliberately pads with one leading and three trailing context
+		// lines, so offset 5/limit 20 would hand Cursor lines 4-27 for a request
+		// that named 5-24. The frame has no way to tell the padding apart from
+		// content it asked for.
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-piread-range-"));
+		try {
+			await Bun.write(
+				path.join(cwd, "n.txt"),
+				`${Array.from({ length: 40 }, (_, i) => `line${i + 1}`).join("\n")}\n`,
+			);
+			const handlers = new CursorExecHandlers({
+				cwd,
+				tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
+			});
+
+			const result = await handlers.piRead({
+				toolCallId: "c1",
+				args: { path: "n.txt", offset: 5, limit: 20 },
+			} as never);
+			const text = result.content
+				.filter(part => part.type === "text")
+				.map(part => (part as { text: string }).text)
+				.join("");
+
+			expect(text.trimEnd().split("\n")).toEqual(Array.from({ length: 20 }, (_, i) => `line${i + 5}`));
+		} finally {
+			await removeWithRetries(cwd);
+		}
 	});
 
 	it("escapes pi_grep's pattern when the frame asks for a literal search", async () => {
