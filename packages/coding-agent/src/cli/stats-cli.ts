@@ -7,6 +7,7 @@
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { APP_NAME, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { Settings } from "../config/settings";
 import { getExchangeRate, shouldConvertCurrency } from "../i18n/exchange-rate";
 import { openPath } from "../utils/open";
 
@@ -124,8 +125,8 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 		console.log(JSON.stringify(stats, null, 2));
 		return;
 	}
-
 	if (cmd.summary) {
+		await Settings.init();
 		await printStatsSummary();
 		return;
 	}

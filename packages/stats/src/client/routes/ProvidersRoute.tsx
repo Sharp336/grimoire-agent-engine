@@ -381,7 +381,7 @@ const UTILIZATION_COLORS = {
 } as const;
 
 function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSeries[] }) {
-	const { t } = useTranslation();
+	const { t, locale } = useTranslation();
 	const providers = useMemo(() => [...new Set(usageSeries.map(s => s.provider))], [usageSeries]);
 	const [selected, setSelected] = useState<string | null>(null);
 	const provider = selected !== null && providers.includes(selected) ? selected : (providers[0] ?? null);
@@ -453,7 +453,7 @@ function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSerie
 						label: (ctx: { dataIndex: number; parsed: { x: number | null } }) => {
 							const row = rows[ctx.dataIndex];
 							const used = `${(ctx.parsed.x ?? 0).toFixed(1)}% ${t("providers.utilization.tooltipUsed")}`;
-							return row ? `${used} · ${t("providers.utilization.tooltipRecorded")} ${formatRelativeTime(row.recordedAt)}` : used;
+							return row ? `${used} · ${t("providers.utilization.tooltipRecorded")} ${formatRelativeTime(row.recordedAt, locale)}` : used;
 						},
 					},
 				},

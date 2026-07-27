@@ -6,7 +6,6 @@
  */
 
 import * as fsSync from "node:fs";
-import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -74,7 +73,6 @@ async function loadCachedRate(): Promise<number | null> {
 
 async function saveCache(rate: number): Promise<void> {
 	const cache: ExchangeRateCache = { timestamp: Date.now(), rate };
-	await fs.mkdir(CACHE_DIR, { recursive: true });
 	await Bun.write(CACHE_FILE, JSON.stringify(cache));
 }
 

@@ -50,6 +50,8 @@
   "settings.i18n.language.label": "语言",
   "settings.i18n.language.options.en.label": "英语",
   "settings.i18n.language.options.zh.label": "简体中文",
+  "settings.i18n.exchangeRate.label": "汇率（USD→CNY）",
+  "settings.i18n.exchangeRate.description": "手动汇率，用于 CNY 成本显示。留空自动获取。",
   "settings.interruptMode.description": "当引导消息中断工具执行时",
   "settings.interruptMode.label": "中断模式",
   "settings.loop.mode.description": "/loop 迭代之间在重新提交提示前执行的操作",
