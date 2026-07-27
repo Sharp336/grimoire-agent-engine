@@ -36,6 +36,9 @@
 - Fixed omp worktree clear prematurely deleting active task-isolation sandboxes owned by running subagents.
 - Fixed /vibe mode preventing the director from completing parent tasks after verifying worker results by keeping the built-in todo tool active.
 - Fixed numeric GitHub issue and pull request autocomplete being suppressed inside skill slash-command arguments.
+### Changed
+
+- Hub parameter validation now uses ArkType's jitless traversal, avoiding generated-validator precompilation while preserving eager schema construction and the existing wire contract.
 
 ## [17.1.7] - 2026-07-27
 

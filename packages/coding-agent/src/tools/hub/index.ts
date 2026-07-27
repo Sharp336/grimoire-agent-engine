@@ -25,7 +25,7 @@ import type {
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
+import { scope } from "arktype";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
@@ -69,6 +69,8 @@ export { isWaitingPollDetails } from "./jobs";
 export type { LaunchParams, LaunchToolDetails } from "./launch";
 export { createIrcMessageCard, isIrcEnabled } from "./messaging";
 export * from "./types";
+
+const { type } = scope({}, { jitless: true });
 
 const hubSchema = type({
 	op: type(
