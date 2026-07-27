@@ -70,6 +70,11 @@ interface CursorExecBridgeOptions {
 	 * is fixed to the session settings at construction — so without this the
 	 * two fields are silently dropped. Callers that cannot supply it keep the
 	 * shared instance and the session's defaults.
+	 *
+	 * The returned tool is executed as-is. Callers whose registry tools carry an
+	 * approval wrapper MUST apply the same wrapper here, or a frame supplying
+	 * either field silently escapes the approval gate that every other call
+	 * goes through.
 	 */
 	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): CursorBridgeTool | undefined;
 }

@@ -178,6 +178,13 @@ interface AdvisorRuntimeDescriptor {
 export interface SessionAdvisorsOptions {
 	enabled: boolean;
 	tools?: AgentTool[];
+	/**
+	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
+	 * match cap. The advisor's tools are fixed instances carrying session
+	 * defaults, so without this an advisor running against Cursor silently
+	 * drops both fields — the same gap the primary bridge closes.
+	 */
+	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
 	watchdogPrompt?: string;
 	sharedInstructions?: string;
 	contextPrompt?: string;
@@ -245,6 +252,7 @@ export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
 	#advisorEnabled: boolean;
 	#advisorTools: AgentTool[] | undefined;
+	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
 	#advisorWatchdogPrompt: string | undefined;
 	#advisorSharedInstructions: string | undefined;
 	#advisorContextPrompt: string | undefined;
@@ -267,6 +275,7 @@ export class SessionAdvisors {
 		this.#host = host;
 		this.#advisorEnabled = options.enabled;
 		this.#advisorTools = options.tools;
+		this.#advisorCreateGrepTool = options.createGrepTool;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
 		this.#advisorSharedInstructions = options.sharedInstructions;
 		this.#advisorContextPrompt = options.contextPrompt;
@@ -695,6 +704,10 @@ export class SessionAdvisors {
 				getCwd: () => this.#host.sessionManager.getCwd(),
 				tools: advisorToolMap,
 				allowNativeDelete: advisorCanMutateFiles,
+				// Gated on the advisor's own grant: the factory builds a fresh
+				// tool, so handing it over unconditionally would give a roster
+				// without `grep` a search tool it was denied.
+				createGrepTool: advisorToolMap.has("grep") ? this.#advisorCreateGrepTool : undefined,
 			});
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
 			const advisorStreamFn: StreamFn = (requestModel, context, options) =>

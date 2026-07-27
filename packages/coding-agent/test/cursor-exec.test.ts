@@ -19,6 +19,8 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { createBridgeGrepFactory } from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { GrepTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -199,6 +201,94 @@ describe("pi_bash truncation reaches the wire from a real BashTool result", () =
 			details: result.details,
 		});
 		expect(wire).toBeUndefined();
+	});
+});
+
+describe("bridge tool resolution beyond the model-facing registry", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-bridge-resolve-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("edits a real file from a pi_edit frame when `edit` is withheld from the model", async () => {
+		// For Cursor the session drops `edit` from the tool registry so the model
+		// is steered to full-file `write`. The native `pi_edit` frame arrives
+		// regardless of the advertised catalog, so the bridge must still reach a
+		// real edit tool through the `getTool` fallback — otherwise every modern
+		// edit answers "Tool \"edit\" not available" and the file is untouched.
+		const target = path.join(cwd, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const session = createTestSession(cwd);
+		// `replace` is the mode `pi_edit`'s `old_text`/`new_text` pairs speak;
+		// the session default is `hashline`, whose schema they do not match.
+		const editTool: Tool = new EditTool(session, "replace");
+
+		const withheld = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			getTool: name => (name === "edit" ? editTool : undefined),
+		});
+		const result = await withheld.piEdit({
+			toolCallId: "e1",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBeFalsy();
+		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
+	});
+
+	it("reports the failure instead of editing when no edit tool is reachable", async () => {
+		const target = path.join(cwd, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const unreachable = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>() });
+		const result = await unreachable.piEdit({
+			toolCallId: "e2",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
+	});
+
+	it("wraps the per-call grep the real bridge factory builds", async () => {
+		// The reviewed bypass was in the factory the session hands the bridge,
+		// not in the bridge: a raw `new GrepTool(...)` there skips the approval
+		// gate every registry tool goes through. Exercise the shared factory
+		// both callsites use, so a regression in it fails here.
+		await Bun.write(path.join(cwd, "hit.txt"), "needle\n");
+		const intercepted: string[] = [];
+		const runner = {
+			hasHandlers: () => true,
+			emitToolCall: async (event: { toolName: string }) => {
+				intercepted.push(event.toolName);
+				return undefined;
+			},
+			emitToolResult: async () => undefined,
+		} as unknown as ExtensionRunner;
+
+		const factory = createBridgeGrepFactory(createTestSession(cwd), runner);
+		const built = factory({ context: 0, totalMatchLimit: 5 });
+		expect(built).toBeInstanceOf(ExtensionToolWrapper);
+
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			createGrepTool: factory,
+		});
+		const result = await handlers.piGrep({
+			toolCallId: "g1",
+			args: { pattern: "needle", path: cwd, limit: 5 },
+		} as never);
+
+		// The wrapper ran (its extension hook fired) and the frame's cap still
+		// reached the underlying tool.
+		expect(intercepted).toEqual(["grep"]);
+		expect((result.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 	});
 });
 

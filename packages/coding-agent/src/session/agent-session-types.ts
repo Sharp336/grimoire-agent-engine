@@ -207,6 +207,12 @@ export interface AgentSessionConfig {
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Full advisor toolset built against an advisor-scoped tool session. */
 	advisorTools?: AgentTool[];
+	/**
+	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
+	 * match cap, against the advisor-scoped tool session. Without it an advisor
+	 * running on Cursor silently drops both fields.
+	 */
+	advisorCreateGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */
