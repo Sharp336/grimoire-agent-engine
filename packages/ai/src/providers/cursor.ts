@@ -1643,14 +1643,27 @@ async function handleExecServerMessage(
 				// Derived from the answer that actually goes on the wire, so no exit
 				// can drift out of sync with what the model was told.
 				const settled = execResult.result;
-				const text =
-					settled.case === "success"
-						? settled.value.downloadPath
+				let text: string;
+				switch (settled.case) {
+					case "success":
+						text = settled.value.downloadPath
 							? `Downloaded ${args.uri} to ${settled.value.downloadPath}`
-							: `Read ${args.uri}`
-						: settled.case === "notFound"
-							? `No such resource: ${args.uri}`
-							: (settled.value?.error ?? `Failed to read ${args.uri}`);
+							: `Read ${args.uri}`;
+						break;
+					case "notFound":
+						text = `No such resource: ${args.uri}`;
+						break;
+					// The wire union carries a refusal variant this client never
+					// builds today — the handler answers content or `null`. Handled
+					// anyway so the switch stays total: it holds a `reason`, not an
+					// `error`, so a collapsed default would have read `undefined`.
+					case "rejected":
+						text = `Refused: ${settled.value.reason}`;
+						break;
+					default:
+						text = settled.value?.error ?? `Failed to read ${args.uri}`;
+						break;
+				}
 				await pairSynthesizedExecResult(
 					state,
 					onToolResult,

@@ -900,9 +900,9 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 				},
 			});
 
-			for (const escape of ["../outside.txt", outside, "nested/../../outside.txt"]) {
+			for (const escapePath of ["../outside.txt", outside, "nested/../../outside.txt"]) {
 				await expect(
-					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: escape }),
+					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: escapePath }),
 				).rejects.toThrow(/outside the workspace/);
 			}
 			// Nothing was written on any of those attempts.
@@ -943,7 +943,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 				},
 			});
 
-			for (const escape of [
+			for (const escapePath of [
 				"out/config",
 				"out/deep/nested.txt",
 				"link.txt",
@@ -952,7 +952,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 				"second.txt",
 			]) {
 				await expect(
-					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: escape }),
+					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: escapePath }),
 				).rejects.toThrow(/outside the workspace/);
 			}
 			expect(await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: outside }))).toEqual(["existing.txt"]);

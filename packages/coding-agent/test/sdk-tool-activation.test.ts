@@ -3,11 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import type { CursorExecHandlers, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import {
 	type CreateAgentSessionOptions,
@@ -531,7 +532,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	const captureCursorExecHandlers = async (session: AgentSession, cursorModel: Model): Promise<CursorExecHandlers> => {
 		let handlers: CursorExecHandlers | undefined;
 		const streamFn: StreamFn = (_model, _context, options) => {
-			handlers = options?.cursorExecHandlers;
+			// The session installs the concrete class; the provider option is
+			// typed as the wire-level interface, whose `piEdit` answers a proto
+			// result rather than the tool result the class returns.
+			handlers = options?.cursorExecHandlers as CursorExecHandlers | undefined;
 			throw new Error("captured");
 		};
 		vi.spyOn(session.agent, "streamFn").mockImplementation(streamFn);
