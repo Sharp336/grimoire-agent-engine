@@ -4477,7 +4477,9 @@ export class AgentSession {
 		return {
 			role: "custom",
 			customType: "vibe-mode-context",
-			content: prompt.render(vibeModeActivePrompt),
+			content: prompt.render(vibeModeActivePrompt, {
+				todoAvailable: this.getActiveToolNames().includes("todo"),
+			}),
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),

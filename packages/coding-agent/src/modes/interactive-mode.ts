@@ -3277,9 +3277,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * `/vibe` toggle. Entering installs the ephemeral vibe tools, strips the
-	 * active toolset down to `read` plus those tools, and injects the director
-	 * context. Exiting unregisters them, restores the previous toolset, and kills
-	 * every worker session so workers cannot outlive the mode that directs them.
+	 * active toolset down to `read`, optional parent-owned `todo`, plus those
+	 * tools, and injects the director context. Exiting unregisters them, restores
+	 * the previous toolset, and kills every worker session so workers cannot
+	 * outlive the mode that directs them.
 	 */
 	async handleVibeModeCommand(initialPrompt?: string): Promise<void> {
 		if (this.vibeModeEnabled) {
@@ -3317,7 +3318,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const ownerScope = vibeRegistry.ownerScope(this.#vibeParentSession());
 		vibeRegistry.activateScope(ownerScope);
 		const previousTools = this.session.getEnabledToolNames();
-		await this.session.activateVibeTools(["read"]);
+		const vibeBaseTools = ["read"];
+		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
+		await this.session.activateVibeTools(vibeBaseTools);
 		this.#vibeModePreviousTools = previousTools;
 		this.#vibeModeOwnerScope = ownerScope;
 		this.vibeModeEnabled = true;
@@ -3330,7 +3333,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#updateVibeModeStatus();
 		if (options?.persistModeChange !== false) this.sessionManager.appendModeChange("vibe");
-		this.showStatus("Vibe mode enabled. You direct fast/good worker sessions; toolset is read + vibe tools.");
+		this.showStatus(
+			"Vibe mode enabled. You direct fast/good worker sessions; toolset is read + optional parent Todo + vibe tools.",
+		);
 	}
 
 	async #exitVibeMode(): Promise<void> {
