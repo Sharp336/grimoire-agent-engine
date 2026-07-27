@@ -4,7 +4,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseCodexRateLimitHeaders } from "@oh-my-pi/pi-ai";
-import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import {
+	AuthBrokerClient,
+	RemoteAuthCredentialStore,
+	type SnapshotResponse,
+	startAuthBroker,
+} from "@oh-my-pi/pi-ai/auth-broker";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
@@ -1177,6 +1182,29 @@ describe("AuthStorage codex oauth ranking", () => {
 				["chat", blockedUntilMs],
 				["spark", blockedUntilMs],
 			]);
+
+			const legacyResponse = await fetch(`${handle.url}/v1/snapshot`, {
+				headers: { Authorization: `Bearer ${token}` },
+			});
+			expect(legacyResponse.status).toBe(200);
+			const legacySnapshot = (await legacyResponse.json()) as SnapshotResponse;
+			const legacyBlocks = legacySnapshot.credentials
+				.find(entry => entry.id === credential.id)
+				?.blocks?.filter(block => block.providerKey === "openai-codex:oauth");
+			expect(legacyBlocks?.map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
+				["shared", blockedUntilMs],
+			]);
+			const legacyStore = new RemoteAuthCredentialStore({
+				client,
+				initialSnapshot: legacySnapshot,
+				streamSnapshots: false,
+			});
+			try {
+				expect(legacyStore.getCredentialBlock(credential.id, "openai-codex:oauth", "shared")).toBe(blockedUntilMs);
+			} finally {
+				legacyStore.close();
+			}
+
 			expect(store.getCredentialBlock(credential.id, "openai-codex:oauth", "shared")).toBeUndefined();
 			expect(store.getCredentialBlock(credential.id, "openai-codex:oauth", "chat")).toBe(blockedUntilMs);
 			expect(store.getCredentialBlock(credential.id, "openai-codex:oauth", "spark")).toBe(blockedUntilMs);
@@ -1202,6 +1230,18 @@ describe("AuthStorage codex oauth ranking", () => {
 				expect(health.state).toBe("healthy");
 				expect(remoteStore.listCredentialBlocks([credential.id]).map(block => block.blockScope)).toEqual(["spark"]);
 				expect(store.listCredentialBlocks([credential.id]).map(block => block.blockScope)).toEqual(["spark"]);
+
+				const legacyAfterHealingResponse = await fetch(`${handle.url}/v1/snapshot`, {
+					headers: { Authorization: `Bearer ${token}` },
+				});
+				expect(legacyAfterHealingResponse.status).toBe(200);
+				const legacyAfterHealingSnapshot = (await legacyAfterHealingResponse.json()) as SnapshotResponse;
+				const legacyAfterHealingBlocks = legacyAfterHealingSnapshot.credentials
+					.find(entry => entry.id === credential.id)
+					?.blocks?.filter(block => block.providerKey === "openai-codex:oauth");
+				expect(legacyAfterHealingBlocks?.map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
+					["shared", blockedUntilMs],
+				]);
 			} finally {
 				clientStorage.close();
 				remoteStore.close();

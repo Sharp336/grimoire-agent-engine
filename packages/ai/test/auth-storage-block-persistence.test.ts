@@ -348,6 +348,59 @@ describe("AuthStorage credential block persistence", () => {
 		store.close();
 	});
 
+	it("normalizes a late legacy Codex shared block before calculating its scoped reconciliation time", async () => {
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		store.saveOAuth(CODEX_PROVIDER, oauthCredential("late-reconcile"));
+		const [row] = store.listAuthCredentials(CODEX_PROVIDER);
+		if (!row) throw new Error("expected credential row");
+		const insertedAtMs = Date.now();
+		const blockedUntilMs = FUTURE_BLOCK_MS + 60_000;
+		const db = new Database(dbPath);
+		try {
+			db.prepare(
+				"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)",
+			).run(row.id, CODEX_PROVIDER_KEY, "shared", blockedUntilMs, Math.floor(insertedAtMs / 1000));
+		} finally {
+			db.close();
+		}
+
+		const reconcileAfterMs = store.getCredentialBlockReconcileAfter(row.id, CODEX_PROVIDER_KEY, "chat");
+		expect(reconcileAfterMs).toBeGreaterThan(insertedAtMs);
+		expect(reconcileAfterMs).toBeLessThan(blockedUntilMs);
+		expect(readCredentialBlockRows(dbPath).map(block => block.block_scope)).toEqual(["chat", "spark"]);
+		store.close();
+	});
+
+	it("keeps steady-state Codex block reads read-only while another connection owns the writer lock", async () => {
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		store.saveOAuth(CODEX_PROVIDER, oauthCredential("read-only"));
+		const [row] = store.listAuthCredentials(CODEX_PROVIDER);
+		if (!row) throw new Error("expected credential row");
+		const blockedUntilMs = FUTURE_BLOCK_MS + 60_000;
+		store.upsertCredentialBlock({
+			credentialId: row.id,
+			providerKey: CODEX_PROVIDER_KEY,
+			blockScope: "chat",
+			blockedUntilMs,
+		});
+
+		const writer = new Database(dbPath);
+		let writerLocked = false;
+		try {
+			writer.run("BEGIN IMMEDIATE");
+			writerLocked = true;
+
+			expect(store.getCredentialBlock(row.id, CODEX_PROVIDER_KEY, "chat")).toBe(blockedUntilMs);
+			const reconcileAfterMs = store.getCredentialBlockReconcileAfter(row.id, CODEX_PROVIDER_KEY, "chat");
+			expect(reconcileAfterMs).toBeGreaterThan(Date.now());
+			expect(reconcileAfterMs).toBeLessThan(blockedUntilMs);
+		} finally {
+			if (writerLocked) writer.run("ROLLBACK");
+			writer.close();
+			store.close();
+		}
+	});
+
 	it("persists a Codex shared upsert as separate chat and Spark blocks", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		store.saveOAuth(CODEX_PROVIDER, oauthCredential("upsert"));

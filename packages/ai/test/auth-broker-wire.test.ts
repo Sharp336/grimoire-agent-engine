@@ -1,12 +1,16 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
+	AUTH_BROKER_CAPABILITIES_HEADER,
+	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
 	AuthBrokerClient,
 	type AuthBrokerServerHandle,
 	AuthBrokerStreamUnsupportedError,
+	type SnapshotResponse,
 	type SnapshotStreamEvent,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
@@ -25,6 +29,21 @@ function mintOAuthCredential(suffix: string, expires: number) {
 		accountId: `account-${suffix}`,
 		email: `${suffix}@example.com`,
 	};
+}
+
+function fetchWithoutAuthBrokerCapabilities(): typeof fetch {
+	return Object.assign(
+		async (input: string | URL | Request, init?: RequestInit) => {
+			const headers = new Headers(init?.headers);
+			headers.delete(AUTH_BROKER_CAPABILITIES_HEADER);
+			return fetch(input, { ...init, headers });
+		},
+		{ preconnect: fetch.preconnect },
+	);
+}
+
+function credentialBlocks(snapshot: SnapshotResponse, credentialId: number) {
+	return snapshot.credentials.find(entry => entry.id === credentialId)?.blocks ?? [];
 }
 
 describe("auth-broker wire surface", () => {
@@ -99,14 +118,125 @@ describe("auth-broker wire surface", () => {
 		const body = (await res.json()) as { generation: number; serverNowMs: number; refresher: { enabled: boolean } };
 		expect(res.headers.get("etag")).toBe(`"${body.generation}"`);
 		expect(res.headers.get("cache-control")).toBe("no-store");
+		expect(res.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 		expect(body.generation).toBeGreaterThan(0);
 		expect(body.serverNowMs).toBeGreaterThan(0);
 		expect(body.refresher.enabled).toBe(false);
 
-		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const observedCapabilities: Array<string | null> = [];
+		const fetchImpl: typeof fetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				observedCapabilities.push(new Headers(init?.headers).get(AUTH_BROKER_CAPABILITIES_HEADER));
+				return fetch(input, init);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const client = new AuthBrokerClient({ url: handle!.url, token, fetchImpl });
 		const unchanged = await client.fetchSnapshot({ ifGenerationGt: body.generation, waitMs: 10 });
 		expect(unchanged.status).toBe(304);
 		expect(unchanged.generation).toBe(body.generation);
+		expect(observedCapabilities).toEqual([AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES]);
+
+		const rawUnchanged = await fetch(`${handle!.url}/v1/snapshot?wait=10`, {
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"If-None-Match": `"${body.generation}"`,
+			},
+		});
+		expect(rawUnchanged.status).toBe(304);
+		expect(rawUnchanged.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
+	});
+
+	test("projects Codex meter blocks to shared only for clients without the capability", async () => {
+		const credential = storage!.upsertCredential("openai-codex", {
+			...mintOAuthCredential("codex-scopes", Date.now() + 60_000),
+		})[0];
+		if (!credential) throw new Error("expected Codex credential");
+		const chatBlockedUntilMs = Date.now() + 60_000;
+		const sparkBlockedUntilMs = Date.now() + 120_000;
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "chat",
+			blockedUntilMs: chatBlockedUntilMs,
+		});
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "spark",
+			blockedUntilMs: sparkBlockedUntilMs,
+		});
+		const sparkUpdatedAtSec = Math.floor(Date.now() / 1000) - 20;
+		const chatUpdatedAtSec = sparkUpdatedAtSec + 10;
+		const db = new Database(path.join(tempDir, "agent.db"));
+		try {
+			const updateTimestamp = db.prepare(
+				"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+			);
+			const chatResult = updateTimestamp.run(chatUpdatedAtSec, credential.id, "openai-codex:oauth", "chat") as {
+				changes: number;
+			};
+			const sparkResult = updateTimestamp.run(sparkUpdatedAtSec, credential.id, "openai-codex:oauth", "spark") as {
+				changes: number;
+			};
+			expect([chatResult.changes, sparkResult.changes]).toEqual([1, 1]);
+		} finally {
+			db.close();
+		}
+
+		const currentClient = new AuthBrokerClient({ url: handle!.url, token });
+		const currentResult = await currentClient.fetchSnapshot();
+		if (currentResult.status !== 200) throw new Error("expected current-client snapshot");
+		const currentBlocks = credentialBlocks(currentResult.snapshot, credential.id);
+		expect(currentBlocks.map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
+			["chat", chatBlockedUntilMs],
+			["spark", sparkBlockedUntilMs],
+		]);
+		const maxUpdatedAtMs = Math.max(...currentBlocks.map(block => block.updatedAtMs ?? 0));
+		expect(maxUpdatedAtMs).toBe(chatUpdatedAtSec * 1000);
+
+		const legacyClient = new AuthBrokerClient({
+			url: handle!.url,
+			token,
+			fetchImpl: fetchWithoutAuthBrokerCapabilities(),
+		});
+		const legacyResult = await legacyClient.fetchSnapshot();
+		if (legacyResult.status !== 200) throw new Error("expected legacy-client snapshot");
+		expect(credentialBlocks(legacyResult.snapshot, credential.id)).toEqual([
+			{
+				providerKey: "openai-codex:oauth",
+				blockScope: "shared",
+				blockedUntilMs: sparkBlockedUntilMs,
+				updatedAtMs: maxUpdatedAtMs,
+			},
+		]);
+
+		expect(
+			storage!
+				.listCredentialBlocks([credential.id])
+				.map(block => block.blockScope)
+				.sort(),
+		).toEqual(["chat", "spark"]);
+
+		const pendingLegacySnapshot = legacyClient.fetchSnapshot({
+			ifGenerationGt: legacyResult.generation,
+			waitMs: 1000,
+		});
+		const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "chat",
+			blockedUntilMs: updatedChatBlockedUntilMs,
+		});
+		const changedLegacyResult = await pendingLegacySnapshot;
+		if (changedLegacyResult.status !== 200) throw new Error("expected legacy-client long-poll snapshot");
+		expect(
+			credentialBlocks(changedLegacyResult.snapshot, credential.id).map(block => [
+				block.blockScope,
+				block.blockedUntilMs,
+			]),
+		).toEqual([["shared", updatedChatBlockedUntilMs]]);
 	});
 
 	test("GET /v1/snapshot long-poll wakes when generation changes", async () => {
@@ -332,6 +462,101 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
+	test("SSE stream projects Codex meter blocks only for clients without the capability", async () => {
+		const credential = storage!.upsertCredential("openai-codex", {
+			...mintOAuthCredential("codex-stream-scopes", Date.now() + 60_000),
+		})[0];
+		if (!credential) throw new Error("expected Codex credential");
+		const chatBlockedUntilMs = Date.now() + 60_000;
+		const sparkBlockedUntilMs = Date.now() + 120_000;
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "chat",
+			blockedUntilMs: chatBlockedUntilMs,
+		});
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "spark",
+			blockedUntilMs: sparkBlockedUntilMs,
+		});
+
+		const currentController = new AbortController();
+		const legacyController = new AbortController();
+		const currentIter = new AuthBrokerClient({ url: handle!.url, token }).openSnapshotStream({
+			signal: currentController.signal,
+		});
+		const legacyIter = new AuthBrokerClient({
+			url: handle!.url,
+			token,
+			fetchImpl: fetchWithoutAuthBrokerCapabilities(),
+		}).openSnapshotStream({ signal: legacyController.signal });
+		try {
+			const [currentInitial, legacyInitial] = await Promise.all([currentIter.next(), legacyIter.next()]);
+			if (currentInitial.done || currentInitial.value.kind !== "snapshot") {
+				throw new Error("expected current-client snapshot frame");
+			}
+			if (legacyInitial.done || legacyInitial.value.kind !== "snapshot") {
+				throw new Error("expected legacy-client snapshot frame");
+			}
+			expect(
+				credentialBlocks(currentInitial.value, credential.id).map(block => [
+					block.blockScope,
+					block.blockedUntilMs,
+				]),
+			).toEqual([
+				["chat", chatBlockedUntilMs],
+				["spark", sparkBlockedUntilMs],
+			]);
+			const initialCurrentBlocks = credentialBlocks(currentInitial.value, credential.id);
+			expect(credentialBlocks(legacyInitial.value, credential.id)).toEqual([
+				{
+					providerKey: "openai-codex:oauth",
+					blockScope: "shared",
+					blockedUntilMs: sparkBlockedUntilMs,
+					updatedAtMs: Math.max(...initialCurrentBlocks.map(block => block.updatedAtMs ?? 0)),
+				},
+			]);
+
+			const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
+			storage!.upsertCredentialBlock({
+				credentialId: credential.id,
+				providerKey: "openai-codex:oauth",
+				blockScope: "chat",
+				blockedUntilMs: updatedChatBlockedUntilMs,
+			});
+
+			const [currentDelta, legacyDelta] = await Promise.all([
+				nextMatching(currentIter, event => event.kind === "entry" && event.entry.id === credential.id),
+				nextMatching(legacyIter, event => event.kind === "entry" && event.entry.id === credential.id),
+			]);
+			if (currentDelta.kind !== "entry" || legacyDelta.kind !== "entry") {
+				throw new Error("expected entry frames");
+			}
+			const currentDeltaBlocks = currentDelta.entry.blocks ?? [];
+			expect(currentDeltaBlocks.map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
+				["chat", updatedChatBlockedUntilMs],
+				["spark", sparkBlockedUntilMs],
+			]);
+			expect(legacyDelta.entry.blocks).toEqual([
+				{
+					providerKey: "openai-codex:oauth",
+					blockScope: "shared",
+					blockedUntilMs: updatedChatBlockedUntilMs,
+					updatedAtMs: Math.max(...currentDeltaBlocks.map(block => block.updatedAtMs ?? 0)),
+				},
+			]);
+		} finally {
+			currentController.abort();
+			legacyController.abort();
+			await Promise.all([
+				currentIter.return(undefined).catch(() => {}),
+				legacyIter.return(undefined).catch(() => {}),
+			]);
+		}
+	});
+
 	test("SSE stream pushes entry frame on refresh", async () => {
 		const refreshed = {
 			access: "access-rotated",
@@ -414,6 +639,7 @@ describe("auth-broker wire surface", () => {
 			});
 			expect(res.status).toBe(200);
 			expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+			expect(res.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 			expect(res.body).not.toBeNull();
 			const reader = (res.body as ReadableStream<Uint8Array>).getReader();
 			const decoder = new TextDecoder();

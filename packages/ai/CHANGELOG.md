@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed legacy Codex usage blocks continuing to gate every model after per-meter backoff shipped. SQLite now splits the old `shared` scope into independent `chat` and `spark` blocks while preserving their expiry and age, so live usage reconciliation can release a healthy meter without releasing an exhausted one.
+- Fixed legacy Codex usage blocks continuing to gate every model after per-meter backoff shipped. SQLite now splits the old `shared` scope into independent `chat` and `spark` blocks while preserving their expiry and age, and block reads keep a read-only fast path when no legacy row exists. Broker clients negotiate meter-scoped snapshots with `OMP-Auth-Broker-Capabilities: codex-meter-block-scopes`; older clients receive a legacy `shared` wire projection, with `Vary` and a new encrypted-cache version keeping the representations separate.
 
 ## [17.1.4] - 2026-07-26
 

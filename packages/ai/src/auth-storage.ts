@@ -6653,6 +6653,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#updateIfMatchesWithLeaseStmt: Statement;
 	#deleteIfMatchesWithLeaseStmt: Statement;
 	#getCredentialBlockStmt: Statement;
+	#getCodexCredentialBlockStateStmt: Statement;
 	#listCredentialBlocksByCredentialStmt: Statement;
 	#upsertCredentialBlockStmt: Statement;
 	#findLegacyCodexCredentialBlockStmt: Statement;
@@ -6738,6 +6739,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
 		this.#getCredentialBlockStmt = this.#db.prepare(
 			"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
+		);
+		this.#getCodexCredentialBlockStateStmt = this.#db.prepare(
+			`SELECT block_scope, blocked_until_ms, updated_at
+			FROM auth_credential_blocks
+			WHERE credential_id = ? AND provider_key = ? AND block_scope IN (?, ?) AND blocked_until_ms > ?`,
 		);
 		this.#listCredentialBlocksByCredentialStmt = this.#db.prepare(
 			"SELECT credential_id, provider_key, block_scope, blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND blocked_until_ms > ? ORDER BY provider_key ASC, block_scope ASC",
@@ -7240,11 +7246,40 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return legacyBlockedUntilMs;
 	}
 
-	#normalizeLegacyCodexCredentialBlocks(credentialId?: number): number | undefined {
+	#normalizeLegacyCodexCredentialBlocks(): void {
 		const normalize = this.#db.transaction(() =>
-			this.#normalizeLegacyCodexCredentialBlocksInTransaction(credentialId, Date.now()),
+			this.#normalizeLegacyCodexCredentialBlocksInTransaction(undefined, Date.now()),
 		);
-		return normalize.immediate();
+		normalize.immediate();
+	}
+
+	/**
+	 * Read the requested Codex scope and its legacy catch-all scope from one
+	 * SQLite snapshot. This keeps the steady-state path read-only without
+	 * introducing a gap between probing for `shared` and reading the scope.
+	 */
+	#readCodexCredentialBlockState(
+		credentialId: number,
+		blockScope: string,
+		nowMs: number,
+	): {
+		requestedRow: { blocked_until_ms: number; updated_at: number } | undefined;
+		legacyBlockedUntilMs: number | undefined;
+	} {
+		const rows = this.#getCodexCredentialBlockStateStmt.all(
+			credentialId,
+			LEGACY_CODEX_BLOCK_PROVIDER_KEY,
+			blockScope,
+			LEGACY_CODEX_BLOCK_SCOPE,
+			nowMs,
+		) as Array<{ block_scope: string; blocked_until_ms: number; updated_at: number }>;
+		let requestedRow: { blocked_until_ms: number; updated_at: number } | undefined;
+		let legacyBlockedUntilMs: number | undefined;
+		for (const row of rows) {
+			if (row.block_scope === blockScope) requestedRow = row;
+			if (row.block_scope === LEGACY_CODEX_BLOCK_SCOPE) legacyBlockedUntilMs = row.blocked_until_ms;
+		}
+		return { requestedRow, legacyBlockedUntilMs };
 	}
 
 	// ─── AuthCredentialStore interface ──────────────────────────────────────
@@ -7575,6 +7610,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
 		const nowMs = Date.now();
 		if (providerKey === LEGACY_CODEX_BLOCK_PROVIDER_KEY) {
+			const state = this.#readCodexCredentialBlockState(credentialId, blockScope, nowMs);
+			if (state.legacyBlockedUntilMs === undefined) return state.requestedRow?.blocked_until_ms;
+
 			const read = this.#db.transaction(() => {
 				const legacyBlockedUntilMs = this.#normalizeLegacyCodexCredentialBlocksInTransaction(credentialId, nowMs);
 				const row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, nowMs) as
@@ -7597,13 +7635,18 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		const nowMs = Date.now();
 		let row: { blocked_until_ms?: number; updated_at?: number } | undefined;
 		if (providerKey === LEGACY_CODEX_BLOCK_PROVIDER_KEY) {
-			const read = this.#db.transaction(() => {
-				this.#normalizeLegacyCodexCredentialBlocksInTransaction(credentialId, nowMs);
-				return this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, nowMs) as
-					| { blocked_until_ms?: number; updated_at?: number }
-					| undefined;
-			});
-			row = read.immediate();
+			const state = this.#readCodexCredentialBlockState(credentialId, blockScope, nowMs);
+			if (state.legacyBlockedUntilMs === undefined) {
+				row = state.requestedRow;
+			} else {
+				const read = this.#db.transaction(() => {
+					this.#normalizeLegacyCodexCredentialBlocksInTransaction(credentialId, nowMs);
+					return this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, nowMs) as
+						| { blocked_until_ms?: number; updated_at?: number }
+						| undefined;
+				});
+				row = read.immediate();
+			}
 		} else {
 			this.#deleteExpiredCredentialBlocksStmt.run(nowMs);
 			row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, nowMs) as
@@ -8027,6 +8070,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#upsertCacheStmt.finalize();
 		this.#deleteExpiredCacheStmt.finalize();
 		this.#getCredentialBlockStmt.finalize();
+		this.#getCodexCredentialBlockStateStmt.finalize();
 		this.#listCredentialBlocksByCredentialStmt.finalize();
 		this.#upsertCredentialBlockStmt.finalize();
 		this.#findLegacyCodexCredentialBlockStmt.finalize();
