@@ -400,10 +400,21 @@ function buildTodoSyncResult(
 export class CursorExecHandlers implements ICursorExecHandlers {
 	constructor(private options: CursorExecBridgeOptions) {}
 
+	/**
+	 * Modern Cursor builds paginate the legacy `read` frame with
+	 * `offset`/`limit`, exactly as `pi_read` does. Dropping them returns the
+	 * whole file (or its own truncation) for every page, so a model walking a
+	 * large file never advances. Composed with the same helper, so both frames
+	 * translate a range identically.
+	 */
 	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const toolResultMessage = await executeTool(this.options, "read", toolCallId, { path: args.path });
-		return toolResultMessage;
+		const composed = piReadPath(args.path, args.offset, args.limit);
+		// A present `limit: 0` asks for zero lines; no selector expresses that.
+		if (composed === null) {
+			return createToolResultMessage(toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
+		}
+		return await executeTool(this.options, "read", toolCallId, { path: composed });
 	}
 
 	async ls(args: Parameters<NonNullable<ICursorExecHandlers["ls"]>>[0]) {
@@ -413,13 +424,21 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		return toolResultMessage;
 	}
 
+	/**
+	 * Modern Cursor builds paginate this frame with `offset`. The local `grep`
+	 * paginates by file through `skip`, which is the same unit its own
+	 * "use skip=N for the next page" advice counts in — so an unforwarded
+	 * offset re-runs the identical search and returns page one forever.
+	 */
 	async grep(args: Parameters<NonNullable<ICursorExecHandlers["grep"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
+		const skip = args.offset !== undefined && args.offset > 0 ? Math.floor(args.offset) : undefined;
 		const toolResultMessage = await executeTool(this.options, "grep", toolCallId, {
 			pattern: args.pattern,
 			path: searchPath,
 			case: args.caseInsensitive === true ? false : undefined,
+			skip,
 		});
 		return toolResultMessage;
 	}

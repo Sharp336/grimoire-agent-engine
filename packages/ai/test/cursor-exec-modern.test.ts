@@ -1533,3 +1533,41 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
 	});
 });
+
+describe("Cursor legacy read frame: range reporting", () => {
+	it("reports rangeApplied only when the frame asked for a window", async () => {
+		// `range_applied: false` tells the server "this is the whole file", which
+		// is true for an unranged read and a lie for a paginated one — a model
+		// walking a large file would stop after the first window believing it had
+		// seen everything.
+		const handlers: CursorExecHandlers = {
+			async read() {
+				return toolResult("line1\nline2");
+			},
+		};
+
+		const ranged = await dispatchExec(
+			buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, { path: "/repo/big.ts", toolCallId: "c1", offset: 5, limit: 20 }),
+			}),
+			{ execHandlers: handlers },
+		);
+		const rangedAnswer = soleResult(ranged.frames);
+		if (rangedAnswer.case !== "readResult") throw new Error(`got ${rangedAnswer.case}`);
+		if (rangedAnswer.value.result.case !== "success") throw new Error(`got ${rangedAnswer.value.result.case}`);
+		expect(rangedAnswer.value.result.value.rangeApplied).toBe(true);
+
+		const whole = await dispatchExec(
+			buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, { path: "/repo/big.ts", toolCallId: "c2" }),
+			}),
+			{ execHandlers: handlers },
+		);
+		const wholeAnswer = soleResult(whole.frames);
+		if (wholeAnswer.case !== "readResult") throw new Error(`got ${wholeAnswer.case}`);
+		if (wholeAnswer.value.result.case !== "success") throw new Error(`got ${wholeAnswer.value.result.case}`);
+		expect(wholeAnswer.value.result.value.rangeApplied).toBe(false);
+	});
+});

@@ -1456,6 +1456,32 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		expect(result.content).toEqual([{ type: "text", text: "" }]);
 	});
 
+	it("composes the legacy read frame's offset/limit the same way pi_read does", async () => {
+		// Modern Cursor builds paginate the legacy `read` frame too. Dropping the
+		// range returns the whole file for every page, so a model walking a large
+		// file never advances past the first window.
+		const { handlers, calls } = recordingHandlers("read");
+
+		await handlers.read({ toolCallId: "c1", path: "a.ts", offset: 5, limit: 20 } as never);
+		await handlers.read({ toolCallId: "c2", path: "a.ts" } as never);
+
+		expect(calls).toEqual([{ path: "a.ts:raw:5+20" }, { path: "a.ts" }]);
+	});
+
+	it("forwards the legacy grep frame's offset as the local tool's file skip", async () => {
+		// `grep` paginates by file and reports "use skip=N for the next page" in
+		// that same unit. An unforwarded offset re-runs the identical search, so
+		// every page after the first repeats page one.
+		const { handlers, calls } = recordingHandlers("grep");
+
+		await handlers.grep({ toolCallId: "c1", pattern: "x", path: "src", offset: 20 } as never);
+		await handlers.grep({ toolCallId: "c2", pattern: "x", path: "src" } as never);
+		// A present 0 is "start at the beginning", which is the unset search.
+		await handlers.grep({ toolCallId: "c3", pattern: "x", path: "src", offset: 0 } as never);
+
+		expect(calls.map(call => (call as { skip?: number }).skip)).toEqual([20, undefined, undefined]);
+	});
+
 	it("returns exactly the lines a pi_read range asked for", async () => {
 		// Producer/consumer contract against the real `ReadTool`: a plain `:N+K`
 		// selector deliberately pads with one leading and three trailing context

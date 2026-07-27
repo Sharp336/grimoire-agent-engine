@@ -1297,7 +1297,12 @@ async function handleExecServerMessage(
 				args,
 				execHandlers?.read?.bind(execHandlers),
 				onToolResult,
-				toolResult => buildReadResultFromToolResult(args.path, toolResult),
+				toolResult =>
+					buildReadResultFromToolResult(
+						args.path,
+						toolResult,
+						args.offset !== undefined || args.limit !== undefined,
+					),
 				reason => buildReadRejectedResult(args.path, reason),
 				error => buildReadErrorResult(args.path, error),
 				{ toolCallId: args.toolCallId, toolName: "read" },
@@ -2319,7 +2324,7 @@ function toolResultDetailBoolean(toolResult: ToolResultMessage, key: string): bo
 	return typeof value === "boolean" ? value : false;
 }
 
-function buildReadResultFromToolResult(path: string, toolResult: ToolResultMessage) {
+function buildReadResultFromToolResult(path: string, toolResult: ToolResultMessage, rangeApplied = false) {
 	const text = toolResultToText(toolResult);
 	if (toolResult.isError) {
 		return buildReadErrorResult(path, text || "Read failed");
@@ -2334,6 +2339,10 @@ function buildReadResultFromToolResult(path: string, toolResult: ToolResultMessa
 				fileSize: BigInt(Buffer.byteLength(text, "utf-8")),
 				truncated: toolResultWasTruncated(toolResult),
 				output: { case: "content", value: text },
+				// Whether the frame's window was honored. Left false for an
+				// unranged read: the server reads it as "this is the whole file",
+				// which is exactly true when no range was asked for.
+				rangeApplied,
 			}),
 		},
 	});
