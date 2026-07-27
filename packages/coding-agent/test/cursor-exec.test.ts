@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { create, fromBinary } from "@bufbuild/protobuf";
 import type { AgentEvent, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
+import { piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
@@ -21,6 +22,8 @@ import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { GrepTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { AdviseTool } from "../src/advisor/advise-tool";
@@ -133,6 +136,69 @@ describe("CursorExecHandlers.grep bridge", () => {
 		const withContextText = withContext.content.map(c => (c.type === "text" ? c.text : "")).join("");
 		expect(withContextText).toContain("before line");
 		expect(withContextText).toContain("after line");
+	});
+});
+
+describe("pi_bash truncation reaches the wire from a real BashTool result", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-pibash-trunc-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("translates the metadata BashTool actually emits, not a hand-built shape", async () => {
+		// Producer/consumer contract. `piTruncation` lives in `pi-ai`, which
+		// cannot import `BashTool`, so every test there must hand-build the
+		// details bag — and a bag built from the same assumption as the code
+		// stays green when `BashTool`'s real shape moves. This runs the actual
+		// tool and feeds its actual output to the actual translator.
+		const bash = new BashTool(createTestSession(cwd));
+		const result = await bash.execute("t1", { command: "seq 1 200000" });
+
+		// Guard the assumption the bridge encodes: Bash files truncation under
+		// `details.meta.truncation`, and that record carries no `truncated`
+		// flag. If either moves, this fails here rather than silently sending
+		// clipped output to Cursor with no truncation notice.
+		// `TruncationMeta` is the producer's own type: if a field this bridge
+		// reads is renamed or dropped, this stops compiling.
+		const details = result.details as { truncation?: unknown; meta?: { truncation?: TruncationMeta } };
+		expect(details.truncation).toBeUndefined();
+		expect(details.meta?.truncation).toBeDefined();
+		expect(details.meta?.truncation).not.toHaveProperty("truncated");
+
+		const wire = piTruncation({
+			role: "toolResult",
+			toolCallId: "t1",
+			toolName: "bash",
+			content: result.content,
+			isError: false,
+			timestamp: Date.now(),
+			details: result.details,
+		});
+
+		expect(wire?.truncated).toBe(true);
+		expect(wire?.totalLines).toBe(details.meta?.truncation?.totalLines);
+		expect(wire?.outputBytes).toBe(details.meta?.truncation?.outputBytes);
+		expect(wire?.truncatedBy).toBe(details.meta?.truncation?.truncatedBy);
+	});
+
+	it("sends no truncation summary for output that fit", async () => {
+		const bash = new BashTool(createTestSession(cwd));
+		const result = await bash.execute("t2", { command: "echo hi" });
+		const wire = piTruncation({
+			role: "toolResult",
+			toolCallId: "t2",
+			toolName: "bash",
+			content: result.content,
+			isError: false,
+			timestamp: Date.now(),
+			details: result.details,
+		});
+		expect(wire).toBeUndefined();
 	});
 });
 

@@ -738,6 +738,44 @@ describe("Cursor modern exec frames: Pi tools", () => {
 		expect(answer.value.result.value.truncation?.totalLines).toBe(5000);
 	});
 
+	it("reads truncation from the `details.meta.truncation` shape real Bash results use", async () => {
+		// `BashTool` files its summary under `details.meta.truncation`
+		// (`TruncationMeta`), which carries no `truncated` flag — its presence is
+		// the signal. Reading only the top-level `TruncationResult` shape handed
+		// Cursor clipped output with no notice that it was clipped.
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "piBashArgs", value: create(PiBashExecArgsSchema, { command: "yes" }) }),
+			{
+				execHandlers: {
+					async piBash() {
+						return toolResult("out", {
+							details: {
+								meta: {
+									truncation: {
+										direction: "head",
+										truncatedBy: "bytes",
+										totalLines: 5000,
+										totalBytes: 120000,
+										outputLines: 300,
+										outputBytes: 4096,
+									},
+								},
+							},
+						});
+					},
+				},
+			},
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "piBashResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error("expected success");
+		expect(answer.value.result.value.truncation?.truncated).toBe(true);
+		expect(answer.value.result.value.truncation?.truncatedBy).toBe("bytes");
+		expect(answer.value.result.value.truncation?.totalLines).toBe(5000);
+		expect(answer.value.result.value.truncation?.outputBytes).toBe(4096);
+	});
+
 	it("omits truncation entirely when nothing was truncated", async () => {
 		// `optional PiTruncation` — a zeroed message would claim the output was
 		// trimmed to nothing.

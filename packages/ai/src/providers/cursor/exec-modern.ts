@@ -104,8 +104,8 @@ export function piReadPath(path: string, offset?: number, limit?: number): strin
  * standing alone rather than building a `./`- or `//`-prefixed spec.
  *
  * Uses `node:path` rather than string surgery so Windows absolutes (`C:\…`,
- * UNC) are recognised and separators stay normalized — the same treatment
- * `joinLegacyGlob` gives the legacy pi shim's identical path/glob pair.
+ * UNC) are recognised and separators stay normalized. The legacy pi shim's
+ * identical path/glob pair calls this too, so both stay in step.
  */
 export function piJoinPath(basePath: string | undefined, pattern: string): string {
 	if (path.isAbsolute(pattern)) return pattern;
@@ -169,17 +169,28 @@ function detailCount(toolResult: ToolResultMessage, key: string): number | undef
 }
 
 /**
- * Translate a local tool's truncation summary
- * (`coding-agent/src/session/streaming-output.ts:TruncationResult`) into
- * `PiTruncation`.
+ * Translate a local tool's truncation summary into `PiTruncation`.
+ *
+ * Two shapes reach here. `read`/`grep` set `details.truncation`
+ * (`TruncationResult`), which carries an explicit `truncated` boolean. `bash`
+ * sets `details.meta.truncation` (`TruncationMeta`), which has **no** such
+ * flag — its presence *is* the signal, and requiring the boolean silently
+ * dropped every Bash truncation, handing Cursor clipped output with no notice
+ * that it was clipped.
  *
  * Returns `undefined` when nothing was truncated: the field is `optional` on
  * every Pi success message, and emitting a zeroed `PiTruncation` would tell the
  * server the output was trimmed to nothing.
  */
 export function piTruncation(toolResult: ToolResultMessage): PiTruncation | undefined {
-	const truncation = bagValue(toolResult.details, "truncation");
-	if (bagValue(truncation, "truncated") !== true) return undefined;
+	const direct = bagValue(toolResult.details, "truncation");
+	// `TruncationResult` is authoritative when present and explicitly false.
+	const truncation = direct !== undefined ? direct : bagValue(bagValue(toolResult.details, "meta"), "truncation");
+	if (truncation === undefined || truncation === null) return undefined;
+	// `TruncationResult` gates on its flag; `TruncationMeta` has none and is
+	// only ever attached when output was actually trimmed.
+	const flag = bagValue(truncation, "truncated");
+	if (flag !== undefined && flag !== true) return undefined;
 	const truncatedBy = bagValue(truncation, "truncatedBy");
 	const totalLines = bagValue(truncation, "totalLines");
 	const outputLines = bagValue(truncation, "outputLines");
