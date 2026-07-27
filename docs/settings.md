@@ -721,6 +721,14 @@ searxng:
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
+### Undo
+
+`/undo [n]` rolls back the last `n` user→assistant turns, restoring workspace files and branching the session so the reverted user message is ready to edit and resend. Snapshots are captured automatically at the start of each user turn in a hidden git repository under the agent data directory, keeping the user's project history untouched. Undo only restores files that actually changed, requires confirmation before destructive restore, and is disabled when git is unavailable or the project directory does not exist. Toggle snapshots with `snapshots.enabled`.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `snapshots.enabled` | boolean | `true` | Capture per-turn workspace snapshots and enable `/undo`. Set to `false` to disable snapshotting entirely. |
+
 ### Other groups
 
 `omp config list` exposes many more grouped settings, including: `task.*` (subagent concurrency, isolation, model overrides), `skills.*` and `commands.*` (discovery toggles), `mcp.*`, `github.*`, `async.*`, `goal.*`, `loop.*`, `todo.*`, `magicKeywords.*`, `ttsr.*` (time-traveling stream rules), `display.*`, `startup.*`, `share.*`, `collab.*`, `stt.*`/`tts.*`, `memories.*`/`hindsight.*`/`mnemopi.*` (memory backends), and `bashInterceptor.*`. Each follows the same type/default rules shown above.

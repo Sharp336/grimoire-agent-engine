@@ -1180,7 +1180,24 @@ function parseStatusPorcelain(text: string): GitStatusSummary {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// API: diff
+// Low-level plumbing runner exposed for callers that need custom args/env.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Run an arbitrary git command and return the raw result. Prefer the typed
+ * helpers in this module; this escape hatch is for custom plumbing that needs
+ * control over arguments and environment (e.g. a snapshot repo with a separate
+ * GIT_DIR and GIT_INDEX_FILE).
+ */
+export async function run(
+	cwd: string,
+	args: readonly string[],
+	options: CommandOptions = {},
+): Promise<GitCommandResult> {
+	ensureAvailable();
+	return git(cwd, args, options);
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 
 /** Run `git diff` with the given options. Returns raw diff text. */

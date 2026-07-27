@@ -1416,6 +1416,63 @@ export class CommandController {
 		}
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}
+
+	async handleUndoCommand(howMuchRaw?: string): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before undoing.");
+			return;
+		}
+
+		const tracker = this.ctx.session.getUndoTracker();
+		const supported = await tracker.isSupported();
+		if (!supported) {
+			this.ctx.showError("Undo is not available (no git or unsupported project).");
+			return;
+		}
+
+		const boundaries = tracker.resolveUndo(howMuchRaw);
+		if (!boundaries) {
+			this.ctx.showError("Nothing to undo.");
+			return;
+		}
+
+		const howMuch = Math.max(1, parseInt(howMuchRaw ?? "1", 10));
+		const confirmed = await this.ctx.showHookConfirm(
+			"Undo?",
+			`Revert ${howMuch === 1 ? "the last turn" : `${howMuch} turns`} and restore ${boundaries.filesToRestore.length} file(s)?`,
+		);
+		if (!confirmed) {
+			this.ctx.showStatus("Undo cancelled.");
+			return;
+		}
+
+		const loader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			"Reverting…",
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(loader);
+		this.ctx.ui.requestRender();
+
+		try {
+			await tracker.restoreFiles(boundaries);
+			this.ctx.sessionManager.branch(boundaries.targetUserEntryId);
+			this.ctx.editor.setText(boundaries.userMessageText);
+			this.ctx.clearTransientSessionUi();
+			this.ctx.renderInitialMessages();
+			this.ctx.statusLine.invalidate();
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
+			this.ctx.showStatus(`Undid ${howMuch === 1 ? "1 turn" : `${howMuch} turns`}. Edit and resend your message.`);
+		} catch (error) {
+			this.ctx.showError(`Undo failed: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			loader.stop();
+			this.ctx.statusContainer.disposeChildren();
+			this.ctx.ui.requestRender();
+		}
+	}
 }
 
 const BAR_WIDTH_MAX = 24;

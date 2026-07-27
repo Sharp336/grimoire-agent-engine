@@ -124,6 +124,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
 	interaction: [
 		"Input",
+		"Undo",
 		"Approvals",
 		"Notifications",
 		"Speech",
@@ -4720,6 +4721,21 @@ export const SETTINGS_SCHEMA = {
 			group: "Commands & Skills",
 			label: "OpenCode Project Commands",
 			description: "Load commands from .opencode/commands/",
+		},
+	},
+
+	// ────────────────────────────────────────────────────────────────────────
+	// Snapshots
+	// ────────────────────────────────────────────────────────────────────────
+
+	"snapshots.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Undo",
+			label: "Enable per-turn snapshots",
+			description: "Capture workspace state before each assistant turn so /undo can restore files",
 		},
 	},
 

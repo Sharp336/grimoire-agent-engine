@@ -4498,6 +4498,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleMemoryCommand(text);
 	}
 
+	async handleUndoCommand(howMuchRaw?: string): Promise<void> {
+		await this.#commandController.handleUndoCommand(howMuchRaw);
+	}
+
 	async handleSTTToggle(): Promise<void> {
 		if (this.#liveCommandController.active) {
 			this.showWarning("End live mode before using push-to-talk speech input.");
