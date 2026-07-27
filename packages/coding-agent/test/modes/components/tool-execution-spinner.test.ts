@@ -156,6 +156,79 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
+	it("does not repaint compact todo results for an invisible strike animation", () => {
+		vi.useFakeTimers();
+		const requestRender = vi.fn();
+		const requestComponentRender = vi.fn();
+		const component = new ToolExecutionComponent(
+			"todo",
+			{ op: "done", task: "finished" },
+			{},
+			undefined,
+			{ requestRender, requestComponentRender } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "done" }],
+					details: {
+						phases: [{ name: "Work", tasks: [{ content: "finished", status: "completed" }] }],
+						storage: "session",
+						completedTasks: [{ phase: "Work", content: "finished" }],
+					},
+				},
+				false,
+			);
+			requestRender.mockClear();
+			requestComponentRender.mockClear();
+
+			vi.advanceTimersByTime(1_000);
+
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(requestComponentRender).not.toHaveBeenCalled();
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
+	it("stops the todo strike animation when an expanded result is compacted", () => {
+		vi.useFakeTimers();
+		const requestComponentRender = vi.fn();
+		const component = new ToolExecutionComponent(
+			"todo",
+			{ op: "done", task: "finished" },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.setExpanded(true);
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "done" }],
+					details: {
+						phases: [{ name: "Work", tasks: [{ content: "finished", status: "completed" }] }],
+						storage: "session",
+						completedTasks: [{ phase: "Work", content: "finished" }],
+					},
+				},
+				false,
+			);
+			component.setExpanded(false);
+			requestComponentRender.mockClear();
+
+			vi.advanceTimersByTime(1_000);
+
+			expect(requestComponentRender).not.toHaveBeenCalled();
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
 	it("pins the live vibe_wait wall and releases it after the final result", () => {
 		const component = new ToolExecutionComponent(
 			"vibe_wait",

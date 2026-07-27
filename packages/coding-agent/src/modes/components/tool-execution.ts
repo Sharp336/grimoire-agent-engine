@@ -732,7 +732,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	#updateTodoStrikeAnimation(): void {
-		if (this.#toolName !== "todo" || this.#isPartial || this.#result?.isError) {
+		if (this.#toolName !== "todo" || !this.#expanded || this.#isPartial || this.#result?.isError) {
 			this.#stopTodoStrikeAnimation();
 			return;
 		}
@@ -869,6 +869,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 	setExpanded(expanded: boolean): void {
 		this.#expanded = expanded;
+		if (!expanded) this.#stopTodoStrikeAnimation();
 		this.#updateDisplay();
 	}
 

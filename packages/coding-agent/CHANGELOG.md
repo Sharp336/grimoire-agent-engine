@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Successful `todo` transcript results now render as a one-line task/completion summary by default instead of duplicating the sticky Todo HUD; Ctrl+O still expands the full task tree, and failures retain their detailed error block ([#5047](https://github.com/can1357/oh-my-pi/issues/5047)).
+
 ## [17.1.5] - 2026-07-27
 
 ### Added
@@ -10,7 +14,6 @@
 
 ### Changed
 
-- Successful `todo` transcript results now render as a one-line task/completion summary by default instead of duplicating the sticky Todo HUD; Ctrl+O still expands the full task tree, and failures retain their detailed error block ([#5047](https://github.com/can1357/oh-my-pi/issues/5047)).
 - Reduced default startup resident memory by constructing the default-off ComputerTool ArkType schema only on first parameter access, then reusing it across tool instances without changing validation or tool behavior ([#6742](https://github.com/can1357/oh-my-pi/pull/6742) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv)).
 - Reduced startup CPU and memory by loading the bundled changelog only when needed, while preserving source, npm bundle, standalone binary, and native absolute-path fallback resolution.
 - Moved PTY log replay into the shared project launch broker, so normal CLI and Hub startup no longer load the xterm runtime while launch logs return validated rendered terminal rows.
