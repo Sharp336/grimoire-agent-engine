@@ -102,6 +102,7 @@ export { loadBundledAgents as BUNDLED_AGENTS } from "./agents";
 export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
+export * from "./subagent-executor";
 export type {
 	AgentDefinition,
 	AgentProgress,

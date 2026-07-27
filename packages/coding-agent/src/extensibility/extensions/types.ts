@@ -52,6 +52,7 @@ import type { Theme } from "../../modes/theme/theme";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+import type { SubagentExecutor } from "../../task/subagent-executor";
 import type {
 	BashToolDetails,
 	BashToolInput,
@@ -1142,6 +1143,9 @@ export interface ExtensionAPI {
 	/** Register a tool that the LLM can call. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
 
+	/** Register a backend for the agent definitions it explicitly claims. */
+	registerSubagentExecutor(executor: SubagentExecutor): void;
+
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
@@ -1378,6 +1382,11 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 // Loaded Extension Types
 // ============================================================================
 
+export interface RegisteredSubagentExecutor {
+	definition: SubagentExecutor;
+	extensionPath: string;
+}
+
 export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = unknown> {
 	definition: ToolDefinition<TParams, TDetails>;
 	extensionPath: string;
@@ -1501,6 +1510,7 @@ export interface Extension {
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;
+	subagentExecutors: Map<string, RegisteredSubagentExecutor>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
 	messageRenderers: Map<string, MessageRenderer>;
 	commands: Map<string, RegisteredCommand>;

@@ -30,6 +30,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
+import type { SubagentExecutorRegistry } from "../task/subagent-executor";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
@@ -182,6 +183,8 @@ export interface ToolSession {
 	 * (`<inline-N>`) are NOT included — those are session-local.
 	 */
 	extensionPaths?: string[];
+	/** Session-scoped extension executor registry; no claim means OMP-native execution. */
+	subagentExecutorRegistry?: SubagentExecutorRegistry;
 	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. Forwarded to subagents so they skip the FS scan but still

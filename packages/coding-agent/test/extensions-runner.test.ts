@@ -95,6 +95,42 @@ describe("ExtensionRunner", () => {
 		expect(runner.createContext().localProtocolOptions).toBe(localProtocolOptions);
 	});
 
+	it("exposes extension-registered subagent executors", async () => {
+		const extCode = `
+			export default function(pi) {
+				pi.registerSubagentExecutor({
+					id: "remote",
+					claim: agent => agent.filePath === "/plugin/agents/reviewer.md",
+					execute: async () => { throw new Error("not called"); },
+				});
+			}
+		`;
+		fs.writeFileSync(path.join(extensionsDir, "subagent-executor.ts"), extCode);
+
+		const result = await loadTestExtensions();
+		expect(result.errors).toEqual([]);
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+
+		const registered = runner.getAllRegisteredSubagentExecutors();
+		expect(registered).toHaveLength(1);
+		expect(registered[0]?.definition.id).toBe("remote");
+		expect(
+			registered[0]?.definition.claim({
+				name: "reviewer",
+				description: "Review",
+				systemPrompt: "Review independently.",
+				source: "project",
+				filePath: "/plugin/agents/reviewer.md",
+			}),
+		).toBe(true);
+	});
+
 	describe("shortcut conflicts", () => {
 		it("warns when extension shortcut conflicts with built-in", async () => {
 			const extCode = `

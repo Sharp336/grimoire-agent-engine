@@ -41,6 +41,7 @@ import type {
 	InputEventResult,
 	MessageRenderer,
 	RegisteredCommand,
+	RegisteredSubagentExecutor,
 	RegisteredTool,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
@@ -406,6 +407,25 @@ export class ExtensionRunner {
 			}
 		}
 		return tools;
+	}
+
+	/** Get all registered subagent executors, rejecting cross-extension ID collisions. */
+	getAllRegisteredSubagentExecutors(): RegisteredSubagentExecutor[] {
+		const executors: RegisteredSubagentExecutor[] = [];
+		const sourceById = new Map<string, string>();
+		for (const ext of this.extensions) {
+			for (const registered of ext.subagentExecutors.values()) {
+				const previous = sourceById.get(registered.definition.id);
+				if (previous) {
+					throw new Error(
+						`Duplicate subagent executor id ${JSON.stringify(registered.definition.id)} from ${previous} and ${registered.extensionPath}`,
+					);
+				}
+				sourceById.set(registered.definition.id, registered.extensionPath);
+				executors.push(registered);
+			}
+		}
+		return executors;
 	}
 
 	/**

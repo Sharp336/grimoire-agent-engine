@@ -54,6 +54,7 @@ export * from "./session/session-migrations";
 export * from "./session/session-storage";
 export * from "./session/sql-session-storage";
 export * from "./task/executor";
+export * from "./task/subagent-executor";
 export type * from "./task/types";
 // Tools (detail types and utilities)
 export * from "./tools";

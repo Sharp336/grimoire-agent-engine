@@ -18,6 +18,7 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import { SubagentExecutorRegistry } from "@oh-my-pi/pi-coding-agent/task/subagent-executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -186,6 +187,48 @@ describe("structured subagent primitive", () => {
 		});
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("routes a claimed agent through the session-scoped executor", async () => {
+		const externalSession = session();
+		const execute = vi.fn(async options => ({ ...result(), id: options.id, agent: options.agent.name }));
+		externalSession.subagentExecutorRegistry = new SubagentExecutorRegistry([
+			{
+				id: "external",
+				claim: agent => agent.filePath === "/plugin/agents/worker.md",
+				execute,
+			},
+		]);
+		mockDiscovery({ ...AGENT, filePath: "/plugin/agents/worker.md" });
+		const nativeExecute = vi.spyOn(executorModule, "runSubprocess");
+
+		const settled = await runStructuredSubagent(request({ session: externalSession }));
+
+		expect(execute).toHaveBeenCalledTimes(1);
+		const externalOptions = execute.mock.calls[0]?.[0];
+		expect(externalOptions?.cwd).toBe("/tmp");
+		expect(externalOptions?.agent.name).toBe("worker");
+		expect(externalOptions?.assignment).toBe("Inspect the target.");
+		expect(externalOptions?.task).toContain("Inspect the target.");
+		expect(nativeExecute).not.toHaveBeenCalled();
+		expect(settled.result.id).toBe(execute.mock.calls[0]?.[0].id);
+	});
+
+	it("fails preflight when multiple executors claim the same agent", async () => {
+		const externalSession = session();
+		const never = vi.fn(async () => result());
+		externalSession.subagentExecutorRegistry = new SubagentExecutorRegistry([
+			{ id: "first", claim: () => true, execute: never },
+			{ id: "second", claim: () => true, execute: never },
+		]);
+		mockDiscovery();
+		const nativeExecute = vi.spyOn(executorModule, "runSubprocess");
+
+		await expect(runStructuredSubagent(request({ session: externalSession }))).rejects.toThrow(
+			'Agent "worker" is claimed by multiple subagent executors: "first", "second"',
+		);
+		expect(never).not.toHaveBeenCalled();
+		expect(nativeExecute).not.toHaveBeenCalled();
 	});
 	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
 		mockDiscovery();

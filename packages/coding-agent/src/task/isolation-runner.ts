@@ -24,7 +24,7 @@ import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
 import type { ExecutorOptions } from "./executor";
-import { runSubprocess } from "./executor";
+import type { SubagentExecute } from "./subagent-executor";
 import type { SingleResult } from "./types";
 import {
 	applyNestedPatches,
@@ -93,6 +93,8 @@ export interface IsolatedRunOptions {
 	 * else unchanged.
 	 */
 	baseOptions: ExecutorOptions;
+	/** Selected backend execution callback. Isolation only rewrites its worktree-bound options. */
+	execute: SubagentExecute;
 	/** Context returned by {@link prepareIsolationContext}. Baseline is cloned per spawn. */
 	context: IsolationContext;
 	/** PAL backend hint from `parseIsolationMode(...)` (undefined ⇒ resolver picks). */
@@ -150,7 +152,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
-		const result = await runSubprocess({
+		const result = await opts.execute({
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,

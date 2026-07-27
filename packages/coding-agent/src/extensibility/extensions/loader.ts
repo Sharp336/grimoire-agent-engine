@@ -28,6 +28,7 @@ import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
+import type { SubagentExecutor } from "../../task/subagent-executor";
 import { EventBus } from "../../utils/event-bus";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
@@ -45,6 +46,7 @@ import type {
 	MessageRenderer,
 	ProviderConfig,
 	RegisteredCommand,
+	RegisteredSubagentExecutor,
 	ToolDefinition,
 } from "./types";
 
@@ -169,6 +171,17 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			definition: tool,
 			extensionPath: this.extension.path,
 		});
+	}
+
+	registerSubagentExecutor(executor: SubagentExecutor): void {
+		if (this.extension.subagentExecutors.has(executor.id)) {
+			throw new Error(`Duplicate subagent executor id ${JSON.stringify(executor.id)} in ${this.extension.path}`);
+		}
+		const registered: RegisteredSubagentExecutor = {
+			definition: executor,
+			extensionPath: this.extension.path,
+		};
+		this.extension.subagentExecutors.set(executor.id, registered);
 	}
 
 	registerCommand(
@@ -302,6 +315,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		resolvedPath,
 		handlers: new Map(),
 		tools: new Map(),
+		subagentExecutors: new Map(),
 		assistantThinkingRenderers: [],
 		messageRenderers: new Map(),
 		commands: new Map(),

@@ -160,6 +160,7 @@ import {
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
+import { SubagentExecutorRegistry } from "./task/subagent-executor";
 import type { StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
@@ -2499,6 +2500,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
 			localProtocolOptions,
+		);
+		toolSession.subagentExecutorRegistry = new SubagentExecutorRegistry(
+			extensionRunner.getAllRegisteredSubagentExecutors().map(registered => registered.definition),
 		);
 
 		credentialDisabledTarget = extensionRunner;

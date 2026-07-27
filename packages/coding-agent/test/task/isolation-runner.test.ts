@@ -122,6 +122,7 @@ describe("runIsolatedSubprocess", () => {
 				index: 0,
 				id: "PreserveBranchFailure",
 			},
+			execute: executorModule.runSubprocess,
 			context: { repoRoot, baseline },
 			preferredBackend: undefined,
 			agentId: "PreserveBranchFailure",

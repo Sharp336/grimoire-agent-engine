@@ -33,6 +33,7 @@ import {
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
+import type { SubagentExecute } from "./subagent-executor";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -533,6 +534,16 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await resolveEffectiveSubagentPolicy(request);
+	let execute: SubagentExecute = runSubprocess;
+	try {
+		execute = request.session.subagentExecutorRegistry?.resolve(policy.effectiveAgent)?.execute ?? runSubprocess;
+	} catch (error) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Subagent executor selection failed: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		);
+	}
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
@@ -559,9 +570,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			}
 		}
 		const result = !isolationContext
-			? await runSubprocess(baseOptions)
+			? await execute(baseOptions)
 			: await runIsolatedSubprocess({
 					baseOptions,
+					execute,
 					context: isolationContext,
 					preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
 					agentId: id,
