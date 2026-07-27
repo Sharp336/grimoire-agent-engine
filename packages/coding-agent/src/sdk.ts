@@ -2594,10 +2594,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// the session's configured mode, so the bridge builds its own.
 		let cursorBridgeEditTool: AgentTool | undefined;
 		if (model?.provider === "cursor") {
-			const bridgeEdit: Tool = new EditTool(toolSession, "replace");
-			cursorBridgeEditTool = new ExtensionToolWrapper(bridgeEdit, extensionRunner);
+			// Only when the session actually granted `edit`. `createTools` omits
+			// it entirely for a restricted tool set, and the bridge answers native
+			// frames that arrive regardless of the advertised catalog — so
+			// building one unconditionally would hand a read-only agent a
+			// mutating tool it was denied (the issue #5680 escalation).
+			const editWasGranted = toolRegistry.has("edit");
 			toolRegistry.delete("edit");
 			builtInRegistryToolNames.delete("edit");
+			if (editWasGranted) {
+				const bridgeEdit: Tool = new EditTool(toolSession, "replace");
+				cursorBridgeEditTool = new ExtensionToolWrapper(bridgeEdit, extensionRunner);
+			}
 		}
 
 		let writeRegistration: Promise<boolean> | undefined;
@@ -2655,8 +2663,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			persistTodoPhases: phases => sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases }),
 			// `pi_grep` carries its own context width and match cap, which the
-			// shared grep instance fixed at construction cannot express.
-			createGrepTool: createBridgeGrepFactory(toolSession, extensionRunner),
+			// shared grep instance fixed at construction cannot express. Gated on
+			// the grant: the factory builds a fresh tool and `executeTool` prefers
+			// it over the registry, so installing it unconditionally would let a
+			// session without `grep` search anyway.
+			createGrepTool: toolRegistry.has("grep") ? createBridgeGrepFactory(toolSession, extensionRunner) : undefined,
 		});
 
 		// Resolve the inline-descriptors setting against the session-start model.

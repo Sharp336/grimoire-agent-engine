@@ -255,6 +255,21 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
 	});
 
+	it("refuses a scoped pi_grep when no grep tool was granted", async () => {
+		// The factory builds a fresh tool and `executeTool` prefers that override
+		// over the registry, so a session that withheld `grep` must not install
+		// one — otherwise a frame carrying `context`/`limit` searches anyway.
+		await Bun.write(path.join(cwd, "hit.txt"), "needle\n");
+		const denied = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>() });
+		const result = await denied.piGrep({
+			toolCallId: "g0",
+			args: { pattern: "needle", path: cwd, limit: 5 },
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(result.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("not available");
+	});
+
 	it("wraps the per-call grep the real bridge factory builds", async () => {
 		// The reviewed bypass was in the factory the session hands the bridge,
 		// not in the bridge: a raw `new GrepTool(...)` there skips the approval
