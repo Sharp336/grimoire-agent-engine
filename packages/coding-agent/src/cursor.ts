@@ -14,6 +14,7 @@ import type {
 	CursorExecHandlers as ICursorExecHandlers,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import { piEscapeRegexLiteral, piJoinPath, piLimit, piReadPath } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { resolveToCwd } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "./tools/todo";
@@ -409,8 +410,23 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * the local tool with matching semantics, so the same approval, sandboxing
 	 * and event plumbing applies as for a model-issued call.
 	 */
+	/**
+	 * `offset`/`limit` are a 1-indexed start line plus a line count (verified
+	 * against the reference `LocalPiReadExecutor`), which is exactly the local
+	 * `read` tool's `:N+K` inline selector — the tool takes no range kwargs, so
+	 * the range has to be composed onto the path or ranged reads silently
+	 * return the whole file.
+	 */
 	async piRead(call: Parameters<NonNullable<ICursorExecHandlers["piRead"]>>[0]) {
-		return await executeTool(this.options, "read", call.toolCallId, { path: call.args.path });
+		const { path: readPath, offset, limit } = call.args;
+		const composed = piReadPath(readPath, offset, limit);
+		// A present `limit: 0` asks for zero lines. The reference slices an empty
+		// string for it; no `read` selector expresses that, so answer directly
+		// rather than falling back to a whole-file read.
+		if (composed === null) {
+			return createToolResultMessage(call.toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
+		}
+		return await executeTool(this.options, "read", call.toolCallId, { path: composed });
 	}
 
 	async piBash(call: Parameters<NonNullable<ICursorExecHandlers["piBash"]>>[0]) {
@@ -440,14 +456,21 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		});
 	}
 
+	/**
+	 * `literal` makes the pattern a fixed string; the local tool is regex-only,
+	 * so the pattern is escaped on the way in (same translation the legacy pi
+	 * shim does). `context` and `limit` have no tool-level equivalent — context
+	 * width comes from `grep.contextBefore`/`grep.contextAfter` settings and the
+	 * result count is bounded by the tool's own file/match caps.
+	 */
 	async piGrep(call: Parameters<NonNullable<ICursorExecHandlers["piGrep"]>>[0]) {
-		const { pattern, path, glob, ignoreCase } = call.args;
+		const { pattern, path, glob, ignoreCase, literal } = call.args;
 		// Same arg mapping as the legacy `grep` handler: the local tool takes one
 		// path spec, and its `case` flag is case-SENSITIVITY, the inverse of the
 		// frame's `ignore_case`.
 		return await executeTool(this.options, "grep", call.toolCallId, {
-			pattern,
-			path: glob ? `${path || "."}/${glob}` : path || ".",
+			pattern: literal === true ? piEscapeRegexLiteral(pattern) : pattern,
+			path: glob ? piJoinPath(path, glob) : path || ".",
 			case: ignoreCase === true ? false : undefined,
 		});
 	}
@@ -456,16 +479,24 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * `pi_find` is a filename search, which is the local `glob` tool — not
 	 * `grep`. Its `pattern` is a glob, joined onto `path` because `glob` takes a
 	 * single combined path spec.
+	 *
+	 * `limit` is `optional int32`, so `0` is present rather than unset; the
+	 * reference clamps it with `Math.max(1, limit ?? 1000)`, and an unset limit
+	 * leaves the local tool's own default in place.
 	 */
 	async piFind(call: Parameters<NonNullable<ICursorExecHandlers["piFind"]>>[0]) {
 		const { pattern, path, limit } = call.args;
 		return await executeTool(this.options, "glob", call.toolCallId, {
-			path: path ? `${path}/${pattern}` : pattern,
-			limit: limit && limit > 0 ? limit : undefined,
+			path: piJoinPath(path, pattern),
+			limit: piLimit(limit),
 		});
 	}
 
-	/** Redirected to `read`, which lists directories — same as the legacy `ls`. */
+	/**
+	 * Redirected to `read`, which lists directories — same as the legacy `ls`.
+	 * `limit` has no tool-level equivalent; the listing is bounded by `read`'s
+	 * own directory-entry caps.
+	 */
 	async piLs(call: Parameters<NonNullable<ICursorExecHandlers["piLs"]>>[0]) {
 		return await executeTool(this.options, "read", call.toolCallId, { path: call.args.path || "." });
 	}

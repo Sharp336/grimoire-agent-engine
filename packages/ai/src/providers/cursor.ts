@@ -192,6 +192,10 @@ import {
 	buildPiReadResult,
 	buildPiWriteError,
 	buildPiWriteResult,
+	piEscapeRegexLiteral,
+	piJoinPath,
+	piLimit,
+	piReadPath,
 } from "./cursor/exec-modern";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
@@ -727,20 +731,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
-			// Every block still open when the transport ends must be closed, not
-			// just the last one started: with interleaved calls several can be
-			// open at once, and an unclosed block leaves its live card animating
-			// and its call unpaired.
-			const openBlocks = new Set<ToolCallState>(state.openToolCalls.values());
-			if (state.currentToolCall) openBlocks.add(state.currentToolCall);
-			for (const block of openBlocks) {
-				const idx = output.content.indexOf(block);
-				block.arguments = parseStreamingJson(block[kStreamingPartialJson]);
-				clearStreamingPartialJson(block);
-				stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
-			}
-			state.openToolCalls.clear();
-			state.setToolCall(null);
+			flushOpenToolCalls(output, stream, state);
 
 			calculateCost(model, output.usage);
 
@@ -1557,7 +1548,11 @@ async function handleExecServerMessage(
 		case "piReadArgs": {
 			const args = execMsg.message.value;
 			const toolCallId = crypto.randomUUID();
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", { path: args.path });
+			// The displayed block must show the operation that actually runs: the
+			// bridge composes the same range selector onto the path.
+			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", {
+				path: piReadPath(args.path, args.offset, args.limit) ?? args.path,
+			});
 			const { execResult } = await resolveExecHandler(
 				{ args, toolCallId },
 				execHandlers?.piRead?.bind(execHandlers),
@@ -1633,8 +1628,8 @@ async function handleExecServerMessage(
 			const args = execMsg.message.value;
 			const toolCallId = crypto.randomUUID();
 			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "grep", {
-				pattern: args.pattern,
-				path: args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".",
+				pattern: args.literal === true ? piEscapeRegexLiteral(args.pattern) : args.pattern,
+				path: args.glob ? piJoinPath(args.path, args.glob) : args.path || ".",
 				case: args.ignoreCase === true ? false : undefined,
 			});
 			const { execResult } = await resolveExecHandler(
@@ -1653,8 +1648,8 @@ async function handleExecServerMessage(
 			const args = execMsg.message.value;
 			const toolCallId = crypto.randomUUID();
 			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "glob", {
-				path: args.path ? `${args.path}/${args.pattern}` : args.pattern,
-				limit: args.limit,
+				path: piJoinPath(args.path, args.pattern),
+				limit: piLimit(args.limit),
 			});
 			const { execResult } = await resolveExecHandler(
 				{ args, toolCallId },
@@ -2812,6 +2807,39 @@ function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined)
  * `currentToolCall` is still set, as the fallback for frames that carry no
  * `call_id` (proto3-optional, and unset on what older builds send).
  */
+/**
+ * Close every tool-call block still open when the stream ends.
+ *
+ * Not just the last one started: with interleaved calls several can be open at
+ * once, and an unclosed block leaves its live card animating and its call
+ * unpaired.
+ *
+ * Only blocks fed by a streamed argument buffer get reparsed. Todo,
+ * connect-SCM and MCP-settled frames arrive with complete `arguments` and
+ * never set the partial buffer; `parseStreamingJson(undefined)` returns `{}`,
+ * so reparsing unconditionally would erase the arguments of every such block
+ * caught open by a truncated stream.
+ */
+export function flushOpenToolCalls(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+): void {
+	const openBlocks = new Set<ToolCallState>(state.openToolCalls.values());
+	if (state.currentToolCall) openBlocks.add(state.currentToolCall);
+	for (const block of openBlocks) {
+		const idx = output.content.indexOf(block);
+		const partialJson = block[kStreamingPartialJson];
+		if (partialJson !== undefined) {
+			block.arguments = parseStreamingJson(partialJson);
+			clearStreamingPartialJson(block);
+		}
+		stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
+	}
+	state.openToolCalls.clear();
+	state.setToolCall(null);
+}
+
 function retainStreamedCall(state: BlockState, block: ToolCallState, envelopeId: string | undefined): void {
 	if (envelopeId) state.openToolCalls.set(envelopeId, block);
 	state.setToolCall(block);

@@ -10,6 +10,7 @@
  * the server reads as "the tool ran and produced nothing".
  */
 
+import * as path from "node:path";
 import { create } from "@bufbuild/protobuf";
 import {
 	AfterAgentResponseRequestResponseSchema,
@@ -64,6 +65,63 @@ import {
 	SubagentStopRequestResponseSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import type { ToolResultMessage } from "../../types";
+
+/**
+ * Translate a Pi frame's args into the local tool kwargs that run it.
+ *
+ * Shared deliberately: the provider synthesizes a display block from these and
+ * the coding-agent bridge executes with them. Two hand-rolled translations of
+ * one frame drift, and the drift is invisible — the transcript shows one
+ * operation while a different one runs.
+ *
+ * Every `optional int32` here is presence-sensitive: `0` is a supplied value,
+ * not "unset", so it must never be folded into a default.
+ */
+
+/**
+ * A `pi_read` range composed onto the path as `read`'s inline `:N+K` selector.
+ *
+ * `read` exposes no range kwargs, so an uncomposed range reads the whole file.
+ * `offset` is a 1-indexed start clamped like the reference's
+ * `Math.max(0, offset - 1)` over 0-indexed lines; `limit` is a line count.
+ * `null` marks a present `limit: 0` — zero lines, which no selector expresses
+ * and which must not degrade into a whole-file read.
+ */
+export function piReadPath(path: string, offset?: number, limit?: number): string | null {
+	if (limit !== undefined && Math.floor(limit) <= 0) return null;
+	const start = offset !== undefined ? Math.max(1, Math.floor(offset)) : undefined;
+	const count = limit !== undefined ? Math.floor(limit) : undefined;
+	if (start === undefined && count === undefined) return path;
+	if (start === undefined) return `${path}:1+${count}`;
+	return count === undefined ? `${path}:${start}-` : `${path}:${start}+${count}`;
+}
+
+/**
+ * Join a Pi frame's optional `path` with the `glob`/`pattern` it scopes.
+ *
+ * The local `grep`/`glob` tools take one combined path spec. An absolute
+ * pattern ignores the path, and an absent or `.` path leaves the pattern
+ * standing alone rather than building a `./`- or `//`-prefixed spec.
+ *
+ * Uses `node:path` rather than string surgery so Windows absolutes (`C:\…`,
+ * UNC) are recognised and separators stay normalized — the same treatment
+ * `joinLegacyGlob` gives the legacy pi shim's identical path/glob pair.
+ */
+export function piJoinPath(basePath: string | undefined, pattern: string): string {
+	if (path.isAbsolute(pattern)) return pattern;
+	if (!basePath || basePath === ".") return pattern;
+	return path.join(basePath, pattern);
+}
+
+/** Escape a literal string so the regex-only local `grep` tool matches it verbatim. */
+export function piEscapeRegexLiteral(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Clamp a present `optional int32` result cap the way the reference does; `undefined` stays unset. */
+export function piLimit(limit: number | undefined): number | undefined {
+	return limit === undefined ? undefined : Math.max(1, Math.floor(limit));
+}
 
 /** Flatten a tool result's content into the single `output` string the Pi frames carry. */
 export function piOutputText(toolResult: ToolResultMessage): string {

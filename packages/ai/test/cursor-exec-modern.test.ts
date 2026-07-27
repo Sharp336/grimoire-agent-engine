@@ -2,12 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
 	type BlockState,
+	flushOpenToolCalls,
 	handleServerMessage,
 	processInteractionUpdate,
 	type ToolCallState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { AssistantMessage, CursorExecHandlers, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
 	type AgentClientMessage,
@@ -187,6 +188,90 @@ function soleResult(frames: AgentClientMessage[]) {
 	if (frame.case !== "execClientMessage") throw new Error(`expected execClientMessage, got ${frame.case}`);
 	return frame.value.message;
 }
+
+describe("Cursor stream teardown", () => {
+	it("keeps whole arguments on a block still open when the transport ends", async () => {
+		// A connect-SCM block arrives with complete `arguments` and never feeds
+		// the streamed partial-JSON buffer. `parseStreamingJson(undefined)`
+		// returns `{}`, so reparsing every open block on teardown erased exactly
+		// those args — the interaction then rebuilt as an empty call.
+		const wire = create(ToolCallSchema, {
+			tool: {
+				case: "connectScmToolCall",
+				value: create(ConnectScmToolCallSchema, {
+					args: create(ConnectScmArgsSchema, {
+						toolCallId: "inner-id",
+						target: {
+							case: "github",
+							value: create(ConnectScmGithubSchema, {
+								repository: create(ConnectScmGithubRepositorySchema, { owner: "can1357", repo: "oh-my-pi" }),
+							}),
+						},
+					}),
+				}),
+			},
+		});
+		const toolCall = fromBinary(ToolCallSchema, toBinary(ToolCallSchema, wire));
+
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+
+		// Start the call and leave it open: the transport dies before completion.
+		processInteractionUpdate(
+			{ message: { case: "toolCallStarted", value: { callId: "envelope-a", toolCall } } },
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+
+		const block = output.content.find((b): b is ToolCallState => b.type === "toolCall");
+		if (!block) throw new Error("expected an open tool-call block");
+		const argsBeforeTeardown = block.arguments;
+		expect(argsBeforeTeardown).not.toEqual({});
+
+		flushOpenToolCalls(output, stream, state);
+
+		expect(block.arguments).toEqual(argsBeforeTeardown);
+		// The block is closed, so no live card is left animating.
+		expect(state.openToolCalls.size).toBe(0);
+		expect(state.currentToolCall).toBeNull();
+	});
+
+	it("salvages a truncated streamed argument buffer into partial arguments", async () => {
+		// The other half of the same contract: blocks that *do* stream their args
+		// must still be reparsed on teardown, or a cut-short call renders with no
+		// arguments at all.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallStarted",
+					value: {
+						callId: "envelope-mcp",
+						toolCall: { tool: { case: "mcpToolCall", value: { args: { toolCallId: "mcp-1" } } } },
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+
+		const block = output.content.find((b): b is ToolCallState => b.type === "toolCall");
+		if (!block) throw new Error("expected an open tool-call block");
+		setStreamingPartialJson(block, '{"path":"/repo/a.ts"');
+
+		flushOpenToolCalls(output, stream, state);
+
+		expect(block.arguments).toEqual({ path: "/repo/a.ts" });
+	});
+});
 
 describe("Cursor modern exec frames: failure channel", () => {
 	it("throws on a frame whose oneof this build does not model, instead of stranding the exec id", async () => {
@@ -443,6 +528,38 @@ describe("Cursor modern exec frames: hooks", () => {
 		expect(answer.value.response.response.value.additionalContext).toBeUndefined();
 	});
 
+	it("maps every modelled hook request onto its parallel response case", async () => {
+		// The request and response oneofs are parallel by field number. A single
+		// mis-wired branch answers a different hook than the one asked, which the
+		// server reads as a stalled or misrouted hook — invisible unless every
+		// variant is exercised.
+		const requestCases = [
+			"preCompact",
+			"subagentStart",
+			"subagentStop",
+			"preToolUse",
+			"postToolUse",
+			"postToolUseFailure",
+			"beforeSubmitPrompt",
+			"afterAgentResponse",
+			"afterAgentThought",
+			"stop",
+		] as const;
+
+		for (const requestCase of requestCases) {
+			const request = create(ExecuteHookRequestSchema, {
+				request: { case: requestCase, value: {} },
+			} as never);
+			const { frames } = await dispatchExec(
+				buildExecMessage({ case: "executeHookArgs", value: create(ExecuteHookArgsSchema, { request }) }),
+			);
+
+			const answer = soleResult(frames);
+			if (answer.case !== "executeHookResult") throw new Error(`${requestCase}: got ${answer.case}`);
+			expect(answer.value.response?.response.case).toBe(requestCase);
+		}
+	});
+
 	it("throws for a hook request whose case this build does not model", async () => {
 		const { frames } = await dispatchExec(
 			buildExecMessage({
@@ -557,6 +674,10 @@ describe("Cursor modern exec frames: Pi tools", () => {
 		expect(blocks).toHaveLength(1);
 		expect(blocks[0].name).toBe("read");
 		expect(results.map(r => r.toolCallId)).toEqual([blocks[0].id]);
+		// The displayed args must be the operation that actually runs. The bridge
+		// composes offset/limit into `read`'s `:N+K` selector, so a block showing
+		// the bare path claims a whole-file read that never happened.
+		expect(blocks[0].arguments).toEqual({ path: "/repo/a.ts:5+20" });
 	});
 
 	it("maps a failing Pi handler onto the frame's own error variant", async () => {
@@ -669,19 +790,22 @@ describe("Cursor modern exec frames: Pi tools", () => {
 		expect(block?.arguments).toEqual({ path: "/repo/a.ts", edits: [{ old_text: "before", new_text: "after" }] });
 	});
 
-	it("answers each remaining Pi frame with its own matching result case", async () => {
+	it("answers each remaining Pi frame with a populated success payload", async () => {
+		// The outer result case alone is not proof: an unset inner oneof reads as
+		// "the tool ran and produced nothing", and dropped output or limit
+		// metadata is invisible at the discriminator level.
 		const handlers: CursorExecHandlers = {
 			async piWrite() {
 				return toolResult("wrote");
 			},
 			async piGrep() {
-				return toolResult("a.ts:1:hit");
+				return toolResult("a.ts:1:hit", { details: { perFileLimitReached: 20, linesTruncated: true } });
 			},
 			async piFind() {
-				return toolResult("a.ts");
+				return toolResult("a.ts", { details: { resultLimitReached: 200 } });
 			},
 			async piLs() {
-				return toolResult("a.ts\nb.ts");
+				return toolResult("a.ts\nb.ts", { details: { resultLimitReached: 500 } });
 			},
 		};
 
@@ -696,7 +820,9 @@ describe("Cursor modern exec frames: Pi tools", () => {
 				)
 			).frames,
 		);
-		expect(write.case).toBe("piWriteResult");
+		if (write.case !== "piWriteResult") throw new Error(`got ${write.case}`);
+		if (write.value.result.case !== "success") throw new Error("expected success");
+		expect(write.value.result.value.output).toBe("wrote");
 
 		const grep = soleResult(
 			(
@@ -706,7 +832,11 @@ describe("Cursor modern exec frames: Pi tools", () => {
 				)
 			).frames,
 		);
-		expect(grep.case).toBe("piGrepResult");
+		if (grep.case !== "piGrepResult") throw new Error(`got ${grep.case}`);
+		if (grep.value.result.case !== "success") throw new Error("expected success");
+		expect(grep.value.result.value.output).toBe("a.ts:1:hit");
+		expect(grep.value.result.value.matchLimitReached).toBe(20);
+		expect(grep.value.result.value.linesTruncated).toBe(true);
 
 		const find = soleResult(
 			(
@@ -716,7 +846,10 @@ describe("Cursor modern exec frames: Pi tools", () => {
 				)
 			).frames,
 		);
-		expect(find.case).toBe("piFindResult");
+		if (find.case !== "piFindResult") throw new Error(`got ${find.case}`);
+		if (find.value.result.case !== "success") throw new Error("expected success");
+		expect(find.value.result.value.output).toBe("a.ts");
+		expect(find.value.result.value.resultLimitReached).toBe(200);
 
 		const ls = soleResult(
 			(
@@ -725,7 +858,10 @@ describe("Cursor modern exec frames: Pi tools", () => {
 				})
 			).frames,
 		);
-		expect(ls.case).toBe("piLsResult");
+		if (ls.case !== "piLsResult") throw new Error(`got ${ls.case}`);
+		if (ls.value.result.case !== "success") throw new Error("expected success");
+		expect(ls.value.result.value.output).toBe("a.ts\nb.ts");
+		expect(ls.value.result.value.entryLimitReached).toBe(500);
 	});
 
 	it("serves miniSweAgentBash from the existing shell handler under its own frame", async () => {

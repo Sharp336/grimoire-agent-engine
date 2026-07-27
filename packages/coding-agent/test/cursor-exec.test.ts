@@ -480,9 +480,64 @@ describe("CursorExecHandlers Pi frame translation", () => {
 
 		await handlers.piGrep({ toolCallId: "c1", args: { pattern: "x", path: "src", glob: "**/*.ts" } } as never);
 		await handlers.piGrep({ toolCallId: "c2", args: { pattern: "x", glob: "**/*.ts" } } as never);
+		await handlers.piGrep({ toolCallId: "c3", args: { pattern: "x", path: ".", glob: "**/*.ts" } } as never);
+		await handlers.piGrep({ toolCallId: "c4", args: { pattern: "x", path: "src", glob: "/abs/**/*.ts" } } as never);
 
 		expect((calls[0] as { path: string }).path).toBe("src/**/*.ts");
-		expect((calls[1] as { path: string }).path).toBe("./**/*.ts");
+		// An absent or "." path leaves the glob standing alone: a "./"-prefixed
+		// spec is a needlessly different path expression for the same scope.
+		expect((calls[1] as { path: string }).path).toBe("**/*.ts");
+		expect((calls[2] as { path: string }).path).toBe("**/*.ts");
+		// An absolute glob ignores the frame's path entirely.
+		expect((calls[3] as { path: string }).path).toBe("/abs/**/*.ts");
+	});
+
+	it("composes pi_read's offset/limit onto the path as the read tool's range selector", async () => {
+		// `read` takes no range kwargs, so a dropped offset/limit silently returns
+		// the whole file. `offset` is a 1-indexed start and `limit` a line count,
+		// which is exactly the `:N+K` selector.
+		const { handlers, calls } = recordingHandlers("read");
+
+		await handlers.piRead({ toolCallId: "c1", args: { path: "a.ts", offset: 5, limit: 20 } } as never);
+		await handlers.piRead({ toolCallId: "c2", args: { path: "a.ts", offset: 5 } } as never);
+		await handlers.piRead({ toolCallId: "c3", args: { path: "a.ts", limit: 20 } } as never);
+		await handlers.piRead({ toolCallId: "c4", args: { path: "a.ts" } } as never);
+		// `optional int32`: a present 0 offset is not "unset". The reference
+		// clamps it to the first line rather than falling back to no range.
+		await handlers.piRead({ toolCallId: "c5", args: { path: "a.ts", offset: 0, limit: 20 } } as never);
+
+		expect(calls).toEqual([
+			{ path: "a.ts:5+20" },
+			{ path: "a.ts:5-" },
+			{ path: "a.ts:1+20" },
+			{ path: "a.ts" },
+			{ path: "a.ts:1+20" },
+		]);
+	});
+
+	it("answers a present pi_read limit of zero with empty output instead of the whole file", async () => {
+		// `limit: 0` is present, not unset: the reference slices zero lines. No
+		// `read` selector expresses an empty range, so treating it as unset would
+		// return the entire file — the opposite of what was asked.
+		const { handlers, calls } = recordingHandlers("read");
+
+		const result = await handlers.piRead({ toolCallId: "c1", args: { path: "a.ts", limit: 0 } } as never);
+
+		expect(calls).toEqual([]);
+		expect(result.isError).toBe(false);
+		expect(result.content).toEqual([{ type: "text", text: "" }]);
+	});
+
+	it("escapes pi_grep's pattern when the frame asks for a literal search", async () => {
+		// The local tool is regex-only, so an unescaped literal turns regex
+		// metacharacters into operators and matches the wrong lines.
+		const { handlers, calls } = recordingHandlers("grep");
+
+		await handlers.piGrep({ toolCallId: "c1", args: { pattern: "a.b(c)", literal: true } } as never);
+		await handlers.piGrep({ toolCallId: "c2", args: { pattern: "a.b(c)" } } as never);
+
+		expect((calls[0] as { pattern: string }).pattern).toBe("a\\.b\\(c\\)");
+		expect((calls[1] as { pattern: string }).pattern).toBe("a.b(c)");
 	});
 
 	it("routes pi_find to glob, not grep, joining its pattern onto the path", async () => {
@@ -492,10 +547,14 @@ describe("CursorExecHandlers Pi frame translation", () => {
 
 		await handlers.piFind({ toolCallId: "c1", args: { pattern: "*.ts", path: "src", limit: 10 } } as never);
 		await handlers.piFind({ toolCallId: "c2", args: { pattern: "*.ts", limit: 0 } } as never);
+		await handlers.piFind({ toolCallId: "c3", args: { pattern: "*.ts" } } as never);
 
 		expect(calls).toEqual([
 			{ path: "src/*.ts", limit: 10 },
-			// A zero limit is protobuf's unset, not a request for zero results.
+			// `optional int32`: a present 0 is clamped to 1 (as the reference
+			// does), not silently widened to the tool's default.
+			{ path: "*.ts", limit: 1 },
+			// Genuinely unset leaves the local tool's own default in place.
 			{ path: "*.ts", limit: undefined },
 		]);
 	});
