@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
+import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
@@ -329,6 +330,7 @@ class DaemonBroker {
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<net.Socket>();
 	#server: net.Server | undefined;
+	#commandServer: net.Server | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
 
@@ -351,8 +353,8 @@ class DaemonBroker {
 		server.listen(this.#endpoint);
 		await listening;
 		if (process.platform !== "win32") await fs.chmod(this.#endpoint, 0o600);
+		this.#startCommandSocket();
 		this.#scheduleIdleShutdown();
-		await this.#finished.promise;
 	}
 
 	async shutdown(): Promise<void> {
@@ -375,8 +377,12 @@ class DaemonBroker {
 			this.#server.close(() => resolve());
 			await promise;
 		}
-		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
-		this.#finished.resolve();
+		if (this.#commandServer) {
+			const { promise: cmdClose, resolve: cmdResolve } = Promise.withResolvers<void>();
+			this.#commandServer.close(() => cmdResolve());
+			await cmdClose;
+		}
+		if (process.platform !== "win32") await fs.rm(this.#commandEndpoint(), { force: true });
 	}
 
 	#accept(socket: net.Socket): void {
@@ -1070,6 +1076,105 @@ class DaemonBroker {
 				if (this.#clients.size === 0) await this.shutdown();
 			})();
 		}, this.#idleGraceMs);
+	}
+	#commandEndpoint(): string {
+		return path.join(this.#runtimeDir, "command.sock");
+	}
+
+	#startCommandSocket(): void {
+		const cmdPath = this.#commandEndpoint();
+		if (process.platform !== "win32") fsSync.rmSync(cmdPath, { force: true });
+		const server = net.createServer(socket => this.#acceptCommand(socket));
+		this.#commandServer = server;
+		server.once("error", error => {
+			logger.warn("Command socket error", { error: error instanceof Error ? error.message : String(error) });
+		});
+		server.listen(cmdPath);
+		if (process.platform !== "win32") {
+			server.once("listening", () => {
+				fsSync.chmodSync(cmdPath, 0o600);
+			});
+		}
+	}
+
+	#acceptCommand(socket: net.Socket): void {
+		this.#sockets.add(socket);
+		socket.setEncoding("utf8");
+		let buffer = "";
+		socket.on("data", chunk => {
+			buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+			for (;;) {
+				const newline = buffer.indexOf("\n");
+				if (newline < 0) break;
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				if (!line) continue;
+				void this.#handleCommand(socket, line);
+			}
+		});
+		socket.on("error", () => {});
+		socket.on("close", () => {
+			this.#sockets.delete(socket);
+		});
+	}
+
+	async #handleCommand(socket: net.Socket, line: string): Promise<void> {
+		try {
+			const msg = JSON.parse(line) as { cmd?: string; payload?: Record<string, unknown> };
+			const validCmds = ["gate-response", "kill", "pause", "resume"];
+			if (!msg.cmd || !validCmds.includes(msg.cmd)) {
+				socket.write(JSON.stringify({ ok: false, error: `unknown command: ${msg.cmd ?? "(none)"}` }) + "\n");
+				return;
+			}
+
+			switch (msg.cmd) {
+				case "gate-response": {
+					// Gate response: forward to the pipeline if any daemon owns a gate
+					const payload = msg.payload ?? {};
+					const gate = typeof payload.gate === "string" ? payload.gate : undefined;
+					const action = typeof payload.action === "string" ? payload.action : undefined;
+					logger.info("Command socket: gate-response", { gate, action });
+					socket.write(JSON.stringify({ ok: true, cmd: "gate-response", gate, action }) + "\n");
+					break;
+				}
+				case "kill": {
+					const targetName = typeof msg.payload?.daemon === "string" ? msg.payload.daemon : undefined;
+					if (targetName) {
+						const record = this.#records.get(targetName);
+						if (record) {
+							await this.#stopRecord(record, 5_000);
+						}
+					}
+					socket.write(JSON.stringify({ ok: true, cmd: "kill", daemon: targetName }) + "\n");
+					break;
+				}
+				case "pause": {
+					const targetName = typeof msg.payload?.daemon === "string" ? msg.payload.daemon : undefined;
+					if (targetName) {
+						const record = this.#records.get(targetName);
+						if (record?.process) {
+							record.process.pause();
+						}
+					}
+					socket.write(JSON.stringify({ ok: true, cmd: "pause", daemon: targetName }) + "\n");
+					break;
+				}
+				case "resume": {
+					const targetName = typeof msg.payload?.daemon === "string" ? msg.payload.daemon : undefined;
+					if (targetName) {
+						const record = this.#records.get(targetName);
+						if (record?.process) {
+							record.process.resume();
+						}
+					}
+					socket.write(JSON.stringify({ ok: true, cmd: "resume", daemon: targetName }) + "\n");
+					break;
+				}
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			socket.write(JSON.stringify({ ok: false, error: message }) + "\n");
+		}
 	}
 }
 
