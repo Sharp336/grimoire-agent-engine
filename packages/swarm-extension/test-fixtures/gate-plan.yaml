@@ -1,0 +1,19 @@
+swarm:
+  name: gate-plan-test
+  workspace: /tmp/proj
+  mode: sequential
+
+  agents:
+    plan:
+      role: planner
+      agent: task
+      gate:
+        prompt: "Approve this implementation plan?"
+        actions: [approve, edit, reject]
+      task: write a detailed implementation plan
+
+    core:
+      role: implementer
+      agent: task
+      task: implement the core feature
+      waits_for: [plan]

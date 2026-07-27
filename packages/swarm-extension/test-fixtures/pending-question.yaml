@@ -1,0 +1,16 @@
+swarm:
+  name: pending-question-test
+  workspace: /tmp/proj
+  mode: sequential
+
+  agents:
+    brainstorm:
+      role: brainstorm
+      agent: task
+      task: brainstorm approaches for the feature
+
+    core:
+      role: implementer
+      agent: task
+      task: implement based on brainstorm output
+      waits_for: [brainstorm]

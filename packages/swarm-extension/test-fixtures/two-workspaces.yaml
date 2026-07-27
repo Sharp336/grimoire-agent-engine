@@ -1,0 +1,17 @@
+swarm:
+  name: two-workspace-test
+  workspace: /tmp/proj
+  mode: sequential
+
+  agents:
+    impl:
+      role: implementer
+      agent: task
+      workspace: wt/a
+      task: implement the feature
+
+    review:
+      role: reviewer
+      agent: reviewer
+      workspace: wt/b
+      task: review the implementation
