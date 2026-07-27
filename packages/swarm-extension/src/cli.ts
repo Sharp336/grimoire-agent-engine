@@ -17,11 +17,11 @@ import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildDependencyGraph, buildExecutionWaves, detectCycles } from "./swarm/dag";
+import { discoverSwarmYaml } from "./swarm/discovery";
 import { PipelineController } from "./swarm/pipeline";
 import { renderSwarmProgress } from "./swarm/render";
-import { parseSwarmYaml, validateSwarmDefinition, type SwarmDefinition } from "./swarm/schema";
+import { type SwarmDefinition, validateSwarmDefinition } from "./swarm/schema";
 import { StateTracker } from "./swarm/state";
-import { discoverSwarmYaml } from "./swarm/discovery";
 
 // ============================================================================
 // Parse CLI flags
@@ -59,8 +59,13 @@ if (!nameOrPath) {
 			"Usage: omp-swarm <path-to-yaml> [--project <dir>] [--name <swarm-name>]",
 			"       omp-swarm <workflow-name> [--project <dir>] [--name <swarm-name>]",
 			"",
-			"Options:",
 			"  --project <dir>   Project directory for ${PROJECT_DIR} substitution",
+			"  --name <name>     Workflow name for ${WORKFLOW_NAME} substitution",
+		].join("\n"),
+	);
+	process.exit(1);
+}
+
 // ============================================================================
 // Discover YAML (Option A: named workflow → ~/.omp/agent/swarms/<name>.yaml)
 // ============================================================================
@@ -76,16 +81,6 @@ try {
 	});
 } catch (err) {
 	console.error(err instanceof Error ? err.message : String(err));
-	process.exit(1);
-}
-
-console.log(`Swarm: ${def.name}`);
-console.log(`Mode: ${def.mode}`);
-console.log(`Target count: ${def.targetCount}`);
-console.log(`Agents: ${[...def.agents.keys()].join(", ")}`);
-	def = parseSwarmYaml(substituted);
-} catch (err) {
-	console.error(`YAML error: ${err instanceof Error ? err.message : String(err)}`);
 	process.exit(1);
 }
 
@@ -112,9 +107,7 @@ const waves = buildExecutionWaves(deps);
 console.log(`Waves: ${waves.map((w, i) => `W${i + 1}:[${w.join(",")}]`).join(" -> ")}`);
 
 // Resolve workspace (relative to projectDir, NOT YAML location)
-const workspace = path.isAbsolute(def.workspace)
-	? def.workspace
-	: path.resolve(projectDir, def.workspace);
+const workspace = path.isAbsolute(def.workspace) ? def.workspace : path.resolve(projectDir, def.workspace);
 
 await fs.mkdir(workspace, { recursive: true });
 console.log(`Workspace: ${workspace}`);

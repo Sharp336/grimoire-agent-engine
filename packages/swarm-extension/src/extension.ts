@@ -14,12 +14,11 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import { buildDependencyGraph, buildExecutionWaves, detectCycles } from "./swarm/dag";
+import { discoverSwarmYaml } from "./swarm/discovery";
 import { PipelineController } from "./swarm/pipeline";
 import { renderSwarmProgress } from "./swarm/render";
 import { type SwarmDefinition, validateSwarmDefinition } from "./swarm/schema";
 import { StateTracker } from "./swarm/state";
-import { discoverSwarmYaml } from "./swarm/discovery";
-import { discoverSwarmYaml } from "./swarm/discovery";
 
 export default function swarmExtension(pi: ExtensionAPI): void {
 	pi.setLabel("Swarm Orchestrator");
@@ -80,10 +79,7 @@ async function handleRun(yamlPath: string, ctx: ExtensionCommandContext, pi: Ext
 			cwd: ctx.cwd,
 		});
 	} catch (err) {
-		ctx.ui.notify(
-			`Cannot load swarm: ${err instanceof Error ? err.message : String(err)}`,
-			"error",
-		);
+		ctx.ui.notify(`Cannot load swarm: ${err instanceof Error ? err.message : String(err)}`, "error");
 		return;
 	}
 
@@ -104,9 +100,7 @@ async function handleRun(yamlPath: string, ctx: ExtensionCommandContext, pi: Ext
 	const waves = buildExecutionWaves(deps);
 
 	// 4. Resolve workspace (relative to ctx.cwd, NOT YAML file location)
-	const workspace = path.isAbsolute(def.workspace)
-		? def.workspace
-		: path.resolve(ctx.cwd, def.workspace);
+	const workspace = path.isAbsolute(def.workspace) ? def.workspace : path.resolve(ctx.cwd, def.workspace);
 
 	// Ensure workspace exists
 	await fs.mkdir(workspace, { recursive: true });

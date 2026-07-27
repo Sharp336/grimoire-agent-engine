@@ -78,26 +78,19 @@ export interface DiscoveryOptions {
  * Option A: searches ONLY `~/.omp/agent/swarms/<name>.yaml`.
  * No project-level override, no `.omp/swarms/` shadow search.
  */
-export async function discoverSwarmYaml(
-	nameOrPath: string,
-	opts: DiscoveryOptions = {},
-): Promise<SwarmDefinition> {
+export async function discoverSwarmYaml(nameOrPath: string, opts: DiscoveryOptions = {}): Promise<SwarmDefinition> {
 	const { projectDir, workflowName, cwd } = opts;
 	const resolvedPath = resolveSwarmYamlPath(nameOrPath);
 
 	// Resolve relative paths against cwd
-	const absolutePath = path.isAbsolute(resolvedPath)
-		? resolvedPath
-		: path.resolve(cwd ?? process.cwd(), resolvedPath);
+	const absolutePath = path.isAbsolute(resolvedPath) ? resolvedPath : path.resolve(cwd ?? process.cwd(), resolvedPath);
 
 	// Read raw YAML text
 	let content: string;
 	try {
 		content = await fs.readFile(absolutePath, "utf-8");
 	} catch (err) {
-		throw new Error(
-			`Cannot read swarm YAML: ${absolutePath}\n${err instanceof Error ? err.message : String(err)}`,
-		);
+		throw new Error(`Cannot read swarm YAML: ${absolutePath}\n${err instanceof Error ? err.message : String(err)}`);
 	}
 
 	// Build substitution map
