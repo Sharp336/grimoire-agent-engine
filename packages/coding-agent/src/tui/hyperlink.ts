@@ -7,11 +7,11 @@
  */
 import * as url from "node:url";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { parseInternalUrl } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../config/settings";
 import {
 	LocalProtocolHandler,
 	memoryRootsFromRegistry,
-	parseInternalUrl,
 	resolveLocalUrlToPath,
 	resolveMemoryUrlToPath,
 } from "../internal-urls";

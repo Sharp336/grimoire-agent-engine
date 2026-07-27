@@ -18,12 +18,17 @@ import { Text } from "@oh-my-pi/pi-tui";
 import {
 	getRemoteDir,
 	type ImageMetadata,
+	type InternalUrl,
 	isEexist,
 	isEnotempty,
 	isProbablyBinary,
 	logger,
+	parseInternalUrl,
+	parseSkillUrlTarget,
 	prompt,
 	readImageMetadata,
+	type SkillUrlTarget,
+	splitInternalUrlSel,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "lru-cache/raw";
@@ -40,8 +45,6 @@ import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
 import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
-import { parseInternalUrl } from "../internal-urls/parse";
-import type { InternalUrl } from "../internal-urls/types";
 import { getLanguageFromPath, isMarkdownPath, type Theme } from "../modes/theme/theme";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -108,7 +111,6 @@ import {
 	probeLiteralPathExists,
 	resolveReadPath,
 	splitDelimitedPathEntry,
-	splitInternalUrlSel,
 	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
@@ -752,26 +754,6 @@ export interface ReadToolDetails {
 	displayReadTargets?: string[];
 	skillTargets?: Array<{ skill: string; target: string }>;
 }
-type SkillTarget = { skill: string; target: string };
-
-/**
- * Classify an executed skill URL without interpreting its selector ourselves.
- * The internal URL splitter removes read selectors, while the shared parser
- * preserves the decoded authority as the canonical skill name.
- */
-function classifySkillTarget(target: string): SkillTarget | undefined {
-	const { path } = splitInternalUrlSel(target);
-	let parsed: InternalUrl;
-	try {
-		parsed = parseInternalUrl(path);
-	} catch {
-		return undefined;
-	}
-	if (parsed.protocol.toLowerCase() !== "skill:" || parsed.rawHost.length === 0) {
-		return undefined;
-	}
-	return { skill: parsed.rawHost, target };
-}
 
 type ReadParams = ReadToolInput;
 
@@ -990,7 +972,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
 		const displayReadTargets: string[] = [];
-		const skillTargets: SkillTarget[] = [];
+		const skillTargets: SkillUrlTarget[] = [];
 		let pendingText = notice;
 		const flushText = () => {
 			if (pendingText.length === 0) return;
@@ -1002,7 +984,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		};
 
 		for (const part of parts) {
-			const skillTarget = classifySkillTarget(part);
+			const skillTarget = parseSkillUrlTarget(part);
 			if (skillTarget) skillTargets.push(skillTarget);
 			try {
 				const result = await this.execute("read-delimited-part", { path: part }, signal);
@@ -2335,7 +2317,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let promotedSelector: string | undefined;
 		if (internalRouter.canResolve(readPath)) {
 			const internalTarget = splitInternalUrlSel(readPath);
-			const skillTarget = classifySkillTarget(readPath);
+			const skillTarget = parseSkillUrlTarget(readPath);
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
@@ -3285,7 +3267,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		url: string,
 		parsedSel: ParsedSelector,
 		signal?: AbortSignal,
-		skillTarget?: SkillTarget,
+		skillTarget?: SkillUrlTarget,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const internalRouter = InternalUrlRouter.instance();
 

@@ -5,10 +5,9 @@
  * prints the resulting content blocks exactly as the model would receive them
  * (including truncation/limit notices appended by the meta-notice wrapper).
  */
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { extractUriScheme, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { Settings } from "../config/settings";
-import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";

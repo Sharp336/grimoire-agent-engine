@@ -5,6 +5,7 @@
  * `InternalUrlRouter.instance()`. Handlers are stateless; per-session and
  * shared state lives in `./state.ts`.
  */
+import { extractUriScheme, parseInternalUrl } from "@oh-my-pi/pi-utils";
 import { AgentProtocolHandler } from "./agent-protocol";
 import { ArtifactProtocolHandler } from "./artifact-protocol";
 import { HistoryProtocolHandler } from "./history-protocol";
@@ -13,7 +14,7 @@ import { LocalProtocolHandler } from "./local-protocol";
 import { McpProtocolHandler } from "./mcp-protocol";
 import { MemoryProtocolHandler } from "./memory-protocol";
 import { OmpProtocolHandler } from "./omp-protocol";
-import { extractUriScheme, parseInternalUrl } from "./parse";
+
 import { RuleProtocolHandler } from "./rule-protocol";
 import { SecurityProtocolHandler } from "./security-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
