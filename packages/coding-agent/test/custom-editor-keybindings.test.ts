@@ -62,6 +62,49 @@ describe("CustomEditor keybindings", () => {
 		expect(onDisplayReset).toHaveBeenCalledTimes(1);
 		expect(onLiveToggle).toHaveBeenCalledTimes(1);
 	});
+
+	it("lets Escape leave Vim insert mode before interrupting the app", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onEscape = vi.fn();
+		editor.setInputMode("vim");
+		editor.onEscape = onEscape;
+
+		editor.handleInput("i");
+		editor.handleInput("\x1b");
+
+		expect(editor.getVimMode()).toBe("normal");
+		expect(onEscape).not.toHaveBeenCalled();
+
+		editor.handleInput("\x1b");
+		expect(onEscape).toHaveBeenCalledTimes(1);
+	});
+	it("does not start push-to-talk from Vim normal-mode spaces", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onSpaceHoldStart = vi.fn();
+		editor.setInputMode("vim");
+		editor.onSpaceHoldStart = onSpaceHoldStart;
+		editor.sttHoldEnabled = () => true;
+
+		for (let i = 0; i < 10; i++) editor.handleInput(" ");
+
+		expect(editor.getText()).toBe("");
+		expect(onSpaceHoldStart).not.toHaveBeenCalled();
+	});
+
+	it("allows clipboard image paste only from Vim insert mode", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onPasteImage = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.clipboard.pasteImage", ["alt+p"]);
+		editor.onPasteImage = onPasteImage;
+
+		editor.handleInput("\x1bp");
+		expect(onPasteImage).not.toHaveBeenCalled();
+
+		editor.handleInput("i");
+		editor.handleInput("\x1bp");
+		expect(onPasteImage).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("shipped dequeue defaults", () => {

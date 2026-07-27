@@ -1688,6 +1688,22 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Input and startup
+	inputMode: {
+		type: "enum",
+		values: ["default", "vim"] as const,
+		default: "default",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Input Mode",
+			description: "Prompt editor keymap",
+			options: [
+				{ value: "default", label: "Default", description: "Use the standard prompt editor keybindings" },
+				{ value: "vim", label: "Vim", description: "Use Vim-style normal and insert modes" },
+			],
+		},
+	},
+
 	doubleEscapeAction: {
 		type: "enum",
 		values: ["branch", "tree", "none"] as const,

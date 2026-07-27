@@ -404,6 +404,13 @@ interface HistoryStorage {
 
 type HistoryCursorAnchor = "start" | "end";
 
+export type EditorInputMode = "default" | "vim";
+export type VimEditorMode = "normal" | "insert";
+
+type VimPendingCommand =
+	| { kind: "operator"; operator: "d" | "c"; prefixCount: number }
+	| { kind: "g"; count: number | undefined };
+
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
 		lines: [""],
@@ -493,12 +500,19 @@ export class Editor implements Component, Focusable {
 	#undoStack: EditorState[] = [];
 	#suspendUndo = false;
 
+	#inputMode: EditorInputMode = "default";
+	#vimMode: VimEditorMode = "insert";
+	#vimPending: VimPendingCommand | undefined;
+	#vimCount = "";
+	#vimInsertUndoActive = false;
+
 	// Debounce timer for autocomplete updates
 	#autocompleteTimeout?: NodeJS.Timeout;
 
 	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
+	onInputModeChange?: (mode: VimEditorMode | undefined) => void;
 	/** Called for a "marker-sized" paste — the point where the editor would otherwise collapse it
 	 *  into a `[Paste #N]` token (> 10 lines or > 1000 characters). Return `true` to intercept:
 	 *  the editor inserts nothing and records no undo state, leaving insertion to the host (e.g. a
@@ -520,6 +534,33 @@ export class Editor implements Component, Focusable {
 	constructor(theme: EditorTheme) {
 		this.#theme = theme;
 		this.borderColor = theme.borderColor;
+	}
+
+	setInputMode(mode: EditorInputMode): void {
+		if (this.#inputMode === mode) return;
+		this.#finishVimInsertUndo();
+		this.#inputMode = mode;
+		this.#vimPending = undefined;
+		this.#vimCount = "";
+		if (mode === "vim") {
+			this.#vimMode = "normal";
+			this.#clampVimNormalCursor();
+		} else {
+			this.#vimMode = "insert";
+		}
+		this.onInputModeChange?.(this.getVimMode());
+	}
+
+	getInputMode(): EditorInputMode {
+		return this.#inputMode;
+	}
+
+	getVimMode(): VimEditorMode | undefined {
+		return this.#inputMode === "vim" ? this.#vimMode : undefined;
+	}
+
+	isVimInsertEscape(data: string): boolean {
+		return this.#inputMode === "vim" && this.#vimMode === "insert" && this.#isVimEscape(data);
 	}
 
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
@@ -1154,6 +1195,12 @@ export class Editor implements Component, Focusable {
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey === undefined ? undefined : canonicalKeyId(parsedKey);
 
+		if (this.isVimInsertEscape(data)) {
+			if (this.#autocompleteState) this.#cancelAutocomplete(true);
+			this.#enterVimNormalMode();
+			return;
+		}
+
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.#jumpMode !== null) {
 			// Cancel if the hotkey is pressed again
@@ -1181,7 +1228,7 @@ export class Editor implements Component, Focusable {
 		const paste = this.#pasteHandler.process(data);
 		if (paste.handled) {
 			if (paste.pasteContent !== undefined) {
-				this.#handlePaste(paste.pasteContent);
+				this.pasteText(paste.pasteContent);
 				if (paste.remaining.length > 0) {
 					return paste.remaining;
 				}
@@ -1211,6 +1258,7 @@ export class Editor implements Component, Focusable {
 
 		// Undo
 		if (kb.matchesCanonical(canonical, "tui.editor.undo")) {
+			if (this.#inputMode === "vim" && this.#vimMode === "insert") this.#finishVimInsertUndo();
 			this.#applyUndo();
 			return;
 		}
@@ -1358,6 +1406,13 @@ export class Editor implements Component, Focusable {
 			}
 			// For other keys (like regular typing), DON'T return here
 			// Let them fall through to normal character handling
+		}
+
+		if (this.#inputMode === "vim" && this.#vimMode === "normal" && this.#handleVimNormalInput(data, kb)) {
+			return;
+		}
+		if (this.#inputMode === "vim" && this.#vimMode === "insert") {
+			this.#prepareVimInsertInput(data, kb);
 		}
 
 		// Tab key - context-aware completion (but not when already autocompleting)
@@ -1773,9 +1828,12 @@ export class Editor implements Component, Focusable {
 	}
 
 	setText(text: string): void {
+		this.#finishVimInsertUndo();
+		if (this.#inputMode === "vim") this.#enterVimNormalMode();
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
 		this.#setTextInternal(text);
+		this.#clampVimNormalCursor();
 	}
 	submit(): void {
 		if (this.disableSubmit) return;
@@ -1879,6 +1937,12 @@ export class Editor implements Component, Focusable {
 
 	/** Apply terminal paste semantics to text from non-bracketed paste transports. */
 	pasteText(text: string): void {
+		if (this.#inputMode === "vim" && this.#vimMode === "normal") return;
+		if (this.#inputMode === "vim" && !this.#vimInsertUndoActive) {
+			this.#recordUndoState();
+			this.#vimInsertUndoActive = true;
+			this.#suspendUndo = true;
+		}
 		this.#handlePaste(text);
 	}
 
@@ -3274,6 +3338,608 @@ export class Editor implements Component, Focusable {
 			clearTimeout(this.#autocompleteTimeout);
 			this.#autocompleteTimeout = undefined;
 		}
+	}
+
+	#isVimEscape(data: string): boolean {
+		return matchesKey(data, "escape") || matchesKey(data, "esc");
+	}
+
+	#finishVimInsertUndo(): void {
+		if (!this.#vimInsertUndoActive) return;
+		this.#vimInsertUndoActive = false;
+		this.#suspendUndo = false;
+	}
+
+	#enterVimNormalMode(): void {
+		this.#finishVimInsertUndo();
+		this.#vimPending = undefined;
+		this.#vimCount = "";
+		const changed = this.#vimMode !== "normal";
+		this.#vimMode = "normal";
+		this.#clampVimNormalCursor();
+		if (changed) this.onInputModeChange?.("normal");
+	}
+
+	#enterVimInsertMode(existingUndo = false, col?: number): void {
+		if (col !== undefined) this.#setCursorCol(col);
+		this.#vimPending = undefined;
+		this.#vimCount = "";
+		if (existingUndo) {
+			this.#vimInsertUndoActive = true;
+			this.#suspendUndo = true;
+		}
+		const changed = this.#vimMode !== "insert";
+		this.#vimMode = "insert";
+		if (changed) this.onInputModeChange?.("insert");
+	}
+
+	#prepareVimInsertInput(data: string, kb: KeybindingsManager): void {
+		if (!this.#autocompleteState && data !== "\n" && kb.matches(data, "tui.input.submit")) {
+			this.#enterVimNormalMode();
+			return;
+		}
+		if (this.#vimInsertUndoActive) return;
+
+		const mutates =
+			extractPrintableText(data) !== undefined ||
+			kb.matches(data, "tui.input.newLine") ||
+			kb.matches(data, "tui.editor.deleteCharBackward") ||
+			kb.matches(data, "tui.editor.deleteCharForward") ||
+			matchesKey(data, "shift+backspace") ||
+			matchesKey(data, "shift+delete") ||
+			matchesKey(data, "ctrl+k") ||
+			matchesKey(data, "ctrl+u") ||
+			matchesKey(data, "ctrl+w") ||
+			matchesKey(data, "alt+backspace") ||
+			matchesKey(data, "super+alt+backspace") ||
+			matchesKey(data, "alt+d") ||
+			matchesKey(data, "alt+delete") ||
+			matchesKey(data, "super+alt+d") ||
+			matchesKey(data, "super+alt+delete") ||
+			matchesKey(data, "ctrl+y") ||
+			data === "\n" ||
+			(data.length > 1 && data.includes("\r"));
+		if (!mutates) return;
+
+		this.#recordUndoState();
+		this.#vimInsertUndoActive = true;
+		this.#suspendUndo = true;
+	}
+
+	#handleVimNormalInput(data: string, kb: KeybindingsManager): boolean {
+		if (this.#isVimEscape(data)) {
+			this.#vimPending = undefined;
+			this.#vimCount = "";
+			return true;
+		}
+		if (data === "\n") return true;
+		if (matchesKey(data, "enter") || matchesKey(data, "return")) return false;
+		if (
+			kb.matches(data, "tui.input.tab") ||
+			kb.matches(data, "tui.input.newLine") ||
+			kb.matches(data, "tui.editor.deleteCharBackward") ||
+			kb.matches(data, "tui.editor.deleteCharForward") ||
+			matchesKey(data, "shift+backspace") ||
+			matchesKey(data, "shift+delete") ||
+			matchesKey(data, "ctrl+k") ||
+			matchesKey(data, "ctrl+u") ||
+			matchesKey(data, "ctrl+w") ||
+			matchesKey(data, "alt+backspace") ||
+			matchesKey(data, "super+alt+backspace") ||
+			matchesKey(data, "alt+d") ||
+			matchesKey(data, "alt+delete") ||
+			matchesKey(data, "super+alt+d") ||
+			matchesKey(data, "super+alt+delete") ||
+			matchesKey(data, "ctrl+y") ||
+			matchesKey(data, "alt+y")
+		) {
+			return true;
+		}
+		const printable = extractPrintableText(data);
+		const graphemes = printable ? [...segmenter.segment(printable)] : [];
+		if (graphemes.length !== 1) return printable !== undefined;
+		const char = graphemes[0]?.segment;
+		if (!char) return false;
+
+		if (this.#vimPending?.kind === "operator") return this.#handleVimOperatorInput(char);
+		if (this.#vimPending?.kind === "g") {
+			const pending = this.#vimPending;
+			this.#vimPending = undefined;
+			this.#vimCount = "";
+			if (char === "g") {
+				this.#setVimCursor(pending.count === undefined ? 0 : pending.count - 1, 0);
+			}
+			return true;
+		}
+
+		if (/[1-9]/u.test(char) || (char === "0" && this.#vimCount.length > 0)) {
+			this.#vimCount += char;
+			return true;
+		}
+
+		switch (char) {
+			case "h":
+				this.#moveVimHorizontal(-1, this.#takeVimCount());
+				return true;
+			case "j":
+				this.#moveVimVertical(1, this.#takeVimCount());
+				return true;
+			case "k":
+				this.#moveVimVertical(-1, this.#takeVimCount());
+				return true;
+			case "l":
+				this.#moveVimHorizontal(1, this.#takeVimCount());
+				return true;
+			case "w":
+				this.#setVimAbsoluteCursor(
+					this.#vimWordForwardPosition(this.#vimAbsoluteCursor(), this.#takeVimCount(), false),
+				);
+				return true;
+			case "W":
+				this.#setVimAbsoluteCursor(
+					this.#vimWordForwardPosition(this.#vimAbsoluteCursor(), this.#takeVimCount(), true),
+				);
+				return true;
+			case "b":
+				this.#setVimAbsoluteCursor(
+					this.#vimWordBackwardPosition(this.#vimAbsoluteCursor(), this.#takeVimCount(), false),
+				);
+				return true;
+			case "B":
+				this.#setVimAbsoluteCursor(
+					this.#vimWordBackwardPosition(this.#vimAbsoluteCursor(), this.#takeVimCount(), true),
+				);
+				return true;
+			case "e":
+				this.#setVimAbsoluteCursor(
+					this.#vimWordEndPosition(this.#vimAbsoluteCursor(), this.#takeVimCount(), false),
+				);
+				return true;
+			case "E":
+				this.#setVimAbsoluteCursor(this.#vimWordEndPosition(this.#vimAbsoluteCursor(), this.#takeVimCount(), true));
+				return true;
+			case "0":
+				this.#vimCount = "";
+				this.#setVimCursor(this.#state.cursorLine, 0);
+				return true;
+			case "^":
+				this.#vimCount = "";
+				this.#setVimCursor(this.#state.cursorLine, this.#vimFirstNonBlankCol(this.#currentLine()));
+				return true;
+			case "$": {
+				const targetLine = Math.min(
+					this.#state.lines.length - 1,
+					this.#state.cursorLine + this.#takeVimCount() - 1,
+				);
+				this.#setVimCursor(targetLine, this.#vimLineLastCol(this.#state.lines[targetLine] ?? ""));
+				return true;
+			}
+			case "G": {
+				const count = this.#takeOptionalVimCount();
+				const targetLine = count === undefined ? this.#state.lines.length - 1 : count - 1;
+				this.#setVimCursor(targetLine, this.#vimFirstNonBlankCol(this.#state.lines[targetLine] ?? ""));
+				return true;
+			}
+			case "g":
+				this.#vimPending = { kind: "g", count: this.#takeOptionalVimCount() };
+				return true;
+			case "i":
+				this.#vimCount = "";
+				this.#enterVimInsertMode();
+				return true;
+			case "a":
+				this.#vimCount = "";
+				this.#enterVimInsertMode(false, this.#vimGraphemeEndAt(this.#currentLine(), this.#state.cursorCol));
+				return true;
+			case "I":
+				this.#vimCount = "";
+				this.#enterVimInsertMode(false, this.#vimFirstNonBlankCol(this.#currentLine()));
+				return true;
+			case "A":
+				this.#vimCount = "";
+				this.#enterVimInsertMode(false, this.#currentLine().length);
+				return true;
+			case "o":
+				this.#openVimLines(1, this.#takeVimCount());
+				return true;
+			case "O":
+				this.#openVimLines(0, this.#takeVimCount());
+				return true;
+			case "x":
+				this.#deleteVimCharacters(this.#takeVimCount());
+				return true;
+			case "D":
+				this.#deleteVimToLineEnd(this.#takeVimCount(), false);
+				return true;
+			case "C":
+				this.#deleteVimToLineEnd(this.#takeVimCount(), true);
+				return true;
+			case "d":
+			case "c":
+				this.#vimPending = { kind: "operator", operator: char, prefixCount: this.#takeVimCount() };
+				return true;
+			case "u": {
+				const count = this.#takeVimCount();
+				for (let i = 0; i < count; i++) this.#applyUndo();
+				this.#clampVimNormalCursor();
+				return true;
+			}
+			default:
+				this.#vimCount = "";
+				return true;
+		}
+	}
+
+	#handleVimOperatorInput(char: string): boolean {
+		const pending = this.#vimPending;
+		if (pending?.kind !== "operator") return false;
+
+		if (/[1-9]/u.test(char) || (char === "0" && this.#vimCount.length > 0)) {
+			this.#vimCount += char;
+			return true;
+		}
+
+		this.#vimPending = undefined;
+		const count = pending.prefixCount * this.#takeVimCount();
+		const enterInsert = pending.operator === "c";
+		if (char === pending.operator) {
+			this.#deleteVimLines(count, enterInsert);
+			return true;
+		}
+
+		const start = this.#vimAbsoluteCursor();
+		let endpoint: number | undefined;
+		switch (char) {
+			case "w":
+			case "W": {
+				const bigWord = char === "W";
+				endpoint =
+					enterInsert && this.#vimClassAt(start, bigWord) !== "whitespace"
+						? this.#vimGraphemeEndAt(this.getText(), this.#vimWordEndPosition(start, count, bigWord))
+						: this.#vimWordForwardPosition(start, count, bigWord);
+				break;
+			}
+			case "b":
+				endpoint = this.#vimWordBackwardPosition(start, count, false);
+				break;
+			case "B":
+				endpoint = this.#vimWordBackwardPosition(start, count, true);
+				break;
+			case "e":
+				endpoint = this.#vimGraphemeEndAt(this.getText(), this.#vimWordEndPosition(start, count, false));
+				break;
+			case "E":
+				endpoint = this.#vimGraphemeEndAt(this.getText(), this.#vimWordEndPosition(start, count, true));
+				break;
+			case "h":
+				endpoint = this.#vimAbsoluteLineStart(this.#state.cursorLine) + this.#vimMoveCol(-1, count);
+				break;
+			case "l":
+				endpoint =
+					this.#vimAbsoluteLineStart(this.#state.cursorLine) +
+					this.#vimGraphemeEndAt(this.#currentLine(), this.#vimMoveCol(1, count));
+				break;
+			case "0":
+				endpoint = this.#vimAbsoluteLineStart(this.#state.cursorLine);
+				break;
+			case "$":
+				endpoint = this.#vimLineEndAbsolute(
+					Math.min(this.#state.lines.length - 1, this.#state.cursorLine + count - 1),
+				);
+				break;
+			default:
+				return true;
+		}
+
+		this.#deleteVimRange(start, endpoint, enterInsert);
+		return true;
+	}
+
+	#takeVimCount(): number {
+		const count = this.#vimCount.length === 0 ? 1 : Number(this.#vimCount);
+		this.#vimCount = "";
+		return Number.isSafeInteger(count) && count > 0 ? count : 1;
+	}
+
+	#takeOptionalVimCount(): number | undefined {
+		if (this.#vimCount.length === 0) return undefined;
+		return this.#takeVimCount();
+	}
+
+	#currentLine(): string {
+		return this.#state.lines[this.#state.cursorLine] ?? "";
+	}
+
+	#vimFirstNonBlankCol(line: string): number {
+		const index = line.search(/\S/u);
+		return index < 0 ? 0 : this.#vimGraphemeStartAtOrBefore(line, index);
+	}
+
+	#vimLineLastCol(line: string): number {
+		let last = 0;
+		for (const grapheme of segmenter.segment(line)) last = grapheme.index;
+		return last;
+	}
+
+	#vimGraphemeStartAtOrBefore(text: string, col: number): number {
+		const bounded = Math.max(0, Math.min(text.length, Math.trunc(col)));
+		let last = 0;
+		for (const grapheme of segmenter.segment(text)) {
+			const end = grapheme.index + grapheme.segment.length;
+			if (bounded < end) return grapheme.index;
+			last = grapheme.index;
+		}
+		return last;
+	}
+
+	#vimGraphemeEndAt(text: string, col: number): number {
+		const bounded = Math.max(0, Math.min(text.length, Math.trunc(col)));
+		for (const grapheme of segmenter.segment(text)) {
+			const end = grapheme.index + grapheme.segment.length;
+			if (bounded <= grapheme.index || bounded < end) return end;
+		}
+		return text.length;
+	}
+
+	#vimPreviousGraphemeStart(text: string, col: number): number {
+		const bounded = Math.max(0, Math.min(text.length, Math.trunc(col)));
+		let previous = 0;
+		for (const grapheme of segmenter.segment(text)) {
+			if (grapheme.index >= bounded) return previous;
+			previous = grapheme.index;
+		}
+		return previous;
+	}
+
+	#vimNextGraphemeStart(text: string, col: number): number {
+		const bounded = Math.max(0, Math.min(text.length, Math.trunc(col)));
+		for (const grapheme of segmenter.segment(text)) {
+			if (grapheme.index > bounded) return grapheme.index;
+		}
+		return text.length;
+	}
+
+	#setVimCursor(line: number, col: number): void {
+		const targetLine = Math.max(0, Math.min(this.#state.lines.length - 1, Math.trunc(line)));
+		const text = this.#state.lines[targetLine] ?? "";
+		this.#state.cursorLine = targetLine;
+		this.#setCursorCol(this.#vimGraphemeStartAtOrBefore(text, col));
+	}
+
+	#clampVimNormalCursor(): void {
+		if (this.#inputMode !== "vim" || this.#vimMode !== "normal") return;
+		this.#setVimCursor(this.#state.cursorLine, this.#state.cursorCol);
+	}
+
+	#vimMoveCol(direction: -1 | 1, count: number): number {
+		const line = this.#currentLine();
+		let col = this.#state.cursorCol;
+		for (let i = 0; i < count; i++) {
+			const next = direction < 0 ? this.#vimPreviousGraphemeStart(line, col) : this.#vimNextGraphemeStart(line, col);
+			if (next >= line.length || next === col) break;
+			col = next;
+		}
+		return col;
+	}
+
+	#moveVimHorizontal(direction: -1 | 1, count: number): void {
+		this.#setVimCursor(this.#state.cursorLine, this.#vimMoveCol(direction, count));
+	}
+
+	#moveVimVertical(direction: -1 | 1, count: number): void {
+		const targetLine = Math.max(
+			0,
+			Math.min(this.#state.lines.length - 1, this.#state.cursorLine + direction * count),
+		);
+		this.#setVimCursor(targetLine, this.#state.cursorCol);
+	}
+
+	#vimAbsoluteLineStart(line: number): number {
+		let offset = 0;
+		for (let i = 0; i < line; i++) offset += (this.#state.lines[i] ?? "").length + 1;
+		return offset;
+	}
+
+	#vimLineEndAbsolute(line: number): number {
+		return this.#vimAbsoluteLineStart(line) + (this.#state.lines[line] ?? "").length;
+	}
+
+	#vimAbsoluteCursor(): number {
+		return this.#vimAbsoluteLineStart(this.#state.cursorLine) + this.#state.cursorCol;
+	}
+
+	#setVimAbsoluteCursor(pos: number, allowLineEnd = false): void {
+		let remaining = Math.max(0, Math.min(this.getText().length, Math.trunc(pos)));
+		for (let line = 0; line < this.#state.lines.length; line++) {
+			const text = this.#state.lines[line] ?? "";
+			if (remaining <= text.length || line === this.#state.lines.length - 1) {
+				this.#state.cursorLine = line;
+				const col =
+					allowLineEnd && remaining >= text.length
+						? text.length
+						: this.#vimGraphemeStartAtOrBefore(text, remaining);
+				this.#setCursorCol(col);
+				return;
+			}
+			remaining -= text.length + 1;
+		}
+	}
+
+	#vimSegments(text: string, bigWord: boolean): Array<{ index: number; segment: string; kind: string }> {
+		return [...segmenter.segment(text)].map(grapheme => ({
+			index: grapheme.index,
+			segment: grapheme.segment,
+			kind: this.#vimWordKind(grapheme.segment, bigWord),
+		}));
+	}
+
+	#vimWordKind(grapheme: string, bigWord: boolean): string {
+		const kind = getWordNavKind(grapheme);
+		if (kind === "whitespace") return "whitespace";
+		if (bigWord) return "word";
+		return kind === "word" || kind === "cjk" ? "word" : "delimiter";
+	}
+
+	#vimClassAt(pos: number, bigWord: boolean): string {
+		const text = this.getText();
+		for (const grapheme of segmenter.segment(text)) {
+			if (pos < grapheme.index + grapheme.segment.length) return this.#vimWordKind(grapheme.segment, bigWord);
+		}
+		return "whitespace";
+	}
+
+	#vimSegmentIndexAt(segments: Array<{ index: number; segment: string; kind: string }>, pos: number): number {
+		for (let i = 0; i < segments.length; i++) {
+			const grapheme = segments[i];
+			if (grapheme && pos < grapheme.index + grapheme.segment.length) return i;
+		}
+		return segments.length;
+	}
+
+	#vimWordForwardPosition(start: number, count: number, bigWord: boolean): number {
+		const text = this.getText();
+		const segments = this.#vimSegments(text, bigWord);
+		let pos = start;
+		for (let step = 0; step < count; step++) {
+			let index = this.#vimSegmentIndexAt(segments, pos);
+			if (index >= segments.length) return text.length;
+			const kind = segments[index]?.kind;
+			if (kind !== "whitespace") {
+				while (index < segments.length && segments[index]?.kind === kind) index++;
+			}
+			while (index < segments.length && segments[index]?.kind === "whitespace") index++;
+			pos = segments[index]?.index ?? text.length;
+		}
+		return pos;
+	}
+
+	#vimWordBackwardPosition(start: number, count: number, bigWord: boolean): number {
+		const segments = this.#vimSegments(this.getText(), bigWord);
+		let pos = start;
+		for (let step = 0; step < count; step++) {
+			let index = this.#vimSegmentIndexAt(segments, pos);
+			if (index >= segments.length || segments[index]?.index === pos) index--;
+			while (index >= 0 && segments[index]?.kind === "whitespace") index--;
+			if (index < 0) return 0;
+			const kind = segments[index]?.kind;
+			while (index > 0 && segments[index - 1]?.kind === kind) index--;
+			pos = segments[index]?.index ?? 0;
+		}
+		return pos;
+	}
+
+	#vimWordEndPosition(start: number, count: number, bigWord: boolean): number {
+		const text = this.getText();
+		const segments = this.#vimSegments(text, bigWord);
+		let pos = start;
+		for (let step = 0; step < count; step++) {
+			let index = this.#vimSegmentIndexAt(segments, pos);
+			if (index >= segments.length) return this.#vimPreviousGraphemeStart(text, text.length);
+			const kind = segments[index]?.kind;
+			if (kind !== "whitespace" && index + 1 < segments.length && segments[index + 1]?.kind === kind) {
+				while (index + 1 < segments.length && segments[index + 1]?.kind === kind) index++;
+			} else {
+				index++;
+				while (index < segments.length && segments[index]?.kind === "whitespace") index++;
+				const nextKind = segments[index]?.kind;
+				while (index + 1 < segments.length && segments[index + 1]?.kind === nextKind) index++;
+			}
+			pos = segments[index]?.index ?? this.#vimPreviousGraphemeStart(text, text.length);
+		}
+		return pos;
+	}
+
+	#deleteVimCharacters(count: number): void {
+		const start = this.#vimAbsoluteCursor();
+		let endCol = this.#state.cursorCol;
+		for (let i = 0; i < count; i++) {
+			const next = this.#vimGraphemeEndAt(this.#currentLine(), endCol);
+			if (next === endCol) break;
+			endCol = next;
+		}
+		this.#deleteVimRange(start, this.#vimAbsoluteLineStart(this.#state.cursorLine) + endCol, false);
+	}
+
+	#deleteVimToLineEnd(count: number, enterInsert: boolean): void {
+		const targetLine = Math.min(this.#state.lines.length - 1, this.#state.cursorLine + count - 1);
+		this.#deleteVimRange(this.#vimAbsoluteCursor(), this.#vimLineEndAbsolute(targetLine), enterInsert);
+	}
+
+	#deleteVimLines(count: number, enterInsert: boolean): void {
+		const startLine = this.#state.cursorLine;
+		const deleteCount = Math.max(1, Math.min(count, this.#state.lines.length - startLine));
+		this.#historyIndex = -1;
+		this.#resetKillSequence();
+		this.#recordUndoState();
+		const deleted = this.#state.lines.slice(startLine, startLine + deleteCount).join("\n");
+		this.#state.lines.splice(startLine, deleteCount);
+		if (this.#state.lines.length === 0) this.#state.lines.push("");
+		this.#state.cursorLine = Math.min(startLine, this.#state.lines.length - 1);
+		this.#setCursorCol(0);
+		this.#recordKill(deleted, "forward");
+		this.#notifyVimMutation();
+		if (enterInsert) this.#enterVimInsertMode(true, 0);
+		else this.#clampVimNormalCursor();
+	}
+
+	#openVimLines(offset: 0 | 1, count: number): void {
+		this.#historyIndex = -1;
+		this.#resetKillSequence();
+		this.#recordUndoState();
+		const line = this.#state.cursorLine + offset;
+		this.#state.lines.splice(line, 0, ...Array.from({ length: count }, () => ""));
+		this.#state.cursorLine = line + count - 1;
+		this.#setCursorCol(0);
+		this.#notifyVimMutation();
+		this.#enterVimInsertMode(true, 0);
+	}
+
+	#deleteVimRange(start: number, end: number, enterInsert: boolean): void {
+		const text = this.getText();
+		let from = Math.max(0, Math.min(start, end));
+		let to = Math.max(from, Math.min(text.length, Math.max(start, end)));
+		if (from === to) {
+			if (enterInsert) this.#enterVimInsertMode();
+			return;
+		}
+
+		const expanded = this.#expandVimRangeOverAtomicTokens(from, to);
+		from = expanded.start;
+		to = expanded.end;
+		this.#historyIndex = -1;
+		this.#resetKillSequence();
+		this.#recordUndoState();
+		const deleted = text.slice(from, to);
+		const nextText = text.slice(0, from) + text.slice(to);
+		this.#state.lines = nextText.split("\n");
+		if (this.#state.lines.length === 0) this.#state.lines = [""];
+		this.#setVimAbsoluteCursor(from, enterInsert);
+		this.#recordKill(deleted, start <= end ? "forward" : "backward");
+		this.#notifyVimMutation();
+		if (enterInsert) this.#enterVimInsertMode(true, this.#state.cursorCol);
+		else this.#clampVimNormalCursor();
+	}
+
+	#expandVimRangeOverAtomicTokens(start: number, end: number): { start: number; end: number } {
+		let expandedStart = start;
+		let expandedEnd = end;
+		for (let line = 0; line < this.#state.lines.length; line++) {
+			const lineText = this.#state.lines[line] ?? "";
+			const lineStart = this.#vimAbsoluteLineStart(line);
+			const localStart = Math.max(0, start - lineStart);
+			const localEnd = Math.min(lineText.length, end - lineStart);
+			if (localStart >= localEnd) continue;
+			const expanded = this.#expandRangeOverAtomicTokens(lineText, localStart, localEnd);
+			expandedStart = Math.min(expandedStart, lineStart + expanded.start);
+			expandedEnd = Math.max(expandedEnd, lineStart + expanded.end);
+		}
+		return { start: expandedStart, end: expandedEnd };
+	}
+
+	#notifyVimMutation(): void {
+		this.#preferredVisualCol = null;
+		this.onChange?.(this.getText());
+		this.#retriggerAutocompleteAtCursor();
 	}
 
 	/**

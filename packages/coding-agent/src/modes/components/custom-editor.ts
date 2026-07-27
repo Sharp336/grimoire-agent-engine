@@ -810,6 +810,11 @@ export class CustomEditor extends Editor {
 			// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
 			// completes — fixes the race where submit runs against an empty `pendingImages`.
 			if (remaining.length > 0) this.#pendingInput.push(remaining);
+			if (this.getVimMode() === "normal") {
+				const drained = this.#pendingInput.splice(0);
+				for (const chunk of drained) this.handleInput(chunk);
+				return;
+			}
 			if (content.length === 0 && this.onPasteImage) {
 				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
@@ -842,7 +847,7 @@ export class CustomEditor extends Editor {
 		}
 
 		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
-		if (this.#handleSpaceHold(data, canonical)) return;
+		if (this.getVimMode() !== "normal" && this.#handleSpaceHold(data, canonical)) return;
 
 		// One union probe decides whether any per-action interception below can
 		// match — plain typing then skips the ~20 per-action set lookups per key.
@@ -851,13 +856,21 @@ export class CustomEditor extends Editor {
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
 			// Intercept configured image paste (async - fires and handles result)
-			if (this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
+			if (
+				this.getVimMode() !== "normal" &&
+				this.#matchesAction(canonical, "app.clipboard.pasteImage") &&
+				this.onPasteImage
+			) {
 				void this.onPasteImage();
 				return;
 			}
 
 			// Intercept configured raw text paste (fires and handles result)
-			if (this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
+			if (
+				this.getVimMode() !== "normal" &&
+				this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") &&
+				this.onPasteTextRaw
+			) {
 				this.onPasteTextRaw();
 				return;
 			}
@@ -928,14 +941,14 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured interrupt shortcut.
-			// When the autocomplete popup is visible, ESC's first job is to dismiss
-			// the popup — let super.handleInput() route it to #cancelAutocomplete().
-			// The user can press ESC again afterward to fire the global interrupt
-			// handler. This matches the standard TUI/IDE pattern and prevents a
-			// single ESC from both closing an @ completion and aborting an active
-			// agent run (#1655).
-			if (this.#matchesAction(canonical, "app.interrupt") && this.onEscape && !this.isShowingAutocomplete()) {
+			// Escape leaves Vim insert mode before it can act as the app interrupt.
+			// Autocomplete still closes on the same key in the base editor.
+			if (
+				this.#matchesAction(canonical, "app.interrupt") &&
+				this.onEscape &&
+				!this.isShowingAutocomplete() &&
+				!this.isVimInsertEscape(data)
+			) {
 				this.onEscape();
 				return;
 			}

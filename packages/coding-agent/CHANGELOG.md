@@ -351,6 +351,10 @@
 - Fixed the bash tool's `kill` builtin rejecting numeric signals and multiple process operands, stopping after the first failed target, and defaulting to `SIGKILL` instead of the standard `SIGTERM`. Negative PID operands (process groups per `kill(2)`) and the `--` end-of-options marker are now handled instead of being misparsed as signals ([#6779](https://github.com/can1357/oh-my-pi/issues/6779)).
 - Fixed `learned.md` saves growing a blank line on every write (trailing-newline split artifact) and hoisting all headings/prose above all bullets, which re-scoped lessons under the wrong heading in hand-organized files. Saves are now byte-idempotent and preserve mixed Markdown ordering: non-list lines keep their positions, new lessons insert newest-first at the head of the first bullet run, and dedupe/cap operate on bullet lines in place.
 
+### Added
+
+- Added an `inputMode: vim` setting for modal prompt editing, including a visible mode label and safe interaction with autocomplete, paste, voice input, app shortcuts, and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
+
 ## [17.1.5] - 2026-07-27
 
 ### Added
