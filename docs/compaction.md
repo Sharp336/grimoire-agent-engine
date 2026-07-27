@@ -1,11 +1,11 @@
 # Compaction and Branch Summaries
 
-Compaction and branch summaries are the two mechanisms that keep long sessions usable without losing prior work context.
+Native compaction and branch summaries keep long sessions usable without losing prior work context.
 
 - **Compaction** rewrites old history into a summary on the current branch.
 - **Branch summary** captures abandoned branch context during `/tree` navigation.
 
-Both are persisted as session entries and converted back into user-context messages when rebuilding LLM input.
+Both are persisted as session entries and converted back into user-context messages when rebuilding LLM input. When the opt-in [Lossless Context Management](./lossless-context-management.md) engine has a fitted projection, it owns automatic context maintenance; native compaction remains available for manual use and as the fail-open path.
 
 ## Key implementation files
 
@@ -55,7 +55,7 @@ while `custom` messages pass through as developer messages with their raw conten
 
 ### Triggers
 
-Compaction/context maintenance can run in six ways:
+Native compaction can run in six ways (automatic paths also serve as Lossless fallback and overflow recovery):
 
 1. **Manual context compaction**: `/compact [instructions]` calls `AgentSession.compact(...)`.
 2. **Automatic overflow recovery**: after a same-model assistant error that matches context overflow.

@@ -21,6 +21,7 @@ import {
 	truncateHeadBytes,
 } from "../session/streaming-output";
 import { resolveReadPath } from "../tools/path-utils";
+import { fileContentHash } from "./file-content-hash";
 import { formatDimensionNote, resizeImage } from "./image-resize";
 
 /** Regex to match @filepath patterns in text */
@@ -217,6 +218,7 @@ export async function generateFileMentionMessages(
 						path: resolvedPath,
 						content: `(skipped auto-read: too large, ${formatBytes(stat.size)})`,
 						byteSize: stat.size,
+						contentHash: await fileContentHash(absolutePath),
 						skippedReason: "tooLarge",
 					});
 					continue;
@@ -253,6 +255,7 @@ export async function generateFileMentionMessages(
 					path: resolvedPath,
 					content: `(skipped auto-read: too large, ${formatBytes(stat.size)})`,
 					byteSize: stat.size,
+					contentHash: await fileContentHash(absolutePath),
 					skippedReason: "tooLarge",
 				});
 				continue;
@@ -262,6 +265,7 @@ export async function generateFileMentionMessages(
 					path: resolvedPath,
 					content: `(skipped auto-read: binary file, ${formatBytes(stat.size)})`,
 					byteSize: stat.size,
+					contentHash: await fileContentHash(absolutePath),
 					skippedReason: "binary",
 				});
 				continue;

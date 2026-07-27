@@ -579,6 +579,12 @@ read:
 ### Context, compaction, and memory
 
 ```yaml
+context:
+  engine: native             # native, lossless
+  lossless:
+    summaryModel: "@smol"
+    maxConcurrentSummaries: 1 # 1-4
+
 contextPromotion:
   enabled: false
 
@@ -596,6 +602,9 @@ memory:
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
+| `context.engine` | enum | `native` | `native` or opt-in `lossless`; changes in `/settings` apply immediately. |
+| `context.lossless.summaryModel` | string | unset (`@smol`) | Model selector used for Lossless background summaries. |
+| `context.lossless.maxConcurrentSummaries` | number | `1` | Per-session Lossless summary concurrency, from `1` through `4`. |
 | `contextPromotion.enabled` | boolean | `false` | Promote to the active model's explicit `contextPromotionTarget` on context overflow. |
 | `compaction.enabled` | boolean | `true` | Automatic conversation compaction. |
 | `compaction.midTurnEnabled` | boolean | `true` | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request. |
@@ -611,7 +620,7 @@ memory:
 | `autolearn.autoContinue` | boolean | `false` | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn. |
 | `autolearn.minToolCalls` | number | `5` | Only nudge after a turn that used at least this many tools. |
 
-`compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
+See [Lossless Context Management](./lossless-context-management.md) for the projection engine, settings, costs, and recovery commands. `compaction` has additional tuning keys visible in `omp config list`; see [Compaction](./compaction.md) for the native strategy reference.
 
 ### Appearance and terminal
 

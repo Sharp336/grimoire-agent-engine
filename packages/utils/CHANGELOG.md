@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the profile-aware Lossless Context Management data directory helper.
+
+### Fixed
+
+- Path containment now treats dot-prefixed child names such as `..cache` as in-root while still rejecting actual parent traversal.
+
 ## [17.1.5] - 2026-07-27
 
 ### Fixed

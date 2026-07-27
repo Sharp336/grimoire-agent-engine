@@ -78,6 +78,7 @@
         "@babel/parser": "catalog:",
         "@mozilla/readability": "catalog:",
         "@oh-my-pi/hashline": "catalog:",
+        "@oh-my-pi/lcm-context": "catalog:",
         "@oh-my-pi/omp-stats": "catalog:",
         "@oh-my-pi/pi-agent-core": "catalog:",
         "@oh-my-pi/pi-ai": "catalog:",
@@ -148,6 +149,13 @@
         "@oh-my-pi/pi-natives": "catalog:",
         "lru-cache": "catalog:",
       },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
+    "packages/lcm-context": {
+      "name": "@oh-my-pi/lcm-context",
+      "version": "17.1.7",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
@@ -372,6 +380,7 @@
     "@mozilla/readability": "^0.6.0",
     "@napi-rs/cli": "3.7.2",
     "@oh-my-pi/hashline": "17.1.7",
+    "@oh-my-pi/lcm-context": "17.1.7",
     "@oh-my-pi/omp-stats": "17.1.7",
     "@oh-my-pi/pi-agent-core": "17.1.7",
     "@oh-my-pi/pi-ai": "17.1.7",
@@ -775,6 +784,8 @@
     "@oh-my-pi/collab-web": ["@oh-my-pi/collab-web@workspace:packages/collab-web"],
 
     "@oh-my-pi/hashline": ["@oh-my-pi/hashline@workspace:packages/hashline"],
+
+    "@oh-my-pi/lcm-context": ["@oh-my-pi/lcm-context@workspace:packages/lcm-context"],
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@workspace:packages/stats"],
 

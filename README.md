@@ -296,6 +296,7 @@ Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
+- `/lcm` — inspect, diagnose, search, rebuild, or clean up the opt-in [Lossless Context Management](docs/lossless-context-management.md) engine.
 
 ## Forty-plus providers, hundreds of models, _one /model away_.
 
@@ -582,6 +583,7 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[@oh-my-pi/pi-catalog](packages/catalog)**              | Model catalog: bundled model database, provider descriptors, and identity  |
 | **[@oh-my-pi/pi-agent-core](packages/agent)**             | Agent runtime with tool calling and state management                       |
 | **[@oh-my-pi/pi-coding-agent](packages/coding-agent)**    | Interactive coding agent CLI and SDK                                       |
+| **[@oh-my-pi/lcm-context](packages/lcm-context)**          | SQLite-backed Lossless context projection and summary storage              |
 | **[@oh-my-pi/pi-tui](packages/tui)**                      | Terminal UI library with differential rendering                            |
 | **[@oh-my-pi/pi-natives](packages/natives)**              | N-API bindings for grep, shell, image, text, syntax highlighting, and more |
 | **[@oh-my-pi/omp-stats](packages/stats)**                 | Local observability dashboard for AI usage statistics                      |

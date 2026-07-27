@@ -46,6 +46,7 @@ function createSelector(onCancel: () => void = () => {}): SettingsSelectorCompon
 			availableThinkingLevels: [],
 			thinkingLevel: undefined,
 			availableThemes: ["dark"],
+			summaryModels: [],
 			providers: [],
 			cwd: process.cwd(),
 		},

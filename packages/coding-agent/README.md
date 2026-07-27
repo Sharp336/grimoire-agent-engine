@@ -8,6 +8,7 @@ For installation, setup, provider configuration, model roles, slash commands, an
 
 Package-specific references:
 - [CHANGELOG](./CHANGELOG.md)
+- [Lossless Context Management](../../docs/lossless-context-management.md)
 - [MCP configuration guide](../../docs/mcp-config.md)
 - [MCP runtime lifecycle](../../docs/mcp-runtime-lifecycle.md)
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)

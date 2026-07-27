@@ -40,6 +40,10 @@ describe("extension loader host runtime binding", () => {
 		if (api.pi !== expectedPi) throw new Error("injected pi module did not match host module");
 	`;
 
+	it("exports SessionLcm through the package root", () => {
+		expect(PiCodingAgent.SessionLcm).toBeDefined();
+	});
+
 	it("passes the in-process host pi module through every loader API", async () => {
 		expect(projectDir).toBeDefined();
 		const cwd = projectDir!.path();

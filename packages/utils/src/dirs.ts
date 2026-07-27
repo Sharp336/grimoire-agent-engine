@@ -164,7 +164,7 @@ export function pathIsWithin(root: string, candidate: string): boolean {
 	const normalizedRoot = normalizePathForComparison(root);
 	const normalizedCandidate = normalizePathForComparison(candidate);
 	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 export function relativePathWithinRoot(root: string, candidate: string): string | null {
@@ -763,6 +763,11 @@ export function getSessionsDir(agentDir?: string): string {
 /** Get the content-addressed blob store directory (~/.omp/agent/blobs). */
 export function getBlobsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "blobs", "data");
+}
+
+/** Get the Lossless Context Management data directory (~/.omp/agent/lcm). */
+export function getLcmDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "lcm", "data");
 }
 
 /** Get the custom themes directory (~/.omp/agent/themes). */

@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -6,7 +8,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as sessionColor from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import type { Container, NativeScrollbackLiveRegion } from "@oh-my-pi/pi-tui";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 
 type Harness = {
 	mode: InteractiveMode;
@@ -47,6 +49,41 @@ async function createHarness(sessionName: string): Promise<Harness> {
 	const harness = { mode, sessionManager, tempDir };
 	harnesses.push(harness);
 	return harness;
+}
+
+async function createIsolatedHarness(sessionName: string) {
+	const tempDir = TempDir.createSync("@pi-isolated-cwd-");
+	const isolatedSettings = await Settings.loadIsolated({
+		cwd: tempDir.path(),
+		agentDir: path.join(tempDir.path(), "agent"),
+	});
+	await Settings.init({ inMemory: true, cwd: tempDir.path() });
+	await initTheme(false);
+	const sessionManager = SessionManager.inMemory(tempDir.path());
+	await sessionManager.setSessionName(sessionName, "user");
+	const refreshLcmSettingsAndRebind = vi.fn(async () => {});
+	const session = {
+		sessionManager,
+		settings: isolatedSettings,
+		agent: {
+			state: { tools: [] },
+			metadataForProvider: () => undefined,
+		},
+		customCommands: [],
+		skills: [],
+		autoCompactionEnabled: true,
+		messages: [],
+		systemPrompt: [],
+		state: { model: undefined },
+		model: undefined,
+		thinkingLevel: undefined,
+		refreshLcmSettingsAndRebind,
+	} as unknown as AgentSession;
+	const mode = new InteractiveMode(session, "test");
+	resetSettingsForTest();
+	const harness = { mode, sessionManager, tempDir };
+	harnesses.push(harness);
+	return { ...harness, isolatedSettings, refreshLcmSettingsAndRebind };
 }
 
 function startStableLoader(mode: InteractiveMode): void {
@@ -197,5 +234,34 @@ describe("InteractiveMode working-message session accent cache", () => {
 		mode.loadingAnimation?.setMessage("Accent enabled");
 		expect(renderLoader(mode)).toContain(accentAnsi);
 		expect(getHex).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("InteractiveMode isolated cwd settings", () => {
+	it("reloads the destination settings and rebinds LCM without a global Settings singleton", async () => {
+		const { mode, tempDir, isolatedSettings, refreshLcmSettingsAndRebind } =
+			await createIsolatedHarness("Isolated move");
+		const targetDir = path.join(tempDir.path(), "destination");
+		fs.mkdirSync(path.join(targetDir, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(targetDir, ".omp", "config.yml"),
+			"context:\n  engine: lossless\n  lossless:\n    maxConcurrentSummaries: 2\n",
+		);
+		vi.spyOn(mode, "refreshTitleSystemPrompt").mockResolvedValue(undefined);
+		vi.spyOn(mode, "refreshSkillState").mockResolvedValue(undefined);
+		vi.spyOn(mode, "refreshSlashCommandState").mockResolvedValue(undefined);
+		mode.ui.requestRender = vi.fn();
+
+		const originalCwd = process.cwd();
+		try {
+			await mode.applyCwdChange(targetDir);
+
+			expect(isolatedSettings.getCwd()).toBe(path.normalize(targetDir));
+			expect(isolatedSettings.get("context.engine")).toBe("lossless");
+			expect(isolatedSettings.get("context.lossless.maxConcurrentSummaries")).toBe(2);
+			expect(refreshLcmSettingsAndRebind).toHaveBeenCalledTimes(1);
+		} finally {
+			setProjectDir(originalCwd);
+		}
 	});
 });
