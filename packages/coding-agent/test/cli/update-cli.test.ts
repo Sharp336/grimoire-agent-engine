@@ -21,7 +21,7 @@ describe("runUpdateCommand fetch cancellation", () => {
 		);
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
 
-		await runUpdateCommand({ force: false, check: true });
+		await runUpdateCommand({ force: false, check: true, json: false });
 
 		expect(requestSignal).toBeInstanceOf(AbortSignal);
 	});

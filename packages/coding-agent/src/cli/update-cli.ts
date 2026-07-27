@@ -33,7 +33,9 @@ const MISE_TOOL = "github:can1357/oh-my-pi";
  */
 const NPM_REGISTRY = "https://registry.npmjs.org/";
 const GITHUB_API = "https://api.github.com";
+const RELEASE_NOTES_BASE_URL = `https://github.com/${REPO}/releases/tag`;
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
+const RELEASE_HISTORY_TIMEOUT_MS = 60_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
@@ -66,6 +68,32 @@ function currentNativeTag(): string {
 interface ReleaseInfo {
 	tag: string;
 	version: string;
+}
+
+export interface UpdateCheckRelease {
+	version: string;
+	tag: string;
+	publishedAt: string | null;
+	releaseNotesUrl: string;
+}
+
+export interface UpdateCheckReport {
+	status: "ok";
+	schemaVersion: 1;
+	currentVersion: string;
+	latestVersion: string;
+	updateAvailable: boolean;
+	releases: UpdateCheckRelease[];
+}
+
+export interface UpdateCheckError {
+	status: "error";
+	schemaVersion: 1;
+	error: string;
+}
+
+export function createUpdateCheckError(error: string): UpdateCheckError {
+	return { status: "error", schemaVersion: 1, error };
 }
 
 export interface ReleaseBinaryAsset {
@@ -133,12 +161,20 @@ export function resolveReleaseBinaryAsset(
 	};
 }
 
-async function getReleaseBinaryAsset(
+export interface ReleaseMetadataOptions {
+	fetchImpl?: Fetch;
+	githubToken?: string;
+	timeoutMs?: number;
+}
+
+export async function getReleaseBinaryAsset(
 	expectedVersion: string,
 	binaryName: string,
-	fetchImpl: Fetch = fetch,
-	githubToken: string | undefined = $env.GITHUB_TOKEN || $env.GH_TOKEN,
+	options: ReleaseMetadataOptions = {},
 ): Promise<ReleaseBinaryAsset> {
+	const fetchImpl = options.fetchImpl ?? fetch;
+	const githubToken = options.githubToken ?? ($env.GITHUB_TOKEN || $env.GH_TOKEN);
+	const timeoutMs = options.timeoutMs ?? RELEASE_METADATA_TIMEOUT_MS;
 	const tag = `v${expectedVersion}`;
 	const headers: Record<string, string> = {
 		Accept: "application/vnd.github+json",
@@ -146,28 +182,28 @@ async function getReleaseBinaryAsset(
 	};
 	if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
 
-	let response: Response;
 	try {
-		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`, {
+		const response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`, {
 			headers,
-			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
+			signal: withTimeoutSignal(timeoutMs),
 		});
+		if ((response.status === 403 && !githubToken) || response.status === 429) {
+			throw new Error(
+				"GitHub API rate limit exceeded while fetching release metadata; retry later or set GITHUB_TOKEN or GH_TOKEN",
+			);
+		}
+		if (!response.ok) {
+			throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
+		}
+		return resolveReleaseBinaryAsset(await response.json(), tag, binaryName);
 	} catch (err) {
 		if (isTimeoutError(err)) {
-			throw new Error("Timed out fetching GitHub release metadata after 30s", { cause: err });
+			throw new Error(`Timed out fetching GitHub release metadata after ${timeoutMs / 1000}s`, {
+				cause: err,
+			});
 		}
 		throw err;
 	}
-	if ((response.status === 403 && !githubToken) || response.status === 429) {
-		throw new Error(
-			"GitHub API rate limit exceeded while fetching release metadata; retry later or set GITHUB_TOKEN or GH_TOKEN",
-		);
-	}
-	if (!response.ok) {
-		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
-	}
-
-	return resolveReleaseBinaryAsset(await response.json(), tag, binaryName);
 }
 
 export interface VerifiedBinaryDownloadOptions {
@@ -193,7 +229,9 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		});
 	} catch (err) {
 		if (isTimeoutError(err)) {
-			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
+			throw new Error(`Timed out downloading release binary after ${BINARY_DOWNLOAD_TIMEOUT_MS / 60_000} minutes`, {
+				cause: err,
+			});
 		}
 		throw err;
 	}
@@ -252,22 +290,6 @@ export interface BinaryReplacementOptions {
 	backupPath: string;
 	expectedVersion: string;
 	verifyInstalledVersion: (expectedVersion: string) => Promise<InstalledVersionVerification>;
-}
-
-/**
- * Parse update subcommand arguments.
- * Returns undefined if not an update command.
- */
-export function parseUpdateArgs(args: string[]): { force: boolean; check: boolean; plugins: boolean } | undefined {
-	if (args.length === 0 || args[0] !== "update") {
-		return undefined;
-	}
-
-	return {
-		force: args.includes("--force") || args.includes("-f"),
-		check: args.includes("--check") || args.includes("-c"),
-		plugins: args.includes("--plugins") || args.includes("-l"),
-	};
 }
 
 async function getBunGlobalBinDir(): Promise<string | undefined> {
@@ -472,48 +494,28 @@ async function resolveUpdateTarget(): Promise<UpdateTarget> {
  * Get the latest release info from the npm registry.
  * Uses npm instead of GitHub API to avoid unauthenticated rate limiting.
  */
-async function getLatestRelease(): Promise<ReleaseInfo> {
-	let response: Response;
+async function getLatestRelease(fetchImpl: Fetch = fetch): Promise<ReleaseInfo> {
 	try {
-		response = await fetch(`${NPM_REGISTRY}${PACKAGE}/latest`, {
+		const response = await fetchImpl(`${NPM_REGISTRY}${PACKAGE}/latest`, {
 			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
 		});
+		if (!response.ok) {
+			throw new Error(`Failed to fetch release info: ${response.statusText}`);
+		}
+
+		const data = await response.json();
+		if (!isRecord(data) || typeof data.version !== "string" || !STABLE_VERSION_PATTERN.test(data.version)) {
+			throw new Error("Invalid npm latest release metadata");
+		}
+		return { tag: `v${data.version}`, version: data.version };
 	} catch (err) {
 		if (isTimeoutError(err)) {
-			throw new Error("Timed out fetching release info after 30s", { cause: err });
+			throw new Error(`Timed out fetching release info after ${RELEASE_METADATA_TIMEOUT_MS / 1000}s`, {
+				cause: err,
+			});
 		}
 		throw err;
 	}
-	if (!response.ok) {
-		throw new Error(`Failed to fetch release info: ${response.statusText}`);
-	}
-
-	const data = (await response.json()) as { version: string };
-	const version = data.version;
-	const tag = `v${version}`;
-
-	return {
-		tag,
-		version,
-	};
-}
-
-/**
- * Compare semver versions. Returns:
- * - negative if a < b
- * - 0 if a == b
- * - positive if a > b
- */
-function compareVersions(a: string, b: string): number {
-	const pa = a.split(".").map(Number);
-	const pb = b.split(".").map(Number);
-
-	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-		const na = pa[i] || 0;
-		const nb = pb[i] || 0;
-		if (na !== nb) return na - nb;
-	}
-	return 0;
 }
 
 interface BunInstallCachePruneResult {
@@ -532,40 +534,92 @@ function stripBunCacheVersionSuffix(name: string): string {
 	return metadataIndex === -1 ? name : name.slice(0, metadataIndex);
 }
 
-function compareSemverIdentifier(a: string, b: string): number {
-	const aNumber = /^\d+$/.test(a);
-	const bNumber = /^\d+$/.test(b);
-	if (aNumber && bNumber) return Number(a) - Number(b);
-	if (aNumber) return -1;
-	if (bNumber) return 1;
-	return a.localeCompare(b);
+function compareSemverLikeVersions(a: string, b: string): number {
+	return Bun.semver.order(a, b);
 }
 
-function compareSemverLikeVersions(a: string, b: string): number {
-	const [aCoreWithPrerelease] = a.split("+", 1);
-	const [bCoreWithPrerelease] = b.split("+", 1);
-	const [aCore, aPrerelease] = aCoreWithPrerelease.split("-", 2);
-	const [bCore, bPrerelease] = bCoreWithPrerelease.split("-", 2);
-	const aParts = aCore.split(".");
-	const bParts = bCore.split(".");
-	for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
-		const diff = Number(aParts[i] ?? 0) - Number(bParts[i] ?? 0);
-		if (diff !== 0 && Number.isFinite(diff)) return diff;
+const SEMVER_VERSION_PATTERN =
+	/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const STABLE_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+export function resolveUpdateCheckReport(metadata: unknown, currentVersion: string): UpdateCheckReport {
+	if (!SEMVER_VERSION_PATTERN.test(currentVersion)) throw new Error("Invalid current version metadata");
+	if (!isRecord(metadata)) throw new Error("Invalid npm package metadata");
+	const distTags = metadata["dist-tags"];
+	const versions = metadata.versions;
+	const publicationTimes = metadata.time;
+	if (!isRecord(distTags) || !isRecord(versions)) throw new Error("Invalid npm package metadata");
+
+	const latestVersion = distTags.latest;
+	const latestManifest = typeof latestVersion === "string" ? versions[latestVersion] : undefined;
+	if (
+		typeof latestVersion !== "string" ||
+		!STABLE_VERSION_PATTERN.test(latestVersion) ||
+		!isRecord(latestManifest) ||
+		typeof latestManifest.deprecated === "string"
+	) {
+		throw new Error("Invalid npm latest release metadata");
 	}
-	if (!aPrerelease && !bPrerelease) return 0;
-	if (!aPrerelease) return 1;
-	if (!bPrerelease) return -1;
-	const aPrereleaseParts = aPrerelease.split(".");
-	const bPrereleaseParts = bPrerelease.split(".");
-	for (let i = 0; i < Math.max(aPrereleaseParts.length, bPrereleaseParts.length); i++) {
-		const aPart = aPrereleaseParts[i];
-		const bPart = bPrereleaseParts[i];
-		if (aPart === undefined) return -1;
-		if (bPart === undefined) return 1;
-		const diff = compareSemverIdentifier(aPart, bPart);
-		if (diff !== 0) return diff;
+
+	const times = isRecord(publicationTimes) ? publicationTimes : {};
+	const releases = Object.keys(versions)
+		.filter(version => {
+			const manifest = versions[version];
+			return (
+				STABLE_VERSION_PATTERN.test(version) &&
+				isRecord(manifest) &&
+				typeof manifest.deprecated !== "string" &&
+				compareSemverLikeVersions(version, currentVersion) > 0 &&
+				compareSemverLikeVersions(version, latestVersion) <= 0
+			);
+		})
+		.sort(compareSemverLikeVersions)
+		.map(version => {
+			const tag = `v${version}`;
+			return {
+				version,
+				tag,
+				publishedAt: typeof times[version] === "string" ? times[version] : null,
+				releaseNotesUrl: `${RELEASE_NOTES_BASE_URL}/${tag}`,
+			};
+		});
+
+	return {
+		status: "ok",
+		schemaVersion: 1,
+		currentVersion,
+		latestVersion,
+		updateAvailable: compareSemverLikeVersions(latestVersion, currentVersion) > 0,
+		releases,
+	};
+}
+
+/**
+ * Fetch the full npm packument. The abbreviated install metadata omits
+ * publication times, so this larger and continually growing response has its
+ * own timeout budget.
+ */
+async function getUpdateCheckReport(
+	fetchImpl: Fetch = fetch,
+	timeoutMs: number = RELEASE_HISTORY_TIMEOUT_MS,
+): Promise<UpdateCheckReport> {
+	try {
+		const response = await fetchImpl(`${NPM_REGISTRY}${PACKAGE}`, {
+			headers: { Accept: "application/json" },
+			signal: withTimeoutSignal(timeoutMs),
+		});
+		if (!response.ok) {
+			throw new Error(`Failed to fetch release history: ${response.statusText}`);
+		}
+		return resolveUpdateCheckReport(await response.json(), VERSION);
+	} catch (err) {
+		if (isTimeoutError(err)) {
+			throw new Error(`Timed out fetching release history after ${timeoutMs / 1000}s`, {
+				cause: err,
+			});
+		}
+		throw err;
 	}
-	return 0;
 }
 
 async function readdirIfExists(dir: string): Promise<fs.Dirent[]> {
@@ -1118,7 +1172,10 @@ export async function updateViaBinaryAt(
 	// would force the move-aside rename to overwrite it. pid + timestamp keeps
 	// two forced updates in the same millisecond from colliding.
 	const backupPath = `${targetPath}.${Date.now()}.${process.pid}.bak`;
-	const asset = await getReleaseBinaryAsset(expectedVersion, binaryName, options.fetchImpl, options.githubToken);
+	const asset = await getReleaseBinaryAsset(expectedVersion, binaryName, {
+		fetchImpl: options.fetchImpl,
+		githubToken: options.githubToken,
+	});
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 	await downloadVerifiedBinary({
 		url: asset.url,
@@ -1146,19 +1203,53 @@ export async function updateViaBinaryAt(
 /**
  * Run the update command.
  */
-export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
+export interface RunUpdateOptions {
+	force: boolean;
+	check: boolean;
+	json: boolean;
+}
+
+export interface RunUpdateDependencies {
+	fetchImpl?: Fetch;
+	releaseHistoryTimeoutMs?: number;
+	writeStdout?: (text: string) => void;
+	setExitCode?: (code: number) => void;
+}
+
+export async function runUpdateCommand(
+	opts: RunUpdateOptions,
+	dependencies: RunUpdateDependencies = {},
+): Promise<void> {
+	if (opts.json) {
+		const writeStdout = dependencies.writeStdout ?? (text => process.stdout.write(text));
+		const setExitCode =
+			dependencies.setExitCode ??
+			(code => {
+				process.exitCode = code;
+			});
+		try {
+			const report = await getUpdateCheckReport(dependencies.fetchImpl, dependencies.releaseHistoryTimeoutMs);
+			writeStdout(`${JSON.stringify(report, null, 2)}\n`);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			writeStdout(`${JSON.stringify(createUpdateCheckError(message), null, 2)}\n`);
+			setExitCode(1);
+		}
+		return;
+	}
+
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 
 	// Check for updates
 	let release: ReleaseInfo;
 	try {
-		release = await getLatestRelease();
+		release = await getLatestRelease(dependencies.fetchImpl);
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
 		process.exit(1);
 	}
 
-	const comparison = compareVersions(release.version, VERSION);
+	const comparison = compareSemverLikeVersions(release.version, VERSION);
 
 	if (comparison <= 0 && !opts.force) {
 		console.log(chalk.green(`${theme.status.success} Already up to date`));
@@ -1194,26 +1285,4 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 		console.error(chalk.red(`Update failed: ${err}`));
 		process.exit(1);
 	}
-}
-
-/**
- * Print update command help.
- */
-export function printUpdateHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} update`)} - Check for and install updates
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} update [options]
-
-${chalk.bold("Options:")}
-  -c, --check     Check for updates without installing
-  -f, --force     Force reinstall even if up to date
-  -l, --plugins   Update installed plugins
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} update              Update to latest version
-  ${APP_NAME} update --check      Check if updates are available
-  ${APP_NAME} update --force      Force reinstall
-  ${APP_NAME} update -l           Update installed plugins
-`);
 }
