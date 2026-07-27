@@ -4,8 +4,9 @@ import { getToolDashboardStats } from "../api";
 import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
 import { formatCompact, formatCost, formatInteger, formatPercent, formatRelativeTime } from "../data/formatters";
+import { useAvailableSelection } from "../data/useAvailableSelection";
 import { useResource } from "../data/useResource";
-import { buildToolRows, resolveAvailableSelection, type ToolRowView } from "../data/view-models";
+import { buildToolRows, type ToolRowView } from "../data/view-models";
 import type { TimeRange, ToolModelStats, ToolTimeSeriesPoint, ToolUsageStats } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -368,7 +369,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 	const [tool, setTool] = useState<string | null>(null);
 
 	const tools = useMemo(() => [...new Set(byToolModel.map(row => row.tool))].sort(), [byToolModel]);
-	const effectiveTool = resolveAvailableSelection(tool, tools);
+	const effectiveTool = useAvailableSelection(tool, tools, setTool);
 
 	const rows = useMemo(() => {
 		const filtered = effectiveTool ? byToolModel.filter(row => row.tool === effectiveTool) : byToolModel;

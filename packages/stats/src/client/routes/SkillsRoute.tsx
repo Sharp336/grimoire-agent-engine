@@ -4,13 +4,9 @@ import { getSkillDashboardStats } from "../api";
 import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
 import { formatCompact, formatCost, formatInteger, formatPercent, formatRelativeTime } from "../data/formatters";
+import { useAvailableSelection } from "../data/useAvailableSelection";
 import { useResource } from "../data/useResource";
-import {
-	averageCostPerInvocation,
-	buildSkillRows,
-	resolveAvailableSelection,
-	type SkillRowView,
-} from "../data/view-models";
+import { averageCostPerInvocation, buildSkillRows, type SkillRowView } from "../data/view-models";
 import type { SkillModelStats, SkillTimeSeriesPoint, SkillUsageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -399,7 +395,7 @@ function SkillModelPanel({ bySkillModel }: { bySkillModel: SkillModelStats[] }) 
 	const [skill, setSkill] = useState<string | null>(null);
 
 	const skills = useMemo(() => [...new Set(bySkillModel.map(row => row.skill))].sort(), [bySkillModel]);
-	const effectiveSkill = resolveAvailableSelection(skill, skills);
+	const effectiveSkill = useAvailableSelection(skill, skills, setSkill);
 
 	const rows = useMemo(() => {
 		const filtered = effectiveSkill ? bySkillModel.filter(row => row.skill === effectiveSkill) : bySkillModel;

@@ -50,6 +50,17 @@ const dashboard: SkillDashboardStats = {
 			costShare: 0.009,
 			lastUsed: Date.parse("2026-06-24T10:05:00.000Z"),
 		},
+		{
+			skill: "outline",
+			calls: 1,
+			errors: 0,
+			argsChars: 0,
+			resultChars: 0,
+			totalTokensShare: 50,
+			outputTokensShare: 10,
+			costShare: 0.004,
+			lastUsed: Date.parse("2026-06-24T10:04:00.000Z"),
+		},
 	],
 	bySkillModel: [
 		{
@@ -65,6 +76,19 @@ const dashboard: SkillDashboardStats = {
 			costShare: 0.009,
 			lastUsed: Date.parse("2026-06-24T10:05:00.000Z"),
 		},
+		{
+			skill: "outline",
+			model: "gpt-5.5",
+			provider: "openai",
+			calls: 1,
+			errors: 0,
+			argsChars: 0,
+			resultChars: 0,
+			totalTokensShare: 50,
+			outputTokensShare: 10,
+			costShare: 0.004,
+			lastUsed: Date.parse("2026-06-24T10:04:00.000Z"),
+		},
 	],
 	series: [],
 };
@@ -72,7 +96,7 @@ const dashboard: SkillDashboardStats = {
 const lintDashboard: SkillDashboardStats = {
 	bySkill: [{ ...dashboard.bySkill[0], skill: "lint" }],
 	bySkillModel: [{ ...dashboard.bySkillModel[0], skill: "lint" }],
-	series: [{ timestamp: Date.parse("2026-06-24T10:10:00.000Z"), skill: "lint", calls: 1, errors: 0 }],
+	series: [],
 };
 
 const collisionSkills = [
@@ -187,6 +211,16 @@ describe("SkillsRoute", () => {
 		if (!refreshedSelect) throw new Error("Expected refreshed skill filter");
 		expect(refreshedSelect.value).toBe("");
 		expect(domWindow.document.body.textContent).toContain("lint");
+		await act(async () => {
+			root?.render(<SkillsRoute active range="24h" refreshTrigger={0} />);
+		});
+		const restoredSelect = domWindow.document.querySelector("select");
+		if (!restoredSelect) throw new Error("Expected restored skill filter");
+		expect(restoredSelect.value).toBe("");
+		const modelTable = domWindow.document.querySelectorAll("table").at(-1);
+		if (!modelTable) throw new Error("Expected skill model table");
+		expect(modelTable.textContent).toContain("review");
+		expect(modelTable.textContent).toContain("outline");
 	});
 
 	it("keeps a real Other skill separate from the overflow series", () => {
