@@ -725,6 +725,38 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		}
 	});
 
+	it("refuses a download path that escapes the workspace", async () => {
+		// `download_path` is workspace-relative by contract, but it comes from
+		// the server and the generic resolver honors absolute paths and `..` —
+		// correct for a path a user typed, a write-anywhere primitive for one a
+		// remote peer supplied.
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-escape-"));
+		const outside = path.join(workspace, "outside.txt");
+		try {
+			const inner = path.join(workspace, "ws");
+			await fs.mkdir(inner);
+			const handlers = new CursorExecHandlers({
+				cwd: inner,
+				tools: new Map(),
+				mcpResources: {
+					serverNames: () => ["files"],
+					getServerResources: () => undefined,
+					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
+				},
+			});
+
+			for (const escape of ["../outside.txt", outside, "nested/../../outside.txt"]) {
+				await expect(
+					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: escape }),
+				).rejects.toThrow(/outside the workspace/);
+			}
+			// Nothing was written on any of those attempts.
+			expect(await Bun.file(outside).exists()).toBe(false);
+		} finally {
+			await removeWithRetries(workspace);
+		}
+	});
+
 	it("answers nothing when the session has no MCP manager", async () => {
 		// A host without MCP must still answer truthfully rather than throwing:
 		// an empty catalog and `not_found` are the honest responses.

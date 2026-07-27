@@ -28,7 +28,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { MCPResourceReadResult } from "./mcp/types";
 import type { ApprovalMode } from "./tools/approval";
 import { resolveApproval } from "./tools/approval";
-import { resolveToCwd } from "./tools/path-utils";
+import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "./tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
@@ -646,10 +646,17 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			const payload =
 				texts.length > 0 ? texts.join("\n") : blob !== undefined ? Buffer.from(blob, "base64") : undefined;
 			if (payload === undefined) return null;
-			const absolutePath = resolveToCwd(downloadPath, this.options.getCwd?.() ?? this.options.cwd);
+			// The path is workspace-relative BY CONTRACT, but it arrives from the
+			// server, and `resolveToCwd` deliberately honors absolute paths and
+			// `..` for user-authored tool input. Taking it at its word would let a
+			// frame write anywhere this process can reach, so confine it here
+			// rather than trusting the declaration.
+			const cwd = this.options.getCwd?.() ?? this.options.cwd;
+			const absolutePath = confineToWorkspace(downloadPath, cwd);
+			if (!absolutePath) throw new Error(`Refusing to download outside the workspace: ${downloadPath}`);
 			await Bun.write(absolutePath, payload);
-			// The path echoed back is the one the frame asked for: it is
-			// workspace-relative by contract, and the model addresses it that way.
+			// The path echoed back is the one the frame asked for; the model
+			// addresses it the same relative way.
 			return { uri, mimeType, downloadPath };
 		}
 

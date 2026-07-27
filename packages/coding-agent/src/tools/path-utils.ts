@@ -520,6 +520,29 @@ export function resolveToCwd(filePath: string, cwd: string): string {
 	return path.resolve(cwd, expanded);
 }
 
+/**
+ * Resolve a path that MUST stay inside `cwd`, or `null` when it would escape.
+ *
+ * {@link resolveToCwd} deliberately honors absolute paths, `~`, and `..` —
+ * correct for a path a user typed, wrong for one a remote peer supplied.
+ * Callers handling untrusted input (Cursor's `download_path`) use this instead:
+ * only a non-empty relative path resolving under the live cwd is accepted, so
+ * neither `/etc/passwd` nor `../../escape` can be written through.
+ *
+ * The cwd itself is rejected: a download names a file, never the directory.
+ */
+export function confineToWorkspace(filePath: string, cwd: string): string | null {
+	if (!filePath || path.isAbsolute(filePath)) return null;
+	// `~` expands to an absolute path, and an internal URL is not a filesystem
+	// target at all; neither is a relative workspace path.
+	if (filePath.startsWith("~") || isInternalUrlPath(filePath)) return null;
+	const root = path.resolve(cwd);
+	const resolved = path.resolve(root, filePath);
+	const relative = path.relative(root, resolved);
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+	return resolved;
+}
+
 export function formatPathRelativeToCwd(
 	filePath: string,
 	cwd: string,
