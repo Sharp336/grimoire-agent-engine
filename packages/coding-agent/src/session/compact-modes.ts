@@ -49,27 +49,24 @@ export interface CompactModeDef {
 export const COMPACT_MODES: readonly CompactModeDef[] = [
 	{
 		name: "soft",
-		description: i18n.t(
-			"compact.modes.soft.description",
-			"Summarize locally with the active model (skip remote endpoints)",
-		),
+		get description() {
+			return i18n.t("compact.modes.soft.description", "Summarize locally with the active model (skip remote endpoints)");
+		},
 		overrides: { strategy: "context-full", remoteEnabled: false },
 	},
 	{
 		name: "remote",
-		description: i18n.t(
-			"compact.modes.remote.description",
-			"Summarize via the remote endpoint / provider-native compaction",
-		),
+		get description() {
+			return i18n.t("compact.modes.remote.description", "Summarize via the remote endpoint / provider-native compaction");
+		},
 		overrides: { strategy: "context-full", remoteEnabled: true },
 		requiresRemote: true,
 	},
 	{
 		name: "snapcompact",
-		description: i18n.t(
-			"compact.modes.snapcompact.description",
-			"Archive history onto dense bitmap images the model reads back (no LLM call)",
-		),
+		get description() {
+			return i18n.t("compact.modes.snapcompact.description", "Archive history onto dense bitmap images the model reads back (no LLM call)");
+		},
 		overrides: { strategy: "snapcompact" },
 		rejectsFocus: true,
 	},

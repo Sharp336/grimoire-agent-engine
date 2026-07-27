@@ -60,5 +60,8 @@
   "ui.none": "(none)",
   "ui.unresolved": "(unresolved)",
   "ui.oauthFlow": "OAuth flow (web-based)",
-  "ui.opensBrowser": "(opens browser)"
+  "ui.opensBrowser": "(opens browser)",
+  "ui.settings.title": "Settings",
+  "ui.settings.noResults": "No matching settings",
+  "tabs.plugins.label": "Plugins"
 }

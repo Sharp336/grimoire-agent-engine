@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { useTranslation } from "../i18n";
+
 
 export interface PaginationProps {
 	currentPage: number;
@@ -9,6 +11,11 @@ export interface PaginationProps {
 
 export function Pagination({ currentPage, pageSize, total, onPageChange }: PaginationProps) {
 	const { t } = useTranslation();
+	// Clamp page when total shrinks (e.g., entries age out of rolling range)
+	useEffect(() => {
+		if (currentPage > totalPages) onPageChange(1);
+	}, [currentPage, totalPages, onPageChange]);
+
 	const totalPages = Math.max(1, Math.ceil(total / pageSize));
 	if (totalPages <= 1) return null;
 
