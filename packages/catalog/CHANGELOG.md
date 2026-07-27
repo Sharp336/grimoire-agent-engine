@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `resolveVertexEndpointHost(location)` for Vertex AI hostname selection: `global` → `aiplatform.googleapis.com`, multi-region `eu`/`us` → `aiplatform.{eu|us}.rep.googleapis.com`, and regional locations → `{location}-aiplatform.googleapis.com`.
+
 ## [17.1.6] - 2026-07-27
 
 ### Added

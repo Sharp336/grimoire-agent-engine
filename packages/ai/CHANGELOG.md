@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Google Vertex AI multi-region locations `eu` and `us` building invalid hosts (`eu-aiplatform.googleapis.com` / `us-aiplatform.googleapis.com`) that 404. Both Gemini GenerateContent and Claude/OpenAI-compat Vertex routes now resolve the REP endpoints (`aiplatform.eu.rep.googleapis.com` / `aiplatform.us.rep.googleapis.com`).
+
 ## [17.1.6] - 2026-07-27
 
 ### Added
