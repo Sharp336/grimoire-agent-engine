@@ -757,6 +757,49 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		}
 	});
 
+	it("refuses a download path that escapes through a symlink", async () => {
+		// A lexical check is not containment. `out/config` is relative and
+		// `..`-free, but with `ws/out` linked outside the workspace the write
+		// lands wherever the link points — as does a write to a dangling link.
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-symlink-"));
+		try {
+			const inner = path.join(workspace, "ws");
+			const outside = path.join(workspace, "outside");
+			await fs.mkdir(inner);
+			await fs.mkdir(outside);
+			await fs.symlink(outside, path.join(inner, "out"));
+			await fs.symlink(path.join(outside, "dangling.txt"), path.join(inner, "link.txt"));
+			// A link whose target already exists: the write would overwrite the
+			// real file out there rather than create anything new.
+			await Bun.write(path.join(outside, "existing.txt"), "original");
+			await fs.symlink(path.join(outside, "existing.txt"), path.join(inner, "existing.txt"));
+			const handlers = new CursorExecHandlers({
+				cwd: inner,
+				tools: new Map(),
+				mcpResources: {
+					serverNames: () => ["files"],
+					getServerResources: () => undefined,
+					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
+				},
+			});
+
+			for (const escape of ["out/config", "out/deep/nested.txt", "link.txt", "existing.txt"]) {
+				await expect(
+					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: escape }),
+				).rejects.toThrow(/outside the workspace/);
+			}
+			expect(await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: outside }))).toEqual(["existing.txt"]);
+			expect(await Bun.file(path.join(outside, "existing.txt")).text()).toBe("original");
+
+			// A real workspace path still downloads: the guard resolves links, it
+			// does not refuse every path whose parents do not exist yet.
+			await handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "deep/new/file.txt" });
+			expect(await Bun.file(path.join(inner, "deep/new/file.txt")).text()).toBe("payload");
+		} finally {
+			await removeWithRetries(workspace);
+		}
+	});
+
 	it("answers nothing when the session has no MCP manager", async () => {
 		// A host without MCP must still answer truthfully rather than throwing:
 		// an empty catalog and `not_found` are the honest responses.

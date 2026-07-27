@@ -6,21 +6,6 @@
 
 - Added `getProxyForUrl()` for transports that need provider-specific and standard proxy environment resolution with `NO_PROXY` support ([#6770](https://github.com/can1357/oh-my-pi/issues/6770)).
 - Added SiliconFlow and SiliconFlow (China) to the built-in API-key login provider catalog so `omp login siliconflow` / `omp login siliconflow-cn` stores a reusable credential validated against each region's `/v1/models` endpoint.
-### Changed
-
-- The Cursor Pi arg translation (`piReadPath`, `piJoinPath`, `piLsPath`, `piEscapeRegexLiteral`, `piLimit`) moved to `providers/cursor-pi-args`, re-exported from `providers/cursor/exec-modern` so existing imports are unaffected. The legacy pi shim shares these helpers and is compiled into the bundled virtual module registry, where a nested `providers/<dir>/<mod>` specifier is unresolvable under bunfs — and importing them from the exec module would drag the whole protobuf graph in for two string functions.
-
-## [17.1.5] - 2026-07-27
-
-### Fixed
-
-- Fixed OpenAI Responses replay treating a tool output as paired with a matching call that appeared later in the input, or a tool call as paired with an earlier output. Pair repair now respects wire order before preserving or synthesizing each side.
-- Fixed adaptive-thinking Anthropic models omitting the interleaved-thinking beta on signature-enforcing proxies, which caused persisted interleaved assistant turns to fail on replay ([#6717](https://github.com/can1357/oh-my-pi/issues/6717)).
-- Kimi Code now sends its session-stable prompt cache key on both supported transports: `prompt_cache_key` for OpenAI-compatible requests and `metadata.user_id` for Anthropic-compatible requests. Explicit keys survive side-channel session IDs, while `cacheRetention: "none"` still disables automatic affinity ([#6049](https://github.com/can1357/oh-my-pi/issues/6049)).
-- Fresh encrypted auth-broker snapshot caches are revalidated within a short startup budget, so one-shot clients see newly imported or revoked credentials immediately when the broker is reachable while retaining cache fallback for transport and server failures.
-- Fixed custom `anthropic-messages` endpoints dropping native web-search call/result blocks in the leaked-thinking wrapper, preserving signed continuation history in source order without carrying a preceding text signature onto later unsigned blocks ([#6703](https://github.com/can1357/oh-my-pi/issues/6703)).
-### Added
-
 - Cursor's modern exec wire protocol is now handled end to end. `agent.proto` models the frames current Cursor CLI builds emit — the seven Pi tools (`ExecServerMessage` 45-51), hooks, subagents, allowlist prechecks, MCP state, smart-mode classification, canvas diagnostics, conversation search, agent-store conflicts and git diff — and every one of them gets a typed answer. The Pi frames run their local equivalents (`read`/`bash`/`edit`/`write`/`grep`/`glob`); the rest answer with the error, not-found or empty-but-valid variant that is actually true of this client. Frames this build cannot name at all now raise `ExecClientControlMessage.throw` with `unknown_exec_variant`, and recognised frames with no truthful answer (`git_diff_request`, whose `GetDiffResponse` has no error variant) raise `exec_variant_unsupported`, instead of a silent ack that leaves the server waiting.
 - `lsp` is advertised in the MCP tool catalog again. It was filtered out as a Cursor-native tool, but the native `diagnostics` frame covers one of roughly ten LSP actions, so the other nine were unreachable.
 
