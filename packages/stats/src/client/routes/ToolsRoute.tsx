@@ -226,7 +226,7 @@ function ToolCallsChart({ series, timeRange }: { series: ToolTimeSeriesPoint[]; 
 				},
 			},
 		}),
-		[chartTheme],
+		[chartTheme, t],
 	);
 
 	return (

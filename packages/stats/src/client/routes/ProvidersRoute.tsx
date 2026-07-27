@@ -462,8 +462,7 @@ function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSerie
 				x: { ...yScale, max: xMax },
 				y: { ...sharedScaleBase, grid: { display: false } },
 			},
-		};
-	}, [chartTheme, rows, t]);
+	}, [chartTheme, rows, t, locale]);
 
 	return (
 		<Panel
