@@ -50,8 +50,10 @@ function subscribe(callback: () => void): () => void {
 async function fetchRate(): Promise<void> {
 	if (fetching) return;
 	fetching = true;
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 10_000);
 	try {
-		const res = await fetch(API_URL);
+		const res = await fetch(API_URL, { signal: controller.signal });
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
 		const json = (await res.json()) as { rates?: { CNY?: number } };
 		const cny = json?.rates?.CNY;
@@ -63,6 +65,7 @@ async function fetchRate(): Promise<void> {
 	} catch {
 		// Keep cached rate, don't emit
 	} finally {
+		clearTimeout(timeout);
 		fetching = false;
 	}
 }
