@@ -35,6 +35,7 @@ import {
 	ForceBackgroundSubagentArgsSchema,
 	ForceBackgroundSubagentStatus,
 	GetDiffRequestSchema,
+	GrepArgsSchema,
 	ListMcpResourcesExecArgsSchema,
 	McpAllowlistPrecheckArgsSchema,
 	McpStateExecArgsSchema,
@@ -1569,5 +1570,47 @@ describe("Cursor legacy read frame: range reporting", () => {
 		if (wholeAnswer.case !== "readResult") throw new Error(`got ${wholeAnswer.case}`);
 		if (wholeAnswer.value.result.case !== "success") throw new Error(`got ${wholeAnswer.value.result.case}`);
 		expect(wholeAnswer.value.result.value.rangeApplied).toBe(false);
+	});
+});
+
+describe("Cursor legacy grep frame: offset reporting", () => {
+	it("echoes the frame's offset back as offsetApplied", async () => {
+		// `offset_applied` is how the server learns the page it asked for is the
+		// page it got. Left unset, a honored offset is indistinguishable from a
+		// client that ignored it, so Cursor re-paginates from the same place.
+		const handlers: CursorExecHandlers = {
+			async grep() {
+				return toolResult("a.ts:1:needle");
+			},
+		};
+
+		const paged = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, { pattern: "needle", path: "src", toolCallId: "c1", offset: 20 }),
+			}),
+			{ execHandlers: handlers },
+		);
+		const pagedAnswer = soleResult(paged.frames);
+		if (pagedAnswer.case !== "grepResult") throw new Error(`got ${pagedAnswer.case}`);
+		if (pagedAnswer.value.result.case !== "success") throw new Error(`got ${pagedAnswer.value.result.case}`);
+		const pagedUnion = pagedAnswer.value.result.value.workspaceResults.src?.result;
+		if (pagedUnion?.case !== "content") throw new Error(`got ${pagedUnion?.case}`);
+		expect(pagedUnion.value.offsetApplied).toBe(20);
+
+		const first = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, { pattern: "needle", path: "src", toolCallId: "c2" }),
+			}),
+			{ execHandlers: handlers },
+		);
+		const firstAnswer = soleResult(first.frames);
+		if (firstAnswer.case !== "grepResult") throw new Error(`got ${firstAnswer.case}`);
+		if (firstAnswer.value.result.case !== "success") throw new Error(`got ${firstAnswer.value.result.case}`);
+		const firstUnion = firstAnswer.value.result.value.workspaceResults.src?.result;
+		if (firstUnion?.case !== "content") throw new Error(`got ${firstUnion?.case}`);
+		// Absent, not 0: no offset was requested, so none was applied.
+		expect(firstUnion.value.offsetApplied).toBeUndefined();
 	});
 });

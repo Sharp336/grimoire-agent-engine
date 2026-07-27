@@ -2568,7 +2568,7 @@ function buildLsRejectedResult(path: string, reason: string) {
 }
 
 function buildGrepResultFromToolResult(
-	args: { pattern: string; path?: string; outputMode?: string },
+	args: { pattern: string; path?: string; outputMode?: string; offset?: number },
 	toolResult: ToolResultMessage,
 ) {
 	const text = toolResultToText(toolResult);
@@ -2596,6 +2596,11 @@ function buildGrepResultFromToolResult(
 					totalFiles: files.length,
 					clientTruncated,
 					ripgrepTruncated: false,
+					// Echoes the frame's own optional field: present means "this
+					// page starts where you asked", absent means no offset was
+					// requested. Without it the server cannot tell a honored
+					// offset from a client that ignored it, and re-paginates.
+					offsetApplied: args.offset,
 				}),
 			},
 		});
@@ -2624,6 +2629,7 @@ function buildGrepResultFromToolResult(
 					totalMatches,
 					clientTruncated,
 					ripgrepTruncated: false,
+					offsetApplied: args.offset,
 				}),
 			},
 		});
@@ -2671,6 +2677,7 @@ function buildGrepResultFromToolResult(
 					totalMatchedLines,
 					clientTruncated,
 					ripgrepTruncated: false,
+					offsetApplied: args.offset,
 				}),
 			},
 		});

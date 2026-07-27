@@ -27,7 +27,7 @@ import {
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -557,6 +557,32 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// reached the underlying tool.
 		expect(intercepted).toEqual(["grep"]);
 		expect((result.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
+	});
+
+	it("denies a pi_write frame the user's policy blocks when the tool came from the caller's map", async () => {
+		// The advisor hands the bridge its own tool map. Those instances are run
+		// directly by `piWrite`/`piBash`, so an unwrapped one executes whatever
+		// the frame asks regardless of `tools.approval.<tool>` — supplying
+		// `getToolContext` alone does not gate anything, because the gate lives
+		// in `ExtensionToolWrapper`, not in the bridge.
+		const settings = Settings.isolated({ "tools.approval": { write: "deny" } });
+		const session = createTestSession(cwd, { settings });
+		const writeTool = await BUILTIN_TOOLS.write(session);
+		if (!writeTool) throw new Error("expected a write tool");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["write", new ExtensionToolWrapper(writeTool, passthroughRunner())]]),
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+
+		const target = path.join(cwd, "denied-write.txt");
+		const result = await handlers.piWrite({
+			toolCallId: "w1",
+			args: { path: target, content: "written" },
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).exists()).toBe(false);
 	});
 });
 

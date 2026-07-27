@@ -3189,7 +3189,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			advisorToolBuilds.push(BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS](advisorToolSession));
 		}
 		const built = await Promise.all(advisorToolBuilds);
-		const advisorTools: Tool[] = built.filter((tool): tool is Tool => tool != null).map(wrapToolWithMetaNotice);
+		// Wrapped like every registry tool: `ExtensionToolWrapper` is where the
+		// approval mode, per-tool `tools.approval.<tool>` policies and
+		// `autoApprove` are enforced. The advisor's loop and its Cursor exec
+		// bridge both run these instances directly, so a raw one would execute a
+		// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
+		// first, matching the registry's wrap order.
+		const advisorTools: Tool[] = built
+			.filter((tool): tool is Tool => tool != null)
+			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
 
 		const advisorWatchdogPrompts = [...watchdogFiles];
 		if (activeRepoContext) {

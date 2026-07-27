@@ -674,4 +674,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			}
 		});
 	});
+
+	it("runs advisor tools through the approval gate", async () => {
+		// The advisor's tools are built straight from `BUILTIN_TOOLS`, outside
+		// the registry loop that wraps everything else. Its own loop and its
+		// Cursor exec bridge (`piWrite`/`piBash`) run those instances directly,
+		// so an unwrapped one executes whatever it is handed regardless of the
+		// user's `tools.approval.<tool>` policy — the gate lives in
+		// `ExtensionToolWrapper`, not in either caller.
+		const tempDir = makeTempDir();
+		const target = path.join(tempDir, "advisor-write.txt");
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "deny" } }),
+		});
+		try {
+			// The default advisor roster is read-only (read/grep/glob); the
+			// reviewed hole needs one actually granted a mutating tool.
+			session.applyAdvisorConfigs([{ name: "writer", tools: ["write"] }], undefined);
+			const advisor = session.getAdvisorAgent();
+			if (!advisor) throw new Error("expected an advisor agent");
+			const writeTool = advisor.state.tools?.find(tool => tool.name === "write");
+			if (!writeTool) throw new Error("expected the advisor to hold a write tool");
+
+			// The gate rejects rather than returning an error result — that throw
+			// IS the refusal, and it only happens when the instance is wrapped.
+			await expect(
+				writeTool.execute("advisor-w1", { path: target, content: "written" }, undefined, undefined, {
+					settings: session.settings,
+				} as never),
+			).rejects.toThrow(/blocked by user policy/);
+			expect(fs.existsSync(target)).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
 });
