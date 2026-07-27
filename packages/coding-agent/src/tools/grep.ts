@@ -1323,8 +1323,20 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				// Single-file scopes can't paginate — there is one file by definition.
 				const canPaginate = isMultiScope;
 				const skipFiles = canPaginate ? Math.min(normalizedSkip, totalFiles) : 0;
-				const windowFiles = canPaginate ? fileOrder.slice(skipFiles, skipFiles + DEFAULT_FILE_LIMIT) : fileOrder;
-				const fileLimitReached = canPaginate && totalFiles > skipFiles + DEFAULT_FILE_LIMIT;
+				// A caller with a total match cap is not paginating: the cap bounds the
+				// output, and the only consumer that sets one (`pi_grep`) has no `skip`
+				// field to follow a "use skip=N" suggestion with. Windowing it to the
+				// first 20 files would silently return fewer matches than it asked for
+				// while reporting the cap as unreached.
+				//
+				// The window is cap+1 files, not cap: with one match per file, a cap
+				// of N over exactly N files is complete, while over N+1 files it is
+				// clipped — and only reading that extra file distinguishes the two.
+				// The cap below then does the trimming and records that it bit, so
+				// `match_limit_reached` reaches the frame set.
+				const fileWindow = this.#totalMatchLimit !== undefined ? this.#totalMatchLimit + 1 : DEFAULT_FILE_LIMIT;
+				const windowFiles = canPaginate ? fileOrder.slice(skipFiles, skipFiles + fileWindow) : fileOrder;
+				const fileLimitReached = canPaginate && totalFiles > skipFiles + fileWindow;
 				const selectedMatches: GrepMatch[] = [];
 				let totalMatchLimitReached = false;
 				if (windowFiles.length > 0) {
@@ -1557,7 +1569,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						count: fileMatchCounts.get(path) ?? 0,
 					})),
 					truncated,
-					fileLimitReached: fileLimitReached ? DEFAULT_FILE_LIMIT : undefined,
+					fileLimitReached: fileLimitReached ? fileWindow : undefined,
 					perFileLimitReached: totalMatchLimitReached
 						? this.#totalMatchLimit
 						: perFileLimitReached

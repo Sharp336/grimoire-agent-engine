@@ -1578,6 +1578,19 @@ async function handleExecServerMessage(
 		case "readMcpResourceExecArgs": {
 			const args = execMsg.message.value;
 			let execResult: ReadMcpResourceExecResult;
+			// The read runs locally, and in download mode it writes a workspace
+			// file — an operation with no transcript block is invisible in the UI
+			// and absent from every rebuilt history. Only synthesized when a
+			// handler exists: without one the frame is a fixed `not_found` that
+			// executed nothing, and a block would claim work that never happened.
+			const toolCallId = execHandlers?.readMcpResource ? crypto.randomUUID() : undefined;
+			if (toolCallId) {
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read_mcp_resource", {
+					server: args.server,
+					uri: args.uri,
+					download_path: args.downloadPath,
+				});
+			}
 			try {
 				// `null` is the handler's "no such server or uri", which is exactly
 				// `not_found`; a throw is a real failure and must not masquerade as
@@ -1625,6 +1638,27 @@ async function handleExecServerMessage(
 						}),
 					},
 				});
+			}
+			if (toolCallId) {
+				// Derived from the answer that actually goes on the wire, so no exit
+				// can drift out of sync with what the model was told.
+				const settled = execResult.result;
+				const text =
+					settled.case === "success"
+						? settled.value.downloadPath
+							? `Downloaded ${args.uri} to ${settled.value.downloadPath}`
+							: `Read ${args.uri}`
+						: settled.case === "notFound"
+							? `No such resource: ${args.uri}`
+							: (settled.value?.error ?? `Failed to read ${args.uri}`);
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"read_mcp_resource",
+					text,
+					settled.case !== "success",
+				);
 			}
 			sendExecClientMessage(h2Request, execMsg, "readMcpResourceExecResult", execResult);
 			return;
@@ -3403,6 +3437,10 @@ export function synthesizeCursorExecToolCall(
  * {@link kCursorExecResolved}, so `agent-loop.ts` emits no placeholder for it
  * and `buildSessionContext` strips an unpaired call, taking the whole
  * interaction out of every rebuilt transcript.
+ *
+ * `isError` defaults true because most such verdicts are refusals; the MCP
+ * resource frames run locally and can genuinely succeed, and a success filed
+ * as an error would render as a failed call in every rebuilt transcript.
  */
 async function pairSynthesizedExecResult(
 	state: BlockState,
@@ -3410,13 +3448,14 @@ async function pairSynthesizedExecResult(
 	toolCallId: string,
 	toolName: string,
 	text: string,
+	isError = true,
 ): Promise<void> {
 	const synthesized: ToolResultMessage = {
 		role: "toolResult",
 		toolCallId,
 		toolName,
 		content: [{ type: "text", text }],
-		isError: true,
+		isError,
 		timestamp: Date.now(),
 	};
 	const sink = onToolResult ?? state.onToolResult;

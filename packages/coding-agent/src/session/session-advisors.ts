@@ -733,7 +733,7 @@ export class SessionAdvisors {
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool resolves as `yolo`.
 				getToolContext: this.#advisorGetToolContext,
-				allowNativeDelete: advisorCanMutateFiles,
+				allowDirectFileMutation: advisorCanMutateFiles,
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster
 				// without `grep` a search tool it was denied.

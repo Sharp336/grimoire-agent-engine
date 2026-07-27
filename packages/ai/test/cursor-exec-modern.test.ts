@@ -649,6 +649,84 @@ describe("Cursor MCP resource frames answer from the host's servers", () => {
 		expect(brokenAnswer.value.result.value.error).toContain("server disconnected");
 	});
 
+	it("records a resource read as a paired transcript block", async () => {
+		// The read runs locally and, in download mode, writes a workspace file.
+		// An exec frame with no synthesized block is invisible in the UI, and an
+		// unpaired call is stripped by `buildSessionContext` — taking the whole
+		// interaction out of every rebuilt transcript.
+		const { output, results } = await dispatchExec(
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, {
+					server: "docs",
+					uri: "docs://readme",
+					downloadPath: "assets/readme.md",
+				}),
+			}),
+			{
+				execHandlers: {
+					readMcpResource: async ({ uri, downloadPath }) => ({ uri, mimeType: "text/markdown", downloadPath }),
+				},
+			},
+		);
+
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		// Not `read`: this is a remote MCP operation, and the name drives
+		// rendering and prune semantics.
+		expect(blocks[0].name).toBe("read_mcp_resource");
+		expect(blocks[0].arguments).toEqual({
+			server: "docs",
+			uri: "docs://readme",
+			download_path: "assets/readme.md",
+		});
+		// Paired under the same id, and a success is not filed as a failure.
+		expect(results.map(r => r.toolCallId)).toEqual([blocks[0].id]);
+		expect(results[0].isError).toBe(false);
+		expect(results[0].content).toEqual([{ type: "text", text: "Downloaded docs://readme to assets/readme.md" }]);
+	});
+
+	it("pairs a failed resource read as an error, still under one block", async () => {
+		// A refused download (no write grant, a path outside the workspace) and
+		// a dead server both land here. The block must resolve — an unpaired
+		// call strips the interaction — and must resolve as an error, or the
+		// transcript shows a read that never happened as having succeeded.
+		const { output, results } = await dispatchExec(
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, { server: "docs", uri: "docs://readme" }),
+			}),
+			{
+				execHandlers: {
+					readMcpResource: async () => {
+						throw new Error("Refusing to download outside the workspace: ../escape");
+					},
+				},
+			},
+		);
+
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(results.map(r => r.toolCallId)).toEqual([blocks[0].id]);
+		expect(results[0].isError).toBe(true);
+		expect(results[0].content).toEqual([
+			{ type: "text", text: "Refusing to download outside the workspace: ../escape" },
+		]);
+	});
+
+	it("leaves no block when no handler ran", async () => {
+		// Without a handler the frame is answered from a fixed `not_found` and
+		// nothing executed, so a block would claim work that never happened.
+		const { output, results } = await dispatchExec(
+			buildExecMessage({
+				case: "readMcpResourceExecArgs",
+				value: create(ReadMcpResourceExecArgsSchema, { server: "docs", uri: "docs://readme" }),
+			}),
+		);
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+		expect(results).toHaveLength(0);
+	});
+
 	it("reports a failing list as an error, not an empty catalog", async () => {
 		// An empty success says "asked, none exist" — a lie when the lookup
 		// failed, and one the model cannot retry.

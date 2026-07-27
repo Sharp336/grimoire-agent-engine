@@ -50,14 +50,22 @@ interface CursorExecBridgeOptions {
 	getToolContext?: () => AgentToolContext | undefined;
 	emitEvent?: (event: AgentEvent) => void;
 	/**
-	 * Whether the Cursor native `delete` frame may remove files. Unlike every
-	 * other exec handler, `executeDelete` mutates the filesystem directly instead
-	 * of consulting {@link tools}, so a background read-only advisor could delete
-	 * workspace files it was never granted a mutating tool for (issue #5680
-	 * review). Defaults to allowed to preserve the primary agent's behavior;
-	 * callers with a restricted tool set (advisors) opt out.
+	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
+	 * may do so: the native `delete` frame, and a `read_mcp_resource` carrying
+	 * `download_path`. Both write or remove workspace files directly instead of
+	 * consulting {@link tools}, so a background read-only advisor could touch
+	 * files it was never granted a mutating tool for (issue #5680 review).
+	 *
+	 * This is a grant, not a policy: it answers "did the session hand this
+	 * channel a file-writing tool", which callers derive from their own roster
+	 * before any bridge-specific rewriting. The primary Cursor session moves
+	 * `edit` out of {@link tools} and serves it through {@link getTool}, so
+	 * reading the map here would deny an edit-only session. Defaults to allowed
+	 * to preserve the primary agent's behavior; callers with a restricted tool
+	 * set (advisors) opt out. The user's approval policy is resolved separately,
+	 * per call.
 	 */
-	allowNativeDelete?: boolean;
+	allowDirectFileMutation?: boolean;
 	/**
 	 * Mirror Cursor's server-owned todo list into local session state. Cursor
 	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
@@ -236,20 +244,15 @@ async function executeTool(
 	return createToolResultMessage(toolCallId, toolName, result, isError);
 }
 
-async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
-	const toolName = "delete";
-
-	if (options.allowNativeDelete === false) {
-		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
-		return createToolResultMessage(toolCallId, toolName, result, true);
-	}
-
-	// Unlike every other frame, this one mutates the filesystem directly instead
-	// of running a registry tool, so no approval wrapper sits in front of it.
-	// `allowNativeDelete` answers "was a mutating tool granted", which is a
-	// different question from "does the user's policy allow this call" — without
-	// this, a configured `deny` or an `always-ask` session still lost the file.
-	// `write` is the tier a file removal belongs to.
+/**
+ * Resolve the user's policy for a frame that mutates the filesystem directly.
+ *
+ * The native `delete` and `read_mcp_resource` download frames both bypass the
+ * registry, so no approval wrapper sits in front of them. `write` is the tier
+ * a file creation or removal belongs to. Returns `null` when the call may
+ * proceed, or the refusal text to answer with.
+ */
+function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string, pathArg: string): string | null {
 	const context = options.getToolContext?.();
 	const settings = context?.settings;
 	const approvalMode: ApprovalMode =
@@ -260,13 +263,28 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 		approvalMode,
 		(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
 	);
-	if (approval.policy !== "allow") {
-		const detail =
-			approval.policy === "deny"
-				? `Tool "${toolName}" is blocked by user policy.`
-				: `Tool "${toolName}" requires approval, which this channel cannot request.`;
-		const result = buildToolErrorResult(detail);
+	if (approval.policy === "allow") return null;
+	return approval.policy === "deny"
+		? `Tool "${toolName}" is blocked by user policy.`
+		: `Tool "${toolName}" requires approval, which this channel cannot request.`;
+}
+
+async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
+	const toolName = "delete";
+
+	if (options.allowDirectFileMutation === false) {
+		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
+	}
+
+	// Unlike every other frame, this one mutates the filesystem directly instead
+	// of running a registry tool, so no approval wrapper sits in front of it.
+	// `allowDirectFileMutation` answers "was a mutating tool granted", which is a
+	// different question from "does the user's policy allow this call" — without
+	// this, a configured `deny` or an `always-ask` session still lost the file.
+	const refusal = refuseByWritePolicy(options, toolName, pathArg);
+	if (refusal) {
+		return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(refusal), true);
 	}
 
 	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: { path: pathArg } });
@@ -680,7 +698,11 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 *
 	 * A `downloadPath` frame is a different contract: write the bytes to that
 	 * workspace-relative path and answer with the path alone, so a large binary
-	 * lands on disk instead of in the model's context.
+	 * lands on disk instead of in the model's context. That makes it a workspace
+	 * mutation reached without a registry tool, so it is gated exactly like the
+	 * native `delete` frame — on the session actually granting a file-writing
+	 * tool, and on the user's `write`-tier policy. The gate runs before the read
+	 * so a refused download never fetches the resource either.
 	 */
 	async readMcpResource({
 		server,
@@ -691,6 +713,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		uri: string;
 		downloadPath?: string;
 	}): Promise<CursorMcpResourceContent | null> {
+		if (downloadPath) {
+			if (this.options.allowDirectFileMutation === false) {
+				throw new Error('Tool "write" not available: this session cannot download resources to disk.');
+			}
+			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);
+			if (refusal) throw new Error(refusal);
+		}
 		const mcp = this.options.mcpResources;
 		if (!mcp) return null;
 		const read = await mcp.readServerResource(server, uri);

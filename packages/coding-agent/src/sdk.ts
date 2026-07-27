@@ -2593,6 +2593,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// not match the tool's parameters at all. The registry instance follows
 		// the session's configured mode, so the bridge builds its own.
 		let cursorBridgeEditTool: AgentTool | undefined;
+		// Whether this session granted a file-writing tool, captured HERE because
+		// both inputs are about to move: `edit` is deleted from the registry for
+		// Cursor just below, and `write` may be auto-registered further down as
+		// an xdev transport. The exec bridge answers native `delete` and
+		// resource-download frames that mutate files without running a registry
+		// tool, so it needs the grant as the session actually made it.
+		//
+		// Unconditional, not inside the Cursor branch below: the bridge is
+		// installed for every session, and a session that starts on another
+		// provider can switch to Cursor later — defaulting to "allowed" outside
+		// this branch would hand a restricted read-only session native delete and
+		// download the moment it switched.
+		const cursorCanMutateFiles = toolRegistry.has("edit") || toolRegistry.has("write");
 		if (model?.provider === "cursor") {
 			// Only when the session actually granted `edit`. `createTools` omits
 			// it entirely for a restricted tool set, and the bridge answers native
@@ -2680,6 +2693,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// it over the registry, so installing it unconditionally would let a
 			// session without `grep` search anyway.
 			createGrepTool: toolRegistry.has("grep") ? createBridgeGrepFactory(toolSession, extensionRunner) : undefined,
+			// The native `delete` and resource-download frames mutate files
+			// without running a registry tool, so this grant is the only thing
+			// standing between a restricted session and a workspace write.
+			allowDirectFileMutation: cursorCanMutateFiles,
 		});
 
 		// Resolve the inline-descriptors setting against the session-start model.

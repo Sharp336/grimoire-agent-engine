@@ -161,6 +161,55 @@ describe("CursorExecHandlers.grep bridge", () => {
 		expect(withContextText).toContain("before line");
 		expect(withContextText).toContain("after line");
 	});
+
+	it("satisfies a pi_grep limit that spans more files than one page", async () => {
+		// The local tool windows results to the first 20 files and tells the
+		// caller to paginate with `skip`. `PiGrepExecArgs` has no `skip` field,
+		// so a frame asking for 100 matches across 25 one-match files would get
+		// 20, no `match_limit_reached`, and advice it cannot act on — output
+		// silently short of what it asked for and labelled complete.
+		const spread = path.join(cwd, "spread");
+		await fs.mkdir(spread, { recursive: true });
+		await Promise.all(
+			Array.from({ length: 25 }, (_, i) => Bun.write(path.join(spread, `f${i}.txt`), "needle here\n")),
+		);
+		const scopedHandlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["grep", searchTool]]),
+			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
+		});
+
+		const wide = await scopedHandlers.piGrep({
+			toolCallId: "c1",
+			args: { pattern: "needle", path: spread, limit: 100 },
+		} as never);
+		const details = wide.details as { matchCount?: number; fileLimitReached?: number } | undefined;
+		expect(details?.matchCount).toBe(25);
+		// Nothing was clipped, so no pagination advice the frame cannot follow.
+		expect(details?.fileLimitReached).toBeUndefined();
+
+		// The cap still binds when the matches really do exceed it, and says so:
+		// `match_limit_reached` is the frame's only signal that output was cut,
+		// and one match per file makes the boundary sharp — a cap of 24 over 25
+		// files is clipped, a cap of 25 is complete. Reading only `cap` files
+		// cannot tell those apart.
+		const capped = await scopedHandlers.piGrep({
+			toolCallId: "c2",
+			args: { pattern: "needle", path: spread, limit: 24 },
+		} as never);
+		const cappedDetails = capped.details as { matchCount?: number; perFileLimitReached?: number } | undefined;
+		expect(cappedDetails?.matchCount).toBe(24);
+		expect(cappedDetails?.perFileLimitReached).toBe(24);
+
+		// Exactly at the cap is complete, not clipped.
+		const exact = await scopedHandlers.piGrep({
+			toolCallId: "c3",
+			args: { pattern: "needle", path: spread, limit: 25 },
+		} as never);
+		const exactDetails = exact.details as { matchCount?: number; perFileLimitReached?: number } | undefined;
+		expect(exactDetails?.matchCount).toBe(25);
+		expect(exactDetails?.perFileLimitReached).toBeUndefined();
+	});
 });
 
 describe("pi_bash truncation reaches the wire from a real BashTool result", () => {
@@ -928,6 +977,58 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		}
 	});
 
+	it("refuses a download when the session withheld file mutation or policy denies it", async () => {
+		// Download mode creates and overwrites workspace files without going
+		// through a registry tool, so nothing else enforces the session's
+		// mutation rules — the same hole the native `delete` frame had. A
+		// channel that was never granted a file-writing tool, and a `write` tier
+		// the user denied, must both stop it before the read, so a refused
+		// download does not even fetch the resource.
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-grant-"));
+		try {
+			let reads = 0;
+			const mcpResources = {
+				serverNames: () => ["files"],
+				getServerResources: async () => undefined,
+				readServerResource: async (_name: string, uri: string) => {
+					reads++;
+					return { contents: [{ uri, text: "payload" }] };
+				},
+			};
+
+			const ungranted = new CursorExecHandlers({
+				cwd: workspace,
+				tools: new Map(),
+				allowDirectFileMutation: false,
+				mcpResources,
+			});
+			await expect(
+				ungranted.readMcpResource({ server: "files", uri: "files://x", downloadPath: "out.txt" }),
+			).rejects.toThrow(/not available/);
+
+			const denied = new CursorExecHandlers({
+				cwd: workspace,
+				tools: new Map(),
+				mcpResources,
+				getToolContext: () =>
+					({ settings: Settings.isolated({ "tools.approval": { write: "deny" } }) }) as AgentToolContext,
+			});
+			await expect(
+				denied.readMcpResource({ server: "files", uri: "files://x", downloadPath: "out.txt" }),
+			).rejects.toThrow(/blocked by user policy/);
+
+			expect(reads).toBe(0);
+			expect(await Bun.file(path.join(workspace, "out.txt")).exists()).toBe(false);
+
+			// A read without `download_path` mutates nothing, so it is unaffected.
+			const read = await ungranted.readMcpResource({ server: "files", uri: "files://x" });
+			expect(read?.text).toBe("payload");
+			expect(reads).toBe(1);
+		} finally {
+			await removeWithRetries(workspace);
+		}
+	});
+
 	it("answers nothing when the session has no MCP manager", async () => {
 		// A host without MCP must still answer truthfully rather than throwing:
 		// an empty catalog and `not_found` are the honest responses.
@@ -1105,13 +1206,13 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		await removeWithRetries(cwd);
 	});
 
-	it("rejects native delete and preserves the file when allowNativeDelete is false", async () => {
+	it("rejects native delete and preserves the file when allowDirectFileMutation is false", async () => {
 		const target = path.join(cwd, "victim.txt");
 		await Bun.write(target, "keep me");
 		const handlers = new CursorExecHandlers({
 			cwd,
 			tools: new Map(),
-			allowNativeDelete: false,
+			allowDirectFileMutation: false,
 		});
 
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
@@ -1121,13 +1222,13 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		expect(await Bun.file(target).exists()).toBe(true);
 	});
 
-	it("performs native delete when allowNativeDelete is true", async () => {
+	it("performs native delete when allowDirectFileMutation is true", async () => {
 		const target = path.join(cwd, "victim.txt");
 		await Bun.write(target, "remove me");
 		const handlers = new CursorExecHandlers({
 			cwd,
 			tools: new Map(),
-			allowNativeDelete: true,
+			allowDirectFileMutation: true,
 		});
 
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
@@ -1148,7 +1249,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 			cwd,
 			getCwd: () => currentCwd,
 			tools: new Map(),
-			allowNativeDelete: true,
+			allowDirectFileMutation: true,
 		});
 
 		currentCwd = movedCwd;
@@ -1160,7 +1261,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 	});
 
 	it("refuses a native delete the user's policy blocks", async () => {
-		// `allowNativeDelete` answers "was a mutating tool granted", not "does
+		// `allowDirectFileMutation` answers "was a mutating tool granted", not "does
 		// policy allow this call". The frame removes the file with `fs.rmSync`
 		// instead of running a registry tool, so no approval wrapper sits in
 		// front of it — a configured `deny` still lost the file.
@@ -1170,7 +1271,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const handlers = new CursorExecHandlers({
 			cwd,
 			tools: new Map(),
-			allowNativeDelete: true,
+			allowDirectFileMutation: true,
 			getToolContext: () => ({ settings }) as AgentToolContext,
 		});
 
@@ -1191,7 +1292,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const handlers = new CursorExecHandlers({
 			cwd,
 			tools: new Map(),
-			allowNativeDelete: true,
+			allowDirectFileMutation: true,
 			getToolContext: () => ({ settings }) as AgentToolContext,
 		});
 
