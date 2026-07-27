@@ -891,6 +891,49 @@ describe("trySyncSlashCompletion", () => {
 		expect(result!.items[0]?.value).toBe("q");
 	});
 
+	it("ranks a priority-boosted prefix match above an equal prefix match", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "export", description: "Export session" },
+				{ name: "expand", description: "Expand selection", priority: 10 },
+			],
+			"/tmp",
+		);
+		const result = provider.trySyncSlashCompletion("/ex");
+		expect(result).not.toBeNull();
+		expect(result!.items[0]?.value).toBe("expand");
+	});
+
+	it("ranks a priority-boosted alias above a same-prefix command (/ex -> exit, not export)", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "quit", aliases: ["q", "exit"], description: "Quit the application", priority: 10 },
+				{ name: "export", description: "Export session" },
+			],
+			"/tmp",
+		);
+		const result = provider.trySyncSlashCompletion("/ex");
+		expect(result).not.toBeNull();
+		// The `exit` alias on `quit` carries a priority boost, so /ex should
+		// resolve to exit/quit even though `export` shares the same prefix.
+		expect(result!.items[0]?.value).toBe("exit");
+	});
+
+	it("does not let priority overtake an exact command-name match", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "quote", description: "Insert a quote", priority: 100 },
+				{ name: "quit", description: "Quit the application" },
+			],
+			"/tmp",
+		);
+		const result = provider.trySyncSlashCompletion("/quit");
+		expect(result).not.toBeNull();
+		// /quit is an exact match for `quit`; even a large priority boost on
+		// `quote` (a mere prefix match) must not overtake it.
+		expect(result!.items[0]?.value).toBe("quit");
+	});
+
 	it("uses aliases when completing slash command arguments", async () => {
 		const provider = new CombinedAutocompleteProvider(
 			[

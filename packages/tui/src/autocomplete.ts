@@ -184,6 +184,13 @@ export interface SlashCommand {
 	argumentHint?: string;
 	/** Whether the command consumes argument text after the command name. False means the full input stays normal prompt text once args are present. */
 	allowArgs?: boolean;
+	/**
+	 * Optional priority boost used when ranking prefix-matched slash commands.
+	 * Higher values make this command appear before other commands that share
+	 * the same prefix. Exact matches still win; prefix matches with equal score
+	 * keep registry order.
+	 */
+	priority?: number;
 	/** Dynamic display-only description for slash-command autocomplete. Must be synchronous and side-effect free. */
 	getAutocompleteDescription?: () => string | undefined;
 	// Function to get argument completions for this command
@@ -308,6 +315,7 @@ function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: str
 				return fullDescMemo;
 			};
 			let best: (AutocompleteItem & { score: number }) | undefined;
+			const priorityBoost = "priority" in cmd && typeof cmd.priority === "number" ? cmd.priority : 0;
 
 			const isSkillCommand = name.startsWith("skill:");
 			const nameScore =
@@ -315,7 +323,7 @@ function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: str
 			const lowerDesc = staticDesc.toLowerCase();
 			const descScore =
 				lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
-			const primaryScore = Math.max(nameScore, descScore);
+			const primaryScore = Math.max(nameScore, descScore) + priorityBoost;
 			if (primaryScore > 0) {
 				const fullDesc = resolveFullDesc();
 				best = {
@@ -329,7 +337,7 @@ function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: str
 			if (lowerPrefix.length > 0) {
 				for (const alias of getCommandAliases(cmd)) {
 					if (alias === name) continue;
-					const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
+					const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase()) + priorityBoost;
 					if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
 					const fullDesc = resolveFullDesc();
 					best = {
