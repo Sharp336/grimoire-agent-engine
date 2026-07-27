@@ -48,6 +48,39 @@ export function piReadPath(readPath: string, offset?: number, limit?: number): s
 }
 
 /**
+ * The same range as {@link piReadPath}, rendered for a transcript block rather
+ * than for execution.
+ *
+ * Differs only at `limit: 0`, where `piReadPath` returns `null` because no
+ * selector reads zero lines and the frame is answered with empty output
+ * directly. The block still has to say so: falling back to the bare path there
+ * would record a whole-file read whose result is empty, which is the widest
+ * possible gap between what a rebuilt transcript shows and what happened.
+ * `+0` is never executed — it exists to be read.
+ */
+export function piReadDisplayPath(readPath: string, offset?: number, limit?: number): string {
+	const composed = piReadPath(readPath, offset, limit);
+	if (composed !== null) return composed;
+	const start = offset !== undefined ? Math.max(1, Math.floor(offset)) : 1;
+	return `${readPath}:raw:${start}+0`;
+}
+
+/**
+ * A legacy `grep` frame's pagination `offset` as the local tool's file `skip`.
+ *
+ * `grep` paginates by file and reports "use skip=N for the next page" in that
+ * same unit, so the offset maps across directly. A present `0` means "start at
+ * the beginning", which is the unskipped search rather than a skip of zero.
+ *
+ * Shared because both the executing bridge and the provider's transcript
+ * synthesis need it: a block showing an unskipped search beside a result from
+ * a later file window misreports what was searched.
+ */
+export function piGrepSkip(offset?: number): number | undefined {
+	return offset !== undefined && offset > 0 ? Math.floor(offset) : undefined;
+}
+
+/**
  * Join a Pi frame's optional `path` with the `glob`/`pattern` it scopes.
  *
  * The local `grep`/`glob` tools take one combined path spec. An absolute

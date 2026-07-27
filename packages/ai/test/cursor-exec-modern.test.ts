@@ -1538,10 +1538,9 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 
 describe("Cursor legacy read frame: range reporting", () => {
 	it("reports rangeApplied only when the frame asked for a window", async () => {
-		// `range_applied: false` tells the server "this is the whole file", which
-		// is true for an unranged read and a lie for a paginated one — a model
-		// walking a large file would stop after the first window believing it had
-		// seen everything.
+		// The field reports whether the frame's window was actually composed
+		// onto the read. Reporting true for an unranged whole-file read, or
+		// false for a paginated one, misdescribes what the client did.
 		const handlers: CursorExecHandlers = {
 			async read() {
 				return toolResult("line1\nline2");
@@ -1572,13 +1571,52 @@ describe("Cursor legacy read frame: range reporting", () => {
 		if (wholeAnswer.value.result.case !== "success") throw new Error(`got ${wholeAnswer.value.result.case}`);
 		expect(wholeAnswer.value.result.value.rangeApplied).toBe(false);
 	});
+
+	it("carries the composed selector into the synthesized call", async () => {
+		// A bare path beside a ranged result makes the slice look like the whole
+		// file in every rebuilt transcript.
+		const { output } = await dispatchExec(
+			buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, { path: "/repo/big.ts", toolCallId: "c1", offset: 5, limit: 20 }),
+			}),
+			{
+				execHandlers: {
+					async read() {
+						return toolResult("line1\nline2");
+					},
+				},
+			},
+		);
+		const call = output.content.find(block => block.type === "toolCall");
+		expect(call?.arguments).toMatchObject({ path: "/repo/big.ts:raw:5+20" });
+	});
+	it("records a zero-line read as zero lines, not the whole file", async () => {
+		// `limit: 0` composes no selector — nothing reads zero lines — and the
+		// frame is answered with empty output directly. A bare path in the block
+		// would replay as a whole-file read that came back empty.
+		const { output } = await dispatchExec(
+			buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, { path: "/repo/big.ts", toolCallId: "c1", offset: 5, limit: 0 }),
+			}),
+			{
+				execHandlers: {
+					async read() {
+						return toolResult("");
+					},
+				},
+			},
+		);
+		const call = output.content.find(block => block.type === "toolCall");
+		expect(call?.arguments).toMatchObject({ path: "/repo/big.ts:raw:5+0" });
+	});
 });
 
 describe("Cursor legacy grep frame: offset reporting", () => {
 	it("echoes the frame's offset back as offsetApplied", async () => {
-		// `offset_applied` is how the server learns the page it asked for is the
-		// page it got. Left unset, a honored offset is indistinguishable from a
-		// client that ignored it, so Cursor re-paginates from the same place.
+		// The field reports the offset this client actually applied, so it must
+		// track the frame's request rather than being left unset.
 		const handlers: CursorExecHandlers = {
 			async grep() {
 				return toolResult("a.ts:1:needle");
@@ -1614,14 +1652,35 @@ describe("Cursor legacy grep frame: offset reporting", () => {
 		// Absent, not 0: no offset was requested, so none was applied.
 		expect(firstUnion.value.offsetApplied).toBeUndefined();
 	});
+
+	it("carries the executed page into the synthesized call", async () => {
+		// The block is what a reloaded transcript replays. Showing an unskipped
+		// search beside a result taken from a later file window tells the next
+		// turn the wrong thing about what was searched.
+		const { output } = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, { pattern: "needle", path: "src", toolCallId: "c1", offset: 20 }),
+			}),
+			{
+				execHandlers: {
+					async grep() {
+						return toolResult("a.ts:1:needle");
+					},
+				},
+			},
+		);
+		const call = output.content.find(block => block.type === "toolCall");
+		expect(call?.arguments).toMatchObject({ pattern: "needle", path: "src", skip: 20 });
+	});
 });
 
 describe("Cursor MCP frame: approval-only probes", () => {
-	it("answers an approval-only frame without running the tool", async () => {
-		// The server sends this to resolve a smart-mode permission decision
-		// BEFORE the real call. Running the tool here fires a side effect the
-		// user has not been asked about, and fires it again when the real frame
-		// arrives.
+	it("answers from the host's policy without running the tool", async () => {
+		// The server sends this to resolve a permission decision BEFORE the real
+		// call. Running the tool to answer it fires a side effect the user has
+		// not been asked about, and fires it again when the real frame arrives.
+		// The verdict comes from the host's policy instead.
 		let invocations = 0;
 		const handlers: CursorExecHandlers = {
 			async mcp() {
@@ -1647,10 +1706,79 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		expect(invocations).toBe(0);
 		const answer = soleResult(frames);
 		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
-		expect(answer.value.result.case).toBe("approved");
+		// No preflight handler is registered here: with nothing to decide
+		// against, the probe cannot be approved.
+		expect(answer.value.result.case).toBe("rejected");
 		// Nothing ran, so nothing may appear in the transcript either.
 		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
 		expect(results).toHaveLength(0);
+	});
+
+	it("approves a probe the host's policy allows", async () => {
+		// A definite allow must still be approved, or a permitted call loses the
+		// fast path on every turn.
+		let invocations = 0;
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "lookup",
+					toolName: "lookup",
+					toolCallId: "c1",
+					providerIdentifier: "ops",
+					smartModeApprovalOnly: true,
+				}),
+			}),
+			{
+				execHandlers: {
+					async mcp() {
+						invocations += 1;
+						return toolResult("ran");
+					},
+					async mcpApprovalPreflight() {
+						return true;
+					},
+				},
+			},
+		);
+
+		// Approved, but still not executed: the call itself comes later.
+		expect(invocations).toBe(0);
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("approved");
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+	});
+
+	it("refuses a probe the host declines to approve", async () => {
+		// A pending prompt resolves to false: it can only be answered at
+		// execution time, and approving on the user's behalf pre-authorizes a
+		// call they never saw.
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "deploy",
+					toolName: "deploy",
+					toolCallId: "c1",
+					providerIdentifier: "ops",
+					smartModeApprovalOnly: true,
+				}),
+			}),
+			{
+				execHandlers: {
+					async mcp() {
+						return toolResult("ran");
+					},
+					async mcpApprovalPreflight() {
+						return false;
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("rejected");
 	});
 
 	it("still runs an ordinary MCP frame", async () => {

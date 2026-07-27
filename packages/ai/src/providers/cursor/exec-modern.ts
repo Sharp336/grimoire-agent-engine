@@ -73,9 +73,11 @@ import type { ToolResultMessage } from "../../types";
  */
 export {
 	piEscapeRegexLiteral,
+	piGrepSkip,
 	piJoinPath,
 	piLimit,
 	piLsPath,
+	piReadDisplayPath,
 	piReadPath,
 	piTimeout,
 } from "../cursor-pi-args";

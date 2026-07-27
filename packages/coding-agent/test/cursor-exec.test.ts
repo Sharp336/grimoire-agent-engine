@@ -1380,6 +1380,84 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 	});
 });
 
+// A `smart_mode_approval_only` frame asks whether an MCP call would be allowed,
+// ahead of the call itself. The verdict has to come from the same policy that
+// gates execution — without running the tool to find out.
+describe("CursorExecHandlers MCP approval preflight", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-preflight-test-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	function mcpHandlers(settings: Settings): { handlers: CursorExecHandlers; executed: () => number } {
+		let executed = 0;
+		const tool: AgentTool = {
+			name: "mcp__ops__deploy",
+			label: "deploy",
+			description: "",
+			parameters: type({}),
+			execute: async () => {
+				executed += 1;
+				return { content: [{ type: "text", text: "ran" }] };
+			},
+		} as unknown as AgentTool;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map([[tool.name, tool]]),
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+		return { handlers, executed: () => executed };
+	}
+
+	const call = {
+		name: "mcp__ops__deploy",
+		toolName: "mcp__ops__deploy",
+		toolCallId: "c1",
+		providerIdentifier: "ops",
+		args: {},
+		rawArgs: {},
+	};
+
+	it("approves a call the policy allows, without running it", async () => {
+		const { handlers, executed } = mcpHandlers(Settings.isolated({ "tools.approvalMode": "yolo" }));
+
+		expect(await handlers.mcpApprovalPreflight(call)).toBe(true);
+		// Approval is the answer; the invocation is a separate frame.
+		expect(executed()).toBe(0);
+	});
+
+	it("refuses a call the user's policy denies", async () => {
+		const { handlers, executed } = mcpHandlers(
+			Settings.isolated({ "tools.approvalMode": "yolo", "tools.approval": { mcp__ops__deploy: "deny" } }),
+		);
+
+		// Approving here would launder the deny into a server-side blessing.
+		expect(await handlers.mcpApprovalPreflight(call)).toBe(false);
+		expect(executed()).toBe(0);
+	});
+
+	it("refuses when the policy demands a prompt this frame cannot raise", async () => {
+		const { handlers } = mcpHandlers(Settings.isolated({ "tools.approvalMode": "always-ask" }));
+
+		// The user is asked for real when the call arrives; answering yes on
+		// their behalf pre-authorizes something they never saw.
+		expect(await handlers.mcpApprovalPreflight(call)).toBe(false);
+	});
+
+	it("refuses a tool the session does not have", async () => {
+		const { handlers } = mcpHandlers(Settings.isolated({ "tools.approvalMode": "yolo" }));
+
+		expect(
+			await handlers.mcpApprovalPreflight({ ...call, name: "mcp__ops__absent", toolName: "mcp__ops__absent" }),
+		).toBe(false);
+	});
+});
+
 // The Pi frames (`ExecServerMessage` 45-51) are a separate wire family from the
 // legacy `read`/`shell`/`grep` args, with different field names and different
 // semantics. Each bridge handler therefore performs a real translation, and a

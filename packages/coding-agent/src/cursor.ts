@@ -19,6 +19,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import {
 	piEscapeRegexLiteral,
+	piGrepSkip,
 	piJoinPath,
 	piLimit,
 	piLsPath,
@@ -433,12 +434,11 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async grep(args: Parameters<NonNullable<ICursorExecHandlers["grep"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
-		const skip = args.offset !== undefined && args.offset > 0 ? Math.floor(args.offset) : undefined;
 		const toolResultMessage = await executeTool(this.options, "grep", toolCallId, {
 			pattern: args.pattern,
 			path: searchPath,
 			case: args.caseInsensitive === true ? false : undefined,
-			skip,
+			skip: piGrepSkip(args.offset),
 		});
 		return toolResultMessage;
 	}
@@ -908,5 +908,31 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const toolResultMessage = await executeTool(this.options, toolName, toolCallId, args);
 		return toolResultMessage;
+	}
+
+	/**
+	 * Resolve an MCP call's approval without running it.
+	 *
+	 * Same resolution the wrapper applies at execution time, minus the
+	 * execution: an unknown tool is not approvable, and a `prompt` is not an
+	 * approval — the frame has no way to carry an interactive question, and the
+	 * user is asked for real when the call itself arrives.
+	 */
+	async mcpApprovalPreflight(call: CursorMcpCall) {
+		const toolName = call.toolName || call.name;
+		const tool = this.options.tools.get(toolName) ?? this.options.getTool?.(toolName);
+		if (!tool) return false;
+		const context = this.options.getToolContext?.();
+		const settings = context?.settings;
+		const approvalMode: ApprovalMode =
+			context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+		const approval = resolveApproval(
+			tool,
+			args,
+			approvalMode,
+			(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+		);
+		return approval.policy === "allow";
 	}
 }

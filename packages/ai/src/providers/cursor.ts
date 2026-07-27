@@ -78,6 +78,7 @@ import {
 	McpApprovedSchema,
 	McpErrorSchema,
 	McpImageContentSchema,
+	McpRejectedSchema,
 	McpResultSchema,
 	McpSuccessSchema,
 	McpTextContentSchema,
@@ -200,10 +201,11 @@ import {
 	buildPiWriteError,
 	buildPiWriteResult,
 	piEscapeRegexLiteral,
+	piGrepSkip,
 	piJoinPath,
 	piLimit,
 	piLsPath,
-	piReadPath,
+	piReadDisplayPath,
 	piTimeout,
 } from "./cursor/exec-modern";
 
@@ -1293,7 +1295,12 @@ async function handleExecServerMessage(
 		case "readArgs": {
 			const args = execMsg.message.value;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "read", { path: args.path });
+			// The same composed selector the bridge executes: showing a bare path
+			// for a ranged read makes the returned slice look like the whole
+			// file in every rebuilt transcript.
+			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "read", {
+				path: piReadDisplayPath(args.path, args.offset, args.limit),
+			});
 			const { execResult } = await resolveExecHandler(
 				args,
 				execHandlers?.read?.bind(execHandlers),
@@ -1352,6 +1359,7 @@ async function handleExecServerMessage(
 				pattern: args.pattern,
 				path: searchPath,
 				case: args.caseInsensitive === true ? false : undefined,
+				skip: piGrepSkip(args.offset),
 			});
 			const { execResult } = await resolveExecHandler(
 				args,
@@ -1514,19 +1522,33 @@ async function handleExecServerMessage(
 		case "mcpArgs": {
 			const args = execMsg.message.value;
 			const mcpCall = decodeMcpCall(args);
-			// An approval probe, not an invocation: the server is resolving a
-			// smart-mode permission decision before the real call and answers
-			// with the dedicated `approved` variant. Executing here would fire a
-			// side-effecting MCP tool the user has not been asked about yet —
-			// and fire it a second time when the real frame follows. No block is
-			// synthesized either: nothing ran, so a transcript entry would claim
-			// work that never happened.
+			// An approval probe, not an invocation: the frame asks whether the
+			// call would be permitted. Running the tool to find out fires a side
+			// effect the user has not been asked about, and fires it again when
+			// the real frame follows — so this must answer without executing.
+			//
+			// The host resolves it against the same policy the wrapper applies at
+			// execution time. Only a definite allow is approved: a pending prompt
+			// cannot be asked through this frame, and answering yes on its behalf
+			// would pre-authorize a call the user never saw. Without a handler
+			// there is nothing to decide with, so it is refused. Either way no
+			// block is synthesized — nothing ran.
 			if (mcpCall.approvalOnly) {
+				const approved = (await execHandlers?.mcpApprovalPreflight?.(mcpCall)) === true;
 				sendExecClientMessage(
 					h2Request,
 					execMsg,
 					"mcpResult",
-					create(McpResultSchema, { result: { case: "approved", value: create(McpApprovedSchema, {}) } }),
+					create(McpResultSchema, {
+						result: approved
+							? { case: "approved", value: create(McpApprovedSchema, {}) }
+							: {
+									case: "rejected",
+									value: create(McpRejectedSchema, {
+										reason: `Tool "${mcpCall.toolName || mcpCall.name}" is not approved to run without asking.`,
+									}),
+								},
+					}),
 				);
 				return;
 			}
@@ -1718,7 +1740,7 @@ async function handleExecServerMessage(
 			// The displayed block must show the operation that actually runs: the
 			// bridge composes the same range selector onto the path.
 			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", {
-				path: piReadPath(args.path, args.offset, args.limit) ?? args.path,
+				path: piReadDisplayPath(args.path, args.offset, args.limit),
 			});
 			const { execResult } = await resolveExecHandler(
 				{ args, toolCallId },
@@ -2356,9 +2378,10 @@ function buildReadResultFromToolResult(path: string, toolResult: ToolResultMessa
 				fileSize: BigInt(Buffer.byteLength(text, "utf-8")),
 				truncated: toolResultWasTruncated(toolResult),
 				output: { case: "content", value: text },
-				// Whether the frame's window was honored. Left false for an
-				// unranged read: the server reads it as "this is the whole file",
-				// which is exactly true when no range was asked for.
+				// Set when this client composed the frame's window onto the read,
+				// left false when it read the file whole. The proto names the
+				// field but nothing here pins the server's use of it, so the only
+				// safe contract is that it describes what we actually did.
 				rangeApplied,
 			}),
 		},
@@ -2613,10 +2636,10 @@ function buildGrepResultFromToolResult(
 					totalFiles: files.length,
 					clientTruncated,
 					ripgrepTruncated: false,
-					// Echoes the frame's own optional field: present means "this
-					// page starts where you asked", absent means no offset was
-					// requested. Without it the server cannot tell a honored
-					// offset from a client that ignored it, and re-paginates.
+					// Echoes the offset this client actually applied; absent when
+					// the frame requested none. The proto names the field but
+					// nothing here pins the server's use of it, so it reports what
+					// we did rather than asserting a pagination protocol.
 					offsetApplied: args.offset,
 				}),
 			},
