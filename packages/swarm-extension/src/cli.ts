@@ -21,7 +21,7 @@ import { PipelineController } from "./swarm/pipeline";
 import { renderSwarmProgress } from "./swarm/render";
 import { parseSwarmYaml, validateSwarmDefinition, type SwarmDefinition } from "./swarm/schema";
 import { StateTracker } from "./swarm/state";
-import { discoverSwarmYaml, resolveSwarmYamlPath, substituteVars } from "./swarm/discovery";
+import { discoverSwarmYaml } from "./swarm/discovery";
 
 // ============================================================================
 // Parse CLI flags
@@ -39,7 +39,12 @@ for (let i = 0; i < rawArgs.length; i++) {
 		if (next && !next.startsWith("--")) {
 			flags[key] = next;
 			i++;
+		} else if (next === undefined) {
+			// Flag at end of args with no value
+			console.error(`Error: --${key} requires a value`);
+			process.exit(1);
 		} else {
+			// next is another flag; treat as boolean
 			flags[key] = "";
 		}
 	} else {
@@ -56,51 +61,28 @@ if (!nameOrPath) {
 			"",
 			"Options:",
 			"  --project <dir>   Project directory for ${PROJECT_DIR} substitution",
-			"  --name <name>     Workflow name for ${WORKFLOW_NAME} substitution",
-		].join("\n"),
-	);
-	process.exit(1);
-}
-
 // ============================================================================
-// Resolve YAML path (Option A: named workflow → ~/.omp/agent/swarms/<name>.yaml)
+// Discover YAML (Option A: named workflow → ~/.omp/agent/swarms/<name>.yaml)
 // ============================================================================
 
-const resolvedPath = resolveSwarmYamlPath(nameOrPath);
-const absolutePath = path.isAbsolute(resolvedPath)
-	? resolvedPath
-	: path.resolve(process.cwd(), resolvedPath);
-
-console.log(`Reading: ${absolutePath}`);
-
-// ============================================================================
-// Read, substitute, parse
-// ============================================================================
-
-let content: string;
-try {
-	content = await Bun.file(absolutePath).text();
-} catch {
-	console.error(`Cannot read file: ${absolutePath}`);
-	process.exit(1);
-}
-
-// Build substitution map
 const projectDir = flags.project ?? process.cwd();
 const workflowName = flags.name;
 
-
-const vars: Record<string, string> = {
-	PROJECT_DIR: projectDir,
-};
-if (workflowName) {
-	vars.WORKFLOW_NAME = workflowName;
-}
-
-const substituted = substituteVars(content, vars);
-
 let def: SwarmDefinition;
 try {
+	def = await discoverSwarmYaml(nameOrPath, {
+		projectDir,
+		workflowName,
+	});
+} catch (err) {
+	console.error(err instanceof Error ? err.message : String(err));
+	process.exit(1);
+}
+
+console.log(`Swarm: ${def.name}`);
+console.log(`Mode: ${def.mode}`);
+console.log(`Target count: ${def.targetCount}`);
+console.log(`Agents: ${[...def.agents.keys()].join(", ")}`);
 	def = parseSwarmYaml(substituted);
 } catch (err) {
 	console.error(`YAML error: ${err instanceof Error ? err.message : String(err)}`);

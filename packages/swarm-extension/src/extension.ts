@@ -16,8 +16,10 @@ import { formatDuration } from "@oh-my-pi/pi-utils";
 import { buildDependencyGraph, buildExecutionWaves, detectCycles } from "./swarm/dag";
 import { PipelineController } from "./swarm/pipeline";
 import { renderSwarmProgress } from "./swarm/render";
-import { parseSwarmYaml, type SwarmDefinition, validateSwarmDefinition } from "./swarm/schema";
+import { type SwarmDefinition, validateSwarmDefinition } from "./swarm/schema";
 import { StateTracker } from "./swarm/state";
+import { discoverSwarmYaml } from "./swarm/discovery";
+import { discoverSwarmYaml } from "./swarm/discovery";
 
 export default function swarmExtension(pi: ExtensionAPI): void {
 	pi.setLabel("Swarm Orchestrator");
@@ -69,34 +71,30 @@ export default function swarmExtension(pi: ExtensionAPI): void {
 // ============================================================================
 
 async function handleRun(yamlPath: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
-	// 1. Resolve and read YAML
-	const resolvedPath = path.isAbsolute(yamlPath) ? yamlPath : path.resolve(ctx.cwd, yamlPath);
-
-	let content: string;
-	try {
-		content = await Bun.file(resolvedPath).text();
-	} catch {
-		ctx.ui.notify(`Cannot read file: ${resolvedPath}`, "error");
-		return;
-	}
-
-	// 2. Parse YAML
+	// 1. Discover YAML via Option A (named workflow → ~/.omp/agent/swarms/<name>.yaml)
+	//    with ${VAR} substitution; workspace resolves relative to ctx.cwd
 	let def: SwarmDefinition;
 	try {
-		def = parseSwarmYaml(content);
+		def = await discoverSwarmYaml(yamlPath, {
+			projectDir: ctx.cwd,
+			cwd: ctx.cwd,
+		});
 	} catch (err) {
-		ctx.ui.notify(`YAML error: ${err instanceof Error ? err.message : String(err)}`, "error");
+		ctx.ui.notify(
+			`Cannot load swarm: ${err instanceof Error ? err.message : String(err)}`,
+			"error",
+		);
 		return;
 	}
 
-	// 3. Validate
+	// 2. Validate
 	const validationErrors = validateSwarmDefinition(def);
 	if (validationErrors.length > 0) {
 		ctx.ui.notify(`Validation errors:\n${validationErrors.map(e => `  - ${e}`).join("\n")}`, "error");
 		return;
 	}
 
-	// 4. Build DAG
+	// 3. Build DAG
 	const deps = buildDependencyGraph(def);
 	const cycleNodes = detectCycles(deps);
 	if (cycleNodes) {
@@ -105,10 +103,10 @@ async function handleRun(yamlPath: string, ctx: ExtensionCommandContext, pi: Ext
 	}
 	const waves = buildExecutionWaves(deps);
 
-	// 5. Resolve workspace (relative to YAML file location)
+	// 4. Resolve workspace (relative to ctx.cwd, NOT YAML file location)
 	const workspace = path.isAbsolute(def.workspace)
 		? def.workspace
-		: path.resolve(path.dirname(resolvedPath), def.workspace);
+		: path.resolve(ctx.cwd, def.workspace);
 
 	// Ensure workspace exists
 	await fs.mkdir(workspace, { recursive: true });
