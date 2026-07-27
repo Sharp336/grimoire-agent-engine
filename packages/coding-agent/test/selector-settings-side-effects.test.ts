@@ -864,7 +864,7 @@ describe("selector setting side effects", () => {
 		}
 	});
 
-	it("applies an @ quick role through the role-switch session API", async () => {
+	it("routes quick roles and explicit inherit through their session APIs", async () => {
 		const testTheme = await getThemeByName("dark");
 		if (!testTheme) throw new Error("Failed to load dark theme for quick-role picker test");
 		setThemeInstance(testTheme);
@@ -927,6 +927,7 @@ describe("selector setting side effects", () => {
 				scopedModels: [{ model: smol }, { model: slow }],
 				getContextUsage: () => undefined,
 				getRoleModelCycle: () => ({ models: quickRoles, currentIndex: 1 }),
+				resolveTemporaryModelThinkingLevel: () => ThinkingLevel.Inherit,
 				applyRoleModel,
 				setModelTemporary,
 			},
@@ -947,6 +948,13 @@ describe("selector setting side effects", () => {
 		expect(setModelTemporary).not.toHaveBeenCalled();
 		expect(showModelCycleTrack).toHaveBeenCalledTimes(1);
 		expect(showError).not.toHaveBeenCalled();
+
+		controller.showModelSelector({ temporaryOnly: true });
+		if (!picker) throw new Error("Expected temporary model picker overlay");
+		picker.handleInput("\n");
+		await Promise.resolve();
+
+		expect(setModelTemporary).toHaveBeenCalledWith(slow, ThinkingLevel.Inherit);
 	});
 
 	it("switches the live session to the global default when the project default is unassigned", async () => {
