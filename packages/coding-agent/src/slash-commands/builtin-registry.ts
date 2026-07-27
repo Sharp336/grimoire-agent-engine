@@ -2005,11 +2005,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
-		name: "exit",
-		description: "Exit the application",
-		handleTui: shutdownHandlerTui,
-	},
-	{
 		name: "marketplace",
 		description: "Manage marketplace plugin sources and installed plugins",
 		acpDescription: "Manage plugins from marketplaces",
@@ -2606,7 +2601,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "quit",
-		aliases: ["q"],
+		aliases: ["q","exit"],
 		description: "Quit the application",
 		handleTui: shutdownHandlerTui,
 	},
@@ -2793,6 +2788,7 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		aliases: command.aliases,
 		allowArgs: command.allowArgs === true,
 		description: command.description,
+		priority: command.priority,
 		subcommands: command.subcommands,
 		inlineHint: command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,

@@ -1172,6 +1172,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSlashCommands = [...retainedCommands, ...skillCommands];
 	}
 
+	/**
+	 * Apply user-configured priority overrides to slash commands before they are
+	 * handed to the autocomplete provider. Keys in `commands.priorityOverrides`
+	 * may match either a command name or one of its aliases. Commands without a
+	 * matching override keep any intrinsic priority they already have.
+	 */
+	#applyCommandPriorityOverrides(commands: SlashCommand[]): SlashCommand[] {
+		if (!isSettingsInitialized()) return commands;
+		const overrides = settings.get("commands.priorityOverrides");
+		if (!overrides || Object.keys(overrides).length === 0) return commands;
+		return commands.map(cmd => {
+			let override = overrides[cmd.name];
+			if (override === undefined) {
+				for (const alias of cmd.aliases ?? []) {
+					if (overrides[alias] !== undefined) {
+						override = overrides[alias];
+						break;
+					}
+				}
+			}
+			return override === undefined ? cmd : { ...cmd, priority: override };
+		});
+	}
+
 	/** Reload slash commands and autocomplete for the provided working directory. */
 	async refreshSlashCommandState(cwd?: string): Promise<void> {
 		const basePath = cwd ?? this.sessionManager.getCwd();
@@ -1204,7 +1228,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				description: template.description,
 			}));
 		this.#baseAutocompleteProvider = this.#inputController.createAutocompleteProvider(
-			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],
+			this.#applyCommandPriorityOverrides([
+				...this.#pendingSlashCommands,
+				...fileSlashCommands,
+				...promptTemplateCommands,
+			]),
 			basePath,
 		);
 		this.#applyAutocompleteProvider();
