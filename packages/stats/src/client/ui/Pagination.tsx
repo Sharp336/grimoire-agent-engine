@@ -11,12 +11,13 @@ export interface PaginationProps {
 
 export function Pagination({ currentPage, pageSize, total, onPageChange }: PaginationProps) {
 	const { t } = useTranslation();
+	const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
 	// Clamp page when total shrinks (e.g., entries age out of rolling range)
 	useEffect(() => {
 		if (currentPage > totalPages) onPageChange(1);
 	}, [currentPage, totalPages, onPageChange]);
 
-	const totalPages = Math.max(1, Math.ceil(total / pageSize));
 	if (totalPages <= 1) return null;
 
 	// Build a compact page range: [1, ..., current-1, current, current+1, ..., last]
