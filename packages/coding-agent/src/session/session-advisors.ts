@@ -55,6 +55,7 @@ import {
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
+	isAdvisorSeverityAtLeast,
 	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
@@ -980,6 +981,15 @@ export class SessionAdvisors {
 	}
 
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
+		const minSeverity = this.#host.settings.get("advisor.minSeverity");
+		if (!isAdvisorSeverityAtLeast(severity, minSeverity)) {
+			logger.debug("advisor advice suppressed below minimum severity", {
+				severity: severity ?? "nit",
+				minSeverity,
+				advisor: advisor.name,
+			});
+			return;
+		}
 		if (!advisor.emissionGuard.accept(note)) {
 			logger.debug("advisor advice suppressed by emission guard", { severity, advisor: advisor.name });
 			return;

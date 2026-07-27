@@ -19,6 +19,7 @@ import {
 	formatAdvisorBatchContent,
 	formatAdvisorContextPrompt,
 	isAdvisorInterruptImmuneTurnActive,
+	isAdvisorSeverityAtLeast,
 	isAdvisorTranscriptName,
 	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
@@ -445,6 +446,14 @@ describe("advisor", () => {
 			await tool.execute("tc-4", { note, severity: "concern" });
 			expect(onAdvice).toHaveBeenCalledTimes(2);
 			expect(onAdvice).toHaveBeenLastCalledWith(note, "concern");
+		});
+
+		it("compares note severity against a configurable delivery floor", () => {
+			expect(isAdvisorSeverityAtLeast(undefined, "nit")).toBe(true);
+			expect(isAdvisorSeverityAtLeast("nit", "concern")).toBe(false);
+			expect(isAdvisorSeverityAtLeast("concern", "concern")).toBe(true);
+			expect(isAdvisorSeverityAtLeast("concern", "blocker")).toBe(false);
+			expect(isAdvisorSeverityAtLeast("blocker", "blocker")).toBe(true);
 		});
 
 		it("validates parameters using ArkType", () => {

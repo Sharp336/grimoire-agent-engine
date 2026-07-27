@@ -169,6 +169,11 @@ function advisorSeverityRank(severity: AdvisorSeverity | undefined): number {
 	return ADVISOR_SEVERITY_RANK[severity ?? "nit"];
 }
 
+/** Whether a note meets the configured delivery floor. Omitted severity is a nit. */
+export function isAdvisorSeverityAtLeast(severity: AdvisorSeverity | undefined, minimum: AdvisorSeverity): boolean {
+	return advisorSeverityRank(severity) >= advisorSeverityRank(minimum);
+}
+
 export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails> {
 	readonly name = "advise";
 	readonly label = "Advise";

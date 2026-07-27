@@ -173,6 +173,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 	async function createCompletedAdvisorSession(
 		severity: "concern" | "blocker" = "concern",
 		extensionRunner?: AdvisorTestExtensionRunner,
+		minSeverity: "nit" | "concern" | "blocker" = "nit",
 	): Promise<CompletedAdvisorHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
@@ -201,7 +202,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			streamFn: mock.stream,
 		});
 		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
+		const settings = Settings.isolated({
+			"advisor.minSeverity": minSeverity,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
 		authStorages.push(authStorage);
@@ -277,6 +282,39 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(persisted.at(-1)).toContain("Fixture verdict confirmed");
 		expect(advisorMock.calls.length).toBeGreaterThanOrEqual(1);
 		expect(mock.calls.length).toBe(1);
+	});
+
+	it("drops advisor notes below the configured minimum severity", async () => {
+		const { session, sessionManager, mock } = await createCompletedAdvisorSession("concern", undefined, "blocker");
+		const persisted = capturePersistedAdvice(sessionManager);
+
+		await session.prompt("answer with exactly one line");
+		await session.waitForIdle();
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(0);
+		expect(persisted).toEqual([]);
+		expect(mock.calls.length).toBe(1);
+	});
+
+	it("delivers advisor notes at the configured minimum severity", async () => {
+		const { session, mock } = await createCompletedAdvisorSession("blocker", undefined, "blocker");
+
+		await session.prompt("answer with exactly one line");
+		await session.waitForIdle();
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(2);
 	});
 
 	it("waits for preserved advisor card hooks and persistence before reporting catch-up", async () => {
