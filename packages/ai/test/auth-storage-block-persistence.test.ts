@@ -318,6 +318,61 @@ describe("AuthStorage credential block persistence", () => {
 			db.close();
 		}
 
+		const preMigrationRows = [
+			{
+				credential_id: codexRow.id,
+				provider_key: CODEX_PROVIDER_KEY,
+				block_scope: "chat",
+				blocked_until_ms: chatExpiryMs,
+				updated_at: chatUpdatedAt,
+			},
+			{
+				credential_id: codexRow.id,
+				provider_key: CODEX_PROVIDER_KEY,
+				block_scope: "shared",
+				blocked_until_ms: sharedExpiryMs,
+				updated_at: sharedUpdatedAt,
+			},
+			{
+				credential_id: codexRow.id,
+				provider_key: CODEX_PROVIDER_KEY,
+				block_scope: "spark",
+				blocked_until_ms: sparkExpiryMs,
+				updated_at: sparkUpdatedAt,
+			},
+			{
+				credential_id: anthropicRow.id,
+				provider_key: PROVIDER_KEY,
+				block_scope: "shared",
+				blocked_until_ms: FUTURE_BLOCK_MS,
+				updated_at: LEGACY_TIMESTAMP,
+			},
+		];
+		const failureDb = new Database(dbPath);
+		try {
+			failureDb.run(`
+				CREATE TRIGGER fail_auth_schema_v7_version_write
+				BEFORE INSERT ON auth_schema_version
+				WHEN NEW.version = 7
+				BEGIN
+					SELECT RAISE(ABORT, 'forced v7 version write failure');
+				END;
+			`);
+		} finally {
+			failureDb.close();
+		}
+
+		await expect(SqliteAuthCredentialStore.open(dbPath)).rejects.toThrow("forced v7 version write failure");
+		expect(readCredentialBlockRows(dbPath)).toEqual(preMigrationRows);
+		expect(readAuthSchemaVersion(dbPath)).toBe(6);
+
+		const cleanupDb = new Database(dbPath);
+		try {
+			cleanupDb.run("DROP TRIGGER fail_auth_schema_v7_version_write");
+		} finally {
+			cleanupDb.close();
+		}
+
 		const expectedRows = [
 			{
 				credential_id: codexRow.id,

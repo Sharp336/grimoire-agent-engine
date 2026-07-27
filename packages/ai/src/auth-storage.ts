@@ -7399,6 +7399,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				DELETE FROM auth_credential_block_mirror_guard;
 			`);
 			this.#createAuthCredentialBlockCompatibilityTriggers();
+			this.#writeAuthSchemaVersion(7);
 		});
 		migrate.immediate();
 	}
