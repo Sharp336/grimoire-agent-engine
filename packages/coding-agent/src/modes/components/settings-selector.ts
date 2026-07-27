@@ -1050,11 +1050,9 @@ export class SettingsSelectorComponent implements Component {
 
 	#getSubmenuCurrentValue(path: SettingPath, value: unknown, def?: SubmenuSettingDef): string {
 		const rawValue = String(value ?? "");
-		// Validate that the stored value matches a known option, but always return
-		// the stored value (not the label) so the settings system sees the actual key.
 		if (def?.options) {
 			const option = def.options.find(o => o.value === rawValue);
-			if (option) return rawValue;
+			if (option) return option.label;
 		}
 		if (path === "compaction.thresholdPercent" && (rawValue === "-1" || rawValue === "")) {
 			return "default";
