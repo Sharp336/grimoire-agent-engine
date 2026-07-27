@@ -10,7 +10,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, parseSkillUrlTarget, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStats,
@@ -62,47 +62,9 @@ function extractFolderFromPath(sessionPath: string): string {
 	// Convert --work--pi-- to /work/pi
 	return projectDir.replace(/^--/, "/").replace(/--/g, "/");
 }
-/**
- * Strip the selector suffix accepted by the read tool from an internal URL.
- * This mirrors the coding-agent splitter locally so stats does not depend on
- * its private utility.
- */
-const INTERNAL_URL_SELECTOR_PART_RE =
-	/^(?:raw|conflicts|L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?(?:,L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?)*|-\d+(?:[-+]\d+)?)$/i;
-
-function stripSkillUrlSelector(rawPath: string): string {
-	let cleanPath = rawPath;
-	const schemeEnd = "skill://".length;
-	while (true) {
-		const colon = cleanPath.lastIndexOf(":");
-		if (colon < schemeEnd) break;
-		const tail = cleanPath.slice(colon + 1);
-		if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
-		cleanPath = cleanPath.slice(0, colon);
-	}
-	return cleanPath;
-}
-
 function extractSkillName(tool: ToolCall): string | null {
 	if (tool.name !== "read" || typeof tool.arguments?.path !== "string") return null;
-	const rawPath = tool.arguments.path;
-	if (!/^skill:\/\//i.test(rawPath)) return null;
-	const cleanPath = stripSkillUrlSelector(rawPath);
-	const authorityStart = "skill://".length;
-	const slash = cleanPath.indexOf("/", authorityStart);
-	const query = cleanPath.indexOf("?", authorityStart);
-	const hash = cleanPath.indexOf("#", authorityStart);
-	let authorityEnd = cleanPath.length;
-	if (slash !== -1 && slash < authorityEnd) authorityEnd = slash;
-	if (query !== -1 && query < authorityEnd) authorityEnd = query;
-	if (hash !== -1 && hash < authorityEnd) authorityEnd = hash;
-	const rawName = cleanPath.slice(authorityStart, authorityEnd);
-	if (rawName.length === 0) return null;
-	try {
-		return decodeURIComponent(rawName);
-	} catch {
-		return rawName;
-	}
+	return parseSkillUrlTarget(tool.arguments.path)?.skill ?? null;
 }
 
 /**
@@ -636,14 +598,9 @@ export async function listAllSessionFiles(): Promise<string[]> {
 
 	const children = new Map<string, string[]>();
 	const indegree = new Map(files.map(file => [file.absoluteFile, 0]));
-	const fallback = new Set<string>();
-	for (const file of files) {
-		if (!file.header) {
-			fallback.add(file.absoluteFile);
-			continue;
-		}
 
-		const parentSession = file.header.parentSession;
+	for (const file of files) {
+		const parentSession = file.header?.parentSession;
 		if (parentSession === undefined) continue;
 		const parent =
 			(typeof parentSession === "string" && fileBySessionId.get(parentSession)) ||
@@ -653,10 +610,7 @@ export async function listAllSessionFiles(): Promise<string[]> {
 			(typeof parentSession === "string"
 				? fileByPath.get(path.resolve(path.dirname(file.file), parentSession))
 				: undefined);
-		if (!parent) {
-			fallback.add(file.absoluteFile);
-			continue;
-		}
+		if (!parent) continue;
 
 		const parentChildren = children.get(parent.absoluteFile);
 		if (parentChildren) parentChildren.push(file.file);
@@ -668,21 +622,7 @@ export async function listAllSessionFiles(): Promise<string[]> {
 		childFiles.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
 	}
 
-	const pendingFallback = [...fallback];
-	while (pendingFallback.length > 0) {
-		const parent = pendingFallback.pop();
-		if (!parent) break;
-		for (const child of children.get(parent) ?? []) {
-			const absoluteChild = path.resolve(child);
-			if (fallback.has(absoluteChild)) continue;
-			fallback.add(absoluteChild);
-			pendingFallback.push(absoluteChild);
-		}
-	}
-
-	const ready = files
-		.filter(file => indegree.get(file.absoluteFile) === 0 && !fallback.has(file.absoluteFile))
-		.map(file => file.file);
+	const ready = files.filter(file => indegree.get(file.absoluteFile) === 0).map(file => file.file);
 	ready.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
 
 	const remaining = new Set(files.map(file => file.absoluteFile));
@@ -698,7 +638,7 @@ export async function listAllSessionFiles(): Promise<string[]> {
 			const absoluteChild = path.resolve(child);
 			const childIndegree = (indegree.get(absoluteChild) ?? 0) - 1;
 			indegree.set(absoluteChild, childIndegree);
-			if (childIndegree === 0 && !fallback.has(absoluteChild)) ready.push(child);
+			if (childIndegree === 0) ready.push(child);
 		}
 		ready.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
 	}

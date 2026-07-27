@@ -432,6 +432,38 @@ describe("skill usage stats pipeline", () => {
 		expect(row).toEqual({ skill_name: "executed", target: "executed.md" });
 	});
 
+	it("keeps a known malformed-header parent ahead of its fork", async () => {
+		const entries = [
+			assistantEntry({
+				id: "missing-header-asst",
+				timestamp: TS1,
+				calls: [{ id: "missing-header-call", name: "read", arguments: { path: "skill://parent" } }],
+				totalTokens: 20,
+				outputTokens: 4,
+				cost: 0.002,
+			}),
+			toolResultEntry("missing-header-result", "missing-header-call", [{ skill: "parent", target: "parent.md" }]),
+		];
+		const sessionDir = path.join(getSessionsDir(), FOLDER_SLUG);
+		await fs.mkdir(sessionDir, { recursive: true });
+		const parentFile = path.join(sessionDir, "99_missing-header-parent.jsonl");
+		await Bun.write(parentFile, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+		await writeSessionFile("01_missing-header-child.jsonl", "missing-header-child", entries, parentFile);
+
+		await syncAllSessions({ workers: 2 });
+
+		const database = new Database(getStatsDbPath(), { readonly: true });
+		const toolRows = database
+			.prepare("SELECT session_file FROM tool_calls WHERE tool_call_id = ?")
+			.all("missing-header-call") as Array<{ session_file: string }>;
+		const invocationRows = database
+			.prepare("SELECT session_file FROM skill_invocations WHERE tool_call_id = ?")
+			.all("missing-header-call") as Array<{ session_file: string }>;
+		database.close();
+		expect(toolRows).toEqual([{ session_file: parentFile }]);
+		expect(invocationRows).toEqual([{ session_file: parentFile }]);
+	});
+
 	it("assigns copied calls to the parent during a cold parallel replay", async () => {
 		const { parentFile } = await createForkFiles();
 
