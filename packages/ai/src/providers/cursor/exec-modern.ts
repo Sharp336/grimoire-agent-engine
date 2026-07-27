@@ -107,7 +107,27 @@ function bagValue(bag: unknown, key: string): unknown {
  */
 function detailCount(toolResult: ToolResultMessage, key: string): number | undefined {
 	const value = bagValue(toolResult.details, key);
+	return positiveCount(value);
+}
+
+function positiveCount(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+/**
+ * The entry cap a listing hit, from either shape a local tool records it in.
+ *
+ * `glob` sets a flat `details.resultLimitReached` alongside the structured
+ * meta; `read` — which serves `pi_ls` — records the cap only through
+ * `OutputMeta` at `details.meta.limits.resultLimit.reached`. Reading just the
+ * flat field dropped `entry_limit_reached` for every real listing, so Cursor
+ * received clipped output with no incompleteness signal.
+ */
+function resultLimitReached(toolResult: ToolResultMessage): number | undefined {
+	const flat = detailCount(toolResult, "resultLimitReached");
+	if (flat !== undefined) return flat;
+	const limits = bagValue(bagValue(toolResult.details, "meta"), "limits");
+	return positiveCount(bagValue(bagValue(limits, "resultLimit"), "reached"));
 }
 
 /**
@@ -264,7 +284,7 @@ export function buildPiFindResult(toolResult: ToolResultMessage): PiFindExecResu
 			value: create(PiFindExecSuccessSchema, {
 				output: text,
 				truncation: piTruncation(toolResult),
-				resultLimitReached: detailCount(toolResult, "resultLimitReached"),
+				resultLimitReached: resultLimitReached(toolResult),
 			}),
 		},
 	});
@@ -285,7 +305,7 @@ export function buildPiLsResult(toolResult: ToolResultMessage): PiLsExecResult {
 			value: create(PiLsExecSuccessSchema, {
 				output: text,
 				truncation: piTruncation(toolResult),
-				entryLimitReached: detailCount(toolResult, "resultLimitReached"),
+				entryLimitReached: resultLimitReached(toolResult),
 			}),
 		},
 	});
