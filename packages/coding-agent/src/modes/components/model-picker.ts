@@ -6,6 +6,7 @@
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type Component, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
@@ -126,6 +127,10 @@ export class ModelPickerComponent implements Component {
 			const levels = getConfiguredThinkingLevelsForModel(item.model);
 			const current = options.thinkingLevelForModel?.(item.model) ?? ThinkingLevel.Inherit;
 			const currentIndex = levels.indexOf(current);
+			if (getSupportedEfforts(item.model).length === 0) {
+				callbacks.onPick(item.model, item.selector, currentIndex >= 0 ? current : ThinkingLevel.Inherit);
+				return;
+			}
 			this.#pendingPick = { item, levels, index: currentIndex >= 0 ? currentIndex : 0 };
 			this.#tui.requestRender();
 		};

@@ -30,12 +30,12 @@ import type { ModelRegistry } from "../../config/model-registry";
 import {
 	formatModelSelectorValue,
 	type ModelRoleLookup,
-	parseModelString,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
+import { parseRetryFallbackSelector, type RetryFallbackSelector } from "../../session/retry-fallback-chains";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -887,12 +887,14 @@ export class ModelHubComponent implements Component {
 		fallbackTarget?: { role: string; index: number | null },
 	): void {
 		const options = fallbackTarget
-			? this.#thinkingOptionsFor(item.model).filter(
-					level =>
-						level !== AUTO_THINKING &&
-						(level === ThinkingLevel.Inherit ||
-							!this.#hasLiteralFallbackSelector(formatModelSelectorValue(item.selector, level))),
-				)
+			? this.#thinkingOptionsFor(item.model).filter(level => {
+					if (level === AUTO_THINKING) return false;
+					if (level === ThinkingLevel.Inherit) return true;
+					return (
+						this.#parseFallbackSelector(formatModelSelectorValue(item.selector, level))?.thinkingLevel !==
+						undefined
+					);
+				})
 			: this.#thinkingOptionsFor(item.model);
 		let current: ConfiguredThinkingLevel;
 		if (fallbackTarget) {
@@ -1016,30 +1018,11 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
-	#hasLiteralFallbackSelector(selector: string): boolean {
-		const normalized = selector.trim();
-		const slashIndex = normalized.indexOf("/");
-		if (slashIndex <= 0) return false;
-		const provider = normalized.slice(0, slashIndex);
-		const id = normalized.slice(slashIndex + 1);
-		return (
-			this.#availableItems.some(item => item.model.provider === provider && item.model.id === id) ||
-			this.#registry.getAll().some(model => model.provider === provider && model.id === id)
-		);
-	}
-
-	#parseFallbackSelector(
-		selector: string,
-	): { provider: string; id: string; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
-		const normalized = selector.trim();
-		if (this.#hasLiteralFallbackSelector(normalized)) {
-			const slashIndex = normalized.indexOf("/");
-			return { provider: normalized.slice(0, slashIndex), id: normalized.slice(slashIndex + 1) };
-		}
-		return parseModelString(normalized, {
-			allowMaxSuffix: true,
-			allowAutoAlias: true,
-			isLiteralModelId: (provider, id) => this.#hasLiteralFallbackSelector(`${provider}/${id}`),
+	#parseFallbackSelector(selector: string): RetryFallbackSelector | undefined {
+		return parseRetryFallbackSelector(selector, {
+			find: (provider, id) =>
+				this.#availableItems.find(item => item.model.provider === provider && item.model.id === id)?.model ??
+				this.#registry.getAll().find(model => model.provider === provider && model.id === id),
 		});
 	}
 

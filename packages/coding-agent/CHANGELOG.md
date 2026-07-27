@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit model-aware thinking-level selection to `/switch` and `/models` fallback assignments, with visible sequential-step controls and persisted fallback effort suffixes.
+
 ## [17.1.4] - 2026-07-26
 
 ### Added
@@ -174,9 +178,6 @@
 - Fixed Assistant-mode TTS playback aborting prematurely when an agent continued after a tool call.
 - Fixed absolute usage amounts rendering inconsistently across CLI, TUI, and ACP output surfaces.
 - Fixed MCP sessions dropping tools from servers that finished connecting after the initial startup window.
-### Added
-
-- Added explicit model-aware thinking-level selection to `/switch` and `/models` fallback assignments, with visible sequential-step controls and persisted fallback effort suffixes.
 
 ## [17.0.9] - 2026-07-23
 

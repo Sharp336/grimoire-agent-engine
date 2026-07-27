@@ -30,6 +30,14 @@ function makeModel(provider: string, id: string, contextWindow = 128_000): Model
 	});
 }
 
+function makeReasoningModel(provider: string, id: string, contextWindow = 128_000): Model {
+	return {
+		...makeModel(provider, id, contextWindow),
+		reasoning: true,
+		thinking: { mode: "effort", efforts: [ThinkingLevel.Low, ThinkingLevel.High] },
+	};
+}
+
 let testTheme = await getThemeByName("dark");
 
 function installTestTheme(): void {
@@ -107,8 +115,6 @@ describe("ModelPicker", () => {
 		expect(rendered).toContain("Step 1 of 2");
 
 		picker.handleInput("\n");
-		expect(onPick).not.toHaveBeenCalled();
-		picker.handleInput("\n");
 		expect(onPick).toHaveBeenCalledTimes(1);
 		expect(onPick.mock.calls[0]?.[0]).toBe(large);
 	});
@@ -122,8 +128,6 @@ describe("ModelPicker", () => {
 			registry: { refresh },
 		});
 
-		picker.handleInput("\n");
-		expect(onPick).not.toHaveBeenCalled();
 		picker.handleInput("\n");
 		expect(onPick).toHaveBeenCalledTimes(1);
 		expect(onPick.mock.calls[0]?.[0]).toBe(cached);
@@ -149,12 +153,15 @@ describe("ModelPicker", () => {
 		// refresh().then(...) continuation chain deterministically.
 		await Bun.sleep(0);
 		picker.handleInput("\n");
-		picker.handleInput("\n");
 		expect(onPick.mock.calls[0]?.[0]?.id).toBe("cc-model");
 	});
 
 	test("highlights and preselects the session's current model", () => {
-		const models = [makeModel("test", "aa-model"), makeModel("test", "bb-model"), makeModel("test", "cc-model")];
+		const models = [
+			makeReasoningModel("test", "aa-model"),
+			makeReasoningModel("test", "bb-model"),
+			makeReasoningModel("test", "cc-model"),
+		];
 		const { picker, onPick } = createPicker({
 			models,
 			scoped: true,
@@ -173,7 +180,7 @@ describe("ModelPicker", () => {
 	});
 
 	test("selects thinking immediately after the model and Esc returns to models", () => {
-		const model = makeModel("test", "thinking-model");
+		const model = makeReasoningModel("test", "thinking-model");
 		const { picker, onPick } = createPicker({ models: [model], scoped: true });
 
 		picker.handleInput("\n");
@@ -190,8 +197,18 @@ describe("ModelPicker", () => {
 		expect(normalize(second.picker.render(220))).toContain("Step 1 of 2");
 	});
 
+	test("applies a non-reasoning model without opening an empty thinking step", () => {
+		const model = makeModel("test", "non-reasoning-model");
+		const { picker, onPick } = createPicker({ models: [model], scoped: true });
+
+		picker.handleInput("\n");
+
+		expect(onPick).toHaveBeenCalledWith(model, "test/non-reasoning-model", ThinkingLevel.Inherit);
+		expect(normalize(picker.render(220))).not.toContain("2/2");
+	});
+
 	test("keeps the selected thinking choice visible beside a long model id on narrow terminals", () => {
-		const model = makeModel("test", "a-very-long-model-id-that-fills-the-picker-footer");
+		const model = makeReasoningModel("test", "a-very-long-model-id-that-fills-the-picker-footer");
 		const { picker } = createPicker({ models: [model], scoped: true });
 
 		picker.handleInput("\n");
