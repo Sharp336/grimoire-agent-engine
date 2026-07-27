@@ -79,3 +79,16 @@ export function piEscapeRegexLiteral(value: string): string {
 export function piLimit(limit: number | undefined): number | undefined {
 	return limit === undefined ? undefined : Math.max(1, Math.floor(limit));
 }
+
+/**
+ * A `pi_bash` frame's timeout as the local `bash` tool's kwarg.
+ *
+ * Presence-sensitive like every other `optional int32` here, and unusually
+ * load-bearing: `bash` documents `timeout: 0` as "disables the command
+ * deadline", so folding a supplied `0` into `undefined` applies the 300s
+ * default and kills exactly the long-running command that asked not to be.
+ * Negative values have no local meaning and fall back to the default.
+ */
+export function piTimeout(timeout: number | undefined): number | undefined {
+	return timeout !== undefined && timeout >= 0 ? timeout : undefined;
+}

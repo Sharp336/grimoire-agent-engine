@@ -77,6 +77,7 @@ export {
 	piLimit,
 	piLsPath,
 	piReadPath,
+	piTimeout,
 } from "../cursor-pi-args";
 
 /** Flatten a tool result's content into the single `output` string the Pi frames carry. */

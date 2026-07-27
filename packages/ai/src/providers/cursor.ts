@@ -197,6 +197,7 @@ import {
 	piLimit,
 	piLsPath,
 	piReadPath,
+	piTimeout,
 } from "./cursor/exec-modern";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
@@ -1571,7 +1572,7 @@ async function handleExecServerMessage(
 			const toolCallId = crypto.randomUUID();
 			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "bash", {
 				command: args.command,
-				timeout: args.timeout && args.timeout > 0 ? args.timeout : undefined,
+				timeout: piTimeout(args.timeout),
 			});
 			const { execResult } = await resolveExecHandler(
 				{ args, toolCallId },

@@ -292,6 +292,69 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 	});
 });
 
+describe("pi_bash timeout presence", () => {
+	let cwd: string;
+	let handlers: CursorExecHandlers;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-pibash-timeout-"));
+		const bash: Tool = new BashTool(createTestSession(cwd));
+		handlers = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>([["bash", bash]]) });
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("disables the deadline for an explicit zero instead of applying the default", async () => {
+		// `timeout` is `optional int32` and `bash` documents `0` as "disables
+		// the command deadline". Folding a supplied `0` into `undefined` applies
+		// the 300s default, killing the long-running command that asked not to
+		// be killed.
+		const disabled = await handlers.piBash({
+			toolCallId: "b1",
+			args: { command: "echo hi", timeout: 0 },
+		} as never);
+		const disabledDetails = disabled.details as { timeoutDisabled?: boolean; timeoutSeconds?: number };
+		expect(disabledDetails.timeoutDisabled).toBe(true);
+		expect(disabledDetails.timeoutSeconds).toBeUndefined();
+
+		const defaulted = await handlers.piBash({
+			toolCallId: "b2",
+			args: { command: "echo hi" },
+		} as never);
+		const defaultedDetails = defaulted.details as { timeoutDisabled?: boolean; timeoutSeconds?: number };
+		expect(defaultedDetails.timeoutDisabled).toBeUndefined();
+		expect(defaultedDetails.timeoutSeconds).toBeGreaterThan(0);
+	});
+
+	it("passes a positive timeout through", async () => {
+		const result = await handlers.piBash({
+			toolCallId: "b3",
+			args: { command: "echo hi", timeout: 42 },
+		} as never);
+		expect((result.details as { timeoutSeconds?: number }).timeoutSeconds).toBe(42);
+	});
+
+	it("falls back to the default for a negative timeout", async () => {
+		// A negative has no local meaning. Passed through, `bash` clamps it to
+		// its 1s floor — a command that dies almost immediately. Dropping it to
+		// the default is the only sane reading, so assert the default rather
+		// than merely "positive", which the clamp also satisfies.
+		const negative = await handlers.piBash({
+			toolCallId: "b4",
+			args: { command: "echo hi", timeout: -5 },
+		} as never);
+		const omitted = await handlers.piBash({
+			toolCallId: "b5",
+			args: { command: "echo hi" },
+		} as never);
+		const negativeDetails = negative.details as { timeoutDisabled?: boolean; timeoutSeconds?: number };
+		expect(negativeDetails.timeoutDisabled).toBeUndefined();
+		expect(negativeDetails.timeoutSeconds).toBe((omitted.details as { timeoutSeconds?: number }).timeoutSeconds);
+	});
+});
+
 describe("CursorExecHandlers error results", () => {
 	const rewrittenErrorTool = (name: string): AgentTool => ({
 		name,

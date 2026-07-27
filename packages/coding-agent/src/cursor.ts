@@ -20,6 +20,7 @@ import {
 	piLimit,
 	piLsPath,
 	piReadPath,
+	piTimeout,
 } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { resolveToCwd } from "./tools/path-utils";
@@ -458,10 +459,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	}
 
 	async piBash(call: Parameters<NonNullable<ICursorExecHandlers["piBash"]>>[0]) {
-		const { timeout } = call.args;
 		return await executeTool(this.options, "bash", call.toolCallId, {
 			command: call.args.command,
-			timeout: timeout && timeout > 0 ? timeout : undefined,
+			timeout: piTimeout(call.args.timeout),
 		});
 	}
 
