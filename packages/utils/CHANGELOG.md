@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Extended `formatBytes` with optional minimum-unit, unit-separator, and trailing-zero controls for compact UI displays ([#6851](https://github.com/can1357/oh-my-pi/pull/6851) by [@joshrzemien](https://github.com/joshrzemien)).
+
 ## [17.1.5] - 2026-07-27
 
 ### Fixed

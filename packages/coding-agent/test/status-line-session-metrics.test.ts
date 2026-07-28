@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
+import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -33,11 +34,18 @@ afterEach(() => {
 });
 
 describe("session_metrics segment", () => {
+	it("remains opt-in for every built-in preset", () => {
+		for (const preset of Object.values(STATUS_LINE_PRESETS)) {
+			expect(preset.leftSegments).not.toContain("session_metrics");
+			expect(preset.rightSegments).not.toContain("session_metrics");
+		}
+	});
+
 	it("renders the compaction count and binary KB/MB journal size in the native theme", () => {
 		const cases: Array<[bytes: number, expected: string]> = [
 			[0, " 3/0 KB 󰆓"],
-			[1536, " 3/2 KB 󰆓"],
-			[MEGABYTE, " 3/1.0 MB 󰆓"],
+			[1536, " 3/1.5 KB 󰆓"],
+			[MEGABYTE, " 3/1 MB 󰆓"],
 			[1.75 * MEGABYTE, " 3/1.8 MB 󰆓"],
 		];
 
@@ -52,11 +60,11 @@ describe("session_metrics segment", () => {
 		}
 	});
 
-	it("reads the real journal and refreshes only after the active leaf changes", async () => {
+	it("refreshes the real journal after mutations even when the active leaf is unchanged", async () => {
 		const sessionFile = path.join(projectDir, "session.jsonl");
 		await Bun.write(sessionFile, "x".repeat(1536));
 
-		let leafId = "compaction-2";
+		let journalRevision = 1;
 		let compactions = 2;
 		let metricReads = 0;
 		const session = {
@@ -77,7 +85,7 @@ describe("session_metrics segment", () => {
 			sessionFile,
 			sessionManager: {
 				getSessionFile: () => sessionFile,
-				getLeafId: () => leafId,
+				getJournalRevision: () => journalRevision,
 				getCompactionCount: () => {
 					metricReads++;
 					return compactions;
@@ -108,18 +116,19 @@ describe("session_metrics segment", () => {
 		});
 
 		const first = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(first).toContain(" 2/2 KB 󰆓");
+		expect(first).toContain(" 2/1.5 KB 󰆓");
 		expect(metricReads).toBe(1);
 
-		component.getTopBorder(120);
+		await Bun.write(sessionFile, "x".repeat(2 * MEGABYTE));
+		const stale = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(stale).toContain(" 2/1.5 KB 󰆓");
 		expect(metricReads).toBe(1);
 
 		compactions = 3;
-		leafId = "compaction-3";
-		await Bun.write(sessionFile, "x".repeat(2 * MEGABYTE));
+		journalRevision++;
 
 		const second = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(second).toContain(" 3/2.0 MB 󰆓");
+		expect(second).toContain(" 3/2 MB 󰆓");
 		expect(metricReads).toBe(2);
 	});
 });

@@ -95,7 +95,7 @@ export interface SegmentContext {
 		cost: number;
 		tokensPerSecond: number | null;
 	};
-	/** Journal compaction count and on-disk JSONL size, populated only when requested by a preset. */
+	/** Journal compaction count and on-disk JSONL size, populated only when the segment is configured. */
 	sessionMetrics?: SessionMetrics;
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */
 	contextPercent: number | null;

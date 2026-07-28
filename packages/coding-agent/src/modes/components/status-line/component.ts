@@ -222,7 +222,7 @@ interface ActiveMeter {
 interface SessionMetricsMemo {
 	session: AgentSession;
 	sessionFile: string | undefined;
-	leafId: string | null;
+	journalRevision: number;
 	metrics: SessionMetrics;
 }
 
@@ -527,16 +527,21 @@ export class StatusLineComponent implements Component {
 	}
 
 	/**
-	 * Collect session metrics only when the journal's active leaf changes. The
-	 * status line can repaint many times per second while streaming, so neither
-	 * the O(1) compaction lookup nor the filesystem stat belongs on the stable render path.
+	 * Collect session metrics only when the journal revision changes. The status
+	 * line can repaint many times per second while streaming, so neither the O(1)
+	 * compaction lookup nor the filesystem stat belongs on the stable render path.
 	 */
 	#getSessionMetrics(): SessionMetrics {
 		const manager = this.session.sessionManager;
 		const sessionFile = manager.getSessionFile();
-		const leafId = manager.getLeafId();
+		const journalRevision = manager.getJournalRevision();
 		const cached = this.#sessionMetricsMemo;
-		if (cached && cached.session === this.session && cached.sessionFile === sessionFile && cached.leafId === leafId) {
+		if (
+			cached &&
+			cached.session === this.session &&
+			cached.sessionFile === sessionFile &&
+			cached.journalRevision === journalRevision
+		) {
 			return cached.metrics;
 		}
 
@@ -552,7 +557,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		const metrics = { compactions, bytes };
-		this.#sessionMetricsMemo = { session: this.session, sessionFile, leafId, metrics };
+		this.#sessionMetricsMemo = { session: this.session, sessionFile, journalRevision, metrics };
 		return metrics;
 	}
 

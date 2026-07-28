@@ -202,6 +202,7 @@ class SessionEntryIndex {
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
 	#compactions = 0;
+	#revision = 0;
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -210,6 +211,7 @@ class SessionEntryIndex {
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
 		this.#compactions = 0;
+		this.#revision++;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -232,6 +234,7 @@ class SessionEntryIndex {
 
 		addUsage(this.#usage, entryUsage(entry));
 		if (entry.type === "compaction") this.#compactions++;
+		this.#revision++;
 	}
 
 	has(id: string): boolean {
@@ -280,6 +283,14 @@ class SessionEntryIndex {
 
 	compactionCount(): number {
 		return this.#compactions;
+	}
+
+	markMutation(): void {
+		this.#revision++;
+	}
+
+	revision(): number {
+		return this.#revision;
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -350,6 +361,7 @@ export type ReadonlySessionManager = Pick<
 	| "getTree"
 	| "getUsageStatistics"
 	| "getCompactionCount"
+	| "getJournalRevision"
 	| "putBlob"
 	| "putBlobSync"
 >;
@@ -771,6 +783,7 @@ export class SessionManager {
 			this.#materializeBreadcrumb();
 			this.#rewriteRequired = false;
 			this.#hasTitleSlot = true;
+			this.#index.markMutation();
 		} catch (err) {
 			this.#noteDiskFailure(err);
 		}
@@ -826,6 +839,7 @@ export class SessionManager {
 				});
 				if (this.#diskEpoch !== epoch) return false;
 			} while (this.#atomicRewriteDirty);
+			this.#index.markMutation();
 			return true;
 		} finally {
 			// Only relinquish the fence if we still own it. A superseding
@@ -1678,6 +1692,11 @@ export class SessionManager {
 	/** Total compaction entries in the journal, including inactive branches. */
 	getCompactionCount(): number {
 		return this.#index.compactionCount();
+	}
+
+	/** Monotonic revision for journal entry and persisted rewrite mutations. */
+	getJournalRevision(): number {
+		return this.#index.revision();
 	}
 
 	/**

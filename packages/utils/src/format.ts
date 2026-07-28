@@ -47,15 +47,31 @@ function trim1(n: number): string {
 	return s.endsWith(".0") ? s.slice(0, -2) : s;
 }
 
+const BYTE_UNITS = ["B", "KB", "MB", "GB"] as const;
+
+export type ByteUnit = (typeof BYTE_UNITS)[number];
+
+export interface FormatBytesOptions {
+	/** Smallest unit the result may use. */
+	minimumUnit?: ByteUnit;
+	/** Text between the numeric value and unit. */
+	unitSeparator?: string;
+	/** Drop a trailing `.0` from KB and larger values. */
+	trimTrailingZero?: boolean;
+}
+
 /**
  * Format a byte count to a human-readable string.
  * Examples: "512B", "1.5KB", "2.3MB", "1.2GB"
  */
-export function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes}B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-	return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+export function formatBytes(bytes: number, options?: Readonly<FormatBytesOptions>): string {
+	let unitIndex = bytes < 1024 ? 0 : bytes < 1024 ** 2 ? 1 : bytes < 1024 ** 3 ? 2 : 3;
+	const minimumUnitIndex = BYTE_UNITS.indexOf(options?.minimumUnit ?? "B");
+	unitIndex = Math.max(unitIndex, minimumUnitIndex);
+
+	const value = bytes / 1024 ** unitIndex;
+	const formatted = unitIndex === 0 ? value.toString() : options?.trimTrailingZero ? trim1(value) : value.toFixed(1);
+	return `${formatted}${options?.unitSeparator ?? ""}${BYTE_UNITS[unitIndex]}`;
 }
 
 /**

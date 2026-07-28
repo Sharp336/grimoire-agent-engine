@@ -2,7 +2,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import {
+	formatBytes,
+	formatDuration,
+	formatNumber,
+	getProjectDir,
+	pathIsWithin,
+	relativePathWithinRoot,
+} from "@oh-my-pi/pi-utils";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
@@ -12,8 +19,11 @@ import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegm
 
 export type { SegmentContext } from "./types";
 
-const KILOBYTE = 1024;
-const MEGABYTE = 1024 * KILOBYTE;
+const SESSION_FILE_SIZE_FORMAT = {
+	minimumUnit: "KB",
+	unitSeparator: " ",
+	trimTrailingZero: true,
+} as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -21,11 +31,6 @@ const MEGABYTE = 1024 * KILOBYTE;
 
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
-}
-
-function formatSessionFileSize(bytes: number): string {
-	if (bytes >= MEGABYTE) return `${(bytes / MEGABYTE).toFixed(1)} MB`;
-	return `${Math.round(bytes / KILOBYTE)} KB`;
 }
 
 /** Left-truncate a path/label to `maxLen`, prefixing an ellipsis when clipped. */
@@ -547,7 +552,8 @@ const sessionMetricsSegment: StatusLineSegment = {
 
 		const leadingIcon = theme.icon.compaction ? `${theme.icon.compaction} ` : "";
 		const trailingIcon = theme.icon.sessionSize ? ` ${theme.icon.sessionSize}` : "";
-		const content = `${leadingIcon}${metrics.compactions}/${formatSessionFileSize(metrics.bytes)}${trailingIcon}`;
+		const size = formatBytes(metrics.bytes, SESSION_FILE_SIZE_FORMAT);
+		const content = `${leadingIcon}${metrics.compactions}/${size}${trailingIcon}`;
 		return { content: theme.fg("statusLineSessionMetrics", content), visible: true };
 	},
 };

@@ -39,4 +39,25 @@ describe("SessionManager compaction statistics", () => {
 			await reopened.close();
 		}
 	});
+
+	it("advances the journal revision for off-branch appends and rewrites", async () => {
+		using tempDir = TempDir.createSync("@pi-session-journal-revision-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		try {
+			const rootId = session.appendMessage({ role: "user", content: "root", timestamp: 1 });
+			const activeLeafId = session.appendMessage({ role: "user", content: "active", timestamp: 2 });
+			await session.ensureOnDisk();
+
+			const beforeBranchAppend = session.getJournalRevision();
+			session.appendMessageToBranch({ role: "user", content: "background", timestamp: 3 }, rootId);
+			expect(session.getLeafId()).toBe(activeLeafId);
+			expect(session.getJournalRevision()).toBeGreaterThan(beforeBranchAppend);
+
+			const beforeRewrite = session.getJournalRevision();
+			await session.rewriteEntries();
+			expect(session.getJournalRevision()).toBeGreaterThan(beforeRewrite);
+		} finally {
+			await session.close();
+		}
+	});
 });
