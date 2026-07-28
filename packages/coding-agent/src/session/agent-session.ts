@@ -379,6 +379,7 @@ type PostPromptSkipReason = "aborted" | "stale-generation";
 type AgentContinueSkipReason =
 	| PostPromptSkipReason
 	| "session-unavailable"
+	| "agent-busy"
 	| "should-continue-false"
 	| "post-restore-unavailable";
 
@@ -433,6 +434,8 @@ export class AgentSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
+	/** Coalesces continuations scheduled at the same turn boundary before Agent.continue can begin. */
+	#agentContinueScheduled = false;
 	#queuedMessageDrainScheduled = false;
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
@@ -2800,6 +2803,7 @@ export class AgentSession {
 				try {
 					await scheduler.wait(delayMs, { signal });
 				} catch {
+					options?.onSkip?.("aborted");
 					return;
 				}
 			}
@@ -2822,6 +2826,11 @@ export class AgentSession {
 	}
 
 	#scheduleAgentContinue(options?: ScheduledAgentContinueOptions): void {
+		if (this.#agentContinueScheduled) {
+			this.#skipAgentContinue("agent-busy", options);
+			return;
+		}
+		this.#agentContinueScheduled = true;
 		this.#schedulePostPromptTask(
 			async signal => {
 				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
@@ -2852,6 +2861,10 @@ export class AgentSession {
 						this.#skipAgentContinue("post-restore-unavailable", options);
 						return;
 					}
+					if (this.agent.state.isStreaming) {
+						this.#skipAgentContinue("agent-busy", options);
+						return;
+					}
 					await this.agent.continue();
 				} catch (error) {
 					logger.warn("agent.continue failed after scheduling", {
@@ -2860,13 +2873,17 @@ export class AgentSession {
 					});
 					options?.onError?.(error);
 				} finally {
+					this.#agentContinueScheduled = false;
 					this.#endInFlight();
 				}
 			},
 			{
 				delayMs: options?.delayMs,
 				generation: options?.generation,
-				onSkip: reason => this.#skipAgentContinue(reason, options),
+				onSkip: reason => {
+					this.#agentContinueScheduled = false;
+					this.#skipAgentContinue(reason, options);
+				},
 			},
 		);
 	}

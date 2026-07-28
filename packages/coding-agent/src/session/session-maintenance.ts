@@ -206,6 +206,7 @@ export interface SessionMaintenanceHost {
 				| "aborted"
 				| "stale-generation"
 				| "session-unavailable"
+				| "agent-busy"
 				| "should-continue-false"
 				| "post-restore-unavailable",
 		) => void;

@@ -296,4 +296,40 @@ describe("AgentSession queued steer delivery", () => {
 
 		expect(session.agent.peekSteeringQueue()).toEqual([]);
 	});
+
+	it("coalesces competing scheduled continuations with queued work", async () => {
+		const { session, mock } = await createSession([
+			{ content: ["initial"] },
+			{ content: ["queued response"], delayMs: 100 },
+		]);
+		await session.prompt("initial prompt");
+
+		const continueAgent = session.agent.continue.bind(session.agent);
+		let continueCalls = 0;
+		let continuedWhileBusy = false;
+		session.agent.continue = async () => {
+			continueCalls++;
+			continuedWhileBusy ||= session.agent.state.isStreaming;
+			await continueAgent();
+		};
+
+		// Session maintenance and reanswer continuations share this scheduler. Queue
+		// work before scheduling two continuations, so both reach the continuation
+		// boundary in the same turn as they can in production.
+		session.agent.steer({
+			role: "user",
+			content: [{ type: "text", text: "queued steer" }],
+			steering: true,
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		session.resumeAfterAskReanswer();
+		session.resumeAfterAskReanswer();
+		await session.waitForIdle();
+
+		expect(continuedWhileBusy).toBe(false);
+		expect(continueCalls).toBe(1);
+		expect(mock.calls.length).toBe(2);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
 });
