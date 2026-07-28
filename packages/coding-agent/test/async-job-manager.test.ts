@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { AsyncJobManager, createScopedAsyncJobs } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 
 describe("AsyncJobManager", () => {
 	test("forwards progress updates and delivers completion", async () => {
@@ -428,6 +428,49 @@ describe("AsyncJobManager", () => {
 		manager.cancelAll();
 		await manager.waitForAll();
 		expect(manager.getJob(parentJobId)?.status).toBe("cancelled");
+	});
+
+	test("scoped plugin jobs preserve type and enforce immutable ownership", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		const mainJobs = createScopedAsyncJobs(manager, "Main");
+		const jobId = mainJobs.register("plugin:custom", "plugin job", async ({ signal }) => {
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await Promise.race([release.promise, aborted.promise]);
+			return "done";
+		});
+
+		expect(manager.getAllJobs({ ownerId: "Main" }).map(job => job.type)).toEqual(["plugin:custom"]);
+		expect(manager.getAllJobs({ ownerId: "OtherAgent" })).toEqual([]);
+		expect(manager.cancel(jobId, { ownerId: "OtherAgent" })).toBe(false);
+		expect(manager.cancel(jobId, { ownerId: "Main" })).toBe(true);
+
+		release.resolve();
+		await manager.waitForAll();
+		expect(manager.getJob(jobId)?.status).toBe("cancelled");
+	});
+
+	test("rejects unsafe plugin job kinds before registration", () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const jobs = createScopedAsyncJobs(manager, "Main");
+		const run = async () => "done";
+		const invalidKinds = [
+			"",
+			"Plugin",
+			"video generation",
+			"video\tgeneration",
+			"video\ngeneration",
+			"\x1b[2Jvideo",
+			"a".repeat(65),
+		];
+
+		for (const kind of invalidKinds) {
+			expect(() => jobs.register(kind, "plugin job", run)).toThrow(
+				"Background job kind must be 1-64 lowercase ASCII letters, digits, dots, underscores, colons, or hyphens.",
+			);
+		}
+		expect(manager.getAllJobs()).toEqual([]);
 	});
 
 	test("routes owned deliveries to the owner's registered sink only", async () => {

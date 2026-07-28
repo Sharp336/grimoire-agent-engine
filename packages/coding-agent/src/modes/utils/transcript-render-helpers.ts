@@ -23,18 +23,18 @@ type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
 
 /**
- * Render an `async-result` custom message (a completed background bash/task job,
- * or a batch of them) as a transcript block of one "Background job completed"
+ * Render an `async-result` custom message (a completed background core or
+ * plugin-defined job, or a batch) as one "Background job completed"
  * row per job.
  */
 export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptBlock {
 	const details = (
 		message as CustomMessage<{
 			jobId?: string;
-			type?: "bash" | "task";
+			type?: string;
 			label?: string;
 			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: "bash" | "task"; label?: string; durationMs?: number }>;
+			jobs?: Array<{ jobId?: string; type?: string; label?: string; durationMs?: number }>;
 		}>
 	).details;
 	const jobs =

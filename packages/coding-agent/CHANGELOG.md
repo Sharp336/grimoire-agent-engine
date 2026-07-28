@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an owner-scoped background-job API to custom-tool and extension contexts, allowing plugin-defined job kinds to participate safely in Hub listing, waiting, cancellation, rendering, and completion delivery ([#6909](https://github.com/can1357/oh-my-pi/pull/6909) by [@incloon](https://github.com/incloon)).
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
