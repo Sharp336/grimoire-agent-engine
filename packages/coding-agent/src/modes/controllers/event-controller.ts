@@ -195,6 +195,7 @@ export class EventController {
 			notice: e => this.#handleNotice(e),
 			model_changed: async () => {
 				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
 			},
 			thinking_level_changed: async () => {
 				this.ctx.statusLine.invalidate();
