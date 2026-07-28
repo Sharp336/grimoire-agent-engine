@@ -36,6 +36,9 @@
 - Fixed omp worktree clear prematurely deleting active task-isolation sandboxes owned by running subagents.
 - Fixed /vibe mode preventing the director from completing parent tasks after verifying worker results by keeping the built-in todo tool active.
 - Fixed numeric GitHub issue and pull request autocomplete being suppressed inside skill slash-command arguments.
+### Fixed
+
+- Fixed compatibility replay for an already-running pre-upgrade launch broker evaluating xterm inside the client process; legacy raw PTY output now replays in an isolated worker while normal main/Hub ownership remains zero ([#6748](https://github.com/can1357/oh-my-pi/pull/6748)).
 
 ## [17.1.7] - 2026-07-27
 
