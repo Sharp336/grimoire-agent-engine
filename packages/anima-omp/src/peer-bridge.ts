@@ -143,7 +143,7 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 					{ id: `mail-ack:${message.id}` },
 				);
 				this.#deliveredPendingAck.delete(message.id);
-				this.#after = message.id;
+				this.#after = message.sent_at;
 			}
 		}
 	}

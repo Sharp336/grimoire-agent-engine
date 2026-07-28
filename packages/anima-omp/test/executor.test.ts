@@ -186,6 +186,22 @@ describe("AnimaExecutorController", () => {
 		expect(progress.some(line => line.includes("creating durable invocation"))).toBe(true);
 	});
 
+	it("ignores OMP's parent-model fallback when the agent configures Claude", async () => {
+		const client = new FakeControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const result = await controller.executor.execute({
+			...executorOptions({ ...packagedAgent(), model: ["anthropic/claude-sonnet-4-6"] }),
+			modelOverride: "openai-codex/gpt-5.4",
+		});
+
+		expect(result.exitCode).toBe(0);
+		const start = client.calls[0]?.params as { route: { model: string } };
+		expect(start.route.model).toBe("claude-sonnet-4-6");
+	});
+
 	it("fails preflight when an agent configures a non-Anthropic model", async () => {
 		const client = new FakeControl();
 		const controller = new AnimaExecutorController({

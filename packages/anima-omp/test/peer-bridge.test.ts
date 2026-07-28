@@ -34,6 +34,7 @@ class FakeControl implements AnimaControl {
 	readonly calls: Array<{ method: string; params: unknown; options?: ControlRequestOptions }> = [];
 	readonly receiveResults: MailReceiveResult[] = [];
 	readonly acknowledged = Promise.withResolvers<string>();
+	readonly afterCursor = Promise.withResolvers<unknown>();
 	#pendingReceive?: ReturnType<typeof Promise.withResolvers<never>>;
 
 	hello(): Promise<ProtocolHello> {
@@ -45,6 +46,7 @@ class FakeControl implements AnimaControl {
 		if (method === "mail.receive") {
 			const result = this.receiveResults.shift();
 			if (result) return Promise.resolve(result as T);
+			if (params && typeof params === "object" && "after" in params) this.afterCursor.resolve(params);
 			this.#pendingReceive = Promise.withResolvers<never>();
 			return this.#pendingReceive.promise;
 		}
@@ -165,6 +167,7 @@ describe("AnimaPeerBridge", () => {
 		const bridge = new AnimaPeerBridge({ client, controller, bus });
 		await bridge.start();
 		expect(await client.acknowledged.promise).toBe("mail-1");
+		await client.afterCursor.promise;
 
 		expect(bus.inbound).toEqual([
 			{
@@ -178,6 +181,8 @@ describe("AnimaPeerBridge", () => {
 			},
 		]);
 		expect(client.calls.some(call => call.method === "mail.ack")).toBe(true);
+		const receiveCalls = client.calls.filter(call => call.method === "mail.receive");
+		expect(receiveCalls.at(-1)?.params).toMatchObject({ after: "2026-07-28T00:00:00Z" });
 		await bridge.stop();
 	});
 });

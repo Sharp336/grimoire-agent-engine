@@ -128,9 +128,20 @@ function normalizeModelSelectors(value: string | readonly string[] | undefined):
 		.filter(Boolean);
 }
 
+function isAnthropicClaudeSelector(selector: string): boolean {
+	const slash = selector.indexOf("/");
+	const provider = slash === -1 ? "anthropic" : selector.slice(0, slash);
+	const modelId = bareModelId(selector).replace(/:(?:inherit|off|minimal|low|medium|high|xhigh|max|auto)$/, "");
+	return provider === "anthropic" && isClaudeModelId(modelId) && !/[?*[\]{}]/.test(modelId);
+}
+
 function configuredModelSelectors(options: ExecutorOptions): string[] {
+	const configured = normalizeModelSelectors(options.agent.model);
 	const override = normalizeModelSelectors(options.modelOverride);
-	return override.length > 0 ? override : normalizeModelSelectors(options.agent.model);
+	const claudeOverride = override.filter(isAnthropicClaudeSelector);
+	// OMP may replace the configured subagent model with the parent model when OMP cannot authenticate it.
+	// Anima owns Claude credentials, so only honor an override that still selects Claude.
+	return claudeOverride.length > 0 ? claudeOverride : configured.length > 0 ? configured : override;
 }
 
 function resolveClaudeModel(options: ExecutorOptions): string {
