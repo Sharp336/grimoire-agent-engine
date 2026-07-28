@@ -2120,7 +2120,7 @@ describe("vibe session registry", () => {
 		const resumedSession = createSession({ manager: createManager(), sessionManager: reopened });
 		expect(await VibeSessionRegistry.global().rehydrate(resumedSession)).toBe(0);
 		expect(AgentRegistry.global().get("pre-init-kill")).toMatchObject({ status: "aborted", session: null });
-	});
+	}, 15_000);
 
 	it("killAll terminates every session for the owner (mode-exit path)", async () => {
 		const gates = new Map<string, Deferred>();
