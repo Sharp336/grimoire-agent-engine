@@ -286,15 +286,29 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		dispatch(target, "change");
 	};
 	if (command === "selectOption") {
-		if (String(element.tagName || "").toLowerCase() !== "select") throw new Error("locator.selectOption requires a select element");
-		const options = Array.from(element.options);
-		const resolved = payload.selections.map(selection => options.find(option => (selection.value === undefined || option.value === selection.value) && (selection.label === undefined || option.label === selection.label) && (selection.index === undefined || option.index === selection.index)));
+		const label = String(element.tagName || "").toLowerCase() === "label" ? element : element.closest?.("label");
+		const select =
+			String(element.tagName || "").toLowerCase() === "select"
+				? element
+				: (label?.control ?? label?.querySelector?.("select"));
+		if (String(select?.tagName || "").toLowerCase() !== "select")
+			throw new Error("locator.selectOption requires a select element");
+		const options = Array.from(select.options);
+		const resolved = payload.selections.map(selection =>
+			options.find(option =>
+				typeof selection === "string"
+					? option.value === selection || option.label === selection
+					: (selection.value === undefined || option.value === selection.value) &&
+						(selection.label === undefined || option.label === selection.label) &&
+						(selection.index === undefined || option.index === selection.index),
+			),
+		);
 		if (resolved.some(option => !option)) throw new Error("locator.selectOption could not resolve every requested option");
-		const selected = new Set(element.multiple ? resolved : resolved.slice(0, 1));
+		const selected = new Set(select.multiple ? resolved : resolved.slice(0, 1));
 		for (const option of options) option.selected = selected.has(option);
-		dispatch(element, "input");
-		dispatch(element, "change");
-		return Array.from(element.selectedOptions).map(option => option.value);
+		dispatch(select, "input");
+		dispatch(select, "change");
+		return Array.from(select.selectedOptions).map(option => option.value);
 	}
 	if (command === "fill" || command === "type") {
 		setValue(element, String(payload.value), command === "type", "locator." + command);

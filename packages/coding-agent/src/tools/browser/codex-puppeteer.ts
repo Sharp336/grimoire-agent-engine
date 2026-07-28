@@ -2472,21 +2472,34 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 						label: string;
 						selected: boolean;
 					}
-					const select = element as unknown as {
+					const source = element as unknown as {
+						tagName: string;
+						control?: unknown;
+						querySelector?(selector: string): unknown;
+						closest(selector: string): {
+							control?: unknown;
+							querySelector?(selector: string): unknown;
+						} | null;
+					};
+					const label = source.tagName === "LABEL" ? source : source.closest("label");
+					const select = (
+						source.tagName === "SELECT" ? source : (label?.control ?? label?.querySelector?.("select"))
+					) as {
 						tagName: string;
 						multiple: boolean;
 						options: ArrayLike<SelectOptionLike>;
 						dispatchEvent(event: unknown): boolean;
-					};
-					if (select.tagName !== "SELECT") throw new Error("locator.selectOption requires a select element");
-					const selections = rawSelections as Array<{ value?: string; label?: string; index?: number }>;
+					} | null;
+					if (select?.tagName !== "SELECT") throw new Error("locator.selectOption requires a select element");
+					const selections = rawSelections as Array<string | { value?: string; label?: string; index?: number }>;
 					const matches: number[] = [];
 					for (const selection of selections) {
-						const index = Array.from(select.options).findIndex(
-							(option, optionIndex) =>
-								(selection.value === undefined || option.value === selection.value) &&
-								(selection.label === undefined || option.label === selection.label) &&
-								(selection.index === undefined || selection.index === optionIndex),
+						const index = Array.from(select.options).findIndex((option, optionIndex) =>
+							typeof selection === "string"
+								? option.value === selection || option.label === selection
+								: (selection.value === undefined || option.value === selection.value) &&
+									(selection.label === undefined || option.label === selection.label) &&
+									(selection.index === undefined || selection.index === optionIndex),
 						);
 						if (index < 0) throw new Error("locator.selectOption could not find a requested option");
 						if (!matches.includes(index)) matches.push(index);

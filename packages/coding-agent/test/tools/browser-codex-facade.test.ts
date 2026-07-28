@@ -981,7 +981,7 @@ describe("Codex agent.browser public contract", () => {
 		});
 	});
 
-	it("normalizes every selectOption string field, including empty strings", async () => {
+	it("preserves string select options while normalizing object fields, including empty strings", async () => {
 		const adapter = new RecordingAdapter(operation => {
 			if (operation === "tab.selected") return { id: "1" };
 			if (operation === "locator.selectOption") return ["", "", "", "value"];
@@ -996,7 +996,7 @@ describe("Codex agent.browser public contract", () => {
 		).resolves.toEqual(["", "", "", "value"]);
 		const call = adapter.calls.find(entry => entry.operation === "locator.selectOption");
 		expect(call?.args.selections).toEqual([
-			{ value: "" },
+			"",
 			{ value: "" },
 			{ label: "" },
 			{ value: "value", label: "", index: 0 },

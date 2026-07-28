@@ -844,7 +844,7 @@ export class CodexLocator {
 		const input = Array.isArray(selection) ? selection : [selection];
 		if (input.length === 0) throw new Error("locator.selectOption requires at least one selection");
 		const normalized = input.map(item => {
-			if (typeof item === "string") return { value: item };
+			if (typeof item === "string") return item;
 			const value = requireObject(item, "locator.selectOption");
 			assertAllowedKeys(value, "locator.selectOption", SELECT_OPTION_KEYS);
 			if (value.value === undefined && value.label === undefined && value.index === undefined) {

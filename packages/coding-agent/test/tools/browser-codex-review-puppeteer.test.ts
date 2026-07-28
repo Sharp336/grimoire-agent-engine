@@ -2966,6 +2966,21 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("matches string labels and resolves label descendants to their select controls", async () => {
+		await withPuppeteerTool(async (tool, name) => {
+			const result = await runBrowserCode(
+				tool,
+				name,
+				`const t=await agent.browser.tabs.selected();
+				 await page.evaluate(()=>{ document.body.innerHTML='<label>Country <span id="country-label">Choose</span><select id="country"><option value="us">United States</option><option value="ca">Canada</option></select></label>'; });
+				 const fromLabel=await t.playwright.locator("#country-label").selectOption("ca");
+				 const fromString=await t.playwright.locator("#country").selectOption("United States");
+				 return {fromLabel,fromString,current:await page.evaluate(()=>document.querySelector("#country").value)};`,
+			);
+			expect(result).toEqual({ fromLabel: ["ca"], fromString: ["us"], current: "us" });
+		});
+	}, 20_000);
+
 	it("removes temporary and destination media files after a rename completes past the deadline", async () => {
 		const rename = Promise.withResolvers<void>();
 		const removed: string[] = [];

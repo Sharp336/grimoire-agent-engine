@@ -871,6 +871,69 @@ describe("cmux Codex browser review regressions", () => {
 		expect(probe.selectedValues()).toEqual(["preferred"]);
 	});
 
+	it("matches string labels and resolves label descendants to their select controls", async () => {
+		const { document, window } = parseHTML(`
+			<html><body>
+				<label>Country <span id="country-label">Choose</span>
+					<select id="country">
+						<option value="us">United States</option>
+						<option value="ca">Canada</option>
+					</select>
+				</label>
+			</body></html>
+		`);
+		interface SelectOptionFixture {
+			value: string;
+			textContent: string | null;
+			selected: boolean;
+		}
+		const select = document.querySelector("#country") as unknown as {
+			selectedOptions: ArrayLike<SelectOptionFixture>;
+		} | null;
+		if (!select) throw new Error("Expected country select");
+		const selectOptions = Array.from(
+			document.querySelectorAll("#country option"),
+		) as unknown as SelectOptionFixture[];
+		for (const [index, option] of selectOptions.entries()) {
+			Reflect.set(option, "index", index);
+			Reflect.set(option, "label", option.textContent ?? "");
+			let selected = false;
+			Object.defineProperty(option, "selected", {
+				configurable: true,
+				get: () => selected,
+				set: (value: boolean) => {
+					selected = value;
+				},
+			});
+		}
+		Object.defineProperty(select, "options", { configurable: true, value: selectOptions });
+		Object.defineProperty(select, "selectedOptions", {
+			configurable: true,
+			get: () => selectOptions.filter(option => option.selected),
+		});
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible", opacity: "1" }));
+		for (const element of document.querySelectorAll("*")) {
+			Reflect.set(element, "getBoundingClientRect", () => ({ x: 0, y: 0, width: 100, height: 20 }));
+			Reflect.set(element, "scrollIntoView", () => undefined);
+		}
+		const current = await selectedTab(
+			facadeFor({
+				async codexEvaluate(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window, Element: window.Element });
+				},
+			}),
+		);
+
+		const fromLabel = await current.playwright.locator("#country-label").selectOption("ca");
+		const fromString = await current.playwright.locator("#country").selectOption("United States");
+
+		expect({ fromLabel, fromString, current: Array.from(select.selectedOptions, option => option.value) }).toEqual({
+			fromLabel: ["ca"],
+			fromString: ["us"],
+			current: ["us"],
+		});
+	});
+
 	it("propagates log RPC failures instead of fabricating an empty log history", async () => {
 		const browser = facadeFor({
 			async codexRequest(method: string) {
