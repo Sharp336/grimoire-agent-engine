@@ -39,6 +39,16 @@ function fixtureConfig(): MCPStdioServerConfig {
 	return { type: "stdio", command: process.execPath, args: [FIXTURE_PATH] };
 }
 
+async function connectFixtureServers(manager: MCPManager): Promise<void> {
+	await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+	await Promise.all(
+		[SHORT_SERVER, COLON_SERVER].map(async serverName => {
+			await manager.waitForConnection(serverName);
+			await manager.refreshServerTools(serverName);
+		}),
+	);
+}
+
 describe("MCP tool ownership with prefix-colliding server names", () => {
 	let workDir: string;
 	let manager: MCPManager;
@@ -54,7 +64,7 @@ describe("MCP tool ownership with prefix-colliding server names", () => {
 	});
 
 	it("refreshing one server keeps the sibling server's tools registered", async () => {
-		await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+		await connectFixtureServers(manager);
 		const names = () => manager.getTools().map(t => t.name);
 		expect(names()).toContain(SHORT_TOOL);
 		expect(names()).toContain(COLON_TOOL);
@@ -78,7 +88,7 @@ describe("MCP tool ownership with prefix-colliding server names", () => {
 	}, 20_000);
 
 	it("disconnecting a server with sanitized name characters removes exactly its tools", async () => {
-		await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+		await connectFixtureServers(manager);
 		const payloads: string[][] = [];
 		manager.setOnToolsChanged(tools => payloads.push(tools.map(t => t.name)));
 
