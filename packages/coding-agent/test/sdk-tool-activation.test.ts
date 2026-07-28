@@ -701,6 +701,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 	});
 
+	it("resolves bridge frame paths through the session's live cwd", async () => {
+		// The bridge is built once, at session creation, while the session's cwd
+		// moves under it (`/cd`, resume, branch restore). The path-confining
+		// frames — the native `delete`, and a `download_path` resource read —
+		// resolve a relative path against whichever cwd the bridge was handed, so
+		// a startup snapshot means acting on the workspace the session has left
+		// while reporting success for the path the server named.
+		const tempDir = makeTempDir();
+		const movedDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+		const staleTarget = path.join(tempDir, "obsolete.txt");
+		const liveTarget = path.join(movedDir, "obsolete.txt");
+		fs.writeFileSync(staleTarget, "preserve me");
+		fs.writeFileSync(liveTarget, "remove me");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory();
+			const { session } = await createAgentSession({ ...baseOptions(tempDir), sessionManager });
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+				await sessionManager.moveTo(movedDir);
+
+				const result = await handlers.delete({ toolCallId: "sdk-cwd-1", path: "obsolete.txt" } as never);
+
+				expect(result.isError).toBe(false);
+				expect(fs.existsSync(liveTarget)).toBe(false);
+				expect(fs.existsSync(staleTarget)).toBe(true);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
 	it("does not execute an unadvertised edit call through the fallback resolver", async () => {
 		// One resolver serves two roles: the session's device resolver is passed
 		// to the bridge as `getExecutableTool` AND installed as the agent loop's

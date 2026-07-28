@@ -2685,6 +2685,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 		const cursorExecHandlers = new CursorExecHandlers({
 			cwd,
+			// The session's cwd moves (`/cd`, resume, branch restore) while this
+			// bridge is built once at startup. Path-confining frames — the native
+			// `delete` and a `download_path` resource read — resolve against
+			// whichever of the two they are given, so without the live resolver the
+			// primary would write into the workspace the session has left while
+			// reporting success for the path the server asked about. The advisor
+			// bridge already passes one.
+			getCwd: () => sessionManager.getCwd(),
 			tools: toolRegistry,
 			getExecutableTool: resolveDeviceTool,
 			// `pi_edit` needs the `replace`-mode instance specifically, and the
