@@ -1864,6 +1864,44 @@ describe("compact() remote compaction failure handling", () => {
 		});
 	});
 
+	test("uses an explicit remote endpoint after provider-native compaction fails", async () => {
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local fallback"));
+		const preparation = makePreparation();
+		preparation.settings = {
+			...preparation.settings,
+			remoteEndpoint: "http://summary.test/v1/chat/completions",
+			remoteStreamingV2Enabled: true,
+		};
+		const model = makeOpenAiModel({
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			requestedUrls.push(url);
+			if (url === preparation.settings.remoteEndpoint) {
+				const summary =
+					requestedUrls.filter(requested => requested === url).length === 1
+						? "configured remote history summary"
+						: "configured remote short summary";
+				return Response.json({ choices: [{ message: { content: summary } }] });
+			}
+			return new Response("native compaction unavailable", { status: 400, statusText: "Bad Request" });
+		};
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		expect(requestedUrls.map(url => new URL(url).pathname)).toEqual([
+			"/v1/responses",
+			"/v1/responses/compact",
+			"/v1/chat/completions",
+			"/v1/chat/completions",
+		]);
+		expect(result.summary).toContain("configured remote history summary");
+		expect(result.shortSummary).toBe("configured remote short summary");
+		expect(completeSpy).not.toHaveBeenCalled();
+	});
+
 	test("native compaction server failure rejects without generic summarization", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const fetchMock: FetchImpl = async () =>

@@ -1555,7 +1555,7 @@ export async function compact(
 		}
 	}
 
-	if (!usedRemoteCompaction && nativeCompactionError !== undefined) {
+	if (!usedRemoteCompaction && nativeCompactionError !== undefined && !summaryOptions.remoteEndpoint) {
 		throw new NativeCompactionError(nativeCompactionError);
 	}
 
