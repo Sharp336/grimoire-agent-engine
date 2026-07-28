@@ -7219,21 +7219,29 @@ export class AgentSession {
 			this.#pendingRewindReport = previousPendingRewindReport;
 			this.#lastCompletedRewind = previousLastCompletedRewind;
 			this.#rewoundToolResultIds = previousRewoundToolResultIds;
+			// The try block may have already reached #setModelWithProviderSessionReset
+			// for the target session's model, which emits `model_changed` for it.
+			// Restoring here bypasses that method (it also resets provider-session
+			// state we're already unwinding above), so if the rollback actually
+			// changes the model back, emit the corrective event ourselves —
+			// otherwise ACP/RPC/TUI keep advertising the never-committed target.
+			// Deferred until after restoreThinkingSnapshot below: #emit's listeners
+			// (ACP's #handleLifetimeEvent -> #pushConfigOptionUpdate) read
+			// session state synchronously before their first await, so emitting
+			// here — before the target session's thinking level is unwound —
+			// would push a { previousModel, target-session-thinking } config that
+			// was never a real session state.
+			let modelRolledBack = false;
 			if (previousModel) {
-				// The try block may have already reached #setModelWithProviderSessionReset
-				// for the target session's model, which emits `model_changed` for it.
-				// Restoring here bypasses that method (it also resets provider-session
-				// state we're already unwinding above), so if the rollback actually
-				// changes the model back, emit the corrective event ourselves —
-				// otherwise ACP/RPC/TUI keep advertising the never-committed target.
 				const rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
-				if (!modelsAreEqual(rolledBackModel, previousModel)) {
-					this.#emit({ type: "model_changed" });
-				}
+				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
+			if (modelRolledBack) {
+				this.#emit({ type: "model_changed" });
+			}
 			this.#todo.syncFromBranch();
 			this.#advisors.resetAllRuntimes();
 			this.#reconnectToAgent();
