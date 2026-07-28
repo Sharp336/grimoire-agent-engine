@@ -1,14 +1,22 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import type { AgentDefinition, ExecutorOptions } from "@oh-my-pi/pi-coding-agent";
+import type {
+	AgentDefinition,
+	ExecutorOptions,
+	ExtensionAPI,
+	ExtensionCommandContext,
+} from "@oh-my-pi/pi-coding-agent";
 import { AnimaExecutorController } from "../src/executor";
+import animaExtension, { handleAnimaCommand } from "../src/extension";
 import type { AnimaControl, ControlEvent, ControlRequestOptions, ProtocolHello } from "../src/protocol";
 
 const HELLO: ProtocolHello = {
 	protocol: "anima-control",
 	version: 1,
 	anima_version: "test",
-	methods: ["invoke.start", "invoke.observe", "invoke.wait_turn", "invoke.cancel", "invoke.release"],
+	owner: "external:omp:test-sidecar",
+	mailbox: "omp-test-sidecar-Main",
+	methods: ["invoke.start", "invoke.observe", "invoke.wait_turn", "invoke.cancel", "invoke.message", "invoke.release"],
 	capabilities: { turn_authority: true },
 	limits: { max_line_bytes: 1_048_576, max_in_flight: 128 },
 };
@@ -51,6 +59,8 @@ class FakeControl implements AnimaControl {
 					session_name: "omp-agent-1",
 					state: "generating",
 				} as T;
+			case "invoke.message":
+				return { message_id: "message-1" } as T;
 			default:
 				return {} as T;
 		}
@@ -95,7 +105,6 @@ describe("AnimaExecutorController", () => {
 			client: new FakeControl(),
 			agentRoot: path.resolve(import.meta.dir, "../agents"),
 			allowAgentNames: ["project-claude"],
-			owner: "external:omp:test",
 		});
 		expect(controller.executor.claim(packagedAgent())).toBe(true);
 		expect(
@@ -109,11 +118,16 @@ describe("AnimaExecutorController", () => {
 		const controller = new AnimaExecutorController({
 			client,
 			agentRoot: path.resolve(import.meta.dir, "../agents"),
-			owner: "external:omp:test",
 		});
 		const progress: string[] = [];
 		const result = await controller.executor.execute({
 			...executorOptions(),
+			worktree: "/tmp/caller-worktree",
+			context: "Shared background from the parent task.",
+			planReference: { path: "local://approved-plan.md", content: "1. Preserve the protocol boundary." },
+			modelOverride: "anthropic/claude-opus-4-6:high",
+			outputSchema: { result: "string" },
+			outputSchemaOverridesAgent: true,
 			onProgress: event => progress.push(event.lastIntent ?? ""),
 		});
 
@@ -132,14 +146,97 @@ describe("AnimaExecutorController", () => {
 		expect(client.calls.map(call => call.method)).toEqual(["invoke.start", "invoke.wait_turn", "invoke.release"]);
 		const start = client.calls[0]?.params as Record<string, unknown>;
 		expect(start.assignment).toBe("Shared context\n\nInspect the target exactly once.");
-		expect(start).not.toHaveProperty("context");
+		expect(start.owner).toBe("external:omp:test-sidecar");
+		expect(start.mailbox).toBe("omp-test-sidecar-Main");
+		expect(start.context).toBe("Shared background from the parent task.");
+		expect(start.workdir).toBe("/tmp/caller-worktree");
 		expect(start.worktree).toBe(false);
-		expect(start.route).toMatchObject({ harness: "claude", provider: "anthropic", effort: "high" });
-		expect(start.core_prompt).toEqual({
-			body: "Review exactly once.",
-			sha256: "6484359fa323e2b597bc6a29f191c1d7af29e9dd1233e3e9bd19d418a4a7a0c8",
+		expect(start.route).toMatchObject({
+			harness: "claude",
+			provider: "anthropic",
+			model: "claude-opus-4-6",
+			effort: "high",
 		});
+		const corePrompt = start.core_prompt as { body: string; sha256: string };
+		expect(corePrompt.body).toContain("Review exactly once.");
+		expect(corePrompt.body).toContain("Shared background from the parent task.");
+		expect(corePrompt.body).toContain("local://approved-plan.md");
+		expect(corePrompt.body).toContain("1. Preserve the protocol boundary.");
+		expect(corePrompt.body).toContain("caller-owned working tree at `/tmp/caller-worktree`");
+		expect(corePrompt.body).toContain("OMP role grants only these tool capabilities: read");
+		expect(corePrompt.body).toContain('"result": "string"');
+		expect(corePrompt.body).toContain("final assistant response");
+		expect(corePrompt.body).not.toContain("Shared context\n\nInspect the target exactly once.");
+		expect(corePrompt.body.toLowerCase()).not.toContain("yield");
+		expect(corePrompt.sha256).toBe(new Bun.CryptoHasher("sha256").update(corePrompt.body).digest("hex"));
+		expect(client.calls[0]?.options?.id).toBe("start:external:omp:test-sidecar:task-2");
 		expect(progress.some(line => line.includes("creating durable invocation"))).toBe(true);
+	});
+
+	it("fails preflight when an agent configures a non-Anthropic model", async () => {
+		const client = new FakeControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const result = await controller.executor.execute(
+			executorOptions({ ...packagedAgent(), model: ["openai/gpt-5.4"] }),
+		);
+
+		expect(result).toMatchObject({
+			exitCode: 1,
+			error: "unsupported_model_selector",
+			stderr: 'Anima Claude executor requires an explicit Anthropic model selector; received "openai/gpt-5.4"',
+		});
+		expect(client.calls).toEqual([]);
+	});
+
+	it("keeps the released worker addressable and delivers follow-up to its original invocation", async () => {
+		const client = new FakeControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+			retention: "keep",
+		});
+
+		expect((await controller.executor.execute(executorOptions())).exitCode).toBe(0);
+		const messageId = await controller.message("task-2", "Check the remaining edge case.");
+
+		expect(messageId).toBe("message-1");
+		expect(client.calls.map(call => call.method)).toEqual([
+			"invoke.start",
+			"invoke.wait_turn",
+			"invoke.release",
+			"invoke.message",
+		]);
+		expect(client.calls[2]?.params).toEqual({ invocation_id: "in-1", policy: "keep" });
+		expect(client.calls[3]?.params).toEqual({
+			invocation_id: "in-1",
+			body: "Check the remaining edge case.",
+			priority: 0,
+		});
+		expect(controller.list()).toEqual([
+			expect.objectContaining({
+				requestId: "task-2",
+				invocationId: "in-1",
+				state: "released",
+				lastMessageId: "message-1",
+				detail: "follow-up message message-1 delivered",
+			}),
+		]);
+	});
+
+	it("rejects follow-up for an unknown task without contacting Anima", async () => {
+		const client = new FakeControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+
+		expect(controller.message("missing-task", "Continue.")).rejects.toThrow(
+			'Unknown Anima invocation "missing-task"',
+		);
+		expect(client.calls).toEqual([]);
 	});
 
 	it("cancels the durable invocation before returning an aborted result", async () => {
@@ -149,7 +246,6 @@ describe("AnimaExecutorController", () => {
 		const controller = new AnimaExecutorController({
 			client,
 			agentRoot: path.resolve(import.meta.dir, "../agents"),
-			owner: "external:omp:test",
 		});
 		const abort = new AbortController();
 		const pending = controller.executor.execute({ ...executorOptions(), signal: abort.signal });
@@ -172,7 +268,6 @@ describe("AnimaExecutorController", () => {
 		const controller = new AnimaExecutorController({
 			client,
 			agentRoot: path.resolve(import.meta.dir, "../agents"),
-			owner: "external:omp:test",
 		});
 		const result = await controller.executor.execute({
 			...executorOptions(),
@@ -180,5 +275,84 @@ describe("AnimaExecutorController", () => {
 		});
 		expect(result).toMatchObject({ exitCode: 1, error: "unsupported_additional_directories" });
 		expect(client.calls).toEqual([]);
+	});
+});
+
+describe("Anima extension commands", () => {
+	it("rejects invalid retention during extension registration", () => {
+		const previous = process.env.ANIMA_OMP_RETENTION;
+		process.env.ANIMA_OMP_RETENTION = "destroy";
+		try {
+			expect(() => animaExtension({} as ExtensionAPI)).toThrow(
+				'Invalid ANIMA_OMP_RETENTION "destroy"; expected "park" or "keep"',
+			);
+		} finally {
+			if (previous === undefined) delete process.env.ANIMA_OMP_RETENTION;
+			else process.env.ANIMA_OMP_RETENTION = previous;
+		}
+	});
+
+	it("fails safely when message task ID or text is missing or unknown", async () => {
+		const client = new FakeControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const notifications: Array<{ message: string; type?: "info" | "warning" | "error" }> = [];
+		let confirmations = 0;
+		const ctx = {
+			ui: {
+				notify: (message: string, type?: "info" | "warning" | "error") => notifications.push({ message, type }),
+				confirm: () => {
+					confirmations += 1;
+					return Promise.resolve(true);
+				},
+			},
+		} as unknown as ExtensionCommandContext;
+
+		await handleAnimaCommand("message", ctx, controller);
+		await handleAnimaCommand("message task-2", ctx, controller);
+		await handleAnimaCommand("message unknown Continue.", ctx, controller);
+
+		expect(notifications).toEqual([
+			{ message: "Usage: /anima message <task-id> <text...>", type: "error" },
+			{ message: "Usage: /anima message <task-id> <text...>", type: "error" },
+			{ message: 'Unknown Anima invocation "unknown"', type: "error" },
+		]);
+		expect(confirmations).toBe(0);
+		expect(client.calls).toEqual([]);
+	});
+
+	it("delivers message text without confirmation", async () => {
+		const client = new FakeControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+			retention: "keep",
+		});
+		expect((await controller.executor.execute(executorOptions())).exitCode).toBe(0);
+		client.calls.length = 0;
+		const notifications: Array<{ message: string; type?: "info" | "warning" | "error" }> = [];
+		let confirmations = 0;
+		const ctx = {
+			ui: {
+				notify: (message: string, type?: "info" | "warning" | "error") => notifications.push({ message, type }),
+				confirm: () => {
+					confirmations += 1;
+					return Promise.resolve(true);
+				},
+			},
+		} as unknown as ExtensionCommandContext;
+
+		await handleAnimaCommand("message task-2 Check   this edge case.", ctx, controller);
+
+		expect(confirmations).toBe(0);
+		expect(client.calls.map(call => call.method)).toEqual(["invoke.message"]);
+		expect(client.calls[0]?.params).toEqual({
+			invocation_id: "in-1",
+			body: "Check   this edge case.",
+			priority: 0,
+		});
+		expect(notifications).toEqual([{ message: "task-2: message message-1 delivered", type: "info" }]);
 	});
 });

@@ -13,7 +13,13 @@ describe("StdioControlClient", () => {
 	it("negotiates protocol v1 and correlates out-of-order responses", async () => {
 		client = new StdioControlClient(["bun", path.join(import.meta.dir, "fixtures/control-server.ts")]);
 		const hello = await client.hello();
-		expect(hello).toMatchObject({ protocol: "anima-control", version: 1, anima_version: "fixture" });
+		expect(hello).toMatchObject({
+			protocol: "anima-control",
+			version: 1,
+			anima_version: "fixture",
+			owner: "external:omp:fixture",
+			mailbox: "omp-fixture-Main",
+		});
 
 		const first = client.request<{ order: number }>("test.first", {}, { id: "first" });
 		const second = client.request<{ order: number }>("test.second", {}, { id: "second" });
@@ -40,5 +46,17 @@ describe("StdioControlClient", () => {
 			expect(error).toBeInstanceOf(ControlProtocolError);
 			expect(error).toMatchObject({ code: "unknown_method", message: "test.missing", retryable: false });
 		}
+	});
+
+	it("rejects a control server without durable invocation messaging", async () => {
+		client = new StdioControlClient([
+			"bun",
+			path.join(import.meta.dir, "fixtures/control-server.ts"),
+			"--omit-message",
+		]);
+		expect(client.hello()).rejects.toMatchObject({
+			code: "missing_method",
+			message: "Anima control is missing required methods: invoke.message",
+		});
 	});
 });

@@ -4,6 +4,7 @@ const REQUIRED_METHODS = [
 	"invoke.observe",
 	"invoke.wait_turn",
 	"invoke.cancel",
+	"invoke.message",
 	"invoke.release",
 ] as const;
 
@@ -29,6 +30,8 @@ export interface ProtocolHello {
 	protocol: "anima-control";
 	version: number;
 	anima_version: string;
+	owner: string;
+	mailbox: string;
 	methods: string[];
 	capabilities: Record<string, boolean>;
 	limits: {
@@ -40,6 +43,17 @@ export interface ProtocolHello {
 export interface ControlRequestOptions {
 	id?: string;
 	timeoutMs?: number;
+}
+
+export interface InvokeMessageParams {
+	invocation_id: string;
+	subject?: string;
+	body: string;
+	priority: number;
+}
+
+export interface InvokeMessageResult {
+	message_id: string;
 }
 
 export interface AnimaControl {
@@ -149,6 +163,12 @@ export class StdioControlClient implements AnimaControl {
 			throw new ControlProtocolError(
 				"unsupported_protocol",
 				`Unsupported Anima control protocol ${JSON.stringify(hello.protocol)} version ${String(hello.version)}`,
+			);
+		}
+		if (!hello.owner || !hello.mailbox) {
+			throw new ControlProtocolError(
+				"invalid_response",
+				"Anima control hello is missing its process owner or mailbox",
 			);
 		}
 		const missing = REQUIRED_METHODS.filter(method => !hello.methods.includes(method));

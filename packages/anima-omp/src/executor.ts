@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { bareModelId } from "@oh-my-pi/pi-catalog/identity/classify";
+import { isClaudeModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import type {
 	AgentDefinition,
 	AgentProgress,
@@ -6,7 +8,9 @@ import type {
 	SingleResult,
 	SubagentExecutor,
 } from "@oh-my-pi/pi-coding-agent";
-import type { AnimaControl, ControlEvent } from "./protocol";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import claudeCorePromptTemplate from "./claude-core-prompt.md" with { type: "text" };
+import type { AnimaControl, ControlEvent, InvokeMessageParams, InvokeMessageResult } from "./protocol";
 
 export interface InvokeStartResult {
 	invocation_id: string;
@@ -51,22 +55,24 @@ export interface ActiveInvocation {
 	detail?: string;
 	attachRef?: string;
 	historyRef?: string;
+	lastMessageId?: string;
 }
 
 export interface AnimaExecutorConfig {
 	client: AnimaControl;
 	agentRoot: string;
 	allowAgentNames?: readonly string[];
-	owner?: string;
 	retention?: "park" | "keep";
 }
 
 interface InvokeStartParams {
 	owner: string;
+	mailbox: string;
 	agent_id: string;
 	session_name: string;
 	workdir: string;
 	assignment: string;
+	context?: string;
 	prompt_mode: "omp-core";
 	core_prompt: {
 		body: string;
@@ -110,6 +116,49 @@ function effortName(effort: ExecutorOptions["effort"]): "low" | "medium" | "high
 	}
 }
 
+function normalizeModelSelectors(value: string | readonly string[] | undefined): string[] {
+	const entries = typeof value === "string" ? [value] : (value ?? []);
+	return entries
+		.flatMap(entry => entry.split(","))
+		.map(entry => entry.trim())
+		.filter(Boolean);
+}
+
+function configuredModelSelectors(options: ExecutorOptions): string[] {
+	const override = normalizeModelSelectors(options.modelOverride);
+	return override.length > 0 ? override : normalizeModelSelectors(options.agent.model);
+}
+
+function resolveClaudeModel(options: ExecutorOptions): string {
+	const selectors = configuredModelSelectors(options);
+	let model = "";
+	for (const selector of selectors) {
+		const slash = selector.indexOf("/");
+		const provider = slash === -1 ? "anthropic" : selector.slice(0, slash);
+		const modelId = bareModelId(selector).replace(/:(?:inherit|off|minimal|low|medium|high|xhigh|max|auto)$/, "");
+		if (provider !== "anthropic" || !isClaudeModelId(modelId) || /[?*[\]{}]/.test(modelId)) {
+			throw new Error(
+				`Anima Claude executor requires an explicit Anthropic model selector; received ${JSON.stringify(selector)}`,
+			);
+		}
+		model ||= modelId;
+	}
+	return model;
+}
+
+function renderClaudeCorePrompt(options: ExecutorOptions, worktree: string): string {
+	return prompt.render(claudeCorePromptTemplate, {
+		role: options.agent.systemPrompt.trim(),
+		context: options.context?.trim() ?? "",
+		planReference: options.planReference?.content.trim() ?? "",
+		planReferencePath: options.planReference?.path ?? "",
+		worktree,
+		toolNames: options.agent.tools?.join(", ") ?? "",
+		outputSchema: options.outputSchema === undefined ? "" : JSON.stringify(options.outputSchema, null, 2),
+		outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+	});
+}
+
 function finalResult(
 	options: ExecutorOptions,
 	startTime: number,
@@ -140,7 +189,6 @@ export class AnimaExecutorController {
 	readonly #client: AnimaControl;
 	readonly #agentRoot: string;
 	readonly #allowAgentNames: ReadonlySet<string>;
-	readonly #owner: string;
 	readonly #retention: "park" | "keep";
 	readonly #active = new Map<string, ActiveInvocation>();
 
@@ -148,7 +196,6 @@ export class AnimaExecutorController {
 		this.#client = config.client;
 		this.#agentRoot = path.resolve(config.agentRoot);
 		this.#allowAgentNames = new Set(config.allowAgentNames ?? []);
-		this.#owner = config.owner ?? `external:omp:${crypto.randomUUID()}`;
 		this.#retention = config.retention ?? "park";
 		this.executor = {
 			id: "anima",
@@ -184,10 +231,25 @@ export class AnimaExecutorController {
 		const active = this.#requireActive(requestId);
 		await this.#client.request(
 			"invoke.release",
-			{ invocation_id: active.invocationId, retention: this.#retention },
+			{ invocation_id: active.invocationId, policy: this.#retention },
 			{ id: `release:${active.invocationId}` },
 		);
 		active.state = "released";
+	}
+
+	async message(requestId: string, text: string): Promise<string> {
+		const active = this.#requireActive(requestId);
+		const params: InvokeMessageParams = {
+			invocation_id: active.invocationId,
+			body: text,
+			priority: 0,
+		};
+		const result = await this.#client.request<InvokeMessageResult>("invoke.message", params, {
+			id: `message:${active.invocationId}:${crypto.randomUUID()}`,
+		});
+		active.lastMessageId = result.message_id;
+		active.detail = `follow-up message ${result.message_id} delivered`;
+		return result.message_id;
 	}
 
 	#claims(agent: Readonly<AgentDefinition>): boolean {
@@ -217,44 +279,59 @@ export class AnimaExecutorController {
 				abortReason: String(options.signal.reason ?? "aborted"),
 			});
 		}
+		let model: string;
+		try {
+			model = resolveClaudeModel(options);
+		} catch (error) {
+			return finalResult(options, startTime, {
+				exitCode: 1,
+				output: "",
+				stderr: error instanceof Error ? error.message : String(error),
+				error: "unsupported_model_selector",
+			});
+		}
 
 		const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 10);
 		const label = safeLabel(options.agent.name, "agent");
 		const agentId = `${label}-${suffix}`;
 		const sessionName = `omp-${agentId}`;
-		const corePrompt = options.agent.systemPrompt;
+		const worktree = path.resolve(options.worktree ?? options.cwd);
+		const corePrompt = renderClaudeCorePrompt(options, worktree);
 		const sha256 = new Bun.CryptoHasher("sha256").update(corePrompt).digest("hex");
-		const startParams: InvokeStartParams = {
-			owner: this.#owner,
-			agent_id: agentId,
-			session_name: sessionName,
-			workdir: path.resolve(options.cwd),
-			assignment: options.task,
-			prompt_mode: "omp-core",
-			core_prompt: { body: corePrompt, sha256 },
-			identity: null,
-			profile: "code",
-			priority: "normal",
-			route: {
-				harness: "claude",
-				provider: "anthropic",
-				account: "",
-				model: "",
-				effort: effortName(options.effort),
-			},
-			retention: this.#retention,
-			worktree: false,
-		};
 
 		let active: ActiveInvocation | undefined;
 		let removeEventListener: (() => void) | undefined;
 		let removeAbortListener: (() => void) | undefined;
 		let released = false;
 		try {
-			await this.#client.hello();
+			const hello = await this.#client.hello();
+			const context = options.context?.trim();
+			const startParams: InvokeStartParams = {
+				owner: hello.owner,
+				mailbox: hello.mailbox,
+				agent_id: agentId,
+				session_name: sessionName,
+				workdir: worktree,
+				assignment: options.task,
+				...(context ? { context } : {}),
+				prompt_mode: "omp-core",
+				core_prompt: { body: corePrompt, sha256 },
+				identity: null,
+				profile: "code",
+				priority: "normal",
+				route: {
+					harness: "claude",
+					provider: "anthropic",
+					account: "",
+					model,
+					effort: effortName(options.effort),
+				},
+				retention: this.#retention,
+				worktree: false,
+			};
 			this.#emitProgress(options, startTime, "running", "Anima: creating durable invocation");
 			const started = await this.#client.request<InvokeStartResult>("invoke.start", startParams, {
-				id: `start:${this.#owner}:${options.id}`,
+				id: `start:${hello.owner}:${options.id}`,
 			});
 			active = {
 				requestId: options.id,
@@ -323,7 +400,7 @@ export class AnimaExecutorController {
 			this.#emitProgress(options, startTime, "completed", this.#progressLabel(active), outcome.text);
 			await this.#client.request(
 				"invoke.release",
-				{ invocation_id: active.invocationId, retention: this.#retention },
+				{ invocation_id: active.invocationId, policy: this.#retention },
 				{ id: `release:${active.invocationId}` },
 			);
 			released = true;
@@ -374,7 +451,7 @@ export class AnimaExecutorController {
 				try {
 					await this.#client.request(
 						"invoke.release",
-						{ invocation_id: active.invocationId, retention: this.#retention },
+						{ invocation_id: active.invocationId, policy: this.#retention },
 						{ id: `release:${active.invocationId}` },
 					);
 					active.state = "released";

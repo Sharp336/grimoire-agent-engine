@@ -12,6 +12,16 @@ function configuredAgentNames(): string[] {
 		.filter(Boolean);
 }
 
+function configuredRetention(): "park" | "keep" {
+	const configured = process.env.ANIMA_OMP_RETENTION;
+	if (configured === undefined) return "park";
+	const retention = configured.trim();
+	if (retention === "park" || retention === "keep") return retention;
+	throw new Error(
+		`Invalid ANIMA_OMP_RETENTION ${JSON.stringify(configured)}; expected ${JSON.stringify("park")} or ${JSON.stringify("keep")}`,
+	);
+}
+
 function formatStatus(invocation: ActiveInvocation): string {
 	const fields = [
 		`${invocation.requestId}: ${invocation.agentName} → anima`,
@@ -24,12 +34,13 @@ function formatStatus(invocation: ActiveInvocation): string {
 	return fields.filter(Boolean).join(" · ");
 }
 
-async function handleCommand(
+export async function handleAnimaCommand(
 	args: string,
 	ctx: ExtensionCommandContext,
 	controller: AnimaExecutorController,
 ): Promise<void> {
-	const [command = "status", requestId] = args.trim().split(/\s+/, 2);
+	const trimmedArgs = args.trim();
+	const [command = "status", requestId] = trimmedArgs.split(/\s+/, 2);
 	if (command === "status") {
 		if (requestId) {
 			try {
@@ -41,6 +52,22 @@ async function handleCommand(
 		}
 		const invocations = controller.list();
 		ctx.ui.notify(invocations.length > 0 ? invocations.map(formatStatus).join("\n") : "No Anima invocations", "info");
+		return;
+	}
+	if (command === "message") {
+		const match = /^message(?:\s+(\S+))?(?:\s+([\s\S]+))?$/.exec(trimmedArgs);
+		const messageRequestId = match?.[1];
+		const text = match?.[2]?.trim();
+		if (!messageRequestId || !text) {
+			ctx.ui.notify("Usage: /anima message <task-id> <text...>", "error");
+			return;
+		}
+		try {
+			const messageId = await controller.message(messageRequestId, text);
+			ctx.ui.notify(`${messageRequestId}: message ${messageId} delivered`, "info");
+		} catch (error) {
+			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		}
 		return;
 	}
 	if (!requestId) {
@@ -75,19 +102,24 @@ async function handleCommand(
 		}
 		return;
 	}
-	ctx.ui.notify("Usage: /anima [status [task-id] | attach <task-id> | cancel <task-id> | release <task-id>]", "error");
+	ctx.ui.notify(
+		"Usage: /anima [status [task-id] | attach <task-id> | message <task-id> <text...> | cancel <task-id> | release <task-id>]",
+		"error",
+	);
 }
 
 export default function animaExtension(pi: ExtensionAPI): void {
+	const retention = configuredRetention();
 	pi.setLabel("Anima Claude executor");
 	const controller = new AnimaExecutorController({
 		client: getSharedControlClient(),
 		agentRoot: AGENT_ROOT,
 		allowAgentNames: configuredAgentNames(),
+		retention,
 	});
 	pi.registerSubagentExecutor(controller.executor);
 	pi.registerCommand("anima", {
 		description: "Inspect and control Anima-managed Claude task agents",
-		handler: (args, ctx) => handleCommand(args, ctx, controller),
+		handler: (args, ctx) => handleAnimaCommand(args, ctx, controller),
 	});
 }

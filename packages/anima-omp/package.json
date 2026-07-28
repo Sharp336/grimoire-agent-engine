@@ -12,6 +12,10 @@
     "fmt": "biome format --write .",
     "test": "bun test"
   },
+  "dependencies": {
+    "@oh-my-pi/pi-catalog": "workspace:*",
+    "@oh-my-pi/pi-utils": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "^1.3.14"
   },

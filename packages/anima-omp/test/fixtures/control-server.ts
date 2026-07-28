@@ -1,6 +1,15 @@
 const decoder = new TextDecoder();
 let buffered = "";
 let deferred: { id: string } | undefined;
+const methods = [
+	"invoke.start",
+	"invoke.observe",
+	"invoke.wait_turn",
+	"invoke.cancel",
+	"invoke.message",
+	"invoke.release",
+];
+if (process.argv.includes("--omit-message")) methods.splice(methods.indexOf("invoke.message"), 1);
 
 function send(value: unknown): void {
 	process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -24,7 +33,9 @@ for await (const chunk of Bun.stdin.stream()) {
 						protocol: "anima-control",
 						version: 1,
 						anima_version: "fixture",
-						methods: ["invoke.start", "invoke.observe", "invoke.wait_turn", "invoke.cancel", "invoke.release"],
+						owner: "external:omp:fixture",
+						mailbox: "omp-fixture-Main",
+						methods,
 						capabilities: { turn_authority: true },
 						limits: { max_line_bytes: 1_048_576, max_in_flight: 128 },
 					},
