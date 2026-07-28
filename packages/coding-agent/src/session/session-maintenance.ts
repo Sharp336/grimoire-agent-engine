@@ -2542,16 +2542,24 @@ export class SessionMaintenance {
 								break;
 							}
 							if (AIError.is(id, AIError.Flag.Timeout)) {
+								const nativeFailure = error instanceof NativeCompactionError;
 								logger.warn(
-									hasMoreCandidates
-										? "Auto-compaction summarization timed out, trying next model"
-										: "Auto-compaction summarization timed out, not retrying same model",
+									nativeFailure
+										? "Provider-native auto-compaction timed out, preserving native failure"
+										: hasMoreCandidates
+											? "Auto-compaction summarization timed out, trying next model"
+											: "Auto-compaction summarization timed out, not retrying same model",
 									{
 										error: message,
 										model: `${candidate.provider}/${candidate.id}`,
 									},
 								);
-								lastError = error;
+								if (nativeFailure) {
+									nativeCompactionFailure ??= { error, provider: candidate.provider };
+									lastError = nativeCompactionFailure.error;
+								} else {
+									lastError = error;
+								}
 								break;
 							}
 

@@ -223,6 +223,35 @@ describe("issue #986 compaction auth fallback", () => {
 		]);
 		expect(waitSpy).toHaveBeenCalledTimes(1);
 	});
+
+	it("preserves native timeout failures before crossing providers", async () => {
+		const { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
+			await createAutoNativeFallbackSession();
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.provider === currentModel.provider || model.provider === sameProviderModel.provider) {
+				throw new compactionModule.NativeCompactionError(new Error("provider stream stall timeout"));
+			}
+			if (model.provider !== crossProviderModel.provider || model.id !== crossProviderModel.id) {
+				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+			}
+			return {
+				summary: "cross-provider summary",
+				shortSummary: "cross-provider",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+	});
+
 	it("stops auto-compaction before a same-provider candidate with native compaction disabled", async () => {
 		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession({
 			sameProviderNativeEnabled: false,
