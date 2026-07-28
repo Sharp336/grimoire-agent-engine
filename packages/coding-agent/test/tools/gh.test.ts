@@ -1152,6 +1152,69 @@ exec ${JSON.stringify(realGit)} "$@"
 		});
 	});
 
+	it("pins gh messages while preserving UTF-8 character locale", async () => {
+		if (process.platform === "win32") return;
+		const originalPath = process.env.PATH;
+		const originalLocale = {
+			EXPECTED_LC_CTYPE: process.env.EXPECTED_LC_CTYPE,
+			LANG: process.env.LANG,
+			LC_ALL: process.env.LC_ALL,
+			LC_CTYPE: process.env.LC_CTYPE,
+			LC_MESSAGES: process.env.LC_MESSAGES,
+		};
+		const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-gh-locale-"));
+		const fakeGh = path.join(fakeBin, "gh");
+		await fs.writeFile(
+			fakeGh,
+			`#!/bin/sh
+if [ "\${LC_MESSAGES-}" != "C" ]; then
+	echo "LC_MESSAGES was \${LC_MESSAGES-<unset>}" >&2
+	exit 41
+fi
+if [ "\${LC_CTYPE-}" != "\${EXPECTED_LC_CTYPE-}" ]; then
+	echo "LC_CTYPE was \${LC_CTYPE-<unset>}, expected \${EXPECTED_LC_CTYPE-<unset>}" >&2
+	exit 42
+fi
+if [ "\${LC_ALL+x}" = "x" ]; then
+	echo "LC_ALL leaked: \${LC_ALL}" >&2
+	exit 43
+fi
+echo ok
+`,
+		);
+		await fs.chmod(fakeGh, 0o755);
+
+		try {
+			process.env.PATH = fakeBin;
+			for (const lcCtype of [undefined, ""] as const) {
+				process.env.EXPECTED_LC_CTYPE = "C.UTF-8";
+				process.env.LC_ALL = "C.UTF-8";
+				delete process.env.LANG;
+				delete process.env.LC_MESSAGES;
+				if (lcCtype === undefined) {
+					delete process.env.LC_CTYPE;
+				} else {
+					process.env.LC_CTYPE = lcCtype;
+				}
+				await expect(git.github.run(process.cwd(), ["--version"])).resolves.toMatchObject({ stdout: "ok" });
+			}
+		} finally {
+			if (originalPath === undefined) {
+				delete process.env.PATH;
+			} else {
+				process.env.PATH = originalPath;
+			}
+			for (const [key, value] of Object.entries(originalLocale)) {
+				if (value === undefined) {
+					delete process.env[key];
+				} else {
+					process.env[key] = value;
+				}
+			}
+			await removeWithRetries(fakeBin);
+		}
+	});
+
 	it("serializes concurrent git mutations through withRepoLock so callers don't race git's internal locks", async () => {
 		// withRepoLock only needs a real `.git/config` to serialize against, so a
 		// bare `git init` repo is enough — no fixture clone, remotes, or commits.

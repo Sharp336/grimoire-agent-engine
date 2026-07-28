@@ -380,13 +380,10 @@ function normalizeStdin(input: CommandOptions["stdin"]): "ignore" | Uint8Array {
 	return new Uint8Array(input);
 }
 
-function buildGitEnv(overrides?: Record<string, string | undefined>): Record<string, string | undefined> {
-	const env: Record<string, string | undefined> = {
-		...process.env,
-		GIT_OPTIONAL_LOCKS: "0",
-		...AMBIENT_GIT_ENV,
-		...overrides,
-	};
+function buildNonInteractiveEnv(
+	env: Record<string, string | undefined>,
+	pinnedEnv: Record<string, string | undefined>,
+): Record<string, string | undefined> {
 	const preservedCharacterLocale =
 		(env.LC_CTYPE === undefined || env.LC_CTYPE === "") &&
 		env.LC_ALL !== undefined &&
@@ -396,8 +393,24 @@ function buildGitEnv(overrides?: Record<string, string | undefined>): Record<str
 	return {
 		...env,
 		...(preservedCharacterLocale === undefined ? {} : { LC_CTYPE: preservedCharacterLocale }),
-		...GIT_NON_INTERACTIVE_ENV,
+		...pinnedEnv,
 	};
+}
+
+function buildGitEnv(overrides?: Record<string, string | undefined>): Record<string, string | undefined> {
+	return buildNonInteractiveEnv(
+		{
+			...process.env,
+			GIT_OPTIONAL_LOCKS: "0",
+			...AMBIENT_GIT_ENV,
+			...overrides,
+		},
+		GIT_NON_INTERACTIVE_ENV,
+	);
+}
+
+function buildGhEnv(): Record<string, string | undefined> {
+	return buildNonInteractiveEnv({ ...process.env }, GH_NON_INTERACTIVE_ENV);
 }
 
 function ensureAvailable(): void {
@@ -2386,10 +2399,7 @@ export const github = {
 		try {
 			const child = Bun.spawn(["gh", ...args], {
 				cwd,
-				env: {
-					...process.env,
-					...GH_NON_INTERACTIVE_ENV,
-				},
+				env: buildGhEnv(),
 				stdin: "ignore",
 				stdout: "pipe",
 				stderr: "pipe",
