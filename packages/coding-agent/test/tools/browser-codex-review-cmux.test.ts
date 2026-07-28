@@ -1398,7 +1398,7 @@ describe("cmux Codex browser review regressions", () => {
 		let transferStatuses = 0;
 		const hostFetch = spyOn(globalThis, "fetch").mockRejectedValue(new Error("host fetch must not run"));
 		const { document, window } = parseHTML(
-			'<html><body><button id="media"><picture><img src="blob:fixture-media"></picture></button></body></html>',
+			'<html><body><button id="media"><picture><img src="blob:fixture-media"></picture></button><a href="blob:ancestor-media"><span id="media-child">Child</span></a></body></html>',
 		);
 		const mediaButton = document.getElementById("media");
 		if (!mediaButton) throw new Error("Expected media wrapper");
@@ -1443,15 +1443,16 @@ describe("cmux Codex browser review regressions", () => {
 		);
 
 		await current.playwright.locator("#media").downloadMedia({ timeoutMs: 250 });
+		await current.playwright.locator("#media-child").downloadMedia({ timeoutMs: 250 });
 		const snapshot = await current.dom_cua.get_visible_dom();
 		const node = snapshot.nodes.find(candidate => candidate.text === "");
 		if (!node) throw new Error("Expected media wrapper DOM node");
 		await current.dom_cua.downloadMedia({ node_id: node.node_id, timeoutMs: 250 });
 
 		expect(hostFetch).not.toHaveBeenCalled();
-		expect(transferStarts).toBe(2);
-		expect(transferStatuses).toBe(2);
-		expect(writes).toEqual([payload, payload]);
+		expect(transferStarts).toBe(3);
+		expect(transferStatuses).toBe(3);
+		expect(writes).toEqual([payload, payload, payload]);
 	});
 
 	it("downloads coordinate media through nested open shadow roots and preserves boundary errors", async () => {

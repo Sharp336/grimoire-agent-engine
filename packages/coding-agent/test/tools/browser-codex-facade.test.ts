@@ -430,6 +430,22 @@ describe("Codex agent.browser public contract", () => {
 		});
 	});
 
+	it("composes run-bound locators without leaking proxy objects into locator internals", async () => {
+		await withCmuxTool(async (tool, name) => {
+			const composed = await runJson<boolean>(
+				tool,
+				name,
+				`const current = await agent.browser.tabs.selected();
+				if (!current) throw new Error("Expected selected tab");
+				const left = current.playwright.locator("#left");
+				const right = current.playwright.locator("#right");
+				const locators = [left.and(right), left.or(right), left.filter({ has: right }), left.filter({ hasNot: right })];
+				return locators.every(locator => typeof locator.count === "function");`,
+			);
+			expect(composed).toBe(true);
+		});
+	});
+
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"preserves callable agent and exposes the complete facade on the Puppeteer adapter",
 		async () => {

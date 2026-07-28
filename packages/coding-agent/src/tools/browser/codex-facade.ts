@@ -659,6 +659,8 @@ class FileChooserValue implements CodexFileChooser {
 	}
 }
 
+const LOCATOR_DESCRIPTOR = Symbol("CodexLocator.descriptor");
+
 /** Playwright-compatible locator callers compose before querying or acting on elements. */
 export class CodexLocator {
 	readonly #adapter: CodexBrowserAdapter;
@@ -675,11 +677,16 @@ export class CodexLocator {
 		return new CodexLocator(this.#adapter, this.#tabId, descriptor);
 	}
 
-	#sameTab(other: unknown, label: string): CodexLocator {
-		if (!(other instanceof CodexLocator) || other.#adapter !== this.#adapter || other.#tabId !== this.#tabId) {
+	#sameTab(other: unknown, label: string): CodexLocatorDescriptor {
+		if (!(other instanceof CodexLocator)) throw new Error(`${label} requires a locator from the same tab`);
+		return other[LOCATOR_DESCRIPTOR](this.#adapter, this.#tabId, label);
+	}
+
+	[LOCATOR_DESCRIPTOR](adapter: CodexBrowserAdapter, tabId: string, label: string): CodexLocatorDescriptor {
+		if (this.#adapter !== adapter || this.#tabId !== tabId) {
 			throw new Error(`${label} requires a locator from the same tab`);
 		}
-		return other;
+		return this.#descriptor;
 	}
 
 	#args(extra: Readonly<Record<string, unknown>> = {}): Readonly<Record<string, unknown>> {
@@ -699,21 +706,18 @@ export class CodexLocator {
 	}
 
 	and(other: CodexLocator): CodexLocator {
-		const right = this.#sameTab(other, "locator.and");
-		return this.#child({ kind: "and", left: this.#descriptor, right: right.#descriptor });
+		return this.#child({ kind: "and", left: this.#descriptor, right: this.#sameTab(other, "locator.and") });
 	}
 
 	or(other: CodexLocator): CodexLocator {
-		const right = this.#sameTab(other, "locator.or");
-		return this.#child({ kind: "or", left: this.#descriptor, right: right.#descriptor });
+		return this.#child({ kind: "or", left: this.#descriptor, right: this.#sameTab(other, "locator.or") });
 	}
 
 	filter(options: CodexLocatorFilterOptions): CodexLocator {
 		const value = requireObject(options, "locator.filter");
 		assertAllowedKeys(value, "locator.filter", FILTER_OPTION_KEYS);
-		const has = value.has === undefined ? undefined : this.#sameTab(value.has, "locator.filter has").#descriptor;
-		const hasNot =
-			value.hasNot === undefined ? undefined : this.#sameTab(value.hasNot, "locator.filter hasNot").#descriptor;
+		const has = value.has === undefined ? undefined : this.#sameTab(value.has, "locator.filter has");
+		const hasNot = value.hasNot === undefined ? undefined : this.#sameTab(value.hasNot, "locator.filter hasNot");
 		if (value.visible !== undefined && typeof value.visible !== "boolean") {
 			throw new Error("locator.filter visible must be a boolean");
 		}

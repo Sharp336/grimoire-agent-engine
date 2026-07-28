@@ -53,7 +53,10 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 		return pattern.exact ? normalized === expected : normalized.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
 	};
 	const viewOf = element => element?.ownerDocument?.defaultView || window;
-	const composedParent = element => element?.parentElement ?? element?.getRootNode?.()?.host ?? null;
+	const composedParent = element => {
+		const root = element?.getRootNode?.();
+		return element?.assignedSlot ?? element?.parentElement ?? root?.host ?? root?.defaultView?.frameElement ?? null;
+	};
 	const accessibilityHidden = element => {
 		if (canonicalState(element)?.hidden === true) return true;
 		for (let current = element; current; current = composedParent(current)) {
@@ -228,9 +231,14 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 	if (command === "innerText") return String(element.innerText ?? "");
 	if (command === "textContent") return element.textContent;
 	if (command === "mediaUrl") {
-		const direct = element.currentSrc || element.src || element.href || element.getAttribute("src") || element.getAttribute("href");
-		const media = direct ? element : element.querySelector?.("img,video,audio,source,a[href]");
-		return String(direct || media?.currentSrc || media?.src || media?.href || media?.getAttribute?.("src") || media?.getAttribute?.("href") || "");
+		const sourceOf = candidate => String(candidate?.currentSrc || candidate?.src || candidate?.href || candidate?.getAttribute?.("src") || candidate?.getAttribute?.("href") || "");
+		let source = sourceOf(element);
+		for (let current = composedParent(element); !source && current; current = composedParent(current)) {
+			const tag = String(current.tagName || "").toLowerCase();
+			if (["img", "video", "audio", "source"].includes(tag) || (tag === "a" && current.getAttribute?.("href") != null)) source = sourceOf(current);
+		}
+		const media = source ? null : element.querySelector?.("img,video,audio,source,a[href]");
+		return source || sourceOf(media);
 	}
 	const dispatch = (target, type, init = {}) => {
 		const EventConstructor = viewOf(target).Event;
