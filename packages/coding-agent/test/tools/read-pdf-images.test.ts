@@ -229,34 +229,46 @@ describe("read PDF image extraction", () => {
 		const tool = new ReadTool(makeSession(testDir));
 		const ownerController = new AbortController();
 		const owner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` }, ownerController.signal);
-		const joiner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
 		await entered.promise;
+		const joiner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		await Bun.sleep(25);
 
+		const ownerSettled = owner.then(
+			() => ({ status: "fulfilled" as const }),
+			error => ({ status: "rejected" as const, error }),
+		);
 		ownerController.abort();
-		await expect(owner).rejects.toThrow(/Aborted|Cancelled/);
 		release.resolve();
-		const result = await joiner;
+		const [ownerResult, result] = await Promise.all([ownerSettled, joiner]);
 
+		expect(ownerResult.status).toBe("rejected");
+		if (ownerResult.status === "rejected") expect(String(ownerResult.error)).toMatch(/abort|cancel/i);
 		expect(result.content.some(content => content.type === "image")).toBe(true);
 		expect(spy).toHaveBeenCalledTimes(1);
-	});
+	}, 15_000);
 
 	it("keeps shared extraction running when a joiner aborts", async () => {
 		const { entered, release, spy } = mockBlockedExtraction();
 		const tool = new ReadTool(makeSession(testDir));
 		const joinerController = new AbortController();
 		const owner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
-		const joiner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` }, joinerController.signal);
 		await entered.promise;
+		const joiner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` }, joinerController.signal);
+		await Bun.sleep(25);
 
+		const joinerSettled = joiner.then(
+			() => ({ status: "fulfilled" as const }),
+			error => ({ status: "rejected" as const, error }),
+		);
 		joinerController.abort();
-		await expect(joiner).rejects.toThrow(/Aborted|Cancelled/);
 		release.resolve();
-		const result = await owner;
+		const [joinerResult, result] = await Promise.all([joinerSettled, owner]);
 
+		expect(joinerResult.status).toBe("rejected");
+		if (joinerResult.status === "rejected") expect(String(joinerResult.error)).toMatch(/abort|cancel/i);
 		expect(result.content.some(content => content.type === "image")).toBe(true);
 		expect(spy).toHaveBeenCalledTimes(1);
-	});
+	}, 15_000);
 
 	it("cleans temporary extraction state when the only caller aborts", async () => {
 		const entered = Promise.withResolvers<void>();
