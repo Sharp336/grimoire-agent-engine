@@ -18,31 +18,13 @@ import {
 	setOsc99Supported,
 	TERMINAL,
 } from "./terminal-capabilities";
-import { type HangulCompatibilityJamoWidth, setHangulCompatibilityJamoWidth } from "./utils";
+import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
+import { setHangulCompatibilityJamoWidth } from "./utils";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
-// Hangul Compatibility Jamo (U+3131..=U+318E) render width is terminal-dependent:
-// Ghostty follows UAX#11 (2 cells); Terminal.app and iTerm2 render narrow (1),
-// matching the macOS platform default. Override only for terminals known to
-// disagree — the rest keep the platform default (macOS narrow, otherwise UAX#11),
-// so this is a no-op everywhere except Ghostty. A runtime DSR/CPR probe that
-// auto-detects the width on unknown terminals is tracked separately.
-export function resolveHangulCompatibilityJamoWidthFromTerminalIdentity(
-	env: NodeJS.ProcessEnv = Bun.env,
-): HangulCompatibilityJamoWidth {
-	if (
-		env.GHOSTTY_RESOURCES_DIR ||
-		env.TERM_PROGRAM?.toLowerCase() === "ghostty" ||
-		env.TERM?.toLowerCase().includes("ghostty")
-	) {
-		return 2;
-	}
-	return "platform";
-}
-
 function shouldEnableModifyOtherKeysFallback(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	if (!env.SSH_CONNECTION && !env.SSH_TTY && !env.SSH_CLIENT) return true;
 	return TERMINAL.id !== "base" && TERMINAL.id !== "trueColor";
@@ -293,24 +275,23 @@ export function emergencyTerminalRestore(): void {
 		restoreTerminalStderr();
 		const terminal = activeTerminal;
 		if (terminal) {
-			terminal.stop();
-			// stop() never touches the alternate screen — the TUI owns that
-			// state and exits it on the normal shutdown path. Only crash paths
-			// with a fullscreen overlay still hold the alt buffer here. The
-			// leave sequence is gated on the tracked state because it is NOT a
-			// universally safe no-op: Windows' VT dispatcher homes the cursor
-			// on DECRST 1049 even when the alt buffer is inactive.
+			// Keyboard enhancement state is screen-local: pop the alt-screen
+			// frame before leaving it, then let stop() pop omp's main-screen frame.
 			if (altScreenActive) {
-				terminal.write("\x1b[?1049l");
+				const keyboardExit =
+					terminal.keyboardEnhancementExitSequence ?? (terminal.kittyEnableSequence ? "\x1b[<u" : "");
+				terminal.write(`${keyboardExit}\x1b[?1049l`);
 				altScreenActive = false;
 			}
-			terminal.showCursor();
+			terminal.stop();
+			terminal.showCursor(true);
 		} else if (terminalEverStarted && !isTerminalHeadless()) {
 			// Blind restore only if we know a terminal was started but lost track of it
 			// This avoids writing escape sequences for non-TUI commands (grep, commit, etc.)
 			process.stdout.write(
 				"\x1b[?2026l" + // End synchronized output
 					"\x1b[?7h" + // Restore autowrap
+					"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
 					"\x1b[?2004l" + // Disable bracketed paste
 					"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
 					"\x1b[?2048l" + // Disable in-band resize notifications
@@ -322,7 +303,7 @@ export function emergencyTerminalRestore(): void {
 					// actually holds it — on Windows, DECRST 1049 on the main
 					// buffer homes the cursor (unconditional CursorRestoreState
 					// with no prior save), corrupting the shell handoff on exit.
-					(altScreenActive ? "\x1b[?1049l" : "") +
+					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
 					"\x1b[?25h", // Show cursor
 			);
 			altScreenActive = false;
@@ -379,9 +360,11 @@ export interface Terminal {
 	// Cursor positioning (relative to current position)
 	moveBy(lines: number): void; // Move cursor up (negative) or down (positive) by N lines
 
-	// Cursor visibility
-	hideCursor(): void; // Hide the cursor
-	showCursor(): void; // Show the cursor
+	// Cursor visibility. Same-state calls are deduped against the visibility
+	// last written to the terminal; pass force=true to write unconditionally
+	// (crash/exit restore paths).
+	hideCursor(force?: boolean): void; // Hide the cursor
+	showCursor(force?: boolean): void; // Show the cursor
 
 	// Clear operations
 	clearLine(): void; // Clear current line
@@ -456,6 +439,7 @@ function parseOsc99KeyValues(section: string): Map<string, string> {
 	return values;
 }
 const XTERM_SCROLL_TO_BOTTOM_MODES = [1010, 1011] as const;
+type Osc11QueryRoute = "direct" | "tmux";
 
 function isXtermScrollToBottomMode(mode: number): boolean {
 	return mode === 1010 || mode === 1011;
@@ -494,6 +478,12 @@ export class ProcessTerminal implements Terminal {
 		this.#markTerminalDisconnected("stdin failed", err);
 	};
 	#dead = false;
+	// Last cursor visibility written to the terminal, sniffed from every
+	// outgoing sequence (frame buffers embed their own ?25h/?25l), so
+	// hideCursor()/showCursor() can skip same-state writes. `undefined` =
+	// unknown (fresh start, resize, or an alt-screen switch newer than the
+	// last cursor sequence — some hosts keep DECTCEM per buffer).
+	#cursorVisible: boolean | undefined;
 	// Captured at construction and re-read at start(): when true, every real
 	// terminal side effect (writes, probes, raw mode, SIGWINCH, timers) is
 	// suppressed. Defaults on under `bun test` — see isTerminalHeadless().
@@ -509,7 +499,7 @@ export class ProcessTerminal implements Terminal {
 	#appearanceCallbacks: Array<(appearance: TerminalAppearance) => void> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
-	#osc11QueryQueued = false;
+	#osc11QueuedRoute?: Osc11QueryRoute;
 	#osc11ResponseBuffer = "";
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
@@ -572,15 +562,15 @@ export class ProcessTerminal implements Terminal {
 
 	/**
 	 * Re-query the terminal background via a single OSC 11 probe. Reuses the
-	 * startup query path — same DA1-sentinel FIFO, pending/queued gating, parsing,
-	 * dedup, and appearance callbacks — so a light/dark switch is picked up
-	 * without a restart on terminals lacking end-to-end Mode 2031 notifications.
-	 * Bounded to one probe per call; no timers are armed. Suppressed while headless
-	 * or after the terminal is torn down.
+	 * startup DA1-sentinel FIFO, pending/queued gating, parsing, dedup, and
+	 * appearance callbacks. Inside tmux, only this explicit path wraps the query
+	 * and sentinel together for passthrough to the outer terminal; startup and
+	 * Mode 2031 probes remain direct. Bounded to one probe per call; no timers are
+	 * armed. Suppressed while headless or after the terminal is torn down.
 	 */
 	refreshAppearance(): void {
 		if (this.#headless || this.#dead) return;
-		this.#queryBackgroundColor();
+		this.#queryBackgroundColor(isInsideTmux() ? "tmux" : "direct");
 	}
 
 	onPrivateModeReport(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void {
@@ -591,6 +581,8 @@ export class ProcessTerminal implements Terminal {
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
+		// The host terminal's cursor visibility is unknown until we write it.
+		this.#cursorVisible = undefined;
 
 		// Headless (tests): suppress every real-terminal side effect. Skip raw
 		// mode, stdin listeners, capability probes, SIGWINCH, and emergency-restore
@@ -623,10 +615,22 @@ export class ProcessTerminal implements Terminal {
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		this.#safeWrite("\x1b[?2004h");
 
+		// Force normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
+		// `rmkx` = "\x1b[?1l\x1b>"). omp decodes both CSI ("\x1b[A") and SS3
+		// ("\x1bOA") arrow encodings, so it never enables application mode
+		// itself — but a prior program that left the TTY in application-cursor-
+		// keys mode makes arrows arrive as SS3. Normalizing on entry keeps input
+		// in the predictable default state; stop() restores the same on exit.
+		// See #6374.
+		this.#safeWrite("\x1b[?1l\x1b>");
+
 		// Set up resize handler immediately. The OS refreshes process.stdout
 		// dimensions before firing `resize`, so it is authoritative for geometry:
 		// reconcile any stale cached DEC 2048 report before notifying the renderer.
 		this.#stdoutResizeListener = () => {
+			// Conservative: some hosts reset modes across a resize/reattach, so
+			// re-establish cursor visibility on the next explicit call.
+			this.#cursorVisible = undefined;
 			this.#reconcileInBandGeometryOnResize();
 			this.#resizeHandler?.();
 		};
@@ -647,7 +651,7 @@ export class ProcessTerminal implements Terminal {
 		// The query handler intercepts input temporarily, then installs the user's handler
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 		this.#queryAndEnableKittyProtocol();
-		setHangulCompatibilityJamoWidth(resolveHangulCompatibilityJamoWidthFromTerminalIdentity());
+		setHangulCompatibilityJamoWidth(TERMINAL.hangulJamoWidth);
 
 		// Query terminal background color via OSC 11 for dark/light detection.
 		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
@@ -917,13 +921,14 @@ export class ProcessTerminal implements Terminal {
 						}
 						// Start a queued OSC 11 query once the prior cycle is fully drained.
 						if (
-							this.#osc11QueryQueued &&
+							this.#osc11QueuedRoute !== undefined &&
 							!this.#osc11Pending &&
 							!this.#da1SentinelOwners.some(o => o.kind === "osc11") &&
 							!this.#dead
 						) {
-							this.#osc11QueryQueued = false;
-							this.#startOsc11Query();
+							const route = this.#osc11QueuedRoute;
+							this.#osc11QueuedRoute = undefined;
+							this.#startOsc11Query(route);
 						}
 						break;
 					}
@@ -1058,23 +1063,28 @@ export class ProcessTerminal implements Terminal {
 	 * DA1 avoids indefinite hangs: if DA1 response arrives before OSC 11,
 	 * the terminal does not support OSC 11.
 	 */
-	#queryBackgroundColor(): void {
+	#queryBackgroundColor(route: Osc11QueryRoute = "direct"): void {
 		if (this.#dead) return;
 		// Queue if an OSC 11 query is in flight or its DA1 sentinel hasn't been
 		// consumed yet. Starting a new query while a DA1 is outstanding would
 		// increment the sentinel counter, and the old DA1 arrival would then
-		// prematurely clear the new query's pending state.
+		// prematurely clear the new query's pending state. Preserve a requested
+		// tmux passthrough route when coalescing direct and explicit queries.
 		if (this.#osc11Pending || this.#da1SentinelOwners.some(o => o.kind === "osc11")) {
-			this.#osc11QueryQueued = true;
+			if (this.#osc11QueuedRoute !== "tmux") this.#osc11QueuedRoute = route;
 			return;
 		}
-		this.#startOsc11Query();
+		this.#startOsc11Query(route);
 	}
 
-	#startOsc11Query(): void {
+	#startOsc11Query(route: Osc11QueryRoute): void {
 		this.#osc11Pending = true;
 		this.#osc11ResponseBuffer = "";
 		this.#da1SentinelOwners.push({ kind: "osc11" });
+		if (route === "tmux") {
+			this.#safeWrite(wrapTmuxPassthrough("\x1b]11;?\x07\x1b[c"));
+			return;
+		}
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
 	}
@@ -1368,6 +1378,13 @@ export class ProcessTerminal implements Terminal {
 		// begin/end halves of a frame. Safe no-ops on terminals that ignored them.
 		this.#safeWrite("\x1b[?2026l\x1b[?7h");
 
+		// Restore normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
+		// `rmkx`). Symmetric with the normalize in start(): a TTY-sharing child
+		// can leave the terminal in application-cursor-keys mode, and without
+		// this reset the parent shell inherits SS3 arrows so Up/Down history
+		// navigation stays broken after omp exits (#6374).
+		this.#safeWrite("\x1b[?1l\x1b>");
+
 		// Disable bracketed paste mode
 		this.#safeWrite("\x1b[?2004l");
 		this.#safeWrite("\x1b[?5522l");
@@ -1397,7 +1414,7 @@ export class ProcessTerminal implements Terminal {
 		this.#appearanceCallbacks = [];
 		this.#osc11Pending = false;
 		this.#clearWindowsTerminalAppearancePoll();
-		this.#osc11QueryQueued = false;
+		this.#osc11QueuedRoute = undefined;
 		this.#osc11ResponseBuffer = "";
 		this.#osc99PendingId = undefined;
 		this.#osc99ResponseBuffer = "";
@@ -1456,12 +1473,21 @@ export class ProcessTerminal implements Terminal {
 		// where Ctrl+D could close the parent shell over SSH.
 		process.stdin.pause();
 
-		// Restore raw mode state
-		if (process.stdin.setRawMode) {
-			process.stdin.setRawMode(this.#wasRaw);
+		// Restore raw mode state. On a disconnected terminal (pane recycled, ssh
+		// dropped) the fd is no longer a tty and Bun's node:tty shim throws; there
+		// is nothing left to restore, and throwing would abort the caller. On a
+		// live terminal the failure still surfaces - swallowing it would silently
+		// leave stdin in raw mode.
+		try {
+			process.stdin.setRawMode?.(this.#wasRaw);
+		} catch (err) {
+			if (!this.#dead) throw err;
 		}
 		this.#stdoutErrorCleanup?.();
 		this.#stdoutErrorCleanup = undefined;
+		// After stop() the terminal is shared with other writers; visibility
+		// tracking is only meaningful while this instance owns the TTY.
+		this.#cursorVisible = undefined;
 	}
 
 	#ensureStdoutErrorHandler(): void {
@@ -1476,7 +1502,14 @@ export class ProcessTerminal implements Terminal {
 		const disconnectHandler = this.#disconnectHandler;
 		this.#disconnectHandler = undefined;
 		if (!disconnectHandler) return;
-		disconnectHandler();
+		// The handler tears the TUI down against a terminal that is already gone,
+		// so any step in it can fail. Swallow that: the exit below is the whole
+		// point of this method and must not be preempted by teardown noise.
+		try {
+			disconnectHandler();
+		} catch (handlerErr) {
+			logger.error("Terminal disconnect handler failed; exiting anyway", { err: handlerErr });
+		}
 
 		if (process.platform === "win32") {
 			void postmortem.quit(129);
@@ -1508,6 +1541,7 @@ export class ProcessTerminal implements Terminal {
 		// files). They serve no purpose there and would surface as visible noise.
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
+		this.#trackCursorVisibility(data);
 		// A console-sharing child process may have flipped the console codepage
 		// away from UTF-8; repair it before any bytes hit WriteFile so no frame
 		// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
@@ -1559,12 +1593,35 @@ export class ProcessTerminal implements Terminal {
 		// lines === 0: no movement
 	}
 
-	hideCursor(): void {
+	hideCursor(force = false): void {
+		if (!force && this.#cursorVisible === false) return;
 		this.#safeWrite("\x1b[?25l");
 	}
 
-	showCursor(): void {
+	showCursor(force = false): void {
+		if (!force && this.#cursorVisible === true) return;
 		this.#safeWrite("\x1b[?25h");
+	}
+
+	/**
+	 * Sniff outgoing data for the last cursor-visibility change so the tracked
+	 * state stays correct for sequences embedded in frame buffers
+	 * (TUI#cursorControlSequence appends ?25h/?25l inside the paint write). An
+	 * alt-screen switch (DECSET/DECRST 1049) newer than the last cursor
+	 * sequence resets tracking to unknown: some hosts keep DECTCEM per buffer.
+	 */
+	#trackCursorVisibility(data: string): void {
+		let idx = data.lastIndexOf("\x1b[?25");
+		while (idx !== -1) {
+			const final = data.charCodeAt(idx + 5);
+			if (final === 0x68 /* h */ || final === 0x6c /* l */) break;
+			idx = idx === 0 ? -1 : data.lastIndexOf("\x1b[?25", idx - 1);
+		}
+		if (data.lastIndexOf("\x1b[?1049") > idx) {
+			this.#cursorVisible = undefined;
+			return;
+		}
+		if (idx !== -1) this.#cursorVisible = data.charCodeAt(idx + 5) === 0x68;
 	}
 
 	clearLine(): void {
