@@ -5,7 +5,7 @@
  * Based on MCP spec 2025-03-26.
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { logger, readSseJson, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, readSseJson, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import type {
 	JsonRpcError,
 	JsonRpcMessage,
@@ -245,7 +245,7 @@ export class HttpTransport implements MCPTransport {
 			}
 
 			if (!response.ok) {
-				const text = await response.text();
+				const text = await untilAborted(operation.signal, response.text());
 				const wwwAuthenticate = response.headers.get("WWW-Authenticate");
 				const mcpAuthServer = response.headers.get("Mcp-Auth-Server");
 				const authHints = [
@@ -266,7 +266,7 @@ export class HttpTransport implements MCPTransport {
 			}
 
 			// Handle JSON response
-			const result = (await response.json()) as JsonRpcResponse;
+			const result = (await untilAborted(operation.signal, response.json())) as JsonRpcResponse;
 
 			if (result.error) {
 				throw new Error(`MCP error ${result.error.code}: ${result.error.message}`);
@@ -446,7 +446,7 @@ export class HttpTransport implements MCPTransport {
 
 			// 202 Accepted is success for notifications
 			if (!response.ok && response.status !== 202) {
-				const text = await response.text();
+				const text = await untilAborted(operation.signal, response.text());
 				throw new Error(`HTTP ${response.status}: ${text}`);
 			}
 

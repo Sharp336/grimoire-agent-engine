@@ -53,6 +53,7 @@ export function createMCPTimeout(
 	return {
 		signal: operationSignal,
 		clear: () => clearTimeout(timeoutId),
-		isTimeoutAbort: () => abortController.signal.aborted && !signal?.aborted,
+		isTimeoutAbort: error =>
+			error instanceof Error && error.name === "AbortError" && abortController.signal.aborted && !signal?.aborted,
 	};
 }
