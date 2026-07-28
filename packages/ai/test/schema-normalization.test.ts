@@ -233,6 +233,27 @@ describe("normalizeSchemaForGoogle", () => {
 		});
 	});
 
+	it("keeps CCA incompatibility passes out of literal defaults", () => {
+		const literal = {
+			nullable: true,
+			allOf: [{ type: "object" }],
+			oneOf: [{ type: "string" }, { type: "number" }],
+		};
+		expect(
+			normalizeSchemaForCCA({
+				type: "object",
+				properties: {
+					value: { oneOf: [{ type: "string" }, { type: "string" }] },
+				},
+				default: literal,
+			}),
+		).toEqual({
+			type: "object",
+			properties: { value: { type: "string" } },
+			default: literal,
+		});
+	});
+
 	it("sets object type while removing an object-valued enum converted from const", () => {
 		const sanitized = normalizeSchemaForGoogle({
 			const: { a: 1 },

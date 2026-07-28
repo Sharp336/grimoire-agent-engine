@@ -134,6 +134,17 @@ const SUBSCHEMA_MAP_KEYS: Record<string, true> = {
 	definitions: true,
 };
 
+type SchemaChildKind = "schema" | "map";
+
+/** Classify only JSON Schema-valued children; instance payloads remain opaque. */
+function classifySchemaChild(key: string, value: unknown, insideSchemaMap: boolean): SchemaChildKind | undefined {
+	if (insideSchemaMap) return "schema";
+	if (Object.hasOwn(SUBSCHEMA_MAP_KEYS, key)) return "map";
+	if (Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) || Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key)) return "schema";
+	if (Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(value)) return "schema";
+	return undefined;
+}
+
 const CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA = {
 	type: "object",
 	properties: {},
@@ -371,21 +382,14 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 				continue;
 			}
 			if (options.stripNullableKeyword && key === "nullable") continue;
-			const childInsideSchemaMap = !options.insideSchemaMap && Object.hasOwn(SUBSCHEMA_MAP_KEYS, key);
-			const childBooleanIsSubschema =
-				options.insideSchemaMap ||
-				Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
-				Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key);
-			const childIsSubschema =
-				childBooleanIsSubschema || (Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(entry));
-			result[key] =
-				childInsideSchemaMap || childIsSubschema
-					? normalizeSchemaNode(entry, {
-							...options,
-							insideSchemaMap: childInsideSchemaMap,
-							booleanIsSubschema: childIsSubschema,
-						})
-					: entry;
+			const childKind = classifySchemaChild(key, entry, options.insideSchemaMap);
+			result[key] = childKind
+				? normalizeSchemaNode(entry, {
+						...options,
+						insideSchemaMap: childKind === "map",
+						booleanIsSubschema: childKind === "schema",
+					})
+				: entry;
 		}
 		applyDescriptionSpill(result, spill, options);
 		return applyNodePostProcessing(result, options);
@@ -404,21 +408,14 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			constValue = entry;
 			continue;
 		}
-		const childInsideSchemaMap = !options.insideSchemaMap && Object.hasOwn(SUBSCHEMA_MAP_KEYS, key);
-		const childBooleanIsSubschema =
-			options.insideSchemaMap ||
-			Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
-			Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key);
-		const childIsSubschema =
-			childBooleanIsSubschema || (Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(entry));
-		result[key] =
-			childInsideSchemaMap || childIsSubschema
-				? normalizeSchemaNode(entry, {
-						...options,
-						insideSchemaMap: childInsideSchemaMap,
-						booleanIsSubschema: childIsSubschema,
-					})
-				: entry;
+		const childKind = classifySchemaChild(key, entry, options.insideSchemaMap);
+		result[key] = childKind
+			? normalizeSchemaNode(entry, {
+					...options,
+					insideSchemaMap: childKind === "map",
+					booleanIsSubschema: childKind === "schema",
+				})
+			: entry;
 	}
 
 	if (options.normalizeTypeArrayToNullable && Array.isArray(result.type)) {
@@ -764,16 +761,27 @@ function collapseSameTypeCombinerVariants(schema: JsonObject, combiner: "anyOf" 
  * create new anyOf in merged subtrees after child normalization already ran.
  */
 export function stripResidualCombiners(value: unknown, epoch: number = epochNext()): unknown {
+	return stripResidualCombinersNode(value, epoch, false);
+}
+
+function stripResidualCombinersNode(value: unknown, epoch: number, insideSchemaMap: boolean): unknown {
 	if (Array.isArray(value)) {
 		if (!once(value, epoch)) return [];
-		return value.map(entry => stripResidualCombiners(entry, epoch));
+		return value.map(entry => stripResidualCombinersNode(entry, epoch, false));
 	}
 	if (!isJsonObject(value)) return value;
 	if (!once(value, epoch)) return {};
 	const result: JsonObject = {};
 	for (const key in value) {
-		if (Object.hasOwn(value, key)) result[key] = stripResidualCombiners(value[key], epoch);
+		if (!Object.hasOwn(value, key)) continue;
+		const entry = value[key];
+		const childKind = classifySchemaChild(key, entry, insideSchemaMap);
+		result[key] = childKind
+			? stripResidualCombinersNode(entry, epoch, childKind === "map")
+			: entry;
 	}
+	if (insideSchemaMap) return result;
+
 	let current: JsonObject = result;
 	let changed = true;
 	while (changed) {
@@ -872,6 +880,7 @@ function normalizeNullablePropertiesForCloudCodeAssist(
 	value: unknown,
 	isPropertySchema = false,
 	epoch: number = epochNext(),
+	insideSchemaMap = false,
 ): NullableNormalizationResult {
 	if (Array.isArray(value)) {
 		if (!once(value, epoch)) {
@@ -891,9 +900,14 @@ function normalizeNullablePropertiesForCloudCodeAssist(
 
 	const normalized: JsonObject = {};
 	for (const key in value) {
-		if (Object.hasOwn(value, key))
-			normalized[key] = normalizeNullablePropertiesForCloudCodeAssist(value[key], false, epoch).schema;
+		if (!Object.hasOwn(value, key)) continue;
+		const entry = value[key];
+		const childKind = classifySchemaChild(key, entry, insideSchemaMap);
+		normalized[key] = childKind
+			? normalizeNullablePropertiesForCloudCodeAssist(entry, false, epoch, childKind === "map").schema
+			: entry;
 	}
+	if (insideSchemaMap) return { schema: normalized, nullable: false };
 
 	if (isJsonObject(normalized.properties)) {
 		const properties = normalized.properties;
@@ -965,7 +979,7 @@ function hasResidualSchemaIncompatibilities(
 ): boolean {
 	if (Array.isArray(value)) {
 		if (!once(value, epoch)) return false;
-		return value.some(entry => hasResidualSchemaIncompatibilities(entry, checks, epoch, insideSchemaMap));
+		return value.some(entry => hasResidualSchemaIncompatibilities(entry, checks, epoch, false));
 	}
 	if (!isJsonObject(value)) {
 		return false;
@@ -974,24 +988,24 @@ function hasResidualSchemaIncompatibilities(
 		return false;
 	}
 
-	if (checks.typeArray && Array.isArray(value.type)) return true;
-	if (checks.typeNull && value.type === "null") return true;
-	if (checks.nullable && Object.hasOwn(value, "nullable")) return true;
-	if (!insideSchemaMap && checks.not && Object.hasOwn(value, "not")) return true;
-	if (!insideSchemaMap && checks.combiners) {
-		for (const combiner of CCA_FORBIDDEN_COMBINERS) {
-			if (Array.isArray(value[combiner])) return true;
+	if (!insideSchemaMap) {
+		if (checks.typeArray && Array.isArray(value.type)) return true;
+		if (checks.typeNull && value.type === "null") return true;
+		if (checks.nullable && Object.hasOwn(value, "nullable")) return true;
+		if (checks.not && Object.hasOwn(value, "not")) return true;
+		if (checks.combiners) {
+			for (const combiner of CCA_FORBIDDEN_COMBINERS) {
+				if (Array.isArray(value[combiner])) return true;
+			}
 		}
 	}
-	for (const k in value) {
-		if (!Object.hasOwn(value, k)) continue;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const entry = value[key];
+		const childKind = classifySchemaChild(key, entry, insideSchemaMap);
 		if (
-			hasResidualSchemaIncompatibilities(
-				value[k],
-				checks,
-				epoch,
-				!insideSchemaMap && Object.hasOwn(SUBSCHEMA_MAP_KEYS, k),
-			)
+			childKind &&
+			hasResidualSchemaIncompatibilities(entry, checks, epoch, childKind === "map")
 		) {
 			return true;
 		}
