@@ -242,6 +242,12 @@ describe("imageGenTool", () => {
 		"https://chatgpt.com/backend-api/codex/",
 		"https://chatgpt.com/backend-api/codex/responses",
 		"https://chatgpt.com/backend-api/codex/responses/",
+		"https://chat.openai.com/backend-api",
+		"https://chat.openai.com/backend-api/",
+		"https://chat.openai.com/backend-api/codex",
+		"https://chat.openai.com/backend-api/codex/",
+		"https://chat.openai.com/backend-api/codex/responses",
+		"https://chat.openai.com/backend-api/codex/responses/",
 	])("uses the Codex Images API for official-JWT text generation with base URL %s", async baseUrl => {
 		setImageProviderOrder(["openai-codex"]);
 		let requestUrl: string | undefined;
@@ -308,7 +314,7 @@ describe("imageGenTool", () => {
 		);
 		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
 
-		expect(requestUrl).toBe("https://chatgpt.com/backend-api/codex/images/generations");
+		expect(requestUrl).toBe(`${new URL(baseUrl).origin}/backend-api/codex/images/generations`);
 		expect(requestMethod).toBe("POST");
 		expect(requestHeaders?.get("authorization")).toBe(`Bearer ${codexToken}`);
 		expect(requestHeaders?.get("chatgpt-account-id")).toBe("acct-codex-1");
@@ -584,6 +590,7 @@ describe("imageGenTool", () => {
 	});
 
 	it("adds Codex account headers when the bearer token exposes an account id", async () => {
+		let requestUrl: string | undefined;
 		let requestHeaders: Headers | undefined;
 		const tokenPayload = Buffer.from(
 			JSON.stringify({
@@ -592,7 +599,8 @@ describe("imageGenTool", () => {
 		).toString("base64");
 		const codexJwt = `header.${tokenPayload}.signature`;
 
-		const fetchMock: typeof fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestUrl = input.toString();
 			requestHeaders = new Headers(init?.headers);
 			return new Response(
 				[
@@ -645,6 +653,7 @@ describe("imageGenTool", () => {
 		const result = await imageGenTool.execute("call-codex-jwt", { subject: "a cat" }, undefined, ctx);
 		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
 
+		expect(requestUrl).toBe("https://example-proxy.invalid/backend-api/codex/responses");
 		expect(requestHeaders?.get("authorization")).toBe(`Bearer ${codexJwt}`);
 		expect(requestHeaders?.get("chatgpt-account-id")).toBe("acc_test");
 		expect(result.details?.imageCount).toBe(1);

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { normalizeCodexBaseUrl } from "@oh-my-pi/pi-ai/usage/openai-codex-base-url";
 import {
 	CODEX_BASE_URL,
 	CODEX_CLIENT_VERSION,
@@ -793,7 +794,10 @@ function getOpenAIHostedImageProvider(model: Model): ImageProvider {
 
 function isOfficialCodexSubscriptionImageRequest(model: Model, apiKey: string): boolean {
 	if (model.api !== "openai-codex-responses" && model.provider !== "openai-codex") return false;
-	return getCodexBackendRoot(model) === CODEX_BASE_URL && getCodexAccountId(apiKey) !== undefined;
+	return (
+		getCodexBackendRoot(model) === normalizeCodexBaseUrl(getOpenAIBaseUrl(model)) &&
+		getCodexAccountId(apiKey) !== undefined
+	);
 }
 
 function resolveOpenAIImageSize(aspectRatio: string | undefined, imageSize: string | undefined): string | undefined {
