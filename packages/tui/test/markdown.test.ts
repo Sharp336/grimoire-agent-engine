@@ -986,6 +986,25 @@ ${table}`;
 			expect(plainLines).toEqual(["- Example:", "    const nested = true;"]);
 		});
 
+		it("renders a marker row before a code-only list item", () => {
+			const markdown = new Markdown("- ```ts\n  const x = 1;\n  ```", 0, 0, defaultMarkdownTheme);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["-", "    const x = 1;"]);
+		});
+
+		it("renders a marker row before code when a list item starts with a fenced block", () => {
+			const markdown = new Markdown(
+				"- ```ts\n  const x = 1;\n  ```\n\n  after",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["-", "    const x = 1;", "", "  after"]);
+		});
+
 		it("separates consecutive fenced blocks inside one list item without showing delimiters", () => {
 			const markdown = new Markdown(
 				"- Examples:\n\n  ```ts\n  const first = 1;\n  ```\n\n  ```sh\n  echo second\n  ```",

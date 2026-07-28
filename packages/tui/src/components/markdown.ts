@@ -2705,6 +2705,9 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 				}
 			} else if (token.type === "code") {
 				// Code block in list item
+				// Without a preceding rendered row, the list renderer would attach the
+				// bullet to the first code row. Reserve an empty item row for the marker.
+				if (lines.length === 0) lines.push({ text: "", nested: false });
 				const codeIndent = padding(this.#codeBlockIndent);
 				for (const bodyLine of this.#renderCodeBodyLines(token, codeIndent)) {
 					lines.push({ text: bodyLine, nested: false });
