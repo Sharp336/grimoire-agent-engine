@@ -378,6 +378,8 @@ export interface AuthCredentialStore {
 	 * Returns true once per observed change.
 	 */
 	pollExternalChanges?(): boolean;
+	/** Record the current auth revision after a local mutation already notified consumers. */
+	acknowledgeLocalChanges?(): void;
 	/** Optional hook to notify the underlying store that usage report cache is stale. */
 	invalidateUsageCache?(signal?: AbortSignal): Promise<void>;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
@@ -1377,6 +1379,7 @@ export class AuthStorage {
 
 	#bumpGeneration(reason: string): void {
 		this.#generation += 1;
+		this.#store.acknowledgeLocalChanges?.();
 		for (const listener of [...this.#generationListeners]) {
 			try {
 				listener(this.#generation);
@@ -6688,12 +6691,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#listUsageHistoryStmt: Statement;
 	#updateUsageHistoryStmt: Statement;
 	#dataVersion: number;
+	#authRevision: number;
+	#localAuthRevision: number;
 	#closed = false;
 
 	constructor(db: Database) {
 		this.#db = db;
 		this.#initializeSchema();
 		this.#dataVersion = this.#readDataVersion();
+		this.#authRevision = this.#readAuthRevision();
+		this.#localAuthRevision = this.#readLocalAuthRevision();
 
 		this.#listActiveStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
@@ -6943,6 +6950,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			this.#createAuthCredentialBlocksTable();
 			this.#createAuthCredentialRefreshLeasesTable();
 			this.#createAuthCredentialBlockCompatibilityObjects();
+			this.#createAuthChangeTrackingObjects();
 			this.#writeAuthSchemaVersion(AUTH_SCHEMA_VERSION);
 			return;
 		}
@@ -6964,6 +6972,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (schemaVersion <= AUTH_SCHEMA_VERSION) {
 			this.#createAuthCredentialBlockCompatibilityObjects();
 		}
+		this.#createAuthChangeTrackingObjects();
 		this.#backfillCredentialIdentityKeys();
 		// Rewriting an already-current version row is a no-op write transaction
 		// on every boot; only persist when the recorded version actually changes.
@@ -7059,6 +7068,39 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			);
 			CREATE INDEX IF NOT EXISTS idx_auth_credential_blocks_expires ON auth_credential_blocks(blocked_until_ms);
 		`);
+	}
+
+	#createAuthChangeTrackingObjects(): void {
+		this.#db.run(`
+			CREATE TABLE IF NOT EXISTS auth_change_revision (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				revision INTEGER NOT NULL
+			);
+			INSERT OR IGNORE INTO auth_change_revision (id, revision) VALUES (1, 0);
+			CREATE TEMP TABLE IF NOT EXISTS auth_local_change_revision (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				revision INTEGER NOT NULL
+			);
+			INSERT OR IGNORE INTO auth_local_change_revision (id, revision) VALUES (1, 0);
+		`);
+		for (const table of ["auth_credentials", "auth_credential_blocks"] as const) {
+			for (const event of ["INSERT", "UPDATE", "DELETE"] as const) {
+				this.#db.run(`
+					CREATE TRIGGER IF NOT EXISTS auth_change_revision_${table}_${event.toLowerCase()}
+					AFTER ${event} ON ${table}
+					BEGIN
+						UPDATE auth_change_revision SET revision = revision + 1 WHERE id = 1;
+					END;
+				`);
+				this.#db.run(`
+					CREATE TEMP TRIGGER IF NOT EXISTS auth_local_change_revision_${table}_${event.toLowerCase()}
+					AFTER ${event} ON main.${table}
+					BEGIN
+						UPDATE auth_local_change_revision SET revision = revision + 1 WHERE id = 1;
+					END;
+				`);
+			}
+		}
 	}
 
 	#createAuthCredentialBlockMirrorGuardTable(): void {
@@ -8205,15 +8247,43 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * writes leave it unchanged and already notify AuthStorage directly.
 	 */
 	pollExternalChanges(): boolean {
+		this.#acknowledgeLocalAuthChanges();
 		const dataVersion = this.#readDataVersion();
 		if (dataVersion === this.#dataVersion) return false;
 		this.#dataVersion = dataVersion;
+		const authRevision = this.#readAuthRevision();
+		if (authRevision === this.#authRevision) return false;
+		this.#authRevision = authRevision;
 		return true;
+	}
+
+	acknowledgeLocalChanges(): void {
+		this.#acknowledgeLocalAuthChanges();
+	}
+
+	#acknowledgeLocalAuthChanges(): void {
+		const localAuthRevision = this.#readLocalAuthRevision();
+		this.#authRevision += localAuthRevision - this.#localAuthRevision;
+		this.#localAuthRevision = localAuthRevision;
 	}
 
 	#readDataVersion(): number {
 		const row = this.#db.query("PRAGMA data_version").get() as { data_version?: number } | null;
 		return row?.data_version ?? 0;
+	}
+
+	#readAuthRevision(): number {
+		const row = this.#db.query("SELECT revision FROM auth_change_revision WHERE id = 1").get() as {
+			revision?: number;
+		} | null;
+		return row?.revision ?? 0;
+	}
+
+	#readLocalAuthRevision(): number {
+		const row = this.#db.query("SELECT revision FROM auth_local_change_revision WHERE id = 1").get() as {
+			revision?: number;
+		} | null;
+		return row?.revision ?? 0;
 	}
 
 	close(): void {

@@ -190,6 +190,49 @@ describe("auth-broker wire surface", () => {
 		expect(rawUnchanged.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 	});
 
+	test("ignores external SQLite commits outside auth tables", async () => {
+		const generation = storage!.getGeneration();
+		const db = new Database(path.join(tempDir, "agent.db"));
+		try {
+			db.run("CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+			db.run("INSERT INTO unrelated_state (value) VALUES ('changed')");
+		} finally {
+			db.close();
+		}
+
+		expect(await storage!.pollExternalChanges()).toBe(false);
+		expect(storage!.getGeneration()).toBe(generation);
+	});
+
+	test("does not double-bump after a local auth write with an unrelated external commit pending", async () => {
+		const db = new Database(path.join(tempDir, "agent.db"));
+		try {
+			db.run("CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+			db.run("INSERT INTO unrelated_state (value) VALUES ('changed')");
+		} finally {
+			db.close();
+		}
+		storage!.upsertCredential("unit-local", { type: "api_key", key: "local-key" });
+		const generation = storage!.getGeneration();
+
+		expect(await storage!.pollExternalChanges()).toBe(false);
+		expect(storage!.getGeneration()).toBe(generation);
+	});
+
+	test("preserves a pending external auth commit while acknowledging local changes", async () => {
+		const generation = storage!.getGeneration();
+		const db = new Database(path.join(tempDir, "agent.db"));
+		try {
+			db.run("UPDATE auth_credentials SET updated_at = updated_at + 1 WHERE provider = 'anthropic'");
+		} finally {
+			db.close();
+		}
+
+		store!.acknowledgeLocalChanges();
+		expect(await storage!.pollExternalChanges()).toBe(true);
+		expect(storage!.getGeneration()).toBeGreaterThan(generation);
+	});
+
 	test("projects Codex meter blocks for legacy clients and observes writes from another connection", async () => {
 		await handle!.close();
 		handle = undefined;
