@@ -2373,8 +2373,11 @@ export class SessionManager {
 		if (options && "sourceLeafId" in options) {
 			const entriesById = new Map(history.map(entry => [entry.id, entry]));
 			const branch: SessionEntry[] = [];
+			const seen = new Set<string>();
 			let cursor = options.sourceLeafId ?? null;
 			while (cursor) {
+				if (seen.has(cursor)) throw new Error(`Fork source contains a parent cycle at entry ${cursor}`);
+				seen.add(cursor);
 				const entry = entriesById.get(cursor);
 				if (!entry) throw new Error(`Fork source entry ${cursor} not found`);
 				branch.push(entry);

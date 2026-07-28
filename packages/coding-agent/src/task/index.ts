@@ -34,6 +34,7 @@ import {
 	canSpawnAtDepth,
 	getTaskSchema,
 	type SingleResult,
+	type TaskContextSource,
 	type TaskItem,
 	type TaskParams,
 	type TaskToolDetails,
@@ -259,6 +260,11 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 
+function validateSource(source: TaskContextSource | undefined, label: string): string | undefined {
+	if (source === undefined || source === "fresh" || source === "fork" || source === "auto") return undefined;
+	return `${label} has an invalid \`source\` value ${JSON.stringify(source)}. Use "fresh", "fork", or "auto".`;
+}
+
 function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
 	const hasTask = typeof params.task === "string" && params.task.trim() !== "";
 	const tasks = params.tasks;
@@ -276,6 +282,8 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			}
 			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 			if (effortError) return effortError;
+			const sourceError = validateSource(item.source, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+			if (sourceError) return sourceError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -298,7 +306,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call");
+	return validateEffort(params.effort, "The call") ?? validateSource(params.source, "The call");
 }
 
 /**
@@ -891,19 +899,32 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		let syncUsage: Usage | undefined;
 		let syncOutputPaths: string[] | undefined;
 		let syncProjectAgentsDir: string | null = null;
-		const buildAsyncDetails = (): TaskToolDetails => ({
-			projectAgentsDir: syncProjectAgentsDir,
-			results: [...syncResults, ...asyncResults],
-			totalDurationMs: Date.now() - callStartedAt,
-			usage: syncUsage,
-			outputPaths: syncOutputPaths,
-			progress: spawns.map(spawn => ({ ...spawn.progress })),
-			async: {
-				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
-				jobId: primaryJobId,
-				type: "task",
-			},
-		});
+		const buildAsyncDetails = (): TaskToolDetails => {
+			const usage = createUsageTotals();
+			let hasUsage = false;
+			if (syncUsage) {
+				addUsageTotals(usage, syncUsage);
+				hasUsage = true;
+			}
+			for (const result of asyncResults) {
+				if (!result.usage) continue;
+				addUsageTotals(usage, result.usage);
+				hasUsage = true;
+			}
+			return {
+				projectAgentsDir: syncProjectAgentsDir,
+				results: [...syncResults, ...asyncResults],
+				totalDurationMs: Date.now() - callStartedAt,
+				usage: hasUsage ? usage : undefined,
+				outputPaths: syncOutputPaths,
+				progress: spawns.map(spawn => ({ ...spawn.progress })),
+				async: {
+					state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
+					jobId: primaryJobId,
+					type: "task",
+				},
+			};
+		};
 
 		const started: Array<{ agentId: string; jobId: string }> = [];
 		const failedSchedules: string[] = [];
@@ -923,6 +944,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					onSettled: failed => {
 						settledCount += 1;
 						if (failed) failedCount += 1;
+						const primary = manager.getJob(primaryJobId);
+						if (primary) primary.latestDetails = buildAsyncDetails() as unknown as Record<string, unknown>;
 					},
 					onResult: result => asyncResults.push(result),
 				});
