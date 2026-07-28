@@ -994,12 +994,7 @@ ${table}`;
 		});
 
 		it("renders a marker row before code when a list item starts with a fenced block", () => {
-			const markdown = new Markdown(
-				"- ```ts\n  const x = 1;\n  ```\n\n  after",
-				0,
-				0,
-				defaultMarkdownTheme,
-			);
+			const markdown = new Markdown("- ```ts\n  const x = 1;\n  ```\n\n  after", 0, 0, defaultMarkdownTheme);
 			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
 
 			expect(plainLines).toEqual(["-", "    const x = 1;", "", "  after"]);
