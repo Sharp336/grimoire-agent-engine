@@ -241,11 +241,21 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
  * is the only source. Parsing goes through `buildRuleFromMarkdown` so plugin
  * rules get the same frontmatter handling (globs, alwaysApply, conditions,
  * scope) as every other rule provider.
+ *
+ * Roots are ordered project-scope-first because rule dedup is first-wins by
+ * name: a plugin installed at both scopes (or two plugins shipping the same
+ * rule name) would otherwise resolve in registry order, letting a user-scoped
+ * rule shadow the project-specific one. `discoverAgents` sorts the same roots
+ * the same way for the same reason.
  */
 async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const scopedRoots = [...roots].sort((a, b) => {
+		if (a.scope === b.scope) return 0;
+		return a.scope === "project" ? -1 : 1;
+	});
 	const results = await Promise.all(
-		roots.map(root =>
+		scopedRoots.map(root =>
 			loadFilesFromDir<Rule>(ctx, path.join(root.path, "rules"), PROVIDER_ID, root.scope, {
 				extensions: ["md", "mdc"],
 				transform: (name, content, filePath, source) =>

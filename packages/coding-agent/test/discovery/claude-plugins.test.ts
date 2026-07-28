@@ -1447,6 +1447,51 @@ describe("listClaudePluginRoots", () => {
 		expect(result.warnings).toEqual([]);
 		expect(result.all.find(rule => rule._source?.provider === "claude-plugins")).toBeUndefined();
 	});
+
+	test("project-scoped rules win over same-named user-scoped rules regardless of registry order", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const userPluginPath = path.join(tempDir, "plugins", "user-pack");
+		const projectPluginPath = path.join(tempDir, "plugins", "project-pack");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(userPluginPath, "rules"), { recursive: true });
+		await fs.mkdir(path.join(projectPluginPath, "rules"), { recursive: true });
+
+		// The user entry is listed FIRST in the registry. Without scope-aware
+		// ordering, first-wins dedup would let it shadow the project rule.
+		const registry = {
+			version: 2,
+			plugins: {
+				"user-pack@market": [
+					{
+						scope: "user",
+						installPath: userPluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+				"project-pack@market": [
+					{
+						scope: "project",
+						installPath: projectPluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(path.join(userPluginPath, "rules", "shared.md"), "User body\n");
+		await fs.writeFile(path.join(projectPluginPath, "rules", "shared.md"), "Project body\n");
+
+		const result = await loadCapability<Rule>("rules", { cwd: tempDir });
+		expect(result.warnings).toEqual([]);
+		const survivor = result.items.find(rule => rule.name === "shared");
+		expect(survivor).toBeDefined();
+		expect(survivor?.content.trim()).toBe("Project body");
+		expect(survivor?.path).toContain(path.join("project-pack", "rules", "shared.md"));
+	});
 });
 
 describe("discoverAgents plugin precedence", () => {
