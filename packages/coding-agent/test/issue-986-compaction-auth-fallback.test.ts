@@ -81,6 +81,144 @@ describe("issue #986 compaction auth fallback", () => {
 		return { currentModel, fallbackModel };
 	}
 
+	async function createAutoNativeFallbackSession() {
+		const currentModel = getBundledModel("openai", "gpt-5");
+		const sameProviderModel = getBundledModel("openai", "gpt-5-mini");
+		const crossProviderModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!currentModel || !sameProviderModel || !crossProviderModel) {
+			throw new Error("Expected bundled native fallback test models");
+		}
+
+		const settings = Settings.isolated({
+			"compaction.autoContinue": false,
+			"compaction.keepRecentTokens": 1,
+			"compaction.strategy": "context-full",
+			"contextPromotion.enabled": false,
+		});
+		settings.setModelRole("smol", `${sameProviderModel.provider}/${sameProviderModel.id}`);
+		settings.setModelRole("slow", `${crossProviderModel.provider}/${crossProviderModel.id}`);
+		const agent = new Agent({
+			initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.setRuntimeApiKey(currentModel.provider, "openai-token");
+		authStorage.setRuntimeApiKey(crossProviderModel.provider, "anthropic-token");
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+		for (const [userText, assistantText] of [
+			["first question", "first answer"],
+			["second question", "second answer"],
+		] as const) {
+			const user = userMsg(userText);
+			const assistant = assistantMsg(assistantText);
+			session.agent.appendMessage(user);
+			session.sessionManager.appendMessage(user);
+			session.agent.appendMessage(assistant);
+			session.sessionManager.appendMessage(assistant);
+		}
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
+			currentModel,
+			sameProviderModel,
+			crossProviderModel,
+		]);
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+
+		const triggerAutoCompaction = async (): Promise<void> => {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_end") resolve();
+			});
+			const contextWindow = currentModel.contextWindow;
+			if (!contextWindow) throw new Error("Expected current model context window");
+			const assistant = {
+				...assistantMsg("threshold reached"),
+				api: currentModel.api,
+				provider: currentModel.provider,
+				model: currentModel.id,
+				usage: {
+					input: contextWindow,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: contextWindow + 1,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistant });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistant] });
+			await promise;
+			await session.waitForIdle();
+		};
+
+		return { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction };
+	}
+
+	it("continues same-provider native candidates but stops before crossing providers on non-auth failure", async () => {
+		const { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
+			await createAutoNativeFallbackSession();
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.provider === currentModel.provider || model.provider === sameProviderModel.provider) {
+				throw new compactionModule.NativeCompactionError(new Error("native compaction transport failed"));
+			}
+			if (model.provider !== crossProviderModel.provider || model.id !== crossProviderModel.id) {
+				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+			}
+			return {
+				summary: "cross-provider summary",
+				shortSummary: "cross-provider",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+	});
+
+	it("preserves cross-provider auto-compaction fallback for auth-classified native failures", async () => {
+		const { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
+			await createAutoNativeFallbackSession();
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.provider === currentModel.provider || model.provider === sameProviderModel.provider) {
+				throw new compactionModule.NativeCompactionError(
+					Object.assign(new Error("native compaction authentication failed"), { status: 401 }),
+				);
+			}
+			if (model.provider !== crossProviderModel.provider || model.id !== crossProviderModel.id) {
+				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+			}
+			return {
+				summary: "authenticated fallback summary",
+				shortSummary: "authenticated fallback",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+			`${crossProviderModel.provider}/${crossProviderModel.id}`,
+		]);
+	});
+
 	it("falls back across providers when native compaction receives auth_unavailable", async () => {
 		const { currentModel, fallbackModel } = await createSession({ fallbackModelRole: "smol" });
 		const originalCompact = compactionModule.compact;
