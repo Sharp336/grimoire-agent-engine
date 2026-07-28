@@ -1349,9 +1349,13 @@ describe("executeBash :async: background retention", () => {
 				});
 				expect(res.cancelled).toBe(false);
 
-				await pollUntil(() => fs.existsSync(pidFile), Date.now() + 4000);
-				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+				await pollUntil(() => {
+					if (!fs.existsSync(pidFile)) return false;
+					pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+					return Number.isInteger(pid);
+				}, Date.now() + 4000);
 				expect(Number.isInteger(pid)).toBe(true);
+				if (pid === undefined) throw new Error("Expected detached child pid");
 
 				// A later turn on a different per-job shell must not have killed it.
 				await executeBash("true", { sessionKey: "reparent-probe:async:job2", cwd: tmp });
