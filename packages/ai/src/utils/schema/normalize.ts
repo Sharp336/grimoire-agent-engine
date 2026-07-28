@@ -139,9 +139,12 @@ type SchemaChildKind = "schema" | "map";
 /** Classify only JSON Schema-valued children; instance payloads remain opaque. */
 function classifySchemaChild(key: string, value: unknown, insideSchemaMap: boolean): SchemaChildKind | undefined {
 	if (insideSchemaMap) return "schema";
-	if (Object.hasOwn(SUBSCHEMA_MAP_KEYS, key)) return "map";
-	if (Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) || Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key)) return "schema";
-	if (Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(value)) return "schema";
+	const normalizedKey = SNAKE_TO_CAMEL_RENAMES.get(key) ?? key;
+	if (Object.hasOwn(SUBSCHEMA_MAP_KEYS, normalizedKey)) return "map";
+	if (Object.hasOwn(SUBSCHEMA_VALUE_KEYS, normalizedKey) || Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, normalizedKey)) {
+		return "schema";
+	}
+	if (Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, normalizedKey) && isJsonObject(value)) return "schema";
 	return undefined;
 }
 

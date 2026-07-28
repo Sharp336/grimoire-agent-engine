@@ -603,6 +603,10 @@ describe("normalizeSchemaForGoogle parity with python-genai process_schema", () 
 		).toEqual({});
 	});
 
+	it("drops negations containing snake-case combiners with non-string enums", () => {
+		expect(normalizeSchemaForGoogle({ not: { any_of: [{ const: 1 }] } })).toEqual({});
+	});
+
 	// Mirrors python-genai test_schema.py::test_process_schema_order_properties_propagates_into_defs
 	it("propagates auto propertyOrdering into inlined $defs targets", () => {
 		const schema = {
