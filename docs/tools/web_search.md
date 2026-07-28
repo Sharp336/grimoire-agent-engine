@@ -83,9 +83,9 @@ Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `exec
 ## Flow
 1. `WebSearchTool.execute()` in `packages/coding-agent/src/web/search/index.ts` delegates directly to `executeSearch()`.
 2. `executeSearch()` computes ordered provider candidates without loading their modules:
-   - if `params.provider` is set and not `"auto"`, it loads that provider only to check `isExplicitlyAvailable()`; if false, it uses the auto candidates.
-   - otherwise it uses the module-global preferred provider from `packages/coding-agent/src/web/search/provider.ts`.
-3. `resolveProviderCandidates()` puts an included preferred provider first (gated by `isExplicitlyAvailable()`), then the effective provider order excluding it. `providers.webSearchOrder` prioritizes listed providers and appends unlisted providers in `SEARCH_PROVIDER_ORDER`; an empty list preserves the built-in order. Excluded providers are skipped entirely, including as the preferred candidate. As `executeSearch()` walks those candidates, it loads a module and checks availability only when the candidate is reached.
+   - if `params.provider` is set and not `"auto"`, that provider is the only candidate and is checked with `isExplicitlyAvailable()`.
+   - otherwise it uses the module-global provider chain from `packages/coding-agent/src/web/search/provider.ts`.
+3. `resolveProviderCandidates()` uses a non-empty `providers.webSearchOrder` as the exact ordered allowlist; an empty list preserves the built-in automatic chain. Excluded providers are skipped entirely. As `executeSearch()` walks those candidates, it loads a module and checks availability only when the candidate is reached.
 4. If no providers are available (for example, after excluding DuckDuckGo and lacking configured keyed/OAuth providers), `executeSearch()` returns `Error: No web search provider configured.` with `details.response.provider = "none"`.
 5. For each provider in order, `executeSearch()` calls `provider.search()` with:
    - `query`,
@@ -102,7 +102,7 @@ Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `exec
 ## Modes / Variants
 - **Provider selection**
   - **Forced provider**: internal callers may pass `provider`; a non-`auto` value is the only attempted provider, while `auto` (or omitting it) walks the configured chain. This field is not in the model-facing schema.
-  - **Configured order**: `setSearchProviderOrder()` prioritizes the valid, first-occurrence provider IDs in `providers.webSearchOrder`; providers omitted from the setting follow in their built-in relative order. Listed providers are explicit selections — they resolve through `isExplicitlyAvailable()`, so e.g. a hand-listed Perplexity may fall back to anonymous search. Wired from settings in `packages/coding-agent/src/config/provider-globals.ts` (SDK startup, cwd reloads, live settings changes).
+  - **Configured order**: `setSearchProviderOrder()` retains the valid, first-occurrence provider IDs in `providers.webSearchOrder` as the complete chain; omitted providers are never attempted. An empty setting restores the built-in automatic chain. Listed providers are explicit selections — they resolve through `isExplicitlyAvailable()`, so e.g. a hand-listed Perplexity may fall back to anonymous search. Wired from settings in `packages/coding-agent/src/config/provider-globals.ts` (SDK startup, cwd reloads, live settings changes).
   - **Excluded providers**: `setExcludedSearchProviders()` records providers `resolveProviderCandidates()` must skip, including as fallbacks. Wired from the `providers.webSearchExclude` setting via the same `provider-globals.ts` paths.
   - **Default auto chain order** (25 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `duckduckgo`, `bing`, `yahoo`, `startpage`, `google`, `ecosia`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false` so the auto chain never fans out implicitly.
 - **Provider adapters**

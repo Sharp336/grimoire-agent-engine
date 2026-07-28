@@ -40,7 +40,7 @@ import { AgentStorage } from "../session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
-import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
+import { isSearchProviderId } from "../web/search/types";
 import { withFileLock } from "./file-lock";
 import {
 	type BashInterceptorRule,
@@ -1797,11 +1797,10 @@ export class Settings {
 		delete raw["mcp.discoveryDefaultServers"];
 
 		// providers.webSearch / providers.image (single preferred provider) →
-		// providers.webSearchOrder / providers.imageOrder (priority lists). A
-		// concrete legacy choice becomes the head of the new list with every
-		// remaining provider appended in its built-in order, so the old
-		// preference stays #1 and the fallback chain is written out explicitly.
-		// "auto" (or an unknown id) just drops the key — the default chain.
+		// providers.webSearchOrder / providers.imageOrder (priority lists).
+		// A concrete web-search choice becomes the complete singleton allowlist.
+		// Image migration preserves its historical fallback chain. "auto" (or an
+		// unknown id) drops the legacy key and leaves the default chain active.
 		const providerPrefsObj = raw.providers as Record<string, unknown> | undefined;
 		const migrateProviderPreference = (
 			legacyKey: string,
@@ -1825,9 +1824,7 @@ export class Settings {
 			delete raw[flatLegacyKey];
 		};
 		migrateProviderPreference("webSearch", "webSearchOrder", value =>
-			value !== "auto" && isSearchProviderId(value)
-				? [value, ...SEARCH_PROVIDER_ORDER.filter(id => id !== value)]
-				: undefined,
+			value !== "auto" && isSearchProviderId(value) ? [value] : undefined,
 		);
 		migrateProviderPreference("image", "imageOrder", value =>
 			value !== "auto" && isImageProviderId(value)

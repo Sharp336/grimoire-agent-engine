@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed explicit web-search provider orders silently falling through to unlisted providers, including paid providers.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

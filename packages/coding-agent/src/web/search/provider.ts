@@ -195,19 +195,14 @@ let orderedProvIds: readonly SearchProviderId[] = SEARCH_PROVIDER_ORDER;
 let explicitProvIds = new Set<SearchProviderId>();
 
 /**
- * Prioritize configured providers while retaining every unlisted provider in
- * its built-in relative order. Invalid IDs are ignored defensively. Listed
- * providers are treated as explicit selections: they resolve through
- * `isExplicitlyAvailable`, so e.g. a hand-listed Perplexity may fall back to
- * anonymous search exactly like the retired single-preference setting did.
+ * Set the configured provider chain. A non-empty list is an exact allowlist;
+ * an empty list restores the built-in automatic chain. Invalid IDs are ignored
+ * defensively, and listed providers retain explicit-selection semantics.
  */
 export function setSearchProviderOrder(providers: readonly SearchProviderId[]): void {
 	const prioritized = new Set(providers.filter(id => SEARCH_PROVIDER_ORDER.includes(id)));
 	explicitProvIds = prioritized;
-	orderedProvIds =
-		prioritized.size === 0
-			? SEARCH_PROVIDER_ORDER
-			: [...prioritized, ...SEARCH_PROVIDER_ORDER.filter(id => !prioritized.has(id))];
+	orderedProvIds = prioritized.size === 0 ? SEARCH_PROVIDER_ORDER : [...prioritized];
 }
 
 /** Providers excluded from web search resolution via settings. */

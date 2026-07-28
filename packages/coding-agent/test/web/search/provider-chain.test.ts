@@ -39,26 +39,28 @@ afterEach(() => {
 });
 
 describe("resolveProviderCandidates", () => {
-	it("orders the forced provider before configured and built-in fallbacks", () => {
+	it("orders the forced provider before the exact configured chain", () => {
 		setSearchProviderOrder(["gemini", "exa"]);
 
 		const candidates = resolveProviderCandidates("perplexity");
 
-		expect(candidates[0]).toEqual({ id: "perplexity", explicit: true });
-		expect(candidates.slice(1).map(candidate => candidate.id)).toEqual([
-			"gemini",
-			"exa",
-			...SEARCH_PROVIDER_ORDER.filter(id => id !== "perplexity" && id !== "gemini" && id !== "exa"),
+		expect(candidates).toEqual([
+			{ id: "perplexity", explicit: true },
+			{ id: "gemini", explicit: true },
+			{ id: "exa", explicit: true },
 		]);
 	});
 
-	it("marks configured-order entries explicit so hand-listed providers keep explicit-selection semantics", () => {
-		setSearchProviderOrder(["perplexity"]);
+	it("treats a non-empty configured order as the exact explicit allowlist", () => {
+		setSearchProviderOrder(["codex"]);
 
-		const candidates = resolveProviderCandidates();
+		expect(resolveProviderCandidates()).toEqual([{ id: "codex", explicit: true }]);
+	});
 
-		expect(candidates[0]).toEqual({ id: "perplexity", explicit: true });
-		expect(candidates[1]?.explicit).toBe(false);
+	it("retains the built-in automatic chain for an empty order", () => {
+		setSearchProviderOrder([]);
+
+		expect(resolveProviderCandidates()).toEqual(SEARCH_PROVIDER_ORDER.map(id => ({ id, explicit: false })));
 	});
 
 	it("omits excluded providers without resolving them", () => {
@@ -75,9 +77,10 @@ describe("resolveProviderCandidates", () => {
 
 		controller.handleSettingChange("providers.webSearchOrder", ["exa", "not-a-provider", "exa", "gemini"]);
 
-		const candidates = resolveProviderCandidates();
-		expect(candidates.slice(0, 2).map(candidate => candidate.id)).toEqual(["exa", "gemini"]);
-		expect(candidates).toHaveLength(SEARCH_PROVIDER_ORDER.length);
+		expect(resolveProviderCandidates()).toEqual([
+			{ id: "exa", explicit: true },
+			{ id: "gemini", explicit: true },
+		]);
 	});
 });
 

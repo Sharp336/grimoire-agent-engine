@@ -17,7 +17,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
-import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import * as fileLock from "../src/config/file-lock";
@@ -873,15 +872,12 @@ describe("Settings", () => {
 	});
 
 	describe("provider preference migration", () => {
-		it("expands a legacy providers.webSearch choice into the head of webSearchOrder", async () => {
-			await writeSettings({ providers: { webSearch: "exa" } });
+		it("migrates a legacy providers.webSearch choice into an exact singleton order", async () => {
+			await writeSettings({ providers: { webSearch: "codex" } });
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("providers.webSearchOrder")).toEqual([
-				"exa",
-				...SEARCH_PROVIDER_ORDER.filter(id => id !== "exa"),
-			]);
+			expect(settings.get("providers.webSearchOrder")).toEqual(["codex"]);
 		});
 
 		it("drops legacy providers.webSearch auto without seeding an order", async () => {
