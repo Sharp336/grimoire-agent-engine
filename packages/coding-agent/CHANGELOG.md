@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a native `session_metrics` status-line segment that shows the session journal's compaction count and current JSONL size, with theme-aware Unicode, Nerd Font, and ASCII icons ([#6851](https://github.com/can1357/oh-my-pi/pull/6851) by [@joshrzemien](https://github.com/joshrzemien)).
+
 ## [17.1.7] - 2026-07-27
 
 ### Fixed

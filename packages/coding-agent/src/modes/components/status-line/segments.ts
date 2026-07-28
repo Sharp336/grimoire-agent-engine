@@ -12,12 +12,20 @@ import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegm
 
 export type { SegmentContext } from "./types";
 
+const KILOBYTE = 1024;
+const MEGABYTE = 1024 * KILOBYTE;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
+}
+
+function formatSessionFileSize(bytes: number): string {
+	if (bytes >= MEGABYTE) return `${(bytes / MEGABYTE).toFixed(1)} MB`;
+	return `${Math.round(bytes / KILOBYTE)} KB`;
 }
 
 /** Left-truncate a path/label to `maxLen`, prefixing an ellipsis when clipped. */
@@ -531,6 +539,19 @@ const sessionSegment: StatusLineSegment = {
 	},
 };
 
+const sessionMetricsSegment: StatusLineSegment = {
+	id: "session_metrics",
+	render(ctx) {
+		const metrics = ctx.sessionMetrics;
+		if (!metrics) return { content: "", visible: false };
+
+		const leadingIcon = theme.icon.compaction ? `${theme.icon.compaction} ` : "";
+		const trailingIcon = theme.icon.sessionSize ? ` ${theme.icon.sessionSize}` : "";
+		const content = `${leadingIcon}${metrics.compactions}/${formatSessionFileSize(metrics.bytes)}${trailingIcon}`;
+		return { content: theme.fg("statusLineSessionMetrics", content), visible: true };
+	},
+};
+
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
 	render(_ctx) {
@@ -690,6 +711,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	time_spent: timeSpentSegment,
 	time: timeSegment,
 	session: sessionSegment,
+	session_metrics: sessionMetricsSegment,
 	hostname: hostnameSegment,
 	cache_read: cacheReadSegment,
 	cache_write: cacheWriteSegment,

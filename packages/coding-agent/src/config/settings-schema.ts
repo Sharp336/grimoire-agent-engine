@@ -172,6 +172,7 @@ export type StatusLineSegmentId =
 	| "time_spent"
 	| "time"
 	| "session"
+	| "session_metrics"
 	| "hostname"
 	| "cache_read"
 	| "cache_write"

@@ -71,6 +71,10 @@ All tokens below are required in `colors`.
 
 ## Optional tokens
 
+### `statusLineSessionMetrics` color (optional)
+
+Colors the `session_metrics` status-line segment. When omitted, it falls back to `statusLineOutput`. Its leading and trailing glyphs can be customized with the `icon.compaction` and `icon.sessionSize` symbol override keys.
+
 ### `export` section (optional)
 
 Used for HTML export theming helpers:

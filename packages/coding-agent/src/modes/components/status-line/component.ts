@@ -22,6 +22,7 @@ import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
 	EffectiveStatusLineSettings,
+	SessionMetrics,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
 	StatusLineSettings,
@@ -218,6 +219,13 @@ interface ActiveMeter {
 	sessionFile: string | undefined;
 }
 
+interface SessionMetricsMemo {
+	session: AgentSession;
+	sessionFile: string | undefined;
+	leafId: string | null;
+	metrics: SessionMetrics;
+}
+
 const EMPTY_MESSAGES: readonly AgentMessage[] = [];
 const STATUS_USAGE_START_DELAY_MS = 0;
 const STATUS_USAGE_REFRESH_TIMEOUT_MS = 2_000;
@@ -336,6 +344,7 @@ export class StatusLineComponent implements Component {
 	// count (matching the provider and the `/context` panel), so a stable
 	// message list + model window yields a stable result we can return verbatim.
 	#contextUsageCache: ContextUsageMemo | undefined;
+	#sessionMetricsMemo: SessionMetricsMemo | undefined;
 
 	constructor(private session: AgentSession) {
 		this.#settings = {
@@ -517,6 +526,36 @@ export class StatusLineComponent implements Component {
 		return meter;
 	}
 
+	/**
+	 * Collect session metrics only when the journal's active leaf changes. The
+	 * status line can repaint many times per second while streaming, so neither
+	 * the O(1) compaction lookup nor the filesystem stat belongs on the stable render path.
+	 */
+	#getSessionMetrics(): SessionMetrics {
+		const manager = this.session.sessionManager;
+		const sessionFile = manager.getSessionFile();
+		const leafId = manager.getLeafId();
+		const cached = this.#sessionMetricsMemo;
+		if (cached && cached.session === this.session && cached.sessionFile === sessionFile && cached.leafId === leafId) {
+			return cached.metrics;
+		}
+
+		const compactions = manager.getCompactionCount();
+
+		let bytes = 0;
+		if (sessionFile) {
+			try {
+				bytes = fs.statSync(sessionFile, { throwIfNoEntry: false })?.size ?? 0;
+			} catch {
+				// A missing or temporarily inaccessible lazy session file is 0 KB.
+			}
+		}
+
+		const metrics = { compactions, bytes };
+		this.#sessionMetricsMemo = { session: this.session, sessionFile, leafId, metrics };
+		return metrics;
+	}
+
 	setPlanModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
 		this.#planModeStatus = status ?? null;
 	}
@@ -618,6 +657,7 @@ export class StatusLineComponent implements Component {
 		this.#usageFetchedAt = 0;
 		this.#usageInFlight = false;
 		this.#contextUsageCache = undefined;
+		this.#sessionMetricsMemo = undefined;
 		this.#lastTokensPerSecond = null;
 		this.#lastTokensPerSecondTimestamp = null;
 	}
@@ -1161,6 +1201,7 @@ export class StatusLineComponent implements Component {
 		segmentOptions: StatusLineSettings["segmentOptions"],
 		includePath: boolean,
 		includeContext: boolean,
+		includeSessionMetrics: boolean,
 		includeGit: boolean,
 		includePr: boolean,
 	): SegmentContext {
@@ -1243,6 +1284,7 @@ export class StatusLineComponent implements Component {
 			vibeMode: this.#vibeModeStatus,
 			collab: this.#collabStatus,
 			usageStats,
+			sessionMetrics: includeSessionMetrics ? this.#getSessionMetrics() : undefined,
 			contextPercent,
 			contextTokens,
 			contextWindow,
@@ -1312,6 +1354,9 @@ export class StatusLineComponent implements Component {
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
 		const includeContext =
 			hasContextSegment(effectiveSettings.leftSegments) || hasContextSegment(effectiveSettings.rightSegments);
+		const includeSessionMetrics =
+			effectiveSettings.leftSegments.includes("session_metrics") ||
+			effectiveSettings.rightSegments.includes("session_metrics");
 		const gitEnabled = this.#gitEnabled();
 		const includeGit =
 			gitEnabled &&
@@ -1323,6 +1368,7 @@ export class StatusLineComponent implements Component {
 			effectiveSettings.segmentOptions,
 			includePath,
 			includeContext,
+			includeSessionMetrics,
 			includeGit,
 			includePr,
 		);

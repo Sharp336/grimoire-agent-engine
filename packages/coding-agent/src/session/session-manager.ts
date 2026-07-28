@@ -191,9 +191,9 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
 
 /**
  * Maintains the derived views over a session's entry list: id lookup, the
- * parent→children adjacency, the resolved label map, the active leaf, and the
- * running usage totals. Kept in lockstep with the manager's `#entries` so reads
- * stay O(1)/O(children) instead of rescanning the whole journal.
+ * parent→children adjacency, the resolved label map, the active leaf, and
+ * running usage and compaction totals. Kept in lockstep with the manager's
+ * `#entries` so reads stay O(1)/O(children) instead of rescanning the journal.
  */
 class SessionEntryIndex {
 	#entriesById = new Map<string, SessionEntry>();
@@ -201,6 +201,7 @@ class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	#compactions = 0;
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -208,6 +209,7 @@ class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#compactions = 0;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -229,6 +231,7 @@ class SessionEntryIndex {
 		}
 
 		addUsage(this.#usage, entryUsage(entry));
+		if (entry.type === "compaction") this.#compactions++;
 	}
 
 	has(id: string): boolean {
@@ -273,6 +276,10 @@ class SessionEntryIndex {
 
 	usageSnapshot(): UsageStatistics {
 		return { ...this.#usage };
+	}
+
+	compactionCount(): number {
+		return this.#compactions;
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -342,6 +349,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getUsageStatistics"
+	| "getCompactionCount"
 	| "putBlob"
 	| "putBlobSync"
 >;
@@ -1665,6 +1673,11 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
+	}
+
+	/** Total compaction entries in the journal, including inactive branches. */
+	getCompactionCount(): number {
+		return this.#index.compactionCount();
 	}
 
 	/**

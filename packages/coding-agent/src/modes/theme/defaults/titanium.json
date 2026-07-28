@@ -80,6 +80,7 @@
 		"statusLineOutput": "deepBlue",
 		"statusLineCost": "titaniumGold",
 		"statusLineSubagents": "electricBlue",
+		"statusLineSessionMetrics": "#A78BFA",
 		"pythonMode": "#f0c040"
 	},
 	"export": {

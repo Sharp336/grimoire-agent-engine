@@ -119,6 +119,8 @@ export type SymbolKey =
 	| "icon.throughput"
 	| "icon.host"
 	| "icon.session"
+	| "icon.compaction"
+	| "icon.sessionSize"
 	| "icon.package"
 	| "icon.warning"
 	| "icon.rewind"
@@ -329,6 +331,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.throughput": "⚡",
 	"icon.host": "🖥",
 	"icon.session": "🆔",
+	"icon.compaction": "♻",
+	"icon.sessionSize": "💾",
 	"icon.package": "📦",
 	"icon.warning": "⚠",
 	"icon.rewind": "↶",
@@ -616,6 +620,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.host": "\uf109",
 	// pick: 󰁑 (nf-md-arrow_left_bold_hexagon_outline) | alt:  
 	"icon.session": "\u{f0051}",
+	// pick:  (nf-fa-recycle)
+	"icon.compaction": "\uf1b8",
+	// pick: 󰆓 (nf-md-content_save)
+	"icon.sessionSize": "\u{f0193}",
 	// pick:  | alt: 
 	"icon.package": "\uf487",
 	// pick:  | alt:  
@@ -849,6 +857,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.input": "in:",
 	"icon.host": "host",
 	"icon.session": "id",
+	"icon.compaction": "cmp",
+	"icon.sessionSize": "log",
 	"icon.package": "[P]",
 	"icon.warning": "[!]",
 	"icon.rewind": "<-",
@@ -1083,6 +1093,7 @@ const themeColorsSchema = type({
 	statusLineOutput: "string | number",
 	statusLineCost: "string | number",
 	statusLineSubagents: "string | number",
+	"statusLineSessionMetrics?": "string | number",
 });
 const spinnerFramesSchema = type("unknown").narrow((value): value is SpinnerFramesOverride => {
 	if (Array.isArray(value)) {
@@ -1186,7 +1197,8 @@ export type ThemeColor =
 	| "statusLineUntracked"
 	| "statusLineOutput"
 	| "statusLineCost"
-	| "statusLineSubagents";
+	| "statusLineSubagents"
+	| "statusLineSessionMetrics";
 
 /** Set of all valid ThemeColor string values for runtime validation */
 const THEME_COLOR_RECORD = {
@@ -1250,6 +1262,7 @@ const THEME_COLOR_RECORD = {
 	statusLineOutput: true,
 	statusLineCost: true,
 	statusLineSubagents: true,
+	statusLineSessionMetrics: true,
 } satisfies Record<ThemeColor, true>;
 
 const VALID_THEME_COLORS: ReadonlySet<string> = new Set(Object.keys(THEME_COLOR_RECORD));
@@ -1849,6 +1862,8 @@ export class Theme {
 			throughput: this.#symbols["icon.throughput"],
 			host: this.#symbols["icon.host"],
 			session: this.#symbols["icon.session"],
+			compaction: this.#symbols["icon.compaction"],
+			sessionSize: this.#symbols["icon.sessionSize"],
 			package: this.#symbols["icon.package"],
 			warning: this.#symbols["icon.warning"],
 			rewind: this.#symbols["icon.rewind"],
@@ -2074,6 +2089,7 @@ function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = {}): Th
 	const { mode, symbolPresetOverride, colorBlindMode } = options;
 	const colorMode = mode ?? detectColorMode();
 	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
+	resolvedColors.statusLineSessionMetrics ??= resolvedColors.statusLineOutput;
 
 	if (colorBlindMode) {
 		const added = resolvedColors.toolDiffAdded;

@@ -48,6 +48,11 @@ export type EffectiveStatusLineSettings = Required<
 
 export type RGB = readonly [number, number, number];
 
+export interface SessionMetrics {
+	compactions: number;
+	bytes: number;
+}
+
 export interface SegmentContext {
 	session: AgentSession;
 	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
@@ -90,6 +95,8 @@ export interface SegmentContext {
 		cost: number;
 		tokensPerSecond: number | null;
 	};
+	/** Journal compaction count and on-disk JSONL size, populated only when requested by a preset. */
+	sessionMetrics?: SessionMetrics;
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */
 	contextPercent: number | null;
 	contextTokens: number;

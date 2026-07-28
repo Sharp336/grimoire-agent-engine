@@ -370,6 +370,10 @@
 				"statusLineSubagents": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Status line subagents segment"
+				},
+				"statusLineSessionMetrics": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line session compaction count and journal size"
 				}
 			},
 			"additionalProperties": false

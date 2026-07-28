@@ -656,6 +656,10 @@ tui:
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`.
 
+Built-in segment IDs are `pi`, `model`, `mode`, `path`, `git`, `pr`, `subagents`, `token_in`, `token_out`, `token_total`, `token_rate`, `cost`, `context_pct`, `context_total`, `time_spent`, `time`, `session`, `session_metrics`, `hostname`, `cache_read`, `cache_write`, `cache_hit`, `session_name`, `usage`, and `collab`.
+
+`session_metrics` displays the journal's compaction count across all branches and its current JSONL size (for example, ` 3/1.5 MB 󰆓`). It is included in the `full` and `nerd` presets and can be placed in either custom segment list.
+
 ### Interaction
 
 | Key | Type | Default | Values |
