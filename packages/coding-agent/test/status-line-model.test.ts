@@ -2,35 +2,11 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import {
-	getThemeByName,
-	initTheme,
-	setThemeInstance,
-	Theme,
-	type ThemeBg,
-	type ThemeColor,
-	theme,
-} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 beforeAll(async () => {
 	await initTheme();
 });
-
-function createFastTheme(fastIcon: string, thinkingHigh: string): Theme {
-	return new Theme(
-		{ statusLineModel: "#ffffff" } as Record<ThemeColor, string | number>,
-		{ statusLineBg: "#000000" } as Record<ThemeBg, string | number>,
-		"truecolor",
-		"unicode",
-		{
-			"icon.model": "",
-			"icon.fast": fastIcon,
-			"sep.dot": "",
-			"thinking.high": thinkingHigh,
-			"thinking.autoPending": "",
-		},
-	);
-}
 
 function createModelContext(advisorActive: boolean): SegmentContext {
 	return {
@@ -143,7 +119,7 @@ describe("status line model segment compact thinking level", () => {
 		expect(Bun.stripANSI(rendered.content)).toBe(`${modelPrefix}Test Model${theme.sep.dot}${display}`);
 	});
 
-	it("removes explicit spacing after a wide Fast icon", async () => {
+	it("removes explicit spacing after the Fast icon", async () => {
 		const originalTheme = theme;
 		const titaniumDracula = await getThemeByName("titanium-dracula");
 		if (!titaniumDracula) throw new Error("Expected Titanium Dracula theme");
@@ -153,27 +129,11 @@ describe("status line model segment compact thinking level", () => {
 			expect(Bun.stripANSI(regular.content)).toBe("Test Model\u00a0high");
 
 			const fixed = renderSegment("model", createThinkingContext(false, { fast: true }));
-			expect(Bun.stripANSI(fixed.content)).toBe("Test Model ⚡high");
+			expect(Bun.stripANSI(fixed.content)).toBe("Test Model ϟhigh");
 			expect(fixed.content).toContain(titaniumDracula.thinking.high.replace("\u00a0", ""));
 
 			const auto = renderSegment("model", createThinkingContext(false, { auto: true, fast: true }));
-			expect(Bun.stripANSI(auto.content)).toBe("Test Model ⚡auto");
-		} finally {
-			setThemeInstance(originalTheme);
-		}
-	});
-
-	it("preserves explicit spacing after narrow Fast icons", async () => {
-		const originalTheme = theme;
-		const titaniumDracula = await getThemeByName("titanium-dracula");
-		if (!titaniumDracula) throw new Error("Expected Titanium Dracula theme");
-		try {
-			for (const fastIcon of [">>", "\uf0e7"]) {
-				setThemeInstance(createFastTheme(fastIcon, titaniumDracula.thinking.high));
-				const rendered = renderSegment("model", createThinkingContext(false, { fast: true }));
-				expect(Bun.stripANSI(rendered.content)).toBe(`Test Model ${fastIcon}\u00a0high`);
-				expect(rendered.content).toContain(titaniumDracula.thinking.high);
-			}
+			expect(Bun.stripANSI(auto.content)).toBe("Test Model ϟauto");
 		} finally {
 			setThemeInstance(originalTheme);
 		}

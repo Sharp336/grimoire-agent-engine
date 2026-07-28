@@ -146,10 +146,7 @@ const modelSegment: StatusLineSegment = {
 		if (!compact && thinkingDisplay) {
 			let visibleThinking = thinkingDisplay;
 			if (fastIcon) {
-				const plainFastIcon = Bun.stripANSI(fastIcon);
-				if (Bun.stringWidth(plainFastIcon) > [...plainFastIcon].length) {
-					visibleThinking = trimVisibleStart(visibleThinking);
-				}
+				visibleThinking = trimVisibleStart(visibleThinking);
 			}
 			tail += `${theme.sep.dot}${visibleThinking}`;
 		}
