@@ -16,7 +16,8 @@ import {
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import * as piUtils from "@oh-my-pi/pi-utils";
+import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir, WhichCachePolicy } from "@oh-my-pi/pi-utils";
 
 // Isolate every `git` invocation in this file from the developer's host
 // configuration. The fixture spawns dozens of git subprocesses against tiny
@@ -1182,6 +1183,17 @@ fi
 echo ok
 `,
 		);
+		const realWhich = $which;
+		process.env.PATH = "";
+		expect(realWhich("gh", { cache: WhichCachePolicy.Bypass, PATH: "" })).toBeNull();
+		const whichSpy = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation((command, options) =>
+				command === "gh"
+					? realWhich(command, { ...options, cache: WhichCachePolicy.Bypass })
+					: realWhich(command, options),
+			);
+
 		await fs.chmod(fakeGh, 0o755);
 
 		try {
@@ -1199,6 +1211,7 @@ echo ok
 				await expect(git.github.run(process.cwd(), ["--version"])).resolves.toMatchObject({ stdout: "ok" });
 			}
 		} finally {
+			whichSpy.mockRestore();
 			if (originalPath === undefined) {
 				delete process.env.PATH;
 			} else {
