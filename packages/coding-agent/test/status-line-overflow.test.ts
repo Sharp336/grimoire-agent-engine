@@ -7,7 +7,7 @@ import type { StatusLineSegmentId } from "@oh-my-pi/pi-coding-agent/config/setti
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -79,7 +79,7 @@ function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null 
 	};
 }
 
-function createStatusLineSession(sessionName: string, modelName?: string) {
+function createStatusLineSession(sessionName: string, modelName?: string, runningJobs: number = 0) {
 	const model = modelName ? { name: modelName, contextWindow: 128000 } : undefined;
 	return {
 		state: { messages: [], model },
@@ -95,7 +95,7 @@ function createStatusLineSession(sessionName: string, modelName?: string) {
 		isAdvisorActive: () => false,
 		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
 		isFastModeActive: () => false,
-		getAsyncJobSnapshot: () => ({ running: [] }),
+		getAsyncJobSnapshot: () => ({ running: Array.from({ length: runningJobs }, (_, id) => ({ id })) }),
 		getCurrentModel: () => undefined,
 		isFastModeEnabled: () => false,
 		getContextUsage: () => ({ tokens: 0, contextWindow: 128000 }),
@@ -159,6 +159,41 @@ describe("status line session accent", () => {
 		// glyph) must not appear. The session_name segment may still emit the accent ANSI
 		// for its own text — we only care that the gap is not accent-painted.
 		expect(border).not.toContain(`${ansi}${theme.boxRound.horizontal}`);
+	});
+});
+
+describe("Titanium Dracula counters", () => {
+	it("hides background jobs and keeps agent counts text-only", async () => {
+		const originalTheme = theme;
+		const titaniumDracula = await getThemeByName("titanium-dracula");
+		expect(titaniumDracula).toBeDefined();
+		setThemeInstance(titaniumDracula!);
+		try {
+			const component = new StatusLineComponent(createStatusLineSession("Hidden counters", undefined, 2));
+			component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: [] });
+			component.setSubagentCount(3);
+
+			const border = stripAnsi(component.getTopBorder(80).content);
+			expect(border).toContain("3 agents");
+			expect(border).not.toContain("2");
+			expect(border).not.toContain(theme.icon.vibe);
+		} finally {
+			setThemeInstance(originalTheme);
+		}
+	});
+
+	it("keeps the Vibe preset icon when agent counts are text-only", async () => {
+		const originalTheme = theme;
+		const titaniumDracula = await getThemeByName("titanium-dracula");
+		expect(titaniumDracula).toBeDefined();
+		setThemeInstance(titaniumDracula!);
+		try {
+			const vibe = renderSegment("mode", { ...createCtx(), vibeMode: { enabled: true } });
+			expect(theme.icon.agents).toBe("");
+			expect(stripAnsi(vibe.content)).toBe(`${theme.icon.vibe} Vibe`);
+		} finally {
+			setThemeInstance(originalTheme);
+		}
 	});
 });
 

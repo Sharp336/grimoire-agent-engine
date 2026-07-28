@@ -111,6 +111,7 @@ export type SymbolKey =
 	| "icon.pi"
 	| "icon.ghost"
 	| "icon.agents"
+	| "icon.vibe"
 	| "icon.job"
 	| "icon.cache"
 	| "icon.cacheMiss"
@@ -321,6 +322,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.pi": "π",
 	"icon.ghost": "👻",
 	"icon.agents": "👥",
+	"icon.vibe": "👥",
 	"icon.job": "⚙",
 	"icon.cache": "💾",
 	"icon.cacheMiss": "⊘",
@@ -600,6 +602,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.ghost": "\u{f02a0}",
 	// pick:  | alt: 
 	"icon.agents": "\uf0c0",
+	"icon.vibe": "\uf0c0",
 	// pick:  (nf-fa-gear) | alt:  ⚙
 	"icon.job": "\uf013",
 	// pick:  | alt:  
@@ -841,6 +844,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.pi": "pi",
 	"icon.ghost": "@",
 	"icon.agents": "AG",
+	"icon.vibe": "AG",
 	"icon.job": "bg",
 	"icon.output": "out:",
 	"icon.throughput": "tok/s:",
@@ -1841,6 +1845,7 @@ export class Theme {
 			pi: this.#symbols["icon.pi"],
 			ghost: this.#symbols["icon.ghost"],
 			agents: this.#symbols["icon.agents"],
+			vibe: this.#symbols["icon.vibe"],
 			job: this.#symbols["icon.job"],
 			cache: this.#symbols["icon.cache"],
 			cacheMiss: this.#symbols["icon.cacheMiss"],

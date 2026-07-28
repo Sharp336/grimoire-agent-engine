@@ -92,5 +92,38 @@
 		"pageBg": "brushedTitanium",
 		"cardBg": "darkTitanium",
 		"infoBg": "subtleGray"
+	},
+	"symbols": {
+		"overrides": {
+			"icon.model": "",
+			"icon.pi": "",
+			"sep.pipe": " \u2502 ",
+			"sep.dot": "",
+			"thinking.minimal": "\u001b[38;2;133;147;194m\u00a0min\u001b[39m",
+			"thinking.low": "\u001b[38;2;133;147;194m\u00a0low\u001b[39m",
+			"thinking.medium": "\u001b[38;2;133;147;194m\u00a0med\u001b[39m",
+			"thinking.high": "\u001b[38;2;133;147;194m\u00a0high\u001b[39m",
+			"thinking.xhigh": "\u001b[38;2;133;147;194m\u00a0xhigh\u001b[39m",
+			"thinking.max": "\u001b[38;2;133;147;194m\u00a0max\u001b[39m",
+			"thinking.autoPending": "",
+			"icon.fast": "\u001b[38;2;241;250;140m󱐋\u001b[39m",
+			"icon.auto": "",
+			"icon.agents": "",
+			"icon.job": "",
+			"icon.folder": "",
+			"icon.branch": "",
+			"icon.git": "",
+			"icon.context": "",
+			"icon.input": "",
+			"icon.output": "",
+			"icon.tokens": "",
+			"icon.throughput": "",
+			"icon.cache": "",
+			"icon.cacheMiss": "",
+			"icon.session": "",
+			"icon.host": "",
+			"icon.time": "",
+			"icon.cost": ""
+		}
 	}
 }

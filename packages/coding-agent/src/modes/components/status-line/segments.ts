@@ -249,7 +249,7 @@ const modeSegment: StatusLineSegment = {
 
 		const vibe = ctx.vibeMode;
 		if (vibe?.enabled) {
-			const content = withIcon(theme.icon.agents, "Vibe");
+			const content = withIcon(theme.icon.vibe, "Vibe");
 			return { content: theme.fg("accent", content), visible: true };
 		}
 

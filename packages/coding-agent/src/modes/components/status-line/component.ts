@@ -1303,7 +1303,9 @@ export class StatusLineComponent implements Component {
 	#subagentBadgeText(): string | undefined {
 		if (this.#subagentCount === 0) return undefined;
 		const noun = this.#subagentCount === 1 ? "agent" : "agents";
-		return theme.fg("statusLineSubagents", `${theme.icon.agents} ${this.#subagentCount} ${noun}`);
+		const label = `${this.#subagentCount} ${noun}`;
+		const content = theme.icon.agents ? `${theme.icon.agents} ${label}` : label;
+		return theme.fg("statusLineSubagents", content);
 	}
 
 	#buildStatusLine(width: number): string {
@@ -1363,7 +1365,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
-		if (runningBackgroundJobs > 0) {
+		if (runningBackgroundJobs > 0 && theme.icon.job) {
 			rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
 		}
 		if (subagentBadge) {
