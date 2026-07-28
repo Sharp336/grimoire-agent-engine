@@ -22,7 +22,9 @@ test("legacy replay rejects when its worker exits before responding", async () =
 				outcome = { error, settled: true };
 			},
 		);
-		await new Promise<void>(resolve => setImmediate(resolve));
+		const turn = Promise.withResolvers<void>();
+		setImmediate(turn.resolve);
+		await turn.promise;
 		expect(outcome.settled).toBeTrue();
 		expect(outcome.error).toBeInstanceOf(Error);
 		expect((outcome.error as Error).message).toBe("Terminal output worker exited before responding");
