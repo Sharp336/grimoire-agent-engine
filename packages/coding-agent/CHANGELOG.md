@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed `/vibe` over ACP/RPC: the builtin slash command now carries a `handle` that activates vibe (director) mode programmatically — building the `VibeParentSession` adapter inline, restricting the toolset to read + vibe tools, recording a mode-change entry, and returning any inline directive as a residual prompt — so an RPC/ACP host toggles director mode instead of the command being forwarded to the model as plain text. `get_state` now reports `vibeMode` so hosts can introspect whether director mode is active, and `VibeModeState` gained an optional `previousTools` so the ACP path can restore the pre-vibe toolset on exit.
+
 ## [17.1.7] - 2026-07-27
 
 ### Fixed
