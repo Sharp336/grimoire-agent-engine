@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pruneToolOutputMessages()` for hosts that need the standard tool-output pruning policy without mutating their caller-owned message history.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed
@@ -23,9 +27,6 @@
 ### Fixed
 
 - Fixed proxy-stream clients dropping finalized provider-only content blocks, including Anthropic native web-search history, by allowing `done` and `error` events to carry terminal assistant content while retaining delta-reconstructed content from older proxy servers that omit it ([#6703](https://github.com/can1357/oh-my-pi/issues/6703)).
-### Added
-
-- Added `pruneToolOutputMessages()` for hosts that need the standard tool-output pruning policy without mutating their caller-owned message history.
 
 ## [17.1.4] - 2026-07-26
 
