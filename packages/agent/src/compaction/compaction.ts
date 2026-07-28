@@ -43,6 +43,7 @@ import {
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
+import { NativeCompactionError } from "./errors";
 import { isEstimateCacheable, readEstimateCache, writeEstimateCache } from "./message-cache";
 import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, defaultConvertToLlm } from "./messages";
 import {
@@ -1530,7 +1531,7 @@ export async function compact(
 	}
 
 	if (!usedRemoteCompaction && nativeCompactionError !== undefined) {
-		throw nativeCompactionError;
+		throw new NativeCompactionError(nativeCompactionError);
 	}
 
 	// Generate summaries (can be parallel if both needed) and merge into one

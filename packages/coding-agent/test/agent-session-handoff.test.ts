@@ -846,6 +846,31 @@ describe("AgentSession handoff", () => {
 		expect(fallbackCandidateKey).toBeDefined();
 		expect(promptSpy).toHaveBeenCalledTimes(1);
 	});
+
+	it("does not switch providers after provider-native auto-compaction fails", async () => {
+		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.thresholdTokens", 50);
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.set("contextPromotion.enabled", false);
+
+		const attemptedCandidates: string[] = [];
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, candidate) => {
+			attemptedCandidates.push(`${candidate.provider}/${candidate.id}`);
+			throw new compactionModule.NativeCompactionError(new Error("native compaction transport failed"));
+		});
+
+		await session.prompt("pending prompt ".repeat(120));
+		await waitFor(() =>
+			events.some(
+				event =>
+					event.type === "auto_compaction_end" &&
+					event.errorMessage?.includes("native compaction transport failed") === true,
+			),
+		);
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(attemptedCandidates).toHaveLength(1);
+	});
 	it("keeps pre-prompt context-full checks aligned with provider-anchored usage", async () => {
 		await session.dispose();
 		authStorage.setRuntimeApiKey("openai", "test-key");
