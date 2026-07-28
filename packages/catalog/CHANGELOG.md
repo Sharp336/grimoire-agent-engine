@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.1.8] - 2026-07-28
+
 ### Added
 
 - Added `resolveVertexEndpointHost(location)` utility to resolve the correct Vertex AI API endpoint hostnames for global, multi-region, and regional locations.

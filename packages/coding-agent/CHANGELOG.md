@@ -9,6 +9,8 @@
 ### Changed
 
 - `applyToolOverlay` primitive extracted on AgentSession, generalizing the snapshot/apply/restore pattern shared by plan mode, plan-yolo, print-mode, and agent-selection. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
+## [17.1.8] - 2026-07-28
+
 ### Breaking Changes
 
 - Changed tab.screenshot() to no longer accept a per-call save path; it now saves screenshots under browser.screenshotDir (or the OS temp directory if unset) and returns the saved path.

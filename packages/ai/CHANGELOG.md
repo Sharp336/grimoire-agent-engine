@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.1.8] - 2026-07-28
+
 ### Fixed
 
 - Fixed an HTTP 400 error when resuming or replaying OpenAI history after an interrupted native Computer Use turn.
