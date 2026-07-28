@@ -593,6 +593,16 @@ describe("normalizeSchemaForGoogle parity with python-genai process_schema", () 
 		expect(sanitized).toEqual({ type: "integer" });
 	});
 
+	it("drops negations whose non-string enums cannot be represented", () => {
+		const sanitized = normalizeSchemaForGoogle({ not: { enum: [1] } });
+		expect(sanitized).toEqual({});
+		expect(
+			normalizeSchemaForGoogle({
+				not: { type: "object", properties: { value: { enum: [1] } } },
+			}),
+		).toEqual({});
+	});
+
 	// Mirrors python-genai test_schema.py::test_process_schema_order_properties_propagates_into_defs
 	it("propagates auto propertyOrdering into inlined $defs targets", () => {
 		const schema = {

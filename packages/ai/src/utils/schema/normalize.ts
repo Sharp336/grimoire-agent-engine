@@ -145,6 +145,47 @@ function classifySchemaChild(key: string, value: unknown, insideSchemaMap: boole
 	return undefined;
 }
 
+function hasUnrepresentableGoogleEnumConstraint(
+	value: unknown,
+	insideSchemaMap = false,
+	seen = new Set<object>(),
+): boolean {
+	if (Array.isArray(value)) {
+		if (seen.has(value)) return false;
+		seen.add(value);
+		return value.some(entry => hasUnrepresentableGoogleEnumConstraint(entry, false, seen));
+	}
+	if (!isJsonObject(value)) return false;
+	if (seen.has(value)) return false;
+	seen.add(value);
+
+	if (insideSchemaMap) {
+		for (const key in value) {
+			if (Object.hasOwn(value, key) && hasUnrepresentableGoogleEnumConstraint(value[key], false, seen)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	if (
+		Array.isArray(value.enum) &&
+		(value.enum.length === 0 || value.enum.some(enumValue => typeof enumValue !== "string"))
+	) {
+		return true;
+	}
+	if (Object.hasOwn(value, "const") && typeof value.const !== "string") return true;
+
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const childKind = classifySchemaChild(key, value[key], false);
+		if (childKind && hasUnrepresentableGoogleEnumConstraint(value[key], childKind === "map", seen)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 const CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA = {
 	type: "object",
 	properties: {},
@@ -382,6 +423,14 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 				continue;
 			}
 			if (options.stripNullableKeyword && key === "nullable") continue;
+			if (
+				options.stringEnumsOnly &&
+				!options.insideSchemaMap &&
+				key === "not" &&
+				hasUnrepresentableGoogleEnumConstraint(entry)
+			) {
+				continue;
+			}
 			const childKind = classifySchemaChild(key, entry, options.insideSchemaMap);
 			result[key] = childKind
 				? normalizeSchemaNode(entry, {
@@ -406,6 +455,14 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 		if (options.stripNullableKeyword && key === "nullable") continue;
 		if (key === "const") {
 			constValue = entry;
+			continue;
+		}
+		if (
+			options.stringEnumsOnly &&
+			!options.insideSchemaMap &&
+			key === "not" &&
+			hasUnrepresentableGoogleEnumConstraint(entry)
+		) {
 			continue;
 		}
 		const childKind = classifySchemaChild(key, entry, options.insideSchemaMap);
