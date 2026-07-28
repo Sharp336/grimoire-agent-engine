@@ -241,23 +241,13 @@ interface OpenAIHostedImageResponse {
 	error?: { code?: string; message?: string };
 }
 
-interface CodexImageRequestBase {
+interface CodexImageRequest {
 	prompt: string;
 	background: "auto";
 	model: typeof CODEX_IMAGE_MODEL;
 	quality: "auto";
 	size: string;
 }
-
-interface CodexImageGenerationRequest extends CodexImageRequestBase {
-	images?: never;
-}
-
-interface CodexImageEditRequest extends CodexImageRequestBase {
-	images: Array<{ image_url: string }>;
-}
-
-type CodexImageRequest = CodexImageGenerationRequest | CodexImageEditRequest;
 
 interface CodexImageResponse {
 	data?: Array<{ b64_json?: string }>;
@@ -819,23 +809,28 @@ function resolveOpenAIImageSize(aspectRatio: string | undefined, imageSize: stri
 	}
 }
 
-function buildCodexImageRequest(
-	promptText: string,
-	params: ImageGenParams,
-	inputImages: InlineImageData[],
-): CodexImageRequest {
-	const base: CodexImageRequestBase = {
+function buildCodexImageRequest(promptText: string, params: ImageGenParams): CodexImageRequest {
+	return {
 		prompt: promptText,
 		background: "auto",
 		model: CODEX_IMAGE_MODEL,
 		quality: "auto",
 		size: resolveOpenAIImageSize(params.aspect_ratio, params.image_size) ?? "auto",
 	};
-	if (inputImages.length === 0) return base;
-	return {
-		...base,
-		images: inputImages.map(image => ({ image_url: toDataUrl(image) })),
-	};
+}
+
+function buildCodexImageEditFormData(request: CodexImageRequest, inputImages: InlineImageData[]): FormData {
+	const formData = new FormData();
+	formData.append("prompt", request.prompt);
+	formData.append("background", request.background);
+	formData.append("model", request.model);
+	formData.append("quality", request.quality);
+	formData.append("size", request.size);
+	for (const [index, image] of inputImages.entries()) {
+		const contents = new Blob([Buffer.from(image.data, "base64")], { type: image.mimeType });
+		formData.append("image", contents, `image-${index + 1}.${getExtensionForMime(image.mimeType)}`);
+	}
+	return formData;
 }
 
 function collectCodexImageResult(response: CodexImageResponse): OpenAIHostedImageResult {
@@ -975,9 +970,13 @@ function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string
 	return headers;
 }
 
-async function buildCodexImageHeaders(model: Model, apiKey: string): Promise<Headers> {
+async function buildCodexImageHeaders(model: Model, apiKey: string, multipart: boolean): Promise<Headers> {
 	const headers = new Headers(model.headers ?? {});
-	headers.set("Content-Type", "application/json");
+	if (multipart) {
+		headers.delete("Content-Type");
+	} else {
+		headers.set("Content-Type", "application/json");
+	}
 	headers.set("Authorization", `Bearer ${apiKey}`);
 	headers.delete("x-api-key");
 	headers.delete(OPENAI_HEADERS.ACCOUNT_ID);
@@ -1080,12 +1079,14 @@ async function generateCodexImage(
 	fetchImpl: FetchImpl,
 	signal: AbortSignal | undefined,
 ): Promise<OpenAIHostedImageResult> {
-	const requestBody = buildCodexImageRequest(assemblePrompt(params), params, inputImages);
-	const path = inputImages.length > 0 ? CODEX_IMAGE_EDITS_PATH : CODEX_IMAGE_GENERATIONS_PATH;
+	const request = buildCodexImageRequest(assemblePrompt(params), params);
+	const isEdit = inputImages.length > 0;
+	const requestBody = isEdit ? buildCodexImageEditFormData(request, inputImages) : JSON.stringify(request);
+	const path = isEdit ? CODEX_IMAGE_EDITS_PATH : CODEX_IMAGE_GENERATIONS_PATH;
 	const response = await fetchImpl(`${getCodexBackendRoot(model)}${path}`, {
 		method: "POST",
-		headers: await buildCodexImageHeaders(model, apiKey),
-		body: JSON.stringify(requestBody),
+		headers: await buildCodexImageHeaders(model, apiKey, isEdit),
+		body: requestBody,
 		signal,
 	});
 
