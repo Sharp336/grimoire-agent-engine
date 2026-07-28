@@ -362,14 +362,19 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 				continue;
 			}
 			if (options.stripNullableKeyword && key === "nullable") continue;
-			result[key] = normalizeSchemaNode(entry, {
-				...options,
-				insideSchemaMap: !options.insideSchemaMap && Object.hasOwn(SUBSCHEMA_MAP_KEYS, key),
-				booleanIsSubschema:
-					options.insideSchemaMap ||
-					Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
-					Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key),
-			});
+			const childInsideSchemaMap = !options.insideSchemaMap && Object.hasOwn(SUBSCHEMA_MAP_KEYS, key);
+			const childBooleanIsSubschema =
+				options.insideSchemaMap ||
+				Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
+				Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key);
+			result[key] =
+				childInsideSchemaMap || childBooleanIsSubschema
+					? normalizeSchemaNode(entry, {
+							...options,
+							insideSchemaMap: childInsideSchemaMap,
+							booleanIsSubschema: childBooleanIsSubschema,
+						})
+					: entry;
 		}
 		applyDescriptionSpill(result, spill, options);
 		return applyNodePostProcessing(result, options);
@@ -388,14 +393,19 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			constValue = entry;
 			continue;
 		}
-		result[key] = normalizeSchemaNode(entry, {
-			...options,
-			insideSchemaMap: !options.insideSchemaMap && Object.hasOwn(SUBSCHEMA_MAP_KEYS, key),
-			booleanIsSubschema:
-				options.insideSchemaMap ||
-				Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
-				Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key),
-		});
+		const childInsideSchemaMap = !options.insideSchemaMap && Object.hasOwn(SUBSCHEMA_MAP_KEYS, key);
+		const childBooleanIsSubschema =
+			options.insideSchemaMap ||
+			Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
+			Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key);
+		result[key] =
+			childInsideSchemaMap || childBooleanIsSubschema
+				? normalizeSchemaNode(entry, {
+						...options,
+						insideSchemaMap: childInsideSchemaMap,
+						booleanIsSubschema: childBooleanIsSubschema,
+					})
+				: entry;
 	}
 
 	if (options.normalizeTypeArrayToNullable && Array.isArray(result.type)) {
