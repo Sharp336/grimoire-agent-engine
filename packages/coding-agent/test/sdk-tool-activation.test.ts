@@ -707,29 +707,38 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const tempDir = makeTempDir();
 		const target = path.join(tempDir, "advisor-write.txt");
 
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "deny" } }),
-		});
-		try {
-			// The default advisor roster is read-only (read/grep/glob); the
-			// reviewed hole needs one actually granted a mutating tool.
-			session.applyAdvisorConfigs([{ name: "writer", tools: ["write"] }], undefined);
-			const advisor = session.getAdvisorAgent();
-			if (!advisor) throw new Error("expected an advisor agent");
-			const writeTool = advisor.state.tools?.find(tool => tool.name === "write");
-			if (!writeTool) throw new Error("expected the advisor to hold a write tool");
+		// An advisor only builds once a model resolves for it, and both the
+		// explicit override and the `advisor` role chain resolve against
+		// `modelRegistry.getAvailable()` — the models this machine holds auth
+		// for. Grant the suite's isolated storage a key and name the model
+		// outright, or the roster silently resolves to `no_model` wherever no
+		// provider is configured (CI) while passing on a developer box whose
+		// environment happens to carry provider keys.
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "deny" } }),
+			});
+			try {
+				// The default advisor roster is read-only (read/grep/glob); the
+				// reviewed hole needs one actually granted a mutating tool.
+				session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
+				const advisor = session.getAdvisorAgent();
+				if (!advisor) throw new Error("expected an advisor agent");
+				const writeTool = advisor.state.tools?.find(tool => tool.name === "write");
+				if (!writeTool) throw new Error("expected the advisor to hold a write tool");
 
-			// The gate rejects rather than returning an error result — that throw
-			// IS the refusal, and it only happens when the instance is wrapped.
-			await expect(
-				writeTool.execute("advisor-w1", { path: target, content: "written" }, undefined, undefined, {
-					settings: session.settings,
-				} as never),
-			).rejects.toThrow(/blocked by user policy/);
-			expect(fs.existsSync(target)).toBe(false);
-		} finally {
-			await session.dispose();
-		}
+				// The gate rejects rather than returning an error result — that throw
+				// IS the refusal, and it only happens when the instance is wrapped.
+				await expect(
+					writeTool.execute("advisor-w1", { path: target, content: "written" }, undefined, undefined, {
+						settings: session.settings,
+					} as never),
+				).rejects.toThrow(/blocked by user policy/);
+				expect(fs.existsSync(target)).toBe(false);
+			} finally {
+				await session.dispose();
+			}
+		});
 	});
 });
