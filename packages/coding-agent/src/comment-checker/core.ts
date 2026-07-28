@@ -108,6 +108,13 @@ export function extractFromOmpEditDetails(
 				if (newText.length === 0 && input) {
 					newText = getString(input, ["new_string", "newString", "newText", "new_text", "after", "new"]) ?? "";
 				}
+				if ((oldText.length === 0 || newText.length === 0) && input) {
+					const fromEdits = getEditTextsFromInputEdits(input);
+					if (fromEdits) {
+						if (oldText.length === 0) oldText = fromEdits.oldText;
+						if (newText.length === 0) newText = fromEdits.newText;
+					}
+				}
 				if (oldText.length === 0 || newText.length === 0) {
 					continue;
 				}
@@ -169,6 +176,13 @@ export function extractFromOmpEditDetails(
 			}
 			if (newText.length === 0 && input) {
 				newText = getString(input, ["new_string", "newString", "newText", "new_text", "after", "new"]) ?? "";
+			}
+			if ((oldText.length === 0 || newText.length === 0) && input) {
+				const fromEdits = getEditTextsFromInputEdits(input);
+				if (fromEdits) {
+					if (oldText.length === 0) oldText = fromEdits.oldText;
+					if (newText.length === 0) newText = fromEdits.newText;
+				}
 			}
 			if (oldText.length === 0 || newText.length === 0) {
 				return [];
@@ -578,4 +592,20 @@ function joinPatchLines(lines: string[]): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
+}
+
+function getEditTextsFromInputEdits(input: Record<string, unknown>): { oldText: string; newText: string } | undefined {
+	const edits = input.edits;
+	if (!Array.isArray(edits) || edits.length === 0) return undefined;
+	const oldParts: string[] = [];
+	const newParts: string[] = [];
+	for (const edit of edits) {
+		if (!isRecord(edit)) continue;
+		const old = getString(edit, ["old_text", "old_string", "oldText", "oldString"]);
+		const next = getString(edit, ["new_text", "new_string", "newText", "newString"]);
+		if (old !== undefined) oldParts.push(old);
+		if (next !== undefined) newParts.push(next);
+	}
+	if (oldParts.length === 0 && newParts.length === 0) return undefined;
+	return { oldText: oldParts.join("\n"), newText: newParts.join("\n") };
 }

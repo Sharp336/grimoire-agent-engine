@@ -133,7 +133,7 @@ export function createCommentCheckerToolResultHandler(deps: CommentCheckerHandle
 					warnings,
 					errorMessage: result.message,
 				});
-				ctx.ui.notify(`omp-comment-checker error: ${result.message}`, "error");
+				ctx.ui.notify(`omp-comment-checker error: ${formatPreview(result.message)}`, "error");
 				return undefined;
 			}
 			if (result.status === "warning" && result.message.trim().length > 0) {

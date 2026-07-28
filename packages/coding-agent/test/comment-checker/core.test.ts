@@ -499,6 +499,42 @@ describe("extractCommentCheckRequests", () => {
 		]);
 	});
 
+	it("reconstructs edit deltas from input.edits array when snapshots are pruned in replace mode", () => {
+		const event: ToolResultLike = {
+			toolName: "edit",
+			input: {
+				path: "src/replace_example.ts",
+				edits: [{ old_text: "// old comment\nconst a = 1;", new_text: "// new comment\nconst a = 1;" }],
+			},
+			details: {
+				snapshotsPruned: true,
+				perFileResults: [
+					{
+						path: "src/replace_example.ts",
+						snapshotsPruned: true,
+					},
+				],
+			},
+			content: [{ type: "text", text: "edited src/replace_example.ts" }],
+			isError: false,
+		};
+
+		const requests = extractCommentCheckRequests(event);
+
+		expect(requests).toEqual([
+			{
+				sourceToolName: "edit",
+				toolName: "Edit",
+				filePath: "src/replace_example.ts",
+				toolInput: {
+					file_path: "src/replace_example.ts",
+					old_string: "// old comment\nconst a = 1;",
+					new_string: "// new comment\nconst a = 1;",
+				},
+			},
+		]);
+	});
+
 	it("skips pruned snapshots without deltas instead of re-reading from disk and emitting whole-file scan", () => {
 		using tempDir = TempDir.createSync("@omp-comment-checker-test-");
 		const filePath = join(tempDir.path(), "pruned.ts");
@@ -868,7 +904,7 @@ describe("createCommentCheckerToolResultHandler UI status update and warning cle
 		const handler = createCommentCheckerToolResultHandler({
 			run: async () => ({
 				status: "error",
-				message: "process crashed unexpectedly",
+				message: "process crashed\twith\nexit code 1",
 			}),
 		});
 
@@ -884,7 +920,7 @@ describe("createCommentCheckerToolResultHandler UI status update and warning cle
 
 		await handler(event, mockCtx);
 		expect(notifications).toEqual([
-			{ message: "omp-comment-checker error: process crashed unexpectedly", type: "error" },
+			{ message: "omp-comment-checker error: process crashed with exit code 1", type: "error" },
 		]);
 	});
 });
