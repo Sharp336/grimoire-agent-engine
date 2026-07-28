@@ -233,8 +233,8 @@ describe("read PDF image extraction", () => {
 		await entered.promise;
 
 		ownerController.abort();
-		await expect(owner).rejects.toThrow(/Aborted|Cancelled/);
 		release.resolve();
+		await expect(owner).rejects.toThrow(/Aborted|Cancelled/);
 		const result = await joiner;
 
 		expect(result.content.some(content => content.type === "image")).toBe(true);
