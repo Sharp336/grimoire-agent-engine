@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `edit`/`write` writes routed through the ACP client bridge (`fs/write_text_file`) trusting the requested content as "what's on disk" even when the client transforms it on save (e.g. Zed with `format_on_save: on` reformatting indentation the tool never touched). `routeWriteThroughBridge` now reads the file back after the bridge write and returns the verified content; `HashlineFilesystem.writeText` propagates it so the hashline snapshot tag matches the real file instead of the pre-write intent. Closes the reported "single-hunk `edit` call reformats the whole file" corruption, whose actual cause was every later edit resolving hunks against a stale snapshot the file had already drifted away from.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
