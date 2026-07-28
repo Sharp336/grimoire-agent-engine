@@ -507,9 +507,7 @@ function nonNegativeInteger(value: unknown, label: string): number {
 }
 
 function selectorTimeout(value: unknown, label: string): number {
-	return value === undefined
-		? SELECTOR_TIMEOUT_MS
-		: Math.min(positiveInteger(value, `${label} timeoutMs`), SELECTOR_TIMEOUT_MS);
+	return value === undefined ? SELECTOR_TIMEOUT_MS : positiveInteger(value, `${label} timeoutMs`);
 }
 
 function navigationTimeout(value: unknown, label: string): number {

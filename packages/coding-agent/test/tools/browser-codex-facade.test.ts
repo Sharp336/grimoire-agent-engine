@@ -540,6 +540,21 @@ describe("Codex agent.browser public contract", () => {
 		});
 	});
 
+	it("preserves explicit selector-action timeouts above the default", async () => {
+		await withCmuxTool(async (tool, name, calls) => {
+			calls.length = 0;
+			await runJson(
+				tool,
+				name,
+				`const current = await agent.browser.tabs.selected();
+				 await current.playwright.locator("#target").click({ timeoutMs: 10_000 });
+				 return { url: await current.url() };`,
+			);
+
+			expect(calls.some(call => call.method === "browser.eval" && call.timeoutMs === 10_000)).toBe(true);
+		});
+	});
+
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"maps CUA mouse buttons 1/2/3 and rejects unsupported button values",
 		async () => {

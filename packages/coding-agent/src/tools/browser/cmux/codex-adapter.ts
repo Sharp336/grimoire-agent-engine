@@ -1158,7 +1158,7 @@ function numberArg(args: Readonly<Record<string, unknown>>, key: string, fallbac
 }
 
 function selectorTimeoutArg(args: Readonly<Record<string, unknown>>): number {
-	return Math.min(numberArg(args, "timeoutMs", SELECTOR_TIMEOUT_MS), SELECTOR_TIMEOUT_MS);
+	return numberArg(args, "timeoutMs", SELECTOR_TIMEOUT_MS);
 }
 
 function stringArrayArg(args: Readonly<Record<string, unknown>>, key: string): string[] {
