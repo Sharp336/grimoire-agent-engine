@@ -47,6 +47,7 @@ export const CODEX_BROWSER_CAPABILITIES = {
 	CONTENT_EXPORT_GSUITE: "tab.content.exportGsuite",
 	WAIT_FOR_EVENT: "playwright.waitForEvent",
 	DOWNLOAD_PATH: "playwright.download.path",
+	DOWNLOAD_MEDIA_CROSS_ORIGIN: "downloadMedia cross-origin",
 	FRAME_LOCATOR_CROSS_ORIGIN: "playwright.frameLocator cross-origin",
 	FRAME_LOCATOR_NESTED_NATIVE_ACTION: "playwright.frameLocator nested native action",
 	DOM_CUA_FRAME_SHADOW_ACTION: "dom_cua framed shadow action",

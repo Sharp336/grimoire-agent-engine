@@ -2418,7 +2418,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			await this.#savePageMedia(absoluteUrl.href, deadline, operation);
 			return;
 		}
-		await this.#saveHostMedia(absoluteUrl.href, deadline, operation);
+		throw new BrowserCapabilityError(CODEX_BROWSER_CAPABILITIES.DOWNLOAD_MEDIA_CROSS_ORIGIN);
 	}
 
 	async #savePageMedia(url: string, deadline: number, operation: string): Promise<void> {
@@ -2456,57 +2456,6 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 					.codexEvaluateCleanup<boolean>(DISPOSE_PAGE_MEDIA_TRANSFER_SOURCE, [token], SELECTOR_TIMEOUT_MS)
 					.catch(() => undefined);
 			}
-		}
-	}
-
-	async #saveHostMedia(url: string, deadline: number, operation: string): Promise<void> {
-		const maxBytes = 32 * 1024 * 1024;
-		const timeoutController = new AbortController();
-		const timer = setTimeout(() => timeoutController.abort(), Math.max(1, remainingMs(deadline, operation)));
-		try {
-			const response = await fetch(url, { signal: timeoutController.signal });
-			if (!response.ok) throw new Error(`downloadMedia failed with HTTP ${response.status}`);
-			const contentLengthHeader = response.headers.get("content-length");
-			const contentLength =
-				contentLengthHeader !== null && /^\d+$/.test(contentLengthHeader) ? Number(contentLengthHeader) : null;
-			if (contentLength !== null && contentLength > maxBytes) {
-				throw new Error("downloadMedia response exceeds the 32 MiB limit");
-			}
-
-			const chunks: Buffer[] = [];
-			let byteLength = 0;
-			if (response.body) {
-				const reader = response.body.getReader();
-				try {
-					for (;;) {
-						const chunk = await reader.read();
-						if (chunk.done) break;
-						if (byteLength + chunk.value.byteLength > maxBytes) {
-							try {
-								await reader.cancel();
-							} catch {
-								// Preserve the size-limit error when cancellation itself fails.
-							}
-							throw new Error("downloadMedia response exceeds the 32 MiB limit");
-						}
-						byteLength += chunk.value.byteLength;
-						chunks.push(Buffer.from(chunk.value.buffer, chunk.value.byteOffset, chunk.value.byteLength));
-					}
-				} finally {
-					reader.releaseLock();
-				}
-			} else {
-				const bytes = new Uint8Array(await response.arrayBuffer());
-				if (bytes.byteLength > maxBytes) throw new Error("downloadMedia response exceeds the 32 MiB limit");
-				byteLength = bytes.byteLength;
-				chunks.push(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
-			}
-			await this.#persistMedia(response.url || url, Buffer.concat(chunks, byteLength), deadline, operation);
-		} catch (error) {
-			if (timeoutController.signal.aborted) throw new ToolError(`${operation} timed out`, { cause: error });
-			throw error;
-		} finally {
-			clearTimeout(timer);
 		}
 	}
 

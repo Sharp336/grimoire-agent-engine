@@ -1454,23 +1454,12 @@ describe("cmux Codex browser review regressions", () => {
 		});
 	});
 
-	it("downloads nested cross-origin media through the host instead of the page fetch context", async () => {
+	it("reports cross-origin media unavailable rather than fetching without browser credentials", async () => {
 		const payload = Buffer.from("cross-origin-media");
-		const writes: Buffer[] = [];
-		const requestedUrls: string[] = [];
-		const fetchMock = Object.assign(
-			async (input: string | Request | URL): Promise<Response> => {
-				requestedUrls.push(String(input));
-				return new Response(payload, {
-					headers: {
-						"Content-Length": String(payload.byteLength),
-						"Content-Type": "application/octet-stream",
-					},
-				});
-			},
-			{ preconnect: globalThis.fetch.preconnect },
-		);
-		spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+		const fetchMock = Object.assign(async (): Promise<Response> => new Response(payload), {
+			preconnect: globalThis.fetch.preconnect,
+		});
+		const hostFetch = spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 		const { document, window } = parseHTML(
 			'<html><body><button id="media"><picture><img src="https://cdn.fixture.test/media.bin"></picture></button><a href="https://cdn.fixture.test/ancestor.bin"><span id="media-child" tabindex="0">Child</span></a></body></html>',
 		);
@@ -1483,7 +1472,6 @@ describe("cmux Codex browser review regressions", () => {
 		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
 		const current = await selectedTab(
 			facadeFor({
-				codexCwd: () => "/tmp/codex-media-contract",
 				async ariaSnapshot() {
 					return "";
 				},
@@ -1497,29 +1485,26 @@ describe("cmux Codex browser review regressions", () => {
 						return runPageEvaluator(source, args, { document, window });
 					throw new Error("Page media transfer must not run");
 				},
-				async codexPersistFile(_path: string, data: Uint8Array) {
-					writes.push(Buffer.from(data));
-				},
 			}),
 		);
+		const unavailable = "Browser capability is unavailable: downloadMedia cross-origin";
 
-		await current.playwright.locator("#media").downloadMedia({ timeoutMs: 250 });
-		await current.playwright.locator("#media-child").downloadMedia({ timeoutMs: 250 });
+		await expect(current.playwright.locator("#media").downloadMedia({ timeoutMs: 250 })).rejects.toThrow(unavailable);
+		await expect(current.playwright.locator("#media-child").downloadMedia({ timeoutMs: 250 })).rejects.toThrow(
+			unavailable,
+		);
 		const snapshot = await current.dom_cua.get_visible_dom();
 		const node = snapshot.nodes.find(candidate => candidate.text === "");
 		if (!node) throw new Error("Expected media wrapper DOM node");
-		await current.dom_cua.downloadMedia({ node_id: node.node_id, timeoutMs: 250 });
+		await expect(current.dom_cua.downloadMedia({ node_id: node.node_id, timeoutMs: 250 })).rejects.toThrow(
+			unavailable,
+		);
 		const childNode = snapshot.nodes.find(candidate => candidate.text === "Child");
 		if (!childNode) throw new Error("Expected media child DOM node");
-		await current.dom_cua.downloadMedia({ node_id: childNode.node_id, timeoutMs: 250 });
-
-		expect(requestedUrls).toEqual([
-			"https://cdn.fixture.test/media.bin",
-			"https://cdn.fixture.test/ancestor.bin",
-			"https://cdn.fixture.test/media.bin",
-			"https://cdn.fixture.test/ancestor.bin",
-		]);
-		expect(writes).toEqual([payload, payload, payload, payload]);
+		await expect(current.dom_cua.downloadMedia({ node_id: childNode.node_id, timeoutMs: 250 })).rejects.toThrow(
+			unavailable,
+		);
+		expect(hostFetch).not.toHaveBeenCalled();
 	});
 
 	it("downloads coordinate media through nested open shadow roots and preserves boundary errors", async () => {
