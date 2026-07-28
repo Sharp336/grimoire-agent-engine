@@ -942,7 +942,6 @@ export class ExtensionUiController {
 	/**
 	 * Show a confirmation dialog for hooks.
 	 */
-<<<<<<< HEAD
 	async showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
 		const result = await this.showHookSelector(`${title}\n${message}`, [
 			i18n.t("ui.yes", "Yes"),

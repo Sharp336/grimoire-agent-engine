@@ -65,7 +65,6 @@
   "settings.sessions.delete": "删除会话",
   "settings.sessions.deleteWarning": "此操作将永久删除当前会话。\n你将返回会话选择器。",
   "settings.sessions.cancelled": "已取消删除",
-  "settings.sessions.cancelled": "已取消删除",
   "settings.sessions.deleted": "会话已删除",
   "ui.settings.title": "设置",
   "ui.settings.noResults": "无匹配设置",
