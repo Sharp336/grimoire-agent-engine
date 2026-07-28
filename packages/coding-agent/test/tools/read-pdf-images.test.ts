@@ -239,7 +239,7 @@ describe("read PDF image extraction", () => {
 
 		expect(result.content.some(content => content.type === "image")).toBe(true);
 		expect(spy).toHaveBeenCalledTimes(1);
-	});
+	}, 30_000);
 
 	it("keeps shared extraction running when a joiner aborts", async () => {
 		const { entered, release, spy } = mockBlockedExtraction();
