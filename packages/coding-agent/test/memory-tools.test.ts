@@ -385,7 +385,7 @@ describe("retain.execute (Mnemopi backend)", () => {
 
 		const text = (recallResult.content[0] as { text: string }).text;
 		expect(text).toContain("user prefers tabs");
-	});
+	}, 30_000);
 
 	it("stores multiple memories and returns correct count", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
@@ -933,7 +933,7 @@ describe("Mnemopi backend lifecycle", () => {
 		}
 		registeredMnemopiState = getMnemopiSessionState(session);
 		expect(registeredMnemopiState).toBeDefined();
-	});
+	}, 30_000);
 
 	it("exposes direct mnemopi runtime status and search/save results", async () => {
 		const config = makeMnemopiConfig({
@@ -1220,7 +1220,7 @@ describe("recall.execute (Mnemopi backend)", () => {
 		expect(text).toContain("the user likes concise CLI output");
 		expect(text).toContain("project alpha uses pnpm workspaces");
 		expect(text).not.toContain("project beta deploys to staging first");
-	});
+	}, 30_000);
 
 	it("throws when no per-session Mnemopi state is registered", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });

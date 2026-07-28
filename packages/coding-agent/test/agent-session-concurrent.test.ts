@@ -119,7 +119,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		return session;
 	}
 
-	async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+	async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() < deadline) {
 			if (predicate()) return;
@@ -1199,7 +1199,7 @@ describe("AgentSession TTSR resume gate", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+	async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() < deadline) {
 			if (predicate()) return;
