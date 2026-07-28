@@ -21,7 +21,14 @@ import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
+import {
+	compileXdevDeviceGlobs,
+	isMountableUnderXdev,
+	listXdevTools,
+	type XdevState,
+	xdevDocsFor,
+	xdevEntries,
+} from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { formatLocalCalendarDate } from "../utils/local-date";
@@ -550,9 +557,13 @@ export class SessionTools {
 		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		const pinnedTopLevelGlobs = compileXdevDeviceGlobs(this.#host.settings.get("tools.xdevTopLevelDevices"));
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
-				this.#xdev !== undefined && xdevReadAvailable && !isPresentationPinned(name) && isMountableUnderXdev(tool),
+				this.#xdev !== undefined &&
+				xdevReadAvailable &&
+				!isPresentationPinned(name) &&
+				isMountableUnderXdev(tool, pinnedTopLevelGlobs),
 		);
 
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");

@@ -72,12 +72,17 @@ export type XdevDocsMode = "inline" | "builtins" | "catalog";
 /**
  * Whether an enabled tool is presented under `xd://` (rather than top-level)
  * while the `xd://` transport is active. Discoverable tools mount unless they
- * are pinned top-level by {@link XDEV_KEEP_TOP_LEVEL} or carry the transport
- * itself ({@link XDEV_TRANSPORT_TOOLS}); essential tools never do. The caller
- * gates this on the transport being active.
+ * are pinned top-level by {@link XDEV_KEEP_TOP_LEVEL}, carry the transport
+ * itself ({@link XDEV_TRANSPORT_TOOLS}), or match a user pin from
+ * `tools.xdevTopLevelDevices`; essential tools never do. The caller gates
+ * this on the transport being active.
  */
-export function isMountableUnderXdev(tool: { name: string; loadMode?: ToolLoadMode }): boolean {
+export function isMountableUnderXdev(
+	tool: { name: string; loadMode?: ToolLoadMode },
+	pinnedTopLevelGlobs?: readonly Bun.Glob[],
+): boolean {
 	if (tool.name in XDEV_TRANSPORT_TOOLS || tool.name in XDEV_KEEP_TOP_LEVEL) return false;
+	if (pinnedTopLevelGlobs?.some(glob => glob.match(tool.name))) return false;
 	return tool.loadMode === "discoverable";
 }
 
@@ -188,9 +193,10 @@ function promptCatalogSummary(inst: Tool, maxLength?: number): string {
 	return `${summary.slice(0, maxLength).trimEnd()}…`;
 }
 
-/** Compile the `tools.xdevInlineDevices` allowlist once per render, dropping
- *  non-string entries so malformed user config cannot break prompt builds. */
-function compileInlineGlobs(patterns: readonly string[]): Bun.Glob[] {
+/** Compile a device-name glob list (`tools.xdevInlineDevices`,
+ *  `tools.xdevTopLevelDevices`) once per use, dropping non-string entries so
+ *  malformed user config cannot break prompt builds or tool partitioning. */
+export function compileXdevDeviceGlobs(patterns: readonly string[]): Bun.Glob[] {
 	if (!Array.isArray(patterns)) return [];
 	const globs: Bun.Glob[] = [];
 	for (const pattern of patterns) {
@@ -292,7 +298,7 @@ export function xdevDocsAll(
 ): string {
 	const sections: string[] = [];
 	const overflow: Tool[] = [];
-	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	const inlineGlobs = compileXdevDeviceGlobs(inlinePatterns);
 	let used = 0;
 	for (const tool of listXdevTools(state)) {
 		if (!shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
@@ -332,7 +338,7 @@ export function xdevDocsFor(
 	inlinePatterns: readonly string[] = [],
 ): string {
 	const sections: string[] = [];
-	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	const inlineGlobs = compileXdevDeviceGlobs(inlinePatterns);
 	let used = 0;
 	for (const name of names) {
 		const tool = resolveMountedXdevTool(state, name);
