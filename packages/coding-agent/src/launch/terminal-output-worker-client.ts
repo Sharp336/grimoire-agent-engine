@@ -23,8 +23,12 @@ export async function renderTerminalOutputIsolated(
 	const onError = (event: ErrorEvent): void => {
 		pending.reject(event.error instanceof Error ? event.error : new Error(event.message));
 	};
+	const onClose = (): void => {
+		pending.reject(new Error("Terminal output worker exited before responding"));
+	};
 	worker.addEventListener("message", onMessage);
 	worker.addEventListener("error", onError);
+	worker.addEventListener("close", onClose);
 	try {
 		const request: TerminalOutputWorkerRequest = { output, options };
 		worker.postMessage(request);
@@ -32,6 +36,7 @@ export async function renderTerminalOutputIsolated(
 	} finally {
 		worker.removeEventListener("message", onMessage);
 		worker.removeEventListener("error", onError);
+		worker.removeEventListener("close", onClose);
 		worker.terminate();
 	}
 }
