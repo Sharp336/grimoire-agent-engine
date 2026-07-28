@@ -15,7 +15,7 @@ import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oau
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime provider registration", () => {
 	let tempDir: string;
@@ -806,5 +806,91 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(getProviderModels(registry, "throwing-provider").map(model => model.id)).toEqual(["runtime-model"]);
 		// A broken extension must not take the rest of the catalog down with it.
 		expect(registry.getAll().some(model => model.provider === "anthropic")).toBe(true);
+	});
+
+	test("a throwing modifyModels logs once per distinct failure", async () => {
+		await authStorage.set("noisy-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		try {
+			registry.registerProvider(
+				"noisy-provider",
+				{
+					api: "custom-noisy-api",
+					baseUrl: "https://example.invalid/",
+					streamSimple,
+					models: [baseModel],
+					oauth: {
+						name: "Noisy OAuth",
+						login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+						refreshToken: async credentials => credentials,
+						getApiKey: credentials => credentials.access,
+						modifyModels: () => {
+							throw new Error("boom");
+						},
+					},
+				},
+				"ext://oauth",
+			);
+
+			const modifierWarnings = () =>
+				warn.mock.calls.filter(([message]) => String(message).includes("extension model projection failed"));
+			expect(modifierWarnings()).toHaveLength(1);
+			expect(modifierWarnings()[0]?.[1]).toMatchObject({ provider: "noisy-provider", error: "boom" });
+
+			// Same failure on every later recomposition must not spam the log.
+			await registry.refresh("offline");
+			expect(modifierWarnings()).toHaveLength(1);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	test("a non-idempotent modifyModels does not compound across refreshes", async () => {
+		await authStorage.set("appending-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+
+		// Deliberately append-only: the hook never strips its own prior output, so
+		// feeding it an already-projected list would duplicate on every rebuild.
+		let projectionCount = 0;
+		registry.registerProvider(
+			"appending-provider",
+			{
+				api: "custom-appending-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Appending OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: models => {
+						projectionCount += 1;
+						const seed = models.find(model => model.provider === "appending-provider") as Model<Api>;
+						return [...models, { ...seed, id: `extra-${projectionCount}` }];
+					},
+				},
+			},
+			"ext://oauth",
+		);
+
+		const ids = () => getProviderModels(registry, "appending-provider").map(model => model.id);
+		expect(ids()).toEqual(["runtime-model", "extra-1"]);
+
+		await registry.refresh("offline");
+		expect(ids()).toHaveLength(2);
+
+		await registry.refresh("online");
+		expect(ids()).toHaveLength(2);
 	});
 });

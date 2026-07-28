@@ -817,6 +817,7 @@ export class ModelRegistry {
 	// definitions, so without re-applying the projection every static reload
 	// would silently revert the provider to its unprojected catalog.
 	#runtimeModelModifiers: Map<string, ModifyModelsHook> = new Map();
+	#lastModelModifierWarnings: Map<string, string> = new Map();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
@@ -1149,7 +1150,7 @@ export class ModelRegistry {
 	 *
 	 * A throwing hook degrades to the unprojected list for that provider instead
 	 * of failing the whole composition; one bad extension must not empty the
-	 * registry.
+	 * registry. The failure is logged (deduped per provider) so it is not silent.
 	 */
 	#applyRuntimeModelModifiers(models: Model<Api>[], providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		if (this.#runtimeModelModifiers.size === 0) return models;
@@ -1161,13 +1162,20 @@ export class ModelRegistry {
 			try {
 				projected = modifyModels(projected, credential);
 			} catch (error) {
-				this.#lastDiscoveryWarnings.set(
-					providerName,
-					`modifyModels failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				this.#warnModelModifierFailure(providerName, error instanceof Error ? error.message : String(error));
 			}
 		}
 		return projected;
+	}
+
+	/**
+	 * Dedup key is separate from `#lastDiscoveryWarnings` so a repeated modifier
+	 * failure cannot mask a subsequent discovery failure for the same provider.
+	 */
+	#warnModelModifierFailure(provider: string, error: string): void {
+		if (this.#lastModelModifierWarnings.get(provider) === error) return;
+		this.#lastModelModifierWarnings.set(provider, error);
+		logger.warn("extension model projection failed; serving unprojected catalog", { provider, error });
 	}
 
 	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
@@ -1661,15 +1669,19 @@ export class ModelRegistry {
 		for (const provider of builtInDiscovery.authoritativeProviders) {
 			authoritativeProviders.add(provider);
 		}
-		const baseModels =
-			authoritativeProviders.size > 0 ? dropProviderModels(this.#models, authoritativeProviders) : this.#models;
+		// `this.#models` is already projected here (via #ensureFullSnapshot), and
+		// the overlay merge below only replaces matching provider+id pairs — a
+		// hook's projection-only entries would survive and be fed back into it.
+		// Drop each modifier provider so the merge re-seeds it from the
+		// unprojected overlays, keeping non-idempotent hooks from compounding.
+		const rebuiltProviders = new Set(authoritativeProviders);
+		for (const providerName of this.#runtimeModelModifiers.keys()) rebuiltProviders.add(providerName);
+		const baseModels = rebuiltProviders.size > 0 ? dropProviderModels(this.#models, rebuiltProviders) : this.#models;
 		const resolved = this.#mergeResolvedModels(baseModels, discoveredModels);
 		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
 		// Merge runtime extension models so they survive online discovery completion
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		// Re-project after discovery for the same reason as #composeStaticModels:
-		// the merge above rebuilds from the unprojected runtime overlays.
 		this.#models = this.#applyRuntimeModelModifiers(
 			this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
 		);
@@ -2445,6 +2457,7 @@ export class ModelRegistry {
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
+		this.#lastModelModifierWarnings.delete(providerName);
 		this.authStorage.removeConfigApiKey(providerName);
 	}
 
