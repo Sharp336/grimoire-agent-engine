@@ -2538,7 +2538,7 @@ export class SessionMaintenance {
 								candidate.api,
 							);
 							if (AIError.is(id, AIError.Flag.AuthFailed)) {
-								lastError = this.#buildCompactionAuthError();
+								if (!nativeCompactionFailure) lastError = this.#buildCompactionAuthError();
 								break;
 							}
 							if (AIError.is(id, AIError.Flag.Timeout)) {

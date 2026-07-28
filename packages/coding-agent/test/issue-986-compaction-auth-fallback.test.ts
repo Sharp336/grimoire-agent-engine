@@ -190,6 +190,39 @@ describe("issue #986 compaction auth fallback", () => {
 		]);
 	});
 
+	it("preserves a native transport failure when a later same-provider candidate fails authentication", async () => {
+		const { apiKeySpy, crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
+			await createAutoNativeFallbackSession();
+		apiKeySpy.mockImplementation(async model =>
+			model.provider === crossProviderModel.provider ? undefined : "test-key",
+		);
+		const attemptedModels: string[] = [];
+		let errorMessage: string | undefined;
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") errorMessage = event.errorMessage;
+		});
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.provider === currentModel.provider && model.id === currentModel.id) {
+				throw new compactionModule.NativeCompactionError(new Error("native compaction transport failed"));
+			}
+			if (model.provider === sameProviderModel.provider && model.id === sameProviderModel.id) {
+				throw new compactionModule.NativeCompactionError(
+					Object.assign(new Error("native compaction authentication failed"), { status: 401 }),
+				);
+			}
+			throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+		expect(errorMessage).toContain("native compaction transport failed");
+	});
+
 	it("skips unauthenticated cross-provider candidates before enforcing the native boundary", async () => {
 		const { apiKeySpy, crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
 			await createAutoNativeFallbackSession();
