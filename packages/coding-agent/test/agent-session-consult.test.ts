@@ -24,6 +24,7 @@ import {
 	CONSULTATION_STATUS_MESSAGE_TYPE,
 	CONSULTATION_THREAD_CUSTOM_TYPE,
 	CONSULTATION_TITLE_CUSTOM_TYPE,
+	CONSULTATION_TITLE_STATE_CUSTOM_TYPE,
 	CONSULTATION_TURN_CUSTOM_TYPE,
 	consultationThreadMetadata,
 	consultationThreadTitle,
@@ -771,6 +772,10 @@ describe("AgentSession durable consultation side turn", () => {
 			});
 			return id;
 		});
+		const { promise: failedTitlePersisted, resolve: resolveFailedTitlePersisted } = Promise.withResolvers<void>();
+		const { promise: canonicalTitlePersisted, resolve: resolveCanonicalTitlePersisted } =
+			Promise.withResolvers<void>();
+		const { promise: secondTurnPersisted, resolve: resolveSecondTurnPersisted } = Promise.withResolvers<void>();
 		const flush = vi.fn(async (): Promise<void> => {
 			await Bun.write(
 				sessionFile,
@@ -785,6 +790,19 @@ describe("AgentSession durable consultation side turn", () => {
 					...entries.map(entry => JSON.stringify(entry)),
 				].join("\n"),
 			);
+			const titleStates = entries.filter(
+				entry => entry.type === "custom" && entry.customType === CONSULTATION_TITLE_STATE_CUSTOM_TYPE,
+			);
+			if (titleStates.length >= 2) resolveFailedTitlePersisted();
+			if (entries.some(entry => entry.type === "custom" && entry.customType === CONSULTATION_TITLE_CUSTOM_TYPE)) {
+				resolveCanonicalTitlePersisted();
+			}
+			if (
+				entries.filter(entry => entry.type === "custom" && entry.customType === CONSULTATION_TURN_CUSTOM_TYPE)
+					.length >= 4
+			) {
+				resolveSecondTurnPersisted();
+			}
 		});
 		const close = vi.fn(async (): Promise<void> => {});
 		const manager = {
@@ -866,7 +884,7 @@ describe("AgentSession durable consultation side turn", () => {
 		const controller = new ConsultController(ctx);
 
 		await controller.start("first question");
-		for (let i = 0; i < 8; i++) await Promise.resolve();
+		await failedTitlePersisted;
 		const threadEntry = entries.find(
 			entry => entry.type === "custom" && entry.customType === CONSULTATION_THREAD_CUSTOM_TYPE,
 		) as { data: { consultationId: string } } | undefined;
@@ -915,7 +933,7 @@ describe("AgentSession durable consultation side turn", () => {
 		});
 		expect(generateConsultationTitle).toHaveBeenCalledTimes(2);
 		resolveCanonicalRetry?.("Recovered canonical title");
-		for (let i = 0; i < 8; i++) await Promise.resolve();
+		await canonicalTitlePersisted;
 		expect(consultationThreadTitle(entries, threadEntry.data.consultationId)).toBe("Recovered canonical title");
 		expect(
 			entries.filter(entry => entry.type === "custom" && entry.customType === CONSULTATION_TITLE_CUSTOM_TYPE),
@@ -943,7 +961,9 @@ describe("AgentSession durable consultation side turn", () => {
 			ownerId: "Main",
 		});
 		await restartedController.submitCurrentThread("second question");
-		for (let i = 0; i < 8; i++) await Promise.resolve();
+		await secondTurnPersisted;
+		await Promise.resolve();
+		await Promise.resolve();
 
 		const thread = consultationThreadMetadata(entries, threadEntry.data.consultationId);
 		expect(thread).toEqual({

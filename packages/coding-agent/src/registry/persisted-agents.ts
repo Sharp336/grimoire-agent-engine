@@ -224,57 +224,62 @@ async function persistCanonicalConsultationTitle(
 		onGenerated?: (title: string) => void;
 	},
 ): Promise<void> {
-	const manager = await SessionManager.open(options.sessionFile, undefined, undefined, { suppressBreadcrumb: true });
+	const reader = await SessionManager.open(options.sessionFile, undefined, undefined, { suppressBreadcrumb: true });
+	const entries = reader.getEntries();
+	if (consultationThreadTitle(entries, options.consultationId)) {
+		await reader.close().catch(() => {});
+		return;
+	}
+	const conversation = consultationFirstTurnConversation(entries, options.consultationId);
+	if (!conversation) {
+		await reader.close().catch(() => {});
+		return;
+	}
+	reader.appendCustomEntry(CONSULTATION_TITLE_STATE_CUSTOM_TYPE, {
+		version: 1,
+		consultationId: options.consultationId,
+		status: "pending",
+		attemptedAt: Date.now(),
+	});
+	await reader.flush();
+	await reader.close();
+
+	let title: string | null = null;
+	let failure: string | undefined;
 	try {
-		const entries = manager.getEntries();
-		if (consultationThreadTitle(entries, options.consultationId)) return;
-		const conversation = consultationFirstTurnConversation(entries, options.consultationId);
-		if (!conversation) return;
+		title = await options.session.generateConsultationTitle(conversation.question, conversation.answer);
+		if (!title) failure = "Canonical title service returned no subject.";
+	} catch (error) {
+		failure = error instanceof Error ? error.message : String(error);
+	}
 
-		manager.appendCustomEntry(CONSULTATION_TITLE_STATE_CUSTOM_TYPE, {
-			version: 1,
-			consultationId: options.consultationId,
-			status: "pending",
-			attemptedAt: Date.now(),
-		});
-		await manager.flush();
-
-		let title: string | null;
-		try {
-			title = await options.session.generateConsultationTitle(conversation.question, conversation.answer);
-		} catch (error) {
-			manager.appendCustomEntry(CONSULTATION_TITLE_STATE_CUSTOM_TYPE, {
+	// Title generation may overlap a follow-up turn. Reopen after the provider
+	// request so the title/failure record extends the current journal leaf rather
+	// than branching from the stale pending-title leaf and hiding newer turns.
+	const writer = await SessionManager.open(options.sessionFile, undefined, undefined, { suppressBreadcrumb: true });
+	try {
+		if (failure) {
+			writer.appendCustomEntry(CONSULTATION_TITLE_STATE_CUSTOM_TYPE, {
 				version: 1,
 				consultationId: options.consultationId,
 				status: "failed",
 				attemptedAt: Date.now(),
-				error: error instanceof Error ? error.message : String(error),
+				error: failure,
 			} satisfies ConsultationTitleStateRecord);
-			await manager.flush();
+			await writer.flush();
 			return;
 		}
-		if (!title) {
-			manager.appendCustomEntry(CONSULTATION_TITLE_STATE_CUSTOM_TYPE, {
-				version: 1,
-				consultationId: options.consultationId,
-				status: "failed",
-				attemptedAt: Date.now(),
-				error: "Canonical title service returned no subject.",
-			} satisfies ConsultationTitleStateRecord);
-			await manager.flush();
-			return;
-		}
-
-		manager.appendCustomEntry(CONSULTATION_TITLE_CUSTOM_TYPE, {
+		if (!title) return;
+		writer.appendCustomEntry(CONSULTATION_TITLE_CUSTOM_TYPE, {
 			version: 1,
 			consultationId: options.consultationId,
 			source: "canonical",
 			title,
 			createdAt: Date.now(),
 		} satisfies ConsultationTitleRecord);
-		await manager.flush();
+		await writer.flush();
 
-		const presentation = consultationThreadTitlePresentation(manager.getEntries(), options.consultationId);
+		const presentation = consultationThreadTitlePresentation(writer.getEntries(), options.consultationId);
 		if (!presentation.generatedTitle) return;
 		registerPersistedConsultation(registry, {
 			ownerId: options.ownerId,
@@ -286,7 +291,7 @@ async function persistCanonicalConsultationTitle(
 		});
 		options.onGenerated?.(presentation.generatedTitle);
 	} finally {
-		await manager.close().catch(() => {});
+		await writer.close().catch(() => {});
 	}
 }
 /** Register persisted subagent and advisor transcripts as parked registry refs. */

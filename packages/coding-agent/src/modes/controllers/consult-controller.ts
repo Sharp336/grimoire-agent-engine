@@ -892,6 +892,9 @@ export class ConsultController {
 					);
 				} else if (this.#activeRequest === request) {
 					this.#updateLatestView(request, { status: "failed" });
+					if (!this.ctx.editor.getText().trim()) this.ctx.editor.setText(request.question);
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					this.ctx.ui.requestRender();
 				}
 				return;
 			}
@@ -905,7 +908,12 @@ export class ConsultController {
 					this.#registerThread(request);
 				}
 				manager = undefined;
-				if (this.#activeRequest === request) this.#updateLatestView(request, { status: "failed" });
+				if (this.#activeRequest === request) {
+					this.#updateLatestView(request, { status: "failed" });
+					if (!this.ctx.editor.getText().trim()) this.ctx.editor.setText(request.question);
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					this.ctx.ui.requestRender();
+				}
 				return;
 			}
 			const cancelled = request.abortController.signal.aborted;

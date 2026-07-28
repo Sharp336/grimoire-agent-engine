@@ -5867,6 +5867,7 @@ export class AgentSession {
 			this.model,
 			provider => buildSessionMetadata(titleSessionId, provider, this.#modelRegistry.authStorage),
 			this.#titleSystemPrompt,
+			this.#titleGenerationAbortController.signal,
 		);
 	}
 
