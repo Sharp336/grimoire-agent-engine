@@ -178,6 +178,8 @@ describe("AnimaExecutorController", () => {
 		expect(corePrompt.body).toContain("caller-owned working tree at `/tmp/caller-worktree`");
 		expect(corePrompt.body).toContain("OMP role grants only these tool capabilities: read");
 		expect(corePrompt.body).toContain('"result": "string"');
+		expect(corePrompt.body).toContain("omp-test-sidecar-Main");
+		expect(corePrompt.body).toContain("an mail send --to omp-test-sidecar-Main");
 		expect(corePrompt.body).toContain("final assistant response");
 		expect(corePrompt.body).not.toContain("Shared context\n\nInspect the target exactly once.");
 		expect(corePrompt.body.toLowerCase()).not.toContain("yield");

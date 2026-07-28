@@ -161,7 +161,7 @@ function resolveClaudeModel(options: ExecutorOptions): string {
 	return model;
 }
 
-function renderClaudeCorePrompt(options: ExecutorOptions, worktree: string): string {
+function renderClaudeCorePrompt(options: ExecutorOptions, worktree: string, mailbox: string): string {
 	return prompt.render(claudeCorePromptTemplate, {
 		role: options.agent.systemPrompt.trim(),
 		context: options.context?.trim() ?? "",
@@ -169,6 +169,7 @@ function renderClaudeCorePrompt(options: ExecutorOptions, worktree: string): str
 		planReferencePath: options.planReference?.path ?? "",
 		worktree,
 		toolNames: options.agent.tools?.join(", ") ?? "",
+		mailbox,
 		outputSchema: options.outputSchema === undefined ? "" : JSON.stringify(options.outputSchema, null, 2),
 		outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 	});
@@ -343,8 +344,6 @@ export class AnimaExecutorController {
 		const agentId = `${label}-${suffix}`;
 		const sessionName = `omp-${agentId}`;
 		const worktree = path.resolve(options.worktree ?? options.cwd);
-		const corePrompt = renderClaudeCorePrompt(options, worktree);
-		const sha256 = new Bun.CryptoHasher("sha256").update(corePrompt).digest("hex");
 
 		let active: ActiveInvocation | undefined;
 		let removeEventListener: (() => void) | undefined;
@@ -352,6 +351,8 @@ export class AnimaExecutorController {
 		let released = false;
 		try {
 			const hello = await this.#client.hello();
+			const corePrompt = renderClaudeCorePrompt(options, worktree, hello.mailbox);
+			const sha256 = new Bun.CryptoHasher("sha256").update(corePrompt).digest("hex");
 			const context = options.context?.trim();
 			const startParams: InvokeStartParams = {
 				owner: hello.owner,

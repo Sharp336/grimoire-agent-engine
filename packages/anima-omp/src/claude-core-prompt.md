@@ -26,6 +26,11 @@ WORKSPACE
 
 Work only in the caller-owned working tree at `{{worktree}}`. Do not create another worktree or modify files outside this path.
 
+OMP COORDINATION
+===================================
+
+Your durable parent mailbox is `{{mailbox}}`. When an assignment or peer message asks you to update or reply to the parent through Anima mail, run `an mail send --to {{mailbox}} --subject "status" --body "..."`. If the inbound message names a thread, preserve it with `--thread THREAD_ID`.
+
 TOOL RESTRICTIONS
 ===================================
 
