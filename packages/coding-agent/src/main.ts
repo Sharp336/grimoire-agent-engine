@@ -1141,10 +1141,6 @@ export async function runRootCommand(
 
 	const notifs: (InteractiveModeNotify | null)[] = [];
 
-	// Create AuthStorage and ModelRegistry upfront
-	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverSessionAuthStorage);
-	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
-
 	if (parsedArgs.version) {
 		writeStartupNotice(parsedArgs, `${VERSION}\n`);
 		process.exit(0);
@@ -1169,6 +1165,10 @@ export async function runRootCommand(
 		process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
 		process.exit(1);
 	}
+	// No-session commands above must not initialize AgentStorage or auth schemas.
+	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverSessionAuthStorage);
+	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
+
 	const mode = parsedArgs.mode || "text";
 	// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
 	const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;

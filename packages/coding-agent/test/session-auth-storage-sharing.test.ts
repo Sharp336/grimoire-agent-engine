@@ -1,15 +1,58 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { parseArgs, type Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { discoverSessionAuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
-import { getAgentDbPath, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, TempDir, VERSION } from "@oh-my-pi/pi-utils";
 
 const AUTH_BROKER_ENV_KEYS = [
 	"OMP_AUTH_BROKER_URL",
 	"OMP_AUTH_BROKER_TOKEN",
 	"OMP_AUTH_BROKER_ACCOUNT_POOL_FILE",
 ] as const;
+
+class ProcessExitSignal extends Error {
+	constructor(readonly code: number) {
+		super(`process.exit(${code})`);
+		this.name = "ProcessExitSignal";
+	}
+}
+
+async function captureEarlyExit(args: string[], configure?: (parsed: Args) => void) {
+	const parsed = parseArgs(args);
+	configure?.(parsed);
+	const stdout: string[] = [];
+	const stderr: string[] = [];
+	let discoveryCalls = 0;
+	const discoverAuthStorage = vi.fn(async () => {
+		discoveryCalls++;
+		throw new Error("auth discovery should not run");
+	});
+	vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+		stdout.push(String(chunk));
+		return true;
+	});
+	vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+		stderr.push(String(chunk));
+		return true;
+	});
+	vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+		throw new ProcessExitSignal(code ?? 0);
+	}) as typeof process.exit);
+
+	let thrown: unknown;
+	try {
+		await runRootCommand(parsed, args, { discoverAuthStorage });
+	} catch (error) {
+		thrown = error;
+	}
+	if (!(thrown instanceof ProcessExitSignal)) throw thrown;
+
+	return { code: thrown.code, stdout: stdout.join(""), stderr: stderr.join(""), discoveryCalls };
+}
 
 describe("session auth storage sharing", () => {
 	let tempDir: TempDir;
@@ -60,5 +103,62 @@ describe("session auth storage sharing", () => {
 		expect(owner.listAuthCredentials("test-provider").map(row => row.credential)).toEqual([
 			{ type: "api_key", key: "shared-key", source: "login" },
 		]);
+	});
+
+	describe("root command auth storage discovery", () => {
+		it("prints --version without discovering session auth storage", async () => {
+			const result = await captureEarlyExit(["--version"]);
+
+			expect(result.code).toBe(0);
+			expect(result.stdout).toBe(`${VERSION}\n`);
+			expect(result.stderr).toBe("");
+			expect(result.discoveryCalls).toBe(0);
+		});
+
+		it("exports a session without discovering session auth storage", async () => {
+			const inputPath = path.join(tempDir.path(), "session.jsonl");
+			const outputPath = path.join(tempDir.path(), "session.html");
+			await Bun.write(
+				inputPath,
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "export-session",
+					timestamp: "2026-07-28T00:00:00.000Z",
+					cwd: tempDir.path(),
+				})}\n`,
+			);
+
+			const result = await captureEarlyExit(["--export", inputPath, outputPath]);
+
+			expect(result.code).toBe(0);
+			expect(result.stdout).toBe(`Exported to: ${outputPath}\n`);
+			expect(result.stderr).toBe("");
+			expect(result.discoveryCalls).toBe(0);
+			expect(await Bun.file(outputPath).exists()).toBe(true);
+		});
+
+		it("rejects RPC file arguments without discovering session auth storage", async () => {
+			const result = await captureEarlyExit(["@prompt.md"], parsed => {
+				parsed.mode = "rpc";
+			});
+
+			expect(result.code).toBe(1);
+			expect(result.stdout).toBe("");
+			expect(result.stderr).toContain("Error: @file arguments are not supported in RPC mode");
+			expect(result.discoveryCalls).toBe(0);
+		});
+
+		it("still discovers session auth storage for normal session startup", async () => {
+			const parsed = parseArgs(["--print", "hello"]);
+			const discoverAuthStorage = vi.fn(async () => {
+				throw new Error("stop after auth discovery");
+			});
+
+			await expect(runRootCommand(parsed, ["--print", "hello"], { discoverAuthStorage })).rejects.toThrow(
+				"stop after auth discovery",
+			);
+			expect(discoverAuthStorage).toHaveBeenCalledTimes(1);
+		});
 	});
 });
