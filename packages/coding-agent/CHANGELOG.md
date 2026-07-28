@@ -12,6 +12,7 @@
 - Populated `previousTools` in the shared `VibeModeState` from the TUI enter path (previously only the ACP/RPC path set it), so the `?? []` fallback on exit can never wipe a legitimately active toolset.
 - Vibe workers are killed on session dispose: `disposeActiveVibe()` runs from `#doDispose` before the async-job manager is torn down, so no runtime (TUI quit, ACP close, RPC shutdown) leaves background workers running. Previously the old scope's workers survived every session dispose.
 - ACP/RPC install a headless vibe session-switch reconciler that detaches the previous scope's workers (suspend-based, not kill) and clears vibe state only AFTER a `switchSession()`/`branch()` commits — a switch that fails and rolls back leaves the original session's vibe mode, workers, and restricted toolset untouched. `branch()` now participates in switch reconciliation (previously it did not).
+- Branching from the TUI while vibe mode is active now runs the after-switch reconciler, so vibe state is correctly reconciled for the branched session (previously the before-switch quiesce suspended workers but the matching rehydrate never fired, leaving InteractiveMode with a stale owner scope and no workers).
 
 ## [17.1.7] - 2026-07-27
 

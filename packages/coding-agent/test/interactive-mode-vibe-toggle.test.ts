@@ -309,4 +309,35 @@ describe("InteractiveMode vibe mode toggle", () => {
 		await mode.handleVibeModeCommand();
 		expect(mode.vibeModeEnabled).toBe(false);
 	});
+
+	it("reconciles TUI vibe state after branching while vibe is active", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+		await session.sessionManager.ensureOnDisk();
+		// A user message after entering vibe gives branch() a branchable entry;
+		// the branched session inherits the vibe mode_change entry, so the
+		// after-switch reconciler must rehydrate vibe for the new session.
+		session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "branch from here" }],
+			timestamp: Date.now(),
+		});
+		const branchable = session.getUserMessagesForBranching();
+		const target = branchable.find(m => m.text === "branch from here");
+		if (!target) throw new Error("Expected a branchable user message");
+
+		const registry = VibeSessionRegistry.global();
+		const rehydrate = vi.spyOn(registry, "rehydrate").mockImplementation(async () => 0);
+
+		const result = await session.branch(target.entryId);
+		expect(result.cancelled).toBe(false);
+
+		// #reconcileModeFromSession (the TUI's sessionSwitchReconciler) must have
+		// fired after the branch, rehydrating the vibe registry for the new
+		// session instead of leaving a suspended scope with no workers.
+		expect(rehydrate).toHaveBeenCalled();
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(1);
+	});
 });

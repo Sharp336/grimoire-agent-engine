@@ -7372,6 +7372,12 @@ export class AgentSession {
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 		}
 
+		try {
+			await this.#sessionSwitchReconciler?.();
+		} catch (error) {
+			logger.warn("Failed to reconcile session mode after branch", { error: String(error) });
+		}
+
 		if (frozenVibeScope) {
 			try {
 				await this.#sessionAfterSwitchReconciler?.(frozenVibeScope);
