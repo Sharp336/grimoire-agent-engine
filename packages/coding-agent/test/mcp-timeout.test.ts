@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import { createMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
+import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import { logger } from "@oh-my-pi/pi-utils";
 
 const ORIGINAL_TIMEOUT = process.env.OMP_MCP_TIMEOUT_MS;
@@ -65,15 +66,37 @@ describe("MCP timeout configuration", () => {
 		}
 	});
 
-	test("classifies only abort errors from the internal timeout", () => {
-		vi.useFakeTimers();
-		const operation = createMCPTimeout(50);
-		vi.advanceTimersByTime(50);
-		const abortError = new Error("aborted");
-		abortError.name = "AbortError";
+	test("preserves real HTTP and JSON-RPC failures while a short timeout is armed", async () => {
+		const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			const payload = JSON.parse(String(init?.body)) as { id?: string | number };
+			if (payload.id !== undefined) {
+				return new Response(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						id: payload.id,
+						error: { code: -32603, message: "request failed" },
+					}),
+					{ headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("notification failed", { status: 500 });
+		});
+		const transport = new HttpTransport({
+			type: "http",
+			url: "https://mcp.invalid/transport",
+			timeout: 50,
+		});
 
-		expect(operation.isTimeoutAbort(new Error("HTTP 500"))).toBe(false);
-		expect(operation.isTimeoutAbort(abortError)).toBe(true);
-		operation.clear();
+		try {
+			await transport.connect();
+			await expect(transport.request("tools/list")).rejects.toThrow("MCP error -32603: request failed");
+			await expect(transport.notify("notifications/initialized")).rejects.toThrow(
+				"HTTP 500: notification failed",
+			);
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+		} finally {
+			await transport.close();
+			fetchMock.mockRestore();
+		}
 	});
 });
