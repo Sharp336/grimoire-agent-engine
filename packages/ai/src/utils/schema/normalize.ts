@@ -776,9 +776,7 @@ function stripResidualCombinersNode(value: unknown, epoch: number, insideSchemaM
 		if (!Object.hasOwn(value, key)) continue;
 		const entry = value[key];
 		const childKind = classifySchemaChild(key, entry, insideSchemaMap);
-		result[key] = childKind
-			? stripResidualCombinersNode(entry, epoch, childKind === "map")
-			: entry;
+		result[key] = childKind ? stripResidualCombinersNode(entry, epoch, childKind === "map") : entry;
 	}
 	if (insideSchemaMap) return result;
 
@@ -1003,10 +1001,7 @@ function hasResidualSchemaIncompatibilities(
 		if (!Object.hasOwn(value, key)) continue;
 		const entry = value[key];
 		const childKind = classifySchemaChild(key, entry, insideSchemaMap);
-		if (
-			childKind &&
-			hasResidualSchemaIncompatibilities(entry, checks, epoch, childKind === "map")
-		) {
+		if (childKind && hasResidualSchemaIncompatibilities(entry, checks, epoch, childKind === "map")) {
 			return true;
 		}
 	}
