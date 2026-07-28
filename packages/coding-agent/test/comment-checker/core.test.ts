@@ -1,7 +1,8 @@
-import { describe, expect, it } from "bun:test";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as cli from "../../src/comment-checker/cli";
 import { runCommentChecker, spawnProcess } from "../../src/comment-checker/cli";
 import {
 	extractCommentCheckRequests,
@@ -10,8 +11,9 @@ import {
 	type ToolResultLike,
 	toHookInput,
 } from "../../src/comment-checker/core";
-import { createCommentCheckerToolResultHandler } from "../../src/comment-checker/index";
+import { createCommentCheckerExtension, createCommentCheckerToolResultHandler } from "../../src/comment-checker/index";
 import { formatFooterStatus, formatPreview, getCommentCheckerWidgetLines } from "../../src/comment-checker/ui";
+import { Settings } from "../../src/config/settings";
 import type { ExtensionContext, ToolResultEvent } from "../../src/extensibility/extensions";
 import type { ExtensionUIContext } from "../../src/extensibility/extensions/types";
 import type { ReadonlySessionManager } from "../../src/session/session-manager";
@@ -240,8 +242,8 @@ describe("extractCommentCheckRequests", () => {
 
 	it("suppresses failed multi-entry edit details and does not re-read from disk", () => {
 		using tempDir = TempDir.createSync("@omp-comment-checker-test-");
-		const filePath = join(tempDir.path(), "existing.ts");
-		writeFileSync(filePath, "// TODO: pre-existing comment\nconst a = 1;\n", "utf-8");
+		const filePath = path.join(tempDir.path(), "existing.ts");
+		fs.writeFileSync(filePath, "// TODO: pre-existing comment\nconst a = 1;\n", "utf-8");
 
 		const event: ToolResultLike = {
 			toolName: "edit",
@@ -537,8 +539,8 @@ describe("extractCommentCheckRequests", () => {
 
 	it("skips pruned snapshots without deltas instead of re-reading from disk and emitting whole-file scan", () => {
 		using tempDir = TempDir.createSync("@omp-comment-checker-test-");
-		const filePath = join(tempDir.path(), "pruned.ts");
-		writeFileSync(filePath, "const diskValue = 42;\n", "utf-8");
+		const filePath = path.join(tempDir.path(), "pruned.ts");
+		fs.writeFileSync(filePath, "const diskValue = 42;\n", "utf-8");
 
 		const details = {
 			perFileResults: [
@@ -1030,5 +1032,82 @@ describe("extractWriteRequest with resolved detail path", () => {
 				},
 			},
 		]);
+	});
+});
+
+describe("createCommentCheckerExtension disabled state", () => {
+	it("clears widget and status when commentChecker is disabled after being active", async () => {
+		await Settings.init({ inMemory: true });
+		const spyBin = spyOn(cli, "resolveCommentCheckerBinary").mockReturnValue(undefined);
+		try {
+			const widgetCalls: Array<{ key: string; lines?: string[] }> = [];
+			const statusCalls: Array<{ key: string; text?: string }> = [];
+
+			const mockCtx: ExtensionContext = {
+				sessionManager: {
+					getSessionId: () => "sess-1",
+					getHeader: () => null,
+				} as unknown as ReadonlySessionManager,
+				cwd: "/workspace",
+				ui: {
+					setWidget: (key: string, lines?: string[]) => {
+						widgetCalls.push({ key, lines });
+					},
+					setStatus: (key: string, text?: string) => {
+						statusCalls.push({ key, text });
+					},
+					notify: () => {},
+				} as unknown as ExtensionUIContext,
+			} as ExtensionContext;
+
+			let sessionStartHandler: ((event: any, ctx: ExtensionContext) => Promise<void>) | undefined;
+			let toolResultHandler: ((event: any, ctx: ExtensionContext) => Promise<any>) | undefined;
+
+			const mockApi = {
+				on: (event: string, handler: any) => {
+					if (event === "session_start") sessionStartHandler = handler;
+					if (event === "tool_result") toolResultHandler = handler;
+				},
+				registerCommand: () => {},
+				sendMessage: () => {},
+			};
+
+			createCommentCheckerExtension(mockApi as any);
+
+			// Start session with checker enabled, but binary missing to set state to "missing" (non-idle)
+			Settings.instance.set("commentChecker.enabled", true);
+			await sessionStartHandler!({}, mockCtx);
+
+			expect(statusCalls[statusCalls.length - 1]).toEqual({
+				key: "omp-comment-checker",
+				text: "comment-checker: missing binary",
+			});
+
+			// Now disable the checker and trigger a tool_result event
+			Settings.instance.set("commentChecker.enabled", false);
+			await toolResultHandler!(
+				{
+					type: "tool_result",
+					toolCallId: "c1",
+					toolName: "write",
+					input: { filePath: "src/a.ts", content: "x" },
+					content: [],
+					isError: false,
+				},
+				mockCtx,
+			);
+
+			// Widget and status should be cleared (lines=undefined, text=undefined)
+			expect(widgetCalls[widgetCalls.length - 1]).toEqual({
+				key: "omp-comment-checker",
+				lines: undefined,
+			});
+			expect(statusCalls[statusCalls.length - 1]).toEqual({
+				key: "omp-comment-checker",
+				text: undefined,
+			});
+		} finally {
+			spyBin.mockRestore();
+		}
 	});
 });

@@ -191,6 +191,9 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 		store.clear();
 		cachedBinaryPath = null;
 		if (!Settings.instance.get("commentChecker.enabled")) {
+			if (state.status !== "idle") {
+				setState(ctx, { status: "idle", checkedFiles: [], warnings: [] });
+			}
 			return;
 		}
 		if (!getCachedBinary()) {
@@ -203,6 +206,9 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 
 	api.on("tool_result", async (event, ctx) => {
 		if (!Settings.instance.get("commentChecker.enabled")) {
+			if (state.status !== "idle") {
+				setState(ctx, { status: "idle", checkedFiles: [], warnings: [] });
+			}
 			return undefined;
 		}
 		if (!getCachedBinary()) {
