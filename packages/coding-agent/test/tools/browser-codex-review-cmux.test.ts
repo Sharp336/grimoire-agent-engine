@@ -1398,11 +1398,14 @@ describe("cmux Codex browser review regressions", () => {
 		let transferStatuses = 0;
 		const hostFetch = spyOn(globalThis, "fetch").mockRejectedValue(new Error("host fetch must not run"));
 		const { document, window } = parseHTML(
-			'<html><body><button id="media"><picture><img src="blob:fixture-media"></picture></button><a href="blob:ancestor-media"><span id="media-child">Child</span></a></body></html>',
+			'<html><body><button id="media"><picture><img src="blob:fixture-media"></picture></button><a href="blob:ancestor-media"><span id="media-child" tabindex="0">Child</span></a></body></html>',
 		);
 		const mediaButton = document.getElementById("media");
 		if (!mediaButton) throw new Error("Expected media wrapper");
 		Reflect.set(mediaButton, "getBoundingClientRect", () => ({ x: 0, y: 0, width: 100, height: 20 }));
+		const mediaChild = document.getElementById("media-child");
+		if (!mediaChild) throw new Error("Expected media child");
+		Reflect.set(mediaChild, "getBoundingClientRect", () => ({ x: 0, y: 24, width: 100, height: 20 }));
 		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
 		spyOn(Bun, "write").mockImplementation(async (_destination, data) => {
 			writes.push(Buffer.from(data as Uint8Array));
@@ -1448,11 +1451,14 @@ describe("cmux Codex browser review regressions", () => {
 		const node = snapshot.nodes.find(candidate => candidate.text === "");
 		if (!node) throw new Error("Expected media wrapper DOM node");
 		await current.dom_cua.downloadMedia({ node_id: node.node_id, timeoutMs: 250 });
+		const childNode = snapshot.nodes.find(candidate => candidate.text === "Child");
+		if (!childNode) throw new Error("Expected media child DOM node");
+		await current.dom_cua.downloadMedia({ node_id: childNode.node_id, timeoutMs: 250 });
 
 		expect(hostFetch).not.toHaveBeenCalled();
-		expect(transferStarts).toBe(3);
-		expect(transferStatuses).toBe(3);
-		expect(writes).toEqual([payload, payload, payload]);
+		expect(transferStarts).toBe(4);
+		expect(transferStatuses).toBe(4);
+		expect(writes).toEqual([payload, payload, payload, payload]);
 	});
 
 	it("downloads coordinate media through nested open shadow roots and preserves boundary errors", async () => {

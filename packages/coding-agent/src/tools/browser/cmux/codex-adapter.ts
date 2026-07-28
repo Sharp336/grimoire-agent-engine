@@ -720,9 +720,18 @@ const DOM_REF_OPERATION_SOURCE = `(nodeId, operation, payload) => {
 		return true;
 	}
 	if (operation === "dom_cua.downloadMedia") {
-		const direct = target.currentSrc || target.src || target.href || target.getAttribute?.("src") || target.getAttribute?.("href");
-		const media = direct ? target : target.querySelector?.("img,video,audio,source,a[href]");
-		return String(direct || media?.currentSrc || media?.src || media?.href || media?.getAttribute?.("src") || media?.getAttribute?.("href") || "");
+		const sourceOf = candidate => String(candidate?.currentSrc || candidate?.src || candidate?.href || candidate?.getAttribute?.("src") || candidate?.getAttribute?.("href") || "");
+		const composedParent = candidate => {
+			const root = candidate?.getRootNode?.();
+			return candidate?.assignedSlot ?? candidate?.parentElement ?? root?.host ?? root?.defaultView?.frameElement ?? null;
+		};
+		let source = sourceOf(target);
+		for (let current = composedParent(target); !source && current; current = composedParent(current)) {
+			const tag = String(current.tagName || "").toLowerCase();
+			if (["img", "video", "audio", "source"].includes(tag) || (tag === "a" && current.getAttribute?.("href") != null)) source = sourceOf(current);
+		}
+		const media = source ? null : target.querySelector?.("img,video,audio,source,a[href]");
+		return source || sourceOf(media);
 	}
 	throw new Error("Unsupported DOM CUA ref operation: " + operation);
 }`;
