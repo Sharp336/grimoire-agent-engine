@@ -16,6 +16,7 @@ import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../ca
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
+import type { AgentAvailability } from "../task/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
@@ -234,6 +235,7 @@ export interface ParsedAgentFields {
 	blocking?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
+	availability?: AgentAvailability;
 }
 
 /**
@@ -297,6 +299,24 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
+
+	// Availability: OpenCode `mode` (canonical) + Copilot aliases
+	const mode = typeof frontmatter.mode === "string" ? frontmatter.mode.trim().toLowerCase() : undefined;
+	const userInvocable = parseBoolean(frontmatter["user-invocable"]);
+	const disableModelInvocation = parseBoolean(frontmatter["disable-model-invocation"]);
+	let availability: AgentAvailability = "all";
+	if (mode === "primary") availability = "primary";
+	else if (mode === "subagent") availability = "subagent";
+	else if (mode === "all") availability = "all";
+	if (mode === undefined) {
+		const ui = userInvocable ?? true;
+		const dmi = disableModelInvocation ?? false;
+		if (ui && !dmi) availability = "all";
+		else if (ui && dmi) availability = "primary";
+		else if (!ui && !dmi) availability = "subagent";
+		else availability = "subagent";
+	}
+
 	return {
 		name,
 		description,
@@ -309,6 +329,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		autoloadSkills,
 		readSummarize,
 		prewalk,
+		availability,
 	};
 }
 

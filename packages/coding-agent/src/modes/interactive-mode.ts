@@ -539,6 +539,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#signalTeardown?: SessionTeardown;
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
+	#planModeToolOverlay: { restore: () => Promise<void> } | undefined;
 	#planModePreviousTools: string[] | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	#vibeModePreviousTools: string[] | undefined;
@@ -2229,9 +2230,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.planModeEnabled || this.planModePaused) {
 			this.session.setPlanModeState(undefined);
 			try {
-				if (this.#planModePreviousTools !== undefined) {
-					await this.session.setActiveToolsByName(this.#planModePreviousTools);
-				}
+				await this.#planModeToolOverlay?.restore();
+				this.#planModeToolOverlay = undefined;
 			} finally {
 				this.session.setPlanProposalHandler?.(null);
 				this.planModeEnabled = false;
@@ -2377,7 +2377,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// prompt, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
 
-		await this.session.setActiveToolsByName(uniquePlanTools);
+		this.#planModeToolOverlay = await this.session.applyToolOverlay(uniquePlanTools);
 		this.session.setPlanModeState({
 			enabled: true,
 			planFilePath,
@@ -2447,9 +2447,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			: undefined;
 		this.session.setPlanModeState(undefined);
 		try {
-			if (this.#planModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#planModePreviousTools);
-			}
+			await this.#planModeToolOverlay?.restore();
+			this.#planModeToolOverlay = undefined;
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
 				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
 			}

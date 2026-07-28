@@ -1874,7 +1874,7 @@ export class AgentSession {
 	 *  list exists (sessions without an ACTIVE todo tool skip the gate). */
 	#prewalkTodoSeen = false;
 	#planYolo: PlanYolo | undefined;
-	#planYoloPreviousTools: string[] | undefined;
+	#planYoloToolOverlay: { restore: () => Promise<void> } | undefined;
 	#planYoloArmed = false;
 
 	#promptTemplates: PromptTemplate[];
@@ -2555,10 +2555,10 @@ export class AgentSession {
 	async #armPlanYoloIfNeeded(): Promise<void> {
 		if (!this.#planYolo || this.#planYoloArmed) return;
 		this.#planYoloArmed = true;
-		const previousTools = this.getEnabledToolNames();
 		const augmentations = this.hasBuiltInTool("write") ? ["write"] : [];
-		await this.setActiveToolsByName([...new Set([...previousTools, ...augmentations])]);
-		this.#planYoloPreviousTools = previousTools;
+		this.#planYoloToolOverlay = await this.applyToolOverlay([
+			...new Set([...this.getEnabledToolNames(), ...augmentations]),
+		]);
 		this.setPlanModeState({
 			enabled: true,
 			planFilePath: this.getPlanReferencePath() || "local://PLAN.md",
@@ -2609,18 +2609,15 @@ export class AgentSession {
 			listPlanFiles: () => this.#listPlanFiles(),
 		});
 		this.setPlanModeState(undefined);
-		const previousTools = this.#planYoloPreviousTools;
 		try {
-			if (previousTools) {
-				await this.setActiveToolsByName(previousTools);
-			}
+			await this.#planYoloToolOverlay?.restore();
 		} catch (error) {
 			this.setPlanModeState(state);
 			throw error;
 		}
 		this.setPlanProposalHandler(null);
 		this.#planYolo = undefined;
-		this.#planYoloPreviousTools = undefined;
+		this.#planYoloToolOverlay = undefined;
 		await this.setModelTemporary(planYolo.target, planYolo.thinkingLevel, { ephemeral: true });
 		this.emitNotice(
 			"info",
@@ -7562,6 +7559,20 @@ export class AgentSession {
 			this.#mountedXdevToolNames,
 			this.getActiveToolNames().includes("write"),
 		);
+	}
+
+	/**
+	 * Snapshot the current enabled tool set, apply a new set, and return a restore handle.
+	 * Shared by plan mode, plan-yolo, print-mode, and agent-selection.
+	 */
+	async applyToolOverlay(toolNames: string[]): Promise<{ restore: () => Promise<void> }> {
+		const previous = this.getEnabledToolNames();
+		await this.setActiveToolsByName(toolNames);
+		return {
+			restore: async () => {
+				await this.setActiveToolsByName(previous);
+			},
+		};
 	}
 
 	/**

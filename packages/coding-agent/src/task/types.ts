@@ -7,6 +7,8 @@ import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
+
+export type AgentAvailability = "primary" | "subagent" | "all";
 /**
  * Enforcement policy for a structured subagent output schema.
  *
@@ -363,6 +365,7 @@ export interface AgentDefinition {
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;
 	source: AgentSource;
+	availability?: AgentAvailability;
 	filePath?: string;
 }
 
