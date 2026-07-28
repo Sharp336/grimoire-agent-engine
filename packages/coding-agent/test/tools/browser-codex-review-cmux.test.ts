@@ -934,6 +934,51 @@ describe("cmux Codex browser review regressions", () => {
 		});
 	});
 
+	it("rejects label descendants whose associated selects are disabled", async () => {
+		const { document, window } = parseHTML(`
+			<html><body>
+				<label>Country <span id="country-label">Choose</span>
+					<select id="country" disabled>
+						<option value="us" selected>United States</option>
+						<option value="ca">Canada</option>
+					</select>
+				</label>
+				<label>Region <span id="region-label">Choose</span>
+					<select id="region" aria-disabled="true">
+						<option value="locked" selected>Locked</option>
+						<option value="other">Other</option>
+					</select>
+				</label>
+			</body></html>
+		`);
+		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible", opacity: "1" }));
+		for (const element of document.querySelectorAll("*")) {
+			Reflect.set(element, "getBoundingClientRect", () => ({ x: 0, y: 0, width: 100, height: 20 }));
+			Reflect.set(element, "scrollIntoView", () => undefined);
+		}
+		const current = await selectedTab(
+			facadeFor({
+				async codexEvaluate(source: string, args: unknown[]) {
+					return runPageEvaluator(source, args, { document, window, Element: window.Element });
+				},
+			}),
+		);
+
+		const outcomes = await Promise.all([
+			caughtError(() => current.playwright.locator("#country-label").selectOption("ca")),
+			caughtError(() => current.playwright.locator("#region-label").selectOption("other")),
+		]);
+
+		expect(outcomes).toEqual([
+			{ name: "Error", message: "locator.selectOption requires an enabled select element" },
+			{ name: "Error", message: "locator.selectOption requires an enabled select element" },
+		]);
+		expect([
+			(document.querySelector("#country") as unknown as { value: string }).value,
+			(document.querySelector("#region") as unknown as { value: string }).value,
+		]).toEqual(["us", "locked"]);
+	});
+
 	it("propagates log RPC failures instead of fabricating an empty log history", async () => {
 		const browser = facadeFor({
 			async codexRequest(method: string) {

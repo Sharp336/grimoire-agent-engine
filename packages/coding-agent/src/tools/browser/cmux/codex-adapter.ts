@@ -293,6 +293,7 @@ const LOCATOR_EVALUATOR_SOURCE = `(descriptor, command, payload) => {
 				: (label?.control ?? label?.querySelector?.("select"));
 		if (String(select?.tagName || "").toLowerCase() !== "select")
 			throw new Error("locator.selectOption requires a select element");
+		if (disabled(select)) throw new Error("locator.selectOption requires an enabled select element");
 		const options = Array.from(select.options);
 		const resolved = payload.selections.map(selection =>
 			options.find(option =>

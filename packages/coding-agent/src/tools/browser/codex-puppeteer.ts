@@ -2491,6 +2491,18 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 						dispatchEvent(event: unknown): boolean;
 					} | null;
 					if (select?.tagName !== "SELECT") throw new Error("locator.selectOption requires a select element");
+					const resolvedSelect = select as unknown as Element;
+					let selectDisabled = resolvedSelect.matches(":disabled");
+					for (let current: Element | null = resolvedSelect; !selectDisabled && current; ) {
+						if (current.getAttribute("aria-disabled")?.trim().toLowerCase() === "true") {
+							selectDisabled = true;
+							break;
+						}
+						const pageCurrent = current as Element & { assignedSlot?: Element | null };
+						const root = current.getRootNode() as unknown as { host?: Element };
+						current = pageCurrent.assignedSlot ?? current.parentElement ?? root.host ?? null;
+					}
+					if (selectDisabled) throw new Error("locator.selectOption requires an enabled select element");
 					const selections = rawSelections as Array<string | { value?: string; label?: string; index?: number }>;
 					const matches: number[] = [];
 					for (const selection of selections) {

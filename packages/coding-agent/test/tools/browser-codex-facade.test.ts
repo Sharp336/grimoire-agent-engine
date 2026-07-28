@@ -1103,6 +1103,7 @@ describe("Codex agent.browser public contract", () => {
 					selectedValues: string[];
 					enabled: boolean[];
 					clipboard: Array<{ name: string; message: string }>;
+					disabledSelect: { errors: Array<{ name: string; message: string }>; selected: string[] };
 					typing: {
 						noFocus: Array<{ name: string; message: string }>;
 						input: string;
@@ -1113,6 +1114,7 @@ describe("Codex agent.browser public contract", () => {
 					tool,
 					name,
 					`const current = await agent.browser.tabs.selected();
+					 await page.evaluate(() => document.body.insertAdjacentHTML("beforeend", "<label>Disabled choice <span id='disabled-select-label'>Choose</span><select id='disabled-select' disabled><option value='locked' selected>Locked</option><option value='other'>Other</option></select></label><label>ARIA-disabled choice <span id='aria-disabled-select-label'>Choose</span><select id='aria-disabled-select' aria-disabled='true'><option value='locked' selected>Locked</option><option value='other'>Other</option></select></label>"));
 					 const permanentErrors = [];
 					 for (const invoke of [
 						() => current.playwright.locator("#hidden").click({ timeoutMs: 100 }),
@@ -1132,6 +1134,12 @@ describe("Codex agent.browser public contract", () => {
 					 const forcedChecked = await page.evaluate(() => document.querySelector("#check").checked);
 					 const selectResult = await current.playwright.locator("#single").selectOption(["one", "two"]);
 					 const selectedValues = await page.evaluate(() => Array.from(document.querySelector("#single").selectedOptions, option => option.value));
+					 const disabledSelectErrors = [];
+					 for (const selector of ["#disabled-select-label", "#aria-disabled-select-label"]) {
+						try { await current.playwright.locator(selector).selectOption("other"); disabledSelectErrors.push({ name: "NO_ERROR", message: "" }); }
+						catch (error) { disabledSelectErrors.push({ name: error.name, message: error.message }); }
+					 }
+					 const disabledSelectValues = await page.evaluate(() => ["#disabled-select", "#aria-disabled-select"].map(selector => document.querySelector(selector).value));
 					 const enabled = await Promise.all([
 						current.playwright.locator("#target").isEnabled(),
 						current.playwright.locator("#aria-disabled").isEnabled(),
@@ -1159,7 +1167,7 @@ describe("Codex agent.browser public contract", () => {
 					 const filledEditable = await page.evaluate(() => document.querySelector("#editable").textContent);
 					 await current.playwright.locator("#editable").click(); await current.dom_cua.type({ text: "editable" });
 					 const typing = await page.evaluate(() => ({ input: document.querySelector("#name").value, editable: document.querySelector("#editable").textContent }));
-					 return { permanentErrors, checkStates: [checked, unchecked, forcedChecked], selectResult, selectedValues, enabled, clipboard, typing: { noFocus, filledEditable, ...typing } };`,
+					 return { permanentErrors, checkStates: [checked, unchecked, forcedChecked], selectResult, selectedValues, disabledSelect: { errors: disabledSelectErrors, selected: disabledSelectValues }, enabled, clipboard, typing: { noFocus, filledEditable, ...typing } };`,
 				);
 				expect(result.permanentErrors).toHaveLength(4);
 				for (const error of result.permanentErrors.slice(0, 2)) {
@@ -1175,6 +1183,13 @@ describe("Codex agent.browser public contract", () => {
 				expect(result.checkStates).toEqual([true, false, true]);
 				expect(result.selectResult).toEqual(["one"]);
 				expect(result.selectedValues).toEqual(["one"]);
+				expect(result.disabledSelect).toEqual({
+					errors: [
+						{ name: "Error", message: "locator.selectOption requires an enabled select element" },
+						{ name: "Error", message: "locator.selectOption requires an enabled select element" },
+					],
+					selected: ["locked", "locked"],
+				});
 				expect(result.enabled).toEqual([true, false, false]);
 				expect(result.clipboard).toEqual([
 					{ name: "BrowserCapabilityError", message: "Browser capability is unavailable: tab.clipboard.read" },
