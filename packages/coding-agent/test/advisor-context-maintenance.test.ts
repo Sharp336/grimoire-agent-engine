@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage, type CompactionSummaryMessage, countTokens } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { calculateContextTokens, estimateTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { estimateToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
@@ -118,6 +120,55 @@ describe("AgentSession advisor context maintenance", () => {
 			// position eligible for a newly appended provider-usage anchor.
 			advisorUsageAnchorStartIndex: 2,
 		};
+	}
+
+	function createAdvisorFallbackHarness() {
+		const primaryMock = createMockModel({
+			provider: "anthropic",
+			responses: [{ content: ["primary complete"] }],
+		});
+		const advisorMock = createMockModel({
+			provider: "openai",
+			responses: [{ content: ["advisor reviewed current update"] }],
+		});
+		const nativeModel = getBundledModel("openai", "gpt-5");
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!nativeModel || !fallbackModel) throw new Error("Expected bundled compaction models");
+
+		authStorage.setRuntimeApiKey(nativeModel.provider, "openai-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": true,
+			"compaction.strategy": "context-full",
+			"contextPromotion.enabled": false,
+		});
+		settings.setModelRole("advisor", `${nativeModel.provider}/${nativeModel.id}`);
+		settings.setModelRole("smol", `${fallbackModel.provider}/${fallbackModel.id}`);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primaryMock, systemPrompt: [], tools: [] },
+			streamFn: primaryMock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be active");
+		advisor.setModel(nativeModel);
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([nativeModel, fallbackModel]);
+		advisor.state.messages.push(
+			usageAnchor(advisorMock, Date.now() - 2_000),
+			usageAnchor(advisorMock, Date.now() - 1_000),
+		);
+		return { advisor, fallbackModel, nativeModel };
 	}
 
 	it("maintains a 371,200-token cached advisor context before the 372,000-token window", async () => {
@@ -270,5 +321,58 @@ describe("AgentSession advisor context maintenance", () => {
 			if (typeof userId !== "string") throw new Error("Expected advisor metadata.user_id");
 			expect((JSON.parse(userId) as { session_id?: string }).session_id).toBe(advisor.sessionId);
 		}
+	});
+
+	it("does not cross providers after a non-auth native advisor compaction failure", async () => {
+		const { advisor, fallbackModel, nativeModel } = createAdvisorFallbackHarness();
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.provider === nativeModel.provider && model.id === nativeModel.id) {
+				throw new compactionModule.NativeCompactionError(new Error("V2 native compaction transport failed"));
+			}
+			if (model.provider !== fallbackModel.provider || model.id !== fallbackModel.id) {
+				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+			}
+			return {
+				summary: "cross-provider summary",
+				shortSummary: "cross-provider",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await session.prompt("small current update");
+
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${nativeModel.provider}/${nativeModel.id}`,
+		]);
+		expect(JSON.stringify(advisor.state.messages)).toContain("prior advisor output");
+	});
+
+	it("allows advisor compaction to try another provider after an auth-classified native failure", async () => {
+		const { advisor, fallbackModel, nativeModel } = createAdvisorFallbackHarness();
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.provider === nativeModel.provider && model.id === nativeModel.id) {
+				throw new compactionModule.NativeCompactionError(
+					Object.assign(new Error("native compaction authentication failed"), { status: 401 }),
+				);
+			}
+			if (model.provider !== fallbackModel.provider || model.id !== fallbackModel.id) {
+				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+			}
+			return {
+				summary: "authenticated fallback summary",
+				shortSummary: "authenticated fallback",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await session.prompt("small current update");
+
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${nativeModel.provider}/${nativeModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(JSON.stringify(advisor.state.messages)).toContain("authenticated fallback summary");
 	});
 });
