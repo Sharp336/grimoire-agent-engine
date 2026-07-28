@@ -807,6 +807,24 @@ function resolveOpenAIImageSize(aspectRatio: string | undefined, imageSize: stri
 	}
 }
 
+function resolveCodexImageSize(aspectRatio: string | undefined, imageSize: string | undefined): string | undefined {
+	if (imageSize) return imageSize;
+	switch (aspectRatio) {
+		case "1:1":
+			return "1024x1024";
+		case "3:4":
+			return "1152x1536";
+		case "4:3":
+			return "1536x1152";
+		case "9:16":
+			return "864x1536";
+		case "16:9":
+			return "1536x864";
+		default:
+			return undefined;
+	}
+}
+
 function buildCodexImageRequest(
 	promptText: string,
 	params: ImageGenParams,
@@ -817,7 +835,7 @@ function buildCodexImageRequest(
 		background: "auto",
 		model: CODEX_IMAGE_MODEL,
 		quality: "auto",
-		size: resolveOpenAIImageSize(params.aspect_ratio, params.image_size) ?? "auto",
+		size: resolveCodexImageSize(params.aspect_ratio, params.image_size) ?? "auto",
 		...(inputImages.length > 0 ? { images: inputImages.map(image => ({ image_url: toDataUrl(image) })) } : {}),
 	};
 }

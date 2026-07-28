@@ -250,7 +250,7 @@ describe("imageGenTool", () => {
 		"https://chat.openai.com/backend-api/codex/",
 		"https://chat.openai.com/backend-api/codex/responses",
 		"https://chat.openai.com/backend-api/codex/responses/",
-	])("uses the Codex Images API with attestation for official-JWT base URL %s", async baseUrl => {
+	])("uses Codex Images with attestation and exact aspect ratio for official-JWT base URL %s", async baseUrl => {
 		setImageProviderOrder(["openai-codex"]);
 		const attestation = '{"v":1,"s":0,"t":"v1.test-attestation"}';
 		vi.spyOn(codexResponses, "getCodexAttestationHeader").mockResolvedValue(attestation);
@@ -331,7 +331,7 @@ describe("imageGenTool", () => {
 			background: "auto",
 			model: "gpt-image-2",
 			quality: "auto",
-			size: "1536x1024",
+			size: "1536x864",
 		});
 		expect(result.details?.provider).toBe("openai-codex");
 		expect(result.details?.model).toBe("gpt-image-2");
@@ -340,6 +340,55 @@ describe("imageGenTool", () => {
 		const savedPath = result.details?.imagePaths[0];
 		if (!savedPath) throw new Error("Expected generated image path");
 		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("codex-image-2"));
+	});
+
+	it("keeps explicit image_size authoritative for native Codex images", async () => {
+		let requestBody: Record<string, unknown> | undefined;
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-codex-size" } }),
+		).toString("base64");
+		const codexToken = `header.${payload}.signature`;
+		const fetchMock: typeof fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("codex-explicit-size").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+		const model = {
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			id: "gpt-5.5",
+			name: "GPT-5.5",
+			baseUrl: "https://chatgpt.com/backend-api",
+		} as Model;
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-explicit-size-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => codexToken,
+				getApiKeyForProvider: async () => undefined,
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => codexToken,
+			} as unknown as ModelRegistry,
+			model,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-codex-explicit-size",
+			{ subject: "a portrait", aspect_ratio: "16:9", image_size: "1024x1536" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestBody?.size).toBe("1024x1536");
 	});
 
 	it("uses JSON Codex Images API payload for official-JWT image edits", async () => {
