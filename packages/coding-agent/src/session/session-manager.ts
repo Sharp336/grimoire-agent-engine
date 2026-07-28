@@ -18,6 +18,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
@@ -446,6 +447,10 @@ export class SessionManager {
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
+	/** Secret obfuscator for pre-persist JSONL seam. Set after construction. */
+	#obfuscator: SecretObfuscator | undefined;
+	/** True when the `secrets.enabled` setting is on (R2 fail-closed gate). */
+	#secretsEnabledSetting = false;
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -500,8 +505,20 @@ export class SessionManager {
 		this.#persist = persist;
 		this.#storage = storage;
 		this.#blobs = new BlobStore(getBlobsDir());
-
 		if (persist && sessionDir) this.#storage.ensureDirSync(sessionDir);
+	}
+
+	/**
+	 * Set the secret obfuscator used by the pre-persist JSONL seam. Called
+	 * after construction once the obfuscator is created. When `secretsEnabled`
+	 * is true but `obfuscator` is undefined (a bug — secrets are enabled but
+	 * the obfuscator failed to initialize), the seam fails closed: user-facing
+	 * message content is replaced with `[REDACTED — obfuscator unavailable]`
+	 * rather than writing plaintext to disk.
+	 */
+	setObfuscator(obfuscator: SecretObfuscator | undefined, secretsEnabled: boolean): void {
+		this.#obfuscator = obfuscator;
+		this.#secretsEnabledSetting = secretsEnabled;
 	}
 
 	#rememberBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
@@ -719,7 +736,29 @@ export class SessionManager {
 	}
 
 	#lineFor(entry: FileEntry): string {
-		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs)) ?? "null"}\n`;
+		const obfuscator = this.#obfuscator;
+		const prepared =
+			this.#secretsEnabledSetting && !obfuscator
+				? prepareEntryForPersistence(this.#redactEntryFailClosed(entry), this.#blobs, undefined)
+				: prepareEntryForPersistence(entry, this.#blobs, obfuscator);
+		return `${stringifyJson(prepared) ?? "null"}\n`;
+	}
+
+	/**
+	 * R2 fail-closed: when `secrets.enabled` is on but the obfuscator is
+	 * undefined (a bug — secrets are enabled but the obfuscator failed to
+	 * initialize), replace user-facing message content with a redaction
+	 * marker rather than writing plaintext to disk. Non-message entries and
+	 * assistant messages pass through (assistant output is model-authored, not
+	 * operator plaintext).
+	 */
+	#redactEntryFailClosed(entry: FileEntry): FileEntry {
+		if (entry.type !== "message") return entry;
+		const message = entry.message;
+		if (message.role !== "user" && message.role !== "developer" && message.role !== "toolResult") return entry;
+		const marker = "[REDACTED — obfuscator unavailable]";
+		const redactedContent = typeof message.content === "string" ? marker : [{ type: "text" as const, text: marker }];
+		return { ...entry, message: { ...message, content: redactedContent } } as FileEntry;
 	}
 
 	#titleSlotLine(): string {

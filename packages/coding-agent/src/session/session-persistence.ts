@@ -1,4 +1,5 @@
 import { isAnthropicWebSearchHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	type BlobStore,
 	externalizeImageDataSync,
@@ -6,7 +7,7 @@ import {
 	isBlobRef,
 	isImageDataUrl,
 } from "./blob-store";
-import type { FileEntry } from "./session-entries";
+import type { FileEntry, SessionMessageEntry } from "./session-entries";
 
 const MAX_PERSIST_CHARS = 500_000;
 const TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
@@ -287,7 +288,51 @@ function stripReplayedReasoningSignatures(entry: FileEntry): FileEntry {
 	if (!changed) return entry;
 	return { ...entry, message: { ...message, content } };
 }
+export function prepareEntryForPersistence(
+	entry: FileEntry,
+	blobStore: BlobStore,
+	obfuscator?: SecretObfuscator,
+): FileEntry {
+	let result = stripReplayedReasoningSignatures(entry);
+	if (obfuscator?.hasSecrets() && result.type === "message") {
+		const obfuscated = obfuscateMessageForPersistence(obfuscator, result.message);
+		if (obfuscated !== result.message) {
+			result = { ...result, message: obfuscated };
+		}
+	}
+	return truncateForPersistence(result, blobStore) as FileEntry;
+}
 
-export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): FileEntry {
-	return truncateForPersistence(stripReplayedReasoningSignatures(entry), blobStore) as FileEntry;
+/**
+ * Obfuscate secret values in user-facing message content before persistence.
+ * Only `user`, `developer`, and `toolResult` messages can carry operator
+ * secrets; assistant output passes through untouched (placeholders already
+ * present are preserved — no double obfuscation). Image blocks are never
+ * walked.
+ */
+function obfuscateMessageForPersistence(
+	obfuscator: SecretObfuscator,
+	message: SessionMessageEntry["message"],
+): SessionMessageEntry["message"] {
+	if (message.role !== "user" && message.role !== "developer" && message.role !== "toolResult") {
+		return message;
+	}
+	if (typeof message.content === "string") {
+		const content = obfuscator.obfuscate(message.content);
+		if (content === message.content) return message;
+		return { ...message, content } as SessionMessageEntry["message"];
+	}
+	if (Array.isArray(message.content)) {
+		let changed = false;
+		const newContent = message.content.map(block => {
+			if (block.type !== "text") return block;
+			const text = obfuscator.obfuscate(block.text);
+			if (text === block.text) return block;
+			changed = true;
+			return { ...block, text };
+		});
+		if (!changed) return message;
+		return { ...message, content: newContent as typeof message.content };
+	}
+	return message;
 }
