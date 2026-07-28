@@ -10,6 +10,7 @@ import type { Settings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
+import type { SecretObfuscator } from "../../secrets/obfuscator";
 import type { SessionManager } from "../../session/session-manager";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { ManagedTimers } from "./managed-timers";
@@ -392,6 +393,7 @@ export class ExtensionRunner {
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
+		private readonly obfuscator?: SecretObfuscator,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -681,6 +683,7 @@ export class ExtensionRunner {
 			getSystemPrompt: () => this.#getSystemPromptFn(),
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
+			obfuscator: this.obfuscator,
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),
