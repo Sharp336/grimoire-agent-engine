@@ -18,6 +18,7 @@
 ### Fixed
 
 - Fixed Advisor notes appending stale-review-window warnings when newer primary turns are queued during a review.
+- Fixed thinking traces losing their markdown hierarchy. The trace was rendered with a flat `DefaultTextStyle.color` override, which `Markdown#applyDefaultStyle` applies after the element theme function, so the innermost sequence won and every heading collapsed to body grey while list markers and inline code — which the override never reached — stayed bright; the block was also italicised throughout, which monospace fonts synthesise by shearing glyphs. Traces now render through the full markdown theme and recede as a whole: each emitted colour is desaturated and faded toward the theme surface (accents less than plain prose, so a heading still outranks the body it introduces), `ESC[39m` is rewritten to a recessed base foreground so uncoloured prose recedes too, and the aside is marked with a left rail instead of italics. Light themes fade toward white rather than scaling HSV value, which cannot dim a `#000000` foreground; 256-colour terminals recess with SGR 2 (faint).
 - Fixed layout padding alignment issues in bordered output blocks and web-search result panels.
 - Fixed excluded web search providers remaining visible in the Web Search Provider Order settings list.
 - Fixed internal Hub peer messages being exposed as ordinary tool-call updates in clients like Paseo.
