@@ -6,6 +6,12 @@
 
 - Exposed `/vibe` over ACP/RPC: the builtin slash command now carries a `handle` that activates vibe (director) mode programmatically — building the `VibeParentSession` adapter inline, restricting the toolset to read + vibe tools, recording a mode-change entry, and returning any inline directive as a residual prompt — so an RPC/ACP host toggles director mode instead of the command being forwarded to the model as plain text. `get_state` now reports `vibeMode` so hosts can introspect whether director mode is active, and `VibeModeState` gained an optional `previousTools` so the ACP path can restore the pre-vibe toolset on exit.
 
+### Fixed
+
+- Forwarded `streamingBehavior` on the RPC builtin residual-prompt path (e.g. `/vibe <directive>`), matching the normal fallthrough: `AgentSession.prompt()` throws `AgentBusyError` when streaming with no behavior, so the directive was rejected instead of queued during an active turn.
+- Blocked RPC `new_session`/`switch_session`/`branch` while vibe mode is active: RPC has no session-switch reconciler (unlike the TUI), so these transitions previously leaked the old scope's workers and carried the restricted tool snapshot into the new session.
+- Populated `previousTools` in the shared `VibeModeState` from the TUI enter path (previously only the ACP/RPC path set it), so the `?? []` fallback on exit can never wipe a legitimately active toolset.
+
 ## [17.1.7] - 2026-07-27
 
 ### Fixed
