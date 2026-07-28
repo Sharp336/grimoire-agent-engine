@@ -1695,6 +1695,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
+			getSystemPrompt: () => session.systemPrompt,
+			getActiveToolNames: () => session.getActiveToolNames(),
+			getConfiguredThinkingLevel: () => session.configuredThinkingLevel(),
+			getPromptCacheKey: () => session.agent.promptCacheKey,
+			getTaskForkLeafId: () => {
+				const leaf = sessionManager.getBranch().at(-1);
+				return leaf?.type === "message" && leaf.message.role === "assistant" ? leaf.parentId : (leaf?.id ?? null);
+			},
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
 			getEvalSessionId: () =>
 				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),

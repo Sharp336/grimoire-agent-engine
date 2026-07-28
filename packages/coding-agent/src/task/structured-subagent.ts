@@ -39,6 +39,7 @@ import {
 	canSpawnAtDepth,
 	type SingleResult,
 	type StructuredSubagentOutput,
+	type TaskContextSource,
 } from "./types";
 import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
 
@@ -83,6 +84,8 @@ export interface StructuredSubagentRequest {
 	invocationKind: "task" | "eval";
 	assignment: string;
 	context?: string;
+	/** Parent-context strategy. Fork modes are available only to task invocations. */
+	source?: TaskContextSource;
 	agent?: string;
 	model?: string | string[];
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
@@ -383,6 +386,15 @@ function buildExecutorOptions(
 		task: renderSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),
 		context: request.context?.trim() || undefined,
+		contextSource: request.source,
+		parentSessionFile: request.session.getSessionFile(),
+		parentSessionManager: request.session.sessionManager,
+		parentModel: request.session.getActiveModel?.(),
+		parentThinkingLevel: request.session.getConfiguredThinkingLevel?.(),
+		parentSystemPrompt: request.session.getSystemPrompt?.(),
+		parentToolNames: request.session.getActiveToolNames?.(),
+		parentPromptCacheKey: request.session.getPromptCacheKey?.(),
+		parentForkLeafId: request.session.getTaskForkLeafId?.(),
 		planReference: undefined,
 		description: trimToUndefined(request.identity?.label),
 		index: request.index ?? 0,

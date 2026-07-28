@@ -22,6 +22,17 @@ export type StructuredSubagentSchemaSource = "caller" | "agent" | "session" | "n
 /** Final validation state of a structured subagent invocation. */
 export type StructuredSubagentValidationStatus = "valid" | "invalid" | "unavailable";
 
+/** Parent-context strategy requested for a task spawn. */
+export type TaskContextSource = "fresh" | "fork" | "auto";
+
+/** Actual context strategy and provider cache evidence for a completed spawn. */
+export interface TaskContextSourceResult {
+	requested: TaskContextSource;
+	used: "fresh" | "fork";
+	cacheReadTokens: number;
+	downgradeReason?: string;
+}
+
 /**
  * Parsed structured completion and its schema-validation metadata.
  *
@@ -110,11 +121,13 @@ export const LABEL_MAX = 80;
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
+const sourceRule = '"fresh" | "fork" | "auto"' as const;
 
 export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	"source?": sourceRule,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
@@ -123,6 +136,7 @@ const taskItemSchemaIsolated = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	"source?": sourceRule,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
@@ -137,6 +151,8 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
+	/** Context source: fresh handoff, full parent-conversation fork, or fork with fresh fallback. */
+	source?: TaskContextSource;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
@@ -151,6 +167,7 @@ export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	"source?": sourceRule,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
@@ -160,6 +177,7 @@ const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	"source?": sourceRule,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
@@ -206,6 +224,7 @@ function createTaskSchema(options: {
 				"name?": "string",
 				agent,
 				task: "string",
+				"source?": sourceRule,
 				...effortField,
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
@@ -222,6 +241,7 @@ function createTaskSchema(options: {
 			"name?": "string",
 			agent,
 			task: "string",
+			"source?": sourceRule,
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
@@ -238,6 +258,7 @@ function createTaskSchema(options: {
 			"name?": "string",
 			agent,
 			task: "string",
+			"source?": sourceRule,
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
@@ -249,6 +270,7 @@ function createTaskSchema(options: {
 		"name?": "string",
 		agent,
 		task: "string",
+		"source?": sourceRule,
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
@@ -290,6 +312,8 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
+	/** Context source (flat form). */
+	source?: TaskContextSource;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
@@ -504,6 +528,8 @@ export interface SingleResult {
 	abortReason?: string;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
+	/** Requested/actual parent-context strategy and measured prompt-cache reuse. */
+	contextSource?: TaskContextSourceResult;
 	/** Output path for the task result */
 	outputPath?: string;
 	/** Patch path for isolated worktree output */

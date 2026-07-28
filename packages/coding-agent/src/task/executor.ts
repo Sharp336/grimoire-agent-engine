@@ -36,6 +36,7 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
+import forkContextSwitchPrompt from "../prompts/system/tan-context-switch.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
@@ -48,6 +49,7 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
+import { resolveToolTier } from "../tools/approval";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
@@ -71,6 +73,8 @@ import {
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
+	type TaskContextSource,
+	type TaskContextSourceResult,
 	type TaskToolDetails,
 	type YieldItem,
 } from "./types";
@@ -314,6 +318,24 @@ export interface ExecutorOptions {
 	assignment?: string;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
 	context?: string;
+	/** Parent-context strategy requested by the task caller. */
+	contextSource?: TaskContextSource;
+	/** Persisted parent session that supplies fork history. */
+	parentSessionFile?: string | null;
+	/** Parent manager used to flush the committed history before cloning. */
+	parentSessionManager?: Pick<SessionManager, "ensureOnDisk" | "flush" | "getCwd">;
+	/** Exact parent model used by fork mode. */
+	parentModel?: Model;
+	/** Exact parent thinking level used by fork mode. */
+	parentThinkingLevel?: ConfiguredThinkingLevel;
+	/** Parent system prompt retained for provider-prefix compatibility. */
+	parentSystemPrompt?: readonly string[];
+	/** Parent tool catalog retained for provider-prefix compatibility. */
+	parentToolNames?: string[];
+	/** Parent provider prompt-cache affinity. */
+	parentPromptCacheKey?: string;
+	/** Last committed parent entry to clone, excluding the in-flight task call. */
+	parentForkLeafId?: string | null;
 	/**
 	 * The session's active overall plan, handed off so subagents spawned during
 	 * plan execution share the same plan context as the main agent. Omitted when
@@ -1794,6 +1816,7 @@ async function driveSessionToYield(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
+	requireYield = true,
 ): Promise<DriveOutcome> {
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -1841,6 +1864,10 @@ async function driveSessionToYield(
 			// failures keep the old path.
 			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
 			if (!recoverableStop || abortSignal.aborted) throw err;
+		}
+
+		if (!requireYield) {
+			return { exitCode, error, aborted, abortReasonText };
 		}
 
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
@@ -2054,6 +2081,7 @@ interface FinalizeRunArgs {
 	detached?: boolean;
 	sessionFile?: string;
 	startTime: number;
+	contextSource?: TaskContextSourceResult;
 }
 
 /**
@@ -2167,6 +2195,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		});
 	}
 
+	const usage = monitor.hasUsage() ? monitor.accumulatedUsage : undefined;
+	if (args.contextSource) args.contextSource.cacheReadTokens = usage?.cacheRead ?? 0;
 	return {
 		index,
 		id,
@@ -2192,7 +2222,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
-		usage: monitor.hasUsage() ? monitor.accumulatedUsage : undefined,
+		usage,
+		contextSource: args.contextSource,
 		outputPath,
 		extractedToolData: progress.extractedToolData,
 		retryFailure: progress.retryFailure,
@@ -2406,6 +2437,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		onProgress,
 	} = options;
 	const startTime = Date.now();
+	const requestedContextSource = options.contextSource ?? "fresh";
+	let contextSource: TaskContextSourceResult = {
+		requested: requestedContextSource,
+		used: "fresh",
+		cacheReadTokens: 0,
+	};
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
 	let firstChatDispatchAt: number | undefined;
@@ -2719,14 +2756,54 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const effectiveCwd = worktree ?? cwd;
-			const sessionManager = sessionFile
-				? await awaitAbortable(
-						SessionManager.open(sessionFile, undefined, undefined, {
-							initialCwd: effectiveCwd,
+			const forkRequested = requestedContextSource !== "fresh";
+			const forkUnavailableReason =
+				worktree !== undefined
+					? "fork context is incompatible with isolated worktrees"
+					: !sessionFile
+						? "fork context requires a persisted child transcript"
+						: !options.parentSessionFile ||
+								!options.parentSessionManager ||
+								options.parentForkLeafId === undefined
+							? "fork context requires a persisted parent session"
+							: !options.parentModel || !options.parentSystemPrompt || !options.parentToolNames
+								? "fork context requires the active parent request shape"
+								: undefined;
+			if (requestedContextSource === "fork" && forkUnavailableReason) {
+				throw new Error(forkUnavailableReason);
+			}
+			const useFork = forkRequested && forkUnavailableReason === undefined;
+			let sessionManager: SessionManager;
+			if (useFork) {
+				await awaitAbortable(options.parentSessionManager!.ensureOnDisk());
+				await awaitAbortable(options.parentSessionManager!.flush());
+				sessionManager = await awaitAbortable(
+					SessionManager.forkFrom(
+						options.parentSessionFile!,
+						effectiveCwd,
+						path.dirname(sessionFile!),
+						undefined,
+						{
 							suppressBreadcrumb: true,
-						}),
-					)
-				: SessionManager.inMemory(effectiveCwd);
+							sessionFile: sessionFile!,
+							sourceLeafId: options.parentForkLeafId,
+						},
+					),
+				);
+				contextSource = { requested: requestedContextSource, used: "fork", cacheReadTokens: 0 };
+			} else {
+				sessionManager = sessionFile
+					? await awaitAbortable(
+							SessionManager.open(sessionFile, undefined, undefined, {
+								initialCwd: effectiveCwd,
+								suppressBreadcrumb: true,
+							}),
+						)
+					: SessionManager.inMemory(effectiveCwd);
+				if (forkUnavailableReason && requestedContextSource === "auto") {
+					contextSource.downgradeReason = forkUnavailableReason;
+				}
+			}
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
@@ -2787,21 +2864,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRegistry,
 				getApiKey: options.getApiKey,
 				settings: subagentSettings,
-				model,
-				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+				model: useFork ? options.parentModel : model,
+				modelPattern: useFork || model || modelOverride === undefined ? undefined : modelPatterns,
 				modelPatternAuthFallback:
-					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+					useFork || model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
 				modelPatternFallbackRole:
-					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
+					useFork || model || modelOverride === undefined
+						? undefined
+						: `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
 				modelPatternDefaultFallbackChain:
-					model || modelOverride === undefined ? undefined : defaultRetryFallbackChain,
-				thinkingLevel: effectiveThinkingLevel,
-				thinkingLevelCeiling: spawnEffortCeiling,
-				toolNames,
+					useFork || model || modelOverride === undefined ? undefined : defaultRetryFallbackChain,
+				thinkingLevel: useFork ? options.parentThinkingLevel : effectiveThinkingLevel,
+				thinkingLevelCeiling: useFork ? undefined : spawnEffortCeiling,
+				toolNames: useFork ? options.parentToolNames : toolNames,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: options.restrictToolNames,
-				requireYieldTool: true,
+				requireYieldTool: !useFork,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
 				promptTemplates: options.promptTemplates,
@@ -2809,22 +2888,26 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				rules: options.rules,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
-						ircSelfId: ircEnabled ? id : "",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
+				systemPrompt: useFork
+					? [...options.parentSystemPrompt!]
+					: defaultPrompt => {
+							const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+								agent: agent.systemPrompt,
+								context: options.context?.trim() ?? "",
+								planReference: options.planReference?.content ?? "",
+								planReferencePath: options.planReference?.path ?? "",
+								worktree: worktree ?? "",
+								outputSchema: normalizedOutputSchema,
+								outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+								ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+								ircSelfId: ircEnabled ? id : "",
+							});
+							return defaultPrompt.length === 0
+								? [subagentPrompt]
+								: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+						},
+				providerSessionId: useFork ? `${sessionManagerForRun.getSessionId()}:fork` : undefined,
+				providerPromptCacheKey: useFork ? options.parentPromptCacheKey : undefined,
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
 				prewalk,
@@ -2865,6 +2948,24 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			if (useFork) {
+				session.setTodoPhases([]);
+				const beforeToolCall = session.agent.beforeToolCall;
+				session.agent.beforeToolCall = async (ctx, toolSignal) => {
+					const inherited = await beforeToolCall?.(ctx, toolSignal);
+					if (inherited?.block || inherited?.args !== undefined) return inherited;
+					if (resolveToolTier(ctx.tool, ctx.args) !== "read") {
+						return { block: true, reason: "Forked task agents are read-only; return findings to the parent." };
+					}
+					return undefined;
+				};
+				session.agent.appendMessage({
+					role: "developer",
+					content: forkContextSwitchPrompt,
+					attribution: "agent",
+					timestamp: Date.now(),
+				});
+			}
 			installRegistryStatusSync(session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
@@ -3018,7 +3119,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToYield(session, monitor, task);
+			const outcome = await driveSessionToYield(session, monitor, task, !useFork);
 			exitCode = outcome.exitCode;
 			error = outcome.error;
 			aborted = outcome.aborted;
@@ -3141,5 +3242,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
 		startTime,
+		contextSource,
 	});
 }

@@ -31,6 +31,7 @@ import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
+import type { ConfiguredThinkingLevel } from "../thinking";
 import type { EventBus } from "../utils/event-bus";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";
@@ -229,7 +230,20 @@ export interface ToolSession {
 	/** Get session file */
 	getSessionFile: () => string | null;
 	/** Parent session journal used by tools that persist runtime lifecycle state. */
-	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
+	sessionManager?: Pick<
+		SessionManager,
+		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries" | "getCwd"
+	>;
+	/** Active parent system prompt, needed to preserve a fork's provider-visible prefix. */
+	getSystemPrompt?: () => readonly string[];
+	/** Active parent tool names, needed to preserve a fork's provider-visible prefix. */
+	getActiveToolNames?: () => string[];
+	/** Parent's configured thinking level for exact-model fork execution. */
+	getConfiguredThinkingLevel?: () => ConfiguredThinkingLevel | undefined;
+	/** Provider prompt-cache affinity inherited across nested forks. */
+	getPromptCacheKey?: () => string | undefined;
+	/** Last committed parent entry included in a task fork. */
+	getTaskForkLeafId?: () => string | null;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Reject new eval work once session disposal has started. */

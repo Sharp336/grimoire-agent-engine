@@ -120,6 +120,7 @@
 
 ### Added
 
+- Added `fresh`, `fork`, and `auto` context sources to the task tool, including completed-parent conversation cloning, prompt-cache lineage inheritance, read-only fork execution, safe fresh fallback, and cache-read result metadata.
 - Added omp cleanse, a new command that automatically detects language-ecosystem checkers, parses diagnostics (such as Cargo Clippy JSON), distributes repair workloads across concurrent subagents, and runs verification checks with a live progress bar.
 
 ### Changed

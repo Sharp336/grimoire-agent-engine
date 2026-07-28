@@ -47,6 +47,14 @@ describe("task spawn policy surfaces", () => {
 		expect(parsed).toEqual({ agent: "fact-finder", task: "check" });
 	});
 
+	it("accepts explicit fresh, fork, and auto context sources", () => {
+		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, defaultAgent: "fact-finder" });
+
+		for (const source of ["fresh", "fork", "auto"] as const) {
+			expect(schema({ task: "check", source })).toEqual({ agent: "fact-finder", task: "check", source });
+		}
+	});
+
 	it("filters the agent list to the restricted spawn policy in the description", async () => {
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
 			agents: [factFinderAgent, oracleAgent],

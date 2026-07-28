@@ -2353,7 +2353,7 @@ export class SessionManager {
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { suppressBreadcrumb?: boolean; sessionFile?: string },
+		options?: { suppressBreadcrumb?: boolean; sessionFile?: string; sourceLeafId?: string | null },
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
@@ -2364,7 +2364,19 @@ export class SessionManager {
 		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		let history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		if (options && "sourceLeafId" in options) {
+			const entriesById = new Map(history.map(entry => [entry.id, entry]));
+			const branch: SessionEntry[] = [];
+			let cursor = options.sourceLeafId ?? null;
+			while (cursor) {
+				const entry = entriesById.get(cursor);
+				if (!entry) throw new Error(`Fork source entry ${cursor} not found`);
+				branch.push(entry);
+				cursor = entry.parentId;
+			}
+			history = branch.reverse();
+		}
 		manager.#resetToNewSession(
 			{
 				parentSession: sourceHeader?.id,
