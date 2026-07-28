@@ -191,7 +191,12 @@ describe("structured subagent primitive", () => {
 
 	it("routes a claimed agent through the session-scoped executor", async () => {
 		const externalSession = session();
-		const execute = vi.fn(async options => ({ ...result(), id: options.id, agent: options.agent.name }));
+		const execute = vi.fn(async options => ({
+			...result(),
+			id: options.id,
+			agent: options.agent.name,
+			output: '{"agent":true}',
+		}));
 		externalSession.subagentExecutorRegistry = new SubagentExecutorRegistry([
 			{
 				id: "external",
@@ -212,6 +217,44 @@ describe("structured subagent primitive", () => {
 		expect(externalOptions?.task).toContain("Inspect the target.");
 		expect(nativeExecute).not.toHaveBeenCalled();
 		expect(settled.result.id).toBe(execute.mock.calls[0]?.[0].id);
+		expect(settled.result.structuredOutput).toMatchObject({
+			source: "agent",
+			mode: "permissive",
+			status: "valid",
+			data: { agent: true },
+		});
+	});
+
+	it("validates an external executor's exact final response under strict and permissive modes", async () => {
+		mockDiscovery({ ...AGENT, filePath: "/plugin/agents/worker.md" });
+		const nativeExecute = vi.spyOn(executorModule, "runSubprocess");
+
+		for (const schemaMode of ["permissive", "strict"] as const) {
+			const externalSession = session();
+			externalSession.subagentExecutorRegistry = new SubagentExecutorRegistry([
+				{
+					id: "external",
+					claim: () => true,
+					execute: async options => ({
+						...result(),
+						id: options.id,
+						output: "newest response is malformed",
+					}),
+				},
+			]);
+			const settled = await runStructuredSubagent(request({ session: externalSession, schemaMode }));
+
+			expect(settled.result.exitCode).toBe(schemaMode === "strict" ? 1 : 0);
+			expect(settled.result.output).toBe("newest response is malformed");
+			expect(settled.result.structuredOutput).toMatchObject({
+				source: "agent",
+				mode: schemaMode,
+				status: "invalid",
+				data: "newest response is malformed",
+			});
+			expect(settled.result.structuredOutput?.error).toContain("final response is not valid JSON");
+		}
+		expect(nativeExecute).not.toHaveBeenCalled();
 	});
 
 	it("fails preflight when multiple executors claim the same agent", async () => {

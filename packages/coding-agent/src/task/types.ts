@@ -509,6 +509,16 @@ export interface SingleResult {
 	abortReason?: string;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
+	/** Metadata for a child executed by an extension-owned backend. */
+	external?: {
+		executor: string;
+		invocationId: string;
+		agentId: string;
+		historyRef?: string;
+		attachRef?: string;
+		/** Native usage metrics are unavailable unless explicitly advertised. */
+		usageAvailable: boolean;
+	};
 	/** Output path for the task result */
 	outputPath?: string;
 	/** Patch path for isolated worktree output */

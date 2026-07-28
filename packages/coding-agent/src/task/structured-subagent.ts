@@ -19,7 +19,7 @@ import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
-import { buildOutputValidator } from "../tools/output-schema-validator";
+import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
@@ -514,18 +514,46 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
 		return;
 	}
 	if (result.structuredOutput) return;
-	let fallbackData: unknown = result.output;
+
+	let data: unknown = result.output;
+	let parseError: string | undefined;
 	try {
-		fallbackData = JSON.parse(result.output);
-	} catch {}
-	const output: StructuredSubagentOutput = {
+		data = JSON.parse(result.output);
+	} catch (error) {
+		parseError = `final response is not valid JSON: ${error instanceof Error ? error.message : String(error)}`;
+	}
+	const { validator, normalized, error: schemaError } = buildOutputValidator(schema.schema);
+	if (schemaError || normalized === undefined) {
+		result.structuredOutput = {
+			source: schema.source,
+			mode: schema.mode,
+			status: "unavailable",
+			data,
+			error: schemaError ? `invalid output schema: ${schemaError}` : undefined,
+		};
+		return;
+	}
+
+	const validation = !parseError && validator ? validator.validate(data) : undefined;
+	const validationError =
+		parseError ??
+		(validation && !validation.success
+			? summarizeValidationFailure(validation, data, validator?.requiredFields ?? []).message
+			: result.exitCode === 0
+				? undefined
+				: result.error || result.stderr || "subagent execution failed");
+	result.structuredOutput = {
 		source: schema.source,
 		mode: schema.mode,
-		status: result.exitCode === 0 ? "valid" : "invalid",
-		data: fallbackData,
-		...(result.error ? { error: result.error } : {}),
+		status: validationError ? "invalid" : "valid",
+		data,
+		...(validationError ? { error: validationError } : {}),
 	};
-	result.structuredOutput = output;
+	if (validationError && schema.mode === "strict" && result.exitCode === 0) {
+		result.exitCode = 1;
+		result.stderr = `schema_violation: ${validationError}`;
+		result.error = validationError;
+	}
 }
 
 /**
