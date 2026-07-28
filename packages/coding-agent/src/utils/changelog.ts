@@ -28,6 +28,101 @@ export interface StartupChangelogSelection {
 	persistCurrentVersion: boolean;
 	truncated: boolean;
 	selectedEntries: number;
+	totalUnseenEntries: number;
+	latestVersion: string | undefined;
+	changeCount: number;
+	categoryCounts: Record<string, number>;
+}
+
+const CHANGELOG_CATEGORY_ORDER = [
+	"Breaking Changes",
+	"Added",
+	"Changed",
+	"Deprecated",
+	"Removed",
+	"Fixed",
+	"Security",
+] as const;
+
+function emptyStartupSelection(persistCurrentVersion: boolean): StartupChangelogSelection {
+	return {
+		markdown: undefined,
+		persistCurrentVersion,
+		truncated: false,
+		selectedEntries: 0,
+		totalUnseenEntries: 0,
+		latestVersion: undefined,
+		changeCount: 0,
+		categoryCounts: {},
+	};
+}
+
+function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
+	changeCount: number;
+	categoryCounts: Record<string, number>;
+} {
+	const categoryCounts: Record<string, number> = {};
+	let changeCount = 0;
+
+	for (const entry of entries) {
+		let category: string | undefined;
+		for (const line of entry.content.split("\n")) {
+			const heading = line.match(/^###\s+(.+?)\s*$/);
+			if (heading) {
+				category = heading[1];
+				continue;
+			}
+			if (!category || !/^-\s+\S/.test(line)) continue;
+			categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
+			changeCount++;
+		}
+	}
+
+	return { changeCount, categoryCounts };
+}
+
+function categoryLabel(category: string, count: number): string {
+	if (category === "Breaking Changes") {
+		return count === 1 ? "breaking change" : "breaking changes";
+	}
+	return category.toLowerCase();
+}
+
+/** Format the compact, deterministic startup update notice. */
+export function formatStartupChangelogSummary(selection: StartupChangelogSelection): string {
+	const latestVersion = selection.latestVersion;
+	if (!latestVersion || selection.selectedEntries === 0) {
+		return "Updated omp. Use /changelog for recent changes.";
+	}
+
+	const releaseCount = selection.selectedEntries;
+	const changeCount = selection.changeCount;
+	const releaseWord = releaseCount === 1 ? "release" : "releases";
+	const changeWord = changeCount === 1 ? "change" : "changes";
+	const firstLine =
+		releaseCount === 1
+			? `Updated to v${latestVersion} · ${changeCount} ${changeWord} in 1 release`
+			: `Updated to v${latestVersion} · ${changeCount} ${changeWord} across ${releaseCount} ${releaseWord}`;
+
+	const orderedCategories = [
+		...CHANGELOG_CATEGORY_ORDER.filter(category => selection.categoryCounts[category]),
+		...Object.keys(selection.categoryCounts)
+			.filter(category => !(CHANGELOG_CATEGORY_ORDER as readonly string[]).includes(category))
+			.sort(),
+	];
+	const breakdown = orderedCategories
+		.map(
+			category =>
+				`${selection.categoryCounts[category]} ${categoryLabel(category, selection.categoryCounts[category])}`,
+		)
+		.join(" · ");
+	const omittedReleases = selection.totalUnseenEntries - selection.selectedEntries;
+	const detailHint =
+		omittedReleases > 0
+			? `+${omittedReleases} earlier ${omittedReleases === 1 ? "release" : "releases"} · Use /changelog full for history.`
+			: "Use /changelog for details.";
+
+	return breakdown ? `${firstLine}\n${breakdown} · ${detailHint}` : `${firstLine}\n${detailHint}`;
 }
 
 /**
@@ -177,16 +272,17 @@ export function selectStartupChangelog(
 ): StartupChangelogSelection {
 	const parsedLastVersion = parseChangelogVersion(lastVersion);
 	if (!parsedLastVersion) {
-		return { markdown: undefined, persistCurrentVersion: true, truncated: false, selectedEntries: 0 };
+		return emptyStartupSelection(true);
 	}
 	const markerVersion = lastVersion ?? "";
 	if (markerVersion === currentVersion) {
-		return { markdown: undefined, persistCurrentVersion: false, truncated: false, selectedEntries: 0 };
+		return emptyStartupSelection(false);
 	}
 
-	const newEntries = getNewEntries(entries, markerVersion).slice(0, RECENT_CHANGELOG_ENTRY_LIMIT);
+	const allNewEntries = getNewEntries(entries, markerVersion);
+	const newEntries = allNewEntries.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT);
 	if (newEntries.length === 0) {
-		return { markdown: undefined, persistCurrentVersion: false, truncated: false, selectedEntries: 0 };
+		return emptyStartupSelection(false);
 	}
 
 	const rendered = renderChangelogEntries(newEntries, {
@@ -194,11 +290,16 @@ export function selectStartupChangelog(
 		truncationHint: STARTUP_CHANGELOG_FULL_HINT,
 		oldestFirst: false,
 	});
+	const summary = summarizeChangelogEntries(newEntries);
+	const latestEntry = newEntries[0];
 	return {
 		markdown: rendered.markdown,
 		persistCurrentVersion: true,
 		truncated: rendered.truncated,
 		selectedEntries: newEntries.length,
+		totalUnseenEntries: allNewEntries.length,
+		latestVersion: latestEntry ? `${latestEntry.major}.${latestEntry.minor}.${latestEntry.patch}` : undefined,
+		...summary,
 	};
 }
 

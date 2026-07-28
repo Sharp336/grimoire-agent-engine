@@ -41,7 +41,7 @@ import {
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
-import { getDefault, type SettingPath, Settings, settings } from "./config/settings";
+import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -84,10 +84,12 @@ import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnab
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
 import {
+	compareVersions,
 	getChangelogPath,
 	parseChangelog,
 	parseChangelogVersion,
 	readLastChangelogVersion,
+	type StartupChangelogSelection,
 	selectStartupChangelog,
 	writeLastChangelogVersion,
 } from "./utils/changelog";
@@ -408,7 +410,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 async function runInteractiveMode(
 	session: AgentSession,
 	version: string,
-	changelogMarkdown: string | undefined,
+	startupChangelog: StartupChangelogSelection | undefined,
 	notifs: (InteractiveModeNotify | null)[],
 	versionCheckPromise: Promise<string | undefined>,
 	initialMessages: string[],
@@ -426,7 +428,7 @@ async function runInteractiveMode(
 	const mode = new InteractiveMode(
 		session,
 		version,
-		changelogMarkdown,
+		startupChangelog,
 		setExtensionUIContext,
 		lspServers,
 		mcpManager,
@@ -651,7 +653,10 @@ async function resolveScopedModels(
 	);
 }
 
-async function getChangelogForDisplay(parsed: Args): Promise<string | undefined> {
+async function getChangelogForDisplay(
+	parsed: Args,
+	mode: SettingValue<"startup.changelogMode">,
+): Promise<StartupChangelogSelection | undefined> {
 	if (parsed.continue || parsed.resume) {
 		return undefined;
 	}
@@ -666,6 +671,13 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 		// Steady state: user already saw the current version's changelog. Skip the file read + parse.
 		return undefined;
 	}
+	if (mode === "hidden") {
+		const currentVersion = parseChangelogVersion(VERSION);
+		if (currentVersion && compareVersions(currentVersion, parsedLastVersion) > 0) {
+			await writeLastChangelogVersion(VERSION);
+		}
+		return undefined;
+	}
 
 	const changelogPath = getChangelogPath();
 	const entries = await parseChangelog(changelogPath);
@@ -673,11 +685,7 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 	if (startupChangelog.persistCurrentVersion) {
 		await writeLastChangelogVersion(VERSION);
 	}
-	if (startupChangelog.markdown) {
-		return startupChangelog.markdown;
-	}
-
-	return undefined;
+	return startupChangelog.markdown ? startupChangelog : undefined;
 }
 
 const SESSION_ID_ARG_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1580,7 +1588,12 @@ export async function runRootCommand(
 			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
-			const changelogMarkdown = await logger.time("main:getChangelogForDisplay", getChangelogForDisplay, parsedArgs);
+			const startupChangelog = await logger.time(
+				"main:getChangelogForDisplay",
+				getChangelogForDisplay,
+				parsedArgs,
+				settingsInstance.get("startup.changelogMode"),
+			);
 
 			const modelScopeNotification = buildModelScopeNotification(
 				scopedModels,
@@ -1605,7 +1618,7 @@ export async function runRootCommand(
 			await runInteractiveMode(
 				session,
 				VERSION,
-				changelogMarkdown,
+				startupChangelog,
 				notifs,
 				versionCheckPromise,
 				initialArgs.messages,

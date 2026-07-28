@@ -15,8 +15,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { Settings } from "../../src/config/settings";
 import {
 	type ChangelogEntry,
+	formatStartupChangelogSummary,
 	getNewEntries,
 	parseChangelog,
 	RECENT_CHANGELOG_ENTRY_LIMIT,
@@ -43,6 +45,25 @@ function release(major: number, minor: number, patch: number, body: string): Cha
 	const content = `${heading}\n\n${body.trimEnd()}`;
 	return { major, minor, patch, content };
 }
+
+describe("startup changelog mode settings", () => {
+	test("defaults to a summary", () => {
+		expect(Settings.isolated().get("startup.changelogMode")).toBe("summary");
+	});
+
+	test("preserves legacy collapsed and expanded choices", () => {
+		expect(Settings.isolated({ collapseChangelog: true }).get("startup.changelogMode")).toBe("summary");
+		expect(Settings.isolated({ collapseChangelog: false }).get("startup.changelogMode")).toBe("expanded");
+	});
+
+	test("an explicit new mode wins over the legacy boolean", () => {
+		const settings = Settings.isolated({
+			collapseChangelog: false,
+			"startup.changelogMode": "hidden",
+		});
+		expect(settings.get("startup.changelogMode")).toBe("hidden");
+	});
+});
 
 async function withTempAgentDir<T>(callback: (agentDir: string) => Promise<T>): Promise<T> {
 	const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-marker-"));
@@ -106,6 +127,10 @@ describe("selectStartupChangelog", () => {
 		expect(selection.persistCurrentVersion).toBe(true);
 		expect(selection.truncated).toBe(false);
 		expect(selection.selectedEntries).toBe(RECENT_CHANGELOG_ENTRY_LIMIT);
+		expect(selection.totalUnseenEntries).toBe(5);
+		expect(selection.latestVersion).toBe("1.0.5");
+		expect(selection.changeCount).toBe(3);
+		expect(selection.categoryCounts).toEqual({ Added: 3 });
 		expect(selection.markdown?.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("1.0.5");
 		expect(selection.markdown).toContain("## [1.0.5]");
 		expect(selection.markdown).toContain("## [1.0.4]");
@@ -150,6 +175,41 @@ describe("selectStartupChangelog", () => {
 		expect(selection.markdown).toContain(STARTUP_CHANGELOG_FULL_HINT);
 		expect(selection.markdown).not.toContain("TAIL-THREE");
 		expect(Buffer.byteLength(selection.markdown ?? "")).toBeLessThanOrEqual(STARTUP_CHANGELOG_MAX_BYTES);
+	});
+});
+
+describe("formatStartupChangelogSummary", () => {
+	test("summarizes selected releases and points to omitted history", () => {
+		const selection = selectStartupChangelog(
+			[
+				release(2, 0, 0, "### Added\n\n- First addition.\n- Second addition.\n\n### Fixed\n\n- A fix."),
+				release(1, 9, 0, "### Changed\n\n- A behavior change."),
+				release(1, 8, 0, "### Security\n\n- A security improvement."),
+				release(1, 7, 0, "### Fixed\n\n- An earlier fix."),
+				release(1, 6, 0, "### Added\n\n- Already seen."),
+			],
+			"1.6.0",
+			"2.0.0",
+		);
+
+		expect(formatStartupChangelogSummary(selection)).toBe(
+			[
+				"Updated to v2.0.0 · 5 changes across 3 releases",
+				"2 added · 1 changed · 1 fixed · 1 security · +1 earlier release · Use /changelog full for history.",
+			].join("\n"),
+		);
+	});
+
+	test("uses the recent-details hint when every unseen release is represented", () => {
+		const selection = selectStartupChangelog(
+			[release(2, 0, 0, "### Breaking Changes\n\n- Removed the old wire format.")],
+			"1.0.0",
+			"2.0.0",
+		);
+
+		expect(formatStartupChangelogSummary(selection)).toBe(
+			["Updated to v2.0.0 · 1 change in 1 release", "1 breaking change · Use /changelog for details."].join("\n"),
+		);
 	});
 });
 
