@@ -253,6 +253,17 @@ function stopStartupWatchdog(): void {
 	disarmStartupWatchdog();
 }
 
+/**
+ * Reset watchdog state after mocked process exits keep a test runtime alive.
+ * Returns whether a timer was armed so regressions can prove cleanup was necessary.
+ */
+export function resetStartupWatchdogForTests(): boolean {
+	const wasArmed = startupWatchdogTimer !== undefined;
+	stopStartupWatchdog();
+	startupWatchdogStartedAt = 0;
+	return wasArmed;
+}
+
 /** Pause while an interactive prompt legitimately waits on the user. */
 function pauseStartupWatchdog(): void {
 	disarmStartupWatchdog();

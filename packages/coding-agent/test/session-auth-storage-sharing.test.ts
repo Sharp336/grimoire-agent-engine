@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { type Args, parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import { resetStartupWatchdogForTests, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { discoverSessionAuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { getAgentDbPath, TempDir, VERSION } from "@oh-my-pi/pi-utils";
@@ -44,14 +44,17 @@ async function captureEarlyExit(args: string[], configure?: (parsed: Args) => vo
 	}) as typeof process.exit);
 
 	let thrown: unknown;
+	let watchdogWasArmed = false;
 	try {
 		await runRootCommand(parsed, args, { discoverAuthStorage });
 	} catch (error) {
 		thrown = error;
+	} finally {
+		watchdogWasArmed = resetStartupWatchdogForTests();
 	}
 	if (!(thrown instanceof ProcessExitSignal)) throw thrown;
 
-	return { code: thrown.code, stdout: stdout.join(""), stderr: stderr.join(""), discoveryCalls };
+	return { code: thrown.code, stdout: stdout.join(""), stderr: stderr.join(""), discoveryCalls, watchdogWasArmed };
 }
 
 describe("session auth storage sharing", () => {
@@ -70,6 +73,7 @@ describe("session auth storage sharing", () => {
 	});
 
 	afterEach(async () => {
+		resetStartupWatchdogForTests();
 		resetSettingsForTest();
 		AgentStorage.resetInstance();
 		vi.restoreAllMocks();
@@ -113,6 +117,7 @@ describe("session auth storage sharing", () => {
 			expect(result.stdout).toBe(`${VERSION}\n`);
 			expect(result.stderr).toBe("");
 			expect(result.discoveryCalls).toBe(0);
+			expect(result.watchdogWasArmed).toBe(true);
 		});
 
 		it("exports a session without discovering session auth storage", async () => {
@@ -135,6 +140,7 @@ describe("session auth storage sharing", () => {
 			expect(result.stdout).toBe(`Exported to: ${outputPath}\n`);
 			expect(result.stderr).toBe("");
 			expect(result.discoveryCalls).toBe(0);
+			expect(result.watchdogWasArmed).toBe(true);
 			expect(await Bun.file(outputPath).exists()).toBe(true);
 		});
 
@@ -147,6 +153,7 @@ describe("session auth storage sharing", () => {
 			expect(result.stdout).toBe("");
 			expect(result.stderr).toContain("Error: @file arguments are not supported in RPC mode");
 			expect(result.discoveryCalls).toBe(0);
+			expect(result.watchdogWasArmed).toBe(true);
 		});
 
 		it("still discovers session auth storage for normal session startup", async () => {
@@ -155,10 +162,16 @@ describe("session auth storage sharing", () => {
 				throw new Error("stop after auth discovery");
 			});
 
-			await expect(runRootCommand(parsed, ["--print", "hello"], { discoverAuthStorage })).rejects.toThrow(
-				"stop after auth discovery",
-			);
+			let watchdogWasArmed = false;
+			try {
+				await expect(runRootCommand(parsed, ["--print", "hello"], { discoverAuthStorage })).rejects.toThrow(
+					"stop after auth discovery",
+				);
+			} finally {
+				watchdogWasArmed = resetStartupWatchdogForTests();
+			}
 			expect(discoverAuthStorage).toHaveBeenCalledTimes(1);
+			expect(watchdogWasArmed).toBe(true);
 		});
 	});
 });
