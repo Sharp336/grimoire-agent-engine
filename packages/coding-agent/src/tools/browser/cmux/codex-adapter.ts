@@ -527,6 +527,7 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 		frameSelectors.unshift(frameSelector(frame));
 		frame = frame.ownerDocument?.defaultView?.frameElement ?? null;
 	}
+	const testId = element.getAttribute("data-testid");
 	const primary = preferredSelector(element);
 	const candidates = primary ? [primary, tagName] : [tagName];
 	const rect = element.getBoundingClientRect();
