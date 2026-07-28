@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an external task-agent executor extension point and the `@anima/omp` plugin, allowing the packaged `claude-implementer`, `claude-researcher`, and `claude-reviewer` roles to run in Anima-managed Claude Code TUI sessions while OMP retains coordination, progress, cancellation, structured-output validation, retained follow-up turns, and IRC visibility.
+
 ## [17.1.5] - 2026-07-27
 
 ### Added
