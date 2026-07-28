@@ -2533,14 +2533,12 @@ export class SessionMaintenance {
 							}
 
 							const message = error instanceof Error ? error.message : String(error);
-							const id = AIError.classify(error, candidate.api);
+							const id = AIError.classify(
+								error instanceof NativeCompactionError ? error.cause : error,
+								candidate.api,
+							);
 							if (AIError.is(id, AIError.Flag.AuthFailed)) {
 								lastError = this.#buildCompactionAuthError();
-								break;
-							}
-							if (error instanceof NativeCompactionError) {
-								nativeCompactionFailure ??= { error, provider: candidate.provider };
-								lastError = nativeCompactionFailure.error;
 								break;
 							}
 							if (AIError.is(id, AIError.Flag.Timeout)) {
@@ -2565,7 +2563,12 @@ export class SessionMaintenance {
 									AIError.is(id, AIError.Flag.Transient) ||
 									AIError.is(id, AIError.Flag.UsageLimit));
 							if (!shouldRetry) {
-								lastError = error;
+								if (error instanceof NativeCompactionError) {
+									nativeCompactionFailure ??= { error, provider: candidate.provider };
+									lastError = nativeCompactionFailure.error;
+								} else {
+									lastError = error;
+								}
 								break;
 							}
 
@@ -2575,6 +2578,11 @@ export class SessionMaintenance {
 							// If retry delay is too long (>30s), try next candidate instead of waiting
 							const maxAcceptableDelayMs = 30_000;
 							if (delayMs > maxAcceptableDelayMs && hasMoreCandidates) {
+								if (error instanceof NativeCompactionError) {
+									nativeCompactionFailure ??= { error, provider: candidate.provider };
+									lastError = nativeCompactionFailure.error;
+									break;
+								}
 								logger.warn("Auto-compaction retry delay too long, trying next model", {
 									delayMs,
 									retryAfterMs,

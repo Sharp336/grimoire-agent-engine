@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -188,6 +190,39 @@ describe("issue #986 compaction auth fallback", () => {
 		]);
 	});
 
+	it("retries a transient native compaction failure on the same candidate", async () => {
+		const { currentModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
+		session.settings.set("retry.enabled", true);
+		session.settings.set("retry.baseDelayMs", 1);
+		session.settings.set("retry.maxRetries", 1);
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.provider !== currentModel.provider || model.id !== currentModel.id) {
+				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+			}
+			if (attemptedModels.length === 1) {
+				throw new compactionModule.NativeCompactionError(
+					new AIError.ProviderHttpError("native compaction temporarily unavailable", 503),
+				);
+			}
+			return {
+				summary: "native retry summary",
+				shortSummary: "native retry",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${currentModel.provider}/${currentModel.id}`,
+		]);
+		expect(waitSpy).toHaveBeenCalledTimes(1);
+	});
 	it("stops auto-compaction before a same-provider candidate with native compaction disabled", async () => {
 		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession({
 			sameProviderNativeEnabled: false,
