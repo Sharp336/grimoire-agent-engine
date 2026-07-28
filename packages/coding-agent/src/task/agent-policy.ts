@@ -28,6 +28,9 @@ export function resolveAgentSessionPolicy(agent: AgentDefinition): AgentSessionP
 	let toolNames: string[] | undefined;
 	if (agent.tools && agent.tools.length > 0) {
 		toolNames = [...agent.tools];
+		// `yield` is auto-added by parseAgentFields for non-primary agents
+		// (helpers.ts:271) but has no meaningful behavior in the main session.
+		toolNames = toolNames.filter(n => n !== "yield");
 		if (spawns && spawns !== "" && !toolNames.includes("task")) {
 			toolNames = [...toolNames, "task"];
 		}

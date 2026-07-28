@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "../../src/config/settings";
 import * as taskDiscovery from "../../src/task/discovery";
 import { TaskTool } from "../../src/task/index";
+import { resolveEffectiveSubagentPolicy, StructuredSubagentError } from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
 import { getTaskSchema } from "../../src/task/types";
 import type { ToolSession } from "../../src/tools";

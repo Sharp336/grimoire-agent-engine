@@ -921,8 +921,11 @@ export async function buildSessionOptions(
 	if (!parsed.agent && sessionManager) {
 		const sessionContext = sessionManager.buildSessionContext();
 		if (sessionContext.agentPersona) {
+			const { agent: name, source } = sessionContext.agentPersona;
 			const discovery = await discoverAgents(options.cwd ?? getProjectDir());
-			const agent = getAgent(discovery.agents, sessionContext.agentPersona.agent);
+			// Prefer source-stable match, fall back to name-only (e.g. if source was deleted)
+			const agent =
+				discovery.agents.find(a => a.name === name && a.source === source) ?? getAgent(discovery.agents, name);
 			if (agent && agent.availability !== "subagent") {
 				agentPersona = agent;
 			}
@@ -939,7 +942,7 @@ export async function buildSessionOptions(
 	// True when a configured `default` role was deliberately left unresolved for
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
-	let deferredDefaultRole = false;
+	const deferredDefaultRole = false;
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -1013,20 +1016,6 @@ export async function buildSessionOptions(
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
-		// A configured `default` role that doesn't resolve within the startup
-		// scope is deferred, NOT silently pinned to `scopedModels[0]`: the scope
-		// is resolved before extensions register their providers, so a role naming
-		// an extension-registered model (listed in `enabledModels`) would drop out
-		// here and the session would run on an unrelated in-scope provider without
-		// any error. Leaving `options.model` unset lets createAgentSession's
-		// post-extension default-role resolution reclaim it against the fully
-		// registered, still enabledModels-scoped catalog (issue #6694).
-		// Defer ONLY for a settings-derived scope: createAgentSession re-resolves
-		// against `settings.enabledModels` and never sees CLI `--models`, so
-		// deferring under an explicit CLI scope would let the saved default
-		// escape it — keep pinning the first scoped model there.
-		deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
-		if (!options.model && !deferredDefaultRole) options.model = scopedModels[0].model;
 	}
 
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
