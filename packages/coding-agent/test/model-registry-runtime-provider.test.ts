@@ -3,11 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	type Api,
 	type AssistantMessageEventStream,
 	clearCustomApis,
 	Effort,
 	type FetchImpl,
 	getCustomApi,
+	type Model,
 } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
@@ -720,5 +722,89 @@ describe("ModelRegistry runtime provider registration", () => {
 		registry.syncExtensionSources([]);
 		expect(getCustomApi("custom-oauth-api")).toBeUndefined();
 		expect(getOAuthProviders().some(provider => provider.id === "oauth-provider")).toBe(false);
+	});
+
+	test("oauth.modifyModels projection survives refresh and refreshProvider", async () => {
+		await authStorage.set("projecting-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+
+		// Mirrors a credential-aware provider: the registered `models` array is a
+		// pre-discovery bootstrap, and modifyModels swaps in the catalog the
+		// account actually has.
+		const config: ProviderConfigInput = {
+			api: "custom-projection-api",
+			baseUrl: "https://example.invalid/",
+			streamSimple,
+			models: [baseModel],
+			oauth: {
+				name: "Projecting OAuth",
+				login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+				refreshToken: async credentials => credentials,
+				getApiKey: credentials => credentials.access,
+				modifyModels: models => [
+					...models.filter(model => model.provider !== "projecting-provider"),
+					{
+						...(models.find(model => model.provider === "projecting-provider") as Model<Api>),
+						id: "projected-model",
+						name: "Projected Model",
+					},
+				],
+			},
+		};
+
+		registry.registerProvider("projecting-provider", config, "ext://oauth");
+
+		const projectedIds = () => getProviderModels(registry, "projecting-provider").map(model => model.id);
+		expect(projectedIds()).toEqual(["projected-model"]);
+
+		// The model selector reloads the registry offline every time it opens; the
+		// projection must not fall back to the bootstrap `models` array.
+		await registry.refresh("offline");
+		expect(projectedIds()).toEqual(["projected-model"]);
+
+		await registry.refreshProvider("projecting-provider", "offline");
+		expect(projectedIds()).toEqual(["projected-model"]);
+
+		registry.clearSourceRegistrations("ext://oauth");
+		expect(getProviderModels(registry, "projecting-provider")).toEqual([]);
+	});
+
+	test("a throwing modifyModels degrades to the unprojected catalog", async () => {
+		await authStorage.set("throwing-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+
+		registry.registerProvider(
+			"throwing-provider",
+			{
+				api: "custom-throwing-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Throwing OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: () => {
+						throw new Error("boom");
+					},
+				},
+			},
+			"ext://oauth",
+		);
+
+		expect(getProviderModels(registry, "throwing-provider").map(model => model.id)).toEqual(["runtime-model"]);
+		await registry.refresh("offline");
+		expect(getProviderModels(registry, "throwing-provider").map(model => model.id)).toEqual(["runtime-model"]);
+		// A broken extension must not take the rest of the catalog down with it.
+		expect(registry.getAll().some(model => model.provider === "anthropic")).toBe(true);
 	});
 });

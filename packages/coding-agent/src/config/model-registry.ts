@@ -539,6 +539,12 @@ interface ModelPatch {
  */
 type ModelTransportPolicy = "merge" | "replace";
 
+/**
+ * Credential-aware model projection supplied by an extension provider. Receives
+ * the fully composed catalog and returns the list the host should serve.
+ */
+type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) => Model<Api>[];
+
 function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
 	if (patch.name !== undefined) result.name = patch.name;
@@ -805,6 +811,12 @@ export class ModelRegistry {
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
 	#runtimeProviderApiKeys: Map<string, string> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
+	// Credential-aware model projections registered via
+	// `registerProvider({ oauth: { modifyModels } })`. Persisted for the same
+	// reason as #runtimeModelOverlays: the overlays hold the *pre-projection*
+	// definitions, so without re-applying the projection every static reload
+	// would silently revert the provider to its unprojected catalog.
+	#runtimeModelModifiers: Map<string, ModifyModelsHook> = new Map();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
@@ -1126,6 +1138,38 @@ export class ModelRegistry {
 		});
 	}
 
+	/**
+	 * Re-apply the credential-aware projections registered by extension providers.
+	 *
+	 * `registerProvider` runs `oauth.modifyModels` once and stores the result in
+	 * `#models`, but only the *pre-projection* definitions survive in
+	 * `#runtimeModelOverlays`. Every static reload therefore has to project
+	 * again, or the provider silently reverts to its unprojected catalog — which
+	 * is exactly what the model selector's `refresh("offline")` used to trigger.
+	 *
+	 * A throwing hook degrades to the unprojected list for that provider instead
+	 * of failing the whole composition; one bad extension must not empty the
+	 * registry.
+	 */
+	#applyRuntimeModelModifiers(models: Model<Api>[], providerFilter?: ReadonlySet<string>): Model<Api>[] {
+		if (this.#runtimeModelModifiers.size === 0) return models;
+		let projected = models;
+		for (const [providerName, modifyModels] of this.#runtimeModelModifiers) {
+			if (providerFilter && !providerFilter.has(providerName)) continue;
+			const credential = this.authStorage.getOAuthCredential(providerName);
+			if (!credential) continue;
+			try {
+				projected = modifyModels(projected, credential);
+			} catch (error) {
+				this.#lastDiscoveryWarnings.set(
+					providerName,
+					`modifyModels failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		return projected;
+	}
+
 	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		const select = <T extends { provider: string }>(models: readonly T[]): T[] =>
 			providerFilter ? models.filter(model => providerFilter.has(model.provider)) : [...models];
@@ -1145,7 +1189,10 @@ export class ModelRegistry {
 		// collapse effort-tier variants here so X/X-thinking twins fold.
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
 		return this.#internStaticModels(
-			this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
+			this.#applyRuntimeModelModifiers(
+				this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
+				providerFilter,
+			),
 		);
 	}
 
@@ -1621,7 +1668,11 @@ export class ModelRegistry {
 		// Merge runtime extension models so they survive online discovery completion
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#models = this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
+		// Re-project after discovery for the same reason as #composeStaticModels:
+		// the merge above rebuilds from the unprojected runtime overlays.
+		this.#models = this.#applyRuntimeModelModifiers(
+			this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
+		);
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -2393,6 +2444,7 @@ export class ModelRegistry {
 		this.#runtimeProviderOverrides.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
+		this.#runtimeModelModifiers.delete(providerName);
 		this.authStorage.removeConfigApiKey(providerName);
 	}
 
@@ -2542,15 +2594,15 @@ export class ModelRegistry {
 					})
 				: nextModels;
 
+			// Persist the projection so it survives every later #reloadStaticModels()
+			// cycle, then apply it to the list we just composed.
 			if (config.oauth?.modifyModels) {
-				const credential = this.authStorage.getOAuthCredential(providerName);
-				if (credential) {
-					this.#models = config.oauth.modifyModels(withRuntimeTransportOverride, credential);
-					return;
-				}
+				this.#runtimeModelModifiers.set(providerName, config.oauth.modifyModels);
+			} else {
+				this.#runtimeModelModifiers.delete(providerName);
 			}
 
-			this.#models = withRuntimeTransportOverride;
+			this.#models = this.#applyRuntimeModelModifiers(withRuntimeTransportOverride);
 			return;
 		}
 
