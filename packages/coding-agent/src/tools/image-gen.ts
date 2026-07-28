@@ -2,7 +2,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	getCodexAttestationHeader,
+	resolveCodexResponsesUrl,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { normalizeCodexBaseUrl } from "@oh-my-pi/pi-ai/usage/openai-codex-base-url";
 import {
 	CODEX_BASE_URL,
@@ -972,7 +975,7 @@ function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string
 	return headers;
 }
 
-function buildCodexImageHeaders(model: Model, apiKey: string): Headers {
+async function buildCodexImageHeaders(model: Model, apiKey: string): Promise<Headers> {
 	const headers = new Headers(model.headers ?? {});
 	headers.set("Content-Type", "application/json");
 	headers.set("Authorization", `Bearer ${apiKey}`);
@@ -988,6 +991,12 @@ function buildCodexImageHeaders(model: Model, apiKey: string): Headers {
 	headers.delete(OPENAI_HEADERS.RESPONSES_LITE);
 	const accountId = getCodexAccountId(apiKey);
 	if (accountId) headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
+	const attestation = await getCodexAttestationHeader(accountId);
+	if (attestation) {
+		headers.set(OPENAI_HEADERS.ATTESTATION, attestation);
+	} else {
+		headers.delete(OPENAI_HEADERS.ATTESTATION);
+	}
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, CODEX_CLIENT_VERSION);
 	headers.set("User-Agent", `pi/${packageJson.version} (${os.platform()} ${os.release()}; ${os.arch()})`);
@@ -1075,7 +1084,7 @@ async function generateCodexImage(
 	const path = inputImages.length > 0 ? CODEX_IMAGE_EDITS_PATH : CODEX_IMAGE_GENERATIONS_PATH;
 	const response = await fetchImpl(`${getCodexBackendRoot(model)}${path}`, {
 		method: "POST",
-		headers: buildCodexImageHeaders(model, apiKey),
+		headers: await buildCodexImageHeaders(model, apiKey),
 		body: JSON.stringify(requestBody),
 		signal,
 	});

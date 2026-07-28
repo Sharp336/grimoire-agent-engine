@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
+import * as codexResponses from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { ReadonlySessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -15,6 +16,7 @@ const originalOpenRouterKey = Bun.env.OPENROUTER_API_KEY;
 const generatedImagePaths: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(generatedImagePaths.splice(0).map(imagePath => removeWithRetries(imagePath)));
 	if (originalOpenRouterKey === undefined) {
 		delete Bun.env.OPENROUTER_API_KEY;
@@ -248,8 +250,10 @@ describe("imageGenTool", () => {
 		"https://chat.openai.com/backend-api/codex/",
 		"https://chat.openai.com/backend-api/codex/responses",
 		"https://chat.openai.com/backend-api/codex/responses/",
-	])("uses the Codex Images API for official-JWT text generation with base URL %s", async baseUrl => {
+	])("uses the Codex Images API with attestation for official-JWT base URL %s", async baseUrl => {
 		setImageProviderOrder(["openai-codex"]);
+		const attestation = '{"v":1,"s":0,"t":"v1.test-attestation"}';
+		vi.spyOn(codexResponses, "getCodexAttestationHeader").mockResolvedValue(attestation);
 		let requestUrl: string | undefined;
 		let requestMethod: string | undefined;
 		let requestHeaders: Headers | undefined;
@@ -318,6 +322,7 @@ describe("imageGenTool", () => {
 		expect(requestMethod).toBe("POST");
 		expect(requestHeaders?.get("authorization")).toBe(`Bearer ${codexToken}`);
 		expect(requestHeaders?.get("chatgpt-account-id")).toBe("acct-codex-1");
+		expect(requestHeaders?.get("x-oai-attestation")).toBe(attestation);
 		expect(requestHeaders?.get("originator")).toBe("pi");
 		expect(requestHeaders?.get("version")).toBe("0.144.1");
 		expect(requestHeaders?.get("content-type")).toBe("application/json");
