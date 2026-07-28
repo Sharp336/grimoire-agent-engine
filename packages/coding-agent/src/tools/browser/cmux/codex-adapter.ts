@@ -496,9 +496,38 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 	const ariaName = accessibleName(element);
 	const tagName = element.tagName.toLowerCase();
 	const role = implicitRole(element);
-	const id = element.getAttribute("id");
-	const testId = element.getAttribute("data-testid");
-	const primary = id ? "#" + CSS.escape(id) : testId ? '[data-testid="' + CSS.escape(testId) + '"]' : null;
+	const preferredSelector = candidate => {
+		const candidateId = candidate.getAttribute("id");
+		if (candidateId) return "#" + CSS.escape(candidateId);
+		const candidateTestId = candidate.getAttribute("data-testid");
+		return candidateTestId ? '[data-testid="' + CSS.escape(candidateTestId) + '"]' : null;
+	};
+	const frameSelector = candidate => {
+		const preferred = preferredSelector(candidate);
+		if (preferred) return preferred;
+		const parts = [];
+		let current = candidate;
+		while (current) {
+			const tag = current.tagName.toLowerCase();
+			const parent = current.parentElement;
+			if (!parent) {
+				parts.unshift(tag);
+				break;
+			}
+			const siblings = Array.from(parent.children).filter(sibling => sibling.tagName === current.tagName);
+			const suffix = siblings.length > 1 ? ":nth-of-type(" + (siblings.indexOf(current) + 1) + ")" : "";
+			parts.unshift(tag + suffix);
+			current = parent;
+		}
+		return parts.join(" > ");
+	};
+	const frameSelectors = [];
+	let frame = element.ownerDocument?.defaultView?.frameElement ?? null;
+	while (frame) {
+		frameSelectors.unshift(frameSelector(frame));
+		frame = frame.ownerDocument?.defaultView?.frameElement ?? null;
+	}
+	const primary = preferredSelector(element);
 	const candidates = primary ? [primary, tagName] : [tagName];
 	const rect = element.getBoundingClientRect();
 	return [{
@@ -509,7 +538,7 @@ const ELEMENT_INFO_SOURCE = `(x, y, includeNonInteractable) => {
 		testId,
 		boundingBox: { x: rect.x + target.offsetX, y: rect.y + target.offsetY, width: rect.width, height: rect.height },
 		preview: element.outerHTML.slice(0, 1000),
-		selector: { primary, candidates },
+		selector: { primary, candidates, ...(frameSelectors.length > 0 ? { frameSelectors } : {}) },
 	}];
 }`;
 
@@ -2228,7 +2257,12 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			}
 		}
 		if (operation === "locator.press") {
-			const key = stringArg(args, "value");
+			const key = stringArg(args, "value")
+				.split("+")
+				.map(part =>
+					part === "ControlOrMeta" ? (process.platform === "darwin" ? "Meta" : "Control") : part,
+				)
+				.join("+");
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
 			let tokenBound = false;
 			try {
@@ -2376,6 +2410,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			}
 		}
 	}
+
 
 	async #pressKeys(keys: string[], deadline: number, operation: string): Promise<void> {
 		if (keys.length === 0) return;

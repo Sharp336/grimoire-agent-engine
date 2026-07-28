@@ -1960,7 +1960,10 @@ describe("Puppeteer final parity blockers", () => {
 		await expect(adapter.invoke("locator.innerText", args)).rejects.toThrow(
 			"locator.innerText resolved to 2 elements; use first() or nth()",
 		);
-		expect(disposals).toBe(4);
+		await expect(adapter.invoke("locator.waitFor", { ...args, state: "visible" })).rejects.toThrow(
+			"locator.waitFor resolved to 2 elements; use first() or nth()",
+		);
+		expect(disposals).toBe(6);
 		await adapter.dispose();
 	});
 

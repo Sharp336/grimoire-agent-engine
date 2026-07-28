@@ -117,6 +117,36 @@ describe("Codex browser public facade closed vocabularies", () => {
 		);
 	});
 
+	it("defaults locator waits to visible when options or state are omitted", async () => {
+		const adapter = new RecordingAdapter();
+		const { tab } = await selectedTab(adapter);
+		const locator = tab.playwright.locator("#target");
+
+		await locator.waitFor();
+		await locator.waitFor({ timeoutMs: 25 });
+
+		expect(adapter.calls.slice(-2)).toEqual([
+			{
+				operation: "locator.waitFor",
+				args: {
+					tabId: "1",
+					locator: { kind: "css", selector: "#target" },
+					state: "visible",
+					timeoutMs: 3_000,
+				},
+			},
+			{
+				operation: "locator.waitFor",
+				args: {
+					tabId: "1",
+					locator: { kind: "css", selector: "#target" },
+					state: "visible",
+					timeoutMs: 25,
+				},
+			},
+		]);
+	});
+
 	it("rejects inherited property names as dev log levels while accepting every valid level", async () => {
 		const adapter = new RecordingAdapter();
 		const { tab } = await selectedTab(adapter);

@@ -1086,7 +1086,7 @@ describe("cmux Codex browser review regressions", () => {
 			getElementById: () => null,
 			querySelectorAll: (selector: string) => (selector === "*" ? [frame] : []),
 		};
-		const frameAttributes = new Map<string, string>();
+		const frameAttributes = new Map<string, string>([["id", "frame-shell"]]);
 		frame = {
 			clientLeft: 2,
 			clientTop: 3,
@@ -1140,6 +1140,7 @@ describe("cmux Codex browser review regressions", () => {
 				tagName: "button",
 				visibleText: "Frame Action",
 				boundingBox: { x: 112, y: 73, width: 80, height: 30 },
+				selector: { primary: null, candidates: ["button"], frameSelectors: ["#frame-shell"] },
 			}),
 		]);
 		expect(localPoints).toEqual([[18, 27]]);
@@ -1789,12 +1790,17 @@ describe("cmux Codex browser review regressions", () => {
 		);
 
 		await current.playwright.getByLabel("Name").press("a");
+		await current.playwright.getByLabel("Name").press("ControlOrMeta+K");
 
-		expect(commands).toEqual(["status", "bindNativeSelector"]);
-		expect(focuses).toEqual([expect.stringMatching(/^\[data-omp-codex-action-token=/)]);
-		expect(presses).toHaveLength(1);
+		expect(commands).toEqual(["status", "bindNativeSelector", "status", "bindNativeSelector"]);
+		expect(focuses).toEqual([
+			expect.stringMatching(/^\[data-omp-codex-action-token=/),
+			expect.stringMatching(/^\[data-omp-codex-action-token=/),
+		]);
+		expect(presses).toHaveLength(2);
 		expect(presses[0]?.key).toBe("a");
-		expect(presses[0]?.timeoutMs).toBeGreaterThan(0);
+		expect(presses[1]?.key).toBe(`${process.platform === "darwin" ? "Meta" : "Control"}+K`);
+		for (const press of presses) expect(press.timeoutMs).toBeGreaterThan(0);
 	});
 
 	it("dispatches CUA key arrays as one normalized native chord", async () => {

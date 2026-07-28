@@ -2559,10 +2559,10 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 			throwIfAborted(this.#signal);
 			this.#operationRemaining(deadline);
 			const handles = await this.#resolve(parsed.locator, deadline);
-			this.#singleHandle(handles, "locator.waitFor");
 			let visible = false;
 			const attached = handles.length > 0;
 			try {
+				this.#singleHandle(handles, "locator.waitFor");
 				for (const handle of handles) {
 					if (await this.#runBeforeDeadline(deadline, () => this.#isVisible(handle))) visible = true;
 				}

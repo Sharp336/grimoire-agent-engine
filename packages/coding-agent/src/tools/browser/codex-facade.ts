@@ -272,7 +272,7 @@ export type CodexSelectOption = string | { value?: string; label?: string; index
 
 /** State and deadline callers use while waiting on a locator. */
 export interface CodexLocatorWaitOptions {
-	state: "attached" | "detached" | "visible" | "hidden";
+	state?: "attached" | "detached" | "visible" | "hidden";
 	timeoutMs?: number;
 }
 
@@ -921,9 +921,9 @@ export class CodexLocator {
 		return await this.#adapter.invoke<boolean>("locator.isVisible", this.#args());
 	}
 
-	async waitFor(options: CodexLocatorWaitOptions): Promise<void> {
+	async waitFor(options: CodexLocatorWaitOptions = {}): Promise<void> {
 		const value = requireObject(options, "locator.waitFor");
-		const state = requireString(value.state, "locator.waitFor state");
+		const state = value.state === undefined ? "visible" : requireString(value.state, "locator.waitFor state");
 		if (state !== "attached" && state !== "detached" && state !== "visible" && state !== "hidden") {
 			throw new Error("locator.waitFor state is invalid");
 		}
