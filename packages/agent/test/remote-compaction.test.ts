@@ -736,7 +736,7 @@ describe("requestCompactionV2Streaming", () => {
 		expect(attempts).toBe(2);
 	});
 
-	test("preserves auth_unavailable from V2 HTTP failures", async () => {
+	test("does not retry and preserves auth_unavailable from V2 HTTP failures", async () => {
 		const model = makeOpenAiModel({
 			remoteCompaction: {
 				enabled: true,
@@ -761,7 +761,7 @@ describe("requestCompactionV2Streaming", () => {
 			retryWait: async () => {},
 		}).catch(cause => cause);
 
-		expect(fetchMock).toHaveBeenCalled();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(error).toBeInstanceOf(AIError.ProviderHttpError);
 		expect(AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)).toBe(true);
 	});

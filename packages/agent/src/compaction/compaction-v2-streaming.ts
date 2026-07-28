@@ -8,7 +8,7 @@
  */
 
 import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
-import { isTransientStatus, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	createOpenAICodexCompactionRequestContext,
@@ -342,7 +342,7 @@ async function attemptCompactionV2Streaming(
 			statusText: response.statusText,
 			errorText: cause.captured.bodyText ?? "",
 		});
-		throw new ProviderHttpError(
+		throw new AIError.ProviderHttpError(
 			`V2 remote compaction failed (${response.status} ${response.statusText})`,
 			response.status,
 			{
@@ -562,6 +562,10 @@ function formatCompactionV2Failure(event: Record<string, unknown>, type: string)
 }
 
 function isRetryableCompactionError(error: Error): boolean {
+	// The gateway's synthetic auth_unavailable is an HTTP 503, but the
+	// captured response cause classifies it as auth. Let provider fallback run
+	// immediately instead of spending the transient retry budget.
+	if (AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)) return false;
 	if (
 		error.name === "AbortError" ||
 		error.name === "TimeoutError" ||
@@ -569,8 +573,8 @@ function isRetryableCompactionError(error: Error): boolean {
 	) {
 		return true;
 	}
-	if (error instanceof ProviderHttpError) {
-		return isTransientStatus(error.status);
+	if (error instanceof AIError.ProviderHttpError) {
+		return AIError.isTransientStatus(error.status);
 	}
 	const message = error.message.toLowerCase();
 	return (
