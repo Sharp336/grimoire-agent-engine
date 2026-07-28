@@ -287,7 +287,7 @@ export class AnimaExecutorController {
 			invocation_id: active.invocationId,
 			subject: `OMP IRC from ${message.from}`,
 			body: message.body,
-			priority: options?.expectsReply ? 0 : 2,
+			priority: 0,
 			thread_id: message.threadId ?? message.replyTo ?? message.id,
 			...(message.replyTo ? { reply_to: message.replyTo } : {}),
 		};

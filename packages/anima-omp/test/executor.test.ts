@@ -255,7 +255,7 @@ describe("AnimaExecutorController", () => {
 		]);
 	});
 
-	it("maps an awaited IRC send to urgent threaded Anima mail", async () => {
+	it("maps a fire-and-forget IRC send to urgent threaded Anima mail", async () => {
 		const client = new FakeControl();
 		const controller = new AnimaExecutorController({
 			client,
@@ -274,7 +274,7 @@ describe("AnimaExecutorController", () => {
 			replyTo: "mail-parent",
 		};
 
-		expect(await controller.sendPeer(message, { expectsReply: true })).toBe("message-1");
+		expect(await controller.sendPeer(message)).toBe("message-1");
 		expect(client.calls).toEqual([
 			{
 				method: "invoke.message",
