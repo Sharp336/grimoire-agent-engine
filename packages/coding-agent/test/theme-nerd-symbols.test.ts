@@ -151,7 +151,7 @@ it("keeps conditional Titanium Dracula indicators preset-specific", async () => 
 		expect(theme?.icon).toMatchObject({
 			...PERSISTENT_ICONS,
 			...icons,
-			fast: "\u001b[38;2;241;250;140m\u{f140b}\u001b[39m",
+			fast: "\u001b[38;2;241;250;140m⚡\u001b[39m",
 			auto: "",
 		});
 		expect(theme?.sep.pipe).toBe(" │ ");
