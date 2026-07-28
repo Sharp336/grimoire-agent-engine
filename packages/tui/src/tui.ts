@@ -1447,6 +1447,17 @@ export class TUI extends Container {
 				: topVisibleOverlay.component;
 		}
 
+		// Idempotent: when the resolved component is already focused, keep the
+		// focus stable. The previous implementation forced `focused = false` and
+		// then `true` on the same component, which the Editor's new focus
+		// callback interprets as a real blur and reacts to (invalidating the
+		// ghost). The cursor mode sync below is still safe and needed when the
+		// hardware-cursor preference has changed since the last setFocus.
+		if (component === this.#focusedComponent) {
+			if (isFocusable(component)) this.#syncTerminalCursorMode(component);
+			return;
+		}
+
 		const previousFocusedComponent = this.#focusedComponent;
 		// Clear focused flag on old component
 		if (isFocusable(previousFocusedComponent)) {

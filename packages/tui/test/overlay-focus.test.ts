@@ -86,6 +86,30 @@ class FocusRecorder implements Component, Focusable {
 	}
 }
 
+/** Focusable that records every transition of its `focused` flag. */
+class RecordingFocusable implements Component, Focusable {
+	#focused = false;
+	readonly transitions: boolean[] = [];
+
+	constructor(readonly label: string) {}
+
+	get focused(): boolean {
+		return this.#focused;
+	}
+
+	set focused(value: boolean) {
+		if (this.#focused === value) return;
+		this.#focused = value;
+		this.transitions.push(value);
+	}
+
+	handleInput(_data: string): void {}
+
+	render(_width: number): readonly string[] {
+		return [this.label];
+	}
+}
+
 class OwningOverlay extends FocusRecorder implements OverlayFocusOwner {
 	focusTarget: Component | undefined;
 
@@ -206,6 +230,31 @@ describe("TUI overlay focus", () => {
 		} finally {
 			tui.stop();
 		}
+	});
+
+	it("is idempotent: setFocus on the already-focused instance does not emit a spurious blur + refocus", () => {
+		// P2 of the TUI review: TUI.setFocus used to mutate the focused
+		// component's `focused` flag to `false` and then back to `true` even
+		// when the effective component was unchanged. The Editor's new focus
+		// callback reacts to the spurious blur and invalidates the ghost, so
+		// a no-op setFocus visibly degraded the editor. Calling setFocus twice
+		// on the same instance must keep focus stable and emit no transition.
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		const component = new RecordingFocusable("editor");
+
+		tui.addChild(component);
+		tui.setFocus(component);
+		// Initial setFocus emits exactly one true.
+		expect(component.transitions).toEqual([true]);
+		component.transitions.length = 0;
+
+		// Two consecutive setFocus calls on the same instance: no transitions.
+		tui.setFocus(component);
+		tui.setFocus(component);
+
+		expect(component.transitions).toEqual([]);
+		expect(tui.getFocused()).toBe(component);
 	});
 
 	it("pre-fix snapshot: hide() alone restores focus to the stale editor, missing the live slot owner (issue #3349)", () => {
