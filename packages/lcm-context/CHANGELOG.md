@@ -11,3 +11,5 @@
 
 - Corruption recovery now verifies the database and coordinates with other live contexts before quarantining the main database, WAL, and SHM files.
 - Lock contention is retried separately from disk-full, permission, and ordinary I/O failures, which are returned to the caller unchanged.
+- Branch-scoped full-text search now filters to the requested lineage before pagination, including maximum-offset queries.
+- Corruption quarantine now moves WAL/SHM before the main database, durably recovers interrupted moves, and avoids mode-changing writes for established recovery guards.

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in Lossless Context Management, which builds a redacted, project-scoped context index without rewriting session history. Native context remains the default and the fallback whenever a Lossless projection is not ready.
+- Added `/lcm` commands for status, diagnostics, search, rebuilds, and cleanup, plus scoped retrieval tools for agents and child sessions.
+- Added live settings for the Lossless summary model and one to four concurrent background summaries. Provider request limits continue to cap aggregate traffic.
+
+### Changed
+
+- Context-engine changes made in `/settings` now apply immediately; configuration-file changes apply on settings reload. Lossless markers stay out of persisted, printed, exported, and shared transcripts.
+
+### Fixed
+
+- Hardened Lossless queue recovery, provider backoff, overflow handling, branch switches, and shutdown so interrupted background work remains retryable without blocking foreground turns.
+- `generateFileMentionMessages()` now defaults `hashSkippedFiles` to false, avoiding full hashes for skipped oversized and binary files; sessions request those hashes while Lossless context is active or being enabled.
+
 ## [17.1.7] - 2026-07-27
 
 ### Fixed
@@ -22,19 +37,6 @@
 - `xd://` device docs now render the parameter schema as a comment-annotated TypeScript type (via `jsonSchemaToTypeScript`, the same renderer the in-band tool inventory uses) instead of a raw JSON Schema dump, shrinking system-prompt device sections while keeping descriptions inline.
 - Added a `/vision [on|off|auto|status]` slash command for session-scoped control of the `inspect_image` vision-delegation tool, modeled on `/computer`: `on`/`off` force the tool for the current session only, `auto` returns to the persisted setting, and `status` reports the effective mode, session override, tool state, and active-model image capability.
 - Replaced the `inspect_image.enabled` boolean with the tri-state `inspect_image.mode` (`auto`|`on`|`off`, default `auto`). In `auto` the tool is registered only when the active model lacks native image input, so vision-capable models (e.g. `kimi-code/k3`) read images inline with their own capabilities instead of delegating to a separate vision model; the tool set is re-evaluated on every model switch with a status notice when it flips. The `read` tool now follows the effective state dynamically rather than the raw setting, so it returns decoded image blocks again whenever `inspect_image` is hidden. Existing `inspect_image.enabled: true/false` configs migrate to `inspect_image.mode: on/off`.
-### Added
-
-- Added opt-in Lossless Context Management, which builds a redacted, project-scoped context index without rewriting session history. Native context remains the default and the fallback whenever a Lossless projection is not ready.
-- Added `/lcm` commands for status, diagnostics, search, rebuilds, and cleanup, plus scoped retrieval tools for agents and child sessions.
-- Added live settings for the Lossless summary model and one to four concurrent background summaries. Provider request limits continue to cap aggregate traffic.
-
-### Changed
-
-- Context-engine changes made in `/settings` now apply immediately; configuration-file changes apply on settings reload. Lossless markers stay out of persisted, printed, exported, and shared transcripts.
-
-### Fixed
-
-- Hardened Lossless queue recovery, provider backoff, overflow handling, branch switches, and shutdown so interrupted background work remains retryable without blocking foreground turns.
 
 ## [17.1.6] - 2026-07-27
 

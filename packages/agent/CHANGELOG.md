@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Compaction summary messages can carry a sanitized `lcmFallback` category so hosts can explain when native compaction replaced unavailable Lossless context work.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed
