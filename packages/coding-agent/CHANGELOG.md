@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed `/vibe` over ACP/RPC: the builtin slash command now carries a `handle` that activates vibe (director) mode programmatically — building the `VibeParentSession` adapter inline, restricting the toolset to read + vibe tools, recording a mode-change entry, and returning any inline directive as a residual prompt — so an RPC/ACP host toggles director mode instead of the command being forwarded to the model as plain text. `get_state` now reports `vibeMode` so hosts can introspect whether director mode is active, and `VibeModeState` gained an optional `previousTools` so the ACP path can restore the pre-vibe toolset on exit.
+
+### Fixed
+
+- Forwarded `streamingBehavior` on the RPC builtin residual-prompt path (e.g. `/vibe <directive>`), matching the normal fallthrough: `AgentSession.prompt()` throws `AgentBusyError` when streaming with no behavior, so the directive was rejected instead of queued during an active turn.
+- Populated `previousTools` in the shared `VibeModeState` from the TUI enter path (previously only the ACP/RPC path set it), so the `?? []` fallback on exit can never wipe a legitimately active toolset.
+- Vibe workers are killed on session dispose: `disposeActiveVibe()` runs from `#doDispose` before the async-job manager is torn down, so no runtime (TUI quit, ACP close, RPC shutdown) leaves background workers running. Previously the old scope's workers survived every session dispose.
+- ACP/RPC install a headless vibe session-switch reconciler that detaches the previous scope's workers (suspend-based, not kill) and clears vibe state only AFTER a `switchSession()`/`branch()` commits — a switch that fails and rolls back leaves the original session's vibe mode, workers, and restricted toolset untouched. `branch()` now participates in switch reconciliation (previously it did not).
+
 ## [17.1.7] - 2026-07-27
 
 ### Fixed

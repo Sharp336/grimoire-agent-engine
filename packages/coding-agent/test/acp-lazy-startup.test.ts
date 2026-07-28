@@ -137,6 +137,7 @@ class LazyFakeSession {
 	async fork(): Promise<boolean> {
 		return false;
 	}
+	setSessionAfterSwitchReconciler(_vibeScope: unknown): void {}
 }
 
 /**

@@ -54,6 +54,7 @@ import {
 } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
+import { type VibeParentSession, VibeSessionRegistry } from "../vibe/runtime";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
@@ -431,11 +432,54 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)",
 		inlineHint: "[prompt]",
 		allowArgs: true,
+		acpDescription: "Toggle vibe mode",
+		acpInputHint: "[prompt]",
 		getTuiAutocompleteDescription: runtime => {
 			if (runtime.ctx.vibeModeEnabled) return "Vibe: on";
 			if (runtime.ctx.planModeEnabled) return "Vibe: blocked by plan mode";
 			if (runtime.ctx.goalModeEnabled) return "Vibe: blocked by goal mode";
 			return "Vibe: off";
+		},
+		handle: async (command, runtime) => {
+			const { session, sessionManager } = runtime;
+			const vibeState = session.getVibeModeState();
+
+			if (vibeState?.enabled) {
+				const killed = await session.disposeActiveVibe();
+				await runtime.output(
+					killed > 0
+						? `Vibe mode disabled. Killed ${killed} worker session${killed === 1 ? "" : "s"}.`
+						: "Vibe mode disabled.",
+				);
+				return commandConsumed();
+			}
+			if (session.getPlanModeState()?.enabled) {
+				return usage("Exit plan mode first.", runtime);
+			}
+			if (session.getGoalModeState()?.enabled) {
+				return usage("Exit goal mode first.", runtime);
+			}
+			const parent: VibeParentSession = {
+				getAgentId: () => session.getAgentId() ?? null,
+				getSessionId: () => sessionManager.getSessionId(),
+				getSessionFile: () => sessionManager.getSessionFile() ?? null,
+				sessionManager,
+				asyncJobManager: session.asyncJobManager,
+				settings: session.settings,
+				getActiveModelString: () => (session.model ? formatModelString(session.model) : undefined),
+			};
+			const registry = VibeSessionRegistry.global();
+			registry.activateScope(registry.ownerScope(parent));
+			const previousTools = session.getEnabledToolNames();
+			await session.activateVibeTools(["read"]);
+			session.setVibeModeState({ enabled: true, previousTools });
+			if (session.isStreaming) {
+				await session.sendVibeModeContext({ deliverAs: "steer" });
+			}
+			sessionManager.appendModeChange("vibe");
+			await runtime.output("Vibe mode enabled. You direct fast/good worker sessions; toolset is read + vibe tools.");
+			const prompt = command.args.trim();
+			return prompt ? { prompt } : commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
 			await runtime.ctx.handleVibeModeCommand(command.args || undefined);

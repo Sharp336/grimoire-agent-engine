@@ -100,6 +100,8 @@ export interface RpcSessionState {
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
 	isCompacting: boolean;
+	/** Whether vibe (director) mode is active — toolset is restricted to read + vibe tools. */
+	vibeMode: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	interruptMode: "immediate" | "wait";

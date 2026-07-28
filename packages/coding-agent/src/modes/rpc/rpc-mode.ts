@@ -670,6 +670,12 @@ export async function runRpcMode(
 	// breaks JSON.parse. In RPC mode stdout is the JSON protocol channel — nothing else
 	// may write there.
 	process.env.PI_NOTIFICATIONS = "off";
+	// Headless runtimes have no InteractiveMode to suspend/rehydrate vibe workers
+	// across a session switch. The after-switch reconciler tears down the previous
+	// scope's workers only after the switch commits, so a switch that fails and
+	// rolls back never strips the original session of its workers. newSession()
+	// self-throws during vibe (it cannot be rolled back).
+	session.setSessionAfterSwitchReconciler?.(vibeScope => session.detachVibeAfterSessionSwitch(vibeScope));
 
 	const frameEncoder = new RpcFrameEncoder();
 	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
@@ -1009,7 +1015,11 @@ export async function runRpcMode(
 					if ("prompt" in builtinResult) {
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: () =>
+								session.prompt(builtinResult.prompt, {
+									images: command.images,
+									streamingBehavior: command.streamingBehavior,
+								}),
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
@@ -1084,6 +1094,7 @@ export async function runRpcMode(
 					sessionId: session.sessionId,
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
+					vibeMode: session.getVibeModeState()?.enabled ?? false,
 					messageCount: session.messages.length,
 					queuedMessageCount: session.queuedMessageCount,
 					todoPhases: session.getTodoPhases(),

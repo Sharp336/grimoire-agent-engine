@@ -3324,7 +3324,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Suppress cache-miss marker on the next turn: vibe mode changes the
 		// injected context, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
-		this.session.setVibeModeState({ enabled: true });
+		this.session.setVibeModeState({ enabled: true, previousTools });
 		if (this.session.isStreaming) {
 			await this.session.sendVibeModeContext({ deliverAs: "steer" });
 		}
