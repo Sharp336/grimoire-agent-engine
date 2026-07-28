@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
+import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
+import { createMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { logger } from "@oh-my-pi/pi-utils";
 
 const ORIGINAL_TIMEOUT = process.env.OMP_MCP_TIMEOUT_MS;
 
 afterEach(() => {
+	vi.useRealTimers();
 	if (ORIGINAL_TIMEOUT === undefined) {
 		delete process.env.OMP_MCP_TIMEOUT_MS;
 	} else {
@@ -62,5 +63,17 @@ describe("MCP timeout configuration", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	test("classifies only abort errors from the internal timeout", () => {
+		vi.useFakeTimers();
+		const operation = createMCPTimeout(50);
+		vi.advanceTimersByTime(50);
+		const abortError = new Error("aborted");
+		abortError.name = "AbortError";
+
+		expect(operation.isTimeoutAbort(new Error("HTTP 500"))).toBe(false);
+		expect(operation.isTimeoutAbort(abortError)).toBe(true);
+		operation.clear();
 	});
 });
