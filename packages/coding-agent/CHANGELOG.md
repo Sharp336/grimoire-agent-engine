@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in next-prompt suggestions after eligible terminal responses using the configurable `@tiny` role, with privacy and output gates, cancellation, and a 30-second expiration.
+
 ## [17.1.5] - 2026-07-27
 
 ### Added

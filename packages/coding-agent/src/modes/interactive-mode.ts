@@ -167,6 +167,7 @@ import { ExtensionUiController } from "./controllers/extension-ui-controller";
 import { InputController } from "./controllers/input-controller";
 import { LiveCommandController } from "./controllers/live-command-controller";
 import { MCPCommandController } from "./controllers/mcp-command-controller";
+import { NextPromptSuggestionController } from "./controllers/next-prompt-suggestion-controller";
 import { OmfgController } from "./controllers/omfg-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
@@ -586,6 +587,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #commandController: CommandController;
 	readonly #todoCommandController: TodoCommandController;
 	readonly #liveCommandController: LiveCommandController;
+	readonly nextPromptSuggestionController: NextPromptSuggestionController;
 	readonly #eventController: EventController;
 	get eventController(): EventController {
 		return this.#eventController;
@@ -616,6 +618,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#focusController.unfocus();
 	}
 	clearTransientSessionUi(): void {
+		this.nextPromptSuggestionController.invalidate();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -719,6 +722,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.editor = new CustomEditor(getEditorTheme());
+		this.nextPromptSuggestionController = new NextPromptSuggestionController(this);
 		this.ui.enableScopedInputRender(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
@@ -727,6 +731,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender(true);
 		};
 		this.editor.onAutocompleteUpdate = () => {
+			if (this.editor.isShowingAutocomplete()) this.nextPromptSuggestionController.invalidate();
 			this.ui.requestRender();
 		};
 		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
@@ -796,7 +801,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController = new CommandController(this);
 		this.#todoCommandController = new TodoCommandController(this);
 		this.#liveCommandController = new LiveCommandController(this);
-		this.#selectorController = new SelectorController(this);
+		this.#selectorController = new SelectorController(this, this.nextPromptSuggestionController);
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.#observerRegistry = new SessionObserverRegistry();
@@ -3930,6 +3935,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.nextPromptSuggestionController.dispose();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
@@ -3976,6 +3982,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async shutdown(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
+		this.nextPromptSuggestionController.dispose();
 
 		await this.#liveCommandController.stop();
 
@@ -4050,6 +4057,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	setEditorComponent(
 		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
 	): void {
+		this.nextPromptSuggestionController.invalidate();
 		const previousEditor = this.editor;
 		const previousText = previousEditor.getText();
 		const nextEditor = factory
@@ -4064,6 +4072,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender(true);
 		};
 		nextEditor.onAutocompleteUpdate = () => {
+			if (nextEditor.isShowingAutocomplete()) this.nextPromptSuggestionController.invalidate();
 			this.ui.requestRender();
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
@@ -4507,6 +4516,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Speech-to-text is disabled. Enable it in settings: stt.enabled");
 			return;
 		}
+		this.nextPromptSuggestionController.invalidate();
 		if (!this.#sttController) {
 			this.#sttController = new STTController();
 		}

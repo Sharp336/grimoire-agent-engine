@@ -1719,6 +1719,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"nextPromptSuggestion.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Next Prompt Suggestions",
+			description:
+				"Generate next-prompt suggestions after eligible responses. This sends additional conversation context and may add cost; the auxiliary role may use a different provider.",
+		},
+	},
+
 	emojiAutocomplete: {
 		type: "boolean",
 		default: true,

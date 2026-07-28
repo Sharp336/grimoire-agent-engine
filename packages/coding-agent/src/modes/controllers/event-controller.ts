@@ -144,6 +144,7 @@ export class EventController {
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
 	#terminalProgressActive = false;
+	#agentActivityEpoch = 0;
 
 	constructor(private ctx: InteractiveModeContext) {
 		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
@@ -433,6 +434,8 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		this.#agentActivityEpoch++;
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		this.#toolTimelineComponents.clear();
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
@@ -1286,7 +1289,18 @@ export class EventController {
 		if (this.ctx.session.isStreaming) return;
 		setTerminalTitleState("idle");
 
+		const agentActivityEpoch = this.#agentActivityEpoch;
+		const nextPromptSuggestionController = this.ctx.nextPromptSuggestionController;
+		const nextPromptSuggestionRevision = nextPromptSuggestionController?.revision;
 		await this.#finishAgentEnd(event);
+		if (
+			agentActivityEpoch !== this.#agentActivityEpoch ||
+			this.ctx.session.isStreaming ||
+			nextPromptSuggestionRevision !== nextPromptSuggestionController?.revision
+		) {
+			return;
+		}
+		nextPromptSuggestionController?.request(event);
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {

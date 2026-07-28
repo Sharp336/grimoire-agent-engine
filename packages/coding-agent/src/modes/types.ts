@@ -37,6 +37,7 @@ import type { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import type { TranscriptContainer } from "./components/transcript-container";
 import type { EventController } from "./controllers/event-controller";
+import type { NextPromptSuggestionController } from "./controllers/next-prompt-suggestion-controller";
 import type { LoopLimitRuntime } from "./loop-limit";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "./theme/theme";
@@ -144,6 +145,7 @@ export interface InteractiveModeContext {
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
 	eventController: EventController;
+	nextPromptSuggestionController: NextPromptSuggestionController;
 	eventBus?: EventBus;
 
 	// State

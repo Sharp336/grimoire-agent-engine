@@ -534,7 +534,7 @@ export class AgentSession {
 	#planInternalAbortPending = false;
 	#pendingAbortErrorId?: number;
 
-	#postPromptTasks = new Set<Promise<unknown>>();
+	#postPromptTasks = new Map<Promise<unknown>, boolean>();
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
 	#postPromptTasksAbortController = new AbortController();
@@ -1247,7 +1247,7 @@ export class AgentSession {
 			},
 			preserveAdvisorCard: card => this.#preserveAdvisorCard(card),
 			hasPendingNextTurnMessages: () => this.#pendingNextTurnMessages.length > 0,
-			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
+			convertToLlmForSideRequest: messages => this.convertToLlmForSideRequest(messages),
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
 			resolveContextPromotionTarget: (model, contextWindow) =>
 				this.#maintenance.resolveContextPromotionTarget(model, contextWindow),
@@ -1305,7 +1305,7 @@ export class AgentSession {
 			reconnectToAgent: () => this.#reconnectToAgent(),
 			drainStrandedQueuedMessages: () => this.#drainStrandedQueuedMessages(),
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
-			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
+			convertToLlmForSideRequest: messages => this.convertToLlmForSideRequest(messages),
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
@@ -1872,11 +1872,12 @@ export class AgentSession {
 	 * `#waitForPostPromptRecovery()` the instant `agent.prompt()` resolves — which
 	 * can land BEFORE the handler registers its tasks, so the wait would observe an
 	 * empty task set and return early, letting a deferred handoff/promotion race
-	 * prompt completion. Tracking the `agent_end` handler as a post-prompt task
-	 * that is registered SYNCHRONOUSLY (before the first await) closes that window:
+	 * prompt completion. Tracking the `agent_end` handler synchronously before
+	 * its first await closes that window:
 	 * `#postPromptTasksPromise` is set the moment `#emit` invokes this handler, so
 	 * the recovery wait always sees the in-flight handler and blocks until it — and
-	 * everything it schedules — settles. */
+	 * everything it schedules — settles. The handler itself is only a settlement
+	 * dependency, not externally scheduled post-prompt work. */
 	#handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
@@ -1893,7 +1894,7 @@ export class AgentSession {
 			return processing;
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#trackPostPromptTask(promise);
+		this.#trackPostPromptTask(promise, false);
 		try {
 			await this.#processAgentEvent(event);
 		} finally {
@@ -2736,8 +2737,8 @@ export class AgentSession {
 		this.#postPromptTasksPromise = undefined;
 	}
 
-	#trackPostPromptTask(task: Promise<unknown>): void {
-		this.#postPromptTasks.add(task);
+	#trackPostPromptTask(task: Promise<unknown>, countsAsPostPromptWork = true): void {
+		this.#postPromptTasks.set(task, countsAsPostPromptWork);
 		this.#ensurePostPromptTasksPromise();
 		void task
 			.catch(() => {})
@@ -2896,7 +2897,7 @@ export class AgentSession {
 		this.#postPromptTasksAbortController = new AbortController();
 		this.#ttsr.resolveResume();
 
-		const pendingTasks = Array.from(this.#postPromptTasks);
+		const pendingTasks = Array.from(this.#postPromptTasks.keys());
 		if (pendingTasks.length === 0) {
 			this.#resolvePostPromptTasks();
 			return;
@@ -4036,7 +4037,7 @@ export class AgentSession {
 	 * to avoid racing against the delivery turn.
 	 */
 	get hasPostPromptWork(): boolean {
-		return this.#postPromptTasks.size > 0;
+		return [...this.#postPromptTasks.values()].some(Boolean);
 	}
 
 	/** Register post-prompt work in tests without driving a full agent turn. */
@@ -4087,7 +4088,8 @@ export class AgentSession {
 		return this.#providerBoundary.deobfuscateDelta(text);
 	}
 
-	#convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
+	/** Convert side-request messages through the session's secret boundary. */
+	convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
 		return this.#providerBoundary.convertToLlmForSideRequest(messages);
 	}
 
@@ -7465,7 +7467,7 @@ export class AgentSession {
 				customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
 				reserveTokens: branchSummarySettings.reserveTokens,
 				metadata: this.agent.metadataForProvider(model.provider),
-				convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+				convertToLlm: messages => this.convertToLlmForSideRequest(messages),
 				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
 				// Same per-provider concurrency cap rationale as the compaction
 				// path above (chatgpt-codex review on #3751).

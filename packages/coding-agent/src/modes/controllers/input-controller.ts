@@ -524,6 +524,7 @@ export class InputController {
 		this.#setupEnhancedPaste();
 
 		this.ctx.editor.onChange = (text: string) => {
+			this.ctx.nextPromptSuggestionController?.invalidate();
 			const wasBashMode = this.ctx.isBashMode;
 			const wasPythonMode = this.ctx.isPythonMode;
 			const trimmed = text.trimStart();
@@ -532,6 +533,9 @@ export class InputController {
 			if (wasBashMode !== this.ctx.isBashMode || wasPythonMode !== this.ctx.isPythonMode) {
 				this.ctx.updateEditorBorderColor();
 			}
+		};
+		this.ctx.editor.onFocusChange = focused => {
+			if (!focused) this.ctx.nextPromptSuggestionController?.invalidate();
 		};
 	}
 
@@ -575,6 +579,7 @@ export class InputController {
 		this.#enhancedPaste = new EnhancedPasteController({
 			write: data => this.ctx.ui.terminal.write(data),
 			pasteText: text => {
+				this.ctx.nextPromptSuggestionController?.invalidate();
 				// Route enhanced-paste text to the currently focused component when it
 				// exposes a `pasteText` hook (modal Input prompts: OAuth API-key entry,
 				// Perplexity OTP, GitHub Enterprise URL, manual redirect URL). Falling
@@ -586,6 +591,7 @@ export class InputController {
 				this.ctx.ui.requestRender();
 			},
 			pasteImage: async image => {
+				this.ctx.nextPromptSuggestionController?.invalidate();
 				// Images can only land in the main editor — when a modal Input is
 				// focused, refuse rather than dump the binary blob in a hidden buffer.
 				const focused = this.ctx.ui.getFocused();
@@ -603,6 +609,7 @@ export class InputController {
 
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
+			this.ctx.nextPromptSuggestionController?.invalidate();
 			text = text.trim();
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
@@ -1151,6 +1158,7 @@ export class InputController {
 	}
 
 	async handleRetry(): Promise<void> {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		if (this.ctx.collabGuest) {
 			this.ctx.showStatus("/retry is host-only during a collab session");
 			return;
@@ -1528,6 +1536,7 @@ export class InputController {
 	}
 
 	async handleImagePathPaste(path: string): Promise<void> {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		try {
 			const image = await loadImageInput({
 				path,
@@ -1590,6 +1599,7 @@ export class InputController {
 	}
 
 	async handleImagePaste(): Promise<boolean> {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		try {
 			// When a modal paste-capable prompt (login/API-key Input) owns focus,
 			// only clipboard text may land there. Image payloads must not mutate
@@ -1668,6 +1678,7 @@ export class InputController {
 	}
 
 	async handleClipboardTextRawPaste(): Promise<void> {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		try {
 			const text = await this.clipboard.readText();
 			if (text) {
@@ -1690,6 +1701,7 @@ export class InputController {
 	handleLargePaste(text: string, lineCount: number): boolean {
 		const threshold = this.ctx.settings.get("paste.largeMenuThreshold");
 		if (!(threshold > 0) || lineCount < threshold) return false;
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		void this.presentLargePasteMenu(text, lineCount);
 		return true;
 	}
@@ -1945,6 +1957,7 @@ export class InputController {
 	}
 
 	async openExternalEditor(): Promise<void> {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		const editorCmd = getEditorCommand();
 		if (!editorCmd) {
 			this.ctx.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
