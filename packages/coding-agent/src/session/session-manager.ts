@@ -362,6 +362,7 @@ export type ReadonlySessionManager = Pick<
 	| "getUsageStatistics"
 	| "getCompactionCount"
 	| "getJournalRevision"
+	| "getSessionSizeBytes"
 	| "putBlob"
 	| "putBlobSync"
 >;
@@ -1697,6 +1698,17 @@ export class SessionManager {
 	/** Monotonic revision for journal entry and persisted rewrite mutations. */
 	getJournalRevision(): number {
 		return this.#index.revision();
+	}
+
+	/** Serialized journal size reported by the configured storage backend. */
+	getSessionSizeBytes(): number {
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile) return 0;
+		try {
+			return this.#storage.statSync(sessionFile).size;
+		} catch {
+			return 0;
+		}
 	}
 
 	/**

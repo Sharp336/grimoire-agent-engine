@@ -51,6 +51,7 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		// that chain; `drain()` mops up the storage-level pending tail.
 		await manager.flush();
 		await storage.drain();
+		expect(manager.getSessionSizeBytes()).toBe(storage.statSync(sessionFilePath).size);
 		await manager.close();
 
 		const rows = (await client.unsafe(`SELECT content FROM omp_session_files WHERE path = ?`, [

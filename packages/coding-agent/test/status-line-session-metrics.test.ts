@@ -60,9 +60,9 @@ describe("session_metrics segment", () => {
 		}
 	});
 
-	it("refreshes the real journal after mutations even when the active leaf is unchanged", async () => {
-		const sessionFile = path.join(projectDir, "session.jsonl");
-		await Bun.write(sessionFile, "x".repeat(1536));
+	it("refreshes a logical storage key after mutations even when the active leaf is unchanged", () => {
+		const sessionFile = "redis://sessions/current";
+		let bytes = 1536;
 
 		let journalRevision = 1;
 		let compactions = 2;
@@ -86,9 +86,10 @@ describe("session_metrics segment", () => {
 			sessionManager: {
 				getSessionFile: () => sessionFile,
 				getJournalRevision: () => journalRevision,
-				getCompactionCount: () => {
+				getCompactionCount: () => compactions,
+				getSessionSizeBytes: () => {
 					metricReads++;
-					return compactions;
+					return bytes;
 				},
 				getSessionName: () => undefined,
 				getUsageStatistics: () => ({
@@ -119,7 +120,7 @@ describe("session_metrics segment", () => {
 		expect(first).toContain(" 2/1.5 KB 󰆓");
 		expect(metricReads).toBe(1);
 
-		await Bun.write(sessionFile, "x".repeat(2 * MEGABYTE));
+		bytes = 2 * MEGABYTE;
 		const stale = stripVTControlCharacters(component.getTopBorder(120).content);
 		expect(stale).toContain(" 2/1.5 KB 󰆓");
 		expect(metricReads).toBe(1);

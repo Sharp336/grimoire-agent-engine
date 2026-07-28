@@ -528,8 +528,8 @@ export class StatusLineComponent implements Component {
 
 	/**
 	 * Collect session metrics only when the journal revision changes. The status
-	 * line can repaint many times per second while streaming, so neither the O(1)
-	 * compaction lookup nor the filesystem stat belongs on the stable render path.
+	 * line can repaint many times per second, so the storage lookup stays off the
+	 * stable render path.
 	 */
 	#getSessionMetrics(): SessionMetrics {
 		const manager = this.session.sessionManager;
@@ -545,18 +545,10 @@ export class StatusLineComponent implements Component {
 			return cached.metrics;
 		}
 
-		const compactions = manager.getCompactionCount();
-
-		let bytes = 0;
-		if (sessionFile) {
-			try {
-				bytes = fs.statSync(sessionFile, { throwIfNoEntry: false })?.size ?? 0;
-			} catch {
-				// A missing or temporarily inaccessible lazy session file is 0 KB.
-			}
-		}
-
-		const metrics = { compactions, bytes };
+		const metrics = {
+			compactions: manager.getCompactionCount(),
+			bytes: manager.getSessionSizeBytes(),
+		};
 		this.#sessionMetricsMemo = { session: this.session, sessionFile, journalRevision, metrics };
 		return metrics;
 	}

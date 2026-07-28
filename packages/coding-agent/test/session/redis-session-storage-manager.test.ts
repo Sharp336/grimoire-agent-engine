@@ -179,6 +179,7 @@ describe("SessionManager + RedisSessionStorage", () => {
 		// that chain; `drain()` mops up the storage-level pending tail.
 		await manager.flush();
 		await storage.drain();
+		expect(manager.getSessionSizeBytes()).toBe(storage.statSync(sessionFilePath).size);
 		await manager.close();
 
 		// Redis now contains the JSONL — title slot + header + one message entry.
