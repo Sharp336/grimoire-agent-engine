@@ -135,6 +135,7 @@ describe("runSubprocess fork context", () => {
 		expect(result.output).toBe("fork result");
 		expect(result.contextSource).toEqual({ requested: "fork", used: "fork", cacheReadTokens: 21 });
 		expect(forkBranch).toHaveBeenCalledWith({
+			sourceFile: parentFile,
 			cwd: "/tmp",
 			sessionDir: "/tmp",
 			suppressBreadcrumb: true,
@@ -208,6 +209,38 @@ describe("runSubprocess fork context", () => {
 		expect(result).toEqual({
 			block: true,
 			reason: "Forked task agents are read-only; return findings to the parent.",
+		});
+	});
+
+	it("blocks forked agents from steering write-capable peers", async () => {
+		const session = createMockSession({ activeTools: ["hub"] });
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: AGENT,
+			task: "inspect",
+			index: 0,
+			id: "PeerSteeringAgent",
+			artifactsDir: "/tmp",
+			settings: Settings.isolated(),
+			modelRegistry: { authStorage: {}, refresh: async () => {} } as unknown as ModelRegistry,
+			enableLsp: false,
+			contextSource: "fork",
+			parentSessionFile: "/tmp/parent.jsonl",
+			parentSessionManager: { forkBranch: async () => SessionManager.inMemory("/tmp"), getCwd: () => "/tmp" },
+			parentForkLeafId: "completed-assistant",
+		});
+
+		const decision = await session.agent.beforeToolCall?.(
+			{
+				tool: { name: "hub", approval: { tier: "read" } },
+				args: { op: "send", to: "Main", message: "edit the workspace" },
+			} as never,
+			undefined,
+		);
+		expect(decision).toEqual({
+			block: true,
+			reason: "Forked task agents cannot steer peers; return findings to the parent.",
 		});
 	});
 

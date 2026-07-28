@@ -2412,6 +2412,7 @@ export class SessionManager {
 
 	/** Clone a completed branch through this manager's configured storage backend. */
 	async forkBranch(options: {
+		sourceFile?: string;
 		cwd: string;
 		sessionDir?: string;
 		sessionFile?: string;
@@ -2419,10 +2420,15 @@ export class SessionManager {
 		additionalDirectories?: readonly string[];
 		suppressBreadcrumb?: boolean;
 	}): Promise<SessionManager> {
-		if (!this.#sessionFile) throw new Error("Cannot fork a session without a persisted transcript");
-		await this.ensureOnDisk();
-		await this.flush();
-		return SessionManager.forkFrom(this.#sessionFile, options.cwd, options.sessionDir, this.#storage, options);
+		const sourceFile = options.sourceFile ?? this.#sessionFile;
+		if (!sourceFile) throw new Error("Cannot fork a session without a persisted transcript");
+		if (sourceFile === this.#sessionFile) {
+			await this.ensureOnDisk();
+			await this.flush();
+		} else {
+			await this.#storage.drain();
+		}
+		return SessionManager.forkFrom(sourceFile, options.cwd, options.sessionDir, this.#storage, options);
 	}
 
 	/** Reopen this session through its configured storage backend. */

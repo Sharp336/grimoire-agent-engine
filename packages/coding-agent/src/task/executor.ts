@@ -2782,6 +2782,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (useFork) {
 				sessionManager = await awaitAbortable(
 					options.parentSessionManager!.forkBranch({
+						sourceFile: options.parentSessionFile!,
 						cwd: effectiveCwd,
 						sessionDir: path.dirname(sessionFile!),
 						suppressBreadcrumb: true,
@@ -2861,6 +2862,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const inherited = await beforeToolCall?.(ctx, toolSignal);
 					if (inherited?.block) return inherited;
 					const effectiveArgs = inherited?.args ?? ctx.args;
+					if (ctx.tool.name === "hub" && isRecord(effectiveArgs) && effectiveArgs.op === "send") {
+						return {
+							block: true,
+							reason: "Forked task agents cannot steer peers; return findings to the parent.",
+						};
+					}
 					if (resolveToolTier(ctx.tool, effectiveArgs) !== "read") {
 						return { block: true, reason: "Forked task agents are read-only; return findings to the parent." };
 					}
