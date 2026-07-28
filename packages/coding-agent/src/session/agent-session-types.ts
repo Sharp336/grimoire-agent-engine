@@ -25,6 +25,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { SecretBroker } from "../secrets/broker/broker";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { SessionManager } from "./session-manager";
@@ -189,6 +190,10 @@ export interface AgentSessionConfig {
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
 	obfuscator?: SecretObfuscator;
+	/** Secret broker for capability calls (run_with_secret etc.). Sub-agent
+	 * sessions inherit the parent's broker (and sidecar attachment) via
+	 * CreateAgentSessionOptions.secretBroker. */
+	secretBroker?: SecretBroker;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
 	/** Logical owner for retained eval kernels created by this session. */

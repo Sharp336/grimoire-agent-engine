@@ -107,6 +107,8 @@ export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
 
+import type { SecretObfuscator } from "../../secrets/obfuscator";
+
 // ============================================================================
 // UI Context
 // ============================================================================
@@ -443,6 +445,8 @@ export interface ExtensionContext {
 	getSystemPrompt(): string[];
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
+	/** Secret obfuscator (for runtime secret registration via addSecret). */
+	obfuscator?: SecretObfuscator;
 	/**
 	 * Schedule a repeating callback whose throws are contained. Unlike raw
 	 * `setInterval`, a synchronous throw or rejected promise from `callback` is

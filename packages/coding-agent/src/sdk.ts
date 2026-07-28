@@ -127,6 +127,8 @@ import {
 	SecretObfuscator,
 	secretEntriesNeedPlaceholderKey,
 } from "./secrets";
+import { BitwardenProvider, createSecretBrokerExtension, InfisicalProvider, SecretBroker } from "./secrets/broker";
+import { connectOrSpawnSidecar } from "./secrets/sidecar/daemon";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
@@ -359,6 +361,13 @@ export interface CreateAgentSessionOptions {
 	modelPatternAuthFallback?: string;
 	/** Role name used to install retry fallbacks after deferred subagent patterns resolve. */
 	modelPatternFallbackRole?: string;
+	/**
+	 * Existing secret broker to reuse instead of creating a new one. The task
+	 * executor passes the parent's broker down so sub-agent spawns share the
+	 * parent's vault and sidecar attachment (empty-vault + redundant-sidecar
+	 * bug). When omitted, a new broker is created per the secrets.enabled gate.
+	 */
+	secretBroker?: import("./secrets/broker").SecretBroker;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
 	/** Thinking selector. Default: from settings, else unset */
@@ -1362,6 +1371,83 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 	const secretsEnabled = obfuscator?.hasSecrets() === true;
+	// Wire the obfuscator to the SessionManager for the pre-persist JSONL seam.
+	// R2 fail-closed: pass the `secrets.enabled` setting (not the derived
+	// `secretsEnabled`) so the seam can redact plaintext if the obfuscator is
+	// undefined despite the setting being on.
+	sessionManager.setObfuscator(obfuscator, settings.get("secrets.enabled"));
+	// Tier-2: create the in-process SecretBroker and register the Bitwarden
+	// provider when the `bw` CLI is installed and unlocked. The broker is the
+	// agent's only interface to vault secrets (via the `run_with_secret` tool and
+	// `/redact` command); it resolves handles, spawns subprocesses with a
+	// hardened env, and returns scrubbed results. The agent never holds a raw
+	// value. Gated on `secrets.enabled` so we don't probe `bw` on every session.
+	let secretBroker: SecretBroker | undefined = options.secretBroker;
+	const brokerInherited = secretBroker !== undefined;
+	if (settings.get("secrets.enabled") && !brokerInherited) {
+		secretBroker = new SecretBroker();
+
+		// Tier-2 R2: move BW_SESSION out of process.env into the broker vault
+		// BEFORE constructing the provider. process.env is the agent's env —
+		// every BashTool call sees it. After this block, the only path to
+		// BW_SESSION is via the broker's in-memory vault.
+		const bwSession = process.env.BW_SESSION;
+		if (bwSession) {
+			await secretBroker.setCredential("BW_SESSION", bwSession);
+			delete process.env.BW_SESSION;
+		}
+
+		const bwProvider = new BitwardenProvider({ credentials: secretBroker.credentials });
+		if (await bwProvider.isAvailable()) {
+			secretBroker.registerProvider(bwProvider);
+		}
+		// Tier-3: register the Infisical provider when machine-identity
+		// credentials are present and the Infisical API health check passes.
+		// Gated on the same `secrets.enabled` setting as Bitwarden.
+		const infisicalClientId = process.env.INFISICAL_CLIENT_ID;
+		const infisicalClientSecret = process.env.INFISICAL_CLIENT_SECRET;
+		const infisicalWorkspace = process.env.INFISICAL_WORKSPACE_ID;
+		if (infisicalClientId && infisicalClientSecret && infisicalWorkspace) {
+			// S7: move Infisical machine-identity creds into the broker
+			// vault and out of process.env (same pattern as BW_SESSION).
+			await secretBroker.setCredential("INFISICAL_CLIENT_ID", infisicalClientId);
+			await secretBroker.setCredential("INFISICAL_CLIENT_SECRET", infisicalClientSecret);
+			delete process.env.INFISICAL_CLIENT_ID;
+			delete process.env.INFISICAL_CLIENT_SECRET;
+			const infisicalProvider = new InfisicalProvider({
+				clientId: secretBroker.getCredential("INFISICAL_CLIENT_ID") ?? infisicalClientId,
+				clientSecret: secretBroker.getCredential("INFISICAL_CLIENT_SECRET") ?? infisicalClientSecret,
+				workspaceId: infisicalWorkspace,
+				apiUrl: process.env.INFISICAL_API_URL,
+			});
+			if (await infisicalProvider.isAvailable()) {
+				secretBroker.registerProvider(infisicalProvider);
+			}
+		}
+
+		// Tier-4: spawn the off-process sidecar broker. The vault's secrets move
+		// out of THIS process's heap into a sibling process the agent's bash
+		// cannot read (Linux ptrace_scope=1: a child can only ptrace its own
+		// descendants — the sidecar is a sibling, not a descendant). Capability
+		// calls (runWithSecret, resolveHandle) proxy to it over a unix socket.
+		// The in-process broker stays as fallback if the spawn fails.
+		// Sub-agent spawns skip this: they inherit the parent's broker (with its
+		// sidecar attachment) via options.secretBroker.
+		try {
+			const sidecar = await connectOrSpawnSidecar({ agentDir });
+			secretBroker.attachSidecar(sidecar.client);
+			logger.info("secret-broker sidecar attached", { sockPath: sidecar.sockPath, spawned: sidecar.spawned });
+		} catch (err) {
+			logger.warn("secret-broker sidecar failed to start; using in-process broker", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	} else if (settings.get("secrets.enabled") && brokerInherited) {
+		// Sub-agent path: the parent's broker (and its sidecar attachment) is
+		// reused as-is. The sub-agent's model still only sees scrubbed results —
+		// the sidecar holds the raw values either way.
+		secretBroker = options.secretBroker;
+	}
 
 	// An abnormal process exit after a non-terminal message tail is durable
 	// evidence that the old process can no longer finish that turn. Preserve the
@@ -1742,6 +1828,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settings,
 			authStorage,
 			modelRegistry,
+			secretBroker,
 			getTelemetry: () => agent?.telemetry,
 			// Subagents inherit the singleton (the parent's manager) so their bash/task
 			// completions still flow into the spawning conversation's yieldQueue.
@@ -1931,6 +2018,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// re-bind under their own `CustomToolAPI` while skipping the FS scan.
 		toolSession.customToolPaths = customToolPaths;
 
+		// Tier-2: register the secret-broker extension (run_with_secret tool +
+		// /redact command) when the broker was created (secrets.enabled).
+		// Gated on !restrictToolNames like upstream's inline pushes above —
+		// broker tools are capabilities, not for restricted sessions.
+		if (!restrictToolNames && secretBroker) {
+			inlineExtensions.push(createSecretBrokerExtension(secretBroker));
+		}
 		// Load extensions. Three paths:
 		//   1. `preloadedExtensions` (CLI): caller already loaded — reuse the
 		//      Extension instances. Shallow-clone `extensions` so the inline
@@ -2513,6 +2607,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
 			localProtocolOptions,
+			obfuscator,
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -3212,6 +3307,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,
+			secretBroker,
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
