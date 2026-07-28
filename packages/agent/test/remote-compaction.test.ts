@@ -4,6 +4,7 @@ import {
 	compact,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
+	NativeCompactionError,
 	prepareCompaction,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -1716,6 +1717,53 @@ describe("compact() remote compaction failure handling", () => {
 		const sameProviderActive = prepareCompaction(entries, settings, openaiSmol);
 		expect(sameProviderActive).toBeDefined();
 		expect(JSON.stringify(sameProviderActive?.messagesToSummarize ?? [])).not.toContain("ORIGINAL ALPHA port 4242");
+	});
+
+	test("retains the V2 non-auth failure when the V1 fallback fails authentication", async () => {
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		const model = makeOpenAiModel({
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			requestedUrls.push(url);
+			return url.endsWith("/responses/compact")
+				? new Response("authentication failed", { status: 401, statusText: "Unauthorized" })
+				: new Response("V2 transport failed", { status: 400, statusText: "Bad Request" });
+		};
+
+		const error = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock }).catch(
+			cause => cause,
+		);
+
+		expect(requestedUrls.map(url => new URL(url).pathname)).toEqual(["/v1/responses", "/v1/responses/compact"]);
+		expect(error).toBeInstanceOf(NativeCompactionError);
+		expect(error).toMatchObject({ cause: { status: 400 } });
+		expect(AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)).toBe(false);
+	});
+
+	test("keeps native compaction auth-classified when every attempted protocol fails authentication", async () => {
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		const model = makeOpenAiModel({
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			requestedUrls.push(String(input));
+			return new Response("authentication failed", { status: 401, statusText: "Unauthorized" });
+		};
+
+		const error = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock }).catch(
+			cause => cause,
+		);
+
+		expect(requestedUrls.map(url => new URL(url).pathname)).toEqual(["/v1/responses", "/v1/responses/compact"]);
+		expect(error).toBeInstanceOf(NativeCompactionError);
+		expect(error).toMatchObject({ cause: { status: 401 } });
+		expect(AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)).toBe(true);
 	});
 
 	test("V2 native failure falls back to V1 without generic summarization", async () => {

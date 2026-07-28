@@ -22,7 +22,7 @@ import {
 	type Usage,
 	withAuth,
 } from "@oh-my-pi/pi-ai";
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -726,7 +726,7 @@ function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined)
  */
 function createSummarizationError(prefix: string, response: AssistantMessage): Error {
 	const text = `${prefix}: ${response.errorMessage || "Unknown error"}`;
-	return response.errorStatus === undefined ? new Error(text) : new ProviderHttpError(text, response.errorStatus);
+	return response.errorStatus === undefined ? new Error(text) : new AIError.ProviderHttpError(text, response.errorStatus);
 }
 
 function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boolean {
@@ -1334,6 +1334,17 @@ function buildCompactionV2Reasoning(
 }
 
 /**
+ * Keep any non-auth native protocol failure ahead of authentication failures.
+ * Downstream may retry compaction with another provider only when every native
+ * protocol failed authentication, so a later auth error must not hide an
+ * earlier transport or protocol failure.
+ */
+function selectNativeCompactionError(previousError: unknown, nextError: unknown): unknown {
+	if (previousError === undefined) return nextError;
+	return AIError.is(AIError.classify(previousError), AIError.Flag.AuthFailed) ? nextError : previousError;
+}
+
+/**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds id/parentId when saving.
  *
@@ -1469,7 +1480,7 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
-				nativeCompactionError = err;
+				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
 				logger.warn("OpenAI V2 remote compaction failed, falling back to V1 remote compaction", {
 					error: err instanceof Error ? err.message : String(err),
 					model: model.id,
@@ -1520,7 +1531,7 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
-				nativeCompactionError = err;
+				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
 				logger.warn("OpenAI remote compaction failed", {
 					error: err instanceof Error ? err.message : String(err),
 					model: model.id,
