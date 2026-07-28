@@ -232,7 +232,7 @@ export interface ToolSession {
 	/** Parent session journal used by tools that persist runtime lifecycle state. */
 	sessionManager?: Pick<
 		SessionManager,
-		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries" | "getCwd"
+		"appendCustomEntry" | "ensureOnDisk" | "flush" | "forkBranch" | "getBranch" | "getEntries" | "getCwd"
 	>;
 	/** Active parent system prompt, needed to preserve a fork's provider-visible prefix. */
 	getSystemPrompt?: () => readonly string[];

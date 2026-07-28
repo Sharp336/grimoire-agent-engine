@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -24,6 +25,31 @@ interface JsonlMessageEntry {
 }
 
 describe("SessionManager.forkFrom", () => {
+	it("forks through the manager storage and can replace inherited workspace roots", async () => {
+		using tempDir = TempDir.createSync("@omp-session-storage-fork-");
+		const storage = new MemorySessionStorage();
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const source = SessionManager.create(cwd, sessionDir, storage);
+		await source.setAdditionalDirectories([path.join(tempDir.path(), "shared")]);
+		source.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+
+		const forked = await source.forkBranch({
+			cwd: path.join(tempDir.path(), "isolated"),
+			sessionDir,
+			sessionFile: path.join(sessionDir, "fork.jsonl"),
+			additionalDirectories: [],
+		});
+		const forkFile = forked.getSessionFile();
+		if (!forkFile) throw new Error("expected forked session file");
+		const entries = await loadEntriesFromFile(forkFile, storage);
+		const header = entries.find((entry): entry is SessionHeader => entry.type === "session");
+
+		expect(header?.additionalDirectories).toBeUndefined();
+		expect(entries.some(entry => entry.type === "message" && entry.message.role === "user")).toBe(true);
+		expect(await Bun.file(forkFile).exists()).toBe(false);
+	});
+
 	it("suppresses terminal breadcrumbs while preserving source history under a new parented session", async () => {
 		using tempDir = TempDir.createSync("@omp-session-fork-");
 		const previousAgentDir = getAgentDir();

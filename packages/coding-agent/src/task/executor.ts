@@ -323,7 +323,7 @@ export interface ExecutorOptions {
 	/** Persisted parent session that supplies fork history. */
 	parentSessionFile?: string | null;
 	/** Parent manager used to flush the committed history before cloning. */
-	parentSessionManager?: Pick<SessionManager, "ensureOnDisk" | "flush" | "getCwd">;
+	parentSessionManager?: Pick<SessionManager, "forkBranch" | "getCwd">;
 	/** Exact parent model used by fork mode. */
 	parentModel?: Model;
 	/** Exact parent thinking level used by fork mode. */
@@ -482,7 +482,7 @@ export interface ExecutorOptions {
 /** Immutable parent request shape captured at the task scheduling boundary. */
 export interface ForkContextSnapshot {
 	sessionFile: string | null;
-	sessionManager: Pick<SessionManager, "ensureOnDisk" | "flush" | "getCwd">;
+	sessionManager: Pick<SessionManager, "forkBranch" | "getCwd">;
 	model?: Model;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	systemPrompt?: readonly string[];
@@ -2780,20 +2780,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			let sessionManager: SessionManager;
 			if (useFork) {
-				await awaitAbortable(options.parentSessionManager!.ensureOnDisk());
-				await awaitAbortable(options.parentSessionManager!.flush());
 				sessionManager = await awaitAbortable(
-					SessionManager.forkFrom(
-						options.parentSessionFile!,
-						effectiveCwd,
-						path.dirname(sessionFile!),
-						undefined,
-						{
-							suppressBreadcrumb: true,
-							sessionFile: sessionFile!,
-							sourceLeafId: options.parentForkLeafId,
-						},
-					),
+					options.parentSessionManager!.forkBranch({
+						cwd: effectiveCwd,
+						sessionDir: path.dirname(sessionFile!),
+						suppressBreadcrumb: true,
+						sessionFile: sessionFile!,
+						sourceLeafId: options.parentForkLeafId,
+						additionalDirectories: worktree !== undefined ? [] : undefined,
+					}),
 				);
 			} else {
 				contextSource = { requested: requestedContextSource, used: "fresh", cacheReadTokens: 0 };
@@ -2990,7 +2985,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// (createAgentSession → agent.replaceMessages). Isolated runs are not
 				// resumable (worktree is merged + cleaned) and never get a reviver.
 				reviveSession = async expectedAgentRef => {
-					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+					const reopened = await sessionManager.reopen({
 						suppressBreadcrumb: true,
 					});
 					if (options.parentArtifactManager) {

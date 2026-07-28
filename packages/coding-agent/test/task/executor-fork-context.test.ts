@@ -104,12 +104,9 @@ describe("runSubprocess fork context", () => {
 	afterEach(() => vi.restoreAllMocks());
 
 	it("clones through the completed boundary and reports measured cache reads", async () => {
-		const parent = SessionManager.inMemory("/tmp");
 		const parentFile = "/tmp/parent.jsonl";
 		const forkManager = SessionManager.inMemory("/tmp");
-		const ensureOnDisk = vi.fn(async () => {});
-		const flush = vi.fn(async () => {});
-		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(forkManager);
+		const forkBranch = vi.fn(async () => forkManager);
 		const createSpy = vi
 			.spyOn(sdkModule, "createAgentSession")
 			.mockResolvedValue(createSessionResult(createMockSession()));
@@ -126,7 +123,7 @@ describe("runSubprocess fork context", () => {
 			enableLsp: false,
 			contextSource: "fork",
 			parentSessionFile: parentFile,
-			parentSessionManager: { ensureOnDisk, flush, getCwd: () => "/tmp" },
+			parentSessionManager: { forkBranch, getCwd: () => "/tmp" },
 			parentForkLeafId: "completed-assistant",
 			parentModel: MODEL,
 			parentSystemPrompt: ["parent system"],
@@ -137,7 +134,9 @@ describe("runSubprocess fork context", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toBe("fork result");
 		expect(result.contextSource).toEqual({ requested: "fork", used: "fork", cacheReadTokens: 21 });
-		expect(forkSpy).toHaveBeenCalledWith(parentFile, "/tmp", "/tmp", undefined, {
+		expect(forkBranch).toHaveBeenCalledWith({
+			cwd: "/tmp",
+			sessionDir: "/tmp",
 			suppressBreadcrumb: true,
 			sessionFile: "/tmp/ForkAgent.jsonl",
 			sourceLeafId: "completed-assistant",
@@ -147,7 +146,6 @@ describe("runSubprocess fork context", () => {
 		expect(options?.systemPrompt).toBeInstanceOf(Function);
 		expect(options?.toolNames).toBeUndefined();
 		expect(options?.providerPromptCacheKey).toBe("parent-cache");
-		expect(parent.getEntries()).toEqual([]);
 	});
 
 	it("auto falls back to fresh context when the parent is not persisted", async () => {
@@ -193,7 +191,7 @@ describe("runSubprocess fork context", () => {
 			enableLsp: false,
 			contextSource: "fork",
 			parentSessionFile: "/tmp/parent.jsonl",
-			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentSessionManager: { forkBranch: async () => SessionManager.inMemory("/tmp"), getCwd: () => "/tmp" },
 			parentForkLeafId: "completed-assistant",
 			parentModel: MODEL,
 			parentSystemPrompt: ["parent system"],
@@ -234,7 +232,7 @@ describe("runSubprocess fork context", () => {
 			enableLsp: false,
 			contextSource: "fork",
 			parentSessionFile: "/tmp/parent.jsonl",
-			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentSessionManager: { forkBranch: async () => SessionManager.inMemory("/tmp"), getCwd: () => "/tmp" },
 			parentForkLeafId: "completed-assistant",
 			parentModel: MODEL,
 			parentSystemPrompt: ["parent system"],
@@ -269,7 +267,7 @@ describe("runSubprocess fork context", () => {
 			enableLsp: false,
 			contextSource: "fork",
 			parentSessionFile: "/tmp/parent.jsonl",
-			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentSessionManager: { forkBranch: async () => SessionManager.inMemory("/tmp"), getCwd: () => "/tmp" },
 			parentForkLeafId: "completed-assistant",
 			parentModel: MODEL,
 			parentSystemPrompt: ["parent system"],
@@ -307,7 +305,7 @@ describe("runSubprocess fork context", () => {
 			enableLsp: false,
 			contextSource: "fork",
 			parentSessionFile: "/tmp/parent.jsonl",
-			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentSessionManager: { forkBranch: async () => SessionManager.inMemory("/tmp"), getCwd: () => "/tmp" },
 			parentForkLeafId: "completed-assistant",
 			parentModel: MODEL,
 			parentSystemPrompt: ["parent system"],

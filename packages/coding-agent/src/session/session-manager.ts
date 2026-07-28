@@ -2353,7 +2353,12 @@ export class SessionManager {
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { suppressBreadcrumb?: boolean; sessionFile?: string; sourceLeafId?: string | null },
+		options?: {
+			suppressBreadcrumb?: boolean;
+			sessionFile?: string;
+			sourceLeafId?: string | null;
+			additionalDirectories?: readonly string[];
+		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
@@ -2386,7 +2391,11 @@ export class SessionManager {
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
-		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+		manager.#additionalDirectories = (
+			options?.additionalDirectories ??
+			sourceHeader?.additionalDirectories ??
+			[]
+		).filter(d => d !== path.resolve(cwd));
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
 		manager.#sessionName = manager.#header.title;
@@ -2399,6 +2408,27 @@ export class SessionManager {
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
 		return manager;
+	}
+
+	/** Clone a completed branch through this manager's configured storage backend. */
+	async forkBranch(options: {
+		cwd: string;
+		sessionDir?: string;
+		sessionFile?: string;
+		sourceLeafId?: string | null;
+		additionalDirectories?: readonly string[];
+		suppressBreadcrumb?: boolean;
+	}): Promise<SessionManager> {
+		if (!this.#sessionFile) throw new Error("Cannot fork a session without a persisted transcript");
+		await this.ensureOnDisk();
+		await this.flush();
+		return SessionManager.forkFrom(this.#sessionFile, options.cwd, options.sessionDir, this.#storage, options);
+	}
+
+	/** Reopen this session through its configured storage backend. */
+	async reopen(options?: { suppressBreadcrumb?: boolean }): Promise<SessionManager> {
+		if (!this.#sessionFile) throw new Error("Cannot reopen a session without a persisted transcript");
+		return SessionManager.open(this.#sessionFile, undefined, this.#storage, options);
 	}
 
 	/**
