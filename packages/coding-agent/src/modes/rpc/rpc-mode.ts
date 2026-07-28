@@ -670,14 +670,12 @@ export async function runRpcMode(
 	// breaks JSON.parse. In RPC mode stdout is the JSON protocol channel — nothing else
 	// may write there.
 	process.env.PI_NOTIFICATIONS = "off";
-	// Headless runtimes have no InteractiveMode to suspend/rehydrate vibe
-	// workers across a session switch; reconcile by tearing down the old scope
-	// (AgentSession.disposeActiveVibe) so a programmatic switch/branch never
-	// leaks workers into another transcript. switchSession()/branch() invoke this
-	// hook before changing the session identity; newSession() self-throws.
-	session.setSessionBeforeSwitchReconciler(async () => {
-		await session.disposeActiveVibe();
-	});
+	// Headless runtimes have no InteractiveMode to suspend/rehydrate vibe workers
+	// across a session switch. The after-switch reconciler tears down the previous
+	// scope's workers only after the switch commits, so a switch that fails and
+	// rolls back never strips the original session of its workers. newSession()
+	// self-throws during vibe (it cannot be rolled back).
+	session.setSessionAfterSwitchReconciler?.(vibeScope => session.detachVibeAfterSessionSwitch(vibeScope));
 
 	const frameEncoder = new RpcFrameEncoder();
 	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced

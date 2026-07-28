@@ -1119,11 +1119,11 @@ export class AcpAgent implements Agent {
 	async #registerPreparedSession(session: AgentSession, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
-		// Headless vibe reconciliation: kill the old scope on session switch/branch
-		// (ACP has no InteractiveMode to suspend/rehydrate). Mirrors rpc-mode.ts.
-		session.setSessionBeforeSwitchReconciler(async () => {
-			await session.disposeActiveVibe();
-		});
+		// Headless vibe reconciliation: detach the old scope's workers only after a
+		// session switch/branch commits (ACP has no InteractiveMode to
+		// suspend/rehydrate), so a failed switch never strips the original session.
+		// Mirrors rpc-mode.ts.
+		session.setSessionAfterSwitchReconciler?.(vibeScope => session.detachVibeAfterSessionSwitch(vibeScope));
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {

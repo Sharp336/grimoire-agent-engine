@@ -9,11 +9,10 @@
 ### Fixed
 
 - Forwarded `streamingBehavior` on the RPC builtin residual-prompt path (e.g. `/vibe <directive>`), matching the normal fallthrough: `AgentSession.prompt()` throws `AgentBusyError` when streaming with no behavior, so the directive was rejected instead of queued during an active turn.
-- Blocked RPC `switch_session`/`branch` while vibe mode is active: these lack the internal vibe guard that `newSession` has (`#assertVibeSessionTransitionAllowed`), and RPC installs no session-switch reconciler (unlike the TUI), so they previously leaked the old scope's workers and carried the restricted tool snapshot into the new session. `new_session` already hard-throws at the `AgentSession` boundary and surfaces a clean RPC error, so it is left untouched.
 - Populated `previousTools` in the shared `VibeModeState` from the TUI enter path (previously only the ACP/RPC path set it), so the `?? []` fallback on exit can never wipe a legitimately active toolset.
-- Vibe workers torn down on session dispose: `disposeActiveVibe()` is called from `#doDispose` before the async-job manager is disposed, so no runtime (TUI quit, ACP close, RPC shutdown) leaks background workers. Previously the registry's old scope lived through every session dispose.
-- ACP/RPC install a headless vibe session-switch reconciler: programmatic `switchSession()`/`branch()` during vibe now tears down the old scope instead of leaking workers into another transcript; `branch()` now invokes the before-switch reconciler (previously it did not).
-- Removed the redundant RPC JSON-command vibe guard: the session-switch reconciler covers all callers, including extension actions calling `switchSession()`/`branch()` directly, so the explicit `vibe_mode` JSON guard was no longer needed.
+- Vibe workers are killed on session dispose: `disposeActiveVibe()` runs from `#doDispose` before the async-job manager is torn down, so no runtime (TUI quit, ACP close, RPC shutdown) leaves background workers running. Previously the old scope's workers survived every session dispose.
+- ACP/RPC install a headless vibe session-switch reconciler that detaches the previous scope's workers (suspend-based, not kill) and clears vibe state only AFTER a `switchSession()`/`branch()` commits — a switch that fails and rolls back leaves the original session's vibe mode, workers, and restricted toolset untouched. `branch()` now participates in switch reconciliation (previously it did not).
+- Removed the redundant RPC JSON-command vibe guard: the commit-phase reconciler covers all callers, including extension actions calling `switchSession()`/`branch()` directly, so the explicit guard was no longer needed.
 
 ## [17.1.7] - 2026-07-27
 

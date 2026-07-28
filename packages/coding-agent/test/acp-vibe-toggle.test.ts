@@ -18,11 +18,14 @@
  * 5. Disposing a vibe-active session tears down its workers and clears vibe
  *    state — no runtime (TUI quit, ACP close, RPC shutdown) leaks background
  *    workers.
- * 6. A headless `switchSession()` during vibe triggers the before-switch
- *    reconciler (kill, not suspend/rehydrate), preventing workers from leaking
- *    into another transcript.
+ * 6. A headless `switchSession()`/`branch()` during vibe detaches the previous
+ *    scope's workers only after the switch commits (commit-phase reconciler),
+ *    clearing vibe state without clobbering the target's tools.
+ * 7. A headless switch that fails and rolls back leaves the original session's
+ *    vibe mode, workers, and restricted toolset untouched.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -178,11 +181,11 @@ describe("ACP /vibe handle", () => {
 		await executeAcpBuiltinSlashCommand("/vibe", buildRuntime());
 		expect(session.getVibeModeState()?.enabled).toBe(true);
 		await session.sessionManager.ensureOnDisk();
-		// Headless runtimes (ACP/RPC) install this reconciler; the TUI installs its
-		// own suspend/rehydrate variant. Mirrors runRpcMode / #registerPreparedSession.
-		session.setSessionBeforeSwitchReconciler(async () => {
-			await session.disposeActiveVibe();
-		});
+		const sourceSessionId = session.sessionManager.getSessionId();
+		// Headless runtimes (ACP/RPC) install the commit-phase reconciler; the TUI
+		// installs its own suspend/rehydrate variant. Mirrors runRpcMode /
+		// #registerPreparedSession — teardown runs AFTER the switch commits.
+		session.setSessionAfterSwitchReconciler(vibeScope => session.detachVibeAfterSessionSwitch(vibeScope));
 
 		const target = SessionManager.create(tempDir.path(), tempDir.path());
 		target.appendModeChange("none");
@@ -196,10 +199,38 @@ describe("ACP /vibe handle", () => {
 
 		expect(await session.switchSession(targetFile)).toBe(true);
 
-		// The headless reconciler kills the old scope (a programmatic switch has no
-		// expectation vibe survives it) and clears vibe state — not suspend/rehydrate.
-		expect(killAll).toHaveBeenCalledTimes(1);
-		expect(suspend).not.toHaveBeenCalled();
+		// The commit-phase reconciler detaches the SOURCE scope (frozen before the
+		// switch, so it is NOT the target's id) and clears vibe state — without
+		// persisting tombstones (suspend, not kill) or clobbering the target tools.
+		expect(suspend).toHaveBeenCalledTimes(1);
+		expect(suspend.mock.calls[0]?.[0]).toMatchObject({ parentSessionId: sourceSessionId });
+		expect(killAll).not.toHaveBeenCalled();
 		expect(session.getVibeModeState()).toBeUndefined();
+	});
+
+	it("leaves vibe mode intact when a headless session switch fails and rolls back", async () => {
+		await executeAcpBuiltinSlashCommand("/vibe", buildRuntime());
+		expect(session.getVibeModeState()?.enabled).toBe(true);
+		await session.sessionManager.ensureOnDisk();
+		const sourceSessionId = session.sessionManager.getSessionId();
+		const vibeToolCount = session.getActiveToolNames().length;
+		session.setSessionAfterSwitchReconciler(vibeScope => session.detachVibeAfterSessionSwitch(vibeScope));
+
+		// A directory path throws EISDIR (not ENOENT) inside setSessionFile,
+		// forcing the switch to fail inside the try and roll back.
+		const dirPath = path.join(tempDir.path(), "not-a-file.jsonl");
+		await fs.mkdir(dirPath);
+		const suspend = vi.spyOn(VibeSessionRegistry.global(), "suspendScope");
+		const killAll = vi.spyOn(VibeSessionRegistry.global(), "killAll");
+
+		await expect(session.switchSession(dirPath)).rejects.toThrow();
+
+		// The commit-phase reconciler must NOT have run: vibe mode, the worker
+		// scope, and the restricted toolset survive the rollback exactly as before.
+		expect(session.getVibeModeState()?.enabled).toBe(true);
+		expect(session.sessionManager.getSessionId()).toBe(sourceSessionId);
+		expect(session.getActiveToolNames().length).toBe(vibeToolCount);
+		expect(suspend).not.toHaveBeenCalled();
+		expect(killAll).not.toHaveBeenCalled();
 	});
 });

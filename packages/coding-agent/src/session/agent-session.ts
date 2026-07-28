@@ -204,7 +204,7 @@ import { normalizeModelContextImages } from "../utils/image-loading";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
-import { type VibeParentSession, VibeSessionRegistry } from "../vibe/runtime";
+import { type VibeOwnerScope, type VibeParentSession, VibeSessionRegistry } from "../vibe/runtime";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import type {
@@ -1525,6 +1525,12 @@ export class AgentSession {
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
+	}
+
+	#sessionAfterSwitchReconciler: ((vibeScope: VibeOwnerScope) => Promise<void>) | undefined;
+
+	setSessionAfterSwitchReconciler(reconciler: ((vibeScope: VibeOwnerScope) => Promise<void>) | null): void {
+		this.#sessionAfterSwitchReconciler = reconciler ?? undefined;
 	}
 
 	/** Provider-scoped mutable state store for transport/session caches. */
@@ -4288,18 +4294,8 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Kill this session's vibe workers, restore the pre-vibe toolset, and clear
-	 * vibe state. Called from {@link #doDispose} (no runtime should leave its own
-	 * background workers running after disposal) and from the headless
-	 * session-switch reconciler installed by ACP/RPC — the TUI instead suspends
-	 * and rehydrates via its own reconciler. A no-op returning 0 when vibe is
-	 * inactive, so callers need not pre-check.
-	 */
-	async disposeActiveVibe(): Promise<number> {
-		const vibeState = this.#vibeModeState;
-		if (!vibeState?.enabled) return 0;
-		const parent: VibeParentSession = {
+	#vibeParentAdapter(): VibeParentSession {
+		return {
 			getAgentId: () => this.getAgentId() ?? null,
 			getSessionId: () => this.sessionManager.getSessionId(),
 			getSessionFile: () => this.sessionManager.getSessionFile() ?? null,
@@ -4307,10 +4303,45 @@ export class AgentSession {
 			asyncJobManager: this.#asyncJobManager,
 			settings: this.settings,
 		};
-		const killed = await VibeSessionRegistry.global().killAll(parent);
+	}
+
+	/** Frozen vibe owner scope for the current session, or undefined when vibe is off. */
+	#captureVibeOwnerScope(): VibeOwnerScope | undefined {
+		if (!this.#vibeModeState?.enabled) return undefined;
+		return VibeSessionRegistry.global().ownerScope(this.#vibeParentAdapter());
+	}
+
+	/**
+	 * Kill this session's vibe workers, restore the pre-vibe toolset, and clear
+	 * vibe state. Called from {@link #doDispose} so no runtime (TUI quit, ACP
+	 * close, RPC shutdown) leaves its own background workers running after
+	 * disposal. A no-op returning 0 when vibe is inactive, so callers need not
+	 * pre-check. NOT used for session switches — those run teardown only after
+	 * the switch commits via {@link detachVibeAfterSessionSwitch}.
+	 */
+	async disposeActiveVibe(): Promise<number> {
+		const vibeState = this.#vibeModeState;
+		if (!vibeState?.enabled) return 0;
+		const killed = await VibeSessionRegistry.global().killAll(this.#vibeParentAdapter());
 		await this.deactivateVibeTools(vibeState.previousTools ?? []);
 		this.#vibeModeState = undefined;
 		return killed;
+	}
+
+	/**
+	 * Commit-phase vibe teardown for a headless session switch/branch: detach the
+	 * previous scope's workers (suspendScope — no tombstone, since the session
+	 * manager has already moved off the source), strip the transient vibe tools
+	 * without clobbering the target's active set, and clear vibe state. Invoked
+	 * only after the switch/branch commits (via the after-switch reconciler), so
+	 * a failed switch that rolls back leaves the original session's vibe mode
+	 * untouched. Uses suspendScope rather than killAll: killAll validates the
+	 * scope against the now-target session manager and would throw.
+	 */
+	async detachVibeAfterSessionSwitch(vibeScope: VibeOwnerScope): Promise<void> {
+		await VibeSessionRegistry.global().suspendScope(vibeScope, this.#asyncJobManager);
+		await this.removeVibeToolsPreservingActive();
+		this.#vibeModeState = undefined;
 	}
 
 	get goalRuntime(): GoalRuntime {
@@ -7010,6 +7041,7 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
+		const frozenVibeScope = this.#captureVibeOwnerScope();
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -7190,6 +7222,18 @@ export class AgentSession {
 					error: String(refreshErr),
 				});
 			}
+			// Commit-phase vibe teardown (headless): detach the previous scope's
+			// workers and clear vibe state AFTER the switch commits, so a switch
+			// that fails and rolls back leaves the original session's vibe mode
+			// intact. Skipped on same-session reload — the scope is unchanged, so
+			// detaching would drop the session's own live workers.
+			if (frozenVibeScope && switchingToDifferentSession) {
+				try {
+					await this.#sessionAfterSwitchReconciler?.(frozenVibeScope);
+				} catch (vibeError) {
+					logger.warn("Failed to reconcile vibe after session switch", { error: String(vibeError) });
+				}
+			}
 			// Only a committed switch retires the previous conversation's advisor spend:
 			// an earlier clear would be lost work if any step above rolled the switch back.
 			if (switchingToDifferentSession) this.#advisors.clearCost();
@@ -7278,6 +7322,7 @@ export class AgentSession {
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
+		const frozenVibeScope = this.#captureVibeOwnerScope();
 		await this.#sessionBeforeSwitchReconciler?.();
 
 		await this.#bash.flushPending();
@@ -7327,6 +7372,13 @@ export class AgentSession {
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 		}
 
+		if (frozenVibeScope) {
+			try {
+				await this.#sessionAfterSwitchReconciler?.(frozenVibeScope);
+			} catch (vibeError) {
+				logger.warn("Failed to reconcile vibe after session branch", { error: String(vibeError) });
+			}
+		}
 		return { selectedText, selectedImages, cancelled: false };
 	}
 
