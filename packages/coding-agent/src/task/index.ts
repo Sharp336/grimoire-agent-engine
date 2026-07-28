@@ -169,6 +169,7 @@ function renderDescription(
 	const spawnPolicy = resolveSpawnPolicy(parentSpawns);
 	const spawningDisabled = !spawnPolicy.enabled;
 	let filteredAgents = disabledAgents.length > 0 ? agents.filter(a => !disabledAgents.includes(a.name)) : agents;
+	filteredAgents = filteredAgents.filter(a => a.availability !== "primary");
 	if (spawningDisabled) {
 		filteredAgents = [];
 	} else if (spawnPolicy.allowedAgents !== null) {

@@ -3,6 +3,7 @@ import { Settings } from "../config/settings";
 import type { ToolSession } from "../tools";
 import * as taskDiscovery from "./discovery";
 import { TaskTool } from "./index";
+import { resolveEffectiveSubagentPolicy, StructuredSubagentError } from "./structured-subagent";
 import type { AgentDefinition } from "./types";
 import { getTaskSchema } from "./types";
 
@@ -58,5 +59,46 @@ describe("task spawn policy surfaces", () => {
 
 		expect(description).toContain("### fact-finder");
 		expect(description).not.toContain("### oracle");
+	});
+});
+
+describe("resolveEffectiveSubagentPolicy primary-only rejection", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("rejects primary-only agent", async () => {
+		const primaryOnlyAgent = {
+			name: "primary-only",
+			description: "",
+			systemPrompt: "",
+			availability: "primary" as const,
+			source: "project" as const,
+		} satisfies AgentDefinition;
+
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [primaryOnlyAgent],
+			projectAgentsDir: null,
+		});
+
+		const session = makeSession("*");
+
+		await expect(
+			resolveEffectiveSubagentPolicy({
+				session,
+				invocationKind: "task",
+				assignment: "do something",
+				agent: "primary-only",
+			}),
+		).rejects.toThrow(StructuredSubagentError);
+
+		await expect(
+			resolveEffectiveSubagentPolicy({
+				session,
+				invocationKind: "task",
+				assignment: "do something",
+				agent: "primary-only",
+			}),
+		).rejects.toThrow(/primary-only/);
 	});
 });

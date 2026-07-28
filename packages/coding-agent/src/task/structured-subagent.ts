@@ -261,6 +261,12 @@ export async function resolveEffectiveSubagentPolicy(
 			`Agent "${agentName}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
 		);
 	}
+	if (agent.availability === "primary") {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Agent "${agentName}" is primary-only and cannot be spawned as a subagent.`,
+		);
+	}
 
 	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
 	const schema = resolveSchema(request, effectiveAgent);

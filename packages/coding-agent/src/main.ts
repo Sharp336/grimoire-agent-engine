@@ -36,6 +36,7 @@ import {
 	expandRoleAlias,
 	getModelMatchPreferences,
 	resolveCliModel,
+	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
@@ -79,7 +80,10 @@ import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { resolveAgentSessionPolicy } from "./task/agent-policy";
+import { discoverAgents, getAgent } from "./task/discovery";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
+import type { AgentDefinition } from "./task/types";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
@@ -873,6 +877,23 @@ export async function buildSessionOptions(
 		}
 	}
 
+	// Agent persona selection (--agent) — must be before model resolution
+	// so agentPolicy is available for the agent model else-if branch.
+	let agentPersona: AgentDefinition | undefined;
+	if (parsed.agent) {
+		const discovery = await discoverAgents(options.cwd ?? getProjectDir());
+		agentPersona = getAgent(discovery.agents, parsed.agent);
+		if (!agentPersona) {
+			const available = discovery.agents.map(a => a.name).join(", ") || "none";
+			throw new Error(`Unknown agent "${parsed.agent}". Available: ${available}`);
+		}
+		if (agentPersona.availability === "subagent") {
+			throw new Error(`Agent "${parsed.agent}" is subagent-only and cannot be selected as main persona.`);
+		}
+	}
+
+	const agentPolicy = agentPersona ? resolveAgentSessionPolicy(agentPersona) : undefined;
+
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
@@ -938,6 +959,17 @@ export async function buildSessionOptions(
 			}
 		}
 		if (!options.model) options.model = scopedModels[0].model;
+	} else if (agentPolicy?.modelPatterns && agentPolicy.modelPatterns.length > 0) {
+		const resolved = resolveModelOverride(agentPolicy.modelPatterns, modelRegistry, activeSettings);
+		if (resolved.model) {
+			options.model = resolved.model;
+			if (resolved.thinkingLevel && !agentPolicy.thinkingLevel) {
+				options.thinkingLevel = resolved.thinkingLevel;
+			}
+		}
+		if (resolved.warning) {
+			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
+		}
 	}
 
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
@@ -991,6 +1023,8 @@ export async function buildSessionOptions(
 		!parsed.resume
 	) {
 		options.thinkingLevel = scopedModels[0].thinkingLevel;
+	} else if (agentPolicy?.thinkingLevel) {
+		options.thinkingLevel = agentPolicy.thinkingLevel;
 	}
 
 	// Scoped models for Ctrl+P cycling - fill in default thinking levels when not explicit
@@ -1026,6 +1060,8 @@ export async function buildSessionOptions(
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
+	} else if (agentPolicy?.toolNames) {
+		options.toolNames = agentPolicy.toolNames;
 	}
 
 	if (parsed.noLsp) {
@@ -1054,6 +1090,10 @@ export async function buildSessionOptions(
 	if (parsed.noExtensions) {
 		options.disableExtensionDiscovery = true;
 		options.additionalExtensionPaths = [];
+	}
+
+	if (agentPersona) {
+		options.agentPersona = agentPersona;
 	}
 
 	return options;

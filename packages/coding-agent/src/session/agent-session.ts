@@ -307,6 +307,7 @@ import {
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
+import type { AgentDefinition } from "../task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -915,6 +916,10 @@ export interface AgentSessionConfig {
 	builtInToolNames?: Iterable<string>;
 	/** Update tool-session predicates that render guidance from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
+	/** Mutate the session spawn allowlist (live agent switch). */
+	setSessionSpawns?: (spawns: string) => void;
+	/** Mutate the active main-session agent persona (live agent switch). */
+	setAgentPersona?: (agent: AgentDefinition | undefined) => void;
 	/** Register the write transport lazily when runtime xdev mounts first need it. */
 	ensureWriteRegistered?: () => Promise<boolean>;
 	/** Current session pre-LLM message transform pipeline */

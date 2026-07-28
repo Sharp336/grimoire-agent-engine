@@ -145,9 +145,10 @@ import {
 	buildSystemPromptToolMetadata,
 	loadProjectContextFiles as loadContextFilesInternal,
 } from "./system-prompt";
+import { resolveAgentSessionPolicy } from "./task/agent-policy";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
-import type { StructuredSubagentSchemaMode } from "./task/types";
+import type { AgentDefinition, StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -375,6 +376,9 @@ export interface CreateAgentSessionOptions {
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
+
+	/** Agent persona to apply as main-session policy (from --agent or /agent). */
+	agentPersona?: AgentDefinition;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -1638,6 +1642,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (model) return formatModelString(model);
 			return undefined;
 		};
+		// Mutable holders for agent persona live-switch (Step 6/9).
+		// These are mutated by setSessionSpawns/setAgentPersona closures passed
+		// to AgentSessionConfig, and read by getSessionSpawns / rebuildSystemPrompt.
+		let sessionSpawns = options.spawns ?? "*";
+		let activeAgentPersona: AgentDefinition | undefined = options.agentPersona;
+		if (activeAgentPersona) {
+			const policy = resolveAgentSessionPolicy(activeAgentPersona);
+			if (policy.spawns !== undefined) sessionSpawns = policy.spawns;
+		}
+
 		// Per-path mutation counter shared across edit/write tools. Late-diagnostics
 		// entries capture it at fetch time and are dropped at injection if a newer
 		// mutation (any tool) bumped it in the meantime.
@@ -1692,7 +1706,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
-			getSessionSpawns: () => options.spawns ?? "*",
+			getSessionSpawns: () => sessionSpawns,
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -2491,6 +2505,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			if (activeAgentPersona?.systemPrompt) {
+				appendParts.push(activeAgentPersona.systemPrompt);
+			}
 			let appendPrompt: string | undefined = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 			if (serverInstructions && serverInstructions.size > 0) {
 				const parts: string[] = [];
@@ -2961,6 +2978,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			initialMountedXdevToolNames,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
 			setActiveToolNames,
+			setSessionSpawns: (spawns: string) => {
+				sessionSpawns = spawns;
+			},
+			setAgentPersona: (agent: AgentDefinition | undefined) => {
+				activeAgentPersona = agent;
+			},
 			ensureWriteRegistered,
 			getMcpServerInstructions: mcpManager
 				? () => {

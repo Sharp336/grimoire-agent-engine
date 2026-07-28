@@ -24,6 +24,7 @@ export interface Args {
 	allowHome?: boolean;
 	provider?: string;
 	model?: string;
+	agent?: string;
 	config?: string[];
 	smol?: string;
 	slow?: string;
