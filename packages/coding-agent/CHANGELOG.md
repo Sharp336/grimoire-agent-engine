@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed ACP clients (e.g. Zed) not learning about a model change that happens from inside the agent loop — prewalk hand-offs, retry-fallback, model cycling — so the client's model picker/status bar kept showing the session's starting model even though the active model had actually switched. `AgentSession` now emits a `model_changed` event from its single model-mutation choke point, and the ACP surface's lifetime subscription re-pushes `config_option_update` on it.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
