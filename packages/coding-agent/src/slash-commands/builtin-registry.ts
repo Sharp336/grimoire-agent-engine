@@ -35,6 +35,7 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { discoverAgents, getAgent } from "../task/discovery";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
@@ -379,6 +380,75 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "agent",
+		aliases: ["switch-agent"],
+		description:
+			"Switch to a different agent persona. Use /agent <name> to switch directly, or /agent to open the picker.",
+		allowArgs: true,
+		inlineHint: "[name]",
+		handle: async (command, runtime) => {
+			const agentName = command.args.trim();
+			if (!agentName) {
+				await runtime.output("Usage: /agent <name>");
+				return commandConsumed();
+			}
+
+			const discovery = await discoverAgents(runtime.cwd);
+			const agent = getAgent(discovery.agents, agentName);
+			if (!agent) {
+				const available =
+					discovery.agents
+						.filter(a => a.availability !== "subagent")
+						.map(a => a.name)
+						.join(", ") || "none";
+				await runtime.output(`Unknown agent "${agentName}". Available: ${available}`);
+				return commandConsumed();
+			}
+			if (agent.availability === "subagent") {
+				await runtime.output(`Agent "${agentName}" is subagent-only and cannot be selected as main persona.`);
+				return commandConsumed();
+			}
+
+			try {
+				await runtime.session.switchAgentPersona(agent);
+			} catch (error) {
+				await runtime.output(`Failed to switch agent: ${error}`);
+				return commandConsumed();
+			}
+			await runtime.output(`Switched to agent persona "${agent.name}".`);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const agentName = command.args.trim();
+			if (agentName) {
+				const discovery = await discoverAgents(runtime.ctx.sessionManager.getCwd());
+				const agent = getAgent(discovery.agents, agentName);
+				if (!agent) {
+					runtime.ctx.showWarning(`Unknown agent "${agentName}".`);
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				if (agent.availability === "subagent") {
+					runtime.ctx.showWarning(`Agent "${agentName}" is subagent-only.`);
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				try {
+					await runtime.ctx.session.switchAgentPersona(agent);
+				} catch (error) {
+					runtime.ctx.showWarning(`Failed to switch agent: ${error}`);
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				runtime.ctx.editor.setText("");
+				return;
+			}
+
+			runtime.ctx.showAgentPersonaSelector();
 			runtime.ctx.editor.setText("");
 		},
 	},

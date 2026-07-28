@@ -640,6 +640,51 @@ export class SelectorController {
 		this.#showModelHub({});
 	}
 
+	async showAgentPersonaSelector(): Promise<void> {
+		const { discoverAgents } = await import("../../task/discovery");
+		const { AgentPersonaPickerComponent } = await import("../components/agent-persona-picker");
+		const discovery = await discoverAgents(this.ctx.sessionManager.getCwd());
+		const disabled = new Set((this.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
+		const available = discovery.agents.filter(a => a.availability !== "subagent" && !disabled.has(a.name));
+		if (available.length === 0) {
+			this.ctx.showStatus("No selectable agent personas found.");
+			return;
+		}
+
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+
+		const picker = new AgentPersonaPickerComponent(this.ctx.ui, available, this.ctx.session.agentPersona?.name, {
+			onSelect: async agent => {
+				try {
+					await this.ctx.session.switchAgentPersona(agent);
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorBorderColor();
+					this.ctx.showStatus(`Switched to agent persona "${agent.name}".`);
+					done();
+				} catch (error) {
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+				}
+			},
+			onCancel: done,
+		});
+		overlayHandle = this.ctx.ui.showOverlay(picker, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(picker);
+		this.ctx.ui.requestRender();
+	}
+
 	/**
 	 * Compact session-only model picker (alt+p / `/switch`): a floating
 	 * bottom-anchored overlay over the transcript. The current model is
