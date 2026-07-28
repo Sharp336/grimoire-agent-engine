@@ -386,6 +386,13 @@ export interface Terminal {
 	 */
 	onAppearanceChange(callback: (appearance: TerminalAppearance) => void): void;
 	/**
+	 * Register a callback fired for every valid OSC 11 appearance report,
+	 * including reports whose classification matches the current appearance.
+	 * Unlike onAppearanceChange, this does not replay an earlier report.
+	 * Optional so custom Terminals built against older pi-tui versions keep working.
+	 */
+	onAppearanceReport?(callback: (appearance: TerminalAppearance) => void): (() => void) | void;
+	/**
 	 * Issue a single OSC 11 background-color re-query, driving the appearance
 	 * callbacks through the same parse/dedup pipeline used at startup and on Mode
 	 * 2031 notifications. Bounded: one probe per call, no timers. Invoked on the
@@ -497,6 +504,7 @@ export class ProcessTerminal implements Terminal {
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
 	#appearanceCallbacks: Array<(appearance: TerminalAppearance) => void> = [];
+	#appearanceReportCallbacks: Array<(appearance: TerminalAppearance) => void> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
 	#osc11QueuedRoute?: Osc11QueryRoute;
@@ -558,6 +566,17 @@ export class ProcessTerminal implements Terminal {
 				/* ignore callback errors */
 			}
 		}
+	}
+
+	onAppearanceReport(callback: (appearance: TerminalAppearance) => void): () => void {
+		this.#appearanceReportCallbacks.push(callback);
+		let subscribed = true;
+		return () => {
+			if (!subscribed) return;
+			subscribed = false;
+			const index = this.#appearanceReportCallbacks.indexOf(callback);
+			if (index !== -1) this.#appearanceReportCallbacks.splice(index, 1);
+		};
 	}
 
 	/**
@@ -1152,8 +1171,16 @@ export class ProcessTerminal implements Terminal {
 		};
 		const luminance = 0.299 * normalize(rHex) + 0.587 * normalize(gHex) + 0.114 * normalize(bHex);
 		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
-		if (mode === this.#appearance) return;
+		const changed = mode !== this.#appearance;
 		this.#appearance = mode;
+		for (const cb of [...this.#appearanceReportCallbacks]) {
+			try {
+				cb(mode);
+			} catch {
+				/* ignore callback errors */
+			}
+		}
+		if (!changed) return;
 		for (const cb of this.#appearanceCallbacks) {
 			try {
 				cb(mode);

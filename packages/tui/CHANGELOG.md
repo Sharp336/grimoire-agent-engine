@@ -22,6 +22,9 @@
 - Streaming markdown now freezes the stable prefix through provably closed lists instead of re-lexing everything after the last non-list block on every delta
 - Raised the markdown render cache entry budget (32 KiB → 256 KiB) so large messages — exactly the expensive renders — are cacheable
 - Deduplicated terminal cursor-visibility writes to skip redundant escape sequences
+### Added
+
+- Added response-level OSC 11 appearance subscriptions so terminal consumers can distinguish confirmed unchanged background classifications from missing replies ([#6923](https://github.com/can1357/oh-my-pi/pull/6923) by [@Sairen777](https://github.com/Sairen777)).
 
 ## [17.1.6] - 2026-07-27
 
