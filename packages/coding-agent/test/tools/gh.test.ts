@@ -1125,7 +1125,7 @@ exec ${JSON.stringify(realGit)} "$@"
 				process.env.EXPECTED_LC_CTYPE = "C.UTF-8";
 				process.env.LC_ALL = "C.UTF-8";
 				delete process.env.LANG;
-				delete process.env.LC_CTYPE;
+				process.env.LC_CTYPE = "";
 				delete process.env.LC_MESSAGES;
 				await git.diff(remoteFixture.repoRoot, { env: { LC_MESSAGES: undefined } });
 

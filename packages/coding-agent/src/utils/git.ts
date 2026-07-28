@@ -388,7 +388,9 @@ function buildGitEnv(overrides?: Record<string, string | undefined>): Record<str
 		...overrides,
 	};
 	const preservedCharacterLocale =
-		env.LC_CTYPE === undefined && env.LC_ALL !== undefined && /(?:^|[._-])utf-?8(?:$|[.@_-])/i.test(env.LC_ALL)
+		(env.LC_CTYPE === undefined || env.LC_CTYPE === "") &&
+		env.LC_ALL !== undefined &&
+		/(?:^|[._-])utf-?8(?:$|[.@_-])/i.test(env.LC_ALL)
 			? env.LC_ALL
 			: undefined;
 	return {
