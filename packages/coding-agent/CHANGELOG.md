@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Agent definition files can now be selected as the main-session persona via `--agent <name>`, `/agent <name>`, and `/switch-agent`. The agent's frontmatter (tools, model, thinking, system prompt) becomes the session policy, with explicit CLI flags taking precedence. Live switching mutates the session in place. Agent identity persists across resume/fork. OpenCode `mode: primary|subagent|all` and Copilot `user-invocable`/`disable-model-invocation` frontmatter control availability. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
+
+### Changed
+
+- `applyToolOverlay` primitive extracted on AgentSession, generalizing the snapshot/apply/restore pattern shared by plan mode, plan-yolo, print-mode, and agent-selection. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
+
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

@@ -67,6 +67,49 @@ describe("resolveEffectiveSubagentPolicy primary-only rejection", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("allows all/subagent agents at preflight", async () => {
+		const allAgent = {
+			name: "all-agent",
+			description: "",
+			systemPrompt: "",
+			availability: "all" as const,
+			source: "project" as const,
+		} satisfies AgentDefinition;
+
+		const subAgent = {
+			name: "sub-agent",
+			description: "",
+			systemPrompt: "",
+			availability: "subagent" as const,
+			source: "project" as const,
+		} satisfies AgentDefinition;
+
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [allAgent, subAgent],
+			projectAgentsDir: null,
+		});
+
+		const session = makeSession("*");
+
+		await expect(
+			resolveEffectiveSubagentPolicy({
+				session,
+				invocationKind: "task",
+				assignment: "do something",
+				agent: "all-agent",
+			}),
+		).resolves.toBeDefined();
+
+		await expect(
+			resolveEffectiveSubagentPolicy({
+				session,
+				invocationKind: "task",
+				assignment: "do something",
+				agent: "sub-agent",
+			}),
+		).resolves.toBeDefined();
+	});
+
 	it("rejects primary-only agent", async () => {
 		const primaryOnlyAgent = {
 			name: "primary-only",
