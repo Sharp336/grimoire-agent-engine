@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Requesty provider support with mixed API routing: `/login requesty` API-key flow validated against the Requesty management endpoint, plus `REQUESTY_API_KEY` env-var discovery.
+
 ## [17.2.0] - 2026-07-30
 
 ### Added
@@ -96,6 +100,7 @@
 ### Added
 
 - MiniMax Token Plan accounts now report quota in `omp usage`. `GET /v1/token_plan/remains` returns one bucket per plan quota, each carrying a rolling interval window and a weekly window, so `minimax-code` surfaces real remaining percentages instead of an empty report. A model the plan does not include comes back looking like an untouched quota; those buckets are dropped from the report and named in its metadata. The mainland id `minimax-code-cn` is untouched.
+
 - OAuth logins now stamp `authorizedAt` (epoch ms of the interactive login) on the stored credential, and every refresh-persist path preserves it. Anthropic expires the whole OAuth grant family ~30 days after authorization regardless of refresh-token rotation (observed as `invalid_grant: "Refresh token expired"` on the latest rotated token, exactly 30 days after login, across four production accounts), so the login anchor is what makes re-login deadlines computable. Exported `ANTHROPIC_OAUTH_GRANT_TTL_MS` alongside the anthropic OAuth flow.
 - Added `GET /v1/credentials/disabled` to the auth broker and `AuthBrokerClient.listDisabledCredentials`: disabled-credential tombstones (`DisabledCredentialSummary` — identity, verbatim disable cause, disable timestamp; never token material) so auto-disabled accounts stay visible to clients instead of silently vanishing from the snapshot. `AuthStorage.listDisabledCredentials` serves the same data locally from SQLite; clients of brokers predating the endpoint get an empty list (404 mapped, no error).
 - Added `AuthStorage.revalidateCredentials()` and the optional `AuthCredentialStore.refreshSnapshot` hook: remote broker stores re-fetch `GET /v1/snapshot` on demand so callers pairing live per-credential data with stored identities (`omp usage`) never render against the up-to-an-hour-stale disk-cached snapshot; local SQLite stores are always current and only reload.
