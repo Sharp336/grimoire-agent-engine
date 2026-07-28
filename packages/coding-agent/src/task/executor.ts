@@ -2765,32 +2765,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const effectiveCwd = worktree ?? cwd;
 			const forkRequested = requestedContextSource !== "fresh";
-			const forkUnavailableReason =
-				worktree !== undefined
-					? "fork context is incompatible with isolated worktrees"
-					: !sessionFile
-						? "fork context requires a persisted child transcript"
-						: !options.parentSessionFile ||
-								!options.parentSessionManager ||
-								options.parentForkLeafId === undefined
-							? "fork context requires a persisted parent session"
-							: !options.parentModel || !options.parentSystemPrompt || !options.parentToolNames
-								? "fork context requires the active parent request shape"
-								: undefined;
+			const forkUnavailableReason = !sessionFile
+				? "fork context requires a persisted child transcript"
+				: !options.parentSessionFile || !options.parentSessionManager || options.parentForkLeafId === undefined
+					? "fork context requires a persisted parent session"
+					: undefined;
 			if (requestedContextSource === "fork" && forkUnavailableReason) {
 				throw new Error(forkUnavailableReason);
 			}
-			let useFork = forkRequested && forkUnavailableReason === undefined;
-			const runtimeModel = useFork ? options.parentModel : model;
+			const useFork = forkRequested && forkUnavailableReason === undefined;
+			const runtimeModel = model;
 			if (runtimeModel?.contextWindow && runtimeModel.contextWindow > 0) {
 				progress.contextWindow = runtimeModel.contextWindow;
-			}
-			if (useFork && runtimeModel) {
-				const level = options.parentThinkingLevel;
-				progress.resolvedModel =
-					level !== undefined
-						? formatModelSelectorValue(formatModelStringWithRouting(runtimeModel), level)
-						: formatModelStringWithRouting(runtimeModel);
 			}
 			let sessionManager: SessionManager;
 			if (useFork) {
@@ -2915,23 +2901,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRegistry,
 				getApiKey: options.getApiKey,
 				settings: subagentSettings,
-				model: useFork ? options.parentModel : model,
-				modelPattern: useFork || model || modelOverride === undefined ? undefined : modelPatterns,
+				model,
+				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 				modelPatternAuthFallback:
-					useFork || model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
 				modelPatternFallbackRole:
-					useFork || model || modelOverride === undefined
-						? undefined
-						: `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
+					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
 				modelPatternDefaultFallbackChain:
-					useFork || model || modelOverride === undefined ? undefined : defaultRetryFallbackChain,
-				thinkingLevel: useFork ? options.parentThinkingLevel : effectiveThinkingLevel,
-				thinkingLevelCeiling: useFork ? undefined : spawnEffortCeiling,
-				toolNames: useFork ? options.parentToolNames : toolNames,
+					model || modelOverride === undefined ? undefined : defaultRetryFallbackChain,
+				thinkingLevel: effectiveThinkingLevel,
+				thinkingLevelCeiling: spawnEffortCeiling,
+				toolNames,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: options.restrictToolNames,
-				requireYieldTool: !useFork,
+				requireYieldTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
 				promptTemplates: options.promptTemplates,
@@ -2939,29 +2923,27 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				rules: options.rules,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPrompt: useFork
-					? [...options.parentSystemPrompt!]
-					: defaultPrompt => {
-							const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-								agent: agent.systemPrompt,
-								context: options.context?.trim() ?? "",
-								planReference: options.planReference?.content ?? "",
-								planReferencePath: options.planReference?.path ?? "",
-								worktree: worktree ?? "",
-								outputSchema: normalizedOutputSchema,
-								outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-								ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
-								ircSelfId: ircEnabled ? id : "",
-							});
-							return defaultPrompt.length === 0
-								? [subagentPrompt]
-								: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-						},
+				systemPrompt: defaultPrompt => {
+					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+						agent: agent.systemPrompt,
+						context: options.context?.trim() ?? "",
+						planReference: options.planReference?.content ?? "",
+						planReferencePath: options.planReference?.path ?? "",
+						worktree: worktree ?? "",
+						outputSchema: normalizedOutputSchema,
+						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+						ircSelfId: ircEnabled ? id : "",
+					});
+					return defaultPrompt.length === 0
+						? [subagentPrompt]
+						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+				},
 				providerSessionId: useFork ? `${sessionManagerForRun.getSessionId()}:fork` : undefined,
 				providerPromptCacheKey: useFork ? options.parentPromptCacheKey : undefined,
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
-				prewalk: useFork ? undefined : prewalk,
+				prewalk,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
 				parentHindsightSessionState: options.parentHindsightSessionState,
@@ -2985,7 +2967,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				},
 			});
 
-			let sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
+			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));
@@ -2996,46 +2978,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
 				throw err;
 			}
-			if (useFork) {
-				const requestedTools = options.parentToolNames!;
-				const reconstructedTools = session.getActiveToolNames();
-				const sameTools =
-					requestedTools.length === reconstructedTools.length &&
-					requestedTools.every((name, index) => reconstructedTools[index] === name);
-				if (!sameTools) {
-					await session.dispose();
-					const reason = `fork context cannot reconstruct the parent tool catalog (expected: ${requestedTools.join(", ")}; actual: ${reconstructedTools.join(", ")})`;
-					if (requestedContextSource === "fork") throw new Error(reason);
-					if (sessionFile) {
-						await sessionManager.dropSession(sessionFile);
-						sessionManager = await SessionManager.open(sessionFile, undefined, undefined, {
-							initialCwd: effectiveCwd,
-							suppressBreadcrumb: true,
-						});
-					} else {
-						sessionManager = SessionManager.inMemory(effectiveCwd);
-					}
-					if (options.parentArtifactManager) sessionManager.adoptArtifactManager(options.parentArtifactManager);
-					useFork = false;
-					contextSource = {
-						requested: requestedContextSource,
-						used: "fresh",
-						cacheReadTokens: 0,
-						downgradeReason: reason,
-					};
-					if (model?.contextWindow && model.contextWindow > 0) progress.contextWindow = model.contextWindow;
-					if (model) {
-						const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
-						progress.resolvedModel =
-							displayLevel !== undefined
-								? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
-								: formatModelStringWithRouting(model);
-					}
-					sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
-					({ session } = await awaitAbortable(sessionPromise));
-				}
-				if (useFork) contextSource = { requested: requestedContextSource, used: "fork", cacheReadTokens: 0 };
-			}
+			if (useFork) contextSource = { requested: requestedContextSource, used: "fork", cacheReadTokens: 0 };
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);

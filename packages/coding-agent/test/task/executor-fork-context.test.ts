@@ -143,9 +143,9 @@ describe("runSubprocess fork context", () => {
 			sourceLeafId: "completed-assistant",
 		});
 		const options = createSpy.mock.calls[0]?.[0];
-		expect(options?.model).toBe(MODEL);
-		expect(options?.systemPrompt).toEqual(["parent system"]);
-		expect(options?.toolNames).toEqual(["read"]);
+		expect(options?.model).toBeUndefined();
+		expect(options?.systemPrompt).toBeInstanceOf(Function);
+		expect(options?.toolNames).toBeUndefined();
 		expect(options?.providerPromptCacheKey).toBe("parent-cache");
 		expect(parent.getEntries()).toEqual([]);
 	});
@@ -290,7 +290,7 @@ describe("runSubprocess fork context", () => {
 		expect(messages).toHaveLength(2);
 	});
 
-	it("reports no fresh downgrade when an explicit incompatible fork never starts", async () => {
+	it("keeps fork context when headless construction omits a parent tool", async () => {
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory("/tmp"));
 		const createSpy = vi
 			.spyOn(sdkModule, "createAgentSession")
@@ -314,43 +314,9 @@ describe("runSubprocess fork context", () => {
 			parentToolNames: ["ask"],
 		});
 
-		expect(result.exitCode).toBe(1);
-		expect(result.contextSource).toBeUndefined();
-		expect(createSpy).toHaveBeenCalledTimes(1);
-	});
-
-	it("auto rebuilds a fresh child when the fork tool catalog differs", async () => {
-		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory("/tmp"));
-		const incompatible = createMockSession({ activeTools: ["read"] });
-		const fresh = createMockSession({ activeTools: ["read"] });
-		const createSpy = vi
-			.spyOn(sdkModule, "createAgentSession")
-			.mockResolvedValueOnce(createSessionResult(incompatible))
-			.mockResolvedValueOnce(createSessionResult(fresh));
-
-		const result = await runSubprocess({
-			cwd: "/tmp",
-			agent: AGENT,
-			task: "inspect",
-			index: 0,
-			id: "AutoCatalogAgent",
-			artifactsDir: "/tmp",
-			settings: Settings.isolated(),
-			modelRegistry: { authStorage: {}, refresh: async () => {} } as unknown as ModelRegistry,
-			enableLsp: false,
-			contextSource: "auto",
-			parentSessionFile: "/tmp/parent.jsonl",
-			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
-			parentForkLeafId: "completed-assistant",
-			parentModel: MODEL,
-			parentSystemPrompt: ["parent system"],
-			parentToolNames: ["read", "ask"],
-		});
-
 		expect(result.exitCode).toBe(0);
-		expect(result.contextSource).toMatchObject({ requested: "auto", used: "fresh" });
-		expect(result.contextSource?.downgradeReason).toContain("cannot reconstruct the parent tool catalog");
-		expect(createSpy).toHaveBeenCalledTimes(2);
-		expect(createSpy.mock.calls[1]?.[0]?.systemPrompt).toBeInstanceOf(Function);
+		expect(result.contextSource).toMatchObject({ requested: "fork", used: "fork" });
+		expect(createSpy).toHaveBeenCalledTimes(1);
+		expect(createSpy.mock.calls[0]?.[0]?.toolNames).toBeUndefined();
 	});
 });
