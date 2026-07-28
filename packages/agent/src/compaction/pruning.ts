@@ -89,9 +89,7 @@ export function pruneToolOutputMessages(
 	messages: readonly AgentMessage[],
 	config?: PruneMessagesConfig,
 ): PruneMessagesResult {
-	const workingMessages = messages.map(message =>
-		message.role === "toolResult" ? ({ ...message } as AgentMessage) : message,
-	);
+	const workingMessages = Array.from(messages);
 	const entries: SessionMessageEntry[] = workingMessages.map((message, index) => ({
 		type: "message",
 		id: `message-${index}`,
@@ -100,11 +98,10 @@ export function pruneToolOutputMessages(
 		message,
 	}));
 
-	const result = pruneToolOutputs(entries, config ?? DEFAULT_PRUNE_CONFIG);
-	const prunedMessages = workingMessages.map((message, index) => {
+	const result = pruneToolOutputsInternal(entries, config ?? DEFAULT_PRUNE_CONFIG, true);
+	const prunedMessages = entries.map((entry, index) => {
 		const original = messages[index];
-		if (message.role !== "toolResult" || original?.role !== "toolResult") return original ?? message;
-		return message.prunedAt === original.prunedAt ? original : message;
+		return entry.message === original ? (original ?? entry.message) : (entry.message as AgentMessage);
 	});
 
 	return { ...result, messages: prunedMessages };
@@ -349,7 +346,11 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 	return { prunedCount: toPrune.length, tokensSaved };
 }
 
-export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = DEFAULT_PRUNE_CONFIG): PruneResult {
+function pruneToolOutputsInternal(
+	entries: SessionEntry[],
+	config: PruneConfig,
+	cloneMessagesBeforePruning: boolean,
+): PruneResult {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
 	let prunedCount = 0;
@@ -439,7 +440,11 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 
 	const prunedAt = Date.now();
 	for (const candidate of candidates) {
-		const message = candidate.entry.message as ToolResultMessage;
+		let message = candidate.entry.message as ToolResultMessage;
+		if (cloneMessagesBeforePruning) {
+			message = { ...message };
+			candidate.entry.message = message;
+		}
 		const notice = candidate.superseded
 			? SUPERSEDED_NOTICE
 			: candidate.useless
@@ -452,6 +457,10 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	}
 
 	return { prunedCount, tokensSaved };
+}
+
+export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = DEFAULT_PRUNE_CONFIG): PruneResult {
+	return pruneToolOutputsInternal(entries, config, false);
 }
 
 /**

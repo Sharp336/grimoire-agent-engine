@@ -80,4 +80,27 @@ describe("pruneToolOutputMessages", () => {
 		expect((fileResult.content[0] as TextContent).text).toStartWith("prunable file output");
 		expect(fileResult.prunedAt).toBeUndefined();
 	});
+
+	it("does not clone tool results that remain unpruned", () => {
+		const cloneProbe = Symbol("cloneProbe");
+		let cloneReads = 0;
+		const fileResult = readResult("file-read", "small output");
+		Object.defineProperty(fileResult, cloneProbe, {
+			enumerable: true,
+			get: () => {
+				cloneReads++;
+				return true;
+			},
+		});
+		const messages: readonly AgentMessage[] = [
+			assistantReadCall("file-read", "packages/agent/src/index.ts"),
+			fileResult,
+		];
+
+		const result = pruneToolOutputMessages(messages, DEFAULT_PRUNE_CONFIG);
+
+		expect(result.prunedCount).toBe(0);
+		expect(result.messages[1]).toBe(fileResult);
+		expect(cloneReads).toBe(0);
+	});
 });
