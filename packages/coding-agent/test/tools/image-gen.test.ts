@@ -342,24 +342,23 @@ describe("imageGenTool", () => {
 		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("codex-image-2"));
 	});
 
-	it("uses multipart Codex Images API payload for official-JWT image edits", async () => {
+	it("uses JSON Codex Images API payload for official-JWT image edits", async () => {
 		let requestUrl: string | undefined;
 		let requestMethod: string | undefined;
 		let requestHeaders: Headers | undefined;
-		let requestBody: FormData | undefined;
+		let requestBody: Record<string, unknown> | undefined;
 		const payload = Buffer.from(
 			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-codex-edit" } }),
 		).toString("base64");
 		const codexToken = `header.${payload}.signature`;
-		const sourceImage = Buffer.from("source-image");
-		const secondSourceImage = Buffer.from("second-source-image");
+		const sourceImage = Buffer.from("source-image").toString("base64");
+		const secondSourceImage = Buffer.from("second-source-image").toString("base64");
 
 		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-			const request = new Request(input, init);
-			requestUrl = request.url;
-			requestMethod = request.method;
-			requestHeaders = request.headers;
-			requestBody = await request.formData();
+			requestUrl = input.toString();
+			requestMethod = init?.method;
+			requestHeaders = new Headers(init?.headers);
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
 			return new Response(
 				JSON.stringify({ data: [{ b64_json: Buffer.from("codex-edited-image").toString("base64") }] }),
 				{ status: 200, headers: { "content-type": "application/json" } },
@@ -397,8 +396,8 @@ describe("imageGenTool", () => {
 				subject: "a cat",
 				changes: ["make the references noir"],
 				input: [
-					{ data: sourceImage.toString("base64"), mime_type: "image/png" },
-					{ data: secondSourceImage.toString("base64"), mime_type: "image/jpeg" },
+					{ data: sourceImage, mime_type: "image/png" },
+					{ data: secondSourceImage, mime_type: "image/jpeg" },
 				],
 			},
 			undefined,
@@ -412,22 +411,18 @@ describe("imageGenTool", () => {
 		expect(requestHeaders?.get("chatgpt-account-id")).toBe("acct-codex-edit");
 		expect(requestHeaders?.get("originator")).toBe("pi");
 		expect(requestHeaders?.get("version")).toBe("0.144.1");
-		expect(requestHeaders?.get("content-type")).toMatch(/^multipart\/form-data; boundary=/);
-		expect(requestBody?.get("prompt")).toBe("a cat.\n\nChanges:\n- make the references noir");
-		expect(requestBody?.get("model")).toBe("gpt-image-2");
-		expect(requestBody?.get("background")).toBe("auto");
-		expect(requestBody?.get("quality")).toBe("auto");
-		expect(requestBody?.get("size")).toBe("auto");
-		const imageParts = requestBody?.getAll("image") ?? [];
-		expect(imageParts).toHaveLength(2);
-		const [firstImage, secondImage] = imageParts;
-		if (!(firstImage instanceof File) || !(secondImage instanceof File)) {
-			throw new Error("Expected repeated image file parts");
-		}
-		expect(firstImage.type).toBe("image/png");
-		expect(Buffer.from(await firstImage.arrayBuffer())).toEqual(sourceImage);
-		expect(secondImage.type).toBe("image/jpeg");
-		expect(Buffer.from(await secondImage.arrayBuffer())).toEqual(secondSourceImage);
+		expect(requestHeaders?.get("content-type")).toBe("application/json");
+		expect(requestBody).toEqual({
+			prompt: "a cat.\n\nChanges:\n- make the references noir",
+			background: "auto",
+			model: "gpt-image-2",
+			quality: "auto",
+			size: "auto",
+			images: [
+				{ image_url: `data:image/png;base64,${sourceImage}` },
+				{ image_url: `data:image/jpeg;base64,${secondSourceImage}` },
+			],
+		});
 		expect(result.details?.provider).toBe("openai-codex");
 		expect(result.details?.model).toBe("gpt-image-2");
 		expect(result.details?.imageCount).toBe(1);
