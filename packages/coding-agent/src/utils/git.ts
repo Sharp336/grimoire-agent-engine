@@ -381,11 +381,19 @@ function normalizeStdin(input: CommandOptions["stdin"]): "ignore" | Uint8Array {
 }
 
 function buildGitEnv(overrides?: Record<string, string | undefined>): Record<string, string | undefined> {
-	return {
+	const env: Record<string, string | undefined> = {
 		...process.env,
 		GIT_OPTIONAL_LOCKS: "0",
 		...AMBIENT_GIT_ENV,
 		...overrides,
+	};
+	const preservedCharacterLocale =
+		env.LC_CTYPE === undefined && env.LC_ALL !== undefined && /(?:^|[._-])utf-?8(?:$|[.@_-])/i.test(env.LC_ALL)
+			? env.LC_ALL
+			: undefined;
+	return {
+		...env,
+		...(preservedCharacterLocale === undefined ? {} : { LC_CTYPE: preservedCharacterLocale }),
 		...GIT_NON_INTERACTIVE_ENV,
 	};
 }

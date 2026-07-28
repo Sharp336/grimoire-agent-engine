@@ -16,7 +16,7 @@ import {
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import { getAgentDir, hashPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 // Isolate every `git` invocation in this file from the developer's host
 // configuration. The fixture spawns dozens of git subprocesses against tiny
@@ -1085,32 +1085,33 @@ exec ${JSON.stringify(realGit)} "$@"
 			}
 		});
 
-		it("pins Git message locale without clobbering LC_CTYPE", async () => {
-			// The shim is a bash script resolved via `which`; neither exists on Windows.
+		it("pins Git messages while preserving UTF-8 character locale", async () => {
 			if (process.platform === "win32") return;
 			const originalPath = process.env.PATH;
 			const originalLocale = {
+				EXPECTED_LC_CTYPE: process.env.EXPECTED_LC_CTYPE,
+				LANG: process.env.LANG,
 				LC_ALL: process.env.LC_ALL,
 				LC_CTYPE: process.env.LC_CTYPE,
 				LC_MESSAGES: process.env.LC_MESSAGES,
 			};
 			const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-locale-"));
-			const realGitResult = Bun.spawnSync(["which", "git"], { stdout: "pipe", stderr: "pipe" });
-			expect(realGitResult.exitCode).toBe(0);
-			const realGit = new TextDecoder().decode(realGitResult.stdout).trim();
+			const realGit = $which("git");
+			expect(realGit).not.toBeNull();
+			if (realGit === null) return;
 			const fakeGit = path.join(fakeBin, "git");
 			await fs.writeFile(
 				fakeGit,
-				`#!/usr/bin/env bash
-if [[ "\${LC_MESSAGES-}" != "C" ]]; then
+				`#!/bin/sh
+if [ "\${LC_MESSAGES-}" != "C" ]; then
 	echo "LC_MESSAGES was \${LC_MESSAGES-<unset>}" >&2
 	exit 41
 fi
-if [[ "\${LC_CTYPE-}" != "UTF-8-SENTINEL" ]]; then
-	echo "LC_CTYPE was \${LC_CTYPE-<unset>}" >&2
+if [ "\${LC_CTYPE-}" != "\${EXPECTED_LC_CTYPE-}" ]; then
+	echo "LC_CTYPE was \${LC_CTYPE-<unset>}, expected \${EXPECTED_LC_CTYPE-<unset>}" >&2
 	exit 42
 fi
-if [[ "\${LC_ALL+x}" == "x" ]]; then
+if [ "\${LC_ALL+x}" = "x" ]; then
 	echo "LC_ALL leaked: \${LC_ALL}" >&2
 	exit 43
 fi
@@ -1120,12 +1121,19 @@ exec ${JSON.stringify(realGit)} "$@"
 			await fs.chmod(fakeGit, 0o755);
 
 			try {
-				process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+				process.env.PATH = fakeBin;
+				process.env.EXPECTED_LC_CTYPE = "C.UTF-8";
+				process.env.LC_ALL = "C.UTF-8";
+				delete process.env.LANG;
+				delete process.env.LC_CTYPE;
+				delete process.env.LC_MESSAGES;
+				await git.diff(remoteFixture.repoRoot, { env: { LC_MESSAGES: undefined } });
+
+				process.env.EXPECTED_LC_CTYPE = "UTF-8-SENTINEL";
 				process.env.LC_ALL = "fr_FR.UTF-8";
 				process.env.LC_CTYPE = "UTF-8-SENTINEL";
 				process.env.LC_MESSAGES = "fr_FR.UTF-8";
-
-				await git.diff(remoteFixture.repoRoot, { env: { LC_ALL: "fr_FR.UTF-8", LC_MESSAGES: undefined } });
+				await git.diff(remoteFixture.repoRoot, { env: { LC_ALL: "C", LC_MESSAGES: undefined } });
 			} finally {
 				if (originalPath === undefined) {
 					delete process.env.PATH;
