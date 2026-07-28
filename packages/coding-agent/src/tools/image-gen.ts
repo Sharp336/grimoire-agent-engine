@@ -818,9 +818,7 @@ function buildCodexImageRequest(
 		model: CODEX_IMAGE_MODEL,
 		quality: "auto",
 		size: resolveOpenAIImageSize(params.aspect_ratio, params.image_size) ?? "auto",
-		...(inputImages.length > 0
-			? { images: inputImages.map(image => ({ image_url: toDataUrl(image) })) }
-			: {}),
+		...(inputImages.length > 0 ? { images: inputImages.map(image => ({ image_url: toDataUrl(image) })) } : {}),
 	};
 }
 
