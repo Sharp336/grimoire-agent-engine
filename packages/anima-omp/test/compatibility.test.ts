@@ -23,7 +23,24 @@ afterEach(async () => {
 	tempRoot = undefined;
 });
 
-describe("OMP 17.1 compatibility", () => {
+function codingAgentPeerRange(manifest: unknown): unknown {
+	if (!manifest || typeof manifest !== "object" || !("peerDependencies" in manifest)) return undefined;
+	const peerDependencies = manifest.peerDependencies;
+	if (!peerDependencies || typeof peerDependencies !== "object") return undefined;
+	return "@oh-my-pi/pi-coding-agent" in peerDependencies ? peerDependencies["@oh-my-pi/pi-coding-agent"] : undefined;
+}
+
+describe("OMP executor-host compatibility", () => {
+	test("assumes the executor APIs first publish in 17.2.0 and excludes unpatched 17.1.5", async () => {
+		const animaManifest: unknown = await Bun.file(path.join(packageRoot, "package.json")).json();
+		const swarmManifest: unknown = await Bun.file(
+			path.resolve(packageRoot, "../swarm-extension/package.json"),
+		).json();
+
+		expect(codingAgentPeerRange(animaManifest)).toBe(">=17.2.0 <18");
+		expect(codingAgentPeerRange(swarmManifest)).toBe(">=17.2.0 <18");
+	});
+
 	test("discovers the packaged Anima task-agent roles from an extension root", async () => {
 		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "anima-omp-compat-"));
 		const projectDir = path.join(tempRoot, "project");

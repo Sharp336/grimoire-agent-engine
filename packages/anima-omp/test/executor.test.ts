@@ -48,6 +48,8 @@ class FakeControl implements AnimaControl {
 	closeCalls = 0;
 	closeCallIndex = -1;
 	#mailReceive?: ReturnType<typeof Promise.withResolvers<never>>;
+	readonly startResults: Array<unknown | Promise<unknown>> = [];
+	readonly waitResults: Array<unknown | Promise<unknown>> = [];
 	startResult: unknown | Promise<unknown> = {
 		invocation_id: "in-1",
 		agent_id: "agent-1",
@@ -73,17 +75,24 @@ class FakeControl implements AnimaControl {
 	async request<T>(method: string, params: unknown, options?: ControlRequestOptions): Promise<T> {
 		this.calls.push({ method, params, options });
 		switch (method) {
-			case "invoke.start":
-				return (await this.startResult) as T;
-			case "invoke.wait_turn":
-				return (await this.waitResult) as T;
-			case "invoke.observe":
+			case "invoke.start": {
+				const result = this.startResults.length > 0 ? this.startResults.shift() : this.startResult;
+				return (await result) as T;
+			}
+			case "invoke.wait_turn": {
+				const result = this.waitResults.length > 0 ? this.waitResults.shift() : this.waitResult;
+				return (await result) as T;
+			}
+			case "invoke.observe": {
+				const observeParams = params as { invocation_id: string };
+				const invocationId = observeParams.invocation_id;
 				return {
-					invocation_id: "in-1",
+					invocation_id: invocationId,
 					agent_id: "agent-1",
 					session_name: "omp-agent-1",
 					state: "generating",
 				} as T;
+			}
 			case "invoke.message":
 				return {
 					invocation_id: "in-1",
@@ -96,10 +105,11 @@ class FakeControl implements AnimaControl {
 			case "invoke.cancel":
 				return (await this.cancelResult) as T;
 			case "invoke.release": {
-				const policy = (params as { policy?: string }).policy ?? "park";
+				const releaseParams = params as { invocation_id: string; policy?: string };
+				const policy = releaseParams.policy ?? "park";
 				if (this.releaseResults.length > 0) return (await this.releaseResults.shift()) as T;
 				return {
-					invocation_id: "in-1",
+					invocation_id: releaseParams.invocation_id,
 					session_name: "omp-agent-1",
 					policy,
 					disposition: policy === "keep" ? "kept" : "parked",
@@ -124,6 +134,20 @@ class FakeControl implements AnimaControl {
 		this.#mailReceive?.reject(new ControlProtocolError("transport_closed", "closed", true));
 		this.#mailReceive = undefined;
 		return Promise.resolve();
+	}
+}
+
+class RetryOnceControl extends FakeControl {
+	waitFailures = 0;
+	waitError = new ControlProtocolError("transport_exited", "sidecar exited", true);
+
+	override async request<T>(method: string, params: unknown, options?: ControlRequestOptions): Promise<T> {
+		if (method === "invoke.wait_turn" && this.waitFailures > 0) {
+			this.waitFailures -= 1;
+			this.calls.push({ method, params, options });
+			throw this.waitError;
+		}
+		return super.request<T>(method, params, options);
 	}
 }
 
@@ -273,7 +297,7 @@ describe("AnimaExecutorController", () => {
 		expect(corePrompt.body).toContain("caller-owned working tree at `/tmp/caller-worktree`");
 		expect(corePrompt.body).toContain("OMP role grants only these tool capabilities: read");
 		expect(corePrompt.body).toContain('"result": "string"');
-		expect(corePrompt.body).toContain("$ANIMA_OMP_REPLY_HELPER");
+		expect(corePrompt.body).toContain("anima-omp-reply");
 		expect(corePrompt.body).toContain('--body "..."');
 		expect(corePrompt.body).toContain("--thread-id THREAD_ID");
 		expect(corePrompt.body).toContain("--reply-to MESSAGE_ID");
@@ -283,8 +307,101 @@ describe("AnimaExecutorController", () => {
 		expect(corePrompt.body).not.toContain("Shared context\n\nInspect the target exactly once.");
 		expect(corePrompt.body.toLowerCase()).not.toContain("yield");
 		expect(corePrompt.sha256).toBe(new Bun.CryptoHasher("sha256").update(corePrompt.body).digest("hex"));
-		expect(client.calls[0]?.options?.id).toBe("start:external:omp:test-sidecar:task-2");
+		const durableKey = client.calls[0]?.options?.id;
+		if (!durableKey) throw new Error("missing durable invocation key");
+		expect(durableKey).toMatch(/^start:external:omp:test-sidecar:task-2:[0-9a-f-]{36}$/);
+		expect(controller.list()[0]?.durableKey).toBe(durableKey);
+		expect(client.calls[2]?.options?.timeoutMs).toBe(60_000);
 		expect(progress.some(line => line.includes("creating durable invocation"))).toBe(true);
+	});
+
+	it("preserves unrestricted native tool semantics when tools are omitted or empty", async () => {
+		const omittedToolsAgent = { ...packagedAgent() };
+		delete omittedToolsAgent.tools;
+		for (const agent of [omittedToolsAgent, { ...omittedToolsAgent, tools: [] }]) {
+			const client = new FakeControl();
+			const controller = new AnimaExecutorController({
+				client,
+				agentRoot: path.resolve(import.meta.dir, "../agents"),
+				allowAgentNames: [agent.name],
+			});
+
+			expect((await controller.executor.execute(executorOptions(agent))).exitCode).toBe(0);
+			const startParams = client.calls[0]?.params as { core_prompt: { body: string } };
+			expect(startParams.core_prompt.body).toContain("OMP role does not restrict tool capabilities");
+			expect(startParams.core_prompt.body).not.toContain("grants no tool capabilities");
+		}
+	});
+
+	it("uses execution-unique durable keys and retains repeated task IDs as distinct invocations", async () => {
+		const client = new FakeControl();
+		client.startResults.push(
+			{ invocation_id: "in-1", agent_id: "agent-1", session_name: "omp-agent-1", state: "starting" },
+			{ invocation_id: "in-2", agent_id: "agent-2", session_name: "omp-agent-2", state: "starting" },
+		);
+		client.waitResults.push(client.waitResult, {
+			invocation_id: "in-2",
+			session_name: "omp-agent-2",
+			authority: { epoch: "epoch-2" },
+			turn_id: "turn-2",
+			text: "second final text",
+			stop_reason: "end_turn",
+			transcript_ref: "history://session-2",
+			attach_ref: "an attach omp-agent-2",
+			completed_at: "2026-07-28T00:01:00Z",
+		});
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+
+		expect((await controller.executor.execute(executorOptions())).exitCode).toBe(0);
+		expect((await controller.executor.execute(executorOptions())).exitCode).toBe(0);
+
+		const durableKeys = client.calls
+			.filter(call => call.method === "invoke.start")
+			.map(call => call.options?.id)
+			.filter((key): key is string => key !== undefined);
+		expect(durableKeys).toHaveLength(2);
+		expect(new Set(durableKeys).size).toBe(2);
+		expect(durableKeys.every(key => key.startsWith("start:external:omp:test-sidecar:task-2:"))).toBe(true);
+		const [firstDurableKey, secondDurableKey] = durableKeys;
+		if (!firstDurableKey || !secondDurableKey) throw new Error("executor did not emit two durable start keys");
+		expect(controller.list()).toEqual([
+			expect.objectContaining({ requestId: "task-2", durableKey: firstDurableKey, invocationId: "in-1" }),
+			expect.objectContaining({ requestId: "task-2", durableKey: secondDurableKey, invocationId: "in-2" }),
+		]);
+
+		await controller.observe("task-2");
+		expect(client.calls.at(-1)?.params).toEqual({ invocation_id: "in-2" });
+		await controller.observe(firstDurableKey);
+		expect(client.calls.at(-1)?.params).toEqual({ invocation_id: "in-1" });
+	});
+
+	it("re-observes and waits for the same invocation after a retryable transport exit", async () => {
+		const client = new RetryOnceControl();
+		client.waitFailures = 1;
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+
+		expect(await controller.executor.execute(executorOptions())).toMatchObject({
+			exitCode: 0,
+			output: "exact final text",
+		});
+		expect(client.calls.map(call => call.method)).toEqual([
+			"invoke.start",
+			"invoke.wait_turn",
+			"invoke.observe",
+			"invoke.wait_turn",
+			"invoke.release",
+		]);
+		expect(client.calls.filter(call => call.method === "invoke.start")).toHaveLength(1);
+		expect(client.calls.filter(call => call.method === "invoke.observe")[0]?.params).toEqual({
+			invocation_id: "in-1",
+		});
+		expect(controller.list()[0]).toMatchObject({ invocationId: "in-1", state: "released" });
 	});
 
 	it("ignores OMP's parent-model fallback when the agent configures Claude", async () => {
@@ -368,6 +485,7 @@ describe("AnimaExecutorController", () => {
 			invocation_id: "in-1",
 			body: "Check the remaining edge case.",
 			priority: 0,
+			timeout_ms: 60_000,
 		});
 		expect(controller.list()).toEqual([
 			expect.objectContaining({
@@ -378,6 +496,64 @@ describe("AnimaExecutorController", () => {
 				detail: "follow-up turn turn-1 completed",
 			}),
 		]);
+	});
+
+	it("re-observes a retained follow-up after transport loss and still releases it", async () => {
+		const client = new RetryOnceControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+			retention: "keep",
+		});
+		expect((await controller.executor.execute(executorOptions())).exitCode).toBe(0);
+		client.calls.length = 0;
+		client.waitFailures = 1;
+
+		expect(await controller.message("task-2", "Check again after reconnect.")).toBe("message-1");
+		while (controller.list()[0]?.state !== "released") await Promise.resolve();
+
+		expect(client.calls.map(call => call.method)).toEqual([
+			"invoke.message",
+			"invoke.wait_turn",
+			"invoke.observe",
+			"invoke.wait_turn",
+			"invoke.release",
+		]);
+		expect(client.calls.filter(call => call.method === "invoke.start")).toHaveLength(0);
+		expect(controller.list()[0]).toMatchObject({
+			invocationId: "in-1",
+			state: "released",
+			detail: "follow-up turn turn-1 completed",
+		});
+	});
+
+	it("cancels and releases a follow-up when turn recovery cannot continue", async () => {
+		const client = new RetryOnceControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+			retention: "keep",
+		});
+		expect((await controller.executor.execute(executorOptions())).exitCode).toBe(0);
+		client.calls.length = 0;
+		client.waitFailures = 1;
+		client.waitError = new ControlProtocolError("invalid_response", "turn authority missing");
+
+		expect(await controller.message("task-2", "Check the terminal cleanup path.")).toBe("message-1");
+		while (controller.list()[0]?.state !== "failed") await Promise.resolve();
+
+		expect(client.calls.map(call => call.method)).toEqual([
+			"invoke.message",
+			"invoke.wait_turn",
+			"invoke.cancel",
+			"invoke.release",
+		]);
+		expect(client.calls.filter(call => call.method === "invoke.start")).toHaveLength(0);
+		expect(controller.list()[0]).toMatchObject({
+			invocationId: "in-1",
+			state: "failed",
+			detail: "follow-up failed: turn authority missing",
+		});
 	});
 
 	it("routes a threaded IRC reply to the originating local peer", async () => {
@@ -410,8 +586,9 @@ describe("AnimaExecutorController", () => {
 				priority: 0,
 				thread_id: "thread-1",
 				reply_to: "mail-parent",
+				timeout_ms: 60_000,
 			},
-			options: { id: "irc:irc-1", timeoutMs: 10_000 },
+			options: { id: "irc:irc-1", timeoutMs: 90_000 },
 		});
 		expect(controller.resolvePeerMessage("omp-agent-1", { threadId: "thread-1" })).toEqual({
 			recipient: "requester-1",
@@ -668,6 +845,56 @@ describe("Anima extension commands", () => {
 		}
 	});
 
+	it("fails preflight before sidecar startup when the executor host API is absent", async () => {
+		const bus = new FakePeerBus();
+		let creates = 0;
+		const pi = {
+			pi: { IrcBus: { global: () => bus } },
+			setLabel: () => undefined,
+			registerCommand: () => undefined,
+			on: () => undefined,
+		} as unknown as ExtensionAPI;
+
+		await expect(
+			registerAnimaExtension(pi, {
+				createClient: () => {
+					creates += 1;
+					return new FakeControl();
+				},
+			}),
+		).rejects.toThrow(
+			"@anima/omp requires @oh-my-pi/pi-coding-agent >=17.2.0 <18; this host does not expose ExtensionAPI.registerSubagentExecutor",
+		);
+		expect(creates).toBe(0);
+		expect(bus.registerCalls).toBe(0);
+	});
+
+	it("registers the peer bridge on the production host IRC bus when no override is supplied", async () => {
+		const client = new FakeControl();
+		const bus = new FakePeerBus();
+		const harness = extensionHarness();
+		let globalCalls = 0;
+		Object.assign(harness.pi, {
+			pi: {
+				IrcBus: {
+					global: () => {
+						globalCalls += 1;
+						return bus;
+					},
+				},
+			},
+		});
+
+		await registerAnimaExtension(harness.pi, { createClient: () => client });
+		while (bus.registerCalls === 0) await Promise.resolve();
+
+		expect(globalCalls).toBe(1);
+		expect(bus.transport).toBeDefined();
+		if (!harness.shutdown) throw new Error("extension did not register its shutdown hook");
+		await harness.shutdown();
+		expect(bus.transport).toBeUndefined();
+	});
+
 	it("registers a fail-closed claimant when sidecar startup fails", async () => {
 		const client = new FakeControl();
 		const hello = Promise.withResolvers<ProtocolHello>();
@@ -802,6 +1029,7 @@ describe("Anima extension commands", () => {
 			invocation_id: "in-1",
 			body: "Check   this edge case.",
 			priority: 0,
+			timeout_ms: 60_000,
 		});
 		expect(notifications).toEqual([{ message: "task-2: message message-1 delivered", type: "info" }]);
 	});

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Require the first executor-registry host contract, assumed for publishing to be
+  `@oh-my-pi/pi-coding-agent >=17.2.0 <18`; unpatched `17.1.5` hosts are rejected at extension registration.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed

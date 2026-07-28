@@ -5,6 +5,7 @@ import { AnimaPeerBridge, type PeerBus } from "./peer-bridge";
 import { type AnimaControl, StdioControlClient } from "./protocol";
 
 const AGENT_ROOT = path.resolve(import.meta.dir, "../agents");
+const REQUIRED_OMP_HOST = "@oh-my-pi/pi-coding-agent >=17.2.0 <18";
 
 function configuredAgentNames(): string[] {
 	return (process.env.ANIMA_OMP_AGENT_NAMES ?? "")
@@ -23,9 +24,25 @@ function configuredRetention(): "park" | "keep" {
 	);
 }
 
+function assertExecutorHost(pi: ExtensionAPI): void {
+	if (typeof pi.registerSubagentExecutor !== "function") {
+		throw new Error(
+			`@anima/omp requires ${REQUIRED_OMP_HOST}; this host does not expose ExtensionAPI.registerSubagentExecutor`,
+		);
+	}
+}
+
+function productionPeerBus(pi: ExtensionAPI): PeerBus {
+	const host = pi.pi as typeof pi.pi | undefined;
+	if (typeof host?.IrcBus?.global !== "function") {
+		throw new Error(`@anima/omp requires ${REQUIRED_OMP_HOST}; this host does not expose the production IRC bus`);
+	}
+	return host.IrcBus.global();
+}
+
 function formatStatus(invocation: ActiveInvocation): string {
 	const fields = [
-		`${invocation.requestId}: ${invocation.agentName} → anima`,
+		`${invocation.requestId} [${invocation.durableKey}]: ${invocation.agentName} → anima`,
 		`state=${invocation.state}`,
 		invocation.sessionName ? `session=${invocation.sessionName}` : undefined,
 		invocation.detail ? `detail=${invocation.detail}` : undefined,
@@ -76,7 +93,7 @@ export async function handleAnimaCommand(
 		return;
 	}
 	if (command === "attach") {
-		const invocation = controller.list().find(item => item.requestId === requestId);
+		const invocation = controller.find(requestId);
 		if (!invocation) {
 			ctx.ui.notify(`Unknown Anima invocation ${JSON.stringify(requestId)}`, "error");
 			return;
@@ -197,7 +214,9 @@ export async function registerAnimaExtension(
 	dependencies: AnimaExtensionDependencies = {},
 ): Promise<void> {
 	const retention = configuredRetention();
-	const runtime = await acquireSharedRuntime(retention, configuredAgentNames(), dependencies);
+	assertExecutorHost(pi);
+	const bus = dependencies.bus ?? productionPeerBus(pi);
+	const runtime = await acquireSharedRuntime(retention, configuredAgentNames(), { ...dependencies, bus });
 	const { controller } = runtime;
 
 	pi.setLabel("Anima Claude executor");

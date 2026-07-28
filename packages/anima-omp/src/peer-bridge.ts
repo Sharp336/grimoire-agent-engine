@@ -1,11 +1,4 @@
-import {
-	IrcBus,
-	type IrcMessage,
-	type IrcPeerTransport,
-	type IrcSendOptions,
-	type IrcTransportPeer,
-	MAIN_AGENT_ID,
-} from "@oh-my-pi/pi-coding-agent";
+import type { IrcMessage, IrcPeerTransport, IrcSendOptions, IrcTransportPeer } from "@oh-my-pi/pi-coding-agent";
 import type { ActiveInvocation, AnimaExecutorController } from "./executor";
 import {
 	type AnimaControl,
@@ -15,6 +8,7 @@ import {
 	type ProtocolHello,
 } from "./protocol";
 
+const MAIN_AGENT_ID = "Main";
 const RECEIVE_TIMEOUT_MS = 30_000;
 const RETRY_DELAY_MS = 250;
 const ACK_TIMEOUT_MS = 5_000;
@@ -35,7 +29,7 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 	readonly id = "anima";
 	readonly #client: AnimaControl;
 	readonly #controller: AnimaExecutorController;
-	readonly #bus: PeerBus;
+	readonly #bus?: PeerBus;
 	readonly #onError: (error: Error) => void;
 	readonly #abort = new AbortController();
 	readonly #deliveredPendingAck = new Set<string>();
@@ -47,21 +41,22 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 	constructor(config: AnimaPeerBridgeConfig) {
 		this.#client = config.client;
 		this.#controller = config.controller;
-		this.#bus = config.bus ?? IrcBus.global();
+		this.#bus = config.bus;
 		this.#onError = config.onError ?? (error => console.error(`[anima-omp] ${error.message}`));
 	}
 
 	async start(): Promise<ProtocolHello> {
 		if (this.#receiveLoop) throw new Error("Anima peer bridge is already started");
 		const hello = await this.#client.hello();
+		if (this.#abort.signal.aborted) {
+			throw new ControlProtocolError("transport_closed", "Anima peer bridge was stopped during startup", true);
+		}
+		if (!this.#bus) return hello;
 		if (!hello.capabilities.threaded_mail || !hello.capabilities.external_mailbox) {
 			throw new ControlProtocolError(
 				"missing_capability",
 				"Anima control must advertise threaded_mail and external_mailbox",
 			);
-		}
-		if (this.#abort.signal.aborted) {
-			throw new ControlProtocolError("transport_closed", "Anima peer bridge was stopped during startup", true);
 		}
 		this.#mailbox = hello.mailbox;
 		this.#disposeTransport = this.#bus.registerPeerTransport(this);
@@ -107,6 +102,8 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 	}
 
 	async #runReceiveLoop(): Promise<void> {
+		const bus = this.#bus;
+		if (!bus) throw new Error("Anima peer bridge receive loop requires an IRC bus");
 		while (!this.#abort.signal.aborted) {
 			let result: MailReceiveResult;
 			try {
@@ -141,7 +138,7 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 					if (inbound) {
 						let receipt: { outcome: string; error?: string };
 						try {
-							receipt = await this.#bus.deliverInbound(inbound);
+							receipt = await bus.deliverInbound(inbound);
 						} catch (error) {
 							this.#onError(error instanceof Error ? error : new Error(String(error)));
 							await Bun.sleep(RETRY_DELAY_MS);

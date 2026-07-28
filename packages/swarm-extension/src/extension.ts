@@ -19,7 +19,18 @@ import { renderSwarmProgress } from "./swarm/render";
 import { parseSwarmYaml, type SwarmDefinition, validateSwarmDefinition } from "./swarm/schema";
 import { StateTracker } from "./swarm/state";
 
+const REQUIRED_OMP_HOST = "@oh-my-pi/pi-coding-agent >=17.2.0 <18";
+
+function assertExecutorHost(pi: ExtensionAPI): void {
+	if (typeof pi.getSubagentExecutorRegistry !== "function") {
+		throw new Error(
+			`@oh-my-pi/swarm-extension requires ${REQUIRED_OMP_HOST}; this host does not expose ExtensionAPI.getSubagentExecutorRegistry`,
+		);
+	}
+}
+
 export default function swarmExtension(pi: ExtensionAPI): void {
+	assertExecutorHost(pi);
 	pi.setLabel("Swarm Orchestrator");
 
 	pi.registerCommand("swarm", {

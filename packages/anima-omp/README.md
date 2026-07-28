@@ -4,12 +4,18 @@ Runs selected OMP task agents in Anima-managed Claude Code TUI sessions. OMP rem
 
 ## Requirements
 
-- `omp` and Bun 1.3.14 or newer
+- OMP host `@oh-my-pi/pi-coding-agent >=17.2.0 <18` and Bun 1.3.14 or newer
 - `an` on `PATH`, built from an Anima version that provides `an control stdio`
 - tmux
 - A configured Anima Anthropic account lane (`an account list --provider anthropic`)
 
-Use `ANIMA_BIN=/absolute/path/to/an` when the compatible Anima binary is not on `PATH`.
+The `17.2.0` lower bound is the publishing assumption for the first OMP release containing
+`registerSubagentExecutor`, `getSubagentExecutorRegistry`, and the host IRC-bus integration used here. The patched
+source workspace still identifies itself as `17.1.5`, but an unpatched published `17.1.5` is unsupported and is
+intentionally excluded from the peer contract. If upstream assigns those APIs a different release number, update the
+peer range before publishing this package.
+
+Use `AN_BIN=/absolute/path/to/an` when the compatible Anima binary is not on `PATH`.
 
 ## Install
 
@@ -70,7 +76,7 @@ Inside OMP:
 
 `attach` prints the corresponding `an attach <session>` command for a second terminal. `message` sends a retained follow-up turn. `cancel` interrupts active work. `release` applies the configured retention policy.
 
-Anima workers are also projected into OMP's `hub` peer list. OMP-to-worker IRC messages become urgent, threaded Anima mail. Each worker receives only an invocation-private `$ANIMA_OMP_REPLY_HELPER`; the helper fixes the authenticated sender and parent destination while accepting only body and reply/thread correlation fields.
+Anima workers are also projected into OMP's `hub` peer list under the Anima session name shown by `/anima status` (for example, `omp-claude-researcher-…`). OMP-to-worker IRC messages become urgent, threaded Anima mail. Each worker receives only an invocation-private `anima-omp-reply` command on `PATH`; the command fixes the authenticated sender and parent destination while accepting only body and reply/thread correlation fields.
 
 ## Boundary
 

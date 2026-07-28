@@ -56,6 +56,7 @@ export interface InvokeMessageParams {
 	priority: number;
 	thread_id?: string;
 	reply_to?: string;
+	timeout_ms?: number;
 }
 
 export interface InvokeMessageResult {
@@ -169,7 +170,7 @@ export class StdioControlClient implements AnimaControl {
 	readonly #shutdownTimeoutMs: number;
 
 	constructor(
-		command: string[] = [process.env.ANIMA_BIN || "an", "control", "stdio"],
+		command: string[] = [process.env.AN_BIN || "an", "control", "stdio"],
 		shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
 	) {
 		this.#command = command;

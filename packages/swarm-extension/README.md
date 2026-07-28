@@ -6,6 +6,14 @@ Each agent is a full oh-my-pi subagent with access to every tool: bash, python, 
 
 Use it for anything: research pipelines, code generation, data processing, content creation, analysis workflows, CI-like automation — any multi-step task that benefits from specialized agents working in coordination.
 
+## Host requirement
+
+The in-process extension requires `@oh-my-pi/pi-coding-agent >=17.2.0 <18`. The `17.2.0` lower bound is the
+publishing assumption for the first OMP release containing `ExtensionAPI.getSubagentExecutorRegistry`. The patched
+source workspace still identifies itself as `17.1.5`, but an unpatched published `17.1.5` is unsupported and is
+intentionally excluded from the peer contract. If upstream assigns the API a different release number, update the peer
+range before publishing this package.
+
 ## Setup
 
 ```bash

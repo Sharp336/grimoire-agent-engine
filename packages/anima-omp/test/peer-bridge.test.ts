@@ -103,6 +103,7 @@ function fakeController(replyRecipient?: string): {
 } {
 	const active: ActiveInvocation = {
 		requestId: "task-1",
+		durableKey: "start:external:omp:test-sidecar:task-1:test-execution",
 		invocationId: "in-1",
 		agentId: "reviewer-1",
 		agentName: "claude-reviewer",
