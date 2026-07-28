@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { ContextProjection } from "@oh-my-pi/lcm-context";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import {
 	handleRpcSessionChange,
