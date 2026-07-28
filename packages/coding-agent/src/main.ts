@@ -1019,7 +1019,12 @@ export async function buildSessionOptions(
 			}
 		}
 		if (!options.model) options.model = scopedModels[0].model;
-	} else if (agentPolicy?.modelPatterns && agentPolicy.modelPatterns.length > 0) {
+	} else if (
+		agentPolicy?.modelPatterns &&
+		agentPolicy.modelPatterns.length > 0 &&
+		!parsed.continue &&
+		!parsed.resume
+	) {
 		const resolved = resolveModelOverride(agentPolicy.modelPatterns, modelRegistry, activeSettings);
 		if (resolved.model) {
 			options.model = resolved.model;

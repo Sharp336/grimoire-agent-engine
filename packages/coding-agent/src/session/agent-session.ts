@@ -6220,6 +6220,7 @@ export class AgentSession {
 	async switchAgentPersona(agent: AgentDefinition): Promise<void> {
 		const policy = resolveAgentSessionPolicy(agent);
 		const previousPersona = this.#agentPersona;
+		const previousOverlay = this.#agentToolOverlay;
 		const previousModel = this.model;
 		const previousThinking = this.configuredThinkingLevel();
 		const previousToolNames = this.getEnabledToolNames();
@@ -6253,7 +6254,7 @@ export class AgentSession {
 		} catch (error) {
 			this.#agentPersona = previousPersona;
 			this.#setAgentPersona?.(previousPersona);
-			this.#agentToolOverlay = undefined;
+			this.#agentToolOverlay = previousOverlay;
 			try {
 				await this.setActiveToolsByName(previousToolNames);
 				if (previousSpawns !== undefined) this.#setSessionSpawns?.(previousSpawns);
