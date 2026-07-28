@@ -7220,7 +7220,17 @@ export class AgentSession {
 			this.#lastCompletedRewind = previousLastCompletedRewind;
 			this.#rewoundToolResultIds = previousRewoundToolResultIds;
 			if (previousModel) {
+				// The try block may have already reached #setModelWithProviderSessionReset
+				// for the target session's model, which emits `model_changed` for it.
+				// Restoring here bypasses that method (it also resets provider-session
+				// state we're already unwinding above), so if the rollback actually
+				// changes the model back, emit the corrective event ourselves —
+				// otherwise ACP/RPC/TUI keep advertising the never-committed target.
+				const rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
+				if (!modelsAreEqual(rolledBackModel, previousModel)) {
+					this.#emit({ type: "model_changed" });
+				}
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
