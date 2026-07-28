@@ -1,4 +1,6 @@
 const DEFAULT_MAX_LINE_BYTES = 1024 * 1024;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 2_000;
+const MAX_TERMINATE_GRACE_MS = 500;
 const REQUIRED_METHODS = [
 	"invoke.start",
 	"invoke.observe",
@@ -57,15 +59,35 @@ export interface InvokeMessageParams {
 }
 
 export interface InvokeMessageResult {
+	invocation_id: string;
+	session_name: string;
 	message_id: string;
+	thread_id?: string;
+	priority: number;
+	disposition: string;
+	sent_at?: string;
+}
+
+export interface InvokeCancelResult {
+	invocation_id: string;
+	disposition: string;
+	cancelled_at?: string;
+}
+
+export interface InvokeReleaseResult {
+	invocation_id: string;
+	session_name: string;
+	policy: string;
+	disposition: string;
+	released_at?: string;
 }
 
 export interface MailMessage {
 	id: string;
 	from: string;
 	to: string;
-	subject: string;
-	body: string;
+	subject?: string;
+	body?: string;
 	priority: number;
 	msg_type?: string;
 	thread_id?: string;
@@ -137,14 +159,20 @@ export class StdioControlClient implements AnimaControl {
 	readonly #command: string[];
 	readonly #pending = new Map<string, PendingRequest>();
 	readonly #listeners = new Set<(event: ControlEvent) => void>();
+	readonly #terminations = new Set<Promise<void>>();
 	#process?: Bun.Subprocess<"pipe", "pipe", "pipe">;
 	#helloPromise?: Promise<ProtocolHello>;
 	#maxLineBytes = DEFAULT_MAX_LINE_BYTES;
 	#closed = false;
 	#requestSequence = 0;
+	readonly #shutdownTimeoutMs: number;
 
-	constructor(command: string[] = [process.env.ANIMA_BIN || "an", "control", "stdio"]) {
+	constructor(
+		command: string[] = [process.env.ANIMA_BIN || "an", "control", "stdio"],
+		shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
+	) {
 		this.#command = command;
+		this.#shutdownTimeoutMs = Math.max(1, shutdownTimeoutMs);
 	}
 
 	onEvent(listener: (event: ControlEvent) => void): () => void {
@@ -153,8 +181,13 @@ export class StdioControlClient implements AnimaControl {
 	}
 
 	hello(): Promise<ProtocolHello> {
-		this.#helloPromise ??= this.#startAndHello();
-		return this.#helloPromise;
+		if (this.#helloPromise) return this.#helloPromise;
+		const promise = this.#startAndHello();
+		this.#helloPromise = promise;
+		void promise.catch(() => {
+			if (this.#helloPromise === promise && !this.#closed) this.#helloPromise = undefined;
+		});
+		return promise;
 	}
 
 	async request<T>(method: string, params: unknown, options: ControlRequestOptions = {}): Promise<T> {
@@ -163,18 +196,47 @@ export class StdioControlClient implements AnimaControl {
 	}
 
 	async close(): Promise<void> {
-		if (this.#closed) return;
+		if (this.#closed) {
+			await Promise.allSettled([...this.#terminations]);
+			return;
+		}
 		this.#closed = true;
 		const process = this.#process;
 		this.#process = undefined;
 		this.#rejectPending(new ControlProtocolError("transport_closed", "Anima control transport closed", true));
-		if (!process) return;
-		try {
-			process.stdin.end();
-		} catch {
-			// Process may already have exited.
+		if (process) {
+			try {
+				process.stdin.end();
+			} catch {
+				// Process may already have exited.
+			}
+			const waitForExit = async (timeoutMs: number): Promise<boolean> => {
+				let exited = false;
+				await Promise.race([
+					process.exited.then(() => {
+						exited = true;
+					}),
+					Bun.sleep(timeoutMs),
+				]);
+				return exited;
+			};
+			if (!(await waitForExit(this.#shutdownTimeoutMs))) {
+				try {
+					process.kill("SIGTERM");
+				} catch {
+					// Process exited between the timeout and escalation.
+				}
+				if (!(await waitForExit(Math.min(MAX_TERMINATE_GRACE_MS, this.#shutdownTimeoutMs)))) {
+					try {
+						process.kill("SIGKILL");
+					} catch {
+						// Process exited between escalation steps.
+					}
+					await process.exited;
+				}
+			}
 		}
-		await process.exited;
+		await Promise.allSettled([...this.#terminations]);
 	}
 
 	async #startAndHello(): Promise<ProtocolHello> {
@@ -208,13 +270,16 @@ export class StdioControlClient implements AnimaControl {
 				"Anima control does not advertise threaded mail and an external mailbox",
 			);
 		}
-		if (hello.limits.max_line_bytes > 0) this.#maxLineBytes = hello.limits.max_line_bytes;
+		if (Number.isFinite(hello.limits.max_line_bytes) && hello.limits.max_line_bytes > 0) {
+			this.#maxLineBytes = Math.min(DEFAULT_MAX_LINE_BYTES, Math.floor(hello.limits.max_line_bytes));
+		}
 		return hello;
 	}
 
 	#ensureStarted(): Bun.Subprocess<"pipe", "pipe", "pipe"> {
 		if (this.#closed) throw new ControlProtocolError("transport_closed", "Anima control transport is closed");
 		if (this.#process) return this.#process;
+		this.#maxLineBytes = DEFAULT_MAX_LINE_BYTES;
 		const child = Bun.spawn(this.#command, {
 			stdin: "pipe",
 			stdout: "pipe",
@@ -227,6 +292,7 @@ export class StdioControlClient implements AnimaControl {
 		void child.exited.then(exitCode => {
 			if (this.#process !== child) return;
 			this.#process = undefined;
+			this.#helloPromise = undefined;
 			this.#rejectPending(
 				new ControlProtocolError(
 					"transport_exited",
@@ -294,9 +360,47 @@ export class StdioControlClient implements AnimaControl {
 					newline = buffered.indexOf("\n");
 				}
 			}
+			if (this.#process === process) {
+				this.#failTransport(
+					process,
+					new ControlProtocolError("transport_closed", "Anima control stdout closed", true),
+				);
+			}
 		} catch (error) {
-			this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
+			this.#failTransport(process, error instanceof Error ? error : new Error(String(error)));
 		}
+	}
+
+	#failTransport(process: Bun.Subprocess<"pipe", "pipe", "pipe">, error: Error): void {
+		if (this.#process !== process) return;
+		this.#process = undefined;
+		this.#helloPromise = undefined;
+		this.#rejectPending(error);
+		try {
+			process.kill("SIGTERM");
+		} catch {
+			// Process may already have exited.
+		}
+		const termination = this.#killAfterGrace(process);
+		this.#terminations.add(termination);
+		void termination.finally(() => this.#terminations.delete(termination)).catch(() => undefined);
+	}
+
+	async #killAfterGrace(process: Bun.Subprocess<"pipe", "pipe", "pipe">): Promise<void> {
+		let exited = false;
+		await Promise.race([
+			process.exited.then(() => {
+				exited = true;
+			}),
+			Bun.sleep(Math.min(MAX_TERMINATE_GRACE_MS, this.#shutdownTimeoutMs)),
+		]);
+		if (exited) return;
+		try {
+			process.kill("SIGKILL");
+		} catch {
+			return;
+		}
+		await process.exited;
 	}
 
 	async #readStderr(process: Bun.Subprocess<"pipe", "pipe", "pipe">): Promise<void> {

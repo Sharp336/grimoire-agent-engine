@@ -17,8 +17,9 @@ import {
 
 const RECEIVE_TIMEOUT_MS = 30_000;
 const RETRY_DELAY_MS = 250;
+const ACK_TIMEOUT_MS = 5_000;
 
-interface PeerBus {
+export interface PeerBus {
 	registerPeerTransport(transport: IrcPeerTransport): () => void;
 	deliverInbound(message: IrcMessage): Promise<{ outcome: string; error?: string }>;
 }
@@ -39,7 +40,6 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 	readonly #abort = new AbortController();
 	readonly #deliveredPendingAck = new Set<string>();
 	#mailbox = "";
-	#after = "";
 	#requestSequence = 0;
 	#disposeTransport?: () => void;
 	#receiveLoop?: Promise<void>;
@@ -59,6 +59,9 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 				"missing_capability",
 				"Anima control must advertise threaded_mail and external_mailbox",
 			);
+		}
+		if (this.#abort.signal.aborted) {
+			throw new ControlProtocolError("transport_closed", "Anima peer bridge was stopped during startup", true);
 		}
 		this.#mailbox = hello.mailbox;
 		this.#disposeTransport = this.#bus.registerPeerTransport(this);
@@ -111,7 +114,6 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 					"mail.receive",
 					{
 						mailbox: this.#mailbox,
-						...(this.#after ? { after: this.#after } : {}),
 						timeout_ms: RECEIVE_TIMEOUT_MS,
 					},
 					{
@@ -129,38 +131,70 @@ export class AnimaPeerBridge implements IrcPeerTransport {
 			for (const message of result.messages) {
 				if (this.#abort.signal.aborted) return;
 				if (!this.#deliveredPendingAck.has(message.id)) {
-					const inbound = this.#toInboundMessage(message);
-					const receipt = await this.#bus.deliverInbound(inbound);
-					if (receipt.outcome === "failed") {
-						await Bun.sleep(RETRY_DELAY_MS);
-						break;
+					let inbound: IrcMessage | undefined;
+					try {
+						inbound = this.#toInboundMessage(message);
+					} catch (error) {
+						if (!message.id) throw error;
+						this.#onError(error instanceof Error ? error : new Error(String(error)));
+					}
+					if (inbound) {
+						let receipt: { outcome: string; error?: string };
+						try {
+							receipt = await this.#bus.deliverInbound(inbound);
+						} catch (error) {
+							this.#onError(error instanceof Error ? error : new Error(String(error)));
+							await Bun.sleep(RETRY_DELAY_MS);
+							break;
+						}
+						if (receipt.outcome === "failed") {
+							await Bun.sleep(RETRY_DELAY_MS);
+							break;
+						}
 					}
 					this.#deliveredPendingAck.add(message.id);
 				}
-				await this.#client.request(
-					"mail.ack",
-					{ mailbox: this.#mailbox, message_id: message.id },
-					{ id: `mail-ack:${message.id}` },
-				);
+				try {
+					await this.#client.request(
+						"mail.ack",
+						{ mailbox: this.#mailbox, message_id: message.id },
+						{ id: `mail-ack:${message.id}`, timeoutMs: ACK_TIMEOUT_MS },
+					);
+				} catch (error) {
+					if (!(error instanceof ControlProtocolError) || !error.retryable) throw error;
+					await Bun.sleep(RETRY_DELAY_MS);
+					break;
+				}
 				this.#deliveredPendingAck.delete(message.id);
-				this.#after = message.sent_at;
 			}
 		}
 	}
 
 	#toInboundMessage(message: MailMessage): IrcMessage {
 		const sentAt = Date.parse(message.sent_at);
-		if (!message.id || !message.from || !message.body || !Number.isFinite(sentAt)) {
+		const rawBody = message.body || message.subject;
+		if (!message.id || !message.from || message.to !== this.#mailbox || !rawBody || !Number.isFinite(sentAt)) {
 			throw new ControlProtocolError("invalid_response", "Anima mail.receive returned an invalid message");
 		}
+		const correlation = {
+			...(message.thread_id ? { threadId: message.thread_id } : {}),
+			...(message.reply_to ? { replyTo: message.reply_to } : {}),
+		};
+		const route = this.#controller.resolvePeerMessage(message.from, correlation);
+		if (!route) {
+			throw new ControlProtocolError(
+				"unauthenticated_sender",
+				`Anima mail sender ${JSON.stringify(message.from)} is not authorized for this message thread`,
+			);
+		}
+		const body = rawBody.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 		return {
 			id: message.id,
 			from: message.from,
-			to: MAIN_AGENT_ID,
-			body: message.body,
+			to: route.recipient ?? MAIN_AGENT_ID,
+			body,
 			ts: sentAt,
-			...(message.thread_id ? { threadId: message.thread_id } : {}),
-			...(message.reply_to ? { replyTo: message.reply_to } : {}),
+			...correlation,
 		};
 	}
 }

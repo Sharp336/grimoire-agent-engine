@@ -1,8 +1,8 @@
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { type ActiveInvocation, AnimaExecutorController } from "./executor";
-import { AnimaPeerBridge } from "./peer-bridge";
-import { getSharedControlClient } from "./protocol";
+import { AnimaPeerBridge, type PeerBus } from "./peer-bridge";
+import { type AnimaControl, StdioControlClient } from "./protocol";
 
 const AGENT_ROOT = path.resolve(import.meta.dir, "../agents");
 
@@ -109,17 +109,96 @@ export async function handleAnimaCommand(
 	);
 }
 
-export default async function animaExtension(pi: ExtensionAPI): Promise<void> {
-	const retention = configuredRetention();
-	const client = getSharedControlClient();
-	const controller = new AnimaExecutorController({
-		client,
-		agentRoot: AGENT_ROOT,
-		allowAgentNames: configuredAgentNames(),
-		retention,
+export interface AnimaExtensionDependencies {
+	createClient?: () => AnimaControl;
+	bus?: PeerBus;
+}
+
+interface SharedRuntime {
+	readonly key: string;
+	readonly controller: AnimaExecutorController;
+	readonly bridge: AnimaPeerBridge;
+	started: Promise<void>;
+	references: number;
+	closing?: Promise<void>;
+}
+
+let sharedRuntime: SharedRuntime | undefined;
+
+async function releaseSharedRuntime(runtime: SharedRuntime): Promise<void> {
+	if (sharedRuntime !== runtime || runtime.references <= 0) return;
+	runtime.references -= 1;
+	if (runtime.references > 0) return;
+	runtime.closing ??= (async () => {
+		await runtime.controller.shutdown();
+		await runtime.bridge.stop();
+	})().finally(() => {
+		if (sharedRuntime === runtime) sharedRuntime = undefined;
 	});
-	const bridge = new AnimaPeerBridge({ client, controller });
-	await bridge.start();
+	await runtime.closing;
+}
+
+async function acquireSharedRuntime(
+	retention: "park" | "keep",
+	allowAgentNames: readonly string[],
+	dependencies: AnimaExtensionDependencies,
+): Promise<{ controller: AnimaExecutorController; release(): Promise<void> }> {
+	if (sharedRuntime?.references === 0) {
+		await sharedRuntime.closing;
+		return acquireSharedRuntime(retention, allowAgentNames, dependencies);
+	}
+	const key = JSON.stringify({ retention, allowAgentNames: [...allowAgentNames].sort() });
+	if (sharedRuntime && sharedRuntime.key !== key) {
+		throw new Error("Anima extension instances in one process must use the same retention and agent allowlist");
+	}
+	if (!sharedRuntime) {
+		const client = dependencies.createClient?.() ?? new StdioControlClient();
+		const ready = Promise.withResolvers<void>();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: AGENT_ROOT,
+			allowAgentNames,
+			retention,
+			ready: ready.promise,
+		});
+		const bridge = new AnimaPeerBridge({ client, controller, bus: dependencies.bus });
+		const started = bridge.start().then(
+			() => ready.resolve(),
+			error => {
+				ready.reject(error);
+				throw error;
+			},
+		);
+		void ready.promise.catch(() => undefined);
+		void started.catch(() => undefined);
+		sharedRuntime = {
+			key,
+			controller,
+			bridge,
+			started,
+			references: 0,
+		};
+	}
+	const runtime = sharedRuntime;
+	runtime.references += 1;
+	let released = false;
+	return {
+		controller: runtime.controller,
+		release: async () => {
+			if (released) return;
+			released = true;
+			await releaseSharedRuntime(runtime);
+		},
+	};
+}
+
+export async function registerAnimaExtension(
+	pi: ExtensionAPI,
+	dependencies: AnimaExtensionDependencies = {},
+): Promise<void> {
+	const retention = configuredRetention();
+	const runtime = await acquireSharedRuntime(retention, configuredAgentNames(), dependencies);
+	const { controller } = runtime;
 
 	pi.setLabel("Anima Claude executor");
 	pi.registerSubagentExecutor(controller.executor);
@@ -127,7 +206,9 @@ export default async function animaExtension(pi: ExtensionAPI): Promise<void> {
 		description: "Inspect and control Anima-managed Claude task agents",
 		handler: (args, ctx) => handleAnimaCommand(args, ctx, controller),
 	});
-	pi.on("session_shutdown", async () => {
-		await bridge.stop();
-	});
+	pi.on("session_shutdown", runtime.release);
+}
+
+export default async function animaExtension(pi: ExtensionAPI): Promise<void> {
+	await registerAnimaExtension(pi);
 }

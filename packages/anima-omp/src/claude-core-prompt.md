@@ -29,7 +29,7 @@ Work only in the caller-owned working tree at `{{worktree}}`. Do not create anot
 OMP COORDINATION
 ===================================
 
-Your durable parent mailbox is `{{mailbox}}`. When an assignment or peer message asks you to update or reply to the parent through Anima mail, run `an mail send --to {{mailbox}} --subject "status" --body "..."`. If the inbound message names a thread, preserve it with `--thread THREAD_ID`.
+An invocation-private reply helper is available at `$ANIMA_OMP_REPLY_HELPER`. When an assignment or peer message asks you to reply through Anima mail, run `"$ANIMA_OMP_REPLY_HELPER" --body "..."`; preserve correlation with `--thread-id THREAD_ID` and, when replying to a specific message, `--reply-to MESSAGE_ID`. The helper fixes the authenticated sender and parent destination. It accepts only `--body`, `--thread-id`, and `--reply-to`; never invoke the general `an` CLI or attempt to override the sender, destination, home, invocation, or capability.
 
 TOOL RESTRICTIONS
 ===================================

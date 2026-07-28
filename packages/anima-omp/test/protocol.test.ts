@@ -27,6 +27,20 @@ describe("StdioControlClient", () => {
 		expect(await first).toEqual({ order: 1 });
 	});
 
+	it("rejects duplicate pending IDs without corrupting response correlation", async () => {
+		client = new StdioControlClient(["bun", path.join(import.meta.dir, "fixtures/control-server.ts")]);
+		await client.hello();
+		const first = client.request<{ order: number }>("test.first", {}, { id: "shared-id" });
+		await expect(client.request("test.first", {}, { id: "shared-id" })).rejects.toMatchObject({
+			code: "duplicate_request",
+		});
+		expect(await client.request<{ order: number }>("test.second", {}, { id: "flush" })).toEqual({ order: 2 });
+		expect(await first).toEqual({ order: 1 });
+		expect(await client.request<{ delivered: boolean }>("test.event", {}, { id: "shared-id" })).toEqual({
+			delivered: true,
+		});
+	});
+
 	it("delivers invocation events without confusing response correlation", async () => {
 		client = new StdioControlClient(["bun", path.join(import.meta.dir, "fixtures/control-server.ts")]);
 		const events: string[] = [];
@@ -48,6 +62,65 @@ describe("StdioControlClient", () => {
 		}
 	});
 
+	it("rejects oversized outbound frames before writing and leaves the request ID reusable", async () => {
+		client = new StdioControlClient([
+			"bun",
+			path.join(import.meta.dir, "fixtures/control-server.ts"),
+			"--max-line-bytes=512",
+		]);
+		await client.hello();
+		await expect(
+			client.request("test.event", { body: "x".repeat(512) }, { id: "bounded-frame" }),
+		).rejects.toMatchObject({
+			code: "line_too_large",
+			message: "Control request exceeds 512 bytes",
+		});
+		expect(await client.request<{ delivered: boolean }>("test.event", {}, { id: "bounded-frame" })).toEqual({
+			delivered: true,
+		});
+	});
+
+	it("tears down an oversized inbound frame and renegotiates on a clean sidecar", async () => {
+		client = new StdioControlClient(["bun", path.join(import.meta.dir, "fixtures/control-server.ts")]);
+		await expect(client.request("test.oversized", {}, { id: "oversized-response" })).rejects.toMatchObject({
+			code: "line_too_large",
+		});
+		expect(await client.request<{ delivered: boolean }>("test.event", {}, { id: "after-oversized" })).toEqual({
+			delivered: true,
+		});
+	});
+
+	it("renegotiates before requests after the sidecar exits", async () => {
+		client = new StdioControlClient([
+			"bun",
+			path.join(import.meta.dir, "fixtures/control-server.ts"),
+			"--report-pid",
+		]);
+		const firstPID = Number((await client.hello()).anima_version);
+		await expect(client.request("test.crash", {}, { id: "crash" })).rejects.toMatchObject({
+			code: expect.stringMatching(/^transport_/),
+		});
+		const secondPID = Number((await client.hello()).anima_version);
+		expect(secondPID).not.toBe(firstPID);
+		expect(await client.request<{ delivered: boolean }>("test.event", {}, { id: "after-restart" })).toEqual({
+			delivered: true,
+		});
+	});
+
+	it("tears down and renegotiates after malformed stdout", async () => {
+		client = new StdioControlClient([
+			"bun",
+			path.join(import.meta.dir, "fixtures/control-server.ts"),
+			"--report-pid",
+		]);
+		const firstPID = Number((await client.hello()).anima_version);
+		await expect(client.request("test.invalid", {}, { id: "invalid" })).rejects.toMatchObject({
+			code: "invalid_response",
+		});
+		const secondPID = Number((await client.hello()).anima_version);
+		expect(secondPID).not.toBe(firstPID);
+	});
+
 	it("rejects a control server without durable invocation messaging", async () => {
 		client = new StdioControlClient([
 			"bun",
@@ -58,5 +131,21 @@ describe("StdioControlClient", () => {
 			code: "missing_method",
 			message: "Anima control is missing required methods: invoke.message",
 		});
+	});
+
+	it("force-terminates a sidecar that ignores stdin EOF", async () => {
+		client = new StdioControlClient(
+			["bun", path.join(import.meta.dir, "fixtures/control-server.ts"), "--ignore-eof", "--report-pid"],
+			20,
+		);
+		const hello = await client.hello();
+		const pid = Number(hello.anima_version);
+		expect(Number.isInteger(pid)).toBe(true);
+		const startedAt = Date.now();
+		await client.close();
+		client = undefined;
+
+		expect(Date.now() - startedAt).toBeLessThan(500);
+		expect(() => process.kill(pid, 0)).toThrow();
 	});
 });

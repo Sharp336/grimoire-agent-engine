@@ -70,7 +70,7 @@ Inside OMP:
 
 `attach` prints the corresponding `an attach <session>` command for a second terminal. `message` sends a retained follow-up turn. `cancel` interrupts active work. `release` applies the configured retention policy.
 
-Anima workers are also projected into OMP's `hub` peer list. OMP-to-worker IRC messages become urgent, threaded Anima mail; worker replies sent to the parent mailbox re-enter the OMP IRC bus. The parent mailbox and thread ID are included in the Claude briefing.
+Anima workers are also projected into OMP's `hub` peer list. OMP-to-worker IRC messages become urgent, threaded Anima mail. Each worker receives only an invocation-private `$ANIMA_OMP_REPLY_HELPER`; the helper fixes the authenticated sender and parent destination while accepting only body and reply/thread correlation fields.
 
 ## Boundary
 

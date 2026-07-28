@@ -6,10 +6,18 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	IrcMessage,
+	IrcPeerTransport,
+	SubagentExecutor,
 } from "@oh-my-pi/pi-coding-agent";
 import { AnimaExecutorController } from "../src/executor";
-import animaExtension, { handleAnimaCommand } from "../src/extension";
-import type { AnimaControl, ControlEvent, ControlRequestOptions, ProtocolHello } from "../src/protocol";
+import animaExtension, { handleAnimaCommand, registerAnimaExtension } from "../src/extension";
+import {
+	type AnimaControl,
+	type ControlEvent,
+	ControlProtocolError,
+	type ControlRequestOptions,
+	type ProtocolHello,
+} from "../src/protocol";
 
 const HELLO: ProtocolHello = {
 	protocol: "anima-control",
@@ -34,6 +42,18 @@ const HELLO: ProtocolHello = {
 class FakeControl implements AnimaControl {
 	readonly calls: Array<{ method: string; params: unknown; options?: ControlRequestOptions }> = [];
 	readonly #listeners = new Set<(event: ControlEvent) => void>();
+	helloResult: ProtocolHello | Promise<ProtocolHello> = HELLO;
+	cancelResult: unknown | Promise<unknown> = { invocation_id: "in-1", disposition: "cancelled_running" };
+	readonly releaseResults: Array<unknown | Promise<unknown>> = [];
+	closeCalls = 0;
+	closeCallIndex = -1;
+	#mailReceive?: ReturnType<typeof Promise.withResolvers<never>>;
+	startResult: unknown | Promise<unknown> = {
+		invocation_id: "in-1",
+		agent_id: "agent-1",
+		session_name: "omp-agent-1",
+		state: "starting",
+	};
 	waitResult: unknown = {
 		invocation_id: "in-1",
 		session_name: "omp-agent-1",
@@ -46,20 +66,15 @@ class FakeControl implements AnimaControl {
 		completed_at: "2026-07-28T00:00:00Z",
 	};
 
-	hello(): Promise<ProtocolHello> {
-		return Promise.resolve(HELLO);
+	async hello(): Promise<ProtocolHello> {
+		return await this.helloResult;
 	}
 
 	async request<T>(method: string, params: unknown, options?: ControlRequestOptions): Promise<T> {
 		this.calls.push({ method, params, options });
 		switch (method) {
 			case "invoke.start":
-				return {
-					invocation_id: "in-1",
-					agent_id: "agent-1",
-					session_name: "omp-agent-1",
-					state: "starting",
-				} as T;
+				return (await this.startResult) as T;
 			case "invoke.wait_turn":
 				return (await this.waitResult) as T;
 			case "invoke.observe":
@@ -70,7 +85,29 @@ class FakeControl implements AnimaControl {
 					state: "generating",
 				} as T;
 			case "invoke.message":
-				return { message_id: "message-1" } as T;
+				return {
+					invocation_id: "in-1",
+					session_name: "omp-agent-1",
+					message_id: "message-1",
+					thread_id: (params as { thread_id?: string }).thread_id,
+					priority: 0,
+					disposition: "delivered",
+				} as T;
+			case "invoke.cancel":
+				return (await this.cancelResult) as T;
+			case "invoke.release": {
+				const policy = (params as { policy?: string }).policy ?? "park";
+				if (this.releaseResults.length > 0) return (await this.releaseResults.shift()) as T;
+				return {
+					invocation_id: "in-1",
+					session_name: "omp-agent-1",
+					policy,
+					disposition: policy === "keep" ? "kept" : "parked",
+				} as T;
+			}
+			case "mail.receive":
+				this.#mailReceive ??= Promise.withResolvers<never>();
+				return this.#mailReceive.promise;
 			default:
 				return {} as T;
 		}
@@ -82,6 +119,10 @@ class FakeControl implements AnimaControl {
 	}
 
 	close(): Promise<void> {
+		this.closeCalls += 1;
+		this.closeCallIndex = this.calls.length;
+		this.#mailReceive?.reject(new ControlProtocolError("transport_closed", "closed", true));
+		this.#mailReceive = undefined;
 		return Promise.resolve();
 	}
 }
@@ -109,6 +150,48 @@ function executorOptions(agent = packagedAgent()): ExecutorOptions {
 	};
 }
 
+function extensionHarness(): {
+	pi: ExtensionAPI;
+	executor?: SubagentExecutor;
+	shutdown?: () => Promise<void>;
+} {
+	const harness: {
+		pi: ExtensionAPI;
+		executor?: SubagentExecutor;
+		shutdown?: () => Promise<void>;
+	} = {
+		pi: undefined as unknown as ExtensionAPI,
+	};
+	harness.pi = {
+		setLabel: () => undefined,
+		registerSubagentExecutor: (executor: SubagentExecutor) => {
+			harness.executor = executor;
+		},
+		registerCommand: () => undefined,
+		on: (event: string, handler: () => Promise<void>) => {
+			if (event === "session_shutdown") harness.shutdown = handler;
+		},
+	} as unknown as ExtensionAPI;
+	return harness;
+}
+
+class FakePeerBus {
+	transport?: IrcPeerTransport;
+	registerCalls = 0;
+
+	registerPeerTransport(transport: IrcPeerTransport): () => void {
+		this.transport = transport;
+		this.registerCalls += 1;
+		return () => {
+			if (this.transport === transport) this.transport = undefined;
+		};
+	}
+
+	deliverInbound(): Promise<{ outcome: string }> {
+		return Promise.resolve({ outcome: "injected" });
+	}
+}
+
 describe("AnimaExecutorController", () => {
 	it("claims only packaged or explicitly configured agents", () => {
 		const controller = new AnimaExecutorController({
@@ -118,8 +201,20 @@ describe("AnimaExecutorController", () => {
 		});
 		expect(controller.executor.claim(packagedAgent())).toBe(true);
 		expect(
-			controller.executor.claim({ ...packagedAgent(), filePath: "/linked/plugin/agents/claude-reviewer.md" }),
-		).toBe(true);
+			controller.executor.claim({ ...packagedAgent(), filePath: "/tmp/project/agents/claude-reviewer.md" }),
+		).toBe(false);
+		expect(
+			controller.executor.claim({
+				...packagedAgent(),
+				filePath: path.resolve(import.meta.dir, "../agents/claude-reviewer-copy.md"),
+			}),
+		).toBe(false);
+		expect(
+			controller.executor.claim({
+				...packagedAgent(),
+				filePath: path.resolve(import.meta.dir, "../agents/claude-implementer.md"),
+			}),
+		).toBe(false);
 		expect(
 			controller.executor.claim({ ...packagedAgent(), name: "project-claude", filePath: "/tmp/project.md" }),
 		).toBe(true);
@@ -178,8 +273,12 @@ describe("AnimaExecutorController", () => {
 		expect(corePrompt.body).toContain("caller-owned working tree at `/tmp/caller-worktree`");
 		expect(corePrompt.body).toContain("OMP role grants only these tool capabilities: read");
 		expect(corePrompt.body).toContain('"result": "string"');
-		expect(corePrompt.body).toContain("omp-test-sidecar-Main");
-		expect(corePrompt.body).toContain("an mail send --to omp-test-sidecar-Main");
+		expect(corePrompt.body).toContain("$ANIMA_OMP_REPLY_HELPER");
+		expect(corePrompt.body).toContain('--body "..."');
+		expect(corePrompt.body).toContain("--thread-id THREAD_ID");
+		expect(corePrompt.body).toContain("--reply-to MESSAGE_ID");
+		expect(corePrompt.body).not.toContain("an mail send");
+		expect(corePrompt.body).not.toContain(HELLO.mailbox);
 		expect(corePrompt.body).toContain("final assistant response");
 		expect(corePrompt.body).not.toContain("Shared context\n\nInspect the target exactly once.");
 		expect(corePrompt.body.toLowerCase()).not.toContain("yield");
@@ -197,11 +296,32 @@ describe("AnimaExecutorController", () => {
 		const result = await controller.executor.execute({
 			...executorOptions({ ...packagedAgent(), model: ["anthropic/claude-sonnet-4-6"] }),
 			modelOverride: "openai-codex/gpt-5.4",
+			parentActiveModelPattern: "openai-codex/gpt-5.4",
 		});
 
 		expect(result.exitCode).toBe(0);
 		const start = client.calls[0]?.params as { route: { model: string } };
 		expect(start.route.model).toBe("claude-sonnet-4-6");
+	});
+
+	it("rejects an explicit non-Claude model override", async () => {
+		const client = new FakeControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const result = await controller.executor.execute({
+			...executorOptions({ ...packagedAgent(), model: ["anthropic/claude-sonnet-4-6"] }),
+			modelOverride: "openai-codex/gpt-5.4",
+			parentActiveModelPattern: "openai-codex/gpt-5.3",
+		});
+
+		expect(result).toMatchObject({
+			exitCode: 1,
+			error: "unsupported_model_selector",
+			stderr: 'Anima Claude executor requires an explicit Anthropic model selector; received "openai-codex/gpt-5.4"',
+		});
+		expect(client.calls).toEqual([]);
 	});
 
 	it("fails preflight when an agent configures a non-Anthropic model", async () => {
@@ -232,6 +352,7 @@ describe("AnimaExecutorController", () => {
 
 		expect((await controller.executor.execute(executorOptions())).exitCode).toBe(0);
 		const messageId = await controller.message("task-2", "Check the remaining edge case.");
+		while (controller.list()[0]?.state !== "released") await Bun.sleep(0);
 
 		expect(messageId).toBe("message-1");
 		expect(client.calls.map(call => call.method)).toEqual([
@@ -239,6 +360,8 @@ describe("AnimaExecutorController", () => {
 			"invoke.wait_turn",
 			"invoke.release",
 			"invoke.message",
+			"invoke.wait_turn",
+			"invoke.release",
 		]);
 		expect(client.calls[2]?.params).toEqual({ invocation_id: "in-1", policy: "keep" });
 		expect(client.calls[3]?.params).toEqual({
@@ -252,12 +375,12 @@ describe("AnimaExecutorController", () => {
 				invocationId: "in-1",
 				state: "released",
 				lastMessageId: "message-1",
-				detail: "follow-up message message-1 delivered",
+				detail: "follow-up turn turn-1 completed",
 			}),
 		]);
 	});
 
-	it("maps a fire-and-forget IRC send to urgent threaded Anima mail", async () => {
+	it("routes a threaded IRC reply to the originating local peer", async () => {
 		const client = new FakeControl();
 		const controller = new AnimaExecutorController({
 			client,
@@ -268,7 +391,7 @@ describe("AnimaExecutorController", () => {
 		client.calls.length = 0;
 		const message: IrcMessage = {
 			id: "irc-1",
-			from: "Main",
+			from: "requester-1",
 			to: "omp-agent-1",
 			body: "Report the blocker.",
 			ts: Date.now(),
@@ -277,20 +400,27 @@ describe("AnimaExecutorController", () => {
 		};
 
 		expect(await controller.sendPeer(message)).toBe("message-1");
-		expect(client.calls).toEqual([
-			{
-				method: "invoke.message",
-				params: {
-					invocation_id: "in-1",
-					subject: "OMP IRC from Main",
-					body: "Report the blocker.",
-					priority: 0,
-					thread_id: "thread-1",
-					reply_to: "mail-parent",
-				},
-				options: { id: "irc:irc-1" },
+		while (controller.list()[0]?.state !== "released") await Bun.sleep(0);
+		expect(client.calls[0]).toEqual({
+			method: "invoke.message",
+			params: {
+				invocation_id: "in-1",
+				subject: "OMP IRC from requester-1",
+				body: "Report the blocker.",
+				priority: 0,
+				thread_id: "thread-1",
+				reply_to: "mail-parent",
 			},
-		]);
+			options: { id: "irc:irc-1", timeoutMs: 10_000 },
+		});
+		expect(controller.resolvePeerMessage("omp-agent-1", { threadId: "thread-1" })).toEqual({
+			recipient: "requester-1",
+		});
+		expect(controller.resolvePeerMessage("omp-agent-1", { replyTo: "message-1" })).toEqual({
+			recipient: "requester-1",
+		});
+		expect(controller.resolvePeerMessage("forged-peer", { threadId: "thread-1" })).toBeUndefined();
+		expect(client.calls.map(call => call.method)).toEqual(["invoke.message", "invoke.wait_turn", "invoke.release"]);
 	});
 
 	it("rejects follow-up for an unknown task without contacting Anima", async () => {
@@ -316,9 +446,10 @@ describe("AnimaExecutorController", () => {
 		});
 		const abort = new AbortController();
 		const pending = controller.executor.execute({ ...executorOptions(), signal: abort.signal });
-		await Promise.resolve();
+		while (client.calls.length < 2) await Bun.sleep(0);
 		abort.abort("operator");
-		const result = await pending;
+		const commandCancellation = controller.cancel("task-2");
+		const [result] = await Promise.all([pending, commandCancellation]);
 		wait.resolve({});
 
 		expect(result).toMatchObject({ exitCode: 1, aborted: true, abortReason: "operator" });
@@ -328,6 +459,184 @@ describe("AnimaExecutorController", () => {
 			"invoke.cancel",
 			"invoke.release",
 		]);
+		expect(client.calls.filter(call => call.method === "invoke.cancel")).toHaveLength(1);
+		expect(client.calls.filter(call => call.method === "invoke.release")).toHaveLength(1);
+	});
+
+	it("returns a completed turn when cancellation loses to terminal commit", async () => {
+		const client = new FakeControl();
+		const completed = client.waitResult;
+		const wait = Promise.withResolvers<unknown>();
+		client.waitResult = wait.promise;
+		client.cancelResult = { invocation_id: "in-1", disposition: "already_completed" };
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const abort = new AbortController();
+		const pending = controller.executor.execute({ ...executorOptions(), signal: abort.signal });
+		while (client.calls.length < 2) await Promise.resolve();
+		abort.abort("operator");
+		wait.resolve(completed);
+
+		expect(await pending).toMatchObject({ exitCode: 0, output: "exact final text" });
+		expect(client.calls.filter(call => call.method === "invoke.cancel")).toHaveLength(1);
+		expect(client.calls.filter(call => call.method === "invoke.release")).toHaveLength(1);
+	});
+
+	it("fails truthfully when cancellation and release both report stale authority", async () => {
+		const client = new FakeControl();
+		client.cancelResult = { invocation_id: "in-1", disposition: "stale_authority" };
+		client.releaseResults.push({
+			invocation_id: "in-1",
+			session_name: "omp-agent-1",
+			policy: "park",
+			disposition: "stale_authority",
+		});
+		const wait = Promise.withResolvers<unknown>();
+		client.waitResult = wait.promise;
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const abort = new AbortController();
+		const pending = controller.executor.execute({ ...executorOptions(), signal: abort.signal });
+		while (client.calls.length < 2) await Promise.resolve();
+		abort.abort("operator");
+
+		expect(await pending).toMatchObject({
+			exitCode: 1,
+			aborted: true,
+			error: "Anima invocation in-1 was not cancelled: stale_authority",
+		});
+		expect(client.calls.filter(call => call.method === "invoke.cancel")).toHaveLength(1);
+		expect(client.calls.filter(call => call.method === "invoke.release")).toHaveLength(1);
+		expect(controller.list()[0]).toMatchObject({ state: "failed" });
+		wait.reject(new Error("cancelled"));
+	});
+
+	it("rejects an unsuccessful release disposition without reporting task success", async () => {
+		const client = new FakeControl();
+		client.releaseResults.push({
+			invocation_id: "in-1",
+			session_name: "omp-agent-1",
+			policy: "park",
+			disposition: "stale_authority",
+		});
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+
+		expect(await controller.executor.execute(executorOptions())).toMatchObject({
+			exitCode: 1,
+			error: "Anima invocation in-1 was not parked: stale_authority",
+		});
+		expect(client.calls.filter(call => call.method === "invoke.release")).toHaveLength(1);
+		expect(controller.list()[0]).toMatchObject({ state: "failed" });
+	});
+
+	it("serializes release and revival and reapplies retention to the new turn revision", async () => {
+		const client = new FakeControl();
+		const firstRelease = Promise.withResolvers<unknown>();
+		client.releaseResults.push(firstRelease.promise);
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const execution = controller.executor.execute(executorOptions());
+		while (client.calls.filter(call => call.method === "invoke.release").length < 1) await Promise.resolve();
+		const message = controller.message("task-2", "Re-check after release.");
+		firstRelease.resolve({
+			invocation_id: "in-1",
+			session_name: "omp-agent-1",
+			policy: "park",
+			disposition: "parked",
+		});
+
+		expect((await execution).exitCode).toBe(0);
+		expect(await message).toBe("message-1");
+		while (controller.list()[0]?.state !== "released") await Promise.resolve();
+		const releases = client.calls.filter(call => call.method === "invoke.release");
+		expect(releases).toHaveLength(2);
+		expect(releases.map(call => call.options?.id)).toEqual(["release:in-1:0", "release:in-1:1"]);
+	});
+
+	it("settles promptly when aborted while protocol hello is pending", async () => {
+		const client = new FakeControl();
+		const hello = Promise.withResolvers<ProtocolHello>();
+		client.helloResult = hello.promise;
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const abort = new AbortController();
+		const pending = controller.executor.execute({ ...executorOptions(), signal: abort.signal });
+		await Promise.resolve();
+		abort.abort("operator");
+
+		expect(await pending).toMatchObject({
+			exitCode: 1,
+			aborted: true,
+			abortReason: "operator",
+		});
+		expect(client.calls).toEqual([]);
+		hello.resolve(HELLO);
+	});
+
+	it("settles on abort while invoke.start is pending and cleans a late commit", async () => {
+		const client = new FakeControl();
+		const start = Promise.withResolvers<unknown>();
+		client.startResult = start.promise;
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const abort = new AbortController();
+		const pending = controller.executor.execute({ ...executorOptions(), signal: abort.signal });
+		while (client.calls.filter(call => call.method === "invoke.start").length < 1) await Promise.resolve();
+		abort.abort("operator");
+
+		expect(await pending).toMatchObject({ exitCode: 1, aborted: true, abortReason: "operator" });
+		start.resolve({
+			invocation_id: "in-late",
+			agent_id: "agent-late",
+			session_name: "omp-agent-late",
+			state: "starting",
+		});
+		while (client.calls.filter(call => call.method === "invoke.release").length < 1) await Promise.resolve();
+		expect(client.calls.filter(call => call.method === "invoke.cancel")).toHaveLength(1);
+		expect(client.calls.filter(call => call.method === "invoke.release")).toHaveLength(1);
+	});
+
+	it("times out during invoke.start and cleans a late committed invocation exactly once", async () => {
+		const client = new FakeControl();
+		const start = Promise.withResolvers<unknown>();
+		client.startResult = start.promise;
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+		});
+		const result = await controller.executor.execute({ ...executorOptions(), maxRuntimeMs: 10 });
+
+		expect(result).toMatchObject({
+			exitCode: 1,
+			error: "runtime_timeout",
+			aborted: true,
+			abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=10)",
+		});
+		expect(client.calls.map(call => call.method)).toEqual(["invoke.start"]);
+
+		start.resolve({
+			invocation_id: "in-late",
+			agent_id: "agent-late",
+			session_name: "omp-agent-late",
+			state: "starting",
+		});
+		await Bun.sleep(0);
+		expect(client.calls.map(call => call.method)).toEqual(["invoke.start", "invoke.cancel", "invoke.release"]);
+		expect(client.calls.filter(call => call.method === "invoke.cancel")).toHaveLength(1);
+		expect(client.calls.filter(call => call.method === "invoke.release")).toHaveLength(1);
 	});
 
 	it("fails unsupported additional roots before contacting Anima", async () => {
@@ -357,6 +666,79 @@ describe("Anima extension commands", () => {
 			if (previous === undefined) delete process.env.ANIMA_OMP_RETENTION;
 			else process.env.ANIMA_OMP_RETENTION = previous;
 		}
+	});
+
+	it("registers a fail-closed claimant when sidecar startup fails", async () => {
+		const client = new FakeControl();
+		const hello = Promise.withResolvers<ProtocolHello>();
+		client.helloResult = hello.promise;
+		const bus = new FakePeerBus();
+		const harness = extensionHarness();
+		await registerAnimaExtension(harness.pi, { createClient: () => client, bus });
+		const executor = harness.executor;
+		if (!executor || !harness.shutdown) throw new Error("extension did not register its executor and shutdown hook");
+		expect(executor.claim(packagedAgent())).toBe(true);
+		hello.reject(new ControlProtocolError("transport_start_failed", "sidecar unavailable", true));
+
+		expect(await executor.execute(executorOptions())).toMatchObject({
+			exitCode: 1,
+			stderr: "sidecar unavailable",
+			error: "sidecar unavailable",
+		});
+		expect(client.calls.some(call => call.method === "invoke.start")).toBe(false);
+		await harness.shutdown();
+		expect(client.closeCalls).toBe(1);
+	});
+
+	it("shares one bridge, drains active invocations before final close, and permits a fresh runtime", async () => {
+		const client = new FakeControl();
+		const bus = new FakePeerBus();
+		let creates = 0;
+		const dependencies = {
+			createClient: () => {
+				creates += 1;
+				return client;
+			},
+			bus,
+		};
+		const first = extensionHarness();
+		const second = extensionHarness();
+		await registerAnimaExtension(first.pi, dependencies);
+		await registerAnimaExtension(second.pi, dependencies);
+		if (!first.executor || !first.shutdown || !second.executor || !second.shutdown) {
+			throw new Error("extension did not register both shared-runtime instances");
+		}
+		expect(first.executor).toBe(second.executor);
+		expect(creates).toBe(1);
+		expect(bus.registerCalls).toBe(1);
+
+		await first.shutdown();
+		expect(client.closeCalls).toBe(0);
+		expect(bus.transport).toBeDefined();
+
+		const wait = Promise.withResolvers<unknown>();
+		client.waitResult = wait.promise;
+		const execution = second.executor.execute(executorOptions());
+		while (client.calls.filter(call => call.method === "invoke.wait_turn").length < 1) await Promise.resolve();
+		await second.shutdown();
+		const cancelIndex = client.calls.findIndex(call => call.method === "invoke.cancel");
+		const releaseIndex = client.calls.findIndex(call => call.method === "invoke.release");
+		expect(cancelIndex).toBeGreaterThanOrEqual(0);
+		expect(releaseIndex).toBeGreaterThan(cancelIndex);
+		expect(client.closeCallIndex).toBeGreaterThan(releaseIndex);
+		expect(client.closeCalls).toBe(1);
+		expect(bus.transport).toBeUndefined();
+		wait.reject(new ControlProtocolError("transport_closed", "closed", true));
+		await execution;
+
+		const freshClient = new FakeControl();
+		const fresh = extensionHarness();
+		await registerAnimaExtension(fresh.pi, { createClient: () => freshClient, bus });
+		if (!fresh.executor || !fresh.shutdown) throw new Error("fresh extension runtime was not registered");
+		expect((await fresh.executor.execute(executorOptions())).exitCode).toBe(0);
+		await fresh.shutdown();
+		expect(freshClient.closeCalls).toBe(1);
+		expect(bus.registerCalls).toBe(2);
 	});
 
 	it("fails safely when message task ID or text is missing or unknown", async () => {
@@ -412,9 +794,10 @@ describe("Anima extension commands", () => {
 		} as unknown as ExtensionCommandContext;
 
 		await handleAnimaCommand("message task-2 Check   this edge case.", ctx, controller);
+		while (controller.list()[0]?.state !== "released") await Bun.sleep(0);
 
 		expect(confirmations).toBe(0);
-		expect(client.calls.map(call => call.method)).toEqual(["invoke.message"]);
+		expect(client.calls.map(call => call.method)).toEqual(["invoke.message", "invoke.wait_turn", "invoke.release"]);
 		expect(client.calls[0]?.params).toEqual({
 			invocation_id: "in-1",
 			body: "Check   this edge case.",
