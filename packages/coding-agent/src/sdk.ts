@@ -2709,7 +2709,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (activeAgentPersona?.systemPrompt) {
 				appendParts.push(activeAgentPersona.systemPrompt);
 			}
-			let appendPrompt: string | undefined = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 			if (serverInstructions && serverInstructions.size > 0) {
 				appendParts.push(
 					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
@@ -3227,7 +3226,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			agentPersona: options.agentPersona,
 			initialToolOverlayRestore: options.agentPersona?.tools?.length
 				? async () => {
-						await session.setActiveToolsByName(toolNamesFromRegistry);
+						await session.setActiveToolsByName(initialToolNames);
 					}
 				: undefined,
 			ensureWriteRegistered,

@@ -736,6 +736,17 @@ export class SessionTools {
 		);
 	}
 
+	/** Snapshots the current tool set, applies a new one, and returns a restore handle. */
+	async applyToolOverlay(toolNames: string[]): Promise<{ restore: () => Promise<void> }> {
+		const previous = this.getEnabledToolNames();
+		await this.setActiveToolsByName(toolNames);
+		return {
+			restore: async () => {
+				await this.setActiveToolsByName(previous);
+			},
+		};
+	}
+
 	/**
 	 * Restore an enabled tool set with its exact top-level versus `xd://` partition.
 	 *

@@ -25,6 +25,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { AgentDefinition } from "../task/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { SessionManager } from "./session-manager";
@@ -221,6 +222,16 @@ export interface AgentSessionConfig {
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
+	/** Callback to update the session-level spawns allowlist. */
+	setSessionSpawns?: (spawns: string) => void;
+	/** Callback to read the session-level spawns allowlist. */
+	getSessionSpawns?: () => string | undefined;
+	/** Callback to update the active agent persona in the SDK closure. */
+	setAgentPersona?: (agent: AgentDefinition | undefined) => void;
+	/** Initial agent persona (from --agent CLI or resume). */
+	agentPersona?: AgentDefinition;
+	/** Restores the pre-overlay tool set when an initial persona had explicit tools. */
+	initialToolOverlayRestore?: () => Promise<void>;
 }
 
 /** Options for AgentSession.prompt(). */

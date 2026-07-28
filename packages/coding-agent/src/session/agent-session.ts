@@ -172,6 +172,8 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
+import { resolveAgentSessionPolicy } from "../task/agent-policy";
+import type { AgentDefinition } from "../task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -586,6 +588,11 @@ export class AgentSession {
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+	#agentPersona: AgentDefinition | undefined;
+	#setAgentPersona: ((agent: AgentDefinition | undefined) => void) | undefined;
+	#getSessionSpawns: (() => string | undefined) | undefined;
+	#setSessionSpawns: ((spawns: string) => void) | undefined;
+	#agentToolOverlay: { restore: () => Promise<void> } | undefined;
 	readonly #memory: SessionMemory;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
@@ -1133,6 +1140,13 @@ export class AgentSession {
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
 		this.#obfuscator = config.obfuscator;
+		this.#agentPersona = config.agentPersona;
+		this.#setAgentPersona = config.setAgentPersona;
+		this.#getSessionSpawns = config.getSessionSpawns;
+		this.#setSessionSpawns = config.setSessionSpawns;
+		if (config.agentPersona?.tools?.length && config.initialToolOverlayRestore) {
+			this.#agentToolOverlay = { restore: config.initialToolOverlayRestore };
+		}
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -3844,6 +3858,11 @@ export class AgentSession {
 		return this.#models.thinkingLevel;
 	}
 
+	/** The active agent persona, if any. */
+	get agentPersona(): AgentDefinition | undefined {
+		return this.#agentPersona;
+	}
+
 	/** The selector the user configured: `auto` when auto mode is active, else the effective level. */
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		return this.#models.configuredThinkingLevel();
@@ -4011,6 +4030,11 @@ export class AgentSession {
 	/** Selects enabled tools, ignoring names absent from the registry. */
 	setActiveToolsByName(toolNames: string[]): Promise<void> {
 		return this.#tools.setActiveToolsByName(toolNames);
+	}
+
+	/** Snapshots the current tool set, applies a new one, and returns a restore handle. */
+	applyToolOverlay(toolNames: string[]): Promise<{ restore: () => Promise<void> }> {
+		return this.#tools.applyToolOverlay(toolNames);
 	}
 
 	/** Restores an exact top-level versus `xd://` tool partition. */
@@ -6187,6 +6211,56 @@ export class AgentSession {
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
 		return this.#models.setModelTemporary(model, thinkingLevel, options);
+	}
+
+	/** Live-switches the agent persona: tools, spawns, model, thinking, system prompt. */
+	async switchAgentPersona(agent: AgentDefinition): Promise<void> {
+		const policy = resolveAgentSessionPolicy(agent);
+		const previousPersona = this.#agentPersona;
+		const previousModel = this.model;
+		const previousThinking = this.configuredThinkingLevel();
+		const previousToolNames = this.getEnabledToolNames();
+		const previousSpawns = this.#getSessionSpawns?.();
+		try {
+			// 1. Tools: overlay
+			if (this.#agentToolOverlay) await this.#agentToolOverlay.restore();
+			if (policy.toolNames) {
+				this.#agentToolOverlay = await this.applyToolOverlay(policy.toolNames);
+			} else {
+				this.#agentToolOverlay = undefined;
+			}
+			// 2. Spawns
+			if (policy.spawns !== undefined) this.#setSessionSpawns?.(policy.spawns);
+			// 3. Model
+			if (policy.modelPatterns?.length) {
+				const resolved = resolveModelOverride(policy.modelPatterns, this.modelRegistry, this.settings);
+				if (resolved.model) await this.setModel(resolved.model, "default");
+				if (resolved.thinkingLevel && !policy.thinkingLevel) this.setThinkingLevel(resolved.thinkingLevel);
+				if (resolved.warning) this.emitNotice("warning", resolved.warning);
+			}
+			// 4. Thinking
+			if (policy.thinkingLevel) this.setThinkingLevel(policy.thinkingLevel);
+			// 5. System prompt
+			this.#agentPersona = agent;
+			this.#setAgentPersona?.(agent);
+			await this.refreshBaseSystemPrompt();
+			// 6. Persist
+			this.sessionManager.appendAgentChange(agent.name, agent.source);
+			this.emitNotice("info", `Switched to agent persona "${agent.name}".`, "agent-switch");
+		} catch (error) {
+			this.#agentPersona = previousPersona;
+			this.#setAgentPersona?.(previousPersona);
+			this.#agentToolOverlay = undefined;
+			try {
+				await this.setActiveToolsByName(previousToolNames);
+				if (previousSpawns !== undefined) this.#setSessionSpawns?.(previousSpawns);
+				if (previousModel) await this.setModel(previousModel, "default");
+				if (previousThinking) this.setThinkingLevel(previousThinking);
+			} catch {
+				/* swallow rollback errors */
+			}
+			throw error;
+		}
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */

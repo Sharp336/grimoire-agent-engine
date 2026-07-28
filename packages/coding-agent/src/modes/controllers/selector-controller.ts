@@ -51,8 +51,8 @@ import {
 	type ResetUsageAccount,
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
-import { discoverAgents } from "../../task/discovery";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { discoverAgents } from "../../task/discovery";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
