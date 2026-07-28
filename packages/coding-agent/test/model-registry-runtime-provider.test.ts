@@ -893,4 +893,61 @@ describe("ModelRegistry runtime provider registration", () => {
 		await registry.refresh("online");
 		expect(ids()).toHaveLength(2);
 	});
+
+	test("a non-idempotent modifyModels does not compound when another provider registers", async () => {
+		// The SDK and CLI loaders drain pending registrations one at a time, so an
+		// earlier provider's projection is still in #models when the next arrives.
+		const registerAppending = async (providerName: string, apiId: string) => {
+			await authStorage.set(providerName, {
+				type: "oauth",
+				access: "access-token",
+				refresh: "refresh-token",
+				expires: Date.now() + 60_000,
+			});
+			let projectionCount = 0;
+			registry.registerProvider(
+				providerName,
+				{
+					api: apiId,
+					baseUrl: "https://example.invalid/",
+					streamSimple,
+					models: [baseModel],
+					oauth: {
+						name: `${providerName} OAuth`,
+						login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+						refreshToken: async credentials => credentials,
+						getApiKey: credentials => credentials.access,
+						modifyModels: models => {
+							projectionCount += 1;
+							const seed = models.find(model => model.provider === providerName) as Model<Api>;
+							return [...models, { ...seed, id: `extra-${projectionCount}` }];
+						},
+					},
+				},
+				"ext://oauth",
+			);
+		};
+
+		await registerAppending("appending-first", "custom-appending-first-api");
+		expect(getProviderModels(registry, "appending-first").map(model => model.id)).toEqual([
+			"runtime-model",
+			"extra-1",
+		]);
+
+		await registerAppending("appending-second", "custom-appending-second-api");
+		// Registering the second provider must not rerun the first provider's hook
+		// over its own output.
+		expect(getProviderModels(registry, "appending-first").map(model => model.id)).toEqual([
+			"runtime-model",
+			"extra-1",
+		]);
+		expect(getProviderModels(registry, "appending-second").map(model => model.id)).toEqual([
+			"runtime-model",
+			"extra-1",
+		]);
+
+		await registry.refresh("offline");
+		expect(getProviderModels(registry, "appending-first")).toHaveLength(2);
+		expect(getProviderModels(registry, "appending-second")).toHaveLength(2);
+	});
 });

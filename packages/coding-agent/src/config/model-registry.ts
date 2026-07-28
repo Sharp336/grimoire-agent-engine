@@ -2615,7 +2615,11 @@ export class ModelRegistry {
 				this.#runtimeModelModifiers.delete(providerName);
 			}
 
-			this.#models = this.#applyRuntimeModelModifiers(withRuntimeTransportOverride);
+			// Only this provider's hook runs: `nextModels` still carries every other
+			// provider's projection from an earlier registration, so rerunning their
+			// hooks here would feed them their own output. Registrations arrive one
+			// at a time, and full rebuilds go through #composeStaticModels.
+			this.#models = this.#applyRuntimeModelModifiers(withRuntimeTransportOverride, new Set([providerName]));
 			return;
 		}
 
