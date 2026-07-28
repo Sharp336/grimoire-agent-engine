@@ -31,12 +31,19 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Conversation identifier preserved by external peer transports. */
+	threadId?: string;
 }
 
 export interface IrcDeliveryReceipt {
 	to: string;
 	outcome: "injected" | "woken" | "revived" | "failed";
 	error?: string;
+}
+
+export interface IrcSendOptions {
+	/** The sender is blocked waiting for a reasoned reply. */
+	expectsReply?: boolean;
 }
 
 /** A non-OMP peer reported by an external IRC transport. */
@@ -68,7 +75,7 @@ export interface IrcExternalPeer extends IrcTransportPeer {
 export interface IrcPeerTransport {
 	readonly id: string;
 	claims(peerId: string): boolean;
-	send(message: IrcMessage): void | Promise<void>;
+	send(message: IrcMessage, options?: Readonly<IrcSendOptions>): void | Promise<void>;
 	listPeers(): readonly IrcTransportPeer[] | Promise<readonly IrcTransportPeer[]>;
 }
 
@@ -236,7 +243,10 @@ export class IrcBus {
 		return this.#deliverLocal(message, ref, opts);
 	}
 
-	async #sendExternal(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
+	async #sendExternal(
+		message: IrcMessage,
+		opts?: IrcSendOptions & { suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
 		const resolution = this.#resolvePeerTransports(message.to);
 		if (resolution.errors.length > 0) {
 			return {
@@ -271,7 +281,7 @@ export class IrcBus {
 			};
 		}
 		try {
-			await registration.transport.send(message);
+			await registration.transport.send(message, { expectsReply: opts?.expectsReply });
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: "injected" };
 		} catch (error) {

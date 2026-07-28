@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { type ActiveInvocation, AnimaExecutorController } from "./executor";
+import { AnimaPeerBridge } from "./peer-bridge";
 import { getSharedControlClient } from "./protocol";
 
 const AGENT_ROOT = path.resolve(import.meta.dir, "../agents");
@@ -108,18 +109,25 @@ export async function handleAnimaCommand(
 	);
 }
 
-export default function animaExtension(pi: ExtensionAPI): void {
+export default async function animaExtension(pi: ExtensionAPI): Promise<void> {
 	const retention = configuredRetention();
-	pi.setLabel("Anima Claude executor");
+	const client = getSharedControlClient();
 	const controller = new AnimaExecutorController({
-		client: getSharedControlClient(),
+		client,
 		agentRoot: AGENT_ROOT,
 		allowAgentNames: configuredAgentNames(),
 		retention,
 	});
+	const bridge = new AnimaPeerBridge({ client, controller });
+	await bridge.start();
+
+	pi.setLabel("Anima Claude executor");
 	pi.registerSubagentExecutor(controller.executor);
 	pi.registerCommand("anima", {
 		description: "Inspect and control Anima-managed Claude task agents",
 		handler: (args, ctx) => handleAnimaCommand(args, ctx, controller),
+	});
+	pi.on("session_shutdown", async () => {
+		await bridge.stop();
 	});
 }

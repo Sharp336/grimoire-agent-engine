@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { IrcBus, type IrcMessage, type IrcPeerTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus, type IrcMessage, type IrcPeerTransport, type IrcSendOptions } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -116,21 +116,26 @@ describe("IRC", () => {
 	describe("IrcBus", () => {
 		it("routes an unknown local recipient through exactly one claiming transport", async () => {
 			const sent: IrcMessage[] = [];
+			let options: Readonly<IrcSendOptions> | undefined;
 			const unregister = bus.registerPeerTransport({
 				id: "remote-workers",
 				claims: peerId => peerId.startsWith("remote:"),
-				send: message => {
+				send: (message, sendOptions) => {
 					sent.push(message);
+					options = sendOptions;
 				},
 				listPeers: () => [],
 			});
 
-			const receipt = await bus.send({
-				from: "0-Main",
-				to: "remote:reviewer",
-				body: "please review",
-				replyTo: "prior-message",
-			});
+			const receipt = await bus.send(
+				{
+					from: "0-Main",
+					to: "remote:reviewer",
+					body: "please review",
+					replyTo: "prior-message",
+				},
+				{ expectsReply: true },
+			);
 
 			expect(receipt).toEqual({ to: "remote:reviewer", outcome: "injected" });
 			expect(sent).toHaveLength(1);
@@ -143,6 +148,7 @@ describe("IRC", () => {
 			expect(sent[0]?.id).toBeTruthy();
 			expect(sent[0]?.ts).toBeGreaterThan(0);
 
+			expect(options).toEqual({ expectsReply: true });
 			unregister();
 			const afterShutdown = await bus.send({ from: "0-Main", to: "remote:reviewer", body: "still there?" });
 			expect(afterShutdown.outcome).toBe("failed");

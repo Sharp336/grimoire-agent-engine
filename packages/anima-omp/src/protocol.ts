@@ -6,6 +6,8 @@ const REQUIRED_METHODS = [
 	"invoke.cancel",
 	"invoke.message",
 	"invoke.release",
+	"mail.receive",
+	"mail.ack",
 ] as const;
 
 export interface ControlErrorBody {
@@ -50,10 +52,29 @@ export interface InvokeMessageParams {
 	subject?: string;
 	body: string;
 	priority: number;
+	thread_id?: string;
+	reply_to?: string;
 }
 
 export interface InvokeMessageResult {
 	message_id: string;
+}
+
+export interface MailMessage {
+	id: string;
+	from: string;
+	to: string;
+	subject: string;
+	body: string;
+	priority: number;
+	msg_type?: string;
+	thread_id?: string;
+	reply_to?: string;
+	sent_at: string;
+}
+
+export interface MailReceiveResult {
+	messages: MailMessage[];
 }
 
 export interface AnimaControl {
@@ -180,6 +201,12 @@ export class StdioControlClient implements AnimaControl {
 		}
 		if (!hello.capabilities.turn_authority) {
 			throw new ControlProtocolError("missing_capability", "Anima control does not advertise turn authority");
+		}
+		if (!hello.capabilities.threaded_mail || !hello.capabilities.external_mailbox) {
+			throw new ControlProtocolError(
+				"missing_capability",
+				"Anima control does not advertise threaded mail and an external mailbox",
+			);
 		}
 		if (hello.limits.max_line_bytes > 0) this.#maxLineBytes = hello.limits.max_line_bytes;
 		return hello;

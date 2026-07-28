@@ -8,6 +8,8 @@ const methods = [
 	"invoke.cancel",
 	"invoke.message",
 	"invoke.release",
+	"mail.receive",
+	"mail.ack",
 ];
 if (process.argv.includes("--omit-message")) methods.splice(methods.indexOf("invoke.message"), 1);
 
@@ -36,7 +38,7 @@ for await (const chunk of Bun.stdin.stream()) {
 						owner: "external:omp:fixture",
 						mailbox: "omp-fixture-Main",
 						methods,
-						capabilities: { turn_authority: true },
+						capabilities: { turn_authority: true, threaded_mail: true, external_mailbox: true },
 						limits: { max_line_bytes: 1_048_576, max_in_flight: 128 },
 					},
 				});

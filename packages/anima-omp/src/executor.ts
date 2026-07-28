@@ -5,6 +5,8 @@ import type {
 	AgentDefinition,
 	AgentProgress,
 	ExecutorOptions,
+	IrcMessage,
+	IrcSendOptions,
 	SingleResult,
 	SubagentExecutor,
 } from "@oh-my-pi/pi-coding-agent";
@@ -208,6 +210,16 @@ export class AnimaExecutorController {
 		return [...this.#active.values()].map(invocation => ({ ...invocation }));
 	}
 
+	findByPeerId(peerId: string): ActiveInvocation | undefined {
+		const active = [...this.#active.values()].find(invocation => invocation.sessionName === peerId);
+		return active ? { ...active } : undefined;
+	}
+
+	peerStatus(invocation: ActiveInvocation): string {
+		if (invocation.state !== "released") return invocation.state;
+		return this.#retention === "keep" ? "idle" : "parked";
+	}
+
 	async observe(requestId: string): Promise<ActiveInvocation> {
 		const active = this.#requireActive(requestId);
 		const observation = await this.#client.request<InvokeObservation>("invoke.observe", {
@@ -249,6 +261,28 @@ export class AnimaExecutorController {
 		});
 		active.lastMessageId = result.message_id;
 		active.detail = `follow-up message ${result.message_id} delivered`;
+		return result.message_id;
+	}
+
+	async sendPeer(message: IrcMessage, options?: Readonly<IrcSendOptions>): Promise<string> {
+		const active = [...this.#active.values()].find(invocation => invocation.sessionName === message.to);
+		if (!active) throw new Error(`Unknown Anima peer ${JSON.stringify(message.to)}`);
+		if (active.state === "failed" || active.state === "aborted" || active.state === "cancelled") {
+			throw new Error(`Anima peer ${JSON.stringify(message.to)} is ${active.state}`);
+		}
+		const params: InvokeMessageParams = {
+			invocation_id: active.invocationId,
+			subject: `OMP IRC from ${message.from}`,
+			body: message.body,
+			priority: options?.expectsReply ? 0 : 2,
+			thread_id: message.threadId ?? message.replyTo ?? message.id,
+			...(message.replyTo ? { reply_to: message.replyTo } : {}),
+		};
+		const result = await this.#client.request<InvokeMessageResult>("invoke.message", params, {
+			id: `irc:${message.id}`,
+		});
+		active.lastMessageId = result.message_id;
+		active.detail = `IRC message ${result.message_id} delivered`;
 		return result.message_id;
 	}
 

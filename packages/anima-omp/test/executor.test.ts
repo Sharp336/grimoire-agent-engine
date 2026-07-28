@@ -5,6 +5,7 @@ import type {
 	ExecutorOptions,
 	ExtensionAPI,
 	ExtensionCommandContext,
+	IrcMessage,
 } from "@oh-my-pi/pi-coding-agent";
 import { AnimaExecutorController } from "../src/executor";
 import animaExtension, { handleAnimaCommand } from "../src/extension";
@@ -16,8 +17,17 @@ const HELLO: ProtocolHello = {
 	anima_version: "test",
 	owner: "external:omp:test-sidecar",
 	mailbox: "omp-test-sidecar-Main",
-	methods: ["invoke.start", "invoke.observe", "invoke.wait_turn", "invoke.cancel", "invoke.message", "invoke.release"],
-	capabilities: { turn_authority: true },
+	methods: [
+		"invoke.start",
+		"invoke.observe",
+		"invoke.wait_turn",
+		"invoke.cancel",
+		"invoke.message",
+		"invoke.release",
+		"mail.receive",
+		"mail.ack",
+	],
+	capabilities: { turn_authority: true, threaded_mail: true, external_mailbox: true },
 	limits: { max_line_bytes: 1_048_576, max_in_flight: 128 },
 };
 
@@ -226,6 +236,42 @@ describe("AnimaExecutorController", () => {
 		]);
 	});
 
+	it("maps an awaited IRC send to urgent threaded Anima mail", async () => {
+		const client = new FakeControl();
+		const controller = new AnimaExecutorController({
+			client,
+			agentRoot: path.resolve(import.meta.dir, "../agents"),
+			retention: "keep",
+		});
+		expect((await controller.executor.execute(executorOptions())).exitCode).toBe(0);
+		client.calls.length = 0;
+		const message: IrcMessage = {
+			id: "irc-1",
+			from: "Main",
+			to: "omp-agent-1",
+			body: "Report the blocker.",
+			ts: Date.now(),
+			threadId: "thread-1",
+			replyTo: "mail-parent",
+		};
+
+		expect(await controller.sendPeer(message, { expectsReply: true })).toBe("message-1");
+		expect(client.calls).toEqual([
+			{
+				method: "invoke.message",
+				params: {
+					invocation_id: "in-1",
+					subject: "OMP IRC from Main",
+					body: "Report the blocker.",
+					priority: 0,
+					thread_id: "thread-1",
+					reply_to: "mail-parent",
+				},
+				options: { id: "irc:irc-1" },
+			},
+		]);
+	});
+
 	it("rejects follow-up for an unknown task without contacting Anima", async () => {
 		const client = new FakeControl();
 		const controller = new AnimaExecutorController({
@@ -279,11 +325,11 @@ describe("AnimaExecutorController", () => {
 });
 
 describe("Anima extension commands", () => {
-	it("rejects invalid retention during extension registration", () => {
+	it("rejects invalid retention during extension registration", async () => {
 		const previous = process.env.ANIMA_OMP_RETENTION;
 		process.env.ANIMA_OMP_RETENTION = "destroy";
 		try {
-			expect(() => animaExtension({} as ExtensionAPI)).toThrow(
+			await expect(animaExtension({} as ExtensionAPI)).rejects.toThrow(
 				'Invalid ANIMA_OMP_RETENTION "destroy"; expected "park" or "keep"',
 			);
 		} finally {
