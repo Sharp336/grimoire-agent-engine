@@ -49,6 +49,7 @@ function capturePayload(
 	const { promise, resolve } = Promise.withResolvers<Payload>();
 	void streamBedrock(bedrockModel, context, {
 		signal: abortedSignal(),
+		bearerToken: "test-token",
 		cacheRetention,
 		onPayload: payload => {
 			resolve(payload as Payload);
