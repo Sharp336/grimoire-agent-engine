@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { parseArgs, type Args } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { type Args, parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
