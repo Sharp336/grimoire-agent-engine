@@ -29,6 +29,7 @@ import {
 	lmStudioModelManagerOptions,
 	metaModelManagerOptions,
 	mistralModelManagerOptions,
+	moonshotCnModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
 	novitaModelManagerOptions,
@@ -276,6 +277,15 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => moonshotModelManagerOptions(config),
 		catalogDiscovery: { label: "Moonshot" },
+	},
+	{
+		// China platform (`api.moonshot.cn`) — separate accounts and keys from the
+		// international host; mirrors the siliconflow/siliconflow-cn split.
+		id: "moonshot-cn",
+		defaultModel: "kimi-k2.7-code",
+		envVars: ["MOONSHOT_CN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => moonshotCnModelManagerOptions(config),
+		catalogDiscovery: { label: "Moonshot (China)" },
 	},
 	{
 		id: "nanogpt",

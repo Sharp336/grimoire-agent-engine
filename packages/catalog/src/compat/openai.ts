@@ -113,7 +113,12 @@ function detectStreamMarkupHealingPattern(
 	modelId: string,
 	baseUrl: string,
 ): OpenAIStreamMarkupHealingPattern | undefined {
-	if (provider === "kimi-code" || provider === "moonshot" || /kimi[-/_.]?k2/i.test(modelId)) {
+	if (
+		provider === "kimi-code" ||
+		provider === "moonshot" ||
+		provider === "moonshot-cn" ||
+		/kimi[-/_.]?k2/i.test(modelId)
+	) {
 		return "kimi";
 	}
 	if (isDeepseekModelIdOrName(modelId) && DSML_HEALING_PROVIDERS.has(provider)) {

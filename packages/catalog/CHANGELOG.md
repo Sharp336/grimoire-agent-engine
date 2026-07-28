@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `moonshot-cn` provider for the Kimi China platform (`api.moonshot.cn`), which issues separate accounts and keys from the international `api.moonshot.ai` host. The provider bundles the models.dev `moonshotai-cn` catalog, discovers models live from the CN `/v1/models` endpoint with the shared Moonshot K2.x/K3 reasoning and pricing mapper, resolves its key from `MOONSHOT_CN_API_KEY`, and honors a `MOONSHOT_CN_BASE_URL` override (explicit `baseUrl` config still wins), mirroring the `siliconflow`/`siliconflow-cn` regional split.
+
 ## [17.1.6] - 2026-07-27
 
 ### Added

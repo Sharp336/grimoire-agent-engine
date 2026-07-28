@@ -35,6 +35,7 @@ import { minimaxCodeProvider } from "./minimax-code";
 import { minimaxCodeCnProvider } from "./minimax-code-cn";
 import { mistralProvider } from "./mistral";
 import { moonshotProvider } from "./moonshot";
+import { moonshotCnProvider } from "./moonshot-cn";
 import { nanogptProvider } from "./nanogpt";
 import { novitaProvider } from "./novita";
 import { nvidiaProvider } from "./nvidia";
@@ -113,6 +114,7 @@ const ALL = [
 	deepseekProvider,
 	metaProvider,
 	moonshotProvider,
+	moonshotCnProvider,
 	cerebrasProvider,
 	basetenProvider,
 	fireworksProvider,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Moonshot (China) to the built-in API-key login provider catalog so `omp login moonshot-cn` stores a credential validated against the China platform's `/v1/models` endpoint, and requests for `moonshot-cn` models honor a `MOONSHOT_CN_BASE_URL` override.
+
 ## [17.1.6] - 2026-07-27
 
 ### Added

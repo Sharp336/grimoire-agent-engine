@@ -3382,19 +3382,44 @@ const MOONSHOT_KIMI_K3_THINKING: ThinkingConfig = { mode: "effort", efforts: [Ef
 export function moonshotModelManagerOptions(
 	config?: MoonshotModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	const apiKey = config?.apiKey;
 	// `MOONSHOT_BASE_URL` redirects discovery (and the streaming request that
 	// inherits this baseUrl) at the Kimi China platform `api.moonshot.cn`; an
 	// explicit `config.baseUrl` still wins. Mirrors LITELLM_BASE_URL/LM_STUDIO_BASE_URL. (#2883)
-	const baseUrl = config?.baseUrl ?? Bun.env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1";
-	const references = createBundledReferenceMap<"openai-completions">("moonshot");
+	return createMoonshotModelManagerOptions(
+		"moonshot",
+		"https://api.moonshot.ai/v1",
+		Bun.env.MOONSHOT_BASE_URL,
+		config,
+	);
+}
+
+export function moonshotCnModelManagerOptions(
+	config?: MoonshotModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createMoonshotModelManagerOptions(
+		"moonshot-cn",
+		"https://api.moonshot.cn/v1",
+		Bun.env.MOONSHOT_CN_BASE_URL,
+		config,
+	);
+}
+
+function createMoonshotModelManagerOptions(
+	providerId: "moonshot" | "moonshot-cn",
+	defaultBaseUrl: string,
+	envBaseUrl: string | undefined,
+	config?: MoonshotModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? envBaseUrl ?? defaultBaseUrl;
+	const references = createBundledReferenceMap<"openai-completions">(providerId);
 	return {
-		providerId: "moonshot",
+		providerId,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
 					api: "openai-completions",
-					provider: "moonshot",
+					provider: providerId,
 					baseUrl,
 					apiKey,
 					mapModel: (entry, defaults) => {
@@ -5267,6 +5292,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	openAiCompletionsDescriptor("kilo", "kilo", "https://api.kilo.ai/api/gateway"),
 	// --- Moonshot AI ---
 	openAiCompletionsDescriptor("moonshotai", "moonshot", "https://api.moonshot.ai/v1"),
+	openAiCompletionsDescriptor("moonshotai-cn", "moonshot-cn", "https://api.moonshot.cn/v1"),
 	// --- NanoGPT ---
 	openAiCompletionsDescriptor("nano-gpt", "nanogpt", "https://nano-gpt.com/api/v1"),
 	// --- Synthetic ---

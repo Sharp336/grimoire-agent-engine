@@ -214,7 +214,7 @@ function generateHealedToolCallId(): string {
 
 /** Cheap model/provider gate for Kimi-K2 chat-template token leaks. */
 export function modelMayLeakKimiToolCalls(provider: string, modelId: string): boolean {
-	if (provider === "kimi-code" || provider === "moonshot") return true;
+	if (provider === "kimi-code" || provider === "moonshot" || provider === "moonshot-cn") return true;
 	return /kimi[-/_.]?k2/i.test(modelId);
 }
 

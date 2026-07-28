@@ -242,6 +242,12 @@ export function resolveOpenAIRequestSetup(
 			baseUrl = moonshotBaseUrl;
 		}
 	}
+	if (model.provider === "moonshot-cn") {
+		const moonshotCnBaseUrl = $env.MOONSHOT_CN_BASE_URL?.trim();
+		if (moonshotCnBaseUrl) {
+			baseUrl = moonshotCnBaseUrl;
+		}
+	}
 	if (model.provider === "sakana") {
 		const sakanaBaseUrl = resolveSakanaRequestBaseUrl();
 		if (sakanaBaseUrl) {
@@ -1124,7 +1130,7 @@ export function resolveOpenAICompletionsOutputClamp(
 	if (isZaiReasoningEffortDialect(model, compat)) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
-	if (model.provider === "moonshot" && isKimiK3ModelId(model.id)) {
+	if ((model.provider === "moonshot" || model.provider === "moonshot-cn") && isKimiK3ModelId(model.id)) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	return undefined;
