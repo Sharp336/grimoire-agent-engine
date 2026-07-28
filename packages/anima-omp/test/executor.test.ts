@@ -118,6 +118,9 @@ describe("AnimaExecutorController", () => {
 		});
 		expect(controller.executor.claim(packagedAgent())).toBe(true);
 		expect(
+			controller.executor.claim({ ...packagedAgent(), filePath: "/linked/plugin/agents/claude-reviewer.md" }),
+		).toBe(true);
+		expect(
 			controller.executor.claim({ ...packagedAgent(), name: "project-claude", filePath: "/tmp/project.md" }),
 		).toBe(true);
 		expect(controller.executor.claim({ ...packagedAgent(), name: "native", filePath: "/tmp/native.md" })).toBe(false);

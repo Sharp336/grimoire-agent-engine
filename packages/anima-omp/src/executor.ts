@@ -94,6 +94,8 @@ interface InvokeStartParams {
 	worktree: false;
 }
 
+const PACKAGED_AGENT_NAMES = new Set(["claude-implementer", "claude-researcher", "claude-reviewer"]);
+
 function normalizedAgentPath(agent: Readonly<AgentDefinition>): string | undefined {
 	return agent.filePath ? path.resolve(agent.filePath) : undefined;
 }
@@ -197,7 +199,7 @@ export class AnimaExecutorController {
 	constructor(config: AnimaExecutorConfig) {
 		this.#client = config.client;
 		this.#agentRoot = path.resolve(config.agentRoot);
-		this.#allowAgentNames = new Set(config.allowAgentNames ?? []);
+		this.#allowAgentNames = new Set([...PACKAGED_AGENT_NAMES, ...(config.allowAgentNames ?? [])]);
 		this.#retention = config.retention ?? "park";
 		this.executor = {
 			id: "anima",

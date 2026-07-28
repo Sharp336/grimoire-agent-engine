@@ -1,6 +1,7 @@
 ---
 name: claude-researcher
 description: "Read-only repository researcher executed by Anima in the official Claude Code TUI"
+model: anthropic/claude-sonnet-4-6
 tools: read, grep, glob, bash, lsp, ast_grep, web_search
 ---
 

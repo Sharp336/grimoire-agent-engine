@@ -1,6 +1,7 @@
 ---
 name: claude-reviewer
 description: "Read-only code reviewer executed by Anima in the official Claude Code TUI"
+model: anthropic/claude-opus-4-6
 tools: read, grep, glob, bash, lsp, ast_grep
 ---
 
