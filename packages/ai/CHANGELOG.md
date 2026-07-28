@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed legacy Codex usage blocks continuing to gate every model after per-meter backoff shipped. SQLite schema 7 now splits the old `shared` scope into independent `chat` and `spark` blocks while preserving their expiry and age, then keeps a trigger-maintained physical `shared` mirror so pre-meter binaries that read the same database remain conservative after a rollback. Current store APIs expose only the meter scopes, while legacy direct `shared` writes fan back out to both meters. Broker clients negotiate meter-scoped snapshots with `OMP-Auth-Broker-Capabilities: codex-meter-block-scopes`; older clients receive a legacy `shared` wire projection, with `Vary` and a new encrypted-cache version keeping the representations separate. Active brokers now detect commits from legacy processes through SQLite's data version and advance snapshot generations, so long-poll and streaming clients receive those compatibility writes without reconnecting.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed
@@ -21,7 +25,6 @@
 
 ### Fixed
 
-- Fixed legacy Codex usage blocks continuing to gate every model after per-meter backoff shipped. SQLite schema 7 now splits the old `shared` scope into independent `chat` and `spark` blocks while preserving their expiry and age, then keeps a trigger-maintained physical `shared` mirror so pre-meter binaries that read the same database remain conservative after a rollback. Current store APIs expose only the meter scopes, while legacy direct `shared` writes fan back out to both meters. Broker clients negotiate meter-scoped snapshots with `OMP-Auth-Broker-Capabilities: codex-meter-block-scopes`; older clients receive a legacy `shared` wire projection, with `Vary` and a new encrypted-cache version keeping the representations separate. Active brokers now detect commits from legacy processes through SQLite's data version and advance snapshot generations, so long-poll and streaming clients receive those compatibility writes without reconnecting.
 - Fixed OpenAI Responses replay treating a tool output as paired with a matching call that appeared later in the input, or a tool call as paired with an earlier output. Pair repair now respects wire order before preserving or synthesizing each side.
 - Fixed adaptive-thinking Anthropic models omitting the interleaved-thinking beta on signature-enforcing proxies, which caused persisted interleaved assistant turns to fail on replay ([#6717](https://github.com/can1357/oh-my-pi/issues/6717)).
 - Kimi Code now sends its session-stable prompt cache key on both supported transports: `prompt_cache_key` for OpenAI-compatible requests and `metadata.user_id` for Anthropic-compatible requests. Explicit keys survive side-channel session IDs, while `cacheRetention: "none"` still disables automatic affinity ([#6049](https://github.com/can1357/oh-my-pi/issues/6049)).
