@@ -9,7 +9,7 @@
 ### Fixed
 
 - Forwarded `streamingBehavior` on the RPC builtin residual-prompt path (e.g. `/vibe <directive>`), matching the normal fallthrough: `AgentSession.prompt()` throws `AgentBusyError` when streaming with no behavior, so the directive was rejected instead of queued during an active turn.
-- Blocked RPC `new_session`/`switch_session`/`branch` while vibe mode is active: RPC has no session-switch reconciler (unlike the TUI), so these transitions previously leaked the old scope's workers and carried the restricted tool snapshot into the new session.
+- Blocked RPC `switch_session`/`branch` while vibe mode is active: these lack the internal vibe guard that `newSession` has (`#assertVibeSessionTransitionAllowed`), and RPC installs no session-switch reconciler (unlike the TUI), so they previously leaked the old scope's workers and carried the restricted tool snapshot into the new session. `new_session` already hard-throws at the `AgentSession` boundary and surfaces a clean RPC error, so it is left untouched.
 - Populated `previousTools` in the shared `VibeModeState` from the TUI enter path (previously only the ACP/RPC path set it), so the `?? []` fallback on exit can never wipe a legitimately active toolset.
 
 ## [17.1.7] - 2026-07-27

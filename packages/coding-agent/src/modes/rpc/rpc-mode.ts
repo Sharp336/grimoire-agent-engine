@@ -1066,12 +1066,13 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				// The TUI installs session-switch reconcilers that suspend and
-				// rehydrate vibe workers; RPC has no such reconciler, so a
-				// session change here would leak the old scope's workers and
-				// carry the restricted tool snapshot into the new session. Block
-				// the transition with a clear error instead.
-				if (session.getVibeModeState()?.enabled) {
+				// switch_session and branch have no vibe guard inside AgentSession
+				// (unlike newSession, which hard-throws via
+				// #assertVibeSessionTransitionAllowed and surfaces a clean RPC
+				// error). The TUI reconciles vibe on session switch via a
+				// reconciler RPC never installs, so block these two here to
+				// avoid leaking workers / carrying the tool snapshot.
+				if (command.type !== "new_session" && session.getVibeModeState()?.enabled) {
 					return error(
 						id,
 						command.type,
