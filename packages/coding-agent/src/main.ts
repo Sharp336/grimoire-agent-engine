@@ -83,16 +83,7 @@ import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
-import {
-	compareVersions,
-	getChangelogPath,
-	parseChangelog,
-	parseChangelogVersion,
-	readLastChangelogVersion,
-	type StartupChangelogSelection,
-	selectStartupChangelog,
-	writeLastChangelogVersion,
-} from "./utils/changelog";
+import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { withTimeoutSignal } from "./utils/fetch-timeout";
 
@@ -661,31 +652,11 @@ async function getChangelogForDisplay(
 		return undefined;
 	}
 
-	const lastVersion = await readLastChangelogVersion();
-	const parsedLastVersion = parseChangelogVersion(lastVersion);
-	if (!parsedLastVersion) {
-		await writeLastChangelogVersion(VERSION);
-		return undefined;
-	}
-	if (lastVersion === VERSION) {
-		// Steady state: user already saw the current version's changelog. Skip the file read + parse.
-		return undefined;
-	}
-	if (mode === "hidden") {
-		const currentVersion = parseChangelogVersion(VERSION);
-		if (currentVersion && compareVersions(currentVersion, parsedLastVersion) > 0) {
-			await writeLastChangelogVersion(VERSION);
-		}
-		return undefined;
-	}
-
-	const changelogPath = getChangelogPath();
-	const entries = await parseChangelog(changelogPath);
-	const startupChangelog = selectStartupChangelog(entries, lastVersion, VERSION);
-	if (startupChangelog.persistCurrentVersion) {
-		await writeLastChangelogVersion(VERSION);
-	}
-	return startupChangelog.markdown ? startupChangelog : undefined;
+	return resolveStartupChangelogForDisplay({
+		mode,
+		currentVersion: VERSION,
+		changelogPath: getChangelogPath(),
+	});
 }
 
 const SESSION_ID_ARG_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

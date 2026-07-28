@@ -1840,13 +1840,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Legacy startup changelog boolean kept only as migration input for
-	// startup.changelogMode; it is intentionally hidden from the settings UI.
-	collapseChangelog: {
-		type: "boolean",
-		default: undefined,
-	},
-
 	"magicKeywords.enabled": {
 		type: "boolean",
 		default: true,

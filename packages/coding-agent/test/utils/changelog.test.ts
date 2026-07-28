@@ -15,7 +15,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
-import { Settings } from "../../src/config/settings";
+import { SETTINGS_SCHEMA, Settings } from "../../src/config/settings";
 import {
 	type ChangelogEntry,
 	formatStartupChangelogSummary,
@@ -24,6 +24,7 @@ import {
 	RECENT_CHANGELOG_ENTRY_LIMIT,
 	readLastChangelogVersion,
 	renderChangelogEntries,
+	resolveStartupChangelogForDisplay,
 	STARTUP_CHANGELOG_FULL_HINT,
 	STARTUP_CHANGELOG_MAX_BYTES,
 	selectStartupChangelog,
@@ -51,17 +52,31 @@ describe("startup changelog mode settings", () => {
 		expect(Settings.isolated().get("startup.changelogMode")).toBe("summary");
 	});
 
-	test("preserves legacy collapsed and expanded choices", () => {
-		expect(Settings.isolated({ collapseChangelog: true }).get("startup.changelogMode")).toBe("summary");
-		expect(Settings.isolated({ collapseChangelog: false }).get("startup.changelogMode")).toBe("expanded");
+	test("keeps the legacy key out of the public schema while migrating raw config", async () => {
+		expect(Object.hasOwn(SETTINGS_SCHEMA, "collapseChangelog")).toBe(false);
+
+		await withTempAgentDir(async agentDir => {
+			const configPath = path.join(agentDir, "config.yml");
+			for (const [legacyValue, expectedMode] of [
+				[true, "summary"],
+				[false, "expanded"],
+			] as const) {
+				await Bun.write(configPath, `collapseChangelog: ${legacyValue}\n`);
+				const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
+				expect(settings.get("startup.changelogMode")).toBe(expectedMode);
+			}
+		});
 	});
 
-	test("an explicit new mode wins over the legacy boolean", () => {
-		const settings = Settings.isolated({
-			collapseChangelog: false,
-			"startup.changelogMode": "hidden",
+	test("lets an explicit new mode win over the legacy raw config key", async () => {
+		await withTempAgentDir(async agentDir => {
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				"collapseChangelog: false\nstartup:\n  changelogMode: hidden\n",
+			);
+			const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
+			expect(settings.get("startup.changelogMode")).toBe("hidden");
 		});
-		expect(settings.get("startup.changelogMode")).toBe("hidden");
 	});
 });
 
@@ -256,6 +271,31 @@ describe("last changelog marker", () => {
 
 			expect(await readLastChangelogVersion(agentDir)).toBe(CURRENT_VERSION);
 			expect(await Bun.file(path.join(agentDir, "last-changelog-version")).text()).toBe(CURRENT_VERSION);
+		});
+	});
+
+	test("hidden mode suppresses display and advances the marker only for upgrades", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("1.0.0", agentDir);
+
+			const upgradeDisplay = await resolveStartupChangelogForDisplay({
+				mode: "hidden",
+				currentVersion: CURRENT_VERSION,
+				agentDir,
+			});
+
+			expect(upgradeDisplay).toBeUndefined();
+			expect(await readLastChangelogVersion(agentDir)).toBe(CURRENT_VERSION);
+
+			await writeLastChangelogVersion("3.0.0", agentDir);
+			const downgradeDisplay = await resolveStartupChangelogForDisplay({
+				mode: "hidden",
+				currentVersion: CURRENT_VERSION,
+				agentDir,
+			});
+
+			expect(downgradeDisplay).toBeUndefined();
+			expect(await readLastChangelogVersion(agentDir)).toBe("3.0.0");
 		});
 	});
 });

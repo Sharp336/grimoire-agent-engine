@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
+import type { SettingValue } from "../config/settings";
 
 export interface ChangelogEntry {
 	major: number;
@@ -301,6 +302,44 @@ export function selectStartupChangelog(
 		latestVersion: latestEntry ? `${latestEntry.major}.${latestEntry.minor}.${latestEntry.patch}` : undefined,
 		...summary,
 	};
+}
+
+/**
+ * Resolve and persist the automatic startup changelog decision.
+ *
+ * Hidden mode advances the marker only for an upgrade, so downgrades do not
+ * erase knowledge of a newer version the user has already seen.
+ */
+export async function resolveStartupChangelogForDisplay(options: {
+	mode: SettingValue<"startup.changelogMode">;
+	currentVersion: string;
+	changelogPath?: string;
+	agentDir?: string;
+}): Promise<StartupChangelogSelection | undefined> {
+	const lastVersion = await readLastChangelogVersion(options.agentDir);
+	const parsedLastVersion = parseChangelogVersion(lastVersion);
+	if (!parsedLastVersion) {
+		await writeLastChangelogVersion(options.currentVersion, options.agentDir);
+		return undefined;
+	}
+	if (lastVersion === options.currentVersion) {
+		// Steady state: skip the changelog file read and parse.
+		return undefined;
+	}
+	if (options.mode === "hidden") {
+		const currentVersion = parseChangelogVersion(options.currentVersion);
+		if (currentVersion && compareVersions(currentVersion, parsedLastVersion) > 0) {
+			await writeLastChangelogVersion(options.currentVersion, options.agentDir);
+		}
+		return undefined;
+	}
+
+	const entries = await parseChangelog(options.changelogPath);
+	const startupChangelog = selectStartupChangelog(entries, lastVersion, options.currentVersion);
+	if (startupChangelog.persistCurrentVersion) {
+		await writeLastChangelogVersion(options.currentVersion, options.agentDir);
+	}
+	return startupChangelog.markdown ? startupChangelog : undefined;
 }
 
 // Re-export getChangelogPath from paths.ts for convenience
