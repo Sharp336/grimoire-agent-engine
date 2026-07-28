@@ -36,12 +36,14 @@
 - Fixed omp worktree clear prematurely deleting active task-isolation sandboxes owned by running subagents.
 - Fixed /vibe mode preventing the director from completing parent tasks after verifying worker results by keeping the built-in todo tool active.
 - Fixed numeric GitHub issue and pull request autocomplete being suppressed inside skill slash-command arguments.
+### Fixed
+
+- Force Git subprocesses to use the stable `C` message locale for predictable non-interactive command output.
 
 ## [17.1.7] - 2026-07-27
 
 ### Fixed
 
-- Force Git subprocesses to use the stable `C` locale for predictable non-interactive command output.
 - Restoring a prompt with image attachments via esc-esc branch or `/tree` now re-attaches the images to the composer draft: previously only the text (with its `[Image #N]` markers) was restored, so resubmitting sent the literal marker with no image.
 - Fixed large bash/eval/ssh output citing two different artifact ids in one result — the truncation notice said `Read artifact://N for full output` while the footer said `Artifact: N+1`. The streaming sink's head and tail windows each had a full budget, so a middle-elided inline body could reach `headBytes + spillThreshold` and always re-tripped the final-defense inline byte cap, which truncated a second time (two elision markers), saved a duplicate already-truncated artifact, and left the notice's line ranges stale. The head and tail windows now share the spill-threshold budget (head clamped to half), the cap budget derives from the configured threshold plus notice slack, and when the cap does fire on a sink-spilled result it references the existing raw artifact instead of saving a copy.
 

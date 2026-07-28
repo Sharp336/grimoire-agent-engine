@@ -1084,6 +1084,64 @@ exec ${JSON.stringify(realGit)} "$@"
 				await removeWithRetries(fakeBin);
 			}
 		});
+
+		it("pins Git message locale without clobbering LC_CTYPE", async () => {
+			// The shim is a bash script resolved via `which`; neither exists on Windows.
+			if (process.platform === "win32") return;
+			const originalPath = process.env.PATH;
+			const originalLocale = {
+				LC_ALL: process.env.LC_ALL,
+				LC_CTYPE: process.env.LC_CTYPE,
+				LC_MESSAGES: process.env.LC_MESSAGES,
+			};
+			const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-locale-"));
+			const realGitResult = Bun.spawnSync(["which", "git"], { stdout: "pipe", stderr: "pipe" });
+			expect(realGitResult.exitCode).toBe(0);
+			const realGit = new TextDecoder().decode(realGitResult.stdout).trim();
+			const fakeGit = path.join(fakeBin, "git");
+			await fs.writeFile(
+				fakeGit,
+				`#!/usr/bin/env bash
+if [[ "\${LC_MESSAGES-}" != "C" ]]; then
+	echo "LC_MESSAGES was \${LC_MESSAGES-<unset>}" >&2
+	exit 41
+fi
+if [[ "\${LC_CTYPE-}" != "UTF-8-SENTINEL" ]]; then
+	echo "LC_CTYPE was \${LC_CTYPE-<unset>}" >&2
+	exit 42
+fi
+if [[ "\${LC_ALL+x}" == "x" ]]; then
+	echo "LC_ALL leaked: \${LC_ALL}" >&2
+	exit 43
+fi
+exec ${JSON.stringify(realGit)} "$@"
+`,
+			);
+			await fs.chmod(fakeGit, 0o755);
+
+			try {
+				process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+				process.env.LC_ALL = "fr_FR.UTF-8";
+				process.env.LC_CTYPE = "UTF-8-SENTINEL";
+				process.env.LC_MESSAGES = "fr_FR.UTF-8";
+
+				await git.diff(remoteFixture.repoRoot, { env: { LC_ALL: "fr_FR.UTF-8", LC_MESSAGES: undefined } });
+			} finally {
+				if (originalPath === undefined) {
+					delete process.env.PATH;
+				} else {
+					process.env.PATH = originalPath;
+				}
+				for (const [key, value] of Object.entries(originalLocale)) {
+					if (value === undefined) {
+						delete process.env[key];
+					} else {
+						process.env[key] = value;
+					}
+				}
+				await removeWithRetries(fakeBin);
+			}
+		});
 	});
 
 	it("serializes concurrent git mutations through withRepoLock so callers don't race git's internal locks", async () => {

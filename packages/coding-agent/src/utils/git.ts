@@ -197,13 +197,14 @@ const GIT_NON_INTERACTIVE_ENV = {
 	GIT_ASKPASS: "true",
 	GIT_EDITOR: "true",
 	GIT_TERMINAL_PROMPT: "0",
-	LC_ALL: "C",
+	LC_ALL: undefined,
+	LC_MESSAGES: "C",
 	SSH_ASKPASS: "/usr/bin/false",
-} satisfies Record<string, string>;
+} satisfies Record<string, string | undefined>;
 const GH_NON_INTERACTIVE_ENV = {
 	...GIT_NON_INTERACTIVE_ENV,
 	GH_PROMPT_DISABLED: "1",
-} satisfies Record<string, string>;
+} satisfies Record<string, string | undefined>;
 
 /** Default deadline for git and gh subprocesses spawned by the coding agent. */
 export const GIT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
