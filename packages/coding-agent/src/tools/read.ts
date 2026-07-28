@@ -725,6 +725,10 @@ const readSchema = type({
 
 export type ReadToolInput = typeof readSchema.infer;
 
+interface ReadSkillTarget extends SkillUrlTarget {
+	isError?: boolean;
+}
+
 export interface ReadToolDetails {
 	kind?: "file" | "url";
 	truncation?: TruncationResult;
@@ -752,7 +756,7 @@ export interface ReadToolDetails {
 	conflictCount?: number;
 	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
 	displayReadTargets?: string[];
-	skillTargets?: Array<{ skill: string; target: string }>;
+	skillTargets?: ReadSkillTarget[];
 }
 
 type ReadParams = ReadToolInput;
@@ -972,7 +976,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
 		const displayReadTargets: string[] = [];
-		const skillTargets: SkillUrlTarget[] = [];
+		const skillTargets: ReadSkillTarget[] = [];
 		let pendingText = notice;
 		const flushText = () => {
 			if (pendingText.length === 0) return;
@@ -985,9 +989,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		for (const part of parts) {
 			const skillTarget = parseSkillUrlTarget(part);
-			if (skillTarget) skillTargets.push(skillTarget);
 			try {
 				const result = await this.execute("read-delimited-part", { path: part }, signal);
+				if (skillTarget) skillTargets.push({ ...skillTarget, isError: false });
 				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
 				for (const block of result.content) {
 					if (block.type === "text") {
@@ -999,6 +1003,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 			} catch (error) {
 				if (error instanceof ToolAbortError || signal?.aborted) throw error;
+				if (skillTarget) skillTargets.push({ ...skillTarget, isError: true });
 				const message = error instanceof Error ? error.message : String(error);
 				const errorNote = `Could not read ${part}: ${message}`;
 				notes.push(errorNote);
@@ -3325,7 +3330,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			},
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
-		if (skillTarget) details.skillTargets = [skillTarget];
+		if (skillTarget) details.skillTargets = [{ ...skillTarget, isError: false }];
 
 		// If extraction was used, return directly (no pagination)
 		if (hasExtraction) {

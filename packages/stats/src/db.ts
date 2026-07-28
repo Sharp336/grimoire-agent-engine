@@ -188,6 +188,7 @@ export async function initDb(): Promise<Database> {
 			target_index INTEGER NOT NULL,
 			target TEXT,
 			skill_name TEXT NOT NULL,
+			is_error INTEGER,
 			UNIQUE(session_file, tool_call_id, target_index)
 		);
 
@@ -212,6 +213,11 @@ export async function initDb(): Promise<Database> {
 		db.run("ALTER TABLE tool_calls ADD COLUMN skill_name TEXT");
 	}
 	db.run("CREATE INDEX IF NOT EXISTS idx_tool_calls_skill_timestamp ON tool_calls(skill_name, timestamp)");
+
+	const skillInvocationColumns = db.prepare("PRAGMA table_info(skill_invocations)").all() as { name: string }[];
+	if (!skillInvocationColumns.some(column => column.name === "is_error")) {
+		db.run("ALTER TABLE skill_invocations ADD COLUMN is_error INTEGER");
+	}
 
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
@@ -1720,16 +1726,17 @@ export function upsertResultSkillInvocations(invocations: ResultSkillInvocationS
 
 	const stmt = db.prepare(`
 		INSERT INTO skill_invocations (
-			session_file, tool_call_id, target_index, target, skill_name
+			session_file, tool_call_id, target_index, target, skill_name, is_error
 		)
-		SELECT ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?
 		WHERE EXISTS (
 			SELECT 1 FROM tool_calls
 			WHERE session_file = ? AND tool_call_id = ?
 		)
 		ON CONFLICT(session_file, tool_call_id, target_index) DO UPDATE SET
 			target = excluded.target,
-			skill_name = excluded.skill_name
+			skill_name = excluded.skill_name,
+			is_error = excluded.is_error
 	`);
 
 	let changed = 0;
@@ -1741,6 +1748,7 @@ export function upsertResultSkillInvocations(invocations: ResultSkillInvocationS
 				invocation.targetIndex,
 				invocation.target,
 				invocation.skillName,
+				invocation.isError === undefined ? null : invocation.isError ? 1 : 0,
 				invocation.sessionFile,
 				invocation.toolCallId,
 			);
@@ -1942,7 +1950,7 @@ export function getSkillStats(cutoff?: number): SkillUsageStats[] {
 		SELECT
 			si.skill_name,
 			COUNT(*) as calls,
-			SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) as errors,
+			SUM(CASE WHEN COALESCE(si.is_error, t.is_error, 0) = 1 THEN 1 ELSE 0 END) as errors,
 			SUM(t.args_chars * 1.0 / tc.target_count) as args_chars,
 			SUM(COALESCE(t.result_chars, 0) * 1.0 / tc.target_count) as result_chars,
 			SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as total_tokens_share,
@@ -1978,7 +1986,7 @@ export function getSkillStatsByModel(cutoff?: number): SkillModelStats[] {
 			t.model,
 			t.provider,
 			COUNT(*) as calls,
-			SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) as errors,
+			SUM(CASE WHEN COALESCE(si.is_error, t.is_error, 0) = 1 THEN 1 ELSE 0 END) as errors,
 			SUM(t.args_chars * 1.0 / tc.target_count) as args_chars,
 			SUM(COALESCE(t.result_chars, 0) * 1.0 / tc.target_count) as result_chars,
 			SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as total_tokens_share,
@@ -2022,7 +2030,7 @@ export function getSkillTimeSeries(
 			(t.timestamp / ?) * ? as bucket,
 			si.skill_name,
 			COUNT(*) as calls,
-			SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) as errors
+			SUM(CASE WHEN COALESCE(si.is_error, t.is_error, 0) = 1 THEN 1 ELSE 0 END) as errors
 		FROM skill_invocations si
 		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
 		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id

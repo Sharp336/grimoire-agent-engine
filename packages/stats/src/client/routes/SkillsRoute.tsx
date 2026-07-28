@@ -137,6 +137,10 @@ const TOP_SKILLS = 6;
 const OVERFLOW_SKILL_KEY = Symbol("skills-overflow");
 type SkillBucketKey = string | typeof OVERFLOW_SKILL_KEY;
 
+export function formatSkillSeriesLabel(skill: SkillBucketKey): string {
+	return skill === OVERFLOW_SKILL_KEY ? "Other skills" : skill;
+}
+
 export function buildSkillInvocationSeries(points: SkillTimeSeriesPoint[]): {
 	buckets: number[];
 	skills: SkillBucketKey[];
@@ -172,7 +176,7 @@ function SkillInvocationsChart({ series, timeRange }: { series: SkillTimeSeriesP
 		() => ({
 			labels: chartSeries.buckets.map(timestamp => formatRangeTick(timestamp, timeRange)),
 			datasets: chartSeries.skills.map((skill, index) => ({
-				label: skill === OVERFLOW_SKILL_KEY ? "Other" : skill,
+				label: formatSkillSeriesLabel(skill),
 				data: chartSeries.buckets.map(bucket => chartSeries.data.get(bucket)?.get(skill) ?? 0),
 				borderColor: MODEL_COLORS[index % MODEL_COLORS.length],
 				backgroundColor: `${MODEL_COLORS[index % MODEL_COLORS.length]}30`,

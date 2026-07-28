@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { parseHTML } from "linkedom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { buildSkillInvocationSeries, SkillsRoute } from "../src/client/routes/SkillsRoute";
+import { buildSkillInvocationSeries, formatSkillSeriesLabel, SkillsRoute } from "../src/client/routes/SkillsRoute";
 import type { SkillDashboardStats } from "../src/shared-types";
 
 
@@ -228,7 +228,7 @@ describe("SkillsRoute", () => {
 		const bucket = chartSeries.buckets[0];
 		if (bucket === undefined) throw new Error("Expected a chart bucket");
 		const datasets = chartSeries.skills.map(skill => ({
-			label: typeof skill === "symbol" ? "Other" : skill,
+			label: formatSkillSeriesLabel(skill),
 			data: [chartSeries.data.get(bucket)?.get(skill) ?? 0],
 		}));
 
@@ -239,11 +239,12 @@ describe("SkillsRoute", () => {
 			{ label: "gamma", data: [7] },
 			{ label: "delta", data: [6] },
 			{ label: "epsilon", data: [5] },
-			{ label: "Other", data: [4] },
+			{ label: "Other skills", data: [4] },
 		]);
 		expect(datasets.reduce((total, dataset) => total + dataset.data[0], 0)).toBe(
 			collisionDashboard.series.reduce((total, point) => total + point.calls, 0),
 		);
-		expect(datasets.filter(dataset => dataset.label === "Other").map(dataset => dataset.data)).toEqual([[10], [4]]);
+		expect(datasets.filter(dataset => dataset.label === "Other").map(dataset => dataset.data)).toEqual([[10]]);
+		expect(datasets.filter(dataset => dataset.label === "Other skills").map(dataset => dataset.data)).toEqual([[4]]);
 	});
 });

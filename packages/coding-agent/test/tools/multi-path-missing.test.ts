@@ -64,7 +64,7 @@ describe("multi-path tools tolerate missing entries", () => {
 		expect(details?.missingPaths).toEqual(["tests/"]);
 	});
 
-	it("records executed skill targets in delimiter order, including failed reads", async () => {
+	it("records per-target skill failures in delimiter order", async () => {
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "read");
 		if (!tool) throw new Error("Missing read tool");
@@ -73,12 +73,14 @@ describe("multi-path tools tolerate missing entries", () => {
 			path: "README.md;skill://review:raw;skill://lint;skill://review",
 		});
 		const text = getText(result);
-		const details = result.details as { skillTargets?: Array<{ skill: string; target: string }> } | undefined;
+		const details = result.details as
+			| { skillTargets?: Array<{ skill: string; target: string; isError?: boolean }> }
+			| undefined;
 
 		expect(details?.skillTargets).toEqual([
-			{ skill: "review", target: "skill://review:raw" },
-			{ skill: "lint", target: "skill://lint" },
-			{ skill: "review", target: "skill://review" },
+			{ skill: "review", target: "skill://review:raw", isError: true },
+			{ skill: "lint", target: "skill://lint", isError: true },
+			{ skill: "review", target: "skill://review", isError: true },
 		]);
 		expect(text).toContain("ordinary read content");
 	});
@@ -106,9 +108,13 @@ describe("multi-path tools tolerate missing entries", () => {
 		if (!tool) throw new Error("Missing read tool");
 
 		const result = await tool.execute("read-direct-skill", { path: "skill://review%3Aguide:raw" });
-		const details = result.details as { skillTargets?: Array<{ skill: string; target: string }> } | undefined;
+		const details = result.details as
+			| { skillTargets?: Array<{ skill: string; target: string; isError?: boolean }> }
+			| undefined;
 
-		expect(details?.skillTargets).toEqual([{ skill: "review:guide", target: "skill://review%3Aguide:raw" }]);
+		expect(details?.skillTargets).toEqual([
+			{ skill: "review:guide", target: "skill://review%3Aguide:raw", isError: false },
+		]);
 	});
 
 	it("search errors only when every path is missing", async () => {

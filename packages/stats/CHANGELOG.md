@@ -11,6 +11,10 @@
 
 - Added a Skills dashboard section for canonical `skill://` read invocation analytics, with range-aware totals, per-model breakdowns, time-series views, additive attributed costs, and average cost per invocation.
 
+### Fixed
+
+- Fixed Skills dashboard error rates for partially failed delimited reads and made its overflow series distinct from a skill named `Other`.
+
 ## [17.1.2] - 2026-07-24
 
 ### Added

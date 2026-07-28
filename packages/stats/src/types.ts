@@ -174,6 +174,8 @@ export interface ProvisionalSkillInvocationStats extends SkillInvocationIdentity
 /** Executed skill target recovered from a read tool result. */
 export interface ResultSkillInvocationStats extends SkillInvocationIdentity {
 	target: string;
+	/** Whether this individual skill target failed to read. */
+	isError?: boolean;
 }
 
 /**

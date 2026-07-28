@@ -73,12 +73,13 @@ function assistantEntry(opts: AssistantFixture) {
 	};
 }
 
-function toolResultEntry(
-	id: string,
-	toolCallId: string,
-	skillTargets: Array<{ skill: string; target: string }>,
-	isError = false,
-) {
+interface SkillTargetFixture {
+	skill: string;
+	target: string;
+	isError?: boolean;
+}
+
+function toolResultEntry(id: string, toolCallId: string, skillTargets: SkillTargetFixture[], isError = false) {
 	return {
 		type: "message",
 		id,
@@ -306,6 +307,35 @@ describe("skill usage stats pipeline", () => {
 		expect(dashboard.bySkill).toEqual(stats);
 		expect(dashboard.bySkillModel).toEqual(byModel);
 		expect(dashboard.series).toEqual(series);
+	});
+
+	it("keeps partial skill read failures attributable to their targets", async () => {
+		await writeSessionFile("partial-failure.jsonl", "partial-failure-sess", [
+			assistantEntry({
+				id: "partial-asst",
+				timestamp: TS1,
+				calls: [{ id: "partial-read", name: "read", arguments: { path: "skill://available;skill://missing" } }],
+				totalTokens: 60,
+				outputTokens: 12,
+				cost: 0.006,
+			}),
+			toolResultEntry("partial-result", "partial-read", [
+				{ skill: "available", target: "skill://available" },
+				{ skill: "missing", target: "skill://missing", isError: true },
+			]),
+		]);
+
+		await syncAllSessions({ workers: 1 });
+
+		expect(skillRow(getSkillStats(), "available")).toMatchObject({ calls: 1, errors: 0 });
+		expect(skillRow(getSkillStats(), "missing")).toMatchObject({ calls: 1, errors: 1 });
+		const errorsBySkill = new Map(getSkillTimeSeries(14, null).map(point => [point.skill, point.errors]));
+		expect(errorsBySkill).toEqual(
+			new Map([
+				["available", 0],
+				["missing", 1],
+			]),
+		);
 	});
 
 	it("counts duplicate executed targets while splitting parent shares", async () => {

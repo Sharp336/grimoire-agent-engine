@@ -389,6 +389,7 @@ function extractResultSkillInvocations(
 		if (!("target" in candidate) || !("skill" in candidate)) continue;
 		const target = candidate.target;
 		const skillName = candidate.skill;
+		const candidateIsError = "isError" in candidate ? candidate.isError : undefined;
 		if (typeof skillName !== "string" || skillName.length === 0) continue;
 		if (typeof target !== "string" || target.length === 0) continue;
 		invocations.push({
@@ -397,6 +398,7 @@ function extractResultSkillInvocations(
 			targetIndex: invocations.length,
 			target,
 			skillName,
+			isError: typeof candidateIsError === "boolean" ? candidateIsError : undefined,
 		});
 	}
 	return invocations;
