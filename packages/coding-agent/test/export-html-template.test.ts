@@ -17,9 +17,6 @@ interface TemplateProbeResult {
 	stableCache: boolean;
 	assetsRemoved: number;
 }
-interface NpmPackResult {
-	files: Array<{ path: string }>;
-}
 
 const expectedTemplate: TemplateProbeResult = {
 	chars: 377_268,
@@ -163,7 +160,7 @@ describe("HTML export template", () => {
 		expect(buildExitCode, `${buildStdout}\n${buildStderr}`).toBe(0);
 		expect(fs.existsSync(staleAssetPath)).toBe(false);
 
-		const proc = Bun.spawn(["npm", "pack", "--dry-run", "--ignore-scripts", "--json"], {
+		const proc = Bun.spawn([process.execPath, "pm", "pack", "--dry-run", "--ignore-scripts"], {
 			cwd: packageDir,
 			stderr: "pipe",
 			stdout: "pipe",
@@ -174,23 +171,10 @@ describe("HTML export template", () => {
 			proc.exited,
 		]);
 		expect(exitCode, stderr).toBe(0);
-		// `npm pack --json` emits an array of pack results on npm <= 11 and an object keyed by
-		// package name on npm >= 12; accept both so the packaging contract is checked either way.
-		const parsed = JSON.parse(stdout) as NpmPackResult[] | Record<string, NpmPackResult>;
-		let packResult: NpmPackResult | undefined;
-		if (Array.isArray(parsed)) packResult = parsed[0];
-		else {
-			for (const key in parsed) {
-				packResult = parsed[key];
-				break;
-			}
-		}
-		expect(packResult, stdout).toBeDefined();
-		const packedAssets = packResult!.files
-			.map(file => file.path)
-			.filter(filePath =>
-				/^dist\/(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js)$/.test(filePath),
-			);
+		const packedAssets = Array.from(
+			stdout.matchAll(/^packed \S+ (dist\/(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js))$/gm),
+			match => match[1],
+		);
 		expect(packedAssets).toHaveLength(4);
 		expect(packedAssets.filter(filePath => /^dist\/template-[^.]+\.css$/.test(filePath))).toHaveLength(1);
 		expect(packedAssets.filter(filePath => /^dist\/template-[^.]+\.html$/.test(filePath))).toHaveLength(1);

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.1.8] - 2026-07-28
+
 ### Added
 
 - Added `setProcessName` utility to set the OS-visible process name on Linux via `bun:ffi`, bypassing Bun's `process.title` limitations.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.1.8] - 2026-07-28
+
 ### Added
 
 - Regenerated the Cursor agent protobufs (`discovery/cursor-gen/agent_pb.ts`) against the modern `agent.proto`, adding the message and enum families current Cursor CLI builds emit: Pi tool exec frames, hook queries and responses, subagents, allowlist prechecks, MCP state, smart-mode classification, canvas diagnostics, conversation search, agent-store conflicts and git diff. Purely additive — no existing exported symbol changed shape.

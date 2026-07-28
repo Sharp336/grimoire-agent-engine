@@ -6,6 +6,7 @@ use std::{
 };
 
 /// Normalizes shell-facing path aliases before `std::fs` sees them.
+#[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 	#[cfg(windows)]
 	{
@@ -18,6 +19,7 @@ pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 }
 
 /// Returns a Windows drive root for a shell pattern that starts with an MSYS/WSL drive alias.
+#[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub fn pattern_drive_alias_root(
 	starts_with_forward_slash: bool,
 	first: &str,

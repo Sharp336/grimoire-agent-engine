@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.1.8] - 2026-07-28
+
 ### Fixed
 
 - Fixed wrapped Markdown list continuations losing their hanging indentation in narrow terminal layouts.
