@@ -2827,6 +2827,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
 		let initialToolNames = [...initialRequestedActiveToolNames];
 
+		// Baseline tool set for persona overlay restore: what the session would have
+		// without the agent persona's toolNames filter. Computed before alwaysInclude
+		// widening so it matches the non-persona startup path.
+		const baselineToolNames = options.toolNames
+			? requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name))
+			: undefined;
+
 		// Custom tools and extension-registered tools are always included regardless of toolNames filter.
 		// Restricted callers own the list, so never widen it with registered tools.
 		const alwaysInclude: string[] = restrictToolNames
@@ -3224,11 +3231,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				activeAgentPersona = agent;
 			},
 			agentPersona: options.agentPersona,
-			initialToolOverlayRestore: options.agentPersona?.tools?.length
-				? async () => {
-						await session.setActiveToolsByName(initialToolNames);
-					}
-				: undefined,
+			initialToolOverlayRestore:
+				options.agentPersona?.tools?.length && baselineToolNames
+					? async () => {
+							await session.setActiveToolsByName(baselineToolNames);
+						}
+					: undefined,
 			ensureWriteRegistered,
 			getMcpServerInstructions: mcpManager
 				? () => {

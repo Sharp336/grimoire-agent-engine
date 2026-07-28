@@ -282,9 +282,13 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 			spawns = "*";
 		} else {
 			spawns = parseArrayOrCSV(trimmed);
+			// Explicit empty string → disable spawning
+			if (spawns === undefined && trimmed === "") spawns = [];
 		}
 	} else {
 		spawns = parseArrayOrCSV(frontmatter.spawns);
+		// Explicit empty array → disable spawning
+		if (spawns === undefined && Array.isArray(frontmatter.spawns)) spawns = [];
 	}
 
 	// Backward compat: infer spawns: "*" when tools includes "task"

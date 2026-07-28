@@ -20,7 +20,14 @@ export interface AgentSessionPolicy {
  */
 export function resolveAgentSessionPolicy(agent: AgentDefinition): AgentSessionPolicy {
 	// Spawns: replicate executor.ts:2272-2278, but main persona: absent spawns → "*"
-	const spawns = agent.spawns === undefined ? "*" : agent.spawns === "*" ? "*" : agent.spawns.join(",");
+	const spawns =
+		agent.spawns === undefined
+			? "*"
+			: agent.spawns === "*"
+				? "*"
+				: agent.spawns.length === 0
+					? ""
+					: agent.spawns.join(",");
 
 	// Tools: replicate executor.ts:2244-2268 logic.
 	// Auto-add `task` when spawning is enabled (resolved spawns is non-empty),

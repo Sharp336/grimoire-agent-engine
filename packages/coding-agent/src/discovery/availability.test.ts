@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { resolveAgentSessionPolicy } from "../task/agent-policy";
+import type { AgentDefinition } from "../task/types";
 import { parseAgentFields } from "./helpers";
 
 describe("availability parsing", () => {
@@ -86,6 +88,24 @@ describe("availability parsing", () => {
 		});
 		expect(result).not.toBeNull();
 		expect(result!.availability).toBe("subagent");
+	});
+
+	test("spawns: [] → spawns empty string, availability unchanged", () => {
+		const result = parseAgentFields({
+			name: "x",
+			description: "y",
+			spawns: [],
+		});
+		expect(result).not.toBeNull();
+		expect(result!.spawns).toEqual([]);
+		// resolveAgentSessionPolicy should produce "" for empty spawns
+		const agent: AgentDefinition = {
+			...result!,
+			systemPrompt: "",
+			source: "user",
+		};
+		const policy = resolveAgentSessionPolicy(agent);
+		expect(policy.spawns).toBe("");
 	});
 
 	test("primary agent tools do not include yield", () => {

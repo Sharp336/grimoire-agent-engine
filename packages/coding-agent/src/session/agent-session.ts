@@ -6039,6 +6039,9 @@ export class AgentSession {
 				...options,
 				additionalDirectories: this.settings.get("workspace.additionalDirectories"),
 			});
+			if (this.#agentPersona) {
+				this.sessionManager.appendAgentChange(this.#agentPersona.name, this.#agentPersona.source);
+			}
 			this.#bash.markSessionTransition(bashTransition);
 			// The new session owns the transcript from here, so the previous
 			// conversation's advisor spend is retired with it. Clearing at the commit

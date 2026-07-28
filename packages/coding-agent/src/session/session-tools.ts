@@ -739,10 +739,11 @@ export class SessionTools {
 	/** Snapshots the current tool set, applies a new one, and returns a restore handle. */
 	async applyToolOverlay(toolNames: string[]): Promise<{ restore: () => Promise<void> }> {
 		const previous = this.getEnabledToolNames();
+		const previousMounted = this.getMountedXdevToolNames();
 		await this.setActiveToolsByName(toolNames);
 		return {
 			restore: async () => {
-				await this.setActiveToolsByName(previous);
+				await this.setActiveToolPresentation(previous, previousMounted);
 			},
 		};
 	}

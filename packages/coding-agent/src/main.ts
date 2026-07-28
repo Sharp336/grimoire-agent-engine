@@ -1004,6 +1004,20 @@ export async function buildSessionOptions(
 				}
 			}
 		}
+		// Agent persona model takes precedence over the scoped fallback
+		if (!options.model && agentPolicy?.modelPatterns?.length) {
+			const resolved = resolveModelOverride(agentPolicy.modelPatterns, modelRegistry, activeSettings);
+			if (resolved.model) {
+				options.model = resolved.model;
+				if (resolved.thinkingLevel && !agentPolicy.thinkingLevel) {
+					options.thinkingLevel = resolved.thinkingLevel;
+				}
+			}
+			if (resolved.warning) {
+				process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}
+`);
+			}
+		}
 		if (!options.model) options.model = scopedModels[0].model;
 	} else if (agentPolicy?.modelPatterns && agentPolicy.modelPatterns.length > 0) {
 		const resolved = resolveModelOverride(agentPolicy.modelPatterns, modelRegistry, activeSettings);
