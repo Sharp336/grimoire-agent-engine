@@ -152,7 +152,7 @@ export async function generateNextPromptSuggestion({
 			matchPreferences: getModelMatchPreferences(settings),
 		}).model;
 		if (!model) return null;
-		const apiKey = await session.modelRegistry.getApiKey(model, session.sessionId);
+		const apiKey = await session.modelRegistry.getApiKey(model, session.sessionId, { signal });
 		if (!apiKey) return null;
 		if (signal.aborted) return null;
 

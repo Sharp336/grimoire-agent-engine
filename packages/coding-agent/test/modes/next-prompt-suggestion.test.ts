@@ -96,7 +96,7 @@ function createHarness(options: GeneratorHarnessOptions = {}) {
 	);
 	const modelRegistry = {
 		getAvailable: () => [model],
-		getApiKey: async () => "test-key",
+		getApiKey: vi.fn(async () => "test-key"),
 		resolver: () => async () => "test-key",
 	} as unknown as ModelRegistry;
 	const event: Extract<AgentSessionEvent, { type: "agent_end" }> = {
@@ -458,6 +458,7 @@ describe("generateNextPromptSuggestion", () => {
 		expect(harness.completeSideRequest).toHaveBeenCalledTimes(1);
 		expect(harness.completeSideRequest.mock.calls[0]?.[0]).toBe(smolModel);
 		expect(harness.completeSideRequest.mock.calls[0]?.[0]).not.toBe(mainModel);
+		expect(harness.modelRegistry.getApiKey).toHaveBeenCalledWith(smolModel, "session-1", { signal });
 		expect(harness.completeSideRequest.mock.calls[0]?.[2]).toMatchObject({
 			maxTokens: NEXT_PROMPT_MAX_TOKENS,
 			disableReasoning: true,
