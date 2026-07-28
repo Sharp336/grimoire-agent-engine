@@ -3,12 +3,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { computeFileHash } from "@oh-my-pi/hashline";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	DEFAULT_FUZZY_THRESHOLD,
+	type EditToolDetails,
 	executeHashlineSingle,
 	executePatchSingle,
 	executeReplaceSingle,
+	hashlineEditParamsSchema,
 } from "@oh-my-pi/pi-coding-agent/edit";
 import { HashlineFilesystem } from "@oh-my-pi/pi-coding-agent/edit/hashline/filesystem";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -210,7 +213,7 @@ describe("HashlineFilesystem ACP fs routing", () => {
 
 // ─── executeHashlineSingle end-to-end (model-visible payload) ────────────────
 
-function getText(result: Awaited<ReturnType<typeof executeHashlineSingle>>): string {
+function getText(result: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema>): string {
 	const first = result.content[0];
 	return first?.type === "text" ? first.text : "";
 }
