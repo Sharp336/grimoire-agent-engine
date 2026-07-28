@@ -70,7 +70,9 @@ async function runScenario(scenario: string): Promise<ScenarioResult> {
 }
 
 async function logFileNames(directory: string): Promise<string[]> {
-	return (await fs.readdir(directory)).filter(name => /^omp\.\d{4}-\d{2}-\d{2}\.\d+\.log(?:\.\d+)?$/.test(name)).sort();
+	return (await fs.readdir(directory))
+		.filter(name => /^omp\.\d{4}-\d{2}-\d{2}\.\d+\.log(?:\.\d+)?$/.test(name))
+		.sort();
 }
 
 async function readSingleLog(directory: string): Promise<{ name: string; text: string }> {
@@ -134,7 +136,17 @@ describe("central logger byte contract", () => {
 		const result = await runScenario("format-tokens");
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
-		const tokenMessages = ["token-%s", "token-%c", "token-%d", "token-%j", "token-%i", "token-%f", "token-%o", "token-%O", "token-%%"];
+		const tokenMessages = [
+			"token-%s",
+			"token-%c",
+			"token-%d",
+			"token-%j",
+			"token-%i",
+			"token-%f",
+			"token-%o",
+			"token-%O",
+			"token-%%",
+		];
 		const expected = [
 			...tokenMessages.map(message => expectedLine(result.pid, "info", message)),
 			expectedLine(result.pid, "info", "non-token-%q", { value: 7 }),
@@ -297,7 +309,8 @@ describe("DailyRotateFile option and retention contract", () => {
 		const basePath = path.join(result.primaryDir, baseName);
 		const baseStat = await fs.stat(basePath);
 		const recordSize = (message: string, payloadSize: number): number =>
-			`{"timestamp":"${fixedTimestamp}","level":"info","pid":${result.pid},"message":"${message}","payload":"`.length +
+			`{"timestamp":"${fixedTimestamp}","level":"info","pid":${result.pid},"message":"${message}","payload":"`
+				.length +
 			payloadSize +
 			`"}${os.EOL}`.length;
 		const expectedBytes =

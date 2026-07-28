@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the central logger's Winston dispatch with a byte-compatible local dispatcher while retaining the existing `winston-daily-rotate-file` rotation and retention behavior.
+
 ## [17.1.8] - 2026-07-28
 
 ### Added
