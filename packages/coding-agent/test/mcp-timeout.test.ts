@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
-import { createMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
+import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -67,20 +67,18 @@ describe("MCP timeout configuration", () => {
 	});
 
 	test("preserves real HTTP and JSON-RPC failures while a short timeout is armed", async () => {
-		const fetchMock = spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
-			const payload = JSON.parse(String(init?.body)) as { id?: string | number };
-			if (payload.id !== undefined) {
-				return new Response(
-					JSON.stringify({
-						jsonrpc: "2.0",
-						id: payload.id,
-						error: { code: -32603, message: "request failed" },
-					}),
-					{ headers: { "Content-Type": "application/json" } },
-				);
-			}
-			return new Response("notification failed", { status: 500 });
-		});
+		const fetchMock = spyOn(globalThis, "fetch");
+		fetchMock.mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					error: { code: -32603, message: "request failed" },
+				}),
+				{ headers: { "Content-Type": "application/json" } },
+			),
+		);
+		fetchMock.mockResolvedValueOnce(new Response("notification failed", { status: 500 }));
 		const transport = new HttpTransport({
 			type: "http",
 			url: "https://mcp.invalid/transport",
@@ -90,9 +88,7 @@ describe("MCP timeout configuration", () => {
 		try {
 			await transport.connect();
 			await expect(transport.request("tools/list")).rejects.toThrow("MCP error -32603: request failed");
-			await expect(transport.notify("notifications/initialized")).rejects.toThrow(
-				"HTTP 500: notification failed",
-			);
+			await expect(transport.notify("notifications/initialized")).rejects.toThrow("HTTP 500: notification failed");
 			expect(fetchMock).toHaveBeenCalledTimes(2);
 		} finally {
 			await transport.close();
