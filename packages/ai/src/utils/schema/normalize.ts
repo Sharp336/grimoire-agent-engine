@@ -377,8 +377,7 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 				Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
 				Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key);
 			const childIsSubschema =
-				childBooleanIsSubschema ||
-				(Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(entry));
+				childBooleanIsSubschema || (Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(entry));
 			result[key] =
 				childInsideSchemaMap || childIsSubschema
 					? normalizeSchemaNode(entry, {
@@ -411,8 +410,7 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
 			Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key);
 		const childIsSubschema =
-			childBooleanIsSubschema ||
-			(Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(entry));
+			childBooleanIsSubschema || (Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(entry));
 		result[key] =
 			childInsideSchemaMap || childIsSubschema
 				? normalizeSchemaNode(entry, {
