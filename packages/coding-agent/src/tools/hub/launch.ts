@@ -296,7 +296,7 @@ async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promi
 				cursor: result.cursor,
 				timedOut: result.timedOut,
 				state: result.state,
-				terminalRows: await renderLaunchLogTerminalRows(result, params),
+				terminalRows: await renderLaunchLogTerminalRows(result, params).catch(() => undefined),
 			};
 		case "wait":
 			return { op: "wait", daemon: result.daemon, timedOut: result.timedOut, matched: result.matched };
