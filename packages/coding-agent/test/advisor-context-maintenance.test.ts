@@ -122,7 +122,7 @@ describe("AgentSession advisor context maintenance", () => {
 		};
 	}
 
-	function createAdvisorFallbackHarness() {
+	function createAdvisorFallbackHarness(options?: { sameProviderNativeEnabled?: boolean }) {
 		const primaryMock = createMockModel({
 			provider: "anthropic",
 			responses: [{ content: ["primary complete"] }],
@@ -132,7 +132,11 @@ describe("AgentSession advisor context maintenance", () => {
 			responses: [{ content: ["advisor reviewed current update"] }],
 		});
 		const nativeModel = getBundledModel("openai", "gpt-5");
-		const sameProviderModel = getBundledModel("openai", "gpt-5-mini");
+		const sameProviderBase = getBundledModel("openai", "gpt-5-mini");
+		const sameProviderModel =
+			sameProviderBase && options?.sameProviderNativeEnabled === false
+				? { ...sameProviderBase, remoteCompaction: { ...sameProviderBase.remoteCompaction, enabled: false } }
+				: sameProviderBase;
 		const crossProviderModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!nativeModel || !sameProviderModel || !crossProviderModel) {
 			throw new Error("Expected bundled compaction models");
@@ -351,6 +355,57 @@ describe("AgentSession advisor context maintenance", () => {
 			`${sameProviderModel.provider}/${sameProviderModel.id}`,
 		]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("prior advisor output");
+	});
+
+	it("applies a successful same-provider native advisor fallback", async () => {
+		const { advisor, crossProviderModel, nativeModel, sameProviderModel } = createAdvisorFallbackHarness();
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.provider === nativeModel.provider && model.id === nativeModel.id) {
+				throw new compactionModule.NativeCompactionError(new Error("V2 native compaction transport failed"));
+			}
+			if (model.provider === sameProviderModel.provider && model.id === sameProviderModel.id) {
+				return {
+					summary: "same-provider native summary",
+					shortSummary: "same-provider native",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: 42,
+				};
+			}
+			throw new Error(`Unexpected cross-provider compaction ${crossProviderModel.provider}/${crossProviderModel.id}`);
+		});
+
+		await session.prompt("small current update");
+
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${nativeModel.provider}/${nativeModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+		expect(JSON.stringify(advisor.state.messages)).toContain("same-provider native summary");
+	});
+
+	it("stops before a same-provider advisor candidate with native compaction disabled", async () => {
+		const { advisor, nativeModel, sameProviderModel } = createAdvisorFallbackHarness({
+			sameProviderNativeEnabled: false,
+		});
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.provider === nativeModel.provider && model.id === nativeModel.id) {
+				throw new compactionModule.NativeCompactionError(new Error("V2 native compaction transport failed"));
+			}
+			return {
+				summary: "generic same-provider summary",
+				shortSummary: "generic same-provider",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await session.prompt("small current update");
+
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${nativeModel.provider}/${nativeModel.id}`,
+		]);
+		expect(JSON.stringify(advisor.state.messages)).not.toContain("generic same-provider summary");
+		expect(sameProviderModel.remoteCompaction?.enabled).toBe(false);
 	});
 
 	it("allows advisor compaction to cross providers after auth-classified native failures", async () => {

@@ -20,6 +20,7 @@ import {
 	prepareCompaction,
 	type SessionMessageEntry,
 	shouldCompact,
+	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
@@ -1309,7 +1310,11 @@ export class SessionAdvisors {
 		});
 
 		for (const candidate of candidates) {
-			if (nativeCompactionFailure && candidate.provider !== nativeCompactionFailure.provider) {
+			if (
+				nativeCompactionFailure &&
+				(candidate.provider !== nativeCompactionFailure.provider ||
+					!shouldUseProviderNativeCompaction(candidate, compactionSettings))
+			) {
 				throw nativeCompactionFailure.error;
 			}
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId);
@@ -1354,7 +1359,7 @@ export class SessionAdvisors {
 			}
 		}
 
-		if (nativeCompactionFailure) throw nativeCompactionFailure.error;
+		if (!compactResult && nativeCompactionFailure) throw nativeCompactionFailure.error;
 
 		if (!compactResult) {
 			logger.warn("Advisor compaction failed, falling back to re-prime", { error: String(lastError) });

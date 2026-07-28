@@ -203,6 +203,18 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	v2RetainedMessageBudget: V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 };
 
+/** Whether a compaction candidate preserves provider-native transport under the effective settings. */
+export function shouldUseProviderNativeCompaction(
+	model: Model,
+	settings: Pick<CompactionSettings, "remoteEnabled" | "remoteStreamingV2Enabled">,
+): boolean {
+	if (settings.remoteEnabled === false) return false;
+	return (
+		shouldUseOpenAiRemoteCompaction(model) ||
+		(settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model))
+	);
+}
+
 // ============================================================================
 // Token calculation
 // ============================================================================

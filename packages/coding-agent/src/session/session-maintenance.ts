@@ -35,6 +35,7 @@ import {
 	type SummaryOptions,
 	shouldCompact,
 	shouldUseOpenAiRemoteCompaction,
+	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -2485,7 +2486,11 @@ export class SessionMaintenance {
 
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
-					if (nativeCompactionFailure && candidate.provider !== nativeCompactionFailure.provider) {
+					if (
+						nativeCompactionFailure &&
+						(candidate.provider !== nativeCompactionFailure.provider ||
+							!shouldUseProviderNativeCompaction(candidate, preparation.settings))
+					) {
 						throw nativeCompactionFailure.error;
 					}
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;

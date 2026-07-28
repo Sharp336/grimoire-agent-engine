@@ -81,9 +81,13 @@ describe("issue #986 compaction auth fallback", () => {
 		return { currentModel, fallbackModel };
 	}
 
-	async function createAutoNativeFallbackSession() {
+	async function createAutoNativeFallbackSession(options?: { sameProviderNativeEnabled?: boolean }) {
 		const currentModel = getBundledModel("openai", "gpt-5");
-		const sameProviderModel = getBundledModel("openai", "gpt-5-mini");
+		const sameProviderBase = getBundledModel("openai", "gpt-5-mini");
+		const sameProviderModel =
+			sameProviderBase && options?.sameProviderNativeEnabled === false
+				? { ...sameProviderBase, remoteCompaction: { ...sameProviderBase.remoteCompaction, enabled: false } }
+				: sameProviderBase;
 		const crossProviderModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!currentModel || !sameProviderModel || !crossProviderModel) {
 			throw new Error("Expected bundled native fallback test models");
@@ -182,6 +186,30 @@ describe("issue #986 compaction auth fallback", () => {
 			`${currentModel.provider}/${currentModel.id}`,
 			`${sameProviderModel.provider}/${sameProviderModel.id}`,
 		]);
+	});
+
+	it("stops auto-compaction before a same-provider candidate with native compaction disabled", async () => {
+		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession({
+			sameProviderNativeEnabled: false,
+		});
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.provider === currentModel.provider && model.id === currentModel.id) {
+				throw new compactionModule.NativeCompactionError(new Error("native compaction transport failed"));
+			}
+			return {
+				summary: "generic same-provider summary",
+				shortSummary: "generic same-provider",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([`${currentModel.provider}/${currentModel.id}`]);
+		expect(sameProviderModel.remoteCompaction?.enabled).toBe(false);
 	});
 
 	it("preserves cross-provider auto-compaction fallback for auth-classified native failures", async () => {
