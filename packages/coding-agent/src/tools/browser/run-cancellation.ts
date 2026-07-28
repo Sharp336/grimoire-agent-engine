@@ -127,6 +127,11 @@ export function bindBrowserRunFacade<T extends object>(target: T, signal: AbortS
 									}),
 								);
 							}
+							const callableValue = Array.isArray(result)
+								? result.some(item => item && typeof item === "object" && hasCallableSurface(item))
+								: hasCallableSurface(result);
+							throwIfAborted(signal);
+							return callableValue ? bind(result) : result;
 						}
 						throwIfAborted(signal);
 						return result;
