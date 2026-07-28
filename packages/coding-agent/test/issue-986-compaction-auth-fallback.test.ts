@@ -123,11 +123,7 @@ describe("issue #986 compaction auth fallback", () => {
 			session.agent.appendMessage(assistant);
 			session.sessionManager.appendMessage(assistant);
 		}
-		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
-			currentModel,
-			sameProviderModel,
-			crossProviderModel,
-		]);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([currentModel, sameProviderModel, crossProviderModel]);
 		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
 
 		const triggerAutoCompaction = async (): Promise<void> => {
