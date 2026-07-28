@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the model picker showing an extension provider's placeholder model list instead of the credential-aware catalog it resolves at registration, so models the account actually has could be missing while unavailable ones stayed listed.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
