@@ -15,6 +15,7 @@ import {
 import { PuppeteerCodexBrowserAdapter } from "@oh-my-pi/pi-coding-agent/tools/browser/codex-puppeteer";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { getTabsMapForTest, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import browserPrompt from "../../src/prompts/tools/browser.md" with { type: "text" };
 
 type RpcCall = {
 	method: string;
@@ -555,6 +556,10 @@ describe("Codex agent.browser public contract", () => {
 		});
 	});
 
+	it("documents the selector timeout as an overridable default", () => {
+		expect(browserPrompt).toContain("Selector actions default to a 3000 ms timeout");
+		expect(browserPrompt).not.toContain("maximum 3000 ms");
+	});
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"maps CUA mouse buttons 1/2/3 and rejects unsupported button values",
 		async () => {

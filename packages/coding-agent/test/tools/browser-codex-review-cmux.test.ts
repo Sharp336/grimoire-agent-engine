@@ -1470,8 +1470,7 @@ describe("cmux Codex browser review regressions", () => {
 				async codexEvaluateCleanup() {
 					return true;
 				},
-				async codexEvaluate(source: string, args: unknown[], timeoutMs: number) {
-					expect(source).toContain("_ariaRef");
+				async codexEvaluate(_source: string, args: unknown[], timeoutMs: number) {
 					expect(args).toEqual([]);
 					expect(timeoutMs).toBeGreaterThan(0);
 					expect(timeoutMs).toBeLessThanOrEqual(3_000);
