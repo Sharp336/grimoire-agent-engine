@@ -279,16 +279,49 @@ export function buildPiWriteRejected(reason: string): PiWriteExecResult {
 export function buildPiGrepResult(toolResult: ToolResultMessage): PiGrepExecResult {
 	const text = piOutputText(toolResult);
 	if (toolResult.isError) return buildPiGrepError(text || "Grep failed");
+	const matchLimitReached = detailCount(toolResult, "perFileLimitReached");
 	return create(PiGrepExecResultSchema, {
 		result: {
 			case: "success",
 			value: create(PiGrepExecSuccessSchema, {
 				output: text,
-				truncation: piTruncation(toolResult),
-				matchLimitReached: detailCount(toolResult, "perFileLimitReached"),
+				truncation: piTruncation(toolResult) ?? grepInternalCapTruncation(toolResult, text, matchLimitReached),
+				matchLimitReached,
 				linesTruncated: bagValue(toolResult.details, "linesTruncated") === true,
 			}),
 		},
+	});
+}
+
+/**
+ * The one grep cap that reaches Cursor through no other field.
+ *
+ * `GrepTool` folds every cap into the flat `details.truncated`, but only
+ * populates `details.truncation` when the output text itself was trimmed and
+ * `perFileLimitReached` when a per-file or explicit total cap fired. Its native
+ * backend's own ceiling (`INTERNAL_TOTAL_CAP`) sets neither, so a search that
+ * hit it answered as an unqualified success over incomplete results — the one
+ * failure mode a caller cannot detect and cannot retry around.
+ *
+ * Only consulted once the specific signals came back empty, so a cap that did
+ * report itself is never restated. `totalLines` stays 0: the flat flag says
+ * that results were dropped, not how many there were.
+ */
+function grepInternalCapTruncation(
+	toolResult: ToolResultMessage,
+	text: string,
+	matchLimitReached: number | undefined,
+): PiTruncation | undefined {
+	if (matchLimitReached !== undefined) return undefined;
+	if (bagValue(toolResult.details, "truncated") !== true) return undefined;
+	return create(PiTruncationSchema, {
+		truncated: true,
+		truncatedBy: "matches",
+		totalLines: 0,
+		outputLines: text ? text.split("\n").length : 0,
+		outputBytes: Buffer.byteLength(text, "utf-8"),
+		firstLineExceedsLimit: false,
+		lastLinePartial: false,
 	});
 }
 

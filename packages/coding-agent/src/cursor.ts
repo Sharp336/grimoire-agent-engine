@@ -161,13 +161,30 @@ interface CursorExecBridgeOptions {
  *
  * Parent directories are created first, since the frame may name a path whose
  * directories do not exist yet.
+ *
+ * `O_NONBLOCK` is what keeps the guard below reachable. A write-only open of a
+ * FIFO blocks until a reader arrives, so a `download_path` naming one would
+ * hang the turn forever WITHOUT the non-regular check ever running — the open
+ * itself never returns. Non-blocking turns that into `ENXIO` when no reader is
+ * attached, and hands back a descriptor the `isFile()` check refuses when one
+ * is. The flag has no effect on regular files, which is every legitimate
+ * target.
  */
 async function writeWithoutFollowingLinks(absolutePath: string, payload: string | Buffer): Promise<void> {
 	await fs.promises.mkdir(path.dirname(absolutePath), { recursive: true });
-	const handle = await fs.promises.open(
-		absolutePath,
-		fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW,
-	);
+	const handle = await fs.promises
+		.open(
+			absolutePath,
+			fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+		)
+		.catch((error: NodeJS.ErrnoException) => {
+			// A readerless FIFO. Reported as the refusal it is, rather than the
+			// bare "no such device or address" the errno spells out.
+			if (error.code === "ENXIO") {
+				throw new Error(`Refusing to download onto a special file: ${absolutePath}`);
+			}
+			throw error;
+		});
 	try {
 		const stat = await handle.stat();
 		if (!stat.isFile()) {
