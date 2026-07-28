@@ -974,7 +974,7 @@ export class WorkerCore {
 						fullPage: opts.fullPage,
 						silent: true,
 					});
-					return (await fs.promises.readFile(screenshot.dest)).toString("base64");
+					return (await fs.promises.readFile(screenshot)).toString("base64");
 				},
 			});
 			await codexAdapter.beginRun();

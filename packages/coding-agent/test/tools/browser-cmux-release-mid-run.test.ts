@@ -298,7 +298,7 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
 		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
-			async (method: string): Promise<Record<string, unknown>> => {
+			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
 				switch (method) {
 					case "browser.open_split":
 						return { surface_id: "surface-screenshot", url: "about:blank" };
@@ -306,8 +306,12 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 						return { url: "about:blank" };
 					case "browser.snapshot":
 						return { page: { html: "" } };
-					case "browser.eval":
-						return { value: "" };
+					case "browser.eval": {
+						const script = typeof params.script === "string" ? params.script : "";
+						return {
+							value: script.includes("return globalThis.__ompCodexBrowserState.fileEventSequence") ? 0 : "",
+						};
+					}
 					case "browser.screenshot":
 						return {
 							path: "/workspace/screenshots/daemon-owned.png",
@@ -344,7 +348,7 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
 		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
-			async (method: string): Promise<Record<string, unknown>> => {
+			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
 				switch (method) {
 					case "browser.open_split":
 						return { surface_id: "surface-screenshot-configured", url: "about:blank" };
@@ -352,8 +356,12 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 						return { url: "about:blank" };
 					case "browser.snapshot":
 						return { page: { html: "" } };
-					case "browser.eval":
-						return { value: "" };
+					case "browser.eval": {
+						const script = typeof params.script === "string" ? params.script : "";
+						return {
+							value: script.includes("return globalThis.__ompCodexBrowserState.fileEventSequence") ? 0 : "",
+						};
+					}
 					case "browser.screenshot":
 						return {
 							path: "/workspace/screenshots/daemon-owned.png",
