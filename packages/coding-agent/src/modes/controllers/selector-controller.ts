@@ -50,6 +50,7 @@ import {
 	type ResetUsageAccount,
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
+import { discoverAgents } from "../../task/discovery";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -71,6 +72,7 @@ import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
+import { AgentPersonaPickerComponent } from "../components/agent-persona-picker";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
 import { ExtensionDashboard } from "../components/extensions";
@@ -641,8 +643,6 @@ export class SelectorController {
 	}
 
 	async showAgentPersonaSelector(): Promise<void> {
-		const { discoverAgents } = await import("../../task/discovery");
-		const { AgentPersonaPickerComponent } = await import("../components/agent-persona-picker");
 		const discovery = await discoverAgents(this.ctx.sessionManager.getCwd());
 		const disabled = new Set((this.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 		const available = discovery.agents.filter(a => a.availability !== "subagent" && !disabled.has(a.name));

@@ -391,6 +391,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		inlineHint: "[name]",
 		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) {
+				await runtime.output("Cannot switch agent while streaming.");
+				return commandConsumed();
+			}
+			if (runtime.session.getPlanModeState()?.enabled) {
+				await runtime.output("Cannot switch agent during plan mode. Exit plan mode first.");
+				return commandConsumed();
+			}
 			const agentName = command.args.trim();
 			if (!agentName) {
 				await runtime.output("Usage: /agent <name>");
@@ -423,6 +431,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
+			if (runtime.ctx.session.isStreaming) {
+				runtime.ctx.showWarning("Cannot switch agent while streaming.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (runtime.ctx.planModeEnabled) {
+				runtime.ctx.showWarning("Cannot switch agent during plan mode. Exit plan mode first.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
 			const agentName = command.args.trim();
 			if (agentName) {
 				const discovery = await discoverAgents(runtime.ctx.sessionManager.getCwd());

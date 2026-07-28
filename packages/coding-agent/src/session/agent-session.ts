@@ -919,6 +919,8 @@ export interface AgentSessionConfig {
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Mutate the session spawn allowlist (live agent switch). */
 	setSessionSpawns?: (spawns: string) => void;
+	/** Read the current session spawn allowlist (live agent switch rollback). */
+	getSessionSpawns?: () => string;
 	/** Mutate the active main-session agent persona (live agent switch). */
 	setAgentPersona?: (agent: AgentDefinition | undefined) => void;
 	/** Initial agent persona (from --agent CLI flag). */
@@ -2093,6 +2095,7 @@ export class AgentSession {
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#setActiveToolNames: ((names: Iterable<string>) => void) | undefined;
 	#setSessionSpawns: ((spawns: string) => void) | undefined;
+	#getSessionSpawns: (() => string) | undefined;
 	#setAgentPersona: ((agent: AgentDefinition | undefined) => void) | undefined;
 	#agentPersona: AgentDefinition | undefined;
 	#ensureWriteRegistered: (() => Promise<boolean>) | undefined;
@@ -2863,6 +2866,7 @@ export class AgentSession {
 		this.#mountedXdevToolNames = new Set(config.initialMountedXdevToolNames ?? []);
 		this.#setActiveToolNames = config.setActiveToolNames;
 		this.#setSessionSpawns = config.setSessionSpawns;
+		this.#getSessionSpawns = config.getSessionSpawns;
 		this.#setAgentPersona = config.setAgentPersona;
 		this.#agentPersona = config.agentPersona;
 		// Initialize tool overlay if the initial persona has tools, so live-switch
@@ -10219,6 +10223,8 @@ export class AgentSession {
 		const previousOverlay = this.#agentToolOverlay;
 		const previousModel = this.model;
 		const previousThinking = this.thinkingLevel;
+		const previousToolNames = this.getEnabledToolNames();
+		const previousSpawns = this.#getSessionSpawns?.();
 
 		try {
 			// 1. Tools: overlay (restore previous overlay first, then apply new one)
@@ -10242,6 +10248,13 @@ export class AgentSession {
 				if (resolved.model) {
 					await this.setModel(resolved.model, "default");
 				}
+				// Apply model-resolution thinking level when agent has no explicit thinkingLevel
+				if (resolved.thinkingLevel && !policy.thinkingLevel) {
+					this.setThinkingLevel(resolved.thinkingLevel);
+				}
+				if (resolved.warning) {
+					this.emitNotice("warn", resolved.warning);
+				}
 			}
 
 			// 4. Thinking
@@ -10261,11 +10274,13 @@ export class AgentSession {
 
 			this.emitNotice("info", `Switched to agent persona "${agent.name}".`, "agent-switch");
 		} catch (error) {
-			// Rollback on failure: restore previous persona, overlay, model, and thinking
+			// Rollback on failure: restore live tools, spawns, persona, overlay, model, and thinking
 			this.#agentPersona = previousPersona;
 			this.#setAgentPersona?.(previousPersona);
 			this.#agentToolOverlay = previousOverlay;
 			try {
+				await this.setActiveToolsByName(previousToolNames);
+				if (previousSpawns !== undefined) this.#setSessionSpawns?.(previousSpawns);
 				if (previousModel) {
 					await this.setModel(previousModel, "default");
 				}

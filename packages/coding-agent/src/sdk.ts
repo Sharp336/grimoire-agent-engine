@@ -2875,7 +2875,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
 		} else {
-			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
+			// Save initial model, thinking level, service tier, and agent persona for new sessions
+			// so they can be restored on resume.
 			if (model) {
 				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
 			}
@@ -2886,6 +2887,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			if (Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(initialServiceTierByFamily);
+			}
+			if (options.agentPersona) {
+				sessionManager.appendAgentChange(options.agentPersona.name, options.agentPersona.source);
 			}
 		}
 
@@ -2982,6 +2986,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			setSessionSpawns: (spawns: string) => {
 				sessionSpawns = spawns;
 			},
+			getSessionSpawns: () => sessionSpawns,
 			setAgentPersona: (agent: AgentDefinition | undefined) => {
 				activeAgentPersona = agent;
 			},

@@ -87,4 +87,16 @@ describe("availability parsing", () => {
 		expect(result).not.toBeNull();
 		expect(result!.availability).toBe("subagent");
 	});
+
+	test("primary agent tools do not include yield", () => {
+		const result = parseAgentFields({ name: "x", description: "y", tools: ["read"], mode: "primary" });
+		expect(result).not.toBeNull();
+		expect(result!.tools).not.toContain("yield");
+	});
+
+	test("subagent agent tools include yield", () => {
+		const result = parseAgentFields({ name: "x", description: "y", tools: ["read"], mode: "subagent" });
+		expect(result).not.toBeNull();
+		expect(result!.tools).toContain("yield");
+	});
 });

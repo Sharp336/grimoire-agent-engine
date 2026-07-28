@@ -25,6 +25,8 @@ describe("/agent slash command", () => {
 			ctx: {
 				showAgentPersonaSelector,
 				editor: { setText },
+				session: { isStreaming: false, getPlanModeState: () => undefined },
+				planModeEnabled: false,
 			},
 		} as unknown as TuiSlashCommandRuntime;
 
@@ -40,7 +42,7 @@ describe("/agent slash command", () => {
 		const switchPersona = vi.fn().mockResolvedValue(undefined);
 		const output = vi.fn();
 		const runtime = {
-			session: { switchAgentPersona: switchPersona },
+			session: { switchAgentPersona: switchPersona, isStreaming: false, getPlanModeState: () => undefined },
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,
@@ -65,7 +67,7 @@ describe("/agent slash command", () => {
 	test("handle with unknown agent prints error", async () => {
 		const output = vi.fn();
 		const runtime = {
-			session: { switchAgentPersona: vi.fn() },
+			session: { switchAgentPersona: vi.fn(), isStreaming: false, getPlanModeState: () => undefined },
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,
@@ -96,7 +98,7 @@ describe("/agent slash command", () => {
 		};
 		const output = vi.fn();
 		const runtime = {
-			session: { switchAgentPersona: vi.fn() },
+			session: { switchAgentPersona: vi.fn(), isStreaming: false, getPlanModeState: () => undefined },
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,

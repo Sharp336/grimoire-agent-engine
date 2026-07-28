@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import type { Model } from "@oh-my-pi/pi-ai";
 import * as modelResolver from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { buildSessionOptions } from "../main";
@@ -9,7 +10,7 @@ import { parseConfiguredThinkingLevel } from "../thinking";
 const HIGH = parseConfiguredThinkingLevel("high")!;
 const LOW = parseConfiguredThinkingLevel("low")!;
 
-const mockModel = { provider: "test", id: "model" } as any;
+const mockModel = { provider: "test", id: "model" } as unknown as Model;
 
 function makeModelRegistry() {
 	return {
@@ -25,6 +26,14 @@ function makeModelRegistry() {
 
 function makeSettings(): Settings {
 	return Settings.isolated({});
+}
+
+function makeSessionManager(context: { agentPersona?: { agent: string; source: "bundled" | "user" | "project" } }) {
+	return {
+		buildSessionContext: () => context,
+		getCwd: () => "/test",
+		getHeader: () => null,
+	} as any;
 }
 
 describe("buildSessionOptions --agent", () => {
@@ -334,5 +343,97 @@ describe("buildSessionOptions --agent", () => {
 		);
 
 		expect(options.model).toBe(cliModel);
+	});
+});
+
+describe("buildSessionOptions resume agent persona", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	test("re-resolves agent from session context on resume", async () => {
+		const mockAgent = {
+			name: "test-agent",
+			description: "A test agent",
+			systemPrompt: "You are a test agent.",
+			tools: ["read", "grep"],
+			source: "project" as const,
+		};
+
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [mockAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(discovery, "getAgent").mockImplementation((agents, name) => agents.find(a => a.name === name));
+		vi.spyOn(systemPrompt, "resolvePromptInput").mockResolvedValue(undefined);
+		vi.spyOn(modelResolver, "resolveModelOverride").mockReturnValue({
+			model: undefined,
+			explicitThinkingLevel: false,
+		});
+		vi.spyOn(modelResolver, "getModelMatchPreferences").mockReturnValue({
+			usageOrder: [],
+			providerOrder: [],
+			deprioritizeProviders: [],
+		});
+
+		const sessionManager = makeSessionManager({
+			agentPersona: { agent: "test-agent", source: "project" },
+		});
+
+		const options = await buildSessionOptions({} as any, [], sessionManager, makeModelRegistry(), makeSettings());
+
+		expect(options.agentPersona).toBe(mockAgent);
+	});
+
+	test("silently falls back to default when agent .md deleted on resume", async () => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(discovery, "getAgent").mockReturnValue(undefined);
+		vi.spyOn(systemPrompt, "resolvePromptInput").mockResolvedValue(undefined);
+		vi.spyOn(modelResolver, "getModelMatchPreferences").mockReturnValue({
+			usageOrder: [],
+			providerOrder: [],
+			deprioritizeProviders: [],
+		});
+
+		const sessionManager = makeSessionManager({
+			agentPersona: { agent: "deleted-agent", source: "project" },
+		});
+
+		const options = await buildSessionOptions({} as any, [], sessionManager, makeModelRegistry(), makeSettings());
+
+		expect(options.agentPersona).toBeUndefined();
+	});
+
+	test("silently falls back when persisted agent changed to subagent-only", async () => {
+		const mockAgent = {
+			name: "test-agent",
+			description: "A test agent",
+			systemPrompt: "",
+			availability: "subagent" as const,
+			source: "project" as const,
+		};
+
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [mockAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(discovery, "getAgent").mockImplementation((agents, name) => agents.find(a => a.name === name));
+		vi.spyOn(systemPrompt, "resolvePromptInput").mockResolvedValue(undefined);
+		vi.spyOn(modelResolver, "getModelMatchPreferences").mockReturnValue({
+			usageOrder: [],
+			providerOrder: [],
+			deprioritizeProviders: [],
+		});
+
+		const sessionManager = makeSessionManager({
+			agentPersona: { agent: "test-agent", source: "project" },
+		});
+
+		const options = await buildSessionOptions({} as any, [], sessionManager, makeModelRegistry(), makeSettings());
+
+		expect(options.agentPersona).toBeUndefined();
 	});
 });

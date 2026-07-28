@@ -71,11 +71,7 @@ describe("showAgentPersonaSelector", () => {
 		const controller = new SelectorController(ctx);
 		await controller.showAgentPersonaSelector();
 
-		expect(showOverlay).toHaveBeenCalled();
-		const [picker] = showOverlay.mock.calls[0] as [unknown, unknown];
-		// The picker should be an object (AgentPersonaPickerComponent instance)
-		expect(picker).toBeTruthy();
-		expect(typeof picker).toBe("object");
+		expect(showOverlay).toHaveBeenCalledTimes(1);
 	});
 
 	test("no selectable agents prints message and does not show overlay", async () => {

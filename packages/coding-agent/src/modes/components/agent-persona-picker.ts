@@ -6,6 +6,7 @@
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import { Input } from "@oh-my-pi/pi-tui";
 import type { AgentDefinition } from "../../task/types";
+import { Ellipsis, replaceTabs, truncateToWidth } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { bottomBorder, row, topBorder } from "./overlay-box";
@@ -135,10 +136,17 @@ export class AgentPersonaPickerComponent implements Component {
 			const isActive = agent.name === this.#currentAgentName;
 			const isSelected = agent === this.#filtered[this.#selectedIndex];
 			const prefix = isSelected ? theme.fg("accent", " \u25b6 ") : "   ";
-			const nameStyle = isActive ? theme.fg("accent", agent.name) : theme.fg("text", agent.name);
+			const nameStyle = isActive
+				? theme.fg("accent", replaceTabs(agent.name))
+				: theme.fg("text", replaceTabs(agent.name));
 			const sourceBadge = this.#sourceBadge(agent.source);
 			const modelHint = agent.model?.length ? theme.fg("dim", ` [${agent.model.join(", ")}]`) : "";
-			const description = agent.description ? theme.fg("muted", ` \u2014 ${agent.description}`) : "";
+			const description = agent.description
+				? theme.fg(
+						"muted",
+						` \u2014 ${truncateToWidth(replaceTabs(agent.description), Math.max(1, width - 20), Ellipsis.Unicode)}`,
+					)
+				: "";
 			out.push(row(`${prefix}${nameStyle}${sourceBadge}${modelHint}${description}`, width));
 		}
 

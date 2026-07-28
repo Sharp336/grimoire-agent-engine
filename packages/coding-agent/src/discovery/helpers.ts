@@ -253,8 +253,22 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	let tools = parseArrayOrCSV(frontmatter.tools);
 	if (tools) tools = normalizeToolNames(tools);
 
+	// Availability: OpenCode `mode` (canonical) + Copilot aliases
+	const mode = typeof frontmatter.mode === "string" ? frontmatter.mode.trim().toLowerCase() : undefined;
+	const userInvocable = parseBoolean(frontmatter["user-invocable"]);
+	const disableModelInvocation = parseBoolean(frontmatter["disable-model-invocation"]);
+	let availability: AgentAvailability = "all";
+	if (mode === "primary") availability = "primary";
+	else if (mode === "subagent") availability = "subagent";
+	else if (mode === "all") availability = "all";
+	if (mode === undefined) {
+		const ui = userInvocable ?? true;
+		const dmi = disableModelInvocation ?? false;
+		availability = !ui ? "subagent" : dmi ? "primary" : "all";
+	}
+
 	// Subagents with explicit tool lists always need yield
-	if (tools && !tools.includes("yield")) {
+	if (tools && !tools.includes("yield") && availability !== "primary") {
 		tools = [...tools, "yield"];
 	}
 
@@ -299,23 +313,6 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
-
-	// Availability: OpenCode `mode` (canonical) + Copilot aliases
-	const mode = typeof frontmatter.mode === "string" ? frontmatter.mode.trim().toLowerCase() : undefined;
-	const userInvocable = parseBoolean(frontmatter["user-invocable"]);
-	const disableModelInvocation = parseBoolean(frontmatter["disable-model-invocation"]);
-	let availability: AgentAvailability = "all";
-	if (mode === "primary") availability = "primary";
-	else if (mode === "subagent") availability = "subagent";
-	else if (mode === "all") availability = "all";
-	if (mode === undefined) {
-		const ui = userInvocable ?? true;
-		const dmi = disableModelInvocation ?? false;
-		if (ui && !dmi) availability = "all";
-		else if (ui && dmi) availability = "primary";
-		else if (!ui && !dmi) availability = "subagent";
-		else availability = "subagent";
-	}
 
 	return {
 		name,
