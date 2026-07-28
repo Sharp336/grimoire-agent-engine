@@ -378,7 +378,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				const hasRunningPeer = messaging.registry
 					.listVisibleTo(messaging.senderId)
 					.some(ref => ref.status === "running");
-				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
+				if (!hasRunningPeer && !IrcBus.global().hasPeerTransports()) return nothingToWaitForResult(this.session);
 			}
 			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
 		}

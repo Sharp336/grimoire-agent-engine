@@ -2,12 +2,13 @@
  * IrcBus - Process-global mailbox bus for agent-to-agent messaging.
  *
  * Replaces the old auto-reply model: a `send` never blocks on the recipient
- * generating anything. Delivery resolves the recipient via the global
- * AgentRegistry — parked agents are revived through the
- * AgentLifecycleManager, idle agents are woken with a real turn, and busy
- * agents receive the message as a non-interrupting aside at the next step
- * boundary (see AgentSession.deliverIrcMessage). Replies are real turns by
- * the recipient, observed via `wait` — with one exception: when the sender
+ * generating anything. Local delivery resolves the recipient via the global
+ * AgentRegistry; unknown local ids may be routed through one registered peer
+ * transport. Parked local agents are revived through the AgentLifecycleManager,
+ * idle agents are woken with a real turn, and busy agents receive the message
+ * as a non-interrupting aside at the next step boundary (see
+ * AgentSession.deliverIrcMessage). Replies are real turns by the recipient,
+ * observed via `wait` — with one exception: when the sender
  * awaits a reply and the recipient cannot run a real reply turn in time
  * (mid-turn with async execution disabled — possibly blocked in a
  * synchronous task spawn whose batch includes the sender — or idle in plan
@@ -17,7 +18,7 @@
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
 export interface IrcMessage {
@@ -36,6 +37,44 @@ export interface IrcDeliveryReceipt {
 	to: string;
 	outcome: "injected" | "woken" | "revived" | "failed";
 	error?: string;
+}
+
+/** A non-OMP peer reported by an external IRC transport. */
+export interface IrcTransportPeer {
+	id: string;
+	displayName: string;
+	/** Transport-defined availability state shown in peer discovery. */
+	status: string;
+	/** Optional short description of the peer's current work. */
+	activity?: string;
+	/** Epoch milliseconds for the peer's most recent known activity. */
+	lastActivity?: number;
+}
+
+/** An external peer annotated with the transport that reported it. */
+export interface IrcExternalPeer extends IrcTransportPeer {
+	transportId: string;
+}
+
+/**
+ * Transport-neutral bridge for making non-OMP agents addressable IRC peers.
+ *
+ * `claims` is the authoritative namespace predicate used for outbound
+ * routing. `listPeers` is discovery metadata only; the bus still requires a
+ * single claim before sending. A successful `send` means the transport
+ * accepted the message for delivery, not that the remote peer generated a
+ * reply.
+ */
+export interface IrcPeerTransport {
+	readonly id: string;
+	claims(peerId: string): boolean;
+	send(message: IrcMessage): void | Promise<void>;
+	listPeers(): readonly IrcTransportPeer[] | Promise<readonly IrcTransportPeer[]>;
+}
+
+interface IrcPeerTransportRegistration {
+	id: string;
+	transport: IrcPeerTransport;
 }
 
 interface IrcWaiter {
@@ -66,12 +105,78 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	readonly #peerTransports = new Map<string, IrcPeerTransportRegistration>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	/**
+	 * Register an external peer transport. IDs are process-local and unique;
+	 * duplicates throw instead of replacing a live transport. The returned
+	 * disposer only unregisters this exact registration, so a stale shutdown
+	 * callback cannot remove a later transport that reuses the same id.
+	 */
+	registerPeerTransport(transport: IrcPeerTransport): () => void {
+		const id = transport.id;
+		if (id.trim().length === 0) throw new Error("IRC peer transport id must not be empty.");
+		if (this.#peerTransports.has(id)) {
+			throw new Error(`IRC peer transport ${JSON.stringify(id)} is already registered.`);
+		}
+
+		const registration: IrcPeerTransportRegistration = { id, transport };
+		this.#peerTransports.set(id, registration);
+		let active = true;
+		return () => {
+			if (!active) return;
+			active = false;
+			if (this.#peerTransports.get(id) === registration) this.#peerTransports.delete(id);
+		};
+	}
+
+	/** Unregister the currently active transport with `transportId`. */
+	unregisterPeerTransport(transportId: string): boolean {
+		return this.#peerTransports.delete(transportId);
+	}
+
+	hasPeerTransports(): boolean {
+		return this.#peerTransports.size > 0;
+	}
+
+	/** True when at least one currently registered transport claims `peerId`. */
+	hasPeerTransportFor(peerId: string): boolean {
+		return this.#resolvePeerTransports(peerId).claimed.length > 0;
+	}
+
+	/**
+	 * List currently reported external peers. A local registry entry always
+	 * shadows the same external id. Listing failures are isolated per
+	 * transport, and results from a transport unregistered while its async
+	 * listing was in flight are discarded.
+	 */
+	async listExternalPeers(): Promise<IrcExternalPeer[]> {
+		const registrations = [...this.#peerTransports.values()];
+		const peerGroups = await Promise.all(
+			registrations.map(async registration => {
+				try {
+					const peers = await registration.transport.listPeers();
+					if (this.#peerTransports.get(registration.id) !== registration) return [];
+					return peers
+						.filter(peer => !this.#registry.get(peer.id))
+						.map(peer => ({ ...peer, transportId: registration.id }));
+				} catch (error) {
+					logger.debug("IrcBus: external peer listing failed", {
+						transportId: registration.id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					return [];
+				}
+			}),
+		);
+		return peerGroups.flat();
 	}
 
 	/**
@@ -105,12 +210,104 @@ export class IrcBus {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
+			return this.#sendExternal(message, opts);
+		}
+		return this.#deliverLocal(message, ref, opts);
+	}
+
+	/**
+	 * Inject one already-identified transport message into a local OMP peer.
+	 * The original id, endpoints, timestamp, and reply correlation are
+	 * preserved. This path never consults outbound transports, so inbound
+	 * messages cannot echo back across the bridge.
+	 */
+	async deliverInbound(
+		message: IrcMessage,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
+		const ref = this.#registry.get(message.to);
+		if (!ref) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `Unknown local agent "${message.to}" — check \`irc list\` for live peers.`,
+			};
+		}
+		return this.#deliverLocal(message, ref, opts);
+	}
+
+	async #sendExternal(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
+		const resolution = this.#resolvePeerTransports(message.to);
+		if (resolution.errors.length > 0) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `External IRC peer resolution failed: ${resolution.errors.join("; ")}`,
+			};
+		}
+		if (resolution.claimed.length === 0) {
 			return {
 				to: message.to,
 				outcome: "failed",
 				error: `Unknown agent "${message.to}" — check \`irc list\` for live peers.`,
 			};
 		}
+		if (resolution.claimed.length > 1) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `Ambiguous external IRC peer "${message.to}" — claimed by transports ${resolution.claimed
+					.map(registration => JSON.stringify(registration.id))
+					.join(", ")}.`,
+			};
+		}
+
+		const [registration] = resolution.claimed;
+		if (!registration || this.#peerTransports.get(registration.id) !== registration) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `IRC peer transport for "${message.to}" was unregistered before delivery.`,
+			};
+		}
+		try {
+			await registration.transport.send(message);
+			if (!opts?.suppressRelay) this.#relayToMainUi(message);
+			return { to: message.to, outcome: "injected" };
+		} catch (error) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: error instanceof Error ? error.message : String(error),
+			};
+		}
+	}
+
+	#resolvePeerTransports(peerId: string): {
+		claimed: IrcPeerTransportRegistration[];
+		errors: string[];
+	} {
+		const claimed: IrcPeerTransportRegistration[] = [];
+		const errors: string[] = [];
+		for (const registration of [...this.#peerTransports.values()]) {
+			if (this.#peerTransports.get(registration.id) !== registration) continue;
+			try {
+				const matches = registration.transport.claims(peerId);
+				if (matches && this.#peerTransports.get(registration.id) === registration) claimed.push(registration);
+			} catch (error) {
+				errors.push(
+					`${JSON.stringify(registration.id)} claim failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		return { claimed, errors };
+	}
+
+	async #deliverLocal(
+		message: IrcMessage,
+		ref: AgentRef,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
 		if (ref.status === "aborted") {
 			return {
 				to: message.to,

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus, type IrcMessage, type IrcPeerTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -114,6 +114,208 @@ describe("IRC", () => {
 	});
 
 	describe("IrcBus", () => {
+		it("routes an unknown local recipient through exactly one claiming transport", async () => {
+			const sent: IrcMessage[] = [];
+			const unregister = bus.registerPeerTransport({
+				id: "remote-workers",
+				claims: peerId => peerId.startsWith("remote:"),
+				send: message => {
+					sent.push(message);
+				},
+				listPeers: () => [],
+			});
+
+			const receipt = await bus.send({
+				from: "0-Main",
+				to: "remote:reviewer",
+				body: "please review",
+				replyTo: "prior-message",
+			});
+
+			expect(receipt).toEqual({ to: "remote:reviewer", outcome: "injected" });
+			expect(sent).toHaveLength(1);
+			expect(sent[0]).toMatchObject({
+				from: "0-Main",
+				to: "remote:reviewer",
+				body: "please review",
+				replyTo: "prior-message",
+			});
+			expect(sent[0]?.id).toBeTruthy();
+			expect(sent[0]?.ts).toBeGreaterThan(0);
+
+			unregister();
+			const afterShutdown = await bus.send({ from: "0-Main", to: "remote:reviewer", body: "still there?" });
+			expect(afterShutdown.outcome).toBe("failed");
+			expect(afterShutdown.error).toContain("Unknown agent");
+			expect(sent).toHaveLength(1);
+		});
+
+		it("fails closed for duplicate and ambiguous transport claims", async () => {
+			const sentBy: string[] = [];
+			const transport = (id: string): IrcPeerTransport => ({
+				id,
+				claims: peerId => peerId === "shared:peer",
+				send: () => {
+					sentBy.push(id);
+				},
+				listPeers: () => [],
+			});
+			bus.registerPeerTransport(transport("one"));
+			expect(() => bus.registerPeerTransport(transport("one"))).toThrow("already registered");
+			bus.registerPeerTransport(transport("two"));
+
+			const receipt = await bus.send({ from: "0-Main", to: "shared:peer", body: "hello" });
+			expect(receipt.outcome).toBe("failed");
+			expect(receipt.error).toContain("Ambiguous external IRC peer");
+			expect(sentBy).toEqual([]);
+		});
+
+		it("does not let a claiming transport steal a local registry recipient", async () => {
+			const local = makeFakeSession();
+			registry.register({ id: "claimed:local", displayName: "task", kind: "sub", session: local.session });
+			const external: IrcMessage[] = [];
+			bus.registerPeerTransport({
+				id: "wildcard",
+				claims: () => true,
+				send: message => {
+					external.push(message);
+				},
+				listPeers: () => [],
+			});
+
+			const receipt = await bus.send({ from: "0-Main", to: "claimed:local", body: "local only" });
+			expect(receipt.outcome).toBe("injected");
+			expect(local.delivered.map(message => message.body)).toEqual(["local only"]);
+			expect(external).toEqual([]);
+		});
+
+		it("maps transport send and claim failures to failed delivery receipts", async () => {
+			bus.registerPeerTransport({
+				id: "broken-send",
+				claims: peerId => peerId === "broken:send",
+				send: () => {
+					throw new Error("bridge offline");
+				},
+				listPeers: () => [],
+			});
+			bus.registerPeerTransport({
+				id: "broken-claim",
+				claims: peerId => {
+					if (peerId === "broken:claim") throw new Error("namespace unavailable");
+					return false;
+				},
+				send: () => undefined,
+				listPeers: () => [],
+			});
+
+			expect(await bus.send({ from: "0-Main", to: "broken:send", body: "hello" })).toEqual({
+				to: "broken:send",
+				outcome: "failed",
+				error: "bridge offline",
+			});
+			const claimFailure = await bus.send({ from: "0-Main", to: "broken:claim", body: "hello" });
+			expect(claimFailure.outcome).toBe("failed");
+			expect(claimFailure.error).toContain("namespace unavailable");
+		});
+
+		it("deliverInbound preserves message identity for local waiters without transport echo", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const outbound: IrcMessage[] = [];
+			bus.registerPeerTransport({
+				id: "remote-workers",
+				claims: peerId => peerId.startsWith("remote:"),
+				send: message => {
+					outbound.push(message);
+				},
+				listPeers: () => [],
+			});
+			const waiting = bus.wait("0-Main", { from: "remote:reviewer" }, 100);
+			const inbound: IrcMessage = {
+				id: "remote-message-42",
+				from: "remote:reviewer",
+				to: "0-Main",
+				body: "review complete",
+				ts: 123_456,
+				replyTo: "outbound-message-7",
+			};
+
+			const receipt = await bus.deliverInbound(inbound);
+			expect(receipt).toEqual({ to: "0-Main", outcome: "injected" });
+			expect(await waiting).toBe(inbound);
+			expect(outbound).toEqual([]);
+			expect(main.delivered).toEqual([]);
+		});
+
+		it("deliverInbound uses local session and revival semantics without minting a new message", async () => {
+			const live = makeFakeSession();
+			live.setOutcome("woken");
+			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
+			AgentLifecycleManager.global().adopt("0-Parked", {
+				idleTtlMs: 0,
+				revive: async () => live.session,
+			});
+			const inbound: IrcMessage = {
+				id: "remote-message-99",
+				from: "remote:operator",
+				to: "0-Parked",
+				body: "wake up",
+				ts: 987_654,
+				replyTo: "remote-question-3",
+			};
+
+			const receipt = await bus.deliverInbound(inbound);
+			expect(receipt).toEqual({ to: "0-Parked", outcome: "revived" });
+			expect(live.delivered).toEqual([inbound]);
+		});
+
+		it("drops async peer listings from a transport unregistered during shutdown", async () => {
+			const listing = Promise.withResolvers<readonly [{ id: string; displayName: string; status: string }]>();
+			let listCalls = 0;
+			const unregister = bus.registerPeerTransport({
+				id: "slow-list",
+				claims: () => false,
+				send: () => undefined,
+				listPeers: () => {
+					listCalls += 1;
+					return listing.promise;
+				},
+			});
+			const peersPromise = bus.listExternalPeers();
+			unregister();
+			listing.resolve([{ id: "remote:late", displayName: "Late", status: "online" }]);
+
+			expect(await peersPromise).toEqual([]);
+			expect(await bus.listExternalPeers()).toEqual([]);
+			expect(listCalls).toBe(1);
+		});
+
+		it("a stale registration disposer cannot unregister a replacement transport", async () => {
+			const firstDispose = bus.registerPeerTransport({
+				id: "replaceable",
+				claims: () => true,
+				send: () => {
+					throw new Error("stale transport called");
+				},
+				listPeers: () => [],
+			});
+			expect(bus.unregisterPeerTransport("replaceable")).toBe(true);
+			let replacementCalls = 0;
+			bus.registerPeerTransport({
+				id: "replaceable",
+				claims: peerId => peerId === "remote:new",
+				send: () => {
+					replacementCalls += 1;
+				},
+				listPeers: () => [],
+			});
+			firstDispose();
+
+			const receipt = await bus.send({ from: "0-Main", to: "remote:new", body: "hello" });
+			expect(receipt.outcome).toBe("injected");
+			expect(replacementCalls).toBe(1);
+		});
+
 		it("send delivers to a live recipient and reports the session outcome", async () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
@@ -572,6 +774,19 @@ describe("IRC", () => {
 			expect(isIrcEnabled(settings, 0)).toBe(false);
 		});
 
+		it("isIrcEnabled remains available for a registered external transport", () => {
+			const settings = Settings.isolated();
+			settings.set("task.maxRecursionDepth", 0);
+			bus.registerPeerTransport({
+				id: "remote-workers",
+				claims: peerId => peerId.startsWith("remote:"),
+				send: () => undefined,
+				listPeers: () => [],
+			});
+
+			expect(isIrcEnabled(settings, 0)).toBe(true);
+		});
+
 		it("isIrcEnabled returns true while the task tool is available", () => {
 			const settings = Settings.isolated();
 			// Default task.maxRecursionDepth (2) at depth 0: task can spawn, and a
@@ -647,6 +862,42 @@ describe("IRC", () => {
 			expect(text).toContain("Parked agents are revived automatically");
 		});
 
+		it("op=list includes external peer status and source while local ids stay authoritative", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const local = makeFakeSession();
+			registry.register({ id: "remote:local", displayName: "Local owner", kind: "sub", session: local.session });
+			bus.registerPeerTransport({
+				id: "remote-workers",
+				claims: peerId => peerId.startsWith("remote:"),
+				send: () => undefined,
+				listPeers: () => [
+					{ id: "remote:reviewer", displayName: "External reviewer", status: "online", activity: "reviewing" },
+					{ id: "remote:local", displayName: "Shadow", status: "online" },
+				],
+			});
+
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", { op: "list" });
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.peers).toContainEqual({
+				id: "remote:reviewer",
+				displayName: "External reviewer",
+				kind: "external",
+				status: "online",
+				source: "remote-workers",
+				unread: 0,
+				lastActivity: undefined,
+				activity: "reviewing",
+			});
+			expect(details?.peers?.filter(peer => peer.id === "remote:local")).toMatchObject([
+				{ displayName: "Local owner", kind: "sub", source: "local" },
+			]);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("remote:reviewer [External reviewer · external · online]");
+			expect(text).toContain("source remote-workers");
+		});
+
 		it("op=list hides advisor-kind refs from the peer roster", async () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Worker", displayName: "task", kind: "sub", session: sub.session });
@@ -677,6 +928,48 @@ describe("IRC", () => {
 			expect(details?.receipts).toEqual([{ to: "0-Sub", outcome: "injected" }]);
 			expect(details?.waited).toBeUndefined();
 			expect(sub.delivered.map(msg => msg.body)).toEqual(["ping"]);
+		});
+
+		it("op=send await=true correlates an external inbound reply with the outbound message id", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			let outboundId: string | undefined;
+			bus.registerPeerTransport({
+				id: "remote-workers",
+				claims: peerId => peerId === "remote:reviewer",
+				send: async message => {
+					outboundId = message.id;
+					await bus.deliverInbound({
+						id: "external-reply-1",
+						from: message.to,
+						to: message.from,
+						body: "approved",
+						ts: 4321,
+						replyTo: message.id,
+					});
+				},
+				listPeers: () => [{ id: "remote:reviewer", displayName: "Reviewer", status: "online" }],
+			});
+
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", {
+				op: "send",
+				to: "remote:reviewer",
+				message: "review this",
+				await: true,
+				timeoutMs: 100,
+			});
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.receipts).toEqual([{ to: "remote:reviewer", outcome: "injected" }]);
+			expect(details?.waited).toMatchObject({
+				id: "external-reply-1",
+				from: "remote:reviewer",
+				to: "0-Main",
+				body: "approved",
+				ts: 4321,
+				replyTo: outboundId,
+			});
+			expect(outboundId).toBeTruthy();
 		});
 
 		it("op=send to=all fans out to live peers and reports per-recipient receipts", async () => {
@@ -843,6 +1136,36 @@ describe("IRC", () => {
 			expect(result.isError).toBeFalsy();
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("No running background jobs to wait for.");
+		});
+
+		it("op=wait keeps listening when the requested sender is an external peer", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			bus.registerPeerTransport({
+				id: "remote-workers",
+				claims: peerId => peerId.startsWith("remote:"),
+				send: () => undefined,
+				listPeers: () => [{ id: "remote:reviewer", displayName: "Reviewer", status: "online" }],
+			});
+			queueMicrotask(() => {
+				void bus.deliverInbound({
+					id: "external-update-1",
+					from: "remote:reviewer",
+					to: "0-Main",
+					body: "review finished",
+					ts: 5678,
+				});
+			});
+
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", { op: "wait", from: "remote:reviewer", timeoutMs: 100 });
+			const details = result.details as CoordinationDetails | undefined;
+			expect(result.isError).toBeFalsy();
+			expect(details?.waited).toMatchObject({
+				id: "external-update-1",
+				from: "remote:reviewer",
+				body: "review finished",
+			});
 		});
 
 		it("op=wait returns an error if the requested specific 'from' agent is not active", async () => {

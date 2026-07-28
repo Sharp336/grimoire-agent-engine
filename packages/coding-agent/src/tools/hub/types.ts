@@ -33,9 +33,11 @@ export interface HubPeerInfo {
 	displayName: string;
 	kind: string;
 	status: string;
+	/** `local` for AgentRegistry peers, otherwise the external transport id. */
+	source?: string;
 	parentId?: string;
 	unread: number;
-	lastActivity: number;
+	lastActivity?: number;
 	activity?: string;
 }
 

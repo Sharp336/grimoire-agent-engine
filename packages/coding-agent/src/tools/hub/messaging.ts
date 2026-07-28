@@ -29,7 +29,7 @@ import {
 	replaceTabs,
 	type ToolUIColor,
 } from "../render-utils";
-import { type CoordinationDetails, type HubRenderArgs, hubErrorResult } from "./types";
+import { type CoordinationDetails, type HubPeerInfo, type HubRenderArgs, hubErrorResult } from "./types";
 
 export const DEFAULT_IRC_TIMEOUT_MS = 120_000;
 
@@ -40,6 +40,7 @@ export const DEFAULT_IRC_TIMEOUT_MS = 120_000;
  * top-level session with task spawning unavailable has no peers.
  */
 export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
+	if (IrcBus.global().hasPeerTransports()) return true;
 	if (taskDepth > 0) return true;
 	// Top-level session: peers exist only if it can still spawn subagents — the
 	// same capacity gate the task tool uses, reused here to avoid drift.
@@ -97,18 +98,32 @@ export async function executeList(
 	}
 
 	const bus = IrcBus.global();
-	const peers = refs
+	const localPeers: HubPeerInfo[] = refs
 		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
 		.map(ref => ({
 			id: ref.id,
 			displayName: ref.displayName,
 			kind: ref.kind,
 			status: ref.status,
+			source: "local",
 			parentId: ref.parentId,
 			unread: bus.unreadCount(ref.id),
 			lastActivity: ref.lastActivity,
 			activity: ref.activity,
 		}));
+	const externalPeers: HubPeerInfo[] = (await bus.listExternalPeers())
+		.filter(peer => peer.id !== senderId)
+		.map(peer => ({
+			id: peer.id,
+			displayName: peer.displayName,
+			kind: "external",
+			status: peer.status,
+			source: peer.transportId,
+			unread: 0,
+			lastActivity: peer.lastActivity,
+			activity: peer.activity,
+		}));
+	const peers = [...localPeers, ...externalPeers];
 	const lines: string[] = [];
 	if (peers.length === 0) {
 		lines.push("No other agents.");
@@ -119,7 +134,10 @@ export async function executeList(
 				peer.activity || undefined,
 				peer.unread > 0 ? `unread ${peer.unread}` : undefined,
 				peer.parentId ? `parent ${peer.parentId}` : undefined,
-				`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
+				peer.source !== "local" ? `source ${peer.source}` : undefined,
+				peer.lastActivity !== undefined
+					? `active ${formatDuration(Date.now() - peer.lastActivity)} ago`
+					: undefined,
 			].filter(Boolean);
 			lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
 		}
@@ -299,9 +317,11 @@ export async function executeMessageWait(
 	const { registry, senderId, settings } = deps;
 	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
+	const bus = IrcBus.global();
+	const mayReceiveFromExternal = from ? !registry.get(from) && bus.hasPeerTransportFor(from) : bus.hasPeerTransports();
 	try {
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
-			liveness: { registry, senderId },
+		const waited = await bus.wait(senderId, { from }, timeoutMs, signal, {
+			liveness: mayReceiveFromExternal ? undefined : { registry, senderId },
 		});
 		if (!waited) {
 			const filterNote = from ? ` from ${from}` : "";
@@ -384,7 +404,7 @@ function peerStatusBadge(status: string, theme: Theme): string {
 		case "parked":
 			return theme.fg("muted", `${theme.status.shadowed} parked`);
 		default:
-			return theme.fg("error", `${theme.status.aborted} ${status}`);
+			return theme.fg("muted", status);
 	}
 }
 
@@ -647,7 +667,8 @@ function renderInboxResult(
 function renderListResult(details: Partial<CoordinationDetails>, expanded: boolean, theme: Theme): string[] {
 	const peers = [...(details.peers ?? [])].sort(
 		(a, b) =>
-			(PEER_STATUS_ORDER[a.status] ?? 9) - (PEER_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
+			(PEER_STATUS_ORDER[a.status] ?? 9) - (PEER_STATUS_ORDER[b.status] ?? 9) ||
+			(b.lastActivity ?? 0) - (a.lastActivity ?? 0),
 	);
 	if (peers.length === 0) {
 		return [renderStatusLine({ icon: "info", title: "IRC peers", meta: ["no other agents"] }, theme)];
@@ -665,7 +686,11 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 			maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 			itemType: "peer",
 			renderItem: peer => {
-				const kindText = peer.parentId ? `${peer.kind}${theme.sep.dot}of ${peer.parentId}` : peer.kind;
+				const kindText = peer.parentId
+					? `${peer.kind}${theme.sep.dot}of ${peer.parentId}`
+					: peer.source && peer.source !== "local"
+						? `${peer.kind}${theme.sep.dot}via ${peer.source}`
+						: peer.kind;
 				const unread = peer.unread > 0 ? ` ${formatBadge(`${peer.unread} unread`, "warning", theme)}` : "";
 				const age = messageAge(peer.lastActivity);
 				const activity = peer.activity ? ` ${theme.fg("dim", replaceTabs(peer.activity))}` : "";
