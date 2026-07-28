@@ -167,11 +167,7 @@ describe("AgentSession advisor context maintenance", () => {
 		if (!advisor) throw new Error("Expected advisor agent to be active");
 		advisor.setModel(nativeModel);
 		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
-		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
-			nativeModel,
-			sameProviderModel,
-			crossProviderModel,
-		]);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([nativeModel, sameProviderModel, crossProviderModel]);
 		advisor.state.messages.push(
 			usageAnchor(advisorMock, Date.now() - 2_000),
 			usageAnchor(advisorMock, Date.now() - 1_000),
