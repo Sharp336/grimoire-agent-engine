@@ -785,6 +785,7 @@ export type ResolvedRequestAuth =
  */
 export class ModelRegistry {
 	#models: Model<Api>[] = [];
+	#unprojectedModels: Model<Api>[] = [];
 	#hasFullSnapshot = false;
 	#cachedStandardModels: Model<Api>[] = [];
 	#cachedDiscoverableModels: Model<Api>[] = [];
@@ -1015,6 +1016,15 @@ export class ModelRegistry {
 		if (patch.contextWindow === undefined && patch.maxTokens === undefined && patch.input === undefined) {
 			return current;
 		}
+		const unprojected = resolveProviderModelReference(current.provider, current.id, this.#unprojectedModels);
+		if (unprojected) {
+			const patchedBase = applyModelPatch(unprojected, patch, "merge");
+			this.#unprojectedModels = this.#unprojectedModels.map(candidate =>
+				candidate.provider === unprojected.provider && candidate.id === unprojected.id ? patchedBase : candidate,
+			);
+			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
+			return resolveProviderModelReference(current.provider, current.id, this.#models) ?? patchedBase;
+		}
 		const patched = applyModelPatch(current, patch, "merge");
 		this.#models = this.#models.map(candidate =>
 			candidate.provider === current.provider && candidate.id === current.id ? patched : candidate,
@@ -1115,6 +1125,7 @@ export class ModelRegistry {
 
 	#resetStaticComposition(): void {
 		this.#models = [];
+		this.#unprojectedModels = [];
 		this.#hasFullSnapshot = false;
 		this.#internedStaticModels.clear();
 		this.#providerLookupSnapshots.clear();
@@ -1142,25 +1153,25 @@ export class ModelRegistry {
 	/**
 	 * Re-apply the credential-aware projections registered by extension providers.
 	 *
-	 * `registerProvider` runs `oauth.modifyModels` once and stores the result in
-	 * `#models`, but only the *pre-projection* definitions survive in
-	 * `#runtimeModelOverlays`. Every static reload therefore has to project
-	 * again, or the provider silently reverts to its unprojected catalog — which
-	 * is exactly what the model selector's `refresh("offline")` used to trigger.
+	 * Runtime overlays hold the pre-projection definitions, so the registry keeps
+	 * those definitions separate from `#models` and reruns the ordered hooks after
+	 * every catalog rebuild. Otherwise an offline refresh silently restores the
+	 * provider's placeholder catalog.
 	 *
-	 * A throwing hook degrades to the unprojected list for that provider instead
+	 * A throwing hook falls back to the catalog produced by earlier hooks instead
 	 * of failing the whole composition; one bad extension must not empty the
 	 * registry. The failure is logged (deduped per provider) so it is not silent.
+	 * Each hook receives its own array because the public contract permits
+	 * structural mutation before returning.
 	 */
-	#applyRuntimeModelModifiers(models: Model<Api>[], providerFilter?: ReadonlySet<string>): Model<Api>[] {
+	#applyRuntimeModelModifiers(models: Model<Api>[]): Model<Api>[] {
 		if (this.#runtimeModelModifiers.size === 0) return models;
 		let projected = models;
 		for (const [providerName, modifyModels] of this.#runtimeModelModifiers) {
-			if (providerFilter && !providerFilter.has(providerName)) continue;
 			const credential = this.authStorage.getOAuthCredential(providerName);
 			if (!credential) continue;
 			try {
-				projected = modifyModels(projected, credential);
+				projected = modifyModels([...projected], credential);
 			} catch (error) {
 				this.#warnModelModifierFailure(providerName, error instanceof Error ? error.message : String(error));
 			}
@@ -1178,7 +1189,7 @@ export class ModelRegistry {
 		logger.warn("extension model projection failed; serving unprojected catalog", { provider, error });
 	}
 
-	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
+	#composeUnprojectedStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		const select = <T extends { provider: string }>(models: readonly T[]): T[] =>
 			providerFilter ? models.filter(model => providerFilter.has(model.provider)) : [...models];
 		let builtInModels = this.#applyHardcodedModelPolicies(
@@ -1193,20 +1204,24 @@ export class ModelRegistry {
 		);
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, select(this.#customModelOverlays));
 		const combined = this.#mergeCustomModels(withConfigModels, select(this.#runtimeModelOverlays));
-		// Custom/config providers bypass the model-manager merge point —
-		// collapse effort-tier variants here so X/X-thinking twins fold.
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		return this.#internStaticModels(
-			this.#applyRuntimeModelModifiers(
-				this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
-				providerFilter,
-			),
-		);
+		return this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
+	}
+
+	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
+		// A modifier is a whole-catalog transform. Build and project the full catalog
+		// before narrowing a lazy lookup, matching getAll() followed by filtering.
+		const projectFullCatalog = providerFilter !== undefined && this.#runtimeModelModifiers.size > 0;
+		const unprojected = this.#composeUnprojectedStaticModels(projectFullCatalog ? undefined : providerFilter);
+		const projected = this.#applyRuntimeModelModifiers(unprojected);
+		const selected = projectFullCatalog ? projected.filter(model => providerFilter.has(model.provider)) : projected;
+		return this.#internStaticModels(selected);
 	}
 
 	#ensureFullSnapshot(): Model<Api>[] {
 		if (!this.#hasFullSnapshot) {
-			this.#models = this.#composeStaticModels();
+			this.#unprojectedModels = this.#composeUnprojectedStaticModels();
+			this.#models = this.#internStaticModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 			this.#hasFullSnapshot = true;
 			this.#providerLookupSnapshots.clear();
 		}
@@ -1660,7 +1675,7 @@ export class ModelRegistry {
 			discovered.map(model =>
 				mergeDiscoveredModel(
 					model,
-					this.find(model.provider, model.id),
+					resolveProviderModelReference(model.provider, model.id, this.#unprojectedModels),
 					this.#providerOverrides.get(model.provider),
 				),
 			),
@@ -1669,22 +1684,18 @@ export class ModelRegistry {
 		for (const provider of builtInDiscovery.authoritativeProviders) {
 			authoritativeProviders.add(provider);
 		}
-		// `this.#models` is already projected here (via #ensureFullSnapshot), and
-		// the overlay merge below only replaces matching provider+id pairs — a
-		// hook's projection-only entries would survive and be fed back into it.
-		// Drop each modifier provider so the merge re-seeds it from the
-		// unprojected overlays, keeping non-idempotent hooks from compounding.
-		const rebuiltProviders = new Set(authoritativeProviders);
-		for (const providerName of this.#runtimeModelModifiers.keys()) rebuiltProviders.add(providerName);
-		const baseModels = rebuiltProviders.size > 0 ? dropProviderModels(this.#models, rebuiltProviders) : this.#models;
+		const baseModels =
+			authoritativeProviders.size > 0
+				? dropProviderModels(this.#unprojectedModels, authoritativeProviders)
+				: this.#unprojectedModels;
 		const resolved = this.#mergeResolvedModels(baseModels, discoveredModels);
 		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
-		// Merge runtime extension models so they survive online discovery completion
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#models = this.#applyRuntimeModelModifiers(
-			this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
+		this.#unprojectedModels = this.#applyLlamaCppQwenThinkingToModels(
+			this.#applyRuntimeProviderOverrides(withModelOverrides),
 		);
+		this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -2594,32 +2605,28 @@ export class ModelRegistry {
 			this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(m => m.provider !== providerName);
 			this.#runtimeModelOverlays.push(...newOverlays);
 
-			// Also update #models immediately for the current cycle
-			const nextModels = this.#models.filter(m => m.provider !== providerName);
+			// Update the unprojected snapshot, then rerun every whole-catalog
+			// projection exactly once. Incremental projection is not safe because one
+			// provider's hook may inspect or suppress another provider's models.
+			const nextModels = this.#unprojectedModels.filter(model => model.provider !== providerName);
 			for (const overlay of newOverlays) {
 				nextModels.push(finalizeCustomModel(overlay, { useDefaults: true }));
 			}
 			const runtimeTransportOverride = this.#runtimeProviderOverrides.get(providerName);
-			const withRuntimeTransportOverride = runtimeTransportOverride
+			this.#unprojectedModels = runtimeTransportOverride
 				? nextModels.map(model => {
 						if (model.provider !== providerName) return model;
 						return this.#applyProviderTransportOverrideToModel(model, runtimeTransportOverride);
 					})
 				: nextModels;
 
-			// Persist the projection so it survives every later #reloadStaticModels()
-			// cycle, then apply it to the list we just composed.
 			if (config.oauth?.modifyModels) {
 				this.#runtimeModelModifiers.set(providerName, config.oauth.modifyModels);
 			} else {
 				this.#runtimeModelModifiers.delete(providerName);
 			}
-
-			// Only this provider's hook runs: `nextModels` still carries every other
-			// provider's projection from an earlier registration, so rerunning their
-			// hooks here would feed them their own output. Registrations arrive one
-			// at a time, and full rebuilds go through #composeStaticModels.
-			this.#models = this.#applyRuntimeModelModifiers(withRuntimeTransportOverride, new Set([providerName]));
+			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
+			this.#providerLookupSnapshots.clear();
 			return;
 		}
 
@@ -2688,12 +2695,14 @@ export class ModelRegistry {
 				transportOverride,
 			);
 			this.#runtimeProviderOverrides.set(providerName, nextRuntimeOverride);
-			this.#models = this.#applyLlamaCppQwenThinkingToModels(
-				this.#models.map(m => {
-					if (m.provider !== providerName) return m;
-					return this.#applyProviderTransportOverrideToModel(m, transportOverride);
+			this.#unprojectedModels = this.#applyLlamaCppQwenThinkingToModels(
+				this.#unprojectedModels.map(model => {
+					if (model.provider !== providerName) return model;
+					return this.#applyProviderTransportOverrideToModel(model, transportOverride);
 				}),
 			);
+			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
+			this.#providerLookupSnapshots.clear();
 		}
 	}
 

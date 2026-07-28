@@ -935,12 +935,9 @@ describe("ModelRegistry runtime provider registration", () => {
 		]);
 
 		await registerAppending("appending-second", "custom-appending-second-api");
-		// Registering the second provider must not rerun the first provider's hook
-		// over its own output.
-		expect(getProviderModels(registry, "appending-first").map(model => model.id)).toEqual([
-			"runtime-model",
-			"extra-1",
-		]);
+		// Catalog changes rerun whole-catalog hooks, but each run must start from
+		// the unprojected snapshot rather than accumulating prior output.
+		expect(getProviderModels(registry, "appending-first")).toHaveLength(2);
 		expect(getProviderModels(registry, "appending-second").map(model => model.id)).toEqual([
 			"runtime-model",
 			"extra-1",
@@ -949,5 +946,252 @@ describe("ModelRegistry runtime provider registration", () => {
 		await registry.refresh("offline");
 		expect(getProviderModels(registry, "appending-first")).toHaveLength(2);
 		expect(getProviderModels(registry, "appending-second")).toHaveLength(2);
+	});
+
+	test("provider-scoped lookups preserve whole-catalog modifyModels projections", async () => {
+		const hiddenModel = registry.getAll().find(model => model.provider === "anthropic");
+		expect(hiddenModel).toBeDefined();
+		await authStorage.set("filtering-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+
+		registry.registerProvider(
+			"filtering-provider",
+			{
+				api: "custom-filtering-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Filtering OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: models =>
+						models.filter(model => model.provider !== hiddenModel?.provider || model.id !== hiddenModel.id),
+				},
+			},
+			"ext://oauth",
+		);
+
+		expect(registry.find(hiddenModel!.provider, hiddenModel!.id)).toBeUndefined();
+		const refreshPromise = registry.refresh("offline");
+		// While refresh is awaiting discovery, lookup takes the provider-scoped composition path.
+		expect(registry.find(hiddenModel!.provider, hiddenModel!.id)).toBeUndefined();
+		await refreshPromise;
+		expect(
+			registry.getAll().find(model => model.provider === hiddenModel!.provider && model.id === hiddenModel!.id),
+		).toBeUndefined();
+	});
+
+	test("provider-scoped lookups do not intern other providers' transient projections", async () => {
+		const anthropicId = registry.getAll().find(model => model.provider === "anthropic")?.id;
+		expect(anthropicId).toBeDefined();
+		await authStorage.set("changing-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		let projectionCount = 0;
+		registry.registerProvider(
+			"changing-provider",
+			{
+				api: "custom-changing-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Changing OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: models => {
+						projectionCount += 1;
+						return models.map(model =>
+							model.provider === "changing-provider"
+								? { ...model, name: `projection-${projectionCount}` }
+								: model,
+						);
+					},
+				},
+			},
+			"ext://oauth",
+		);
+
+		const refreshPromise = registry.refresh("offline");
+		expect(registry.find("anthropic", anthropicId!)).toBeDefined();
+		expect(registry.find("changing-provider", "runtime-model")?.name).toBe("projection-3");
+		await refreshPromise;
+	});
+
+	test("registering another provider reapplies whole-catalog modifyModels projections", async () => {
+		await authStorage.set("filtering-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		registry.registerProvider(
+			"filtering-provider",
+			{
+				api: "custom-filtering-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Filtering OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: models => models.filter(model => model.provider !== "later-provider"),
+				},
+			},
+			"ext://oauth",
+		);
+
+		registry.registerProvider(
+			"later-provider",
+			{
+				api: "custom-later-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				apiKey: "RUNTIME_KEY",
+				models: [baseModel],
+			},
+			"ext://runtime",
+		);
+
+		expect(getProviderModels(registry, "later-provider")).toEqual([]);
+	});
+
+	test("runtime transport overrides reapply whole-catalog modifyModels projections", async () => {
+		const proxyBaseUrl = "https://proxy.example.invalid/v1";
+		await authStorage.set("filtering-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		registry.registerProvider(
+			"filtering-provider",
+			{
+				api: "custom-filtering-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Filtering OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: models =>
+						models.filter(model => model.provider !== "anthropic" || model.baseUrl !== proxyBaseUrl),
+				},
+			},
+			"ext://oauth",
+		);
+		expect(getProviderModels(registry, "anthropic").length).toBeGreaterThan(0);
+
+		registry.registerProvider("anthropic", { baseUrl: proxyBaseUrl }, "ext://runtime");
+
+		expect(getProviderModels(registry, "anthropic")).toEqual([]);
+	});
+
+	test("online discovery reapplies modifiers to an unprojected full catalog", async () => {
+		const target = registry.getAll().find(model => model.provider === "anthropic");
+		expect(target).toBeDefined();
+		await authStorage.set("renaming-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		registry.registerProvider(
+			"renaming-provider",
+			{
+				api: "custom-renaming-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Renaming OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: models =>
+						models.map(model =>
+							model.provider === target?.provider && model.id === target.id
+								? { ...model, name: `${model.name} projected` }
+								: model,
+						),
+				},
+			},
+			"ext://oauth",
+		);
+		registry.registerProvider(
+			"dynamic-provider",
+			{
+				api: "custom-dynamic-api",
+				baseUrl: "https://example.invalid/",
+				apiKey: "RUNTIME_KEY",
+				streamSimple,
+				fetchDynamicModels: async () => [{ ...baseModel, id: "dynamic-model" }],
+			},
+			"ext://runtime",
+		);
+
+		expect(registry.find(target!.provider, target!.id)?.name).toBe(`${target!.name} projected`);
+		await registry.refreshRuntimeProviders("online");
+		expect(registry.find(target!.provider, target!.id)?.name).toBe(`${target!.name} projected`);
+	});
+
+	test("a modifyModels that mutates in place then throws cannot corrupt the catalog", async () => {
+		await authStorage.set("mutating-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		try {
+			const anthropicBefore = registry.getAll().filter(model => model.provider === "anthropic").length;
+			expect(anthropicBefore).toBeGreaterThan(0);
+
+			registry.registerProvider(
+				"mutating-provider",
+				{
+					api: "custom-mutating-api",
+					baseUrl: "https://example.invalid/",
+					streamSimple,
+					models: [baseModel],
+					oauth: {
+						name: "Mutating OAuth",
+						login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+						refreshToken: async credentials => credentials,
+						getApiKey: credentials => credentials.access,
+						// Wipes the array it was handed, then fails.
+						modifyModels: models => {
+							models.length = 0;
+							throw new Error("mutated then failed");
+						},
+					},
+				},
+				"ext://oauth",
+			);
+
+			expect(registry.getAll().filter(model => model.provider === "anthropic")).toHaveLength(anthropicBefore);
+			expect(getProviderModels(registry, "mutating-provider").map(model => model.id)).toEqual(["runtime-model"]);
+
+			await registry.refresh("offline");
+			expect(registry.getAll().filter(model => model.provider === "anthropic")).toHaveLength(anthropicBefore);
+			expect(getProviderModels(registry, "mutating-provider").map(model => model.id)).toEqual(["runtime-model"]);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });
