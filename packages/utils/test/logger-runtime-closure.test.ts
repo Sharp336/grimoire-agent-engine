@@ -97,4 +97,13 @@ describe("central logger runtime closure", () => {
 		expect(filed.stdout).toBe("");
 		expect(filed.stderr).toBe("");
 	});
+	test("pins the deep rotation entrypoint to the reviewed package layout", async () => {
+		const rootPackage = JSON.parse(
+			await fs.readFile(path.resolve(import.meta.dir, "../../..", "package.json"), "utf8"),
+		) as { workspaces?: { catalog?: Record<string, string> } };
+		expect(rootPackage.workspaces?.catalog?.["winston-daily-rotate-file"]).toBe("5.0.0");
+		expect(Bun.resolveSync("winston-daily-rotate-file/daily-rotate-file.js", import.meta.dir)).toEndWith(
+			"/winston-daily-rotate-file/daily-rotate-file.js",
+		);
+	});
 });

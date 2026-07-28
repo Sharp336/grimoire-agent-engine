@@ -17,6 +17,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isPromise } from "node:util/types";
 import type DailyRotateFile from "winston-daily-rotate-file";
+// Import the implementation directly because the package index imports and mutates
+// Winston. The exact workspace catalog pin protects this internal entrypoint.
 import DailyRotateFileImplementation from "winston-daily-rotate-file/daily-rotate-file.js";
 import { getLogsDir } from "./dirs";
 import { drainModuleLoadEvents } from "./timing-buffer";
