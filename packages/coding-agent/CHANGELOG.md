@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed ChatGPT/Codex subscription image generation to use the native Codex Images API with `gpt-image-2` for every official backend URL form (`/backend-api`, `/codex`, or `/codex/responses`, with or without a trailing slash), while preserving hosted Responses routing for custom proxies and standard OpenAI models.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
@@ -16,7 +20,6 @@
 
 - Reworked the /guided-goal command from a modal-based popup flow into a natural, conversational chat interface where the agent asks follow-up questions directly in the session.
 - Reduced startup memory usage by lazy-loading HTML session export assets only on their first use.
-- Changed ChatGPT/Codex subscription image generation to use the native Codex Images API with `gpt-image-2` for every official backend URL form (`/backend-api`, `/codex`, or `/codex/responses`, with or without a trailing slash), while preserving hosted Responses routing for custom proxies and standard OpenAI models.
 
 ### Fixed
 
