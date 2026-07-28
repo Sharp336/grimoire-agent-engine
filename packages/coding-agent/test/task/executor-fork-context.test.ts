@@ -27,8 +27,15 @@ const AGENT: AgentDefinition = {
 	source: "bundled",
 };
 
-function createMockSession(options: { activeTools?: string[]; messages?: unknown[] } = {}): AgentSession {
-	const listeners: Array<(event: AgentSessionEvent) => void> = [];
+function createMockSession(
+	options: {
+		activeTools?: string[];
+		messages?: unknown[];
+		appendMessage?: (message: AgentMessage) => void;
+		listeners?: Array<(event: AgentSessionEvent) => void>;
+	} = {},
+): AgentSession {
+	const listeners = options.listeners ?? [];
 	const activeTools = options.activeTools ?? ["read"];
 	return {
 		agent: {
@@ -38,7 +45,7 @@ function createMockSession(options: { activeTools?: string[]; messages?: unknown
 		},
 		model: MODEL,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
+		sessionManager: { appendSessionInit: () => {}, appendMessage: options.appendMessage ?? (() => {}) },
 		getActiveToolNames: () => activeTools,
 		getEnabledToolNames: () => activeTools,
 		setActiveToolsByName: async () => {},
@@ -79,7 +86,7 @@ function createMockSession(options: { activeTools?: string[]; messages?: unknown
 }
 
 function createRewriteSession() {
-	const session = createMockSession();
+	const session = createMockSession({ activeTools: ["bash", "todo"] });
 	session.agent.beforeToolCall = async () => ({ args: { command: "rewritten" } });
 	return session;
 }
@@ -240,5 +247,110 @@ describe("runSubprocess fork context", () => {
 		expect(JSON.stringify(messages[0])).toContain("Do not change the API contract.");
 		expect(JSON.stringify(messages[0])).toContain("answer");
 		expect(JSON.stringify(messages[0])).not.toContain("NEVER fix, audit, or build on it");
+	});
+
+	it("reinjects and persists the fork contract after compaction", async () => {
+		const messages: unknown[] = [];
+		const listeners: Array<(event: AgentSessionEvent) => void> = [];
+		const appendMessage = vi.fn();
+		const session = createMockSession({ messages, appendMessage, listeners });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory("/tmp"));
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: AGENT,
+			task: "inspect",
+			index: 0,
+			id: "CompactAgent",
+			artifactsDir: "/tmp",
+			settings: Settings.isolated(),
+			modelRegistry: { authStorage: {}, refresh: async () => {} } as unknown as ModelRegistry,
+			enableLsp: false,
+			contextSource: "fork",
+			parentSessionFile: "/tmp/parent.jsonl",
+			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentForkLeafId: "completed-assistant",
+			parentModel: MODEL,
+			parentSystemPrompt: ["parent system"],
+			parentToolNames: ["read"],
+		});
+
+		expect(appendMessage).toHaveBeenCalledTimes(1);
+		for (const listener of listeners) {
+			listener({
+				type: "auto_compaction_end",
+				action: "context-full",
+				result: {} as never,
+				aborted: false,
+				willRetry: true,
+			});
+		}
+		expect(appendMessage).toHaveBeenCalledTimes(2);
+		expect(messages).toHaveLength(2);
+	});
+
+	it("reports no fresh downgrade when an explicit incompatible fork never starts", async () => {
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory("/tmp"));
+		const createSpy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue(createSessionResult(createMockSession({ activeTools: ["read"] })));
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: AGENT,
+			task: "inspect",
+			index: 0,
+			id: "IncompatibleAgent",
+			artifactsDir: "/tmp",
+			settings: Settings.isolated(),
+			modelRegistry: { authStorage: {}, refresh: async () => {} } as unknown as ModelRegistry,
+			enableLsp: false,
+			contextSource: "fork",
+			parentSessionFile: "/tmp/parent.jsonl",
+			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentForkLeafId: "completed-assistant",
+			parentModel: MODEL,
+			parentSystemPrompt: ["parent system"],
+			parentToolNames: ["ask"],
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.contextSource).toBeUndefined();
+		expect(createSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("auto rebuilds a fresh child when the fork tool catalog differs", async () => {
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory("/tmp"));
+		const incompatible = createMockSession({ activeTools: ["read"] });
+		const fresh = createMockSession({ activeTools: ["read"] });
+		const createSpy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValueOnce(createSessionResult(incompatible))
+			.mockResolvedValueOnce(createSessionResult(fresh));
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: AGENT,
+			task: "inspect",
+			index: 0,
+			id: "AutoCatalogAgent",
+			artifactsDir: "/tmp",
+			settings: Settings.isolated(),
+			modelRegistry: { authStorage: {}, refresh: async () => {} } as unknown as ModelRegistry,
+			enableLsp: false,
+			contextSource: "auto",
+			parentSessionFile: "/tmp/parent.jsonl",
+			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentForkLeafId: "completed-assistant",
+			parentModel: MODEL,
+			parentSystemPrompt: ["parent system"],
+			parentToolNames: ["read", "ask"],
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.contextSource).toMatchObject({ requested: "auto", used: "fresh" });
+		expect(result.contextSource?.downgradeReason).toContain("cannot reconstruct the parent tool catalog");
+		expect(createSpy).toHaveBeenCalledTimes(2);
+		expect(createSpy.mock.calls[1]?.[0]?.systemPrompt).toBeInstanceOf(Function);
 	});
 });

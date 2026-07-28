@@ -2450,11 +2450,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	} = options;
 	const startTime = Date.now();
 	const requestedContextSource = options.contextSource ?? "fresh";
-	let contextSource: TaskContextSourceResult = {
-		requested: requestedContextSource,
-		used: "fresh",
-		cacheReadTokens: 0,
-	};
+	let contextSource: TaskContextSourceResult | undefined;
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
 	let firstChatDispatchAt: number | undefined;
@@ -2784,7 +2780,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (requestedContextSource === "fork" && forkUnavailableReason) {
 				throw new Error(forkUnavailableReason);
 			}
-			const useFork = forkRequested && forkUnavailableReason === undefined;
+			let useFork = forkRequested && forkUnavailableReason === undefined;
 			const runtimeModel = useFork ? options.parentModel : model;
 			if (runtimeModel?.contextWindow && runtimeModel.contextWindow > 0) {
 				progress.contextWindow = runtimeModel.contextWindow;
@@ -2813,8 +2809,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						},
 					),
 				);
-				contextSource = { requested: requestedContextSource, used: "fork", cacheReadTokens: 0 };
 			} else {
+				contextSource = { requested: requestedContextSource, used: "fresh", cacheReadTokens: 0 };
 				sessionManager = sessionFile
 					? await awaitAbortable(
 							SessionManager.open(sessionFile, undefined, undefined, {
@@ -2889,14 +2885,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					}
 					return inherited;
 				};
-				if (appendNotice) {
-					target.agent.appendMessage({
+				const injectNotice = () => {
+					const message = {
 						role: "developer",
 						content: forkTaskNotice,
 						attribution: "agent",
 						timestamp: Date.now(),
-					});
-				}
+					} as const;
+					target.agent.appendMessage(message);
+					target.sessionManager.appendMessage(message);
+				};
+				if (appendNotice) injectNotice();
+				target.subscribe(event => {
+					if (event.type === "auto_compaction_end" && event.result && !event.aborted) injectNotice();
+				});
 			};
 
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
@@ -2959,7 +2961,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				providerPromptCacheKey: useFork ? options.parentPromptCacheKey : undefined,
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
-				prewalk,
+				prewalk: useFork ? undefined : prewalk,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
 				parentHindsightSessionState: options.parentHindsightSessionState,
@@ -2983,7 +2985,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				},
 			});
 
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
+			let sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));
@@ -2993,6 +2995,46 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// a cancelled subagent cannot leak them.
 				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
 				throw err;
+			}
+			if (useFork) {
+				const requestedTools = options.parentToolNames!;
+				const reconstructedTools = session.getActiveToolNames();
+				const sameTools =
+					requestedTools.length === reconstructedTools.length &&
+					requestedTools.every((name, index) => reconstructedTools[index] === name);
+				if (!sameTools) {
+					await session.dispose();
+					const reason = `fork context cannot reconstruct the parent tool catalog (expected: ${requestedTools.join(", ")}; actual: ${reconstructedTools.join(", ")})`;
+					if (requestedContextSource === "fork") throw new Error(reason);
+					if (sessionFile) {
+						await sessionManager.dropSession(sessionFile);
+						sessionManager = await SessionManager.open(sessionFile, undefined, undefined, {
+							initialCwd: effectiveCwd,
+							suppressBreadcrumb: true,
+						});
+					} else {
+						sessionManager = SessionManager.inMemory(effectiveCwd);
+					}
+					if (options.parentArtifactManager) sessionManager.adoptArtifactManager(options.parentArtifactManager);
+					useFork = false;
+					contextSource = {
+						requested: requestedContextSource,
+						used: "fresh",
+						cacheReadTokens: 0,
+						downgradeReason: reason,
+					};
+					if (model?.contextWindow && model.contextWindow > 0) progress.contextWindow = model.contextWindow;
+					if (model) {
+						const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+						progress.resolvedModel =
+							displayLevel !== undefined
+								? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
+								: formatModelStringWithRouting(model);
+					}
+					sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
+					({ session } = await awaitAbortable(sessionPromise));
+				}
+				if (useFork) contextSource = { requested: requestedContextSource, used: "fork", cacheReadTokens: 0 };
 			}
 			sessionCreatedAt = performance.now();
 
