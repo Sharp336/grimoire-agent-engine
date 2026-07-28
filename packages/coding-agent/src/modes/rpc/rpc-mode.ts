@@ -1009,7 +1009,11 @@ export async function runRpcMode(
 					if ("prompt" in builtinResult) {
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: () =>
+								session.prompt(builtinResult.prompt, {
+									images: command.images,
+									streamingBehavior: command.streamingBehavior,
+								}),
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
@@ -1062,6 +1066,18 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
+				// The TUI installs session-switch reconcilers that suspend and
+				// rehydrate vibe workers; RPC has no such reconciler, so a
+				// session change here would leak the old scope's workers and
+				// carry the restricted tool snapshot into the new session. Block
+				// the transition with a clear error instead.
+				if (session.getVibeModeState()?.enabled) {
+					return error(
+						id,
+						command.type,
+						"Cannot change the active session while vibe mode is active. Exit vibe mode first.",
+					);
+				}
 				const result = await handleRpcSessionChange(session, command, subagentRegistry);
 				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
 				return success(id, result.type, result.data);
