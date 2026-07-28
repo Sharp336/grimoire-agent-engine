@@ -1873,10 +1873,10 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 			);
 			const tokenLineOffsets = [0];
 			for (const line of renderedTokenLines) {
-				// Lists wrap while their structural prefixes are still available, so
-				// continuation rows retain the correct hanging indent. Re-wrapping the
-				// flattened rows here would discard that structure.
-				if (token.type === "list" || TERMINAL.isImageLine(line) || isOsc66Line(line)) {
+				// Lists and headings wrap while their structural prefixes are still
+				// available, so continuation rows retain the correct indentation.
+				// Re-wrapping flattened rows here would discard that structure.
+				if (token.type === "list" || token.type === "heading" || TERMINAL.isImageLine(line) || isOsc66Line(line)) {
 					wrappedLines.push(line);
 				} else {
 					wrappedLines.push(...wrapTextWithAnsi(line, contentWidth));
@@ -2208,12 +2208,19 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 						break;
 					}
 				}
+				const desiredIndentWidth = Math.max(0, (headingLevel - 2) * 2);
+				// Always leave one content cell at narrow widths. This retains as much
+				// hierarchy as the row can represent without emitting an indent-only row.
+				const indentWidth = Math.min(desiredIndentWidth, Math.max(0, width - 1));
+				const indent = padding(indentWidth);
 				if (headingLevel === 1) {
 					styledHeading = this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)));
 				} else {
-					styledHeading = `${padding((headingLevel - 2) * 2)}${this.#theme.heading(this.#theme.bold(headingText))}`;
+					styledHeading = this.#theme.heading(this.#theme.bold(headingText));
 				}
-				lines.push(styledHeading);
+				for (const headingLine of wrapTextWithAnsi(styledHeading, Math.max(1, width - indentWidth))) {
+					lines.push(indent + headingLine);
+				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after headings (unless space token follows)
 				}

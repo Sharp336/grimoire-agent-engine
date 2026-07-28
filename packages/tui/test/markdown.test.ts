@@ -949,6 +949,31 @@ ${table}`;
 			]);
 		});
 
+		it("preserves nested-heading indentation on every wrapped row", () => {
+			const text = "alpha beta gamma delta epsilon zeta";
+			for (const level of [3, 4, 5, 6]) {
+				const indent = " ".repeat((level - 2) * 2);
+				const plainLines = new Markdown(`${"#".repeat(level)} ${text}`, 0, 0, defaultMarkdownTheme)
+					.render(18)
+					.map(line => stripVTControlCharacters(line).trimEnd());
+
+				expect(plainLines.length).toBeGreaterThan(1);
+				expect(plainLines.every(line => line.startsWith(indent) && line.length > indent.length)).toBe(true);
+				expect(plainLines.map(line => line.slice(indent.length)).join(" ")).toBe(text);
+				expect(plainLines.every(line => visibleWidth(line) <= 18)).toBe(true);
+			}
+		});
+
+		it("uses the available indentation without emitting blank rows at ultra-narrow widths", () => {
+			for (const width of [1, 2, 3, 4]) {
+				const plainLines = new Markdown("###### X", 0, 0, defaultMarkdownTheme)
+					.render(width)
+					.map(line => stripVTControlCharacters(line).trimEnd());
+
+				expect(plainLines).toEqual([`${" ".repeat(Math.max(0, width - 1))}X`]);
+			}
+		});
+
 		it("hides fenced-code delimiters inside lists while preserving nesting", () => {
 			const markdown = new Markdown(
 				"- Example:\n\n  ```ts\n  const nested = true;\n  ```",
