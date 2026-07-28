@@ -95,19 +95,11 @@ import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 import { buildCopyTargets } from "../utils/copy-targets";
-import type { NextPromptSuggestionController } from "./next-prompt-suggestion-controller";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
 export class SelectorController {
-	readonly #nextPromptSuggestionController: NextPromptSuggestionController | undefined;
-
-	constructor(
-		private ctx: InteractiveModeContext,
-		nextPromptSuggestionController?: NextPromptSuggestionController,
-	) {
-		this.#nextPromptSuggestionController = nextPromptSuggestionController;
-	}
+	constructor(private ctx: InteractiveModeContext) {}
 	#defaultRoleMutationTail = Promise.resolve();
 
 	async #acquireDefaultRoleMutation(): Promise<() => void> {
@@ -162,7 +154,7 @@ export class SelectorController {
 	}
 
 	showSettingsSelector(): void {
-		this.#nextPromptSuggestionController?.invalidate();
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		getAvailableThemes().then(availableThemes => {
 			// Fullscreen settings editor on the alternate screen: the overlay
 			// enables mouse tracking (click/hover/wheel) for its lifetime and
@@ -474,7 +466,7 @@ export class SelectorController {
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;
 			case "nextPromptSuggestion.enabled":
-				if (value === false) this.#nextPromptSuggestionController?.invalidate();
+				if (value === false) this.ctx.nextPromptSuggestionController?.invalidate();
 				break;
 
 			// Settings with UI side effects
@@ -1371,7 +1363,7 @@ export class SelectorController {
 	}
 
 	async showSessionSelector(): Promise<void> {
-		this.#nextPromptSuggestionController?.invalidate();
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		const sessions = await SessionManager.list(
 			this.ctx.sessionManager.getCwd(),
 			this.ctx.sessionManager.getSessionDir(),
@@ -1899,7 +1891,7 @@ export class SelectorController {
 	}
 
 	async showDebugSelector(): Promise<void> {
-		this.#nextPromptSuggestionController?.invalidate();
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		const { DebugSelectorComponent } = await import("../../debug");
 		this.showSelector(done => {
 			const selector = new DebugSelectorComponent(this.ctx, done);
@@ -1911,7 +1903,7 @@ export class SelectorController {
 		observers: SessionObserverRegistry,
 		options?: { requireContent?: boolean; armCloseTap?: boolean },
 	): void {
-		this.#nextPromptSuggestionController?.invalidate();
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		const hubKeys = [
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),

@@ -86,8 +86,10 @@ describe("InteractiveMode next prompt suggestion lifecycle", () => {
 		const initialEditor = mode.editor;
 
 		initialEditor.onChange?.("draft");
-		initialEditor.onFocusChange?.(false);
+		mode.ui.setFocus(null);
+		await Promise.resolve();
 		expect(invalidate).toHaveBeenCalledTimes(2);
+		mode.ui.setFocus(initialEditor);
 		invalidate.mockClear();
 		vi.spyOn(initialEditor, "isShowingAutocomplete").mockReturnValue(true);
 		initialEditor.onAutocompleteUpdate?.();
@@ -102,12 +104,14 @@ describe("InteractiveMode next prompt suggestion lifecycle", () => {
 		invalidate.mockClear();
 		const clearEditorContainer = vi.spyOn(mode.editorContainer, "clear");
 		mode.setEditorComponent((_tui, editorTheme) => new ReplacementEditor(editorTheme));
+		await Promise.resolve();
 		expect(invalidate).toHaveBeenCalledTimes(2);
 		expect(invalidate.mock.invocationCallOrder[0]!).toBeLessThan(clearEditorContainer.mock.invocationCallOrder[0]!);
 
 		const replacementEditor = mode.editor;
 		replacementEditor.onChange?.("replacement draft");
-		replacementEditor.onFocusChange?.(false);
+		mode.ui.setFocus(null);
+		await Promise.resolve();
 		expect(invalidate).toHaveBeenCalledTimes(4);
 	});
 

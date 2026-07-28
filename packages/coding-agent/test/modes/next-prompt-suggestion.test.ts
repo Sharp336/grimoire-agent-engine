@@ -1,7 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Message, SimpleStreamOptions, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
-import * as ai from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	ToolResultMessage,
+	UserMessage,
+} from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -97,8 +104,9 @@ function createHarness(options: GeneratorHarnessOptions = {}) {
 		isTerminal: true,
 		messages: options.eventMessages ?? [userMessage("Question", 1), assistantMessage("Answer", 2)],
 	};
-	const prepareSimpleStreamOptions = vi.fn(
-		(streamOptions: SimpleStreamOptions, _provider?: string): SimpleStreamOptions => streamOptions,
+	const completeSideRequest = vi.fn(
+		async (_model: Model, _context: Context, _streamOptions: SimpleStreamOptions): Promise<AssistantMessage> =>
+			assistantMessage(options.responseText ?? "Suggested follow-up", 30),
 	);
 	const session = {
 		messages: options.sessionMessages ?? [
@@ -109,35 +117,27 @@ function createHarness(options: GeneratorHarnessOptions = {}) {
 		sessionId: "session-1",
 		obfuscator: options.obfuscator,
 		convertToLlmForSideRequest,
-		prepareSimpleStreamOptions,
+		completeSideRequest,
 	} as unknown as AgentSession;
 	const settings = Settings.isolated({
 		modelRoles: { tiny: `${model.provider}/${model.id}` },
 	});
-	const completeSimpleSpy = vi
-		.spyOn(ai, "completeSimple")
-		.mockResolvedValue(assistantMessage(options.responseText ?? "Suggested follow-up", 30));
 	return {
-		completeSimpleSpy,
+		completeSideRequest,
 		convertToLlmForSideRequest,
 		event,
 		model,
 		modelRegistry,
-		prepareSimpleStreamOptions,
 		session,
 		settings,
 	};
 }
 
-afterEach(() => {
-	vi.restoreAllMocks();
-});
-
 describe("generateNextPromptSuggestion", () => {
 	it("sends only the last valid textual pair from the current agent_end event", async () => {
 		const latestUser = userMessage("Latest event question", 12);
 		const latestAssistant = assistantMessage("Latest event answer", 14);
-		const { completeSimpleSpy, convertToLlmForSideRequest, event, session, settings } = createHarness({
+		const { completeSideRequest, convertToLlmForSideRequest, event, session, settings } = createHarness({
 			eventMessages: [
 				userMessage("Older event question", 10),
 				assistantMessage("Older event answer", 11),
@@ -156,8 +156,8 @@ describe("generateNextPromptSuggestion", () => {
 
 		expect(convertToLlmForSideRequest).toHaveBeenCalledTimes(1);
 		expect(convertToLlmForSideRequest.mock.calls[0]?.[0]).toEqual([latestUser, latestAssistant]);
-		expect(completeSimpleSpy).toHaveBeenCalledTimes(1);
-		const context = completeSimpleSpy.mock.calls[0]?.[1];
+		expect(completeSideRequest).toHaveBeenCalledTimes(1);
+		const context = completeSideRequest.mock.calls[0]?.[1];
 		expect(context?.messages.map(message => ({ role: message.role, text: messageText(message) }))).toEqual([
 			{ role: "user", text: "Latest event question" },
 			{ role: "assistant", text: "Latest event answer" },
@@ -218,8 +218,8 @@ describe("generateNextPromptSuggestion", () => {
 				expect((message as AgentMessage & ProviderPayloadCarrier).providerPayload).toBeUndefined();
 			}
 		}
-		expect(harness.completeSimpleSpy).toHaveBeenCalledTimes(2);
-		for (const call of harness.completeSimpleSpy.mock.calls) {
+		expect(harness.completeSideRequest).toHaveBeenCalledTimes(2);
+		for (const call of harness.completeSideRequest.mock.calls) {
 			for (const message of call[1].messages) {
 				expect((message as Message & ProviderPayloadCarrier).providerPayload).toBeUndefined();
 			}
@@ -265,7 +265,7 @@ describe("generateNextPromptSuggestion", () => {
 		}
 
 		expect(harness.convertToLlmForSideRequest).not.toHaveBeenCalled();
-		expect(harness.completeSimpleSpy).not.toHaveBeenCalled();
+		expect(harness.completeSideRequest).not.toHaveBeenCalled();
 	});
 
 	it("accepts a displayed custom message attributed to the user", async () => {
@@ -321,7 +321,7 @@ describe("generateNextPromptSuggestion", () => {
 
 		expect(result).toBeNull();
 		expect(harness.convertToLlmForSideRequest).not.toHaveBeenCalled();
-		expect(harness.completeSimpleSpy).not.toHaveBeenCalled();
+		expect(harness.completeSideRequest).not.toHaveBeenCalled();
 	});
 
 	it.each(["error", "aborted"] as const)(
@@ -345,7 +345,7 @@ describe("generateNextPromptSuggestion", () => {
 
 			expect(result).toBeNull();
 			expect(harness.convertToLlmForSideRequest).not.toHaveBeenCalled();
-			expect(harness.completeSimpleSpy).not.toHaveBeenCalled();
+			expect(harness.completeSideRequest).not.toHaveBeenCalled();
 		},
 	);
 
@@ -370,7 +370,7 @@ describe("generateNextPromptSuggestion", () => {
 			userText,
 			assistantText,
 		]);
-		const context = harness.completeSimpleSpy.mock.calls[0]?.[1];
+		const context = harness.completeSideRequest.mock.calls[0]?.[1];
 		const sentTexts = context?.messages.map(messageText) ?? [];
 		expect(sentTexts).toHaveLength(2);
 		expect(sentTexts[0]).not.toContain(userHash);
@@ -398,7 +398,7 @@ describe("generateNextPromptSuggestion", () => {
 
 		expect(messageText(harness.convertToLlmForSideRequest.mock.calls[0]?.[0][0] as Message)).toBe(oversizedUserText);
 		expect(result).toBeNull();
-		expect(harness.completeSimpleSpy).not.toHaveBeenCalled();
+		expect(harness.completeSideRequest).not.toHaveBeenCalled();
 	});
 
 	it("keeps bounded obfuscated context intact and rejects a known secret placeholder in output", async () => {
@@ -425,7 +425,7 @@ describe("generateNextPromptSuggestion", () => {
 			signal: new AbortController().signal,
 		});
 
-		const context = harness.completeSimpleSpy.mock.calls[0]?.[1];
+		const context = harness.completeSideRequest.mock.calls[0]?.[1];
 		const sentText = context?.messages.map(messageText).join("\n") ?? "";
 		expect(context?.messages.map(messageText)[0]?.length).toBe(NEXT_PROMPT_CONTEXT_MAX_CHARS);
 		expect(sentText).not.toContain(secret);
@@ -435,7 +435,7 @@ describe("generateNextPromptSuggestion", () => {
 		expect(result).toBeNull();
 	});
 
-	it("uses the tiny-to-smol role chain and prepares one bounded side request", async () => {
+	it("uses the tiny-to-smol role chain through one bounded session side request", async () => {
 		const smolModel = getBundledModel("anthropic", "claude-haiku-4-5");
 		const mainModel = getBundledModel("anthropic", "claude-opus-4-8");
 		if (!smolModel || !mainModel) throw new Error("Expected bundled smol and main models");
@@ -455,19 +455,17 @@ describe("generateNextPromptSuggestion", () => {
 			signal,
 		});
 
-		expect(harness.completeSimpleSpy).toHaveBeenCalledTimes(1);
-		expect(harness.completeSimpleSpy.mock.calls[0]?.[0]).toBe(smolModel);
-		expect(harness.completeSimpleSpy.mock.calls[0]?.[0]).not.toBe(mainModel);
-		expect(harness.prepareSimpleStreamOptions).toHaveBeenCalledTimes(1);
-		expect(harness.prepareSimpleStreamOptions.mock.calls[0]?.[1]).toBe(smolModel.provider);
-		expect(harness.completeSimpleSpy.mock.calls[0]?.[2]).toMatchObject({
+		expect(harness.completeSideRequest).toHaveBeenCalledTimes(1);
+		expect(harness.completeSideRequest.mock.calls[0]?.[0]).toBe(smolModel);
+		expect(harness.completeSideRequest.mock.calls[0]?.[0]).not.toBe(mainModel);
+		expect(harness.completeSideRequest.mock.calls[0]?.[2]).toMatchObject({
 			maxTokens: NEXT_PROMPT_MAX_TOKENS,
 			disableReasoning: true,
 			signal,
 			loopGuard: { enabled: false },
 			codexSseMaxAttempts: 1,
 		});
-		const context = harness.completeSimpleSpy.mock.calls[0]?.[1];
+		const context = harness.completeSideRequest.mock.calls[0]?.[1];
 		const systemPrompt = context?.systemPrompt;
 		expect(systemPrompt).toHaveLength(1);
 		expect(systemPrompt?.[0]).toContain("untrusted data");
@@ -485,7 +483,7 @@ describe("generateNextPromptSuggestion", () => {
 			event: harness.event,
 			signal: new AbortController().signal,
 		});
-		harness.completeSimpleSpy.mockResolvedValueOnce(assistantMessage("   ", 31));
+		harness.completeSideRequest.mockResolvedValueOnce(assistantMessage("   ", 31));
 		const blankResult = await generateNextPromptSuggestion({
 			session: harness.session,
 			settings: harness.settings,
@@ -508,7 +506,7 @@ describe("generateNextPromptSuggestion", () => {
 		];
 
 		for (const output of invalidOutputs) {
-			harness.completeSimpleSpy.mockResolvedValueOnce(assistantMessage(output, 31));
+			harness.completeSideRequest.mockResolvedValueOnce(assistantMessage(output, 31));
 			const result = await generateNextPromptSuggestion({
 				session: harness.session,
 				settings: harness.settings,
@@ -531,7 +529,7 @@ describe("generateNextPromptSuggestion", () => {
 		];
 
 		for (const output of invalidOutputs) {
-			harness.completeSimpleSpy.mockResolvedValueOnce(assistantMessage(output, 31));
+			harness.completeSideRequest.mockResolvedValueOnce(assistantMessage(output, 31));
 			const result = await generateNextPromptSuggestion({
 				session: harness.session,
 				settings: harness.settings,
@@ -553,7 +551,7 @@ describe("generateNextPromptSuggestion", () => {
 			event: harness.event,
 			signal: new AbortController().signal,
 		});
-		harness.completeSimpleSpy.mockResolvedValueOnce(assistantMessage(overLimit, 31));
+		harness.completeSideRequest.mockResolvedValueOnce(assistantMessage(overLimit, 31));
 		const rejected = await generateNextPromptSuggestion({
 			session: harness.session,
 			settings: harness.settings,
@@ -579,7 +577,7 @@ describe("generateNextPromptSuggestion", () => {
 
 		expect(result).toBeNull();
 		expect(harness.convertToLlmForSideRequest).not.toHaveBeenCalled();
-		expect(harness.completeSimpleSpy).not.toHaveBeenCalled();
+		expect(harness.completeSideRequest).not.toHaveBeenCalled();
 	});
 
 	it("fails silently without an auxiliary model or its credential", async () => {
@@ -608,6 +606,6 @@ describe("generateNextPromptSuggestion", () => {
 		expect(missingModel).toBeNull();
 		expect(missingKey).toBeNull();
 		expect(harness.convertToLlmForSideRequest).not.toHaveBeenCalled();
-		expect(harness.completeSimpleSpy).not.toHaveBeenCalled();
+		expect(harness.completeSideRequest).not.toHaveBeenCalled();
 	});
 });

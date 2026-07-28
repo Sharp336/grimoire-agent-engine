@@ -534,8 +534,17 @@ export class InputController {
 				this.ctx.updateEditorBorderColor();
 			}
 		};
-		this.ctx.editor.onFocusChange = focused => {
-			if (!focused) this.ctx.nextPromptSuggestionController?.invalidate();
+		const editor = this.ctx.editor;
+		editor.onFocusChange = focused => {
+			if (focused) return;
+			// TUI updates its focused component after clearing the old flag. Defer
+			// invalidation until that transition completes so a same-editor refocus
+			// does not discard a still-valid suggestion.
+			queueMicrotask(() => {
+				if (this.ctx.ui.getFocused() !== editor) {
+					this.ctx.nextPromptSuggestionController?.invalidate();
+				}
+			});
 		};
 	}
 

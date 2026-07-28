@@ -28,7 +28,7 @@ function isEligible(
 		editor.pendingImageLinks.length === 0 &&
 		session.isStreaming === false &&
 		session.isCompacting === false &&
-		session.hasPostPromptWork === false &&
+		session.hasDeferredPostPromptWork === false &&
 		session.isGeneratingHandoff === false &&
 		session.queuedMessageCount === 0 &&
 		ctx.retryLoader === undefined &&

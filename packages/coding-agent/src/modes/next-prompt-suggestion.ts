@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type AssistantMessage, completeSimple, type Message, type TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
@@ -159,20 +159,17 @@ export async function generateNextPromptSuggestion({
 		const convertedMessages = session.convertToLlmForSideRequest(pair);
 		const messages = prepareConvertedContext(convertedMessages, session.obfuscator?.hasSecrets() === true);
 		if (!messages) return null;
-		const response = await completeSimple(
+		const response = await session.completeSideRequest(
 			model,
 			{ systemPrompt: [SYSTEM_PROMPT], messages },
-			session.prepareSimpleStreamOptions(
-				{
-					apiKey: session.modelRegistry.resolver(model, session.sessionId),
-					maxTokens: NEXT_PROMPT_MAX_TOKENS,
-					disableReasoning: true,
-					signal,
-					loopGuard: { enabled: false },
-					codexSseMaxAttempts: 1,
-				},
-				model.provider,
-			),
+			{
+				apiKey: session.modelRegistry.resolver(model, session.sessionId),
+				maxTokens: NEXT_PROMPT_MAX_TOKENS,
+				disableReasoning: true,
+				signal,
+				loopGuard: { enabled: false },
+				codexSseMaxAttempts: 1,
+			},
 		);
 		if (signal.aborted) return null;
 		if (response.stopReason === "error") return null;

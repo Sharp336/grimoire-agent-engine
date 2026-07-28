@@ -88,7 +88,7 @@ function createHarness(generateResult: Promise<string | null> = Promise.resolve(
 	const session = {
 		isStreaming: false,
 		isCompacting: false,
-		hasPostPromptWork: false,
+		hasDeferredPostPromptWork: false,
 		isGeneratingHandoff: false,
 		queuedMessageCount: 0,
 	} as unknown as AgentSession;
@@ -317,10 +317,10 @@ describe("NextPromptSuggestionController", () => {
 				},
 			},
 			{
-				name: "post-prompt work",
+				name: "deferred post-prompt work",
 				arrange: harness => {
-					Object.assign(harness.session as unknown as { hasPostPromptWork: boolean }, {
-						hasPostPromptWork: true,
+					Object.assign(harness.session as unknown as { hasDeferredPostPromptWork: boolean }, {
+						hasDeferredPostPromptWork: true,
 					});
 				},
 			},
@@ -591,14 +591,14 @@ describe("NextPromptSuggestionController", () => {
 		expect(harness.requestComponentRender).not.toHaveBeenCalled();
 	});
 
-	it("generates on a real terminal event when only the agent_end handler is still tracked", async () => {
+	it("generates during agent_end settlement without changing the public post-prompt work signal", async () => {
 		vi.useRealTimers();
 		const harness = await createSessionLifecycleHarness();
 		sessionLifecycleHarnesses.push(harness);
 
 		const observedPostPromptWork = await emitTerminalAgentEnd(harness);
 
-		expect(observedPostPromptWork).toEqual([false]);
+		expect(observedPostPromptWork).toEqual([true]);
 		expect(harness.generate).toHaveBeenCalledTimes(1);
 		await harness.session.waitForIdle();
 	});

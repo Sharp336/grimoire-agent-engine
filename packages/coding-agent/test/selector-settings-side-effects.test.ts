@@ -53,7 +53,7 @@ describe("selector setting side effects", () => {
 		const nextPromptSuggestionController = {
 			invalidate,
 		} as unknown as NextPromptSuggestionController;
-		const controller = new SelectorController({} as InteractiveModeContext, nextPromptSuggestionController);
+		const controller = new SelectorController({ nextPromptSuggestionController } as InteractiveModeContext);
 
 		controller.handleSettingChange("nextPromptSuggestion.enabled", false);
 
@@ -65,7 +65,7 @@ describe("selector setting side effects", () => {
 		const nextPromptSuggestionController = {
 			invalidate,
 		} as unknown as NextPromptSuggestionController;
-		const controller = new SelectorController({} as InteractiveModeContext, nextPromptSuggestionController);
+		const controller = new SelectorController({ nextPromptSuggestionController } as InteractiveModeContext);
 
 		controller.handleSettingChange("nextPromptSuggestion.enabled", true);
 

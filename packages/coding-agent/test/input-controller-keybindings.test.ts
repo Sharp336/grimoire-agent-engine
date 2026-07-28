@@ -318,7 +318,7 @@ describe("InputController keybinding setup", () => {
 
 	it("invalidates on draft changes and blur, and before input work can cross async boundaries", async () => {
 		const imageRead = Promise.withResolvers<null>();
-		const { InputController, ctx, editor, spies } = await createContext();
+		const { InputController, ctx, editor, setFocused, spies } = await createContext();
 		const controller = new InputController(ctx, {
 			readImage: () => imageRead.promise,
 			readText: async () => "raw clipboard text",
@@ -330,6 +330,7 @@ describe("InputController keybinding setup", () => {
 
 		editor.onChange?.("new draft");
 		editor.onFocusChange?.(false);
+		setFocused(null);
 		await editor.onSubmit?.("");
 		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(3);
 
@@ -358,6 +359,24 @@ describe("InputController keybinding setup", () => {
 		await controller.openExternalEditor();
 		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
 		getEditorCommand.mockRestore();
+	});
+
+	it("keeps a suggestion when the same editor regains focus but invalidates it after focus leaves", async () => {
+		const { InputController, ctx, editor, setFocused, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onFocusChange?.(false);
+		editor.onFocusChange?.(true);
+		await Promise.resolve();
+
+		expect(spies.invalidateNextPromptSuggestion).not.toHaveBeenCalled();
+
+		editor.onFocusChange?.(false);
+		setFocused(null);
+		await Promise.resolve();
+
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
 	});
 
 	it("invalidates enhanced text and image pastes before they mutate the editor", async () => {

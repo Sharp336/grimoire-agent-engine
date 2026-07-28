@@ -121,8 +121,8 @@ describe("next prompt suggestion entrypoint invalidation", () => {
 	it("clears a painted stale ghost before showSessionSelector awaits the session list", async () => {
 		const sessions = Promise.withResolvers<SessionInfo[]>();
 		vi.spyOn(SessionManager, "list").mockImplementation(() => sessions.promise);
-		const { ctx, editor, nextPromptSuggestionController } = createGhostHarness();
-		const controller = new SelectorController(ctx, nextPromptSuggestionController);
+		const { ctx, editor } = createGhostHarness();
+		const controller = new SelectorController(ctx);
 
 		const pendingSelector = controller.showSessionSelector();
 
@@ -132,8 +132,8 @@ describe("next prompt suggestion entrypoint invalidation", () => {
 	});
 
 	it("clears a painted stale ghost before showDebugSelector awaits its module", async () => {
-		const { ctx, editor, nextPromptSuggestionController } = createGhostHarness();
-		const controller = new SelectorController(ctx, nextPromptSuggestionController);
+		const { ctx, editor } = createGhostHarness();
+		const controller = new SelectorController(ctx);
 
 		const pendingSelector = controller.showDebugSelector();
 
@@ -144,8 +144,8 @@ describe("next prompt suggestion entrypoint invalidation", () => {
 	it("clears a painted stale ghost before showSettingsSelector waits for themes", () => {
 		const availableThemes = Promise.withResolvers<string[]>();
 		vi.spyOn(theme, "getAvailableThemes").mockImplementation(() => availableThemes.promise);
-		const { ctx, editor, nextPromptSuggestionController } = createGhostHarness();
-		const controller = new SelectorController(ctx, nextPromptSuggestionController);
+		const { ctx, editor } = createGhostHarness();
+		const controller = new SelectorController(ctx);
 
 		controller.showSettingsSelector();
 
@@ -153,8 +153,8 @@ describe("next prompt suggestion entrypoint invalidation", () => {
 	});
 
 	it("clears a painted stale ghost before showAgentHub waits for persisted subagents", async () => {
-		const { ctx, editor, nextPromptSuggestionController } = createGhostHarness({ collabGuest: true });
-		const controller = new SelectorController(ctx, nextPromptSuggestionController);
+		const { ctx, editor } = createGhostHarness({ collabGuest: true });
+		const controller = new SelectorController(ctx);
 
 		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
 

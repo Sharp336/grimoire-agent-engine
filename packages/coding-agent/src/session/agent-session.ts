@@ -55,6 +55,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	Context,
 	ImageContent,
 	Message,
 	Model,
@@ -4127,7 +4128,15 @@ export class AgentSession {
 	 * to avoid racing against the delivery turn.
 	 */
 	get hasPostPromptWork(): boolean {
-		return [...this.#postPromptTasks.values()].some(Boolean);
+		return this.#postPromptTasks.size > 0;
+	}
+
+	/** Whether work beyond the synchronous `agent_end` settlement dependency is pending. */
+	get hasDeferredPostPromptWork(): boolean {
+		for (const countsAsWork of this.#postPromptTasks.values()) {
+			if (countsAsWork) return true;
+		}
+		return false;
 	}
 
 	/** Register post-prompt work in tests without driving a full agent turn. */
@@ -4191,6 +4200,12 @@ export class AgentSession {
 	/** Apply session-level stream hooks to a direct side request. */
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider = "anthropic"): SimpleStreamOptions {
 		return this.#providerBoundary.prepareSimpleStreamOptions(options, provider);
+	}
+
+	/** Complete a direct side request through the session's configured stream wrapper. */
+	async completeSideRequest(model: Model, context: Context, options: SimpleStreamOptions): Promise<AssistantMessage> {
+		const stream = await this.#sideStreamFn(model, context, this.prepareSimpleStreamOptions(options, model.provider));
+		return stream.result();
 	}
 
 	/** Current steering mode */
