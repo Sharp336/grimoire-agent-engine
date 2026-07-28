@@ -1215,9 +1215,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return extraction;
 	}
 
-	async #waitForPdfImageExtraction(extraction: PdfImageExtraction, signal: AbortSignal | undefined): Promise<string> {
+	async #waitForPdfImageExtraction(
+		extraction: PdfImageExtraction,
+		signal: AbortSignal | undefined,
+		onJoined?: () => Promise<void>,
+	): Promise<string> {
 		extraction.waiters++;
 		try {
+			await onJoined?.();
 			return await untilAborted(signal, extraction.promise);
 		} finally {
 			extraction.waiters--;
@@ -1235,8 +1240,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const imageDir = this.#pdfImageCacheDir(absolutePdfPath, snapshot.digest);
 		const existing = pdfImageExtractions.get(imageDir);
 		if (existing && !existing.settled && !existing.controller.signal.aborted) {
-			await fs.rm(snapshot.directory, { recursive: true, force: true });
-			return this.#waitForPdfImageExtraction(existing, signal);
+			return this.#waitForPdfImageExtraction(existing, signal, () =>
+				fs.rm(snapshot.directory, { recursive: true, force: true }),
+			);
 		}
 
 		const extraction = this.#createPdfImageExtraction(snapshot, imageDir);
