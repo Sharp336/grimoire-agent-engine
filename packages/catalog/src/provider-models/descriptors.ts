@@ -370,7 +370,7 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["REQUESTY_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => requestyModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
-		catalogDiscovery: { label: "Requesty", allowUnauthenticated: true },
+		catalogDiscovery: { label: "Requesty", allowUnauthenticated: true, ignoreApiKey: true },
 	},
 	{
 		id: "sakana",

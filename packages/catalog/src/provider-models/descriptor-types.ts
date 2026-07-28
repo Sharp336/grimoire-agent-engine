@@ -17,6 +17,8 @@ export interface CatalogDiscoveryConfig {
 	oauthProvider?: string;
 	/** When true, catalog discovery proceeds even without credentials. */
 	allowUnauthenticated?: boolean;
+	/** When true, catalog discovery intentionally ignores local credentials to fetch the full public catalog. */
+	ignoreApiKey?: boolean;
 }
 
 /** Unified provider descriptor used by both runtime discovery and catalog generation. */
