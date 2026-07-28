@@ -6,12 +6,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import { getSearchProvider, setSearchProviderOrder } from "../../../web/search/provider";
-import {
-	isSearchProviderId,
-	SEARCH_PROVIDER_OPTIONS,
-	SEARCH_PROVIDER_ORDER,
-	type SearchProviderId,
-} from "../../../web/search/types";
+import { isSearchProviderId, SEARCH_PROVIDER_OPTIONS, type SearchProviderId } from "../../../web/search/types";
 import { getSelectListTheme, theme } from "../../theme/theme";
 import type { SetupSceneHost, SetupTab } from "./types";
 
@@ -125,9 +120,8 @@ export class WebSearchTab implements SetupTab {
 
 	#apply(value: string): void {
 		if (value !== "auto" && !isSearchProviderId(value)) return;
-		// The wizard picks one favorite; persist it as the head of the priority
-		// list with the remaining providers in their built-in order (auto = reset).
-		const order = value === "auto" ? [] : [value, ...SEARCH_PROVIDER_ORDER.filter(id => id !== value)];
+		// The wizard selects the complete provider allowlist (auto = built-in chain).
+		const order = value === "auto" ? [] : [value];
 		this.host.ctx.settings.set("providers.webSearchOrder", order);
 		setSearchProviderOrder(order);
 		const label = WEB_SEARCH_ITEMS.find(item => item.value === value)?.label ?? value;

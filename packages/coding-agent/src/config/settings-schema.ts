@@ -4798,8 +4798,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Web Search Provider Order",
-			description:
-				"Prioritized providers for the web_search tool; unlisted providers retain their default order afterward",
+			description: "Exact ordered provider allowlist for web_search; empty uses the built-in automatic chain",
 			options: SEARCH_PROVIDER_CHOICES,
 			ordered: true,
 		},

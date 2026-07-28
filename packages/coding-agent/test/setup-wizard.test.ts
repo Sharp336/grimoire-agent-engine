@@ -491,7 +491,7 @@ describe("setup wizard web search tab", () => {
 		expect(SEARCH_PROVIDER_OPTIONS.slice(1).map(option => option.value)).toEqual([...SEARCH_PROVIDER_ORDER]);
 	});
 
-	it("persists the highlighted provider as the head of the web search order", async () => {
+	it("persists the highlighted provider as the exact web search order", async () => {
 		const settings = Settings.isolated();
 		const host = {
 			ctx: {
@@ -511,10 +511,7 @@ describe("setup wizard web search tab", () => {
 
 		const expected = SEARCH_PROVIDER_OPTIONS[1]!.value;
 		expect(expected).not.toBe("auto");
-		expect(settings.get("providers.webSearchOrder")).toEqual([
-			expected,
-			...SEARCH_PROVIDER_ORDER.filter(id => id !== expected),
-		]);
+		expect(settings.get("providers.webSearchOrder")).toEqual([expected]);
 	});
 
 	it("can select the last provider in the setup TUI list", async () => {
@@ -540,10 +537,7 @@ describe("setup wizard web search tab", () => {
 		const lastOption = SEARCH_PROVIDER_OPTIONS[SEARCH_PROVIDER_OPTIONS.length - 1]!;
 		const lastValue = lastOption.value;
 		if (lastValue === "auto") throw new Error("last option must be a concrete provider");
-		expect(settings.get("providers.webSearchOrder")).toEqual([
-			lastValue,
-			...SEARCH_PROVIDER_ORDER.filter(id => id !== lastValue),
-		]);
+		expect(settings.get("providers.webSearchOrder")).toEqual([lastValue]);
 	});
 });
 
