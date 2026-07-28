@@ -33,6 +33,7 @@ import {
 } from "./messages";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
 import {
+	type AgentChangeEntry,
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	CURRENT_SESSION_VERSION,
@@ -176,6 +177,7 @@ function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
 		case "thinking_level_change":
 		case "service_tier_change":
 		case "mode_change":
+		case "agent_change":
 			return true;
 		default:
 			return false;
@@ -1569,6 +1571,12 @@ export class SessionManager {
 	 */
 	appendModelChange(model: string, role?: string): string {
 		const entry: ModelChangeEntry = { type: "model_change", ...this.#freshEntryFields(), model, role };
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	appendAgentChange(agent: string, source: "bundled" | "user" | "project"): string {
+		const entry: AgentChangeEntry = { type: "agent_change", ...this.#freshEntryFields(), agent, source };
 		this.#recordEntry(entry);
 		return entry.id;
 	}

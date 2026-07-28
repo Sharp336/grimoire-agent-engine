@@ -892,6 +892,20 @@ export async function buildSessionOptions(
 		}
 	}
 
+	// Resume: re-resolve agent from persisted session context
+	// --agent CLI flag takes precedence (the !parsed.agent guard ensures this).
+	if (!parsed.agent && sessionManager) {
+		const sessionContext = sessionManager.buildSessionContext();
+		if (sessionContext.agentPersona) {
+			const discovery = await discoverAgents(options.cwd ?? getProjectDir());
+			const agent = getAgent(discovery.agents, sessionContext.agentPersona.agent);
+			if (agent && agent.availability !== "subagent") {
+				agentPersona = agent;
+			}
+			// If agent .md was deleted or changed to subagent-only, silently fall back to default main
+		}
+	}
+
 	const agentPolicy = agentPersona ? resolveAgentSessionPolicy(agentPersona) : undefined;
 
 	// Model from CLI

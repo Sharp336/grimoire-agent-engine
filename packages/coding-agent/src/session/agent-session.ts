@@ -306,6 +306,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
+import { resolveAgentSessionPolicy } from "../task/agent-policy";
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import type { AgentDefinition } from "../task/types";
 import {
@@ -920,6 +921,15 @@ export interface AgentSessionConfig {
 	setSessionSpawns?: (spawns: string) => void;
 	/** Mutate the active main-session agent persona (live agent switch). */
 	setAgentPersona?: (agent: AgentDefinition | undefined) => void;
+	/** Initial agent persona (from --agent CLI flag). */
+	agentPersona?: AgentDefinition;
+	/**
+	 * Restore function for the initial tool overlay, capturing the original full
+	 * tool set before the persona's restricted tools were applied at startup.
+	 * Used by live-switch to recover the original set when switching away from
+	 * the initial persona.
+	 */
+	initialToolOverlayRestore?: () => Promise<void>;
 	/** Register the write transport lazily when runtime xdev mounts first need it. */
 	ensureWriteRegistered?: () => Promise<boolean>;
 	/** Current session pre-LLM message transform pipeline */
@@ -1880,6 +1890,7 @@ export class AgentSession {
 	#prewalkTodoSeen = false;
 	#planYolo: PlanYolo | undefined;
 	#planYoloToolOverlay: { restore: () => Promise<void> } | undefined;
+	#agentToolOverlay: { restore: () => Promise<void> } | undefined;
 	#planYoloArmed = false;
 
 	#promptTemplates: PromptTemplate[];
@@ -2081,6 +2092,9 @@ export class AgentSession {
 	#getLocalCalendarDate: () => string;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#setActiveToolNames: ((names: Iterable<string>) => void) | undefined;
+	#setSessionSpawns: ((spawns: string) => void) | undefined;
+	#setAgentPersona: ((agent: AgentDefinition | undefined) => void) | undefined;
+	#agentPersona: AgentDefinition | undefined;
 	#ensureWriteRegistered: (() => Promise<boolean>) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
@@ -2848,6 +2862,16 @@ export class AgentSession {
 		this.#xdevRegistry = config.xdevRegistry;
 		this.#mountedXdevToolNames = new Set(config.initialMountedXdevToolNames ?? []);
 		this.#setActiveToolNames = config.setActiveToolNames;
+		this.#setSessionSpawns = config.setSessionSpawns;
+		this.#setAgentPersona = config.setAgentPersona;
+		this.#agentPersona = config.agentPersona;
+		// Initialize tool overlay if the initial persona has tools, so live-switch
+		// restore can recover the original full tool set.
+		if (config.agentPersona?.tools?.length) {
+			this.#agentToolOverlay = {
+				restore: config.initialToolOverlayRestore ?? (async () => {}),
+			};
+		}
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#promptModelKey = this.#currentPromptModelKey();
@@ -10176,6 +10200,83 @@ export class AgentSession {
 		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		await this.#syncAfterModelChange(previousEditMode);
 		return { switched: true };
+	}
+
+	get agentPersona(): AgentDefinition | undefined {
+		return this.#agentPersona;
+	}
+
+	/**
+	 * Switch the main session to a different agent persona.
+	 * Applies model, thinking, tools, spawns, and system prompt on the next turn.
+	 * Persists the change to the session log for resume.
+	 */
+	async switchAgentPersona(agent: AgentDefinition): Promise<void> {
+		const policy = resolveAgentSessionPolicy(agent);
+
+		// Snapshot current state for rollback on failure
+		const previousPersona = this.#agentPersona;
+		const previousOverlay = this.#agentToolOverlay;
+		const previousModel = this.model;
+		const previousThinking = this.thinkingLevel;
+
+		try {
+			// 1. Tools: overlay (restore previous overlay first, then apply new one)
+			if (this.#agentToolOverlay) {
+				await this.#agentToolOverlay.restore();
+			}
+			if (policy.toolNames) {
+				this.#agentToolOverlay = await this.applyToolOverlay(policy.toolNames);
+			} else {
+				this.#agentToolOverlay = undefined;
+			}
+
+			// 2. Spawns
+			if (policy.spawns !== undefined) {
+				this.#setSessionSpawns?.(policy.spawns);
+			}
+
+			// 3. Model: resolve frontmatter patterns to a concrete Model, then switch.
+			if (policy.modelPatterns?.length) {
+				const resolved = resolveModelOverride(policy.modelPatterns, this.modelRegistry, this.settings);
+				if (resolved.model) {
+					await this.setModel(resolved.model, "default");
+				}
+			}
+
+			// 4. Thinking
+			if (policy.thinkingLevel) {
+				this.setThinkingLevel(policy.thinkingLevel);
+			}
+
+			// 5. System prompt: update the mutable persona holder in sdk.ts, then rebuild.
+			//    refreshBaseSystemPrompt() re-invokes the rebuildSystemPrompt closure
+			//    which reads the mutable holder and appends the agent body.
+			this.#agentPersona = agent;
+			this.#setAgentPersona?.(agent);
+			await this.refreshBaseSystemPrompt();
+
+			// 6. Persist
+			this.sessionManager.appendAgentChange(agent.name, agent.source);
+
+			this.emitNotice("info", `Switched to agent persona "${agent.name}".`, "agent-switch");
+		} catch (error) {
+			// Rollback on failure: restore previous persona, overlay, model, and thinking
+			this.#agentPersona = previousPersona;
+			this.#setAgentPersona?.(previousPersona);
+			this.#agentToolOverlay = previousOverlay;
+			try {
+				if (previousModel) {
+					await this.setModel(previousModel, "default");
+				}
+				if (previousThinking) {
+					this.setThinkingLevel(previousThinking);
+				}
+			} catch {
+				// Swallow rollback errors to preserve the original failure
+			}
+			throw error;
+		}
 	}
 
 	/**

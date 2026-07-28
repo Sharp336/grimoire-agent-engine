@@ -186,6 +186,15 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
+/** Agent persona change entry - tracks main-session agent persona selection for resume. */
+export interface AgentChangeEntry extends SessionEntryBase {
+	type: "agent_change";
+	/** Agent name (from AgentDefinition.name). */
+	agent: string;
+	/** Agent source for disambiguation (mirrors task/types.ts AgentSource). */
+	source: "bundled" | "user" | "project";
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -222,7 +231,8 @@ export type SessionEntry =
 	| TitleChangeEntry
 	| TtsrInjectionEntry
 	| SessionInitEntry
-	| ModeChangeEntry;
+	| ModeChangeEntry
+	| AgentChangeEntry;
 
 /** Raw logical file entry after loaders strip any fixed-width title slot. */
 export type FileEntry = SessionHeader | SessionEntry;

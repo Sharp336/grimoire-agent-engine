@@ -2680,6 +2680,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		setActiveToolNames(initialToolNames);
+
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
@@ -2984,6 +2985,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			setAgentPersona: (agent: AgentDefinition | undefined) => {
 				activeAgentPersona = agent;
 			},
+			agentPersona: options.agentPersona,
+			initialToolOverlayRestore: options.agentPersona?.tools?.length
+				? async () => {
+						await session.setActiveToolsByName(toolNamesFromRegistry);
+					}
+				: undefined,
 			ensureWriteRegistered,
 			getMcpServerInstructions: mcpManager
 				? () => {
@@ -3011,6 +3018,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+
 		if (asyncJobManager) {
 			session.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),
