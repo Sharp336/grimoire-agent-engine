@@ -38,6 +38,7 @@ import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prom
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
+import type { SecretBroker } from "../secrets/broker";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
@@ -433,6 +434,13 @@ export interface ExecutorOptions {
 	 * passes its own `getAgentId()`).
 	 */
 	parentAgentId?: string;
+	/**
+	 * Parent session's secret broker. Forwarded into createAgentSession so the
+	 * sub-agent shares the parent's vault and sidecar attachment instead of
+	 * creating a fresh empty broker + redundant sidecar spawn. The sub-agent's
+	 * model still only sees scrubbed results — the sidecar holds raw values.
+	 */
+	parentSecretBroker?: SecretBroker;
 	/**
 	 * Keep the finished subagent addressable in the registry for IRC/revival.
 	 * Defaults to true. Eval bridge agents are programmatic one-shot helpers and
@@ -2818,6 +2826,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 				parentTaskPrefix: id,
 				parentAgentId: options.parentAgentId,
+				secretBroker: options.parentSecretBroker,
 				agentId: id,
 				agentDisplayName: agent.name,
 				expectedAgentRef,

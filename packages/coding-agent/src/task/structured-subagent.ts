@@ -434,6 +434,9 @@ function buildExecutorOptions(
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+		// Parent's secret broker: sub-agents share the parent's vault and
+		// sidecar attachment instead of creating a fresh empty broker (Tier-4b).
+		parentSecretBroker: session.secretBroker,
 	};
 }
 
