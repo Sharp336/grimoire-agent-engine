@@ -15,6 +15,7 @@ const methods = [
 if (process.argv.includes("--omit-message")) methods.splice(methods.indexOf("invoke.message"), 1);
 const ignoreEOF = process.argv.includes("--ignore-eof");
 const reportPID = process.argv.includes("--report-pid");
+const reportControlInstance = process.argv.includes("--report-control-instance");
 const maxLineArg = process.argv.find(argument => argument.startsWith("--max-line-bytes="));
 const maxLineBytes = maxLineArg ? Number(maxLineArg.slice("--max-line-bytes=".length)) : 1_048_576;
 
@@ -48,7 +49,11 @@ for await (const chunk of Bun.stdin.stream()) {
 					result: {
 						protocol: "anima-control",
 						version: 1,
-						anima_version: reportPID ? String(process.pid) : "fixture",
+						anima_version: reportControlInstance
+							? (process.env.ANIMA_OMP_CONTROL_INSTANCE ?? "missing")
+							: reportPID
+								? String(process.pid)
+								: "fixture",
 						owner: "external:omp:fixture",
 						mailbox: "omp-fixture-Main",
 						methods,

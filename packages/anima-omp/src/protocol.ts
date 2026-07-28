@@ -157,6 +157,7 @@ function isControlEvent(value: unknown): value is ControlEvent {
 
 export class StdioControlClient implements AnimaControl {
 	readonly #command: string[];
+	readonly #controlInstance = crypto.randomUUID().replaceAll("-", "");
 	readonly #pending = new Map<string, PendingRequest>();
 	readonly #listeners = new Set<(event: ControlEvent) => void>();
 	readonly #terminations = new Set<Promise<void>>();
@@ -284,7 +285,7 @@ export class StdioControlClient implements AnimaControl {
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
-			env: process.env,
+			env: { ...process.env, ANIMA_OMP_CONTROL_INSTANCE: this.#controlInstance },
 		});
 		this.#process = child;
 		void this.#readStdout(child);

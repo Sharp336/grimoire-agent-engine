@@ -107,6 +107,28 @@ describe("StdioControlClient", () => {
 		});
 	});
 
+	it("overwrites inherited control identity and reuses its private token after restart", async () => {
+		const inherited = process.env.ANIMA_OMP_CONTROL_INSTANCE;
+		process.env.ANIMA_OMP_CONTROL_INSTANCE = "hostidentitymustnotleak";
+		try {
+			client = new StdioControlClient([
+				"bun",
+				path.join(import.meta.dir, "fixtures/control-server.ts"),
+				"--report-control-instance",
+			]);
+			const firstIdentity = (await client.hello()).anima_version;
+			expect(firstIdentity).toMatch(/^[a-f0-9]{32}$/);
+			expect(firstIdentity).not.toBe("hostidentitymustnotleak");
+			await expect(client.request("test.crash", {}, { id: "identity-crash" })).rejects.toMatchObject({
+				code: expect.stringMatching(/^transport_/),
+			});
+			expect((await client.hello()).anima_version).toBe(firstIdentity);
+		} finally {
+			if (inherited === undefined) delete process.env.ANIMA_OMP_CONTROL_INSTANCE;
+			else process.env.ANIMA_OMP_CONTROL_INSTANCE = inherited;
+		}
+	});
+
 	it("tears down and renegotiates after malformed stdout", async () => {
 		client = new StdioControlClient([
 			"bun",
