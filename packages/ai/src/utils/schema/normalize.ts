@@ -107,6 +107,15 @@ const SUBSCHEMA_VALUE_KEYS: Record<string, true> = {
 	contentSchema: true,
 };
 
+/**
+ * Keywords whose value is either a boolean keyword value or an object
+ * subschema. Object values must be walked, while bare booleans stay literal.
+ */
+const BOOLEAN_OR_SCHEMA_VALUE_KEYS: Record<string, true> = {
+	additionalProperties: true,
+	unevaluatedProperties: true,
+};
+
 /** Keywords whose value is an array of subschemas. */
 const SUBSCHEMA_ARRAY_KEYS: Record<string, true> = {
 	anyOf: true,
@@ -367,12 +376,15 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 				options.insideSchemaMap ||
 				Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
 				Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key);
+			const childIsSubschema =
+				childBooleanIsSubschema ||
+				(Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(entry));
 			result[key] =
-				childInsideSchemaMap || childBooleanIsSubschema
+				childInsideSchemaMap || childIsSubschema
 					? normalizeSchemaNode(entry, {
 							...options,
 							insideSchemaMap: childInsideSchemaMap,
-							booleanIsSubschema: childBooleanIsSubschema,
+							booleanIsSubschema: childIsSubschema,
 						})
 					: entry;
 		}
@@ -398,12 +410,15 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			options.insideSchemaMap ||
 			Object.hasOwn(SUBSCHEMA_VALUE_KEYS, key) ||
 			Object.hasOwn(SUBSCHEMA_ARRAY_KEYS, key);
+		const childIsSubschema =
+			childBooleanIsSubschema ||
+			(Object.hasOwn(BOOLEAN_OR_SCHEMA_VALUE_KEYS, key) && isJsonObject(entry));
 		result[key] =
-			childInsideSchemaMap || childBooleanIsSubschema
+			childInsideSchemaMap || childIsSubschema
 				? normalizeSchemaNode(entry, {
 						...options,
 						insideSchemaMap: childInsideSchemaMap,
-						booleanIsSubschema: childBooleanIsSubschema,
+						booleanIsSubschema: childIsSubschema,
 					})
 				: entry;
 	}

@@ -1305,6 +1305,21 @@ describe("normalizeSchemaForMoonshot", () => {
 		expect(props.limit).toEqual({ type: "integer", default: 10 });
 	});
 
+	it("normalizes schema-valued additionalProperties without walking literal payload objects", () => {
+		const literal = { oneOf: [{ const: "literal-a" }, { const: "literal-b" }] };
+		const normalized = normalizeSchemaForMoonshot({
+			type: "object",
+			additionalProperties: { oneOf: [{ const: 1 }, { const: 2 }] },
+			default: literal,
+		});
+
+		expect(normalized).toEqual({
+			type: "object",
+			additionalProperties: { type: "number", enum: [1, 2] },
+			default: literal,
+		});
+	});
+
 	it("coerces boolean subschemas to MFJS object forms without changing boolean keywords", () => {
 		expect(
 			normalizeSchemaForMoonshot({
