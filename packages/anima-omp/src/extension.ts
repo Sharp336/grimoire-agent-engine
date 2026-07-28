@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-
 import { type ActiveInvocation, AnimaExecutorController } from "./executor";
 import { AnimaPeerBridge, type PeerBus } from "./peer-bridge";
 import { type AnimaControl, StdioControlClient } from "./protocol";
+import { registerAnimaClaudeProvider } from "./provider";
 
 const AGENT_ROOT = path.resolve(import.meta.dir, "../agents");
 const REQUIRED_OMP_HOST = "@oh-my-pi/pi-coding-agent >=17.2.0 <18";
@@ -221,6 +222,7 @@ export async function registerAnimaExtension(
 
 	pi.setLabel("Anima Claude executor");
 	pi.registerSubagentExecutor(controller.executor);
+	registerAnimaClaudeProvider(pi, options => controller.executor.execute(options));
 	pi.registerCommand("anima", {
 		description: "Inspect and control Anima-managed Claude task agents",
 		handler: (args, ctx) => handleAnimaCommand(args, ctx, controller),

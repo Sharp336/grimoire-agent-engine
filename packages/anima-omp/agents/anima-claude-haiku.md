@@ -1,7 +1,7 @@
 ---
-name: claude-researcher
-description: "Read-only repository researcher executed by Anima in the official Claude Code TUI"
-model: anthropic/claude-sonnet-4-6
+name: anima-claude-haiku
+description: "Read-only repository researcher running through Anima-managed Claude Haiku"
+model: anima-claude/haiku
 tools: read, grep, glob, bash, lsp, ast_grep, web_search
 ---
 

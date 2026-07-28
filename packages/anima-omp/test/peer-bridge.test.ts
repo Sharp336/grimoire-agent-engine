@@ -106,7 +106,7 @@ function fakeController(replyRecipient?: string): {
 		durableKey: "start:external:omp:test-sidecar:task-1:test-execution",
 		invocationId: "in-1",
 		agentId: "reviewer-1",
-		agentName: "claude-reviewer",
+		agentName: "anima-claude-fable",
 		sessionName: "omp-reviewer-1",
 		state: "generating",
 		detail: "reviewing",
@@ -140,7 +140,7 @@ describe("AnimaPeerBridge", () => {
 		expect(bridge.listPeers()).toEqual([
 			{
 				id: "omp-reviewer-1",
-				displayName: "claude-reviewer",
+				displayName: "anima-claude-fable",
 				status: "generating",
 				activity: "reviewing",
 			},

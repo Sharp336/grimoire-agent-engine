@@ -43,6 +43,8 @@ describe("isClaudeModelId", () => {
 	test("matches Claude namespace and delimiter forms", () => {
 		expect(isClaudeModelId("claude-sonnet-4-6")).toBe(true);
 		expect(isClaudeModelId("anthropic/claude.3")).toBe(true);
+		expect(isClaudeModelId("opus")).toBe(true);
+		expect(isClaudeModelId("fable")).toBe(true);
 		expect(isClaudeModelId("my-claudius")).toBe(false);
 	});
 	test("matches dotted Bedrock cross-region inference profile ids for Claude kinds not enumerated in parseAnthropicModel", () => {

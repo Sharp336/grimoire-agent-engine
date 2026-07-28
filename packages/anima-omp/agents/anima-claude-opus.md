@@ -1,7 +1,7 @@
 ---
-name: claude-implementer
-description: "Implementation agent executed by Anima in the official Claude Code TUI"
-model: anthropic/claude-opus-4-6
+name: anima-claude-opus
+description: "Implementation agent running through Anima-managed Claude Opus"
+model: anima-claude/opus
 tools: read, grep, glob, bash, edit, write, lsp, ast_grep
 spawns: scout
 ---

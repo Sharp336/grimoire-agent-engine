@@ -2,7 +2,7 @@
   "type": "module",
   "name": "@anima/omp",
   "version": "0.1.0",
-  "description": "Run selected OMP task agents through Anima-managed Claude Code sessions",
+  "description": "Route OMP turns and task agents through Anima-managed Claude Code sessions",
   "license": "MIT",
   "scripts": {
     "check": "biome check . && bun run check:types",
@@ -19,6 +19,7 @@
     "@types/bun": "^1.3.14"
   },
   "peerDependencies": {
+    "@oh-my-pi/pi-ai": ">=17.2.0 <18",
     "@oh-my-pi/pi-coding-agent": ">=17.2.0 <18"
   },
   "engines": {

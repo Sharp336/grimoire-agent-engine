@@ -153,12 +153,13 @@ class RetryOnceControl extends FakeControl {
 
 function packagedAgent(): AgentDefinition {
 	return {
-		name: "claude-reviewer",
+		name: "anima-claude-fable",
 		description: "Reviewer",
 		systemPrompt: "Review exactly once.",
 		tools: ["read"],
+		model: ["anima-claude/fable"],
 		source: "user",
-		filePath: path.resolve(import.meta.dir, "../agents/claude-reviewer.md"),
+		filePath: path.resolve(import.meta.dir, "../agents/anima-claude-fable.md"),
 	};
 }
 
@@ -191,6 +192,7 @@ function extensionHarness(): {
 		registerSubagentExecutor: (executor: SubagentExecutor) => {
 			harness.executor = executor;
 		},
+		registerProvider: () => undefined,
 		registerCommand: () => undefined,
 		on: (event: string, handler: () => Promise<void>) => {
 			if (event === "session_shutdown") harness.shutdown = handler;
@@ -225,18 +227,18 @@ describe("AnimaExecutorController", () => {
 		});
 		expect(controller.executor.claim(packagedAgent())).toBe(true);
 		expect(
-			controller.executor.claim({ ...packagedAgent(), filePath: "/tmp/project/agents/claude-reviewer.md" }),
+			controller.executor.claim({ ...packagedAgent(), filePath: "/tmp/project/agents/anima-claude-fable.md" }),
 		).toBe(false);
 		expect(
 			controller.executor.claim({
 				...packagedAgent(),
-				filePath: path.resolve(import.meta.dir, "../agents/claude-reviewer-copy.md"),
+				filePath: path.resolve(import.meta.dir, "../agents/anima-claude-fable-copy.md"),
 			}),
 		).toBe(false);
 		expect(
 			controller.executor.claim({
 				...packagedAgent(),
-				filePath: path.resolve(import.meta.dir, "../agents/claude-implementer.md"),
+				filePath: path.resolve(import.meta.dir, "../agents/anima-claude-opus.md"),
 			}),
 		).toBe(false);
 		expect(
@@ -436,12 +438,12 @@ describe("AnimaExecutorController", () => {
 		expect(result).toMatchObject({
 			exitCode: 1,
 			error: "unsupported_model_selector",
-			stderr: 'Anima Claude executor requires an explicit Anthropic model selector; received "openai-codex/gpt-5.4"',
+			stderr: 'Anima Claude executor requires an explicit Claude model selector; received "openai-codex/gpt-5.4"',
 		});
 		expect(client.calls).toEqual([]);
 	});
 
-	it("fails preflight when an agent configures a non-Anthropic model", async () => {
+	it("fails preflight when an agent configures a non-Claude model", async () => {
 		const client = new FakeControl();
 		const controller = new AnimaExecutorController({
 			client,
@@ -454,7 +456,7 @@ describe("AnimaExecutorController", () => {
 		expect(result).toMatchObject({
 			exitCode: 1,
 			error: "unsupported_model_selector",
-			stderr: 'Anima Claude executor requires an explicit Anthropic model selector; received "openai/gpt-5.4"',
+			stderr: 'Anima Claude executor requires an explicit Claude model selector; received "openai/gpt-5.4"',
 		});
 		expect(client.calls).toEqual([]);
 	});

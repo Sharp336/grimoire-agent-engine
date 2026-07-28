@@ -60,7 +60,7 @@ export const isKimiK3ModelId = memo((modelId: string): boolean => {
  * (e.g. `haiku`) is not enumerated would otherwise slip past this fallback.
  */
 export const isClaudeModelId = memo((modelId: string): boolean => {
-	return /(^|[/.])claude[-.]/i.test(modelId);
+	return /(^|[/.])claude[-.]/i.test(modelId) || /^(?:opus|sonnet|haiku|fable)$/i.test(modelId);
 });
 
 /** `anthropic/`-namespaced ids (aggregator catalogs like OpenRouter). */
@@ -117,7 +117,6 @@ export const isMinimaxM2FamilyModelId = memo((modelId: string): boolean => {
 	// variants like `m21`/`m25`/`m27`) and an optional dotted minor version.
 	return /(?:^|[/.-])m2\d*(?:[.-]\d+)?(?:[-.:_]|$)/i.test(lower);
 });
-
 /** MiniMax M3 family ids in bundled/default and aggregator namespace forms. */
 export const isMinimaxM3FamilyModelId = memo((modelId: string): boolean => {
 	const lower = modelId.toLowerCase();

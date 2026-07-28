@@ -109,7 +109,7 @@ interface InvokeStartParams {
 	worktree: false;
 }
 
-const PACKAGED_AGENT_NAMES = ["claude-implementer", "claude-researcher", "claude-reviewer"] as const;
+const PACKAGED_AGENT_NAMES = ["anima-claude-opus", "anima-claude-haiku", "anima-claude-fable"] as const;
 type PackagedAgentName = (typeof PACKAGED_AGENT_NAMES)[number];
 
 function canonicalPath(filePath: string): string {
@@ -149,18 +149,22 @@ function normalizeModelSelectors(value: string | readonly string[] | undefined):
 		.filter(Boolean);
 }
 
-function isAnthropicClaudeSelector(selector: string): boolean {
+function isAnimaClaudeSelector(selector: string): boolean {
 	const slash = selector.indexOf("/");
 	const provider = slash === -1 ? "anthropic" : selector.slice(0, slash);
 	const modelId = bareModelId(selector).replace(/:(?:inherit|off|minimal|low|medium|high|xhigh|max|auto)$/, "");
-	return provider === "anthropic" && isClaudeModelId(modelId) && !/[?*[\]{}]/.test(modelId);
+	return (
+		(provider === "anthropic" || provider === "anima-claude") &&
+		isClaudeModelId(modelId) &&
+		!/[?*[\]{}]/.test(modelId)
+	);
 }
 
 function configuredModelSelectors(options: ExecutorOptions): string[] {
 	const configured = normalizeModelSelectors(options.agent.model);
 	const override = normalizeModelSelectors(options.modelOverride);
 	if (override.length === 0) return configured;
-	if (override.every(isAnthropicClaudeSelector)) return override;
+	if (override.every(isAnimaClaudeSelector)) return override;
 	const parentFallback = normalizeModelSelectors(options.parentActiveModelPattern);
 	const isParentFallback =
 		override.length === parentFallback.length &&
@@ -174,12 +178,10 @@ function resolveClaudeModel(options: ExecutorOptions): string {
 	const selectors = configuredModelSelectors(options);
 	let model = "";
 	for (const selector of selectors) {
-		const slash = selector.indexOf("/");
-		const provider = slash === -1 ? "anthropic" : selector.slice(0, slash);
 		const modelId = bareModelId(selector).replace(/:(?:inherit|off|minimal|low|medium|high|xhigh|max|auto)$/, "");
-		if (provider !== "anthropic" || !isClaudeModelId(modelId) || /[?*[\]{}]/.test(modelId)) {
+		if (!isAnimaClaudeSelector(selector)) {
 			throw new Error(
-				`Anima Claude executor requires an explicit Anthropic model selector; received ${JSON.stringify(selector)}`,
+				`Anima Claude executor requires an explicit Claude model selector; received ${JSON.stringify(selector)}`,
 			);
 		}
 		model ||= modelId;
@@ -306,9 +308,9 @@ export class AnimaExecutorController {
 		this.#client = config.client;
 		const agentRoot = canonicalPath(config.agentRoot);
 		this.#packagedAgentPaths = {
-			"claude-implementer": canonicalPath(path.join(agentRoot, "claude-implementer.md")),
-			"claude-researcher": canonicalPath(path.join(agentRoot, "claude-researcher.md")),
-			"claude-reviewer": canonicalPath(path.join(agentRoot, "claude-reviewer.md")),
+			"anima-claude-opus": canonicalPath(path.join(agentRoot, "anima-claude-opus.md")),
+			"anima-claude-haiku": canonicalPath(path.join(agentRoot, "anima-claude-haiku.md")),
+			"anima-claude-fable": canonicalPath(path.join(agentRoot, "anima-claude-fable.md")),
 		};
 		this.#allowAgentNames = new Set(config.allowAgentNames ?? []);
 		this.#retention = config.retention ?? "park";

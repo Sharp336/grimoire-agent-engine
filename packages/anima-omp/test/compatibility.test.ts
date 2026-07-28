@@ -23,11 +23,12 @@ afterEach(async () => {
 	tempRoot = undefined;
 });
 
-function codingAgentPeerRange(manifest: unknown): unknown {
+function peerRange(manifest: unknown, name: string): unknown {
 	if (!manifest || typeof manifest !== "object" || !("peerDependencies" in manifest)) return undefined;
 	const peerDependencies = manifest.peerDependencies;
 	if (!peerDependencies || typeof peerDependencies !== "object") return undefined;
-	return "@oh-my-pi/pi-coding-agent" in peerDependencies ? peerDependencies["@oh-my-pi/pi-coding-agent"] : undefined;
+	const ranges = peerDependencies as Record<string, unknown>;
+	return name in ranges ? ranges[name] : undefined;
 }
 
 describe("OMP executor-host compatibility", () => {
@@ -37,8 +38,9 @@ describe("OMP executor-host compatibility", () => {
 			path.resolve(packageRoot, "../swarm-extension/package.json"),
 		).json();
 
-		expect(codingAgentPeerRange(animaManifest)).toBe(">=17.2.0 <18");
-		expect(codingAgentPeerRange(swarmManifest)).toBe(">=17.2.0 <18");
+		expect(peerRange(animaManifest, "@oh-my-pi/pi-ai")).toBe(">=17.2.0 <18");
+		expect(peerRange(animaManifest, "@oh-my-pi/pi-coding-agent")).toBe(">=17.2.0 <18");
+		expect(peerRange(swarmManifest, "@oh-my-pi/pi-coding-agent")).toBe(">=17.2.0 <18");
 	});
 
 	test("discovers the packaged Anima task-agent roles from an extension root", async () => {
@@ -54,9 +56,9 @@ describe("OMP executor-host compatibility", () => {
 		);
 
 		expect(packaged.map(agent => agent.name).sort()).toEqual([
-			"claude-implementer",
-			"claude-researcher",
-			"claude-reviewer",
+			"anima-claude-fable",
+			"anima-claude-haiku",
+			"anima-claude-opus",
 		]);
 		expect(packaged.every(agent => (agent.tools?.length ?? 0) > 0)).toBe(true);
 	});
@@ -66,15 +68,17 @@ describe("OMP executor-host compatibility", () => {
 		const projectDir = path.join(tempRoot, "project");
 		const projectAgentsDir = path.join(projectDir, ".omp", "agents");
 		await fs.mkdir(projectAgentsDir, { recursive: true });
-		const projectReviewer = path.join(projectAgentsDir, "claude-reviewer.md");
+		const projectReviewer = path.join(projectAgentsDir, "anima-claude-fable.md");
 		await fs.writeFile(
 			projectReviewer,
-			["---", "name: claude-reviewer", "description: Project-owned reviewer", "---", "Review locally."].join("\n"),
+			["---", "name: anima-claude-fable", "description: Project-owned reviewer", "---", "Review locally."].join(
+				"\n",
+			),
 		);
 		injectOmpExtensionCliRoots([packageRoot], tempRoot, projectDir);
 
 		const { agents } = await discoverAgents(projectDir, tempRoot);
-		const selected = agents.find(agent => agent.name === "claude-reviewer");
+		const selected = agents.find(agent => agent.name === "anima-claude-fable");
 		expect(selected?.filePath).toBe(projectReviewer);
 		const controller = new AnimaExecutorController({
 			client: {} as AnimaControl,
@@ -82,26 +86,26 @@ describe("OMP executor-host compatibility", () => {
 		});
 		expect(selected && controller.executor.claim(selected)).toBe(false);
 
-		const linkedReviewer = path.join(tempRoot, "linked-claude-reviewer.md");
-		await fs.symlink(path.join(packageRoot, "agents", "claude-reviewer.md"), linkedReviewer);
+		const linkedReviewer = path.join(tempRoot, "linked-anima-claude-fable.md");
+		await fs.symlink(path.join(packageRoot, "agents", "anima-claude-fable.md"), linkedReviewer);
 		expect(selected && controller.executor.claim({ ...selected, filePath: linkedReviewer })).toBe(true);
 		expect(
 			selected &&
 				controller.executor.claim({
 					...selected,
-					filePath: path.join(packageRoot, "agents", "claude-implementer.md"),
+					filePath: path.join(packageRoot, "agents", "anima-claude-opus.md"),
 				}),
 		).toBe(false);
 		expect(
 			selected &&
 				controller.executor.claim({
 					...selected,
-					filePath: path.join(packageRoot, "agents", "nested", "claude-reviewer.md"),
+					filePath: path.join(packageRoot, "agents", "nested", "anima-claude-fable.md"),
 				}),
 		).toBe(false);
 		const packagedImplementer = agents.find(
 			agent =>
-				agent.name === "claude-implementer" &&
+				agent.name === "anima-claude-opus" &&
 				agent.filePath !== undefined &&
 				path.resolve(agent.filePath).startsWith(path.join(packageRoot, "agents")),
 		);
