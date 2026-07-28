@@ -2103,6 +2103,7 @@ describe("vibe session registry", () => {
 		await registry.spawn(session, { cli: "fast", name: "pre-init-kill", prompt: "Start later." });
 
 		expect((await registry.kill(session, "pre-init-kill")).cancelledTurn).toBe(true);
+		await pollUntil(() => AgentRegistry.global().get("pre-init-kill")?.status === "aborted");
 		expect(AgentRegistry.global().get("pre-init-kill")).toMatchObject({ status: "aborted", session: null });
 		expect(
 			parentManager.getEntries().some(entry => {
