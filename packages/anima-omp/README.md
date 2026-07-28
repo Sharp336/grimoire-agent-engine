@@ -6,6 +6,7 @@ Routes OMP parent turns and selected task agents through Anima-managed Claude Co
 
 - OMP host `@oh-my-pi/pi-coding-agent` and `@oh-my-pi/pi-ai >=17.2.0 <18`, plus Bun 1.3.14 or newer
 - `an` on `PATH`, built from an Anima version that provides `an control stdio`
+- Claude Code CLI `>=2.1.220`; verify it with `an account doctor --provider anthropic`
 - tmux
 - A configured Anima Anthropic account lane (`an account list --provider anthropic`)
 
