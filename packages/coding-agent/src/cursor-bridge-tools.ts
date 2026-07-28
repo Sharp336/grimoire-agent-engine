@@ -66,8 +66,8 @@ export function createBridgeEditTool(session: ToolSession, extensionRunner: Exte
  * The advisor roster passes its granted map here; the primary session keeps its
  * instance out of the registry entirely (Cursor does not advertise `edit`) and
  * serves it through the bridge's `getEditReplaceTool` accessor instead — not
- * the `getTool` fallback, which doubles as the agent loop's resolver for
- * unadvertised calls and must stay device-only.
+ * the `getExecutableTool` resolver, which doubles as the agent loop's resolver
+ * for unadvertised calls and must stay device-only.
  */
 export function bridgeToolMap(
 	granted: ReadonlyMap<string, AgentTool>,

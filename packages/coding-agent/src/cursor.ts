@@ -61,7 +61,8 @@ interface CursorExecBridgeOptions {
 	cwd: string;
 	getCwd?: () => string;
 	tools: Map<string, AgentTool>;
-	getTool?: (name: string) => AgentTool | undefined;
+	/** Resolves execution overrides (mounted-device permission wrappers) before the canonical map. */
+	getExecutableTool?: (name: string) => AgentTool | undefined;
 	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
 	 * granted `edit` at all.
@@ -215,7 +216,7 @@ async function executeTool(
 	args: Record<string, unknown>,
 	overrideTool?: CursorBridgeTool,
 ): Promise<ToolResultMessage> {
-	const tool = overrideTool ?? options.tools.get(toolName) ?? options.getTool?.(toolName);
+	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
 	if (!tool) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
@@ -905,7 +906,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async mcp(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
-		const tool = this.options.tools.get(toolName) ?? this.options.getTool?.(toolName);
+		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 			const message = formatMcpToolErrorMessage(toolName, availableTools);
@@ -928,7 +929,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async mcpApprovalPreflight(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
-		const tool = this.options.tools.get(toolName) ?? this.options.getTool?.(toolName);
+		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
 		const settings = context?.settings;

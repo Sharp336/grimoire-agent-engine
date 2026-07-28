@@ -2185,7 +2185,7 @@ mod tests {
 	#[cfg(unix)]
 	async fn kill_test_context() -> (ShellSessionCore, ExecutionParameters) {
 		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
-		let mut session = create_session(&config).await.expect("create_session");
+		let session = create_session(&config).await.expect("create_session");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));

@@ -356,6 +356,32 @@ export class ExtensionRunner {
 	#managedTimers = new ManagedTimers((event, error, stack) =>
 		this.emitError({ extensionPath: "<timer>", event, error, stack }),
 	);
+	/**
+	 * Dedup markers for `tool_call` emission, keyed `${toolCallId}:${toolName}`.
+	 * The agent loop emits `tool_call` at arg-prep time (before scheduling and
+	 * `tool_execution_start`) via the session's `beforeToolCall` wiring; the
+	 * marker tells `ExtensionToolWrapper.execute` not to emit a second event for
+	 * the same dispatch. Keyed by call id + tool name because a nested xd://
+	 * device dispatch reuses the model's toolCallId under a different tool name
+	 * and must still emit its own event. Bounded: markers for calls whose
+	 * execute path never runs (policy deny, validation failure) would otherwise
+	 * accumulate for the session's lifetime.
+	 */
+	#emittedToolCalls = new Set<string>();
+
+	/** Records that the loop already emitted `tool_call` for this dispatch. */
+	markToolCallEmitted(toolCallId: string, toolName: string): void {
+		if (this.#emittedToolCalls.size >= 512) {
+			const oldest = this.#emittedToolCalls.values().next().value;
+			if (oldest !== undefined) this.#emittedToolCalls.delete(oldest);
+		}
+		this.#emittedToolCalls.add(`${toolCallId}:${toolName}`);
+	}
+
+	/** Consumes a {@link markToolCallEmitted} marker; true when the loop already emitted. */
+	consumeToolCallEmitted(toolCallId: string, toolName: string): boolean {
+		return this.#emittedToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
 
 	constructor(
 		private readonly extensions: Extension[],

@@ -55,6 +55,9 @@ function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): T
 function passthroughRunner(seen: string[] = []): ExtensionRunner {
 	return {
 		hasHandlers: () => true,
+		// Direct (non-loop) dispatches like the Cursor bridge never set the
+		// loop's marker, so the wrapper still emits `tool_call` itself.
+		consumeToolCallEmitted: () => false,
 		emitToolCall: async (event: { toolName: string }) => {
 			seen.push(event.toolName);
 			return undefined;
@@ -331,8 +334,8 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// regardless of the advertised catalog, so the bridge must still reach a
 		// real edit tool through `getEditReplaceTool` — otherwise every modern
 		// edit answers "Tool \"edit\" not available" and the file is untouched.
-		// (Not the `getTool` fallback: that resolver also serves the agent loop's
-		// unadvertised calls, so it stays device-only.)
+		// (Not the `getExecutableTool` resolver: that one also serves the agent
+		// loop's unadvertised calls, so it stays device-only.)
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
 		// Build it exactly as the session does. Both bridge callsites go through
@@ -399,8 +402,8 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// switching to Cursor: `edit` was never deleted from the registry (that
 		// only happens for a session created on Cursor) and the roster is not
 		// rebuilt on switch, so the configured-mode instance is still there.
-		// `executeTool` prefers the map over the `getTool` fallback, so without
-		// an explicit replace-mode accessor every native edit after the switch
+		// `executeTool` resolves `edit` straight from that map, so without an
+		// explicit replace-mode accessor every native edit after the switch
 		// fails validation against the wrong schema.
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
@@ -714,8 +717,8 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		};
 		const handlers = new CursorExecHandlers({
 			cwd: ".",
-			tools: new Map(),
-			getTool: name => (name === mountedTool.name ? mountedTool : undefined),
+			tools: new Map([[mountedTool.name, mountedTool]]),
+			getExecutableTool: name => (name === mountedTool.name ? mountedTool : undefined),
 		});
 
 		const result = await handlers.mcp({
@@ -743,14 +746,19 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 				return { content: [{ type: "text", text: "edited" }], details: {} };
 			},
 		};
-		// The deny path throws inside resolveApproval before the runner is touched,
-		// so a bare runner stub suffices to prove the gate runs.
-		const wrapped = new ExtensionToolWrapper(device, {} as unknown as ExtensionRunner);
+		// The deny path throws inside resolveApproval before any handler runs;
+		// the stub only needs the loop-emission marker probe the wrapper always
+		// consults first.
+		const wrapped = new ExtensionToolWrapper(device, {
+			consumeToolCallEmitted: () => false,
+		} as unknown as ExtensionRunner);
 		const settings = Settings.isolated({ "tools.approval": { ast_edit: "deny" } });
 		const handlers = new CursorExecHandlers({
 			cwd: ".",
-			tools: new Map(),
-			getTool: name => (name === device.name ? (wrapped as unknown as AgentTool) : undefined),
+			// The canonical map contains the undecorated mounted tool. The execution
+			// override must win or Cursor bypasses the approval gate.
+			tools: new Map([[device.name, device]]),
+			getExecutableTool: name => (name === device.name ? (wrapped as unknown as AgentTool) : undefined),
 			getToolContext: () => ({ settings }) as AgentToolContext,
 		});
 

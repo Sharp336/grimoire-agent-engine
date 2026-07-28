@@ -1,5 +1,5 @@
 {
-  "checksum": "b2d729129cedf0e3bcba62a4b2b7df6000355c2c3cc3ea9d10fc3670cd22ed81",
+  "checksum": "895940582b3df625bf97f8d0dbfa4e278a01598c711363c7c09b944c976796d4",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -1719,7 +1719,7 @@
         "deps": {
           "common": [
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -2026,7 +2026,7 @@
         "deps": {
           "common": [
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -2090,7 +2090,7 @@
               "target": "cfg_if"
             },
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -8130,14 +8130,14 @@
       ],
       "license_file": "LICENSES"
     },
-    "crc-fast 1.10.0": {
+    "crc-fast 1.8.2": {
       "name": "crc-fast",
-      "version": "1.10.0",
+      "version": "1.8.2",
       "package_url": "https://github.com/awesomized/crc-fast-rust",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/crc-fast/1.10.0/download",
-          "sha256": "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
+          "url": "https://static.crates.io/crates/crc-fast/1.8.2/download",
+          "sha256": "85d9be5297a59f1b7651fd2711a1f4461929f53b182b394df0df15b3a387ef51"
         }
       },
       "targets": [
@@ -8170,6 +8170,10 @@
         "deps": {
           "common": [
             {
+              "id": "crc 3.4.0",
+              "target": "crc"
+            },
+            {
               "id": "digest 0.10.7",
               "target": "digest"
             }
@@ -8196,7 +8200,16 @@
           }
         },
         "edition": "2021",
-        "version": "1.10.0"
+        "proc_macro_deps": {
+          "common": [
+            {
+              "id": "rustversion 1.0.23",
+              "target": "rustversion"
+            }
+          ],
+          "selects": {}
+        },
+        "version": "1.8.2"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11962,14 +11975,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "event-listener 5.4.1": {
+    "event-listener 5.4.2": {
       "name": "event-listener",
-      "version": "5.4.1",
+      "version": "5.4.2",
       "package_url": "https://github.com/smol-rs/event-listener",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/event-listener/5.4.1/download",
-          "sha256": "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+          "url": "https://static.crates.io/crates/event-listener/5.4.2/download",
+          "sha256": "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
         }
       },
       "targets": [
@@ -11994,10 +12007,6 @@
         "deps": {
           "common": [
             {
-              "id": "concurrent-queue 2.5.0",
-              "target": "concurrent_queue"
-            },
-            {
               "id": "pin-project-lite 0.2.17",
               "target": "pin_project_lite"
             }
@@ -12005,7 +12014,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "5.4.1"
+        "version": "5.4.2"
       },
       "license": "Apache-2.0 OR MIT",
       "license_ids": [
@@ -12046,7 +12055,7 @@
         "deps": {
           "common": [
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -29925,9 +29934,9 @@
       ],
       "license_file": "LICENSE"
     },
-    "pi-ast 17.1.5": {
+    "pi-ast 17.1.7": {
       "name": "pi-ast",
-      "version": "17.1.5",
+      "version": "17.1.7",
       "package_url": "https://github.com/can1357/oh-my-pi",
       "repository": null,
       "targets": [
@@ -30213,7 +30222,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "17.1.5"
+        "version": "17.1.7"
       },
       "license": "MIT",
       "license_ids": [
@@ -30221,9 +30230,9 @@
       ],
       "license_file": null
     },
-    "pi-iso 17.1.5": {
+    "pi-iso 17.1.7": {
       "name": "pi-iso",
-      "version": "17.1.5",
+      "version": "17.1.7",
       "package_url": "https://github.com/can1357/oh-my-pi",
       "repository": null,
       "targets": [
@@ -30291,7 +30300,7 @@
           ],
           "selects": {}
         },
-        "version": "17.1.5"
+        "version": "17.1.7"
       },
       "license": "MIT",
       "license_ids": [
@@ -30299,9 +30308,9 @@
       ],
       "license_file": null
     },
-    "pi-natives 17.1.5": {
+    "pi-natives 17.1.7": {
       "name": "pi-natives",
-      "version": "17.1.5",
+      "version": "17.1.7",
       "package_url": "https://github.com/can1357/oh-my-pi",
       "repository": null,
       "targets": [
@@ -30422,7 +30431,7 @@
               "target": "phf"
             },
             {
-              "id": "pi-natives 17.1.5",
+              "id": "pi-natives 17.1.7",
               "target": "build_script_build"
             },
             {
@@ -30553,7 +30562,7 @@
           ],
           "selects": {}
         },
-        "version": "17.1.5"
+        "version": "17.1.7"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -30589,9 +30598,9 @@
       ],
       "license_file": null
     },
-    "pi-shell 17.1.5": {
+    "pi-shell 17.1.7": {
       "name": "pi-shell",
-      "version": "17.1.5",
+      "version": "17.1.7",
       "package_url": "https://github.com/can1357/oh-my-pi",
       "repository": null,
       "targets": [
@@ -30672,7 +30681,7 @@
               "target": "parking_lot"
             },
             {
-              "id": "pi-shell 17.1.5",
+              "id": "pi-shell 17.1.7",
               "target": "build_script_build"
             },
             {
@@ -30737,7 +30746,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "17.1.5"
+        "version": "17.1.7"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -30800,9 +30809,9 @@
       ],
       "license_file": null
     },
-    "pi-walker 17.1.5": {
+    "pi-walker 17.1.7": {
       "name": "pi-walker",
-      "version": "17.1.5",
+      "version": "17.1.7",
       "package_url": "https://github.com/can1357/oh-my-pi",
       "repository": null,
       "targets": [
@@ -30863,7 +30872,7 @@
           }
         },
         "edition": "2024",
-        "version": "17.1.5"
+        "version": "17.1.7"
       },
       "license": "MIT",
       "license_ids": [
@@ -40997,7 +41006,7 @@
               "target": "toml_datetime"
             },
             {
-              "id": "toml_parser 1.1.2+spec-1.1.0",
+              "id": "toml_parser 1.1.3+spec-1.1.0",
               "target": "toml_parser"
             },
             {
@@ -41124,7 +41133,7 @@
               "target": "toml_datetime"
             },
             {
-              "id": "toml_parser 1.1.2+spec-1.1.0",
+              "id": "toml_parser 1.1.3+spec-1.1.0",
               "target": "toml_parser"
             },
             {
@@ -41144,14 +41153,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "toml_parser 1.1.2+spec-1.1.0": {
+    "toml_parser 1.1.3+spec-1.1.0": {
       "name": "toml_parser",
-      "version": "1.1.2+spec-1.1.0",
+      "version": "1.1.3+spec-1.1.0",
       "package_url": "https://github.com/toml-rs/toml",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/toml_parser/1.1.2+spec-1.1.0/download",
-          "sha256": "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+          "url": "https://static.crates.io/crates/toml_parser/1.1.3+spec-1.1.0/download",
+          "sha256": "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
         }
       },
       "targets": [
@@ -41191,7 +41200,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "1.1.2+spec-1.1.0"
+        "version": "1.1.3+spec-1.1.0"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -51083,7 +51092,7 @@
               "target": "clap"
             },
             {
-              "id": "crc-fast 1.10.0",
+              "id": "crc-fast 1.8.2",
               "target": "crc_fast"
             },
             {
@@ -59770,7 +59779,7 @@
               "target": "enumflags2"
             },
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -60982,12 +60991,12 @@
     "brush-builtins 0.2.0": "crates/vendor/brush-builtins",
     "brush-core 0.5.0": "crates/vendor/brush-core",
     "jaq 2.3.0": "crates/vendor/jaq",
-    "pi-ast 17.1.5": "crates/pi-ast",
-    "pi-iso 17.1.5": "crates/pi-iso",
-    "pi-natives 17.1.5": "crates/pi-natives",
-    "pi-shell 17.1.5": "crates/pi-shell",
+    "pi-ast 17.1.7": "crates/pi-ast",
+    "pi-iso 17.1.7": "crates/pi-iso",
+    "pi-natives 17.1.7": "crates/pi-natives",
+    "pi-shell 17.1.7": "crates/pi-shell",
     "pi-uutils-ctx 0.1.0": "crates/pi-uutils-ctx",
-    "pi-walker 17.1.5": "crates/pi-walker",
+    "pi-walker 17.1.7": "crates/pi-walker",
     "pi_uu_diff 0.8.0": "crates/pi-uu-diff",
     "pi_uu_grep 0.8.0": "crates/pi-uu-grep",
     "uu_b2sum 0.8.0": "crates/vendor/uu-b2sum",

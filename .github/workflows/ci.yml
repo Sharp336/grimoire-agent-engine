@@ -118,21 +118,16 @@ jobs:
          - name: Build collab web
            run: bun run collab:web:build
 
-   # Bazel validation and cache warm — replaces the old cargo pipeline
-   # (rust_validation + native build matrices + hand-rolled artifact caching).
-   # `bazel test` covers the Rust suite, the clippy/rustfmt aspect configs cover
-   # linting, and on main pushes (omp-kata, read-write cache) an additional
-   # //:natives-linux-all build populates the shared bazel-remote cache so every
-   # downstream job — TS tests, releases, PR runners — gets cache hits instead
-   # of rebuilding. No toolchain setup: bazelisk is on the GitHub images and
-   # baked into the kata runner image; bazel fetches the rest hermetically.
+   # One Bazel job validates Rust changes and builds native addons for every
+   # downstream job. Main builds all Linux-hosted targets. Pull requests build
+   # only the Linux x64 pair required by tests.
    rust:
       name: Validate Rust workspace (bazel)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       steps:
          - uses: actions/checkout@v4
-         # TS-only PRs skip Rust validation entirely; addons for the TS test
-         # jobs come from the main-exported disk cache. Pushes always run.
+         # TS-only PRs skip Rust validation. They still materialize the Linux
+         # x64 addons once from the main-exported disk cache.
          - name: Detect Rust-affecting changes
            id: changes
            shell: bash
@@ -153,7 +148,6 @@ jobs:
          - if: steps.changes.outputs.rust == 'true'
            uses: ./.github/actions/bun-install
          - id: cache
-           if: steps.changes.outputs.rust == 'true'
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
@@ -184,11 +178,30 @@ jobs:
          - name: Rustfmt
            if: steps.changes.outputs.rust == 'true'
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
-         - name: Warm native addon cache (main push)
-           if: github.event_name != 'pull_request'
+         - name: Build native addons once
+           env:
+              EVENT_NAME: ${{ github.event_name }}
            run: |
+              set -euo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build //:natives-linux-all
+              targets=(//:natives-linux-x64-baseline //:natives-linux-x64-modern)
+              if [ "$EVENT_NAME" != "pull_request" ]; then
+                targets=(//:natives-linux-all)
+              fi
+              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "${targets[@]}"
+         - name: Save Bazel disk cache
+           if: steps.cache.outputs.save-needed == 'true'
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.cache/omp-bazel-disk
+              key: ${{ steps.cache.outputs.cache-key }}
+         - name: Upload native addon artifacts
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: native-addons
+              path: bazel-bin/natives-*/*.node
+              if-no-files-found: error
+              retention-days: 1
 
    test_workspace:
       name: Test TS workspace fast
@@ -200,10 +213,9 @@ jobs:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/bazel-natives
+         - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: Test workspace packages and repo scripts (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -219,10 +231,9 @@ jobs:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/bazel-natives
+         - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: Test coding-agent singleton/global-state bucket
            # Keep global Settings/env/fake-timer tests serial; native addon
            # artifacts are still available like every other coding-agent bucket.
@@ -238,10 +249,9 @@ jobs:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/bazel-natives
+         - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: Test native/TUI/browser-ish packages (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -257,10 +267,9 @@ jobs:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/bazel-natives
+         - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: Test coding-agent UI/TUI bucket
            env:
               OMP_TEST_CONCURRENCY: "2"
@@ -276,10 +285,9 @@ jobs:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/bazel-natives
+         - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: Test coding-agent runtime bucket
            # Runtime/session tests import native-backed barrels too; keep this
            # separate for concurrency, not as a native-free guardrail.
@@ -297,10 +305,9 @@ jobs:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/bazel-natives
+         - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: Test coding-agent native/unit bucket
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -316,10 +323,9 @@ jobs:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/bazel-natives
+         - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: CLI smoke test
            run: bun run ci:test:smoke
 
@@ -332,10 +338,9 @@ jobs:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/bazel-natives
+         - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: Install method smoke tests
            env:
               OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
@@ -398,7 +403,7 @@ jobs:
                     arch: x64,
                     target_id: darwin-x64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-x64,
-                    native_targets: darwin-all,
+                    native_targets: darwin-x64-baseline,
                  }
                - {
                     os: macos-14,
@@ -406,7 +411,7 @@ jobs:
                     arch: arm64,
                     target_id: darwin-arm64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
-                    native_targets: darwin-all,
+                    native_targets: darwin-arm64,
                  }
                - {
                     os: ubuntu-22.04,
@@ -442,14 +447,20 @@ jobs:
               path: ~/.bun/install/cache
               key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          - run: bun install --frozen-lockfile
-         # Release runners are GitHub-hosted and never touch the private
-         # cluster cache: they build with the actions/cache-backed disk cache,
-         # so repeat releases with unchanged Rust are mostly local cache hits.
-         - name: Build native addon(s) (bazel)
+         # Linux and Windows addons come from the Rust job. Darwin runners
+         # build only their own architecture because cross-hosted artifacts do
+         # not exist for macOS.
+         - name: Install prebuilt native addon(s)
+           if: matrix.platform != 'darwin'
+           uses: ./.github/actions/native-artifacts
+           with:
+              targets: ${{ matrix.native_targets }}
+         - name: Build native addon (bazel)
+           if: matrix.platform == 'darwin'
            uses: ./.github/actions/bazel-natives
            with:
               targets: ${{ matrix.native_targets }}
-              cache-scope: ${{ startsWith(matrix.target_id, 'darwin') && format('release-{0}', matrix.target_id) || 'linux' }}
+              cache-scope: release-${{ matrix.target_id }}
          - name: Build release binary
            env:
               RELEASE_TARGETS: ${{ matrix.target_id }}
@@ -609,14 +620,12 @@ jobs:
               path: ~/.bun/install/cache
               key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          - run: bun install --frozen-lockfile
-         # The pi-coding-agent prepack executes workspace code (bundle-dist
-         # imports the pi-utils barrel, which loads the pi-natives addon), so
-         # this job needs the Linux x64 native addons just like TS tests do.
-         - name: Build native addons (bazel)
-           uses: ./.github/actions/bazel-natives
+         # The prepack executes workspace code which loads the Linux x64
+         # addon, so install the Rust job's artifact before publishing.
+         - name: Install prebuilt native addons
+           uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              cache-scope: linux
          - name: Publish to npm
            env:
               # Fallback auth: setup-node wrote an .npmrc referencing

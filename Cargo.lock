@@ -1353,11 +1353,13 @@ checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
 name = "crc-fast"
-version = "1.10.0"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
+checksum = "85d9be5297a59f1b7651fd2711a1f4461929f53b182b394df0df15b3a387ef51"
 dependencies = [
+ "crc",
  "digest 0.10.7",
+ "rustversion",
  "spin 0.10.1",
 ]
 
@@ -1962,11 +1964,10 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -4728,7 +4729,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "17.1.5"
+version = "17.1.7"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -4797,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "17.1.5"
+version = "17.1.7"
 dependencies = [
  "async-trait",
  "libc",
@@ -4809,7 +4810,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "17.1.5"
+version = "17.1.7"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4872,7 +4873,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "17.1.5"
+version = "17.1.7"
 dependencies = [
  "anyhow",
  "brush-builtins",
@@ -4959,7 +4960,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "17.1.5"
+version = "17.1.7"
 dependencies = [
  "dashmap",
  "globset",
@@ -6574,9 +6575,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.2+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow 1.0.4",
 ]

@@ -499,6 +499,28 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("renders report-issue guidance only for unrestricted sessions", async () => {
+		const normalDir = makeTempDir();
+		const restrictedDir = makeTempDir();
+		const { session: normal } = await createAgentSession({
+			...baseOptions(normalDir),
+			settings: Settings.isolated({ "dev.autoqa": true }),
+		});
+		const { session: restricted } = await createAgentSession({
+			...baseOptions(restrictedDir),
+			settings: Settings.isolated({ "dev.autoqa": true }),
+			toolNames: ["read"],
+			restrictToolNames: true,
+		});
+
+		try {
+			expect(normal.systemPrompt.join("\n")).toContain("xd://report_issue");
+			expect(restricted.systemPrompt.join("\n")).not.toContain("xd://report_issue");
+		} finally {
+			await Promise.all([normal.dispose(), restricted.dispose()]);
+		}
+	});
+
 	it("ignores an inherited MCP manager when MCP is disabled", async () => {
 		const tempDir = makeTempDir();
 		const inheritedManager = {
@@ -617,7 +639,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 	it("does not execute an unadvertised edit call through the fallback resolver", async () => {
 		// One resolver serves two roles: the session's device resolver is passed
-		// to the bridge as `getTool` AND installed as the agent loop's
+		// to the bridge as `getExecutableTool` AND installed as the agent loop's
 		// `resolveFallbackTool`, which runs for ANY call the advertised set does
 		// not contain. It must stay device-only: routing `edit` through it would
 		// execute a replace-mode edit for a call the model was never offered —
