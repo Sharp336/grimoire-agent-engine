@@ -1877,3 +1877,184 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		expect(answer.value.result.case).toBe("success");
 	});
 });
+
+describe("Cursor exec answers: what the result claims about the work", () => {
+	it("reports the file's own line count for a windowed read", async () => {
+		// `total_lines` derived from the payload is the file's length only when
+		// the payload is the file. Under a composed window it is the window's, so
+		// a 20-line page of a 100-line file answered `total_lines: 20` — which a
+		// paginating server reads as "you have the whole thing".
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, { path: "/repo/big.ts", toolCallId: "c1", offset: 5, limit: 20 }),
+			}),
+			{
+				execHandlers: {
+					async read() {
+						return toolResult("line5\nline6\nline7", {
+							// The shape `read` records a composed range in: the flat
+							// `truncation.totalLines` counts from the window's start,
+							// `meta.truncation.totalLines` counts the file.
+							details: {
+								truncation: { truncated: true, totalLines: 97 },
+								meta: { truncation: { totalLines: 101 } },
+							},
+						});
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "readResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.totalLines).toBe(101);
+		expect(answer.value.result.value.rangeApplied).toBe(true);
+	});
+
+	it("counts the payload when the read returned the file whole", async () => {
+		// No window, no recorded total: the payload IS the file, so counting it
+		// is exact and the fallback must stay.
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, { path: "/repo/small.ts", toolCallId: "c1" }),
+			}),
+			{
+				execHandlers: {
+					async read() {
+						return toolResult("a\nb\nc");
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "readResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.totalLines).toBe(3);
+	});
+
+	it("signals the native grep backend's internal cap", async () => {
+		// `GrepTool` folds that ceiling into the flat `details.truncated` alone —
+		// no `details.truncation`, no `perFileLimitReached`. Forwarding only the
+		// latter two answered a clipped search as an unqualified success, which
+		// is the one truncation a caller can neither detect nor page around.
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "piGrepArgs", value: create(PiGrepExecArgsSchema, { pattern: "hit" }) }),
+			{
+				execHandlers: {
+					async piGrep() {
+						return toolResult("a.ts:1:hit", { details: { truncated: true } });
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "piGrepResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.truncation?.truncated).toBe(true);
+		expect(answer.value.result.value.truncation?.truncatedBy).toBe("matches");
+	});
+
+	it("leaves an untruncated grep unqualified", async () => {
+		// The flat flag is the only signal consulted, so a search that hit no cap
+		// must not acquire one.
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "piGrepArgs", value: create(PiGrepExecArgsSchema, { pattern: "hit" }) }),
+			{
+				execHandlers: {
+					async piGrep() {
+						return toolResult("a.ts:1:hit", { details: { truncated: false } });
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "piGrepResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.truncation).toBeUndefined();
+	});
+
+	it("does not restate a cap that already reported itself", async () => {
+		// `perFileLimitReached` carries the count; adding a second, countless
+		// truncation record for the same event tells the server two caps fired.
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "piGrepArgs", value: create(PiGrepExecArgsSchema, { pattern: "hit" }) }),
+			{
+				execHandlers: {
+					async piGrep() {
+						return toolResult("a.ts:1:hit", { details: { truncated: true, perFileLimitReached: 20 } });
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "piGrepResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.matchLimitReached).toBe(20);
+		expect(answer.value.result.value.truncation).toBeUndefined();
+	});
+
+	it("records the scoped grep's context and cap in the synthesized call", async () => {
+		// Neither field is expressible in the `grep` schema, so the bridge serves
+		// them by building a scoped tool. A block that omits them replays a
+		// context-widened, capped search as an ordinary grep.
+		const { output } = await dispatchExec(
+			buildExecMessage({
+				case: "piGrepArgs",
+				value: create(PiGrepExecArgsSchema, { pattern: "hit", context: 3, limit: 50 }),
+			}),
+			{
+				execHandlers: {
+					async piGrep() {
+						return toolResult("a.ts:1:hit");
+					},
+				},
+			},
+		);
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].arguments).toMatchObject({ pattern: "hit", context: 3, limit: 50 });
+	});
+
+	it("names the MCP resources it listed in the paired result", async () => {
+		// Rebuilt history is serialized from the paired result, so recording only
+		// a count leaves the model aware it once saw N resources and unable to
+		// name the URIs a follow-up read needs.
+		const { results } = await dispatchExec(
+			buildExecMessage({
+				case: "listMcpResourcesExecArgs",
+				value: create(ListMcpResourcesExecArgsSchema, { server: "docs" }),
+			}),
+			{
+				execHandlers: {
+					listMcpResources: async () => [
+						{ uri: "docs://readme", name: "README", mimeType: "text/markdown", server: "docs" },
+						{ uri: "docs://changelog", server: "docs" },
+					],
+				},
+			},
+		);
+		expect(results).toHaveLength(1);
+		const text = results[0].content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toContain("docs://readme");
+		expect(text).toContain("README");
+		expect(text).toContain("text/markdown");
+		// A resource the server described with nothing but a URI still gets named.
+		expect(text).toContain("docs://changelog");
+	});
+
+	it("says so plainly when a server advertises nothing", async () => {
+		const { results } = await dispatchExec(
+			buildExecMessage({
+				case: "listMcpResourcesExecArgs",
+				value: create(ListMcpResourcesExecArgsSchema, { server: "docs" }),
+			}),
+			{ execHandlers: { listMcpResources: async () => [] } },
+		);
+		expect(results).toHaveLength(1);
+		const text = results[0].content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toBe("No MCP resources available");
+		expect(results[0].isError).toBe(false);
+	});
+});

@@ -11,8 +11,6 @@
 
 - The Cursor Pi arg translation (`piReadPath`, `piJoinPath`, `piLsPath`, `piEscapeRegexLiteral`, `piLimit`) moved to `providers/cursor-pi-args`, re-exported from `providers/cursor/exec-modern` so existing imports are unaffected. The legacy pi shim shares these helpers and is compiled into the bundled virtual module registry, where a nested `providers/<dir>/<mod>` specifier is unresolvable under bunfs — and importing them from the exec module would drag the whole protobuf graph in for two string functions.
 
-## [17.1.8] - 2026-07-28
-
 ### Fixed
 
 - Fixed the `pi_read` range translation padding the slice it asks for. `piReadPath` composed a plain `:N+K` selector, which the local `read` tool expands by one leading and three trailing context line — so a frame naming offset 5/limit 20 received lines 4-27. Ranged Pi reads now compose `:raw:N+K`; the wire result is an opaque output string, so the line-number gutter `raw` also drops carries nothing the contract needs.
@@ -30,6 +28,15 @@
 - Fixed the Pi exec frames displaying a different operation than the one they run. The provider synthesized its transcript block from a second, hand-rolled translation of the frame args, so `pi_read`'s `offset`/`limit` were shown as a whole-file read, `pi_grep`'s `literal` pattern as an unescaped regex, and `pi_find`'s path/glob join differed from the executed one. Both sides now share a single translation.
 - Fixed the streamed `pi_*_tool_call` announcements that modern builds send alongside each exec frame being unrecognized. The exec channel already synthesizes those blocks when it runs the tool; the duplicate was avoided only because the decoder recognized none of the variants, which would have started double-rendering as soon as any one was added.
 - Fixed `pi_bash` results reaching Cursor clipped with no truncation notice. Two truncation records exist locally: `read`/`grep` set `details.truncation`, which carries an explicit `truncated` flag, while `bash` sets `details.meta.truncation`, whose record has no such flag — its presence is the signal. `piTruncation` read only the first shape and required the flag, so every real Bash truncation was dropped and the server was told the clipped output was complete. Both shapes now translate, and an explicit `truncated: false` still suppresses the field.
+- Fixed a windowed Cursor `read` reporting the window's line count as the file's. `total_lines` and `file_size` were derived from the payload, which is the whole file only for an unranged read — a 20-line page of a 100-line file answered `total_lines: 20`, which a paginating server reads as the end of the file. The count now comes from the read's own record of the file (`details.meta.truncation.totalLines`), falling back to counting the payload when the read returned the file whole.
+- Fixed a `pi_grep` that hit the native backend's internal match ceiling answering as an unqualified success. `GrepTool` folds that cap into the flat `details.truncated` alone, setting neither `details.truncation` nor `perFileLimitReached` — the two fields the Pi result was built from — so the one truncation a caller can neither detect nor page around was the one it was never told about. The flat flag is now translated into a `PiTruncation`, and only when no specific cap already reported itself.
+- Fixed a `pi_grep` frame's `context` and `limit` vanishing from the transcript. The bridge honors both by building a scoped `grep`, but neither is expressible in the model-facing schema, so the synthesized block recorded a plain pattern/path search — replaying a context-widened or capped search as an ordinary grep sitting beside output no ordinary grep produces. Both are now recorded on the block.
+- Fixed a Cursor MCP resource listing shrinking to a count in the transcript. The full URI/name/mime catalog goes out on the wire, but the paired local result recorded `Listed N MCP resource(s)` — and rebuilt history is serialized from that result, so one reload later the model knew it had seen N resources and could name none of them. The paired result now lists what the answer carried.
+
+## [17.1.8] - 2026-07-28
+
+### Fixed
+
 - Fixed an HTTP 400 error when resuming or replaying OpenAI history after an interrupted native Computer Use turn.
 - Fixed connection 404 errors when using Google Vertex AI in multi-region locations (eu and us) by correctly resolving regional endpoint (REP) hosts.
 - Fixed a resource leak in SqliteAuthCredentialStore.close() where unclosed prepared statements kept the SQLite connection alive, preventing database file cleanup (especially on Windows where files remained locked).

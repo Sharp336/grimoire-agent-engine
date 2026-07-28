@@ -1636,7 +1636,7 @@ async function handleExecServerMessage(
 				const settled = execResult.result;
 				const text =
 					settled.case === "success"
-						? `Listed ${settled.value.resources.length} MCP resource(s)`
+						? formatListedMcpResources(settled.value.resources)
 						: settled.case === "error"
 							? settled.value.error || "Failed to list MCP resources"
 							: (settled.value?.reason ?? "Failed to list MCP resources");
@@ -1853,6 +1853,13 @@ async function handleExecServerMessage(
 				pattern: args.literal === true ? piEscapeRegexLiteral(args.pattern) : args.pattern,
 				path: args.glob ? piJoinPath(args.path, args.glob) : args.path || ".",
 				case: args.ignoreCase === true ? false : undefined,
+				// Neither field exists in the model-facing `grep` schema — the bridge
+				// serves them by building a scoped tool instead. Recorded anyway, for
+				// the same reason `pi_read` renders its range into the displayed path:
+				// a capped or context-widened search is otherwise replayed as an
+				// ordinary grep sitting next to output no ordinary grep produces.
+				context: args.context,
+				limit: piLimit(args.limit),
 			});
 			const { execResult } = await resolveExecHandler(
 				{ args, toolCallId },
@@ -2380,6 +2387,27 @@ function toolResultToText(toolResult: ToolResultMessage): string {
 	return toolResult.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
 }
 
+/**
+ * The catalog as the paired transcript result records it.
+ *
+ * Cursor receives every resource's identity on the wire, but rebuilt history is
+ * serialized from this local result — so recording only a count leaves the
+ * model, one reload later, aware that it once saw N resources and unable to
+ * name any of them. The URI is what a follow-up `read_mcp_resource` needs, so
+ * it leads; name and mime type follow only when the server supplied them.
+ */
+function formatListedMcpResources(
+	resources: { uri: string; name?: string; mimeType?: string; server?: string }[],
+): string {
+	if (resources.length === 0) return "No MCP resources available";
+	const lines = resources.map(resource => {
+		const qualifiers = [resource.name, resource.mimeType].filter(part => !!part).join(", ");
+		const server = resource.server ? `[${resource.server}] ` : "";
+		return qualifiers ? `- ${server}${resource.uri} (${qualifiers})` : `- ${server}${resource.uri}`;
+	});
+	return [`Listed ${resources.length} MCP resource(s):`, ...lines].join("\n");
+}
+
 function toolResultWasTruncated(toolResult: ToolResultMessage): boolean {
 	if (!toolResult.details || typeof toolResult.details !== "object") {
 		return false;
@@ -2396,12 +2424,31 @@ function toolResultDetailBoolean(toolResult: ToolResultMessage, key: string): bo
 	return typeof value === "boolean" ? value : false;
 }
 
+/**
+ * The file's own line count, when the tool recorded one.
+ *
+ * `details.meta.truncation.totalLines` is the whole file; the flat
+ * `details.truncation.totalLines` counts from the window's start line and is
+ * deliberately not consulted here. Absent for a read that returned the file
+ * whole, where the payload IS the file and counting it is exact.
+ */
+function readTotalLinesFromDetails(toolResult: ToolResultMessage): number | undefined {
+	if (!toolResult.details || typeof toolResult.details !== "object") return undefined;
+	const meta = (toolResult.details as { meta?: { truncation?: { totalLines?: unknown } } }).meta;
+	const totalLines = meta?.truncation?.totalLines;
+	return typeof totalLines === "number" && Number.isFinite(totalLines) ? totalLines : undefined;
+}
+
 function buildReadResultFromToolResult(path: string, toolResult: ToolResultMessage, rangeApplied = false) {
 	const text = toolResultToText(toolResult);
 	if (toolResult.isError) {
 		return buildReadErrorResult(path, text || "Read failed");
 	}
-	const totalLines = text ? text.split("\n").length : 0;
+	// Counting the payload is only the file's length when the payload is the
+	// whole file. Under a composed window it is the window's, and answering a
+	// 20-line page of a 100-line file with `total_lines: 20` tells a paginating
+	// server it has reached the end.
+	const totalLines = readTotalLinesFromDetails(toolResult) ?? (text ? text.split("\n").length : 0);
 	return create(ReadResultSchema, {
 		result: {
 			case: "success",
