@@ -132,8 +132,11 @@ describe("AgentSession advisor context maintenance", () => {
 			responses: [{ content: ["advisor reviewed current update"] }],
 		});
 		const nativeModel = getBundledModel("openai", "gpt-5");
-		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!nativeModel || !fallbackModel) throw new Error("Expected bundled compaction models");
+		const sameProviderModel = getBundledModel("openai", "gpt-5-mini");
+		const crossProviderModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!nativeModel || !sameProviderModel || !crossProviderModel) {
+			throw new Error("Expected bundled compaction models");
+		}
 
 		authStorage.setRuntimeApiKey(nativeModel.provider, "openai-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
@@ -144,7 +147,8 @@ describe("AgentSession advisor context maintenance", () => {
 			"contextPromotion.enabled": false,
 		});
 		settings.setModelRole("advisor", `${nativeModel.provider}/${nativeModel.id}`);
-		settings.setModelRole("smol", `${fallbackModel.provider}/${fallbackModel.id}`);
+		settings.setModelRole("smol", `${sameProviderModel.provider}/${sameProviderModel.id}`);
+		settings.setModelRole("slow", `${crossProviderModel.provider}/${crossProviderModel.id}`);
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model: primaryMock, systemPrompt: [], tools: [] },
@@ -163,12 +167,16 @@ describe("AgentSession advisor context maintenance", () => {
 		if (!advisor) throw new Error("Expected advisor agent to be active");
 		advisor.setModel(nativeModel);
 		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
-		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([nativeModel, fallbackModel]);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
+			nativeModel,
+			sameProviderModel,
+			crossProviderModel,
+		]);
 		advisor.state.messages.push(
 			usageAnchor(advisorMock, Date.now() - 2_000),
 			usageAnchor(advisorMock, Date.now() - 1_000),
 		);
-		return { advisor, fallbackModel, nativeModel };
+		return { advisor, crossProviderModel, nativeModel, sameProviderModel };
 	}
 
 	it("maintains a 371,200-token cached advisor context before the 372,000-token window", async () => {
@@ -323,13 +331,13 @@ describe("AgentSession advisor context maintenance", () => {
 		}
 	});
 
-	it("does not cross providers after a non-auth native advisor compaction failure", async () => {
-		const { advisor, fallbackModel, nativeModel } = createAdvisorFallbackHarness();
+	it("continues same-provider advisor candidates but stops before crossing providers on non-auth failure", async () => {
+		const { advisor, crossProviderModel, nativeModel, sameProviderModel } = createAdvisorFallbackHarness();
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
-			if (model.provider === nativeModel.provider && model.id === nativeModel.id) {
+			if (model.provider === nativeModel.provider || model.provider === sameProviderModel.provider) {
 				throw new compactionModule.NativeCompactionError(new Error("V2 native compaction transport failed"));
 			}
-			if (model.provider !== fallbackModel.provider || model.id !== fallbackModel.id) {
+			if (model.provider !== crossProviderModel.provider || model.id !== crossProviderModel.id) {
 				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
 			}
 			return {
@@ -344,19 +352,20 @@ describe("AgentSession advisor context maintenance", () => {
 
 		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
 			`${nativeModel.provider}/${nativeModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
 		]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("prior advisor output");
 	});
 
-	it("allows advisor compaction to try another provider after an auth-classified native failure", async () => {
-		const { advisor, fallbackModel, nativeModel } = createAdvisorFallbackHarness();
+	it("allows advisor compaction to cross providers after auth-classified native failures", async () => {
+		const { advisor, crossProviderModel, nativeModel, sameProviderModel } = createAdvisorFallbackHarness();
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
-			if (model.provider === nativeModel.provider && model.id === nativeModel.id) {
+			if (model.provider === nativeModel.provider || model.provider === sameProviderModel.provider) {
 				throw new compactionModule.NativeCompactionError(
 					Object.assign(new Error("native compaction authentication failed"), { status: 401 }),
 				);
 			}
-			if (model.provider !== fallbackModel.provider || model.id !== fallbackModel.id) {
+			if (model.provider !== crossProviderModel.provider || model.id !== crossProviderModel.id) {
 				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
 			}
 			return {
@@ -371,7 +380,8 @@ describe("AgentSession advisor context maintenance", () => {
 
 		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
 			`${nativeModel.provider}/${nativeModel.id}`,
-			`${fallbackModel.provider}/${fallbackModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+			`${crossProviderModel.provider}/${crossProviderModel.id}`,
 		]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("authenticated fallback summary");
 	});
