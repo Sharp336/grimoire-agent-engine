@@ -738,7 +738,9 @@ function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined)
  */
 function createSummarizationError(prefix: string, response: AssistantMessage): Error {
 	const text = `${prefix}: ${response.errorMessage || "Unknown error"}`;
-	return response.errorStatus === undefined ? new Error(text) : new AIError.ProviderHttpError(text, response.errorStatus);
+	return response.errorStatus === undefined
+		? new Error(text)
+		: new AIError.ProviderHttpError(text, response.errorStatus);
 }
 
 function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boolean {

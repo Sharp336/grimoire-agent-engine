@@ -371,7 +371,9 @@ describe("AgentSession advisor context maintenance", () => {
 					tokensBefore: 42,
 				};
 			}
-			throw new Error(`Unexpected cross-provider compaction ${crossProviderModel.provider}/${crossProviderModel.id}`);
+			throw new Error(
+				`Unexpected cross-provider compaction ${crossProviderModel.provider}/${crossProviderModel.id}`,
+			);
 		});
 
 		await session.prompt("small current update");
