@@ -1456,10 +1456,18 @@ export class SessionMaintenance {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
+		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
+			if (
+				nativeCompactionFailure &&
+				(candidate.provider !== nativeCompactionFailure.provider ||
+					!shouldUseProviderNativeCompaction(candidate, preparation.settings))
+			) {
+				throw nativeCompactionFailure.error;
+			}
 
 			try {
 				return await compact(
@@ -1497,12 +1505,17 @@ export class SessionMaintenance {
 					},
 				);
 			} catch (error) {
-				if (!AIError.is(AIError.classify(error, candidate.api), AIError.Flag.AuthFailed)) {
-					throw error;
+				const id = AIError.classify(error instanceof NativeCompactionError ? error.cause : error, candidate.api);
+				if (AIError.is(id, AIError.Flag.AuthFailed)) continue;
+				if (error instanceof NativeCompactionError) {
+					nativeCompactionFailure ??= { error, provider: candidate.provider };
+					continue;
 				}
+				throw error;
 			}
 		}
 
+		if (nativeCompactionFailure) throw nativeCompactionFailure.error;
 		throw this.#buildCompactionAuthError();
 	}
 
