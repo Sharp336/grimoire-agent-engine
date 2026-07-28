@@ -231,6 +231,37 @@ describe("Puppeteer Codex logical tabs", () => {
 	});
 });
 
+describe("Puppeteer Codex screenshots", () => {
+	it("returns raw Playwright bytes without routing through the preview capture", async () => {
+		const rawScreenshot = Buffer.from("raw-page-screenshot").toString("base64");
+		let previewCaptures = 0;
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "https://fixture.test/current",
+				screenshot: async (options: unknown) => {
+					expect(options).toEqual({ type: "png", encoding: "base64" });
+					return rawScreenshot;
+				},
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: ".",
+			captureScreenshot: async () => {
+				previewCaptures++;
+				return "preview-screenshot";
+			},
+		});
+
+		expect(await adapter.invoke<string>("playwright.screenshot", { tabId: "1" })).toBe(rawScreenshot);
+		expect(previewCaptures).toBe(0);
+		expect(await adapter.invoke<{ data: string }>("cua.get_visible_screenshot", { tabId: "1" })).toEqual({
+			data: "preview-screenshot",
+		});
+		expect(previewCaptures).toBe(1);
+	});
+});
+
 describe("Puppeteer Codex download adapter", () => {
 	it("blocks the first download trigger until capture listeners are ready", async () => {
 		spyOn(fs, "mkdir").mockResolvedValue(undefined);
@@ -1750,6 +1781,86 @@ describe("Puppeteer final parity blockers", () => {
 		});
 	}, 20_000);
 
+	it("downloads cross-origin media through browser networking rather than page-context fetch", async () => {
+		const downloadDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cross-origin-media-"));
+		const source = "https://cdn.example.test/protected.png";
+		let pageFetches = 0;
+		let loadRequest: Record<string, unknown> | undefined;
+		const element = {
+			getAttribute: (name: string) => (name === "src" ? source : null),
+			getRootNode: () => ({}),
+			ownerDocument: { baseURI: "https://fixture.test/page" },
+			parentElement: null,
+			querySelector: () => null,
+		};
+		const handle: Record<string, unknown> = {
+			asElement: () => handle,
+			dispose: async () => undefined,
+			evaluate: async (callback: (target: typeof element) => Promise<unknown>) => {
+				const originalFetch = globalThis.fetch;
+				globalThis.fetch = (async () => {
+					pageFetches++;
+					throw new TypeError("Blocked by CORS");
+				}) as unknown as typeof fetch;
+				try {
+					return await callback(element);
+				} finally {
+					globalThis.fetch = originalFetch;
+				}
+			},
+		};
+		const session = {
+			async send(method: string, params?: Record<string, unknown>) {
+				if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main-frame" } } };
+				if (method === "Network.loadNetworkResource") {
+					loadRequest = params;
+					return {
+						resource: {
+							success: true,
+							httpStatusCode: 200,
+							headers: { "content-length": "11", "content-type": "image/png" },
+							stream: "media-stream",
+						},
+					};
+				}
+				if (method === "IO.read") {
+					return { base64Encoded: true, data: Buffer.from("image-bytes").toString("base64"), eof: true };
+				}
+				if (method === "IO.close") return {};
+				throw new Error(`Unexpected CDP method ${method}`);
+			},
+			async detach() {},
+		};
+		const adapter = new PuppeteerCodexBrowserAdapter({
+			currentTabId: "1",
+			page: {
+				url: () => "https://fixture.test/page",
+				evaluateHandle: async () => handle,
+				createCDPSession: async () => session,
+			} as never,
+			browser: {} as never,
+			signal: new AbortController().signal,
+			cwd: downloadDir,
+			captureScreenshot: async () => "",
+		});
+
+		try {
+			await adapter.invoke("cua.downloadMedia", { tabId: "1", x: 1, y: 1, timeoutMs: 1_000 });
+			expect(pageFetches).toBe(0);
+			expect(loadRequest).toEqual({
+				frameId: "main-frame",
+				url: source,
+				options: { disableCache: false, includeCredentials: true },
+			});
+			const files = await fs.readdir(downloadDir);
+			expect(files).toHaveLength(1);
+			expect(await fs.readFile(path.join(downloadDir, files[0]!))).toEqual(Buffer.from("image-bytes"));
+		} finally {
+			await adapter.dispose();
+			await fs.rm(downloadDir, { force: true, recursive: true });
+		}
+	});
+
 	it("includes browser credentials when fetching protected media", async () => {
 		const originalDocument = Reflect.get(globalThis, "document");
 		const hadDocument = Reflect.has(globalThis, "document");
@@ -1910,13 +2021,35 @@ describe("Puppeteer final parity blockers", () => {
 		}
 	});
 
-	it("revalidates bounded media after the Puppeteer page boundary", async () => {
-		const chunk = Buffer.alloc(1024).toString("base64");
-		const oversizedChunks = Array.from({ length: 32 * 1024 + 1 }, () => chunk);
+	it("rejects oversized browser-network streams before persistence", async () => {
+		const source = "https://media.fixture.test/oversized.bin";
+		let streamReads = 0;
 		const handle: Record<string, unknown> = {
 			asElement: () => handle,
 			dispose: async () => undefined,
-			evaluate: async () => ({ contentType: "application/octet-stream", base64Chunks: oversizedChunks }),
+			evaluate: async () => source,
+		};
+		const session = {
+			async send(method: string) {
+				if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main-frame" } } };
+				if (method === "Network.loadNetworkResource") {
+					return {
+						resource: {
+							success: true,
+							httpStatusCode: 200,
+							headers: { "content-length": String(32 * 1024 * 1024 + 1) },
+							stream: "oversized-stream",
+						},
+					};
+				}
+				if (method === "IO.read") {
+					streamReads++;
+					return { data: "", eof: true };
+				}
+				if (method === "IO.close") return {};
+				throw new Error(`Unexpected CDP method ${method}`);
+			},
+			async detach() {},
 		};
 		const openSpy = spyOn(fs, "open").mockRejectedValue(new Error("oversized media reached persistence"));
 		const adapter = new PuppeteerCodexBrowserAdapter({
@@ -1924,6 +2057,7 @@ describe("Puppeteer final parity blockers", () => {
 			page: {
 				url: () => "https://fixture.test/page",
 				evaluateHandle: async () => handle,
+				createCDPSession: async () => session,
 			} as never,
 			browser: {} as never,
 			signal: new AbortController().signal,
@@ -1934,6 +2068,7 @@ describe("Puppeteer final parity blockers", () => {
 		await expect(adapter.invoke("cua.downloadMedia", { tabId: "1", x: 1, y: 1, timeoutMs: 1_000 })).rejects.toThrow(
 			"downloadMedia response exceeds the 32 MiB limit",
 		);
+		expect(streamReads).toBe(0);
 		expect(openSpy).not.toHaveBeenCalled();
 		await adapter.dispose();
 	});
@@ -2843,10 +2978,13 @@ describe("Puppeteer final parity blockers", () => {
 		spyOn(fs, "rm").mockImplementation(async target => {
 			removed.push(String(target));
 		});
+		spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(new Uint8Array([65]), { headers: { "content-type": "text/plain" } }),
+		);
 		const handle: Record<string, unknown> = {
 			asElement: () => handle,
 			dispose: async () => undefined,
-			evaluate: async () => ({ base64Chunks: ["QQ=="], contentType: "text/plain" }),
+			evaluate: async () => "https://fixture.test/media.txt",
 		};
 		const adapter = new PuppeteerCodexBrowserAdapter({
 			currentTabId: "1",

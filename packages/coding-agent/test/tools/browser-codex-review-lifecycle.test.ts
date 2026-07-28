@@ -563,7 +563,7 @@ describe("Codex agent.browser Puppeteer inline-worker lifecycle", () => {
 		]);
 	}, 20_000);
 
-	it("reads persisted screenshot bytes through fs.promises", async () => {
+	it("returns page screenshot bytes without persisted preview reads", async () => {
 		const screenshotBytes = Buffer.from(
 			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XxR5WQAAAABJRU5ErkJggg==",
 			"base64",
@@ -594,7 +594,7 @@ describe("Codex agent.browser Puppeteer inline-worker lifecycle", () => {
 				ok: true,
 				payload: { returnValue: screenshotBytes.toString("base64") },
 			});
-			expect(readFileSpy).toHaveBeenCalledTimes(1);
+			expect(readFileSpy).not.toHaveBeenCalled();
 			expect(bunFileSpy).not.toHaveBeenCalled();
 		} finally {
 			readFileSpy.mockRestore();

@@ -30,7 +30,6 @@ import {
 	type CodexTextPattern,
 	type CodexVisibleDom,
 } from "./codex-facade";
-import { decodeBoundedMediaChunks } from "./media-decode";
 
 interface RuntimeRemoteObject {
 	type: string;
@@ -222,7 +221,7 @@ interface PageSelectionLike {
 }
 
 interface DownloadedMedia {
-	base64Chunks: string[];
+	chunks: Uint8Array[];
 	contentType: string | null;
 }
 
@@ -940,7 +939,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 				await this.#downloadDomMedia(args);
 				return undefined;
 			case "cua.get_visible_screenshot":
-				return { data: await this.#screenshot({ tabId: this.currentTabId }) };
+				return { data: await this.#captureScreenshot({}) };
 			case "cua.click":
 				await this.#withHeldKeys(args.keypress, async () => {
 					await this.#page.mouse.click(numberArg(args, "x"), numberArg(args, "y"), {
@@ -1444,11 +1443,6 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 	}
 
 	async #screenshot(args: Readonly<Record<string, unknown>>): Promise<string> {
-		if (args.clip === undefined) {
-			return await this.#captureScreenshot({
-				fullPage: typeof args.fullPage === "boolean" ? args.fullPage : undefined,
-			});
-		}
 		const options: {
 			type: "png";
 			encoding: "base64";
@@ -3198,118 +3192,169 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		}
 	}
 
-	async #downloadHandleMedia(handle: ElementHandle, deadline: OperationDeadline): Promise<void> {
-		const fetchTimeoutMs = this.#operationRemaining(deadline);
-		const media = (await this.#runBeforeDeadline(deadline, () =>
-			handle.evaluate(
-				async (element, timeoutMs, label) => {
-					const sourceOf = (candidate: Element): string | null => {
-						const currentSrc = "currentSrc" in candidate ? candidate.currentSrc : undefined;
-						return (
-							(typeof currentSrc === "string" && currentSrc ? currentSrc : null) ??
-							candidate.getAttribute("src") ??
-							candidate.getAttribute("href")
-						);
-					};
-					const composedParent = (candidate: Element): Element | null => {
-						const pageCandidate = candidate as Element & { assignedSlot?: Element | null };
-						const root = candidate.getRootNode?.() as
-							| { defaultView?: { frameElement?: Element | null }; host?: Element }
-							| undefined;
-						return (
-							pageCandidate.assignedSlot ??
-							candidate.parentElement ??
-							root?.host ??
-							root?.defaultView?.frameElement ??
-							null
-						);
-					};
-					let sourceElement: Element | null = element;
-					let source = sourceOf(sourceElement);
-					for (let current = composedParent(element); !source && current; current = composedParent(current)) {
-						const tagName = current.tagName.toLowerCase();
-						if (
-							tagName === "img" ||
-							tagName === "video" ||
-							tagName === "audio" ||
-							tagName === "source" ||
-							(tagName === "a" && current.getAttribute("href") !== null)
-						) {
-							source = sourceOf(current);
-							if (source) sourceElement = current;
-						}
-					}
-					if (!source) {
-						const nestedMedia = element.querySelector("img,video,audio,source,a[href]");
-						source = nestedMedia ? sourceOf(nestedMedia) : null;
-						if (source) sourceElement = nestedMedia;
-					}
-					if (!source) return null;
-					const controller = new AbortController();
-					const timer = setTimeout(() => controller.abort(new Error(`${label} media fetch timed out`)), timeoutMs);
+	async #loadMediaWithFetch(source: string, deadline: OperationDeadline): Promise<DownloadedMedia> {
+		const controller = new AbortController();
+		return await this.#runBeforeDeadline(
+			deadline,
+			async () => {
+				const response = await fetch(source, { credentials: "include", signal: controller.signal });
+				if (!response.ok) throw new Error(`${deadline.label} media fetch failed with HTTP ${response.status}`);
+				const maxBytes = 32 * 1024 * 1024;
+				const contentLengthHeader = response.headers.get("content-length");
+				const contentLength =
+					contentLengthHeader !== null && /^\d+$/.test(contentLengthHeader) ? Number(contentLengthHeader) : null;
+				if (contentLength !== null && contentLength > maxBytes) {
+					throw new Error(`${deadline.label} response exceeds the 32 MiB limit`);
+				}
+				const chunks: Uint8Array[] = [];
+				if (response.body) {
+					const reader = response.body.getReader();
+					let received = 0;
 					try {
-						const pageDocument = document as unknown as PageDocumentLike;
-						const response = await fetch(
-							new URL(source, sourceElement?.ownerDocument?.baseURI ?? pageDocument.baseURI),
-							{
-								credentials: "include",
-								signal: controller.signal,
-							},
-						);
-						if (!response.ok) throw new Error(`${label} media fetch failed with HTTP ${response.status}`);
-						const maxBytes = 32 * 1024 * 1024;
-						const contentLengthHeader = response.headers.get("content-length");
-						const contentLength =
-							contentLengthHeader !== null && /^\d+$/.test(contentLengthHeader)
-								? Number(contentLengthHeader)
-								: null;
-						if (contentLength !== null && contentLength > maxBytes) {
-							throw new Error(`${label} response exceeds the 32 MiB limit`);
-						}
-						const base64Chunks: string[] = [];
-						const append = (bytes: Uint8Array) => {
-							let binary = "";
-							for (const byte of bytes) binary += String.fromCharCode(byte);
-							base64Chunks.push(globalThis.btoa(binary));
-						};
-						if (response.body) {
-							const reader = response.body.getReader();
-							let received = 0;
-							try {
-								for (;;) {
-									const chunk = await reader.read();
-									if (chunk.done) break;
-									if (received + chunk.value.byteLength > maxBytes) {
-										try {
-											await reader.cancel();
-										} catch {}
-										throw new Error(`${label} response exceeds the 32 MiB limit`);
-									}
-									received += chunk.value.byteLength;
-									append(chunk.value);
-								}
-							} finally {
-								reader.releaseLock();
+						for (;;) {
+							const chunk = await reader.read();
+							if (chunk.done) break;
+							if (received + chunk.value.byteLength > maxBytes) {
+								await reader.cancel().catch(() => undefined);
+								throw new Error(`${deadline.label} response exceeds the 32 MiB limit`);
 							}
-						} else {
-							if (contentLength === null)
-								throw new Error(`${label} requires Content-Length for a non-streaming response`);
-							const bytes = new Uint8Array(await response.arrayBuffer());
-							if (bytes.byteLength > maxBytes) throw new Error(`${label} response exceeds the 32 MiB limit`);
-							append(bytes);
+							received += chunk.value.byteLength;
+							chunks.push(chunk.value);
 						}
-						return { base64Chunks, contentType: response.headers.get("content-type") };
 					} finally {
-						clearTimeout(timer);
+						reader.releaseLock();
 					}
-				},
-				fetchTimeoutMs,
-				deadline.label,
-			),
-		)) as DownloadedMedia | null;
-		if (!media) throw new Error(`${deadline.label} requires an element with a media source`);
-		this.#operationRemaining(deadline);
-		const { chunks: decodedChunks } = decodeBoundedMediaChunks(media.base64Chunks);
+				} else {
+					if (contentLength === null)
+						throw new Error(`${deadline.label} requires Content-Length for a non-streaming response`);
+					const bytes = new Uint8Array(await response.arrayBuffer());
+					if (bytes.byteLength > maxBytes) throw new Error(`${deadline.label} response exceeds the 32 MiB limit`);
+					if (bytes.byteLength > 0) chunks.push(bytes);
+				}
+				return { chunks, contentType: response.headers.get("content-type") };
+			},
+			() => controller.abort(new Error(`${deadline.label} media fetch canceled`)),
+		);
+	}
+
+	async #loadMediaWithCdp(source: string, deadline: OperationDeadline): Promise<DownloadedMedia> {
+		const session = await this.#runBeforeDeadline(deadline, () => this.#page.createCDPSession());
+		let stream: string | undefined;
+		try {
+			const { frameTree } = await this.#runBeforeDeadline(deadline, () => session.send("Page.getFrameTree"));
+			const { resource } = await this.#runBeforeDeadline(deadline, () =>
+				session.send("Network.loadNetworkResource", {
+					frameId: frameTree.frame.id,
+					url: source,
+					options: { disableCache: false, includeCredentials: true },
+				}),
+			);
+			if (!resource.success || (resource.httpStatusCode !== undefined && resource.httpStatusCode >= 400)) {
+				if (resource.httpStatusCode !== undefined)
+					throw new Error(`${deadline.label} media fetch failed with HTTP ${resource.httpStatusCode}`);
+				throw new Error(
+					`${deadline.label} media fetch failed${resource.netErrorName ? `: ${resource.netErrorName}` : ""}`,
+				);
+			}
+
+			const responseHeader = (name: string): string | null => {
+				for (const [header, value] of Object.entries(resource.headers ?? {})) {
+					if (header.toLowerCase() === name) return String(value);
+				}
+				return null;
+			};
+			const maxBytes = 32 * 1024 * 1024;
+			const contentLengthHeader = responseHeader("content-length");
+			const contentLength =
+				contentLengthHeader !== null && /^\d+$/.test(contentLengthHeader) ? Number(contentLengthHeader) : null;
+			if (contentLength !== null && contentLength > maxBytes) {
+				throw new Error(`${deadline.label} response exceeds the 32 MiB limit`);
+			}
+
+			stream = resource.stream;
+			if (!stream) {
+				if (contentLength !== 0) throw new Error(`${deadline.label} media fetch returned no readable stream`);
+				return { chunks: [], contentType: responseHeader("content-type") };
+			}
+			const chunks: Uint8Array[] = [];
+			let received = 0;
+			for (;;) {
+				const chunk = await this.#runBeforeDeadline(deadline, () =>
+					session.send("IO.read", { handle: stream!, size: 1024 * 1024 }),
+				);
+				const bytes = Buffer.from(chunk.data, chunk.base64Encoded ? "base64" : "utf8");
+				if (received + bytes.byteLength > maxBytes) {
+					throw new Error(`${deadline.label} response exceeds the 32 MiB limit`);
+				}
+				received += bytes.byteLength;
+				if (bytes.byteLength > 0) chunks.push(bytes);
+				if (chunk.eof) break;
+			}
+			return { chunks, contentType: responseHeader("content-type") };
+		} finally {
+			if (stream) await session.send("IO.close", { handle: stream }).catch(() => undefined);
+			await session.detach().catch(() => undefined);
+		}
+	}
+
+	async #downloadHandleMedia(handle: ElementHandle, deadline: OperationDeadline): Promise<void> {
+		const source = await this.#runBeforeDeadline(deadline, () =>
+			handle.evaluate(element => {
+				const sourceOf = (candidate: Element): string | null => {
+					const currentSrc = "currentSrc" in candidate ? candidate.currentSrc : undefined;
+					return (
+						(typeof currentSrc === "string" && currentSrc ? currentSrc : null) ??
+						candidate.getAttribute("src") ??
+						candidate.getAttribute("href")
+					);
+				};
+				const composedParent = (candidate: Element): Element | null => {
+					const pageCandidate = candidate as Element & { assignedSlot?: Element | null };
+					const root = candidate.getRootNode?.() as
+						| { defaultView?: { frameElement?: Element | null }; host?: Element }
+						| undefined;
+					return (
+						pageCandidate.assignedSlot ??
+						candidate.parentElement ??
+						root?.host ??
+						root?.defaultView?.frameElement ??
+						null
+					);
+				};
+				let sourceElement: Element | null = element;
+				let mediaSource = sourceOf(sourceElement);
+				for (let current = composedParent(element); !mediaSource && current; current = composedParent(current)) {
+					const tagName = current.tagName.toLowerCase();
+					if (
+						tagName === "img" ||
+						tagName === "video" ||
+						tagName === "audio" ||
+						tagName === "source" ||
+						(tagName === "a" && current.getAttribute("href") !== null)
+					) {
+						mediaSource = sourceOf(current);
+						if (mediaSource) sourceElement = current;
+					}
+				}
+				if (!mediaSource) {
+					const nestedMedia = element.querySelector("img,video,audio,source,a[href]");
+					mediaSource = nestedMedia ? sourceOf(nestedMedia) : null;
+					if (mediaSource) sourceElement = nestedMedia;
+				}
+				if (!mediaSource) return null;
+				return new URL(
+					mediaSource,
+					sourceElement?.ownerDocument?.baseURI ?? (document as unknown as PageDocumentLike).baseURI,
+				).href;
+			}),
+		);
+		if (!source) throw new Error(`${deadline.label} requires an element with a media source`);
+
+		const media =
+			typeof this.#page.createCDPSession === "function"
+				? await this.#loadMediaWithCdp(source, deadline)
+				: await this.#loadMediaWithFetch(source, deadline);
+
 		this.#operationRemaining(deadline);
 		const destination = path.join(
 			this.#cwd,
@@ -3330,7 +3375,7 @@ export class PuppeteerCodexBrowserAdapter implements CodexBrowserAdapter {
 		const persistence = (async () => {
 			const output = await fs.open(temporary, "w");
 			try {
-				for (const chunk of decodedChunks) {
+				for (const chunk of media.chunks) {
 					this.#operationRemaining(deadline);
 					if (abandoned) throw new Error(`${deadline.label} persistence canceled`);
 					await output.writeFile(chunk);

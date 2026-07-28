@@ -104,7 +104,8 @@ export function bindBrowserRunFacade<T extends object>(target: T, signal: AbortS
 		const existing = boundObjects.get(current);
 		if (existing) return existing as U;
 		const cache = new Map<PropertyKey, unknown>();
-		const proxy = new Proxy(current, {
+		let proxy: U;
+		proxy = new Proxy(current, {
 			get(source, prop) {
 				throwIfAborted(signal);
 				if (cache.has(prop)) return cache.get(prop);
@@ -112,7 +113,7 @@ export function bindBrowserRunFacade<T extends object>(target: T, signal: AbortS
 				if (typeof value === "function") {
 					const wrapped = (...args: unknown[]): unknown => {
 						throwIfAborted(signal);
-						const result = Reflect.apply(value, source, args);
+						const result = Reflect.apply(value, Array.isArray(source) ? proxy : source, args);
 						if (result && typeof result === "object") {
 							const then = Reflect.get(result, "then");
 							if (typeof then === "function") {

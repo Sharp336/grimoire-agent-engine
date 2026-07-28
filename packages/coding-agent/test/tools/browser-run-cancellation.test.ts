@@ -172,6 +172,34 @@ describe("browser run cancellation", () => {
 		expect(reasons).toEqual([]);
 	});
 
+	it("binds facade objects yielded by array iteration and methods", async () => {
+		const controller = new AbortController();
+		const iteration = Promise.withResolvers<void>();
+		const mapping = Promise.withResolvers<void>();
+		const facade = bindBrowserRunFacade(
+			{
+				async all() {
+					return [{ click: () => iteration.promise }, { click: () => mapping.promise }];
+				},
+			},
+			controller.signal,
+		);
+
+		const reasons = await collectUnhandledRejections(async () => {
+			const locators = await facade.all();
+			for (const locator of locators) {
+				void locator.click();
+				break;
+			}
+			void locators.slice(1).map(locator => locator.click());
+			controller.abort(postmortem.markExpectedCleanupError(new Error("browser run ended")));
+			iteration.reject(controller.signal.reason);
+			mapping.reject(controller.signal.reason);
+		});
+
+		expect(reasons).toEqual([]);
+	});
+
 	it("handles unawaited methods on facade objects returned synchronously", async () => {
 		const controller = new AbortController();
 		const deferred = Promise.withResolvers<void>();

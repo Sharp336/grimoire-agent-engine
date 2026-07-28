@@ -1552,8 +1552,8 @@ describe("Codex agent.browser public contract", () => {
 			await withPuppeteerTool(async (tool, name) => {
 				const result = await runJson<{
 					info: Array<Record<string, unknown>>;
-					coordinateScreenshot: string;
-					playwrightBase64: string;
+					coordinateScreenshotLength: number;
+					playwrightScreenshotLength: number;
 					exportPath: string;
 				}>(
 					tool,
@@ -1566,8 +1566,8 @@ describe("Codex agent.browser public contract", () => {
 					 const image = await current.playwright.screenshot();
 					 return {
 						info: await current.playwright.elementInfo(point),
-						coordinateScreenshot: (await current.cua.get_visible_screenshot()).toBase64(),
-						playwrightBase64: image.toBase64(),
+						coordinateScreenshotLength: (await current.cua.get_visible_screenshot()).toBase64().length,
+						playwrightScreenshotLength: image.toBase64().length,
 						exportPath: await current.content.export(),
 					 };`,
 				);
@@ -1590,8 +1590,8 @@ describe("Codex agent.browser public contract", () => {
 					testId: "target",
 					selector: { candidates: expect.any(Array) },
 				});
-				expect(result.coordinateScreenshot.length).toBeGreaterThan(0);
-				expect(result.playwrightBase64.length).toBeGreaterThan(0);
+				expect(result.coordinateScreenshotLength).toBeGreaterThan(0);
+				expect(result.playwrightScreenshotLength).toBeGreaterThan(0);
 				expect(result.exportPath).toEqual(expect.any(String));
 				expect(result.exportPath).not.toContain("<html");
 			});
@@ -1670,18 +1670,26 @@ describe("Codex agent.browser public contract", () => {
 		expect(evaluationCount).toBeGreaterThan(beforeDispose);
 	});
 
-	it("transfers Puppeteer media in bounded base64 chunks without per-byte arrays", async () => {
-		const media = { contentType: "application/octet-stream", base64Chunks: ["AAEC", "AwQ="] } as Record<
-			string,
-			unknown
-		>;
-		Object.defineProperty(media, "bytes", {
-			get() {
-				throw new Error("per-byte media transport was accessed");
+	it("transfers Puppeteer media in bounded streamed chunks without page base64 transport", async () => {
+		const chunks = [new Uint8Array([0, 1, 2]), new Uint8Array([3, 4])];
+		let readIndex = 0;
+		spyOn(globalThis, "fetch").mockResolvedValue({
+			ok: true,
+			status: 200,
+			headers: new Headers({ "content-type": "application/octet-stream" }),
+			body: {
+				getReader: () => ({
+					read: async () =>
+						readIndex < chunks.length
+							? { done: false, value: chunks[readIndex++]! }
+							: { done: true, value: undefined },
+					cancel: async () => undefined,
+					releaseLock: () => undefined,
+				}),
 			},
-		});
+		} as unknown as Response);
 		const handle = {
-			evaluate: async () => media,
+			evaluate: async () => "https://fixture.test/media.bin",
 			dispose: async () => undefined,
 		} as never;
 		const page = {
@@ -1716,13 +1724,30 @@ describe("Codex agent.browser public contract", () => {
 		if (!current) throw new Error("Expected selected contract tab");
 		expect(await current.playwright.locator("img").downloadMedia()).toBeUndefined();
 		expect(Buffer.concat(writes)).toEqual(Buffer.from([0, 1, 2, 3, 4]));
-		adapter.dispose();
+		await adapter.dispose();
 	});
 
-	it("removes partial Puppeteer media output when chunk transfer is aborted", async () => {
+	it("removes partial Puppeteer media output when streamed persistence is aborted", async () => {
 		const controller = new AbortController();
+		const chunks = [new Uint8Array([0, 1, 2]), new Uint8Array([3, 4]), new Uint8Array([5, 6])];
+		let readIndex = 0;
+		spyOn(globalThis, "fetch").mockResolvedValue({
+			ok: true,
+			status: 200,
+			headers: new Headers({ "content-type": "application/octet-stream" }),
+			body: {
+				getReader: () => ({
+					read: async () =>
+						readIndex < chunks.length
+							? { done: false, value: chunks[readIndex++]! }
+							: { done: true, value: undefined },
+					cancel: async () => undefined,
+					releaseLock: () => undefined,
+				}),
+			},
+		} as unknown as Response);
 		const handle = {
-			evaluate: async () => ({ contentType: "application/octet-stream", base64Chunks: ["AAEC", "AwQ=", "BQY="] }),
+			evaluate: async () => "https://fixture.test/media.bin",
 			dispose: async () => undefined,
 		} as never;
 		const page = {
@@ -1761,7 +1786,7 @@ describe("Codex agent.browser public contract", () => {
 		const removedPaths = removeSpy.mock.calls.map(([file]) => String(file));
 		expect(removedPaths.some(file => file.includes(".partial-"))).toBe(true);
 		expect(removedPaths.some(file => !file.includes(".partial-") && file.includes("codex-media-"))).toBe(true);
-		adapter.dispose();
+		await adapter.dispose();
 	});
 
 	it("bounds cmux native logs across repeated observer installation", async () => {
