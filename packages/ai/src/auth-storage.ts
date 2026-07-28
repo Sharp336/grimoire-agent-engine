@@ -7734,7 +7734,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					id,
 					expectedData,
 				) as { changes: number });
-		if (result.changes !== 1) return false;
+		if (result.changes === 0) return false;
 		if (provider) {
 			this.#purgeSupersededDisabledRows(provider, this.listAuthCredentials(provider));
 		}
@@ -7773,7 +7773,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			: (this.#deleteIfMatchesStmt.run(normalizeDisabledCause(disabledCause), id, expectedData) as {
 					changes: number;
 				});
-		return result.changes === 1;
+		return result.changes > 0;
 	}
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
 		try {
