@@ -2540,9 +2540,10 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		expect(code.length).toBeGreaterThan(2 * 1024);
 
 		const rendered = plain(doc);
-		// Exactly one fence pair: a window cut inside the block would close and
-		// reopen it (or spill code lines into prose).
-		expect(rendered.filter(line => line.trimStart().startsWith("```"))).toHaveLength(2);
+		// Source fences stay hidden, and every code row remains contiguous: a
+		// window cut inside the block would spill or duplicate code rows.
+		expect(rendered.some(line => line.trimStart().startsWith("```"))).toBe(false);
+		expect(rendered.filter(line => line.includes("const value"))).toHaveLength(200);
 		const first = rendered.findIndex(line => line.includes("const value0 = 0;"));
 		expect(first).toBeGreaterThan(-1);
 		for (let i = 0; i < 200; i++) {
