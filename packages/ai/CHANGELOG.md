@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [17.1.7] - 2026-07-27
+
+### Changed
+
+- Upstream `403 Forbidden` responses (e.g. Anthropic `permission_error` plan/model denials, Copilot model-policy rejections) now rotate through sibling credentials like usage limits do, instead of failing the session on the first denied account. The denied credential is soft-blocked for 60s and re-validated — never removed — and the original 403 surfaces only once every sibling has been tried.
+- Usage report filtering in the auth-broker remote store is memoized per (reports, snapshot) with a precomputed per-provider OAuth credential map, replacing an O(reports × credentials) scan on every credential-selection and status refresh
+- Cursor and Devin Connect-frame readers no longer copy every stream chunk through `Buffer.concat` when the pending buffer is empty
+
+## [17.1.6] - 2026-07-27
+
+### Added
+
+- Added `getProxyForUrl()` for transports that need provider-specific and standard proxy environment resolution with `NO_PROXY` support ([#6770](https://github.com/can1357/oh-my-pi/issues/6770)).
+- Added SiliconFlow and SiliconFlow (China) to the built-in API-key login provider catalog so `omp login siliconflow` / `omp login siliconflow-cn` stores a reusable credential validated against each region's `/v1/models` endpoint.
+
+## [17.1.5] - 2026-07-27
+
 ### Fixed
 
 - Fixed legacy Codex usage blocks continuing to gate every model after per-meter backoff shipped. SQLite schema 7 now splits the old `shared` scope into independent `chat` and `spark` blocks while preserving their expiry and age, then keeps a trigger-maintained physical `shared` mirror so pre-meter binaries that read the same database remain conservative after a rollback. Current store APIs expose only the meter scopes, while legacy direct `shared` writes fan back out to both meters. Broker clients negotiate meter-scoped snapshots with `OMP-Auth-Broker-Capabilities: codex-meter-block-scopes`; older clients receive a legacy `shared` wire projection, with `Vary` and a new encrypted-cache version keeping the representations separate. Active brokers now detect commits from legacy processes through SQLite's data version and advance snapshot generations, so long-poll and streaming clients receive those compatibility writes without reconnecting.

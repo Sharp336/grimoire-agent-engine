@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { VERSION } from "@oh-my-pi/pi-utils";
+import type { BunPlugin } from "bun";
 import { resolveBundledChangelogPath } from "../../src/utils/changelog";
 
 interface HeapProbeResult {
@@ -19,16 +20,6 @@ const heapProbePath = path.resolve(import.meta.dir, "..", "fixtures", "changelog
 const bundleProbePath = path.resolve(import.meta.dir, "..", "fixtures", "changelog-bundle-fallback-probe.ts");
 const utilsStubPath = path.resolve(import.meta.dir, "..", "fixtures", "changelog-utils-stub.ts");
 
-const changelogUtilsStubPlugin: Bun.BunPlugin = {
-	name: "changelog-utils-stub",
-	setup(build) {
-		build.onResolve({ filter: /^@oh-my-pi\/pi-utils$/ }, () => ({ path: utilsStubPath }));
-		build.onResolve({ filter: /^\.\.\/config$/ }, args =>
-			args.importer.endsWith("/utils/changelog.ts") ? { path: utilsStubPath } : undefined,
-		);
-	},
-};
-
 async function runProbe(command: string[], cwd?: string): Promise<BundleProbeResult> {
 	const proc = Bun.spawn(command, {
 		cwd,
@@ -42,6 +33,25 @@ async function runProbe(command: string[], cwd?: string): Promise<BundleProbeRes
 	]);
 	expect(exitCode, stderr).toBe(0);
 	return JSON.parse(stdout) as BundleProbeResult;
+}
+
+/**
+ * Swap `@oh-my-pi/pi-utils` and the changelog module's `../config` import for a
+ * dependency-free stub. Both pull the native addon loader into the bundle graph, and
+ * that loader resolves `pi_natives.<platform>.node` relative to the emitted artifact,
+ * so any probe written outside the repo fails to start. The subject under test is
+ * emitted-asset resolution, not native loading.
+ */
+function changelogUtilsStubPlugin(): BunPlugin {
+	return {
+		name: "changelog-utils-stub",
+		setup(build) {
+			build.onResolve({ filter: /^@oh-my-pi\/pi-utils$/ }, () => ({ path: utilsStubPath }));
+			build.onResolve({ filter: /^\.\.\/config$/ }, args =>
+				args.importer.endsWith("/utils/changelog.ts") ? { path: utilsStubPath } : undefined,
+			);
+		},
+	};
 }
 
 describe("bundled changelog asset path resolution", () => {
@@ -89,10 +99,10 @@ describe("changelog static import resources", () => {
 
 			const buildOutput = await Bun.build({
 				entrypoints: [bundleProbePath],
-				external: ["omp-legacy-pi-modules"],
 				outdir: bundleDir,
-				plugins: [changelogUtilsStubPlugin],
 				target: "bun",
+				external: ["omp-legacy-pi-modules"],
+				plugins: [changelogUtilsStubPlugin()],
 			});
 			expect(buildOutput.success, buildOutput.logs.map(log => log.message).join("\n")).toBe(true);
 
@@ -125,7 +135,7 @@ describe("changelog static import resources", () => {
 				entrypoints: [bundleProbePath],
 				root: repoRoot,
 				external: ["omp-legacy-pi-modules"],
-				plugins: [changelogUtilsStubPlugin],
+				plugins: [changelogUtilsStubPlugin()],
 				compile: {
 					outfile: binaryPath,
 					autoloadBunfig: false,

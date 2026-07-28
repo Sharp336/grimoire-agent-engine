@@ -1580,6 +1580,10 @@ describe("AuthStorage codex oauth ranking", () => {
 				remoteStore.cleanExpiredCredentialBlocks(Date.now() + STALE_BLOCK_GUARD_MS);
 
 				await clientStorage.fetchUsageReports();
+				// The broker heals its own store synchronously while serving /v1/usage,
+				// but the client snapshot converges via the background long-poll. Pull
+				// one explicit snapshot so the assertion doesn't race that poll.
+				await remoteStore.refreshSnapshot();
 
 				expect(remoteStore.getCredentialBlock(blockedRow.id, "openai-codex:oauth", "chat")).toBeUndefined();
 				expect(store.getCredentialBlock(blockedRow.id, "openai-codex:oauth", "chat")).toBeUndefined();
