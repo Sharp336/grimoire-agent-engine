@@ -163,7 +163,7 @@ interface ActiveAdvisor {
 	signature: string;
 }
 
-interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
+export interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
 	firstKeptEntryId?: string;
 	advisorUsageAnchorStartIndex?: number;
 }

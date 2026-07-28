@@ -46,6 +46,7 @@ import {
 import {
 	type CompactionPreparation,
 	type CompactionResult,
+	calculateContextTokens,
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
 	estimateTokens,
@@ -306,7 +307,7 @@ import {
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import { formatRetryFallbackSelector, type RetryFallbackSelector } from "./retry-fallback-chains";
-import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
+import { type AdvisorCompactionSummaryMessage, type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";

@@ -25,6 +25,8 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 	useEffect(() => {
 		if (id !== null) {
 			previousActiveElement.current = document.activeElement as HTMLElement;
+			// Focus close button for keyboard/screen-reader users
+			setTimeout(() => closeButtonRef.current?.focus(), 0);
 		}
 	}, [id]);
 
