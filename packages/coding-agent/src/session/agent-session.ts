@@ -6519,13 +6519,22 @@ export class AgentSession {
 
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
+		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
-			if (!modelsAreEqual(currentModel, model)) {
+			if (isChanging) {
 				this.#clearInheritedProviderPromptCacheKey();
 			}
 		}
 		this.agent.setModel(model);
+		// Every internal model mutation funnels through this method (explicit
+		// /model, prewalk hand-offs, retry-fallback, model cycling), so this is
+		// the single point that notifies subscribers (ACP config sync, RPC,
+		// TUI status line) — callers that bypass ModelControls never need to
+		// remember to notify separately.
+		if (isChanging) {
+			await this.#emitSessionEvent({ type: "model_changed" });
+		}
 
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);
