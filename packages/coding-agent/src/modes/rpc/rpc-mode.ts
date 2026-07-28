@@ -670,6 +670,14 @@ export async function runRpcMode(
 	// breaks JSON.parse. In RPC mode stdout is the JSON protocol channel — nothing else
 	// may write there.
 	process.env.PI_NOTIFICATIONS = "off";
+	// Headless runtimes have no InteractiveMode to suspend/rehydrate vibe
+	// workers across a session switch; reconcile by tearing down the old scope
+	// (AgentSession.disposeActiveVibe) so a programmatic switch/branch never
+	// leaks workers into another transcript. switchSession()/branch() invoke this
+	// hook before changing the session identity; newSession() self-throws.
+	session.setSessionBeforeSwitchReconciler(async () => {
+		await session.disposeActiveVibe();
+	});
 
 	const frameEncoder = new RpcFrameEncoder();
 	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
@@ -1066,19 +1074,6 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				// switch_session and branch have no vibe guard inside AgentSession
-				// (unlike newSession, which hard-throws via
-				// #assertVibeSessionTransitionAllowed and surfaces a clean RPC
-				// error). The TUI reconciles vibe on session switch via a
-				// reconciler RPC never installs, so block these two here to
-				// avoid leaking workers / carrying the tool snapshot.
-				if (command.type !== "new_session" && session.getVibeModeState()?.enabled) {
-					return error(
-						id,
-						command.type,
-						"Cannot change the active session while vibe mode is active. Exit vibe mode first.",
-					);
-				}
 				const result = await handleRpcSessionChange(session, command, subagentRegistry);
 				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
 				return success(id, result.type, result.data);

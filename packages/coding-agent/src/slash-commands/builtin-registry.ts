@@ -443,21 +443,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handle: async (command, runtime) => {
 			const { session, sessionManager } = runtime;
 			const vibeState = session.getVibeModeState();
-			// The ACP handler has no InteractiveModeContext, so build the
-			// VibeParentSession adapter inline and reuse it on both paths.
-			const parent: VibeParentSession = {
-				getAgentId: () => session.getAgentId() ?? null,
-				getSessionId: () => sessionManager.getSessionId(),
-				getSessionFile: () => sessionManager.getSessionFile() ?? null,
-				sessionManager,
-				asyncJobManager: session.asyncJobManager,
-				settings: session.settings,
-				getActiveModelString: () => (session.model ? formatModelString(session.model) : undefined),
-			};
+
 			if (vibeState?.enabled) {
-				const killed = await VibeSessionRegistry.global().killAll(parent);
-				await session.deactivateVibeTools(vibeState.previousTools ?? []);
-				session.setVibeModeState(undefined);
+				const killed = await session.disposeActiveVibe();
 				await runtime.output(
 					killed > 0
 						? `Vibe mode disabled. Killed ${killed} worker session${killed === 1 ? "" : "s"}.`
@@ -471,6 +459,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (session.getGoalModeState()?.enabled) {
 				return usage("Exit goal mode first.", runtime);
 			}
+			const parent: VibeParentSession = {
+				getAgentId: () => session.getAgentId() ?? null,
+				getSessionId: () => sessionManager.getSessionId(),
+				getSessionFile: () => sessionManager.getSessionFile() ?? null,
+				sessionManager,
+				asyncJobManager: session.asyncJobManager,
+				settings: session.settings,
+				getActiveModelString: () => (session.model ? formatModelString(session.model) : undefined),
+			};
 			const registry = VibeSessionRegistry.global();
 			registry.activateScope(registry.ownerScope(parent));
 			const previousTools = session.getEnabledToolNames();

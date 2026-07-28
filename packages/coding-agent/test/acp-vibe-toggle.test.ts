@@ -15,6 +15,12 @@
  *    the registry's workers.
  * 4. While plan mode is active, `/vibe` is consumed with a usage message and
  *    vibe stays disabled (the guard works).
+ * 5. Disposing a vibe-active session tears down its workers and clears vibe
+ *    state — no runtime (TUI quit, ACP close, RPC shutdown) leaks background
+ *    workers.
+ * 6. A headless `switchSession()` during vibe triggers the before-switch
+ *    reconciler (kill, not suspend/rehydrate), preventing workers from leaking
+ *    into another transcript.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -153,6 +159,47 @@ describe("ACP /vibe handle", () => {
 		// Consumed (not forwarded to the model), but vibe must stay off.
 		expect(result).toEqual({ consumed: true });
 		expect(output.some(line => line.includes("Exit plan mode first"))).toBe(true);
+		expect(session.getVibeModeState()).toBeUndefined();
+	});
+	it("kills active vibe workers and clears vibe state when the session is disposed", async () => {
+		await executeAcpBuiltinSlashCommand("/vibe", buildRuntime());
+		expect(session.getVibeModeState()?.enabled).toBe(true);
+		const killAll = vi.spyOn(VibeSessionRegistry.global(), "killAll");
+
+		await session.dispose();
+
+		// Disposing a vibe-active session must tear down its workers so no runtime
+		// (TUI quit, ACP close, RPC shutdown) leaves background workers running.
+		expect(killAll).toHaveBeenCalledTimes(1);
+		expect(session.getVibeModeState()).toBeUndefined();
+	});
+
+	it("reconciles vibe on a headless session switch instead of leaking workers", async () => {
+		await executeAcpBuiltinSlashCommand("/vibe", buildRuntime());
+		expect(session.getVibeModeState()?.enabled).toBe(true);
+		await session.sessionManager.ensureOnDisk();
+		// Headless runtimes (ACP/RPC) install this reconciler; the TUI installs its
+		// own suspend/rehydrate variant. Mirrors runRpcMode / #registerPreparedSession.
+		session.setSessionBeforeSwitchReconciler(async () => {
+			await session.disposeActiveVibe();
+		});
+
+		const target = SessionManager.create(tempDir.path(), tempDir.path());
+		target.appendModeChange("none");
+		await target.ensureOnDisk();
+		const targetFile = target.getSessionFile();
+		if (!targetFile) throw new Error("Expected target session file");
+		await target.close();
+
+		const killAll = vi.spyOn(VibeSessionRegistry.global(), "killAll");
+		const suspend = vi.spyOn(VibeSessionRegistry.global(), "suspendScope");
+
+		expect(await session.switchSession(targetFile)).toBe(true);
+
+		// The headless reconciler kills the old scope (a programmatic switch has no
+		// expectation vibe survives it) and clears vibe state — not suspend/rehydrate.
+		expect(killAll).toHaveBeenCalledTimes(1);
+		expect(suspend).not.toHaveBeenCalled();
 		expect(session.getVibeModeState()).toBeUndefined();
 	});
 });

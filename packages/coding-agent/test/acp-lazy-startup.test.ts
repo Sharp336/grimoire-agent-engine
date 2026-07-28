@@ -137,6 +137,7 @@ class LazyFakeSession {
 	async fork(): Promise<boolean> {
 		return false;
 	}
+	setSessionBeforeSwitchReconciler(_reconciler: (() => Promise<void>) | null): void {}
 }
 
 /**

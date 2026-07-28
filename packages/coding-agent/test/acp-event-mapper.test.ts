@@ -103,6 +103,7 @@ class ReplayTestSession {
 	}
 
 	async refreshMCPTools(_tools: unknown): Promise<void> {}
+	setSessionBeforeSwitchReconciler(_reconciler: (() => Promise<void>) | null): void {}
 }
 
 describe("ACP event mapper", () => {

@@ -204,6 +204,7 @@ import { normalizeModelContextImages } from "../utils/image-loading";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
+import { type VibeParentSession, VibeSessionRegistry } from "../vibe/runtime";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import type {
@@ -3552,6 +3553,15 @@ export class AgentSession {
 		}
 		await this.#drainAutolearnCapture();
 		await this.#memory.transition;
+		// Tear down any active vibe workers before the async-job manager is
+		// disposed: killAll drives #killRecord through session.asyncJobManager,
+		// which #disposeOwnedAsyncJobs (below) tears down. No runtime should
+		// leave its own background workers running after disposal.
+		try {
+			await this.disposeActiveVibe();
+		} catch (error) {
+			logger.warn("Failed to tear down active vibe workers during dispose", { error: String(error) });
+		}
 
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
@@ -4276,6 +4286,31 @@ export class AgentSession {
 		if (this.#vibeModeState?.enabled) {
 			throw new Error(`Cannot ${action} while vibe mode is active. Exit vibe mode first.`);
 		}
+	}
+
+	/**
+	 * Kill this session's vibe workers, restore the pre-vibe toolset, and clear
+	 * vibe state. Called from {@link #doDispose} (no runtime should leave its own
+	 * background workers running after disposal) and from the headless
+	 * session-switch reconciler installed by ACP/RPC — the TUI instead suspends
+	 * and rehydrates via its own reconciler. A no-op returning 0 when vibe is
+	 * inactive, so callers need not pre-check.
+	 */
+	async disposeActiveVibe(): Promise<number> {
+		const vibeState = this.#vibeModeState;
+		if (!vibeState?.enabled) return 0;
+		const parent: VibeParentSession = {
+			getAgentId: () => this.getAgentId() ?? null,
+			getSessionId: () => this.sessionManager.getSessionId(),
+			getSessionFile: () => this.sessionManager.getSessionFile() ?? null,
+			sessionManager: this.sessionManager,
+			asyncJobManager: this.#asyncJobManager,
+			settings: this.settings,
+		};
+		const killed = await VibeSessionRegistry.global().killAll(parent);
+		await this.deactivateVibeTools(vibeState.previousTools ?? []);
+		this.#vibeModeState = undefined;
+		return killed;
 	}
 
 	get goalRuntime(): GoalRuntime {
@@ -7242,6 +7277,8 @@ export class AgentSession {
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+
+		await this.#sessionBeforeSwitchReconciler?.();
 
 		await this.#bash.flushPending();
 		// Flush pending writes before branching
