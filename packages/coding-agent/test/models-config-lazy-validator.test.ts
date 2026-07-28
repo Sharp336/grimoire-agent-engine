@@ -62,4 +62,8 @@ test("models config validation resources are retained only for a custom config",
 	} finally {
 		await tempDir.remove().catch(() => {});
 	}
-});
+	// Two subprocess probes, each transpiling the config/model graph from a cold
+	// cache. That lands near 4s on a warm developer box and past the 5s default
+	// on a CI runner, where every job starts cold — the failure surfaces as
+	// "timed out after 5000ms" plus a killed dangling process, not an assertion.
+}, 60_000);
