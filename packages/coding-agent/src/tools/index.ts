@@ -62,7 +62,7 @@ import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
-import { isMountableUnderXdev, type XdevState } from "./xdev";
+import { compileXdevDeviceGlobs, isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
 
 export * from "../edit";
@@ -632,8 +632,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	if (xdevEnabled) {
 		const mountedNames = new Set<string>();
 		const kept: Tool[] = [];
+		const pinnedTopLevelGlobs = compileXdevDeviceGlobs(session.settings.get("tools.xdevTopLevelDevices"));
 		for (const tool of tools) {
-			const mountable = mountBuiltinTools && isMountableUnderXdev(tool) && tool.name in BUILTIN_TOOLS;
+			const mountable =
+				mountBuiltinTools && isMountableUnderXdev(tool, pinnedTopLevelGlobs) && tool.name in BUILTIN_TOOLS;
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}

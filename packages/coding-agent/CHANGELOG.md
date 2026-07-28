@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tools.xdevTopLevelDevices`, a glob allowlist that keeps matching discoverable tools (built-in, MCP, or extension) mounted top-level instead of behind `xd://` dispatch, trading prompt tokens for zero docs-read/write round-trips on hot devices.
+
 ## [17.1.7] - 2026-07-27
 
 ### Fixed
