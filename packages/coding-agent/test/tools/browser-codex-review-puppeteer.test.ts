@@ -186,7 +186,7 @@ describe("Puppeteer Codex log capture", () => {
 		for (let index = 0; index < 80; index++) {
 			session.emit("Runtime.consoleAPICalled", {
 				type: "log",
-				args: [{ type: "string", value: `${index}:` + "x".repeat(32 * 1024) }],
+				args: [{ type: "string", value: `${index}:${"x".repeat(32 * 1024)}` }],
 			});
 		}
 

@@ -2260,9 +2260,7 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 		if (operation === "locator.press") {
 			const key = stringArg(args, "value")
 				.split("+")
-				.map(part =>
-					part === "ControlOrMeta" ? (process.platform === "darwin" ? "Meta" : "Control") : part,
-				)
+				.map(part => (part === "ControlOrMeta" ? (process.platform === "darwin" ? "Meta" : "Control") : part))
 				.join("+");
 			const token = `${this.#tokenNamespace}-action-${crypto.randomUUID()}`;
 			let tokenBound = false;
@@ -2411,7 +2409,6 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 			}
 		}
 	}
-
 
 	async #pressKeys(keys: string[], deadline: number, operation: string): Promise<void> {
 		if (keys.length === 0) return;
