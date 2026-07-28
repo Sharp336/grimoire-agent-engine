@@ -2,17 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Hid fenced-code delimiters and Markdown heading hashes from rendered output while preserving code indentation, list nesting, and heading hierarchy through indentation.
+
+### Changed
+
+- Retained `MarkdownTheme.codeBlockBorder` as a deprecated optional callback for source compatibility; it is ignored now that source fence delimiters are not rendered.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
 
 - Fixed wrapped Markdown list continuations losing their hanging indentation in narrow terminal layouts.
 - Fixed an issue where emergency exits from fullscreen overlays could leave the Kitty keyboard protocol active, corrupting Arrow Up input in the terminal after exiting.
-- Hid fenced-code delimiters and Markdown heading hashes from rendered output while preserving code indentation, list nesting, and heading hierarchy through indentation.
 
-### Changed
-
-- Retained `MarkdownTheme.codeBlockBorder` as a deprecated optional callback for source compatibility; it is ignored now that source fence delimiters are not rendered.
 
 ## [17.1.7] - 2026-07-27
 
