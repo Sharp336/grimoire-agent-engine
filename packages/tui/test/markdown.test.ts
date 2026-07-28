@@ -4,6 +4,7 @@ import {
 	autolinkSchemeScanIndex,
 	clearRenderCache,
 	Markdown,
+	type MarkdownTheme,
 	mathStartIndex,
 	renderInlineMarkdown,
 	urlTokenPossible,
@@ -920,6 +921,23 @@ ${table}`;
 			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
 
 			expect(plainLines).toEqual(["  const answer = 42;", "  console.log(answer);"]);
+		});
+
+		it("accepts the legacy code-block border callback without rendering delimiters", () => {
+			let borderCalls = 0;
+			const legacyCompatibleTheme: MarkdownTheme = {
+				...defaultMarkdownTheme,
+				codeBlockBorder: text => {
+					borderCalls++;
+					return `<border>${text}</border>`;
+				},
+			};
+			const plainLines = new Markdown("```ts\nconst answer = 42;\n```", 0, 0, legacyCompatibleTheme)
+				.render(80)
+				.map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["  const answer = 42;"]);
+			expect(borderCalls).toBe(0);
 		});
 
 		it("indents level-two through level-six headings without rendering source hashes", () => {

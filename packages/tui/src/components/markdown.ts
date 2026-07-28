@@ -1088,6 +1088,8 @@ export interface MarkdownTheme {
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
+	/** @deprecated Fenced-code delimiters are not rendered. Accepted for source compatibility and ignored. */
+	codeBlockBorder?: (text: string) => string;
 	quote: (text: string) => string;
 	quoteBorder: (text: string) => string;
 	hr: (text: string) => string;
