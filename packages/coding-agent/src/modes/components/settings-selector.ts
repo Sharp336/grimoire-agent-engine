@@ -1280,8 +1280,10 @@ export class SettingsSelectorComponent implements Component {
 				parsed = validateProviderMaxInFlightRequests(parsed);
 			}
 			settings.set(path, parsed as never);
-		} else if (typeof currentValue === "number") {
-			settings.set(path, Number(value) as never);
+		} else if (schemaType === "number") {
+			// Parse numeric value; empty string clears to undefined for automatic behavior
+			const parsed = value.trim() === "" ? undefined : Number(value);
+			settings.set(path, parsed as never);
 		} else if (typeof currentValue === "boolean") {
 			settings.set(path, (value === "true") as never);
 		} else {
