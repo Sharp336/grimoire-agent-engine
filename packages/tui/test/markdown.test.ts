@@ -972,6 +972,18 @@ ${table}`;
 
 			expect(plainLines).toEqual(["- Examples:", "    const first = 1;", "", "    echo second"]);
 		});
+
+		it("preserves a blank boundary between fenced code and following prose inside a list item", () => {
+			const markdown = new Markdown(
+				"- Example:\n\n  ```ts\n  const x = 1;\n  ```\n\n  after",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["- Example:", "    const x = 1;", "", "  after"]);
+		});
 	});
 
 	describe("Spacing after code blocks", () => {

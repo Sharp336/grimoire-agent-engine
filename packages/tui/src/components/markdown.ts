@@ -2660,6 +2660,11 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 		let previousNonSpaceType: string | undefined;
 
 		for (const token of tokens) {
+			// Fenced delimiters are hidden, so preserve their visual boundary before
+			// the next rendered block. Space tokens may intervene but do not render.
+			if (previousNonSpaceType === "code" && token.type !== "space") {
+				lines.push({ text: "", nested: false });
+			}
 			if (token.type === "list") {
 				// Nested list - render with one additional indent level
 				// These lines carry their own indent, so tag them for pass-through
@@ -2693,7 +2698,6 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 				}
 			} else if (token.type === "code") {
 				// Code block in list item
-				if (previousNonSpaceType === "code") lines.push({ text: "", nested: false });
 				const codeIndent = padding(this.#codeBlockIndent);
 				for (const bodyLine of this.#renderCodeBodyLines(token, codeIndent)) {
 					lines.push({ text: bodyLine, nested: false });
