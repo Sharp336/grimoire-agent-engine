@@ -130,7 +130,7 @@ describe("issue #986 compaction auth fallback", () => {
 			session.sessionManager.appendMessage(assistant);
 		}
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([currentModel, sameProviderModel, crossProviderModel]);
-		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		const apiKeySpy = vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
 
 		const triggerAutoCompaction = async (): Promise<void> => {
 			const { promise, resolve } = Promise.withResolvers<void>();
@@ -159,7 +159,7 @@ describe("issue #986 compaction auth fallback", () => {
 			await session.waitForIdle();
 		};
 
-		return { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction };
+		return { apiKeySpy, crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction };
 	}
 
 	it("continues same-provider native candidates but stops before crossing providers on non-auth failure", async () => {
@@ -180,6 +180,39 @@ describe("issue #986 compaction auth fallback", () => {
 				firstKeptEntryId: preparation.firstKeptEntryId,
 				tokensBefore: 42,
 			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+	});
+
+	it("skips unauthenticated cross-provider candidates before enforcing the native boundary", async () => {
+		const { apiKeySpy, crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
+			await createAutoNativeFallbackSession();
+		session.settings.setModelRole("smol", `${crossProviderModel.provider}/${crossProviderModel.id}`);
+		session.settings.setModelRole("slow", `${sameProviderModel.provider}/${sameProviderModel.id}`);
+		apiKeySpy.mockImplementation(async model =>
+			model.provider === crossProviderModel.provider ? undefined : "test-key",
+		);
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.provider === currentModel.provider && model.id === currentModel.id) {
+				throw new compactionModule.NativeCompactionError(new Error("native compaction transport failed"));
+			}
+			if (model.provider === sameProviderModel.provider && model.id === sameProviderModel.id) {
+				return {
+					summary: "authenticated same-provider summary",
+					shortSummary: "authenticated same-provider",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: 42,
+				};
+			}
+			throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
 		});
 
 		await triggerAutoCompaction();

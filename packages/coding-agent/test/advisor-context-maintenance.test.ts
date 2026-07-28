@@ -170,13 +170,13 @@ describe("AgentSession advisor context maintenance", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be active");
 		advisor.setModel(nativeModel);
-		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		const apiKeySpy = vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([nativeModel, sameProviderModel, crossProviderModel]);
 		advisor.state.messages.push(
 			usageAnchor(advisorMock, Date.now() - 2_000),
 			usageAnchor(advisorMock, Date.now() - 1_000),
 		);
-		return { advisor, crossProviderModel, nativeModel, sameProviderModel };
+		return { advisor, apiKeySpy, crossProviderModel, nativeModel, sameProviderModel, settings };
 	}
 
 	it("maintains a 371,200-token cached advisor context before the 372,000-token window", async () => {
@@ -383,6 +383,38 @@ describe("AgentSession advisor context maintenance", () => {
 			`${sameProviderModel.provider}/${sameProviderModel.id}`,
 		]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("same-provider native summary");
+	});
+
+	it("skips unauthenticated advisor candidates before enforcing the native boundary", async () => {
+		const { advisor, apiKeySpy, crossProviderModel, nativeModel, sameProviderModel, settings } =
+			createAdvisorFallbackHarness();
+		settings.setModelRole("smol", `${crossProviderModel.provider}/${crossProviderModel.id}`);
+		settings.setModelRole("slow", `${sameProviderModel.provider}/${sameProviderModel.id}`);
+		apiKeySpy.mockImplementation(async model =>
+			model.provider === crossProviderModel.provider && model.id === crossProviderModel.id ? undefined : "test-key",
+		);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.provider === nativeModel.provider && model.id === nativeModel.id) {
+				throw new compactionModule.NativeCompactionError(new Error("V2 native compaction transport failed"));
+			}
+			if (model.provider === sameProviderModel.provider && model.id === sameProviderModel.id) {
+				return {
+					summary: "authenticated same-provider advisor summary",
+					shortSummary: "authenticated same-provider advisor",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: 42,
+				};
+			}
+			throw new Error(`Unexpected advisor compaction model ${model.provider}/${model.id}`);
+		});
+
+		await session.prompt("small current update");
+
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${nativeModel.provider}/${nativeModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+		expect(JSON.stringify(advisor.state.messages)).toContain("authenticated same-provider advisor summary");
 	});
 
 	it("stops before a same-provider advisor candidate with native compaction disabled", async () => {
