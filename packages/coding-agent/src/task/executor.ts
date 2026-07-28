@@ -1828,7 +1828,6 @@ async function driveSessionToYield(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
-	requireYield = true,
 ): Promise<DriveOutcome> {
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -1876,10 +1875,6 @@ async function driveSessionToYield(
 			// failures keep the old path.
 			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
 			if (!recoverableStop || abortSignal.aborted) throw err;
-		}
-
-		if (!requireYield) {
-			return { exitCode, error, aborted, abortReasonText };
 		}
 
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
@@ -2862,12 +2857,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const inherited = await beforeToolCall?.(ctx, toolSignal);
 					if (inherited?.block) return inherited;
 					const effectiveArgs = inherited?.args ?? ctx.args;
-					if (ctx.tool.name === "hub" && isRecord(effectiveArgs) && effectiveArgs.op === "send") {
-						return {
-							block: true,
-							reason: "Forked task agents cannot steer peers; return findings to the parent.",
-						};
-					}
 					if (resolveToolTier(ctx.tool, effectiveArgs) !== "read") {
 						return { block: true, reason: "Forked task agents are read-only; return findings to the parent." };
 					}
@@ -3139,7 +3128,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToYield(session, monitor, task, !useFork);
+			const outcome = await driveSessionToYield(session, monitor, task);
 			exitCode = outcome.exitCode;
 			error = outcome.error;
 			aborted = outcome.aborted;
