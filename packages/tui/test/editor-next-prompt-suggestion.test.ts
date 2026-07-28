@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
@@ -34,6 +35,27 @@ describe("Editor next prompt suggestion", () => {
 
 		expect(editor.getText()).toBe("");
 		expect(changes).toEqual([suggestion, ""]);
+	});
+
+	it("renders and accepts a contextual ghost with the IME-safe hardware cursor layout", () => {
+		const suggestion = "Inspect the failing test";
+		const editor = new Editor(defaultEditorTheme);
+		let submitted: string | undefined;
+		editor.focused = true;
+		editor.setUseTerminalCursor(true);
+		editor.setImeSafeCursorLayout(true);
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+		editor.setNextPromptSuggestion(suggestion);
+
+		const rendered = editor.render(80).map(line => stripVTControlCharacters(line.replaceAll(CURSOR_MARKER, "")));
+
+		expect(rendered[1]).toBe("|  ");
+		expect(rendered[2]).toContain(suggestion);
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe(suggestion);
+		expect(submitted).toBeUndefined();
 	});
 
 	it("notifies focus changes only on real transitions", () => {

@@ -1159,22 +1159,28 @@ export class Editor implements Component, Focusable {
 			// trailing `─`, but never the corner/vertical bar itself.
 			const isLastLine = visibleIndex === visibleLayoutLines.length - 1;
 			const rightChromeCells = Math.max(1, paddingX + 1 - cursorPaddingOverflow);
-			if (isLastLine && imeSafeCursorTail) {
-				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
-				const bottomBorder = this.borderColor(
-					`${box.bottomLeft}${box.horizontal.repeat(Math.max(0, width - 2))}${box.bottomRight}`,
-				);
-				result.push(leftBorder + displayText);
-				result.push(bottomBorder);
-				continue;
-			}
 			if (isLastLine) {
 				const rightPad = Math.max(0, rightChromeCells - 2);
 				const includeHorizontal = rightChromeCells >= 2;
 				const bottomRightAdjusted = this.borderColor(
 					`${padding(rightPad)}${includeHorizontal ? box.horizontal : ""}${box.bottomRight}`,
 				);
-				result.push(`${bottomLeft}${displayText}${linePad}${bottomRightAdjusted}`);
+				if (imeSafeCursorTail) {
+					const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
+					const renderedHint = inlineHint ? renderInlineHint(lineContentWidth) : undefined;
+					result.push(leftBorder + displayText);
+					if (renderedHint && renderedHint.width > 0) {
+						const hintPad = padding(Math.max(0, lineContentWidth - renderedHint.width));
+						result.push(`${bottomLeft}${renderedHint.text}${hintPad}${bottomRightAdjusted}`);
+					} else {
+						const bottomBorder = this.borderColor(
+							`${box.bottomLeft}${box.horizontal.repeat(Math.max(0, width - 2))}${box.bottomRight}`,
+						);
+						result.push(bottomBorder);
+					}
+				} else {
+					result.push(`${bottomLeft}${displayText}${linePad}${bottomRightAdjusted}`);
+				}
 			} else {
 				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
 				// When scrollbar is active, replace the right border vertical with a
