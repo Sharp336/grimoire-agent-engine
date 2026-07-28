@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { computeFileHash } from "@oh-my-pi/hashline";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	DEFAULT_FUZZY_THRESHOLD,
@@ -250,8 +251,7 @@ describe("executeHashlineSingle model-visible payload under write-time drift", (
 		const { writethrough } = makeWritethroughMock();
 		const session = createSession(tmpDir, { bridge });
 
-		const read = await import("@oh-my-pi/hashline");
-		const realTag = read.computeFileHash(original);
+		const realTag = computeFileHash(original);
 
 		const result = await executeHashlineSingle({
 			session,
@@ -296,8 +296,7 @@ describe("executeHashlineSingle model-visible payload under write-time drift", (
 		const original = "\uFEFFhello\nworld\n";
 		await fs.writeFile(absPath, original);
 
-		const read = await import("@oh-my-pi/hashline");
-		const realTag = read.computeFileHash("hello\nworld\n"); // tag hashes BOM-stripped content
+		const realTag = computeFileHash("hello\nworld\n"); // tag hashes BOM-stripped content
 
 		const result = await executeHashlineSingle({
 			session,
@@ -329,9 +328,8 @@ describe("executeHashlineSingle model-visible payload under write-time drift", (
 		// (full JSON) were being conflated regardless of any ACP client.
 		const session = createSession(tmpDir);
 
-		const read = await import("@oh-my-pi/hashline");
 		const cellView = "# %% [code] cell:0\nprint('old')\n";
-		const realTag = read.computeFileHash(cellView);
+		const realTag = computeFileHash(cellView);
 
 		const result = await executeHashlineSingle({
 			session,
