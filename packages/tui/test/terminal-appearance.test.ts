@@ -297,15 +297,22 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		// An explicit refresh gesture (Ctrl+L) issues one bounded probe.
 		terminal.refreshAppearance?.();
-		expect(queryCount()).toBe(afterInitial + 1);
+		const afterFirstRefresh = queryCount();
 
 		// Complete that query's cycle, then refresh again: still one probe each.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		terminal.refreshAppearance?.();
-		expect(queryCount()).toBe(afterInitial + 2);
+		const afterSecondRefresh = queryCount();
 
 		terminal.stop();
+		const afterStop = queryCount();
+		terminal.refreshAppearance?.();
+		const afterStoppedRefresh = queryCount();
+
+		expect(afterFirstRefresh).toBe(afterInitial + 1);
+		expect(afterSecondRefresh).toBe(afterInitial + 2);
+		expect(afterStoppedRefresh).toBe(afterStop);
 	});
 
 	it("passes an explicit appearance refresh through tmux without changing the startup probe", () => {

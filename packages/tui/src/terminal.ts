@@ -485,6 +485,7 @@ export class ProcessTerminal implements Terminal {
 		this.#markTerminalDisconnected("stdin failed", err);
 	};
 	#dead = false;
+	#active = false;
 	// Last cursor visibility written to the terminal, sniffed from every
 	// outgoing sequence (frame buffers embed their own ?25h/?25l), so
 	// hideCursor()/showCursor() can skip same-state writes. `undefined` =
@@ -585,10 +586,11 @@ export class ProcessTerminal implements Terminal {
 	 * appearance callbacks. Inside tmux, only this explicit path wraps the query
 	 * and sentinel together for passthrough to the outer terminal; startup and
 	 * Mode 2031 probes remain direct. Bounded to one probe per call; no timers are
-	 * armed. Suppressed while headless or after the terminal is torn down.
+	 * armed. Suppressed while inactive, headless, or after the terminal is torn
+	 * down.
 	 */
 	refreshAppearance(): void {
-		if (this.#headless || this.#dead) return;
+		if (!this.#active || this.#headless || this.#dead) return;
 		this.#queryBackgroundColor(isInsideTmux() ? "tmux" : "direct");
 	}
 
@@ -670,6 +672,9 @@ export class ProcessTerminal implements Terminal {
 		// The query handler intercepts input temporarily, then installs the user's handler
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 		this.#queryAndEnableKittyProtocol();
+		// Explicit probes are safe only after their response parser and stdin
+		// data handler are installed. Keep this false throughout temporary stops.
+		this.#active = true;
 		setHangulCompatibilityJamoWidth(TERMINAL.hangulJamoWidth);
 
 		// Query terminal background color via OSC 11 for dark/light detection.
@@ -1386,6 +1391,8 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		// Suppress observer/timer callbacks before any teardown can yield or throw.
+		this.#active = false;
 		if (this.#headless) return;
 		// Unregister from emergency cleanup
 		if (activeTerminal === this) {
