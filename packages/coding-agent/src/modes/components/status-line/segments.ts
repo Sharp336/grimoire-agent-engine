@@ -37,6 +37,15 @@ function thinkingGlyph(display: string): string {
 	return space === -1 ? display : display.slice(0, space);
 }
 
+function trimVisibleStart(value: string): string {
+	const visible = Bun.stripANSI(value);
+	const trimmed = visible.trimStart();
+	if (trimmed.length === visible.length) return value;
+	const leading = visible.slice(0, visible.length - trimmed.length);
+	const index = value.indexOf(leading);
+	return index === -1 ? value : value.slice(0, index) + value.slice(index + leading.length);
+}
+
 function stripDisplayRoot(pwd: string): string {
 	for (const root of [path.join(os.homedir(), "Projects"), "/work"]) {
 		const relative = relativePathWithinRoot(root, pwd);
@@ -132,12 +141,17 @@ const modelSegment: StatusLineSegment = {
 		// sits between the name and that tail, so it reads as a distinct marker.
 		// theme.fg resets only the fg, so the spans are concatenated (not
 		// nested) to keep each color intact.
-		let tail = "";
-		if (ctx.session.isFastModeActive() && theme.icon.fast) {
-			tail += ` ${theme.icon.fast}`;
-		}
+		const fastIcon = ctx.session.isFastModeActive() ? theme.icon.fast : "";
+		let tail = fastIcon ? ` ${fastIcon}` : "";
 		if (!compact && thinkingDisplay) {
-			tail += `${theme.sep.dot}${thinkingDisplay}`;
+			let visibleThinking = thinkingDisplay;
+			if (fastIcon) {
+				const plainFastIcon = Bun.stripANSI(fastIcon);
+				if (Bun.stringWidth(plainFastIcon) > [...plainFastIcon].length) {
+					visibleThinking = trimVisibleStart(visibleThinking);
+				}
+			}
+			tail += `${theme.sep.dot}${visibleThinking}`;
 		}
 
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge

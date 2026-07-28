@@ -2,11 +2,35 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	getThemeByName,
+	initTheme,
+	setThemeInstance,
+	Theme,
+	type ThemeBg,
+	type ThemeColor,
+	theme,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 beforeAll(async () => {
 	await initTheme();
 });
+
+function createFastTheme(fastIcon: string, thinkingHigh: string): Theme {
+	return new Theme(
+		{ statusLineModel: "#ffffff" } as Record<ThemeColor, string | number>,
+		{ statusLineBg: "#000000" } as Record<ThemeBg, string | number>,
+		"truecolor",
+		"unicode",
+		{
+			"icon.model": "",
+			"icon.fast": fastIcon,
+			"sep.dot": "",
+			"thinking.high": thinkingHigh,
+			"thinking.autoPending": "",
+		},
+	);
+}
 
 function createModelContext(advisorActive: boolean): SegmentContext {
 	return {
@@ -91,7 +115,10 @@ describe("status line model segment advisor badge", () => {
 });
 
 describe("status line model segment compact thinking level", () => {
-	function createThinkingContext(compactThinkingLevel: boolean): SegmentContext {
+	function createThinkingContext(
+		compactThinkingLevel: boolean,
+		options: { auto?: boolean; fast?: boolean } = {},
+	): SegmentContext {
 		return {
 			...createModelContext(false),
 			compactThinkingLevel,
@@ -100,8 +127,8 @@ describe("status line model segment compact thinking level", () => {
 					model: { id: "test-model", name: "Test Model", thinking: true },
 					thinkingLevel: ThinkingLevel.High,
 				},
-				isFastModeActive: () => false,
-				isAutoThinking: false,
+				isFastModeActive: () => options.fast === true,
+				isAutoThinking: options.auto === true,
 				autoResolvedThinkingLevel: () => undefined,
 				isAdvisorActive: () => false,
 				getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
@@ -114,6 +141,42 @@ describe("status line model segment compact thinking level", () => {
 		const modelPrefix = theme.icon.model ? `${theme.icon.model} ` : "";
 		const rendered = renderSegment("model", createThinkingContext(false));
 		expect(Bun.stripANSI(rendered.content)).toBe(`${modelPrefix}Test Model${theme.sep.dot}${display}`);
+	});
+
+	it("removes explicit spacing after a wide Fast icon", async () => {
+		const originalTheme = theme;
+		const titaniumDracula = await getThemeByName("titanium-dracula");
+		if (!titaniumDracula) throw new Error("Expected Titanium Dracula theme");
+		setThemeInstance(titaniumDracula);
+		try {
+			const regular = renderSegment("model", createThinkingContext(false));
+			expect(Bun.stripANSI(regular.content)).toBe("Test Model\u00a0high");
+
+			const fixed = renderSegment("model", createThinkingContext(false, { fast: true }));
+			expect(Bun.stripANSI(fixed.content)).toBe("Test Model ⚡high");
+			expect(fixed.content).toContain(titaniumDracula.thinking.high.replace("\u00a0", ""));
+
+			const auto = renderSegment("model", createThinkingContext(false, { auto: true, fast: true }));
+			expect(Bun.stripANSI(auto.content)).toBe("Test Model ⚡auto");
+		} finally {
+			setThemeInstance(originalTheme);
+		}
+	});
+
+	it("preserves explicit spacing after narrow Fast icons", async () => {
+		const originalTheme = theme;
+		const titaniumDracula = await getThemeByName("titanium-dracula");
+		if (!titaniumDracula) throw new Error("Expected Titanium Dracula theme");
+		try {
+			for (const fastIcon of [">>", "\uf0e7"]) {
+				setThemeInstance(createFastTheme(fastIcon, titaniumDracula.thinking.high));
+				const rendered = renderSegment("model", createThinkingContext(false, { fast: true }));
+				expect(Bun.stripANSI(rendered.content)).toBe(`Test Model ${fastIcon}\u00a0high`);
+				expect(rendered.content).toContain(titaniumDracula.thinking.high);
+			}
+		} finally {
+			setThemeInstance(originalTheme);
+		}
 	});
 
 	it("swaps the model icon for the level glyph and drops the suffix when compact", () => {
