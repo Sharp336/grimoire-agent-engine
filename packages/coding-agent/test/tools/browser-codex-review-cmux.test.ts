@@ -1454,14 +1454,25 @@ describe("cmux Codex browser review regressions", () => {
 		});
 	});
 
-	it("downloads nested media through locator and DOM-ref page contexts", async () => {
-		const payload = Buffer.from("page-authenticated-media");
+	it("downloads nested cross-origin media through the host instead of the page fetch context", async () => {
+		const payload = Buffer.from("cross-origin-media");
 		const writes: Buffer[] = [];
-		let transferStarts = 0;
-		let transferStatuses = 0;
-		const hostFetch = spyOn(globalThis, "fetch").mockRejectedValue(new Error("host fetch must not run"));
+		const requestedUrls: string[] = [];
+		const fetchMock = Object.assign(
+			async (input: string | Request | URL): Promise<Response> => {
+				requestedUrls.push(String(input));
+				return new Response(payload, {
+					headers: {
+						"Content-Length": String(payload.byteLength),
+						"Content-Type": "application/octet-stream",
+					},
+				});
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 		const { document, window } = parseHTML(
-			'<html><body><button id="media"><picture><img src="blob:fixture-media"></picture></button><a href="blob:ancestor-media"><span id="media-child" tabindex="0">Child</span></a></body></html>',
+			'<html><body><button id="media"><picture><img src="https://cdn.fixture.test/media.bin"></picture></button><a href="https://cdn.fixture.test/ancestor.bin"><span id="media-child" tabindex="0">Child</span></a></body></html>',
 		);
 		const mediaButton = document.getElementById("media");
 		if (!mediaButton) throw new Error("Expected media wrapper");
@@ -1470,10 +1481,6 @@ describe("cmux Codex browser review regressions", () => {
 		if (!mediaChild) throw new Error("Expected media child");
 		Reflect.set(mediaChild, "getBoundingClientRect", () => ({ x: 0, y: 24, width: 100, height: 20 }));
 		Reflect.set(window, "getComputedStyle", () => ({ display: "block", visibility: "visible" }));
-		spyOn(Bun, "write").mockImplementation(async (_destination, data) => {
-			writes.push(Buffer.from(data as Uint8Array));
-			return writes.at(-1)?.byteLength ?? 0;
-		});
 		const current = await selectedTab(
 			facadeFor({
 				codexCwd: () => "/tmp/codex-media-contract",
@@ -1488,22 +1495,10 @@ describe("cmux Codex browser review regressions", () => {
 					if (args[1] === "mediaUrl") return runPageEvaluator(source, args, { document, window });
 					if (args[1] === "dom_cua.downloadMedia" || args.length === 0)
 						return runPageEvaluator(source, args, { document, window });
-					if (source.includes("__ompCodexMediaTransfers") && args.length === 2) {
-						transferStarts++;
-						return true;
-					}
-					if (source.includes("__ompCodexMediaTransfers") && args.length === 1) {
-						transferStatuses++;
-						return {
-							url: "blob:fixture-media",
-							contentType: "application/octet-stream",
-							base64Chunks: [payload.toString("base64")],
-						};
-					}
-					throw new Error("Unexpected page evaluation");
+					throw new Error("Page media transfer must not run");
 				},
-				async codexWait() {
-					throw new Error("Completed transfer must not poll");
+				async codexPersistFile(_path: string, data: Uint8Array) {
+					writes.push(Buffer.from(data));
 				},
 			}),
 		);
@@ -1518,9 +1513,12 @@ describe("cmux Codex browser review regressions", () => {
 		if (!childNode) throw new Error("Expected media child DOM node");
 		await current.dom_cua.downloadMedia({ node_id: childNode.node_id, timeoutMs: 250 });
 
-		expect(hostFetch).not.toHaveBeenCalled();
-		expect(transferStarts).toBe(4);
-		expect(transferStatuses).toBe(4);
+		expect(requestedUrls).toEqual([
+			"https://cdn.fixture.test/media.bin",
+			"https://cdn.fixture.test/ancestor.bin",
+			"https://cdn.fixture.test/media.bin",
+			"https://cdn.fixture.test/ancestor.bin",
+		]);
 		expect(writes).toEqual([payload, payload, payload, payload]);
 	});
 

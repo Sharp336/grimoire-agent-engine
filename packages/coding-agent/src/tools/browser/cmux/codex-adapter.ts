@@ -2392,6 +2392,36 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 
 	async #saveMedia(url: string, deadline: number, operation: string): Promise<void> {
 		if (!url) throw new ToolError(`${operation} target has no downloadable URL`);
+		let pageUrl: string | undefined;
+		let absoluteUrl: URL;
+		try {
+			absoluteUrl = new URL(url);
+		} catch {
+			pageUrl = await this.#tab.codexUrl(remainingMs(deadline, operation));
+			try {
+				absoluteUrl = new URL(url, pageUrl);
+			} catch (error) {
+				throw new ToolError(`${operation} target has an invalid downloadable URL`, { cause: error });
+			}
+		}
+
+		let usePageTransfer = absoluteUrl.protocol === "blob:";
+		if (!usePageTransfer && (absoluteUrl.protocol === "http:" || absoluteUrl.protocol === "https:")) {
+			pageUrl ??= await this.#tab.codexUrl(remainingMs(deadline, operation));
+			try {
+				usePageTransfer = absoluteUrl.origin === new URL(pageUrl).origin;
+			} catch {
+				// An invalid page URL cannot establish a same-origin page transfer.
+			}
+		}
+		if (usePageTransfer) {
+			await this.#savePageMedia(absoluteUrl.href, deadline, operation);
+			return;
+		}
+		await this.#saveHostMedia(absoluteUrl.href, deadline, operation);
+	}
+
+	async #savePageMedia(url: string, deadline: number, operation: string): Promise<void> {
 		const token = `${this.#tokenNamespace}-media-${crypto.randomUUID()}`;
 		let consumed = false;
 		try {
@@ -2410,24 +2440,12 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 					consumed = true;
 					const result = pageMediaTransferResult(value);
 					const decoded = decodeBoundedMediaChunks(result.base64Chunks);
-					const bytes = Buffer.concat(decoded.chunks, decoded.byteLength);
-					let rawName = "media";
-					try {
-						const pathname = new URL(result.url || url).pathname;
-						rawName = pathname.slice(pathname.lastIndexOf("/") + 1) || rawName;
-					} catch {
-						// Keep the stable fallback name for opaque URLs.
-					}
-					const filename = rawName.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) || "media";
-					const cwd = this.#tab.codexCwd().replace(/\/$/, "");
-					const destination = `${cwd}/${crypto.randomUUID()}-${filename}`;
-					const persistenceTimeoutMs = remainingMs(deadline, operation);
-					if (typeof this.#tab.codexPersistFile === "function") {
-						await this.#tab.codexPersistFile(destination, bytes, persistenceTimeoutMs, operation);
-					} else {
-						await Bun.write(destination, bytes);
-						remainingMs(deadline, operation);
-					}
+					await this.#persistMedia(
+						result.url || url,
+						Buffer.concat(decoded.chunks, decoded.byteLength),
+						deadline,
+						operation,
+					);
 					return;
 				}
 				await this.#tab.codexWait(Math.min(25, remainingMs(deadline, operation)));
@@ -2438,6 +2456,77 @@ export class CmuxCodexBrowserAdapter implements CodexBrowserAdapter {
 					.codexEvaluateCleanup<boolean>(DISPOSE_PAGE_MEDIA_TRANSFER_SOURCE, [token], SELECTOR_TIMEOUT_MS)
 					.catch(() => undefined);
 			}
+		}
+	}
+
+	async #saveHostMedia(url: string, deadline: number, operation: string): Promise<void> {
+		const maxBytes = 32 * 1024 * 1024;
+		const timeoutController = new AbortController();
+		const timer = setTimeout(() => timeoutController.abort(), Math.max(1, remainingMs(deadline, operation)));
+		try {
+			const response = await fetch(url, { signal: timeoutController.signal });
+			if (!response.ok) throw new Error(`downloadMedia failed with HTTP ${response.status}`);
+			const contentLengthHeader = response.headers.get("content-length");
+			const contentLength =
+				contentLengthHeader !== null && /^\d+$/.test(contentLengthHeader) ? Number(contentLengthHeader) : null;
+			if (contentLength !== null && contentLength > maxBytes) {
+				throw new Error("downloadMedia response exceeds the 32 MiB limit");
+			}
+
+			const chunks: Buffer[] = [];
+			let byteLength = 0;
+			if (response.body) {
+				const reader = response.body.getReader();
+				try {
+					for (;;) {
+						const chunk = await reader.read();
+						if (chunk.done) break;
+						if (byteLength + chunk.value.byteLength > maxBytes) {
+							try {
+								await reader.cancel();
+							} catch {
+								// Preserve the size-limit error when cancellation itself fails.
+							}
+							throw new Error("downloadMedia response exceeds the 32 MiB limit");
+						}
+						byteLength += chunk.value.byteLength;
+						chunks.push(Buffer.from(chunk.value.buffer, chunk.value.byteOffset, chunk.value.byteLength));
+					}
+				} finally {
+					reader.releaseLock();
+				}
+			} else {
+				const bytes = new Uint8Array(await response.arrayBuffer());
+				if (bytes.byteLength > maxBytes) throw new Error("downloadMedia response exceeds the 32 MiB limit");
+				byteLength = bytes.byteLength;
+				chunks.push(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+			}
+			await this.#persistMedia(response.url || url, Buffer.concat(chunks, byteLength), deadline, operation);
+		} catch (error) {
+			if (timeoutController.signal.aborted) throw new ToolError(`${operation} timed out`, { cause: error });
+			throw error;
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	async #persistMedia(url: string, bytes: Uint8Array, deadline: number, operation: string): Promise<void> {
+		let rawName = "media";
+		try {
+			const pathname = new URL(url).pathname;
+			rawName = pathname.slice(pathname.lastIndexOf("/") + 1) || rawName;
+		} catch {
+			// Keep the stable fallback name for opaque URLs.
+		}
+		const filename = rawName.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) || "media";
+		const cwd = this.#tab.codexCwd().replace(/\/$/, "");
+		const destination = `${cwd}/${crypto.randomUUID()}-${filename}`;
+		const persistenceTimeoutMs = remainingMs(deadline, operation);
+		if (typeof this.#tab.codexPersistFile === "function") {
+			await this.#tab.codexPersistFile(destination, bytes, persistenceTimeoutMs, operation);
+		} else {
+			await Bun.write(destination, bytes);
+			remainingMs(deadline, operation);
 		}
 	}
 
