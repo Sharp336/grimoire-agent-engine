@@ -64,7 +64,8 @@ describe("launch broker protocol compatibility", () => {
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
-		const originalWorker = globalThis.Worker;
+		const originalWorkerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+		expect(originalWorkerDescriptor).toBeDefined();
 		Object.defineProperty(globalThis, "Worker", { configurable: true, value: CleanExitWorker });
 		try {
 			const result = await executeLaunch({ cwd: projectDir } as ToolSession, {
@@ -76,7 +77,12 @@ describe("launch broker protocol compatibility", () => {
 			expect(result.content).toEqual([{ type: "text", text: "ready\n[web: running; cursor=42]" }]);
 			expect(result.details?.terminalRows).toBeUndefined();
 		} finally {
-			Object.defineProperty(globalThis, "Worker", { configurable: true, value: originalWorker });
+			if (originalWorkerDescriptor) {
+				Object.defineProperty(globalThis, "Worker", originalWorkerDescriptor);
+			} else {
+				Reflect.deleteProperty(globalThis, "Worker");
+			}
 		}
+		expect(Object.getOwnPropertyDescriptor(globalThis, "Worker")).toEqual(originalWorkerDescriptor);
 	});
 });

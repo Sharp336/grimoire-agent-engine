@@ -10,7 +10,8 @@ class CleanExitWorker extends EventTarget {
 }
 
 test("legacy replay rejects when its worker exits before responding", async () => {
-	const originalWorker = globalThis.Worker;
+	const originalWorkerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+	expect(originalWorkerDescriptor).toBeDefined();
 	Object.defineProperty(globalThis, "Worker", { configurable: true, value: CleanExitWorker });
 	try {
 		let outcome: { error?: unknown; settled: boolean } = { settled: false };
@@ -29,6 +30,11 @@ test("legacy replay rejects when its worker exits before responding", async () =
 		expect(outcome.error).toBeInstanceOf(Error);
 		expect((outcome.error as Error).message).toBe("Terminal output worker exited before responding");
 	} finally {
-		Object.defineProperty(globalThis, "Worker", { configurable: true, value: originalWorker });
+		if (originalWorkerDescriptor) {
+			Object.defineProperty(globalThis, "Worker", originalWorkerDescriptor);
+		} else {
+			Reflect.deleteProperty(globalThis, "Worker");
+		}
 	}
+	expect(Object.getOwnPropertyDescriptor(globalThis, "Worker")).toEqual(originalWorkerDescriptor);
 });
