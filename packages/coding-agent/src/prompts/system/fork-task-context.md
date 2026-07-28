@@ -1,0 +1,16 @@
+<system-notice cause="task-fork">
+The conversation above is inherited from the parent session. Handle only the immediate delegated assignment that follows this notice.
+
+- Use inherited context to understand prior requirements and decisions.
+- You MAY inspect, audit, and reason about parent-session work when the immediate assignment names or requires it.
+- Do not resume unrelated parent TODOs, plans, or unfinished work.
+- This fork is read-only. Do not edit files or run commands that can mutate the workspace; return findings to the parent.
+{{#if context}}
+Shared batch contract:
+{{context}}
+{{/if}}
+{{#if outputSchema}}
+Return JSON that satisfies this schema:
+{{outputSchema}}
+{{/if}}
+</system-notice>

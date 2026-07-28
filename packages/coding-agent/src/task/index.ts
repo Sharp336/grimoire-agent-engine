@@ -45,6 +45,7 @@ import type { AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
+import type { ForkContextSnapshot } from "./executor";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
@@ -56,6 +57,20 @@ function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
 		assignment: assignment.trim(),
 	});
+}
+
+function captureForkContext(session: ToolSession, source: TaskParams["source"]): ForkContextSnapshot | undefined {
+	if (source === undefined || source === "fresh" || !session.sessionManager) return undefined;
+	return {
+		sessionFile: session.getSessionFile(),
+		sessionManager: session.sessionManager,
+		model: session.getActiveModel?.(),
+		thinkingLevel: session.getConfiguredThinkingLevel?.(),
+		systemPrompt: session.getSystemPrompt?.(),
+		toolNames: session.getActiveToolNames?.(),
+		promptCacheKey: session.getPromptCacheKey?.(),
+		leafId: session.getTaskForkLeafId?.(),
+	};
 }
 
 function createUsageTotals(): Usage {
@@ -893,10 +908,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const failedSchedules: string[] = [];
 		for (const spawn of asyncSpawns) {
 			try {
+				const spawnParams = spawnParamsFor(params, spawn.item, defaultAgent);
 				const jobId = this.#registerSpawnJob({
 					manager,
 					toolCallId,
-					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
+					spawnParams,
+					forkContextSnapshot: captureForkContext(this.session, spawnParams.source),
 					agentId: spawn.agentId,
 					progress: spawn.progress,
 					ircEnabled,
@@ -1056,6 +1073,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		manager: AsyncJobManager;
 		toolCallId: string;
 		spawnParams: TaskParams;
+		forkContextSnapshot?: ForkContextSnapshot;
 		agentId: string;
 		progress: AgentProgress;
 		ircEnabled: boolean;
@@ -1063,8 +1081,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
-			options;
+		const {
+			manager,
+			toolCallId,
+			spawnParams,
+			forkContextSnapshot,
+			agentId,
+			progress,
+			ircEnabled,
+			buildDetails,
+			onUpdate,
+			onSettled,
+		} = options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			if (aborted) {
 				const ref = AgentRegistry.global().get(agentId);
@@ -1157,6 +1185,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.index,
 						true,
 						{ invokedAt: startedAt, acquiredAt },
+						forkContextSnapshot,
 					);
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
@@ -1385,8 +1414,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnIndex = 0,
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
+		forkContextSnapshot?: ForkContextSnapshot,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		return this.#runSpawn(toolCallId, params, signal, onUpdate, preAllocatedId, spawnIndex, detached, launchTiming);
+		return this.#runSpawn(
+			toolCallId,
+			params,
+			signal,
+			onUpdate,
+			preAllocatedId,
+			spawnIndex,
+			detached,
+			launchTiming,
+			forkContextSnapshot,
+		);
 	}
 
 	/** Spawn a fresh subagent and run it to completion. */
@@ -1399,6 +1439,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnIndex = 0,
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
+		forkContextSnapshot?: ForkContextSnapshot,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
@@ -1411,6 +1452,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context,
 				source: params.source,
+				forkContextSnapshot,
 				agent: params.agent,
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),

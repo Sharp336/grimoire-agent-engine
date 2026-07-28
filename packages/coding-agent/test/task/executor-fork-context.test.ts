@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-catalog";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -26,19 +27,20 @@ const AGENT: AgentDefinition = {
 	source: "bundled",
 };
 
-function createMockSession(): AgentSession {
+function createMockSession(options: { activeTools?: string[]; messages?: unknown[] } = {}): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
+	const activeTools = options.activeTools ?? ["read"];
 	return {
 		agent: {
 			state: { systemPrompt: ["parent system"] },
 			beforeToolCall: undefined,
-			appendMessage: () => {},
+			appendMessage: (message: AgentMessage) => options.messages?.push(message),
 		},
 		model: MODEL,
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
-		getActiveToolNames: () => ["read"],
-		getEnabledToolNames: () => ["read"],
+		getActiveToolNames: () => activeTools,
+		getEnabledToolNames: () => activeTools,
 		setActiveToolsByName: async () => {},
 		setTodoPhases: () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
@@ -74,6 +76,12 @@ function createMockSession(): AgentSession {
 		abort: async () => {},
 		dispose: async () => {},
 	} as unknown as AgentSession;
+}
+
+function createRewriteSession() {
+	const session = createMockSession();
+	session.agent.beforeToolCall = async () => ({ args: { command: "rewritten" } });
+	return session;
 }
 
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
@@ -159,5 +167,78 @@ describe("runSubprocess fork context", () => {
 			downgradeReason: "fork context requires a persisted child transcript",
 		});
 		expect(typeof createSpy.mock.calls[0]?.[0]?.systemPrompt).toBe("function");
+	});
+
+	it("blocks non-read tools after extension argument rewrites", async () => {
+		const session = createRewriteSession();
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory("/tmp"));
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: AGENT,
+			task: "inspect",
+			index: 0,
+			id: "GuardAgent",
+			artifactsDir: "/tmp",
+			settings: Settings.isolated(),
+			modelRegistry: { authStorage: {}, refresh: async () => {} } as unknown as ModelRegistry,
+			enableLsp: false,
+			contextSource: "fork",
+			parentSessionFile: "/tmp/parent.jsonl",
+			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentForkLeafId: "completed-assistant",
+			parentModel: MODEL,
+			parentSystemPrompt: ["parent system"],
+			parentToolNames: ["bash", "todo"],
+		});
+
+		const result = await session.agent.beforeToolCall?.(
+			{
+				tool: { name: "bash", approval: { tier: "exec" } },
+				args: { command: "original" },
+			} as never,
+			undefined,
+		);
+		expect(result).toEqual({
+			block: true,
+			reason: "Forked task agents are read-only; return findings to the parent.",
+		});
+	});
+
+	it("preserves parent tools and appends fork-specific invocation contracts", async () => {
+		const messages: unknown[] = [];
+		const session = createMockSession({ activeTools: ["read", "todo"], messages });
+		const setTools = vi.spyOn(session, "setActiveToolsByName");
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory("/tmp"));
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: AGENT,
+			task: "inspect",
+			context: "Do not change the API contract.",
+			outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
+			index: 0,
+			id: "ContractAgent",
+			artifactsDir: "/tmp",
+			settings: Settings.isolated(),
+			modelRegistry: { authStorage: {}, refresh: async () => {} } as unknown as ModelRegistry,
+			enableLsp: false,
+			contextSource: "fork",
+			parentSessionFile: "/tmp/parent.jsonl",
+			parentSessionManager: { ensureOnDisk: async () => {}, flush: async () => {}, getCwd: () => "/tmp" },
+			parentForkLeafId: "completed-assistant",
+			parentModel: MODEL,
+			parentSystemPrompt: ["parent system"],
+			parentToolNames: ["read", "todo"],
+		});
+
+		expect(setTools).not.toHaveBeenCalled();
+		expect(messages).toHaveLength(1);
+		expect(messages[0]).toMatchObject({ role: "developer" });
+		expect(JSON.stringify(messages[0])).toContain("Do not change the API contract.");
+		expect(JSON.stringify(messages[0])).toContain("answer");
+		expect(JSON.stringify(messages[0])).not.toContain("NEVER fix, audit, or build on it");
 	});
 });

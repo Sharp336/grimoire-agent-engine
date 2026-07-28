@@ -21,7 +21,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
-import { type ExecutorOptions, runSubprocess } from "./executor";
+import { type ExecutorOptions, type ForkContextSnapshot, runSubprocess } from "./executor";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -86,6 +86,8 @@ export interface StructuredSubagentRequest {
 	context?: string;
 	/** Parent-context strategy. Fork modes are available only to task invocations. */
 	source?: TaskContextSource;
+	/** Parent request boundary captured when an async task is scheduled. */
+	forkContextSnapshot?: ForkContextSnapshot;
 	agent?: string;
 	model?: string | string[];
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
@@ -378,6 +380,7 @@ function buildExecutorOptions(
 	};
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const forkContext = request.forkContextSnapshot;
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -387,14 +390,14 @@ function buildExecutorOptions(
 		assignment: request.assignment.trim(),
 		context: request.context?.trim() || undefined,
 		contextSource: request.source,
-		parentSessionFile: request.session.getSessionFile(),
-		parentSessionManager: request.session.sessionManager,
-		parentModel: request.session.getActiveModel?.(),
-		parentThinkingLevel: request.session.getConfiguredThinkingLevel?.(),
-		parentSystemPrompt: request.session.getSystemPrompt?.(),
-		parentToolNames: request.session.getActiveToolNames?.(),
-		parentPromptCacheKey: request.session.getPromptCacheKey?.(),
-		parentForkLeafId: request.session.getTaskForkLeafId?.(),
+		parentSessionFile: forkContext?.sessionFile ?? request.session.getSessionFile(),
+		parentSessionManager: forkContext?.sessionManager ?? request.session.sessionManager,
+		parentModel: forkContext?.model ?? request.session.getActiveModel?.(),
+		parentThinkingLevel: forkContext?.thinkingLevel ?? request.session.getConfiguredThinkingLevel?.(),
+		parentSystemPrompt: forkContext?.systemPrompt ?? request.session.getSystemPrompt?.(),
+		parentToolNames: forkContext?.toolNames ?? request.session.getActiveToolNames?.(),
+		parentPromptCacheKey: forkContext?.promptCacheKey ?? request.session.getPromptCacheKey?.(),
+		parentForkLeafId: forkContext ? forkContext.leafId : request.session.getTaskForkLeafId?.(),
 		planReference: undefined,
 		description: trimToUndefined(request.identity?.label),
 		index: request.index ?? 0,

@@ -33,10 +33,10 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import forkTaskContextPrompt from "../prompts/system/fork-task-context.md" with { type: "text" };
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
-import forkContextSwitchPrompt from "../prompts/system/tan-context-switch.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
@@ -477,6 +477,18 @@ export interface ExecutorOptions {
 	 * set this false so disposal unregisters them instead of leaving idle peers.
 	 */
 	keepAlive?: boolean;
+}
+
+/** Immutable parent request shape captured at the task scheduling boundary. */
+export interface ForkContextSnapshot {
+	sessionFile: string | null;
+	sessionManager: Pick<SessionManager, "ensureOnDisk" | "flush" | "getCwd">;
+	model?: Model;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	systemPrompt?: readonly string[];
+	toolNames?: string[];
+	promptCacheKey?: string;
+	leafId?: string | null;
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -2773,6 +2785,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				throw new Error(forkUnavailableReason);
 			}
 			const useFork = forkRequested && forkUnavailableReason === undefined;
+			const runtimeModel = useFork ? options.parentModel : model;
+			if (runtimeModel?.contextWindow && runtimeModel.contextWindow > 0) {
+				progress.contextWindow = runtimeModel.contextWindow;
+			}
+			if (useFork && runtimeModel) {
+				const level = options.parentThinkingLevel;
+				progress.resolvedModel =
+					level !== undefined
+						? formatModelSelectorValue(formatModelStringWithRouting(runtimeModel), level)
+						: formatModelStringWithRouting(runtimeModel);
+			}
 			let sessionManager: SessionManager;
 			if (useFork) {
 				await awaitAbortable(options.parentSessionManager!.ensureOnDisk());
@@ -2849,6 +2872,32 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			const forkTaskNotice = prompt.render(forkTaskContextPrompt, {
+				context: options.context?.trim() ?? "",
+				outputSchema: normalizedOutputSchema ? JSON.stringify(normalizedOutputSchema, null, 2) : "",
+			});
+			const installForkRestrictions = (target: AgentSession, appendNotice: boolean): void => {
+				if (!useFork) return;
+				target.setTodoPhases([]);
+				const beforeToolCall = target.agent.beforeToolCall;
+				target.agent.beforeToolCall = async (ctx, toolSignal) => {
+					const inherited = await beforeToolCall?.(ctx, toolSignal);
+					if (inherited?.block) return inherited;
+					const effectiveArgs = inherited?.args ?? ctx.args;
+					if (resolveToolTier(ctx.tool, effectiveArgs) !== "read") {
+						return { block: true, reason: "Forked task agents are read-only; return findings to the parent." };
+					}
+					return inherited;
+				};
+				if (appendNotice) {
+					target.agent.appendMessage({
+						role: "developer",
+						content: forkTaskNotice,
+						attribution: "agent",
+						timestamp: Date.now(),
+					});
+				}
+			};
 
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
 			// the same JSONL file re-invokes createAgentSession with the exact options
@@ -2948,24 +2997,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
-			if (useFork) {
-				session.setTodoPhases([]);
-				const beforeToolCall = session.agent.beforeToolCall;
-				session.agent.beforeToolCall = async (ctx, toolSignal) => {
-					const inherited = await beforeToolCall?.(ctx, toolSignal);
-					if (inherited?.block || inherited?.args !== undefined) return inherited;
-					if (resolveToolTier(ctx.tool, ctx.args) !== "read") {
-						return { block: true, reason: "Forked task agents are read-only; return findings to the parent." };
-					}
-					return undefined;
-				};
-				session.agent.appendMessage({
-					role: "developer",
-					content: forkContextSwitchPrompt,
-					attribution: "agent",
-					timestamp: Date.now(),
-				});
-			}
+			installForkRestrictions(session, true);
 			installRegistryStatusSync(session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
@@ -2982,6 +3014,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const { session: revived } = await createAgentSession(
 						buildSubagentSessionOptions(reopened, expectedAgentRef),
 					);
+					installForkRestrictions(revived, false);
 					installRegistryStatusSync(revived);
 					return revived;
 				};
@@ -3005,7 +3038,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Todos are parent-owned bookkeeping and stripped from subagents —
 			// except under prewalk, whose plan nudge + todo gate require the
 			// subagent to commit its own todo list before the hand-off.
-			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
+			const isParentOwnedTool = (name: string): boolean => !useFork && !prewalk && name === "todo";
 			const subagentToolNames = session.getEnabledToolNames();
 			const filteredSubagentTools = subagentToolNames.filter(name => !isParentOwnedTool(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
