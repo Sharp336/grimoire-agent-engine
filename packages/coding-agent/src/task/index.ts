@@ -887,12 +887,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		let failedCount = 0;
 		let primaryJobId = asyncSpawns[0].agentId;
 		const syncResults: SingleResult[] = [];
+		const asyncResults: SingleResult[] = [];
 		let syncUsage: Usage | undefined;
 		let syncOutputPaths: string[] | undefined;
 		let syncProjectAgentsDir: string | null = null;
 		const buildAsyncDetails = (): TaskToolDetails => ({
 			projectAgentsDir: syncProjectAgentsDir,
-			results: [...syncResults],
+			results: [...syncResults, ...asyncResults],
 			totalDurationMs: Date.now() - callStartedAt,
 			usage: syncUsage,
 			outputPaths: syncOutputPaths,
@@ -923,6 +924,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						settledCount += 1;
 						if (failed) failedCount += 1;
 					},
+					onResult: result => asyncResults.push(result),
 				});
 				if (started.length === 0) primaryJobId = jobId;
 				started.push({ agentId: spawn.agentId, jobId });
@@ -1080,6 +1082,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
+		onResult?: (result: SingleResult) => void;
 	}): string {
 		const {
 			manager,
@@ -1092,6 +1095,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			buildDetails,
 			onUpdate,
 			onSettled,
+			onResult,
 		} = options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			if (aborted) {
@@ -1189,6 +1193,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					);
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
+					if (singleResult) onResult?.(singleResult);
 					// A missing result means the sync path failed at the tool level
 					// (results: []) — treat it as a failure, not success.
 					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;

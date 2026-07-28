@@ -398,6 +398,34 @@ describe("task.batch spawning", () => {
 		for (const spawn of seen) expect(spawn.parentAgentId).toBe("ParentA");
 	});
 
+	it("preserves completed fork metadata in background job details", async () => {
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
+			makeResult("Forked", {
+				contextSource: { requested: "fork", used: "fork", cacheReadTokens: 17 },
+			}),
+		);
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
+		);
+
+		await tool.execute("tc-fork-background", {
+			context: "Shared context.",
+			tasks: [{ name: "Forked", task: "Inspect inherited context.", source: "fork" }],
+		} as TaskParams);
+		const job = manager.getJob("Forked");
+		expect(job).toBeDefined();
+		await job!.promise;
+
+		const details = job?.latestDetails as { results?: SingleResult[] } | undefined;
+		expect(details?.results?.[0]?.contextSource).toEqual({
+			requested: "fork",
+			used: "fork",
+			cacheReadTokens: 17,
+		});
+	});
+
 	it("routes each mixed-agent item through its selected definition while preserving caller overrides", async () => {
 		const scoutSchema = { type: "object", properties: { findings: { type: "array" } } };
 		const reviewerSchema = { type: "object", properties: { verdict: { type: "string" } } };

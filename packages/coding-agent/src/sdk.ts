@@ -1698,10 +1698,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSystemPrompt: () => session.systemPrompt,
 			getActiveToolNames: () => session.getActiveToolNames(),
 			getConfiguredThinkingLevel: () => session.configuredThinkingLevel(),
-			getPromptCacheKey: () => session.agent.promptCacheKey ?? providerSessionId,
+			getPromptCacheKey: () => session.agent.promptCacheKey ?? session.sessionId,
 			getTaskForkLeafId: () => {
-				const leaf = sessionManager.getBranch().at(-1);
-				return leaf?.type === "message" && leaf.message.role === "assistant" ? leaf.parentId : (leaf?.id ?? null);
+				const branch = sessionManager.getBranch();
+				for (let index = branch.length - 1; index >= 0; index--) {
+					const entry = branch[index];
+					if (entry?.type === "message" && entry.message.role === "assistant") return entry.parentId;
+				}
+				return branch.at(-1)?.id ?? null;
 			},
 
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
