@@ -111,6 +111,19 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${threePath}:5-6`);
 	});
 
+	it("renders an explicit path array as child rows while the read is pending", () => {
+		const component = new ReadToolGroupComponent();
+		const onePath = path.resolve("/tmp/one.ts");
+		const twoPath = path.resolve("/tmp/two.ts");
+		component.updateArgs({ path: [onePath, twoPath] }, "read-array");
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(plain).toContain("Read (2)");
+		expect(plain).toContain(onePath);
+		expect(plain).toContain(twoPath);
+	});
+
 	it("merges multi-range selectors into one file row", () => {
 		const component = new ReadToolGroupComponent();
 		const examplePath = path.resolve("/tmp/example.ts");
@@ -159,6 +172,34 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain("Read (2)");
 		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${twoPath}`);
+	});
+
+	it("renders each batched-read outcome with its own status", () => {
+		const component = new ReadToolGroupComponent();
+		const onePath = path.resolve("/tmp/one.ts");
+		const warningPath = path.resolve("/tmp/warning.ts");
+		const twoPath = path.resolve("/tmp/two.ts");
+		component.updateArgs({ path: [onePath, warningPath, twoPath] }, "read-outcomes");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "partial result" }],
+				details: {
+					readTargetOutcomes: [
+						{ path: onePath, resolvedPath: onePath, status: "success" },
+						{ path: warningPath, resolvedPath: warningPath, status: "warning", message: "truncated" },
+						{ path: twoPath, resolvedPath: twoPath, status: "error", message: "not found" },
+					],
+				},
+			},
+			false,
+			"read-outcomes",
+		);
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
+		expect(plain).toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.warning} ${warningPath}`);
+		expect(plain).toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.error} ${twoPath}`);
 	});
 
 	it("renders warning previews with warning styling instead of success styling", () => {
@@ -302,6 +343,12 @@ describe("readArgsCollapseIntoGroup", () => {
 	])("collapses %s into the read group", target => {
 		expect(readArgsCollapseIntoGroup({ path: target })).toBe(true);
 		expect(readArgsCollapseIntoGroup({ file_path: target })).toBe(true);
+	});
+
+	it("groups every native multi-target array so partial outcomes stay visible", () => {
+		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "https://example.com/second.ts"] })).toBe(true);
+		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "skill://my-skill"] })).toBe(true);
+		expect(readArgsCollapseIntoGroup({ path: ["skill://my-skill", "omp://docs/tools/read.md"] })).toBe(true);
 	});
 
 	it("returns false for non-record / missing arguments", () => {

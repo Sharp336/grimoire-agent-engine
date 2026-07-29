@@ -746,7 +746,15 @@ export class EventController {
 			}
 			for (const content of this.ctx.streamingMessage.content) {
 				if (content.type !== "toolCall") continue;
+				const partialJson = getStreamingPartialJson(content);
 				if (content.name === "read") {
+					const pathInput = content.arguments.path ?? content.arguments.file_path;
+					if (partialJson && Array.isArray(pathInput)) {
+						// A permissive streaming parser exposes completed array elements
+						// before the closing bracket. Wait for the final args so the
+						// grouped read is created once with the complete target list.
+						continue;
+					}
 					if (!readArgsHaveTarget(content.arguments)) {
 						// Args still streaming — defer until path is parseable so we can route to the
 						// read group (files + xd:// devices) vs ToolExecutionComponent (other internal URLs).
@@ -777,7 +785,6 @@ export class EventController {
 				// delivers large batches); once it closes, the final args render
 				// as-is — mirroring how assistant text snaps at message_end.
 				let renderArgs: Record<string, unknown>;
-				const partialJson = getStreamingPartialJson(content);
 				const rawInput = content.customWireName !== undefined;
 				const tool = this.ctx.viewSession.getToolByName(content.name);
 				if (partialJson) {

@@ -530,6 +530,38 @@ describe("ACP event mapper", () => {
 		expect(update.locations).toEqual([{ path: "single.ts" }]);
 	});
 
+	it("emits resolved completion locations for every batched-read outcome", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-read-batch",
+				toolName: "read",
+				isError: false,
+				result: {
+					content: [{ type: "text", text: "partial" }],
+					details: {
+						readTargetOutcomes: [
+							{ path: "src/one.ts:10-20", resolvedPath: "/repo/src/one.ts", status: "success" },
+							{ path: "missing.ts:raw", status: "error" },
+							{ path: "skill://read-docs", status: "success" },
+						],
+					},
+				},
+			} as AgentSessionEvent,
+			"session-1",
+			{ cwd: "/repo" },
+		);
+
+		expect(updates).toHaveLength(1);
+		expectAcpNotifications(updates);
+		const update = updates[0]!.update as { sessionUpdate: string; locations?: { path: string }[] };
+		expect(update.sessionUpdate).toBe("tool_call_update");
+		expect(update.locations).toEqual([
+			{ path: path.resolve("/repo", "src/one.ts") },
+			{ path: path.resolve("/repo", "missing.ts") },
+		]);
+	});
+
 	it("resolves live image blob refs for ACP content without expanding rawOutput", () => {
 		const blobRef = "blob:sha256:77467fcfe2bbdc034e0eabb4778c9d7de521c0d7c3e0d0a62566468e4d7da3a5";
 		const resolvedImageData = "resolved-webp-base64";
@@ -1001,8 +1033,18 @@ describe("ACP event mapper", () => {
 		});
 	});
 
-	it("builds replayed read tool-call locations against the replay cwd", () => {
-		const replayArgs = normalizeReplayToolArguments(JSON.stringify({ path: "src/foo.ts" }));
+	it("builds replayed batched-read locations against the replay cwd", () => {
+		const replayArgs = normalizeReplayToolArguments(
+			JSON.stringify({
+				path: [
+					"src/foo.ts:10-20",
+					"src/bar.ts:raw",
+					"fixtures/data.sqlite:users:42",
+					"fixtures/source.zip:inner/file.ts:1-2",
+					"skill://read-docs",
+				],
+			}),
+		);
 		const update = buildToolCallStartUpdate({
 			toolCallId: "toolu_replay_read",
 			toolName: "read",
@@ -1015,13 +1057,47 @@ describe("ACP event mapper", () => {
 		expect(update).toMatchObject({
 			sessionUpdate: "tool_call",
 			toolCallId: "toolu_replay_read",
-			title: "read: src/foo.ts",
+			title: "read: src/foo.ts:10-20, src/bar.ts:raw, fixtures/data.sqlite:users:42, fixtures/source.zip:inner/file.ts:1-2, skill://read-docs",
 			kind: "read",
 			status: "completed",
-			rawInput: { path: "src/foo.ts" },
-			locations: [{ path: path.resolve("/repo", "src/foo.ts") }],
+			rawInput: {
+				path: [
+					"src/foo.ts:10-20",
+					"src/bar.ts:raw",
+					"fixtures/data.sqlite:users:42",
+					"fixtures/source.zip:inner/file.ts:1-2",
+					"skill://read-docs",
+				],
+			},
+			locations: [
+				{ path: path.resolve("/repo", "src/foo.ts") },
+				{ path: path.resolve("/repo", "src/bar.ts") },
+				{ path: path.resolve("/repo", "fixtures/data.sqlite") },
+				{ path: path.resolve("/repo", "fixtures/source.zip") },
+			],
 		});
 		expect("content" in update).toBe(false);
+	});
+
+	it("preserves an existing selector-shaped read filename as the ACP location", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-literal-"));
+		const literalPath = "literal.ts:10-20";
+		fs.writeFileSync(path.join(cwd, literalPath), "literal");
+		try {
+			const update = buildToolCallStartUpdate({
+				toolCallId: "toolu_read_literal",
+				toolName: "read",
+				args: { path: [literalPath] },
+				cwd,
+				status: "completed",
+			});
+
+			expect((update as { locations?: { path: string }[] }).locations).toEqual([
+				{ path: path.join(cwd, literalPath) },
+			]);
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("keeps malformed replay arguments as raw input without command content", () => {

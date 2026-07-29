@@ -99,6 +99,7 @@ import {
 } from "./output-meta";
 import {
 	expandPath,
+	extractPathArguments,
 	findUniqueWorkspaceSuffix,
 	formatPathRelativeToCwd,
 	isReadableUrlPath,
@@ -112,6 +113,7 @@ import {
 	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
+import { executeReadBatch, MAX_READ_PATHS, type ReadBatchDetails } from "./read-batch";
 import { formatBytes, replaceTabs, shortenPath, wrapBrackets } from "./render-utils";
 import { REPORT_ISSUE_DEVICE_NAME, reportIssueDeviceUsage } from "./report-tool-issue";
 import { isResolutionDeviceName, resolutionDeviceUsage } from "./resolve";
@@ -132,9 +134,11 @@ import {
 	renderTableList,
 	resolveTableRowLookup,
 } from "./sqlite-reader";
-import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
+import { ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { xdevDocs, xdevListing } from "./xdev";
+
+export type { ReadTargetOutcome, ReadTargetStatus } from "./read-batch";
 
 // Per-session memo for tree-sitter summaries. `summarizeCode` is a pure function
 // of (code, path, fold settings) but costs ~12-18ms for a ~1500-line file, and a
@@ -715,15 +719,18 @@ function splitPdfImageMemberReadPath(readPath: string): { pdfPath: string; membe
 	return { pdfPath, member };
 }
 
+const readPathSchema = type("string").describe(
+	"Local path, internal URI (e.g. memory://, skill://), or URL. Inline selectors are supported.",
+);
 const readSchema = type({
-	path: type("string").describe(
-		"Local path, internal URI (e.g. memory://, skill://), or URL. Inline selectors are supported.",
-	),
+	path: readPathSchema
+		.or(readPathSchema.array().atLeastLength(1).atMostLength(MAX_READ_PATHS))
+		.describe("One read target or an array of targets. Use an array for multiple independent reads."),
 });
 
 export type ReadToolInput = typeof readSchema.infer;
 
-export interface ReadToolDetails {
+export interface ReadToolDetails extends ReadBatchDetails {
 	kind?: "file" | "url";
 	truncation?: TruncationResult;
 	isDirectory?: boolean;
@@ -746,9 +753,8 @@ export interface ReadToolDetails {
 	summary?: { lines: number; elidedSpans: number; elidedLines: number };
 	/** Number of unresolved git conflicts surfaced by this read (TUI uses for inline `⚠ N` badge). */
 	conflictCount?: number;
-	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
-	displayReadTargets?: string[];
 }
+
 type ReadParams = ReadToolInput;
 
 /** Parsed representation of a path-embedded selector. */
@@ -846,8 +852,9 @@ interface ResolvedSqliteReadPath {
 	suffixResolution?: { from: string; to: string };
 }
 
-/** Per-execute memo of suffix-glob lookups; `null` records a confirmed miss. */
-type SuffixMatchCache = Map<string, { absolutePath: string; displayPath: string } | null>;
+/** Shared memo of suffix-glob lookups for one top-level read, including batch children. */
+type SuffixMatch = { absolutePath: string; displayPath: string } | null;
+type SuffixMatchCache = Map<string, Promise<SuffixMatch>>;
 
 /**
  * Read tool implementation.
@@ -857,8 +864,7 @@ type SuffixMatchCache = Map<string, { absolutePath: string; displayPath: string 
  */
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
-	readonly approval = (args: unknown): ToolTier =>
-		pathTargetsSsh(String((args as { path?: unknown }).path ?? "")) ? "exec" : "read";
+	readonly approval = (args: unknown): ToolTier => (extractPathArguments(args).some(pathTargetsSsh) ? "exec" : "read");
 	readonly label = "Read";
 	readonly loadMode = "essential";
 	description: string;
@@ -955,70 +961,46 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 	}
 
+	async #readPathBatch(
+		parts: string[],
+		notice: string,
+		suffixCache: SuffixMatchCache,
+		enforceAggregateBudget: boolean,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		return executeReadBatch<ReadToolDetails>({
+			parts,
+			notice,
+			enforceAggregateBudget,
+			signal,
+			readPart: (part, workerSignal) =>
+				this.#execute("read-batch-part", { path: part }, suffixCache, false, workerSignal),
+		});
+	}
+
 	async #tryReadDelimitedPaths(
 		readPath: string,
+		suffixCache: SuffixMatchCache,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
 		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd);
 		if (!parts) return null;
 
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
-		const notes = [notice];
-		const content: Array<TextContent | ImageContent> = [];
-		const displayReadTargets: string[] = [];
-		let pendingText = notice;
-		const flushText = () => {
-			if (pendingText.length === 0) return;
-			content.push({ type: "text", text: pendingText });
-			pendingText = "";
-		};
-		const appendText = (text: string) => {
-			pendingText = pendingText.length > 0 ? `${pendingText}\n\n${text}` : text;
-		};
-
-		for (const part of parts) {
-			try {
-				const result = await this.execute("read-delimited-part", { path: part }, signal);
-				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
-				for (const block of result.content) {
-					if (block.type === "text") {
-						appendText(block.text);
-						continue;
-					}
-					flushText();
-					content.push(block);
-				}
-			} catch (error) {
-				if (error instanceof ToolAbortError || signal?.aborted) throw error;
-				const message = error instanceof Error ? error.message : String(error);
-				const errorNote = `Could not read ${part}: ${message}`;
-				notes.push(errorNote);
-				displayReadTargets.push(part);
-				appendText(`[${errorNote}]`);
-			}
-		}
-		flushText();
-
-		return toolResult<ReadToolDetails>({ notes, displayReadTargets }).content(content).done();
+		return this.#readPathBatch(parts, notice, suffixCache, false, signal);
 	}
 
 	/**
-	 * Memoized {@link findUniqueWorkspaceSuffix} for a single read call. A missing
-	 * path with archive/sqlite extensions probes the workspace once per stage
-	 * (archive candidates, sqlite candidates, plain path) — each glob carries a
-	 * 5s timeout, so repeated lookups of the same string stack into a long
-	 * stall before erroring. The cache collapses repeats within one execute().
+	 * Memoized {@link findUniqueWorkspaceSuffix} for one top-level read. Batch
+	 * children share both settled and in-flight lookups, so repeated missing
+	 * suffix candidates cannot each pay the workspace-glob timeout.
 	 */
-	async #findSuffixMatchCached(
-		cache: SuffixMatchCache,
-		rawPath: string,
-		signal?: AbortSignal,
-	): Promise<{ absolutePath: string; displayPath: string } | null> {
+	async #findSuffixMatchCached(cache: SuffixMatchCache, rawPath: string, signal?: AbortSignal): Promise<SuffixMatch> {
 		const hit = cache.get(rawPath);
-		if (hit !== undefined) return hit;
-		const result = await findUniqueWorkspaceSuffix(rawPath, this.session.cwd, signal);
-		cache.set(rawPath, result);
-		return result;
+		if (hit) return hit;
+		const pending = findUniqueWorkspaceSuffix(rawPath, this.session.cwd, signal);
+		cache.set(rawPath, pending);
+		return pending;
 	}
 
 	async #resolveArchiveReadPath(
@@ -2247,7 +2229,28 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		_toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		let { path: readPath } = params;
+		return this.#execute(_toolCallId, params, new Map(), !Array.isArray(params.path), signal);
+	}
+
+	async #execute(
+		_toolCallId: string,
+		params: ReadParams,
+		suffixCache: SuffixMatchCache,
+		allowDelimitedFallback: boolean,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		const readPaths = Array.isArray(params.path) ? params.path : [params.path];
+		if (readPaths.length === 0) throw new ToolError("At least one read path is required.");
+		if (readPaths.length > MAX_READ_PATHS) {
+			throw new ToolError(`Read accepts at most ${MAX_READ_PATHS} paths per call.`);
+		}
+		if (Array.isArray(params.path)) {
+			const notice = `Note: read ${readPaths.length} paths: ${readPaths.join(", ")}`;
+			return this.#readPathBatch(readPaths, notice, suffixCache, true, signal);
+		}
+
+		let readPath = readPaths[0];
+		if (readPath === undefined) throw new ToolError("At least one read path is required.");
 		if (readPath.startsWith("file://")) {
 			readPath = expandPath(readPath);
 		}
@@ -2334,10 +2337,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				return this.#handleInternalUrl(internalTarget.path, parsed, signal);
 			}
 		}
-
-		// One suffix-glob memo per read call — archive, sqlite, and plain-path
-		// resolution share misses instead of re-globbing the workspace.
-		const suffixCache: SuffixMatchCache = new Map();
 
 		// Prefer a literal filesystem match over selector interpretation so real
 		// POSIX filenames containing selector-looking suffixes win over structured
@@ -2449,7 +2448,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 
 				if (!recoveredApprovedPlan && !suffixResolution) {
-					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+					const delimitedResult = allowDelimitedFallback
+						? await this.#tryReadDelimitedPaths(readPath, suffixCache, signal)
+						: null;
 					if (delimitedResult) return delimitedResult;
 					throw new ToolError(`Path '${localReadPath}' not found`);
 				}
@@ -3535,17 +3536,16 @@ function formatReadPathLink(
 
 export const readToolRenderer = {
 	renderCall(args: ReadRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const rawPath =
-			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
-		if (isReadableUrlPath(rawPath)) {
+		const rawPaths = extractPathArguments(args);
+		const rawPath = rawPaths[0] ?? "";
+		if (rawPaths.length === 1 && isReadableUrlPath(rawPath)) {
 			return renderReadUrlCall({ path: rawPath, raw: args.raw }, _options, uiTheme);
 		}
 
 		const offset = args.offset;
 		const limit = args.limit;
-
-		let pathDisplay = formatReadPathLink(rawPath, { offset, fallbackLabel: "…" }) || "…";
-		if (offset !== undefined || limit !== undefined) {
+		let pathDisplay = rawPaths.map(path => formatReadPathLink(path, { fallbackLabel: "…" })).join(", ") || "…";
+		if (rawPaths.length === 1 && (offset !== undefined || limit !== undefined)) {
 			const startLine = offset ?? 1;
 			const endLine = limit !== undefined ? startLine + limit - 1 : "";
 			pathDisplay += `:${startLine}${endLine ? `-${endLine}` : ""}`;
@@ -3561,10 +3561,11 @@ export const readToolRenderer = {
 		uiTheme: Theme,
 		args?: ReadRenderArgs,
 	): Component {
+		const rawPaths = extractPathArguments(args);
+		const rawPath = rawPaths[0] ?? "";
+		const isBatch = rawPaths.length > 1;
 		const urlDetails = result.details as ReadUrlToolDetails | undefined;
-		const baseRawPathForKind =
-			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
-		if (urlDetails?.kind === "url" || isReadableUrlPath(baseRawPathForKind)) {
+		if (!isBatch && (urlDetails?.kind === "url" || isReadableUrlPath(rawPath))) {
 			return renderReadUrlResult(
 				result as {
 					content: Array<{ type: string; text?: string }>;
@@ -3579,13 +3580,12 @@ export const readToolRenderer = {
 		if (result.isError) {
 			const rawErrorText = result.content?.find(c => c.type === "text")?.text ?? "";
 			const errorText = (rawErrorText || "Unknown error").replace(/^Error:\s*/, "");
-			const rawPath =
-				typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
-			const filePath =
-				formatReadPathLink(rawPath, { offset: args?.offset, sourcePath: readSourceFsPath(result.details) }) ||
-				shortenPath(rawPath);
-			let title = filePath ? `Read ${filePath}` : "Read";
-			if (args?.offset !== undefined || args?.limit !== undefined) {
+			const filePath = formatReadPathLink(rawPath, {
+				offset: args?.offset,
+				sourcePath: readSourceFsPath(result.details),
+			});
+			let title = isBatch ? `Read (${rawPaths.length})` : filePath ? `Read ${filePath}` : "Read";
+			if (!isBatch && (args?.offset !== undefined || args?.limit !== undefined)) {
 				const startLine = args.offset ?? 1;
 				const endLine = args.limit !== undefined ? startLine + args.limit - 1 : "";
 				title += `:${startLine}${endLine ? `-${endLine}` : ""}`;
@@ -3607,8 +3607,6 @@ export const readToolRenderer = {
 		// echo next to the styled warning line below.
 		const contentText = details?.displayContent?.text ?? stripOutputNotice(rawText, details?.meta);
 		const imageContent = result.content?.find(c => c.type === "image");
-		const rawPath =
-			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
 		const renderPath = splitReadRenderPath(rawPath);
 		const lang = getLanguageFromPath(renderPath.path);
 
@@ -3641,7 +3639,11 @@ export const readToolRenderer = {
 			});
 			const correction = suffix ? ` ${uiTheme.fg("dim", `(corrected from ${shortenPath(suffix.from)})`)}` : "";
 			const header = renderStatusLine(
-				{ icon: suffix ? "warning" : "success", title: "Read", description: `${displayPath}${correction}` },
+				{
+					icon: suffix ? "warning" : "success",
+					title: "Read",
+					description: isBatch ? `${rawPaths.length} paths` : `${displayPath}${correction}`,
+				},
 				uiTheme,
 			);
 			const detailLines = contentText ? contentText.split("\n").map(line => uiTheme.fg("toolOutput", line)) : [];
@@ -3679,8 +3681,8 @@ export const readToolRenderer = {
 			offset: args?.offset,
 		});
 		const correction = suffix ? ` ${uiTheme.fg("dim", `(corrected from ${shortenPath(suffix.from)})`)}` : "";
-		let title = displayPath ? `Read ${displayPath}${correction}` : "Read";
-		if (args?.offset !== undefined || args?.limit !== undefined) {
+		let title = isBatch ? `Read (${rawPaths.length})` : displayPath ? `Read ${displayPath}${correction}` : "Read";
+		if (!isBatch && (args?.offset !== undefined || args?.limit !== undefined)) {
 			const startLine = args.offset ?? 1;
 			const endLine = args.limit !== undefined ? startLine + args.limit - 1 : "";
 			title += `:${startLine}${endLine ? `-${endLine}` : ""}`;

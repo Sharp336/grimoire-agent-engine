@@ -83,6 +83,33 @@ describe("readToolRenderer hyperlinks", () => {
 		expect(extractLinkTexts(rendered)).not.toContain(`${examplePath}:10-12`);
 	});
 
+	it("renders every native-array target in calls and a batch title in results", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const args = { path: ["src/first.ts:10-12", "src/second.ts:20-22"] };
+
+		const call = readToolRenderer.renderCall(args, { expanded: false, isPartial: false }, theme!);
+		const renderedCall = Bun.stripANSI(call.render(200).join("\n"));
+		expect(renderedCall).toContain("src/first.ts:10-12");
+		expect(renderedCall).toContain("src/second.ts:20-22");
+
+		const result = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "first\n\nsecond" }],
+				details: {
+					readTargetOutcomes: [
+						{ path: "src/first.ts:10-12", status: "success" },
+						{ path: "src/second.ts:20-22", status: "success" },
+					],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme!,
+			args,
+		);
+		expect(Bun.stripANSI(result.render(200).join("\n"))).toContain("Read (2)");
+	});
+
 	it("links HTTP read result headers to the final URL", async () => {
 		settings.override("tui.hyperlinks", "always");
 		const theme = await getThemeByName("dark");

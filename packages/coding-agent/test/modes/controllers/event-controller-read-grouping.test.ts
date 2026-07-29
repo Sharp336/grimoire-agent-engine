@@ -14,6 +14,7 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
@@ -116,6 +117,34 @@ function hasImageComponent(component: Component): boolean {
 }
 
 describe("EventController read-group accretion", () => {
+	it("waits for a streamed path array to close before grouping it", async () => {
+		const { controller, chatContainer } = createFixture();
+		const partial = assistantMessage([
+			{
+				type: "toolCall",
+				id: "read-array",
+				name: "read",
+				arguments: { path: ["a.ts"] },
+				[kStreamingPartialJson]: '{"path":["a.ts","b',
+			} as Block,
+		]);
+		await controller.handleEvent({ type: "message_start", message: partial } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message: partial } as AgentSessionEvent);
+		expect(readGroups(chatContainer)).toHaveLength(0);
+
+		const complete = assistantMessage([
+			{ type: "toolCall", id: "read-array", name: "read", arguments: { path: ["a.ts", "b.ts"] } } as Block,
+		]);
+		await controller.handleEvent({ type: "message_update", message: complete } as AgentSessionEvent);
+
+		const [group] = readGroups(chatContainer);
+		expect(group).toBeDefined();
+		const rendered = Bun.stripANSI(group!.render(120).join("\n"));
+		expect(rendered).toContain("Read (2)");
+		expect(rendered).toContain("a.ts");
+		expect(rendered).toContain("b.ts");
+	});
+
 	it("collapses a run of single-read completions into one group (mixed/empty thinking)", async () => {
 		const { controller, chatContainer } = createFixture();
 

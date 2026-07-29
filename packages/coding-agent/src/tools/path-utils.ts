@@ -584,6 +584,20 @@ function parseStringEncodedPathArray(input: string): string[] | null {
 }
 
 /**
+ * Extract a tool's canonical `path` argument as literal targets. Native arrays
+ * stay flat and string values are never decoded or delimiter-expanded. The
+ * legacy `file_path` alias is accepted only when `path` is absent.
+ */
+export function extractPathArguments(args: unknown): string[] {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return [];
+	const record = args as { path?: unknown; file_path?: unknown };
+	const input = record.path ?? record.file_path;
+	if (typeof input === "string") return [input];
+	if (Array.isArray(input) && input.every(target => typeof target === "string")) return input;
+	return [];
+}
+
+/**
  * Normalize a path argument that may arrive as a single string, a JSON-encoded
  * string array (`'["a.ts"]'`), or an actual array into a flat `string[]`.
  * Delimited single strings (`"a.ts b.ts"`) are left for
