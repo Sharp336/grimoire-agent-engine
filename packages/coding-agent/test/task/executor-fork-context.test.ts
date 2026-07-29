@@ -155,7 +155,7 @@ describe("runSubprocess fork context", () => {
 		const options = createSpy.mock.calls[0]?.[0];
 		expect(options?.model).toBeUndefined();
 		expect(options?.systemPrompt).toBeInstanceOf(Function);
-		expect(options?.toolNames).toBeUndefined();
+		expect(options?.toolNames).toEqual(["read", "hub"]);
 		expect(options?.providerPromptCacheKey).toBe("parent-cache");
 	});
 
@@ -326,6 +326,6 @@ describe("runSubprocess fork context", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.contextSource).toMatchObject({ requested: "fork", used: "fork" });
 		expect(createSpy).toHaveBeenCalledTimes(1);
-		expect(createSpy.mock.calls[0]?.[0]?.toolNames).toBeUndefined();
+		expect(createSpy.mock.calls[0]?.[0]?.toolNames).toEqual(["ask", "hub"]);
 	});
 });

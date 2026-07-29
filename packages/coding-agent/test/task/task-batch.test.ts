@@ -403,6 +403,7 @@ describe("task.batch spawning", () => {
 		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
 			makeResult("Forked", {
 				contextSource: { requested: "fork", used: "fork", cacheReadTokens: 17 },
+				outputPath: "/tmp/Forked-output.txt",
 			}),
 		);
 		const manager = createManager();
@@ -418,12 +419,13 @@ describe("task.batch spawning", () => {
 		expect(job).toBeDefined();
 		await job!.promise;
 
-		const details = job?.latestDetails as { results?: SingleResult[] } | undefined;
+		const details = job?.latestDetails as { results?: SingleResult[]; outputPaths?: string[] } | undefined;
 		expect(details?.results?.[0]?.contextSource).toEqual({
 			requested: "fork",
 			used: "fork",
 			cacheReadTokens: 17,
 		});
+		expect(details?.outputPaths).toEqual(["/tmp/Forked-output.txt"]);
 	});
 
 	it("routes each mixed-agent item through its selected definition while preserving caller overrides", async () => {

@@ -902,11 +902,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const buildAsyncDetails = (): TaskToolDetails => {
 			const usage = createUsageTotals();
 			let hasUsage = false;
+			const outputPaths = syncOutputPaths ? [...syncOutputPaths] : [];
 			if (syncUsage) {
 				addUsageTotals(usage, syncUsage);
 				hasUsage = true;
 			}
 			for (const result of asyncResults) {
+				if (result.outputPath) outputPaths.push(result.outputPath);
 				if (!result.usage) continue;
 				addUsageTotals(usage, result.usage);
 				hasUsage = true;
@@ -916,7 +918,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				results: [...syncResults, ...asyncResults],
 				totalDurationMs: Date.now() - callStartedAt,
 				usage: hasUsage ? usage : undefined,
-				outputPaths: syncOutputPaths,
+				outputPaths: outputPaths.length > 0 ? outputPaths : undefined,
 				progress: spawns.map(spawn => ({ ...spawn.progress })),
 				async: {
 					state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",

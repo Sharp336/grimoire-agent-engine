@@ -2509,14 +2509,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 	const ircEnabled = options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
 
-	// Add tools if specified
+	// Named agents with an explicit catalog use it. The default agent inherits
+	// the parent's active catalog so spawning does not silently widen access.
 	let toolNames: string[] | undefined;
 	if (agent.tools && agent.tools.length > 0) {
-		toolNames = agent.tools;
+		toolNames = [...agent.tools];
 		// Auto-include task tool if spawns defined but task not in tools
 		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
 			toolNames = [...toolNames, "task"];
 		}
+	} else if (options.parentToolNames) {
+		toolNames = [...options.parentToolNames];
 	}
 
 	if (atMaxDepth && toolNames?.includes("task")) {

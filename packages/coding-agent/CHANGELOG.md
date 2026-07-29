@@ -125,11 +125,13 @@
 
 ### Changed
 
+- Changed default task subagents without an explicit tool catalog to inherit the parent's active tools.
 - Reworked the /guided-goal command from a modal-based popup flow into a natural, conversational chat interface where the agent asks follow-up questions directly in the session.
 - Reduced startup memory usage by lazy-loading HTML session export assets only on their first use.
 
 ### Fixed
 
+- Fixed completed background task artifact paths being omitted from aggregate task details.
 - Fixed Advisor notes appending stale-review-window warnings when newer primary turns are queued during a review.
 - Fixed layout padding alignment issues in bordered output blocks and web-search result panels.
 - Fixed excluded web search providers remaining visible in the Web Search Provider Order settings list.
