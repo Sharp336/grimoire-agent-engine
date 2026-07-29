@@ -87,6 +87,15 @@ function endTurnMetadataFrame(): Uint8Array {
 	return encodeKiroEvent("metadataEvent", { stopReason: "END_TURN" });
 }
 
+function oversizedFramePrelude(totalLength: number): Uint8Array {
+	const prelude = new Uint8Array(12);
+	const view = new DataView(prelude.buffer);
+	view.setUint32(0, totalLength, false);
+	view.setUint32(4, 0, false);
+	view.setUint32(8, crc32(prelude.subarray(0, 8)), false);
+	return prelude;
+}
+
 async function startServer(): Promise<string> {
 	server = http2.createServer();
 	server.on("session", session => {
@@ -242,5 +251,29 @@ describe("Kiro terminal-state invariant", () => {
 			expect(eventTypes).not.toContain("done");
 			await stopServer();
 		}
+	});
+
+	it("rejects an oversized advertised frame before buffering its body", async () => {
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(oversizedFramePrelude(16 * 1024 * 1024 + 1));
+				controller.close();
+			},
+		});
+		const stream = streamKiro(makeModel("https://kiro.invalid"), context, {
+			apiKey: "test-token",
+			fetch: async () =>
+				new Response(body, {
+					status: 200,
+					headers: { "content-type": "application/vnd.amazon.eventstream" },
+				}),
+		});
+		const eventTypes: string[] = [];
+		for await (const event of stream) eventTypes.push(event.type);
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("frame length 16777217 exceeds maximum 16777216");
+		expect(eventTypes).toEqual(["start", "error"]);
 	});
 });

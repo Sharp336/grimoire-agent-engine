@@ -22,6 +22,7 @@ import { decodeEventStream } from "./aws-eventstream";
 
 const KIRO_DEFAULT_REGION = "us-east-1";
 const KIRO_GENERATE_TARGET = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse";
+const KIRO_MAX_EVENTSTREAM_FRAME_BYTES = 16 * 1024 * 1024;
 const TEXT_DECODER = new TextDecoder();
 
 type KiroWireToolSpecification = {
@@ -135,7 +136,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 
 			stream.push({ type: "start", partial: output });
 			const body = response.body;
-			for await (const frame of decodeEventStream(body)) {
+			for await (const frame of decodeEventStream(body, { maxFrameBytes: KIRO_MAX_EVENTSTREAM_FRAME_BYTES })) {
 				const messageType = frame.headers[":message-type"];
 				if (messageType === "exception" || messageType === "error") {
 					const code = frame.headers[":exception-type"] ?? frame.headers[":error-code"];
