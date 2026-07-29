@@ -407,28 +407,20 @@ export interface ResolveArtifactPathOptions {
 	platform?: () => NodeJS.Platform;
 }
 
-type PathComparisonMode = "posix" | "darwin" | "win32";
-
-function pathComparisonMode(platform: NodeJS.Platform): PathComparisonMode {
-	if (platform === "win32") return "win32";
-	if (platform === "darwin") return "darwin";
-	return "posix";
+function caselessFilesystem(platform: NodeJS.Platform): boolean {
+	return platform === "darwin" || platform === "win32";
 }
 
-function pathComparisonKey(target: string, mode: PathComparisonMode): string {
-	let normalized = normalizePathForComparison(target).normalize("NFC");
-	if (mode === "win32") {
-		// Inputs are canonical: path.resolve plus realpath(parent) means dot parents cannot survive here.
-		normalized = normalized
-			.split(path.sep)
-			.map(component => component.replace(/[. ]+$/u, ""))
-			.join(path.sep);
+function pathsAlias(left: string, right: string, caseless: boolean): boolean {
+	const normalizedLeft = normalizePathForComparison(left).normalize("NFC");
+	const normalizedRight = normalizePathForComparison(right).normalize("NFC");
+	if (caseless) {
+		return (
+			normalizedLeft.toUpperCase().toLowerCase().normalize("NFC") ===
+			normalizedRight.toUpperCase().toLowerCase().normalize("NFC")
+		);
 	}
-	return mode === "posix" ? normalized : normalized.toUpperCase().toLowerCase().normalize("NFC");
-}
-
-function pathsAlias(left: string, right: string, mode: PathComparisonMode): boolean {
-	return pathComparisonKey(left, mode) === pathComparisonKey(right, mode);
+	return normalizedLeft === normalizedRight;
 }
 
 export async function resolveArtifactPaths(
@@ -446,15 +438,15 @@ export async function resolveArtifactPaths(
 		await fs.promises.realpath(path.dirname(sourceAbsolute)),
 		path.basename(sourceAbsolute),
 	);
-	const mode = pathComparisonMode(options.platform?.() ?? process.platform);
+	const caseless = caselessFilesystem(options.platform?.() ?? process.platform);
 	const forbidden = [canonicalSource, `${canonicalSource}-wal`, `${canonicalSource}-shm`];
 	assertInvariant(
 		!forbidden.some(
-			forbiddenPath => pathsAlias(candidate, forbiddenPath, mode) || pathsAlias(backup, forbiddenPath, mode),
+			forbiddenPath => pathsAlias(candidate, forbiddenPath, caseless) || pathsAlias(backup, forbiddenPath, caseless),
 		),
 		"Repair artifact collides with source triplet",
 	);
-	assertInvariant(!pathsAlias(candidate, backup, mode), "Candidate and backup paths collide");
+	assertInvariant(!pathsAlias(candidate, backup, caseless), "Candidate and backup paths collide");
 	return { backup, candidate };
 }
 
@@ -587,44 +579,45 @@ async function verifyFinalFile(finalPath: string, expected: PublishedFile): Prom
 
 async function runPublicationHook(
 	hook: (() => void | Promise<void>) | undefined,
-	verify: () => Promise<void>,
-	onPublished?: () => void,
+	stage: string,
+	finalPath: string,
+	expected: PublishedFile,
+	onPublished: () => void,
 ): Promise<void> {
-	if (!hook) return;
 	try {
-		await hook();
+		await hook?.();
 	} catch (error) {
 		try {
-			await verify();
+			await verifyPublishedFile(stage, finalPath, expected);
 		} catch (verificationError) {
 			throw new AggregateError(
 				[error, verificationError],
 				"Publication hook failed and changed the output identity",
 			);
 		}
-		onPublished?.();
+		onPublished();
 		throw error;
 	}
-	await verify();
 }
 
 async function publishNoReplace(
 	stage: string,
 	finalPath: string,
 	expected: PublishedFile,
-	onLinked: () => void,
-	onPublished?: () => void,
+	onPublished: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
 	await verifySealedFile(stage, expected);
 	await fs.promises.link(stage, finalPath);
-	onLinked();
 	await verifyPublishedFile(stage, finalPath, expected);
-	await runPublicationHook(hooks.afterLink, () => verifyPublishedFile(stage, finalPath, expected), onPublished);
-	await runPublicationHook(hooks.beforeStageUnlink, () => verifyPublishedFile(stage, finalPath, expected), onPublished);
+	await runPublicationHook(hooks.afterLink, stage, finalPath, expected, onPublished);
+	await verifyPublishedFile(stage, finalPath, expected);
+	await runPublicationHook(hooks.beforeStageUnlink, stage, finalPath, expected, onPublished);
+	await verifyPublishedFile(stage, finalPath, expected);
 	await fs.promises.unlink(stage);
-	onPublished?.();
-	await runPublicationHook(hooks.beforeDirectorySync, () => verifyFinalFile(finalPath, expected), onPublished);
+	onPublished();
+	await hooks.beforeDirectorySync?.();
+	await verifyFinalFile(finalPath, expected);
 	await syncDirectory(
 		path.dirname(finalPath),
 		hooks.isWindows ?? (() => process.platform === "win32"),
@@ -717,7 +710,7 @@ export async function publishBackup(
 		reported = true;
 		onPublished(checksum);
 	};
-	await publishNoReplace(stage, backup, seal, report, report, { afterLink, isWindows, onDirectorySync });
+	await publishNoReplace(stage, backup, seal, report, { afterLink, isWindows, onDirectorySync });
 	return checksum;
 }
 
@@ -756,10 +749,10 @@ export async function publishCandidate(
 	stage: string,
 	finalPath: string,
 	seal: PublishedFile,
-	onLinked: () => void,
+	onPublished: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
-	await publishNoReplace(stage, finalPath, seal, onLinked, undefined, hooks);
+	await publishNoReplace(stage, finalPath, seal, onPublished, hooks);
 }
 
 export function manualNextStep(source: string, candidate: string, backup: string): string {
