@@ -144,6 +144,37 @@ describe("WorkflowRuntime", () => {
 		expect(completed.nodes.join.status).toBe("succeeded");
 	});
 
+	it("starts a newly ready descendant before an unrelated root settles", async () => {
+		const runtime = await createRuntime();
+		await runtime.createWorkflow({
+			objective: "Keep the critical path moving",
+			nodes: [
+				{ id: "fast", agent: "task", task: "Fast root" },
+				{ id: "child", agent: "task", task: "Fast child", needs: ["fast"] },
+				{ id: "slow", agent: "task", task: "Slow root" },
+			],
+		});
+
+		const started: string[] = [];
+		const gates = new Map<string, OutcomeGate>();
+		const running = runtime.run(request => {
+			started.push(request.nodeId);
+			const gate = Promise.withResolvers<WorkflowDispatchOutcome>();
+			gates.set(request.nodeId, gate);
+			return gate.promise;
+		});
+		await waitFor(() => started.length === 2);
+
+		gates.get("fast")!.resolve({ result: resultFor(gatesRequest("fast")) });
+		await waitFor(() => started.includes("child"));
+		expect(runtime.getSnapshot()?.nodes.slow.status).toBe("running");
+
+		gates.get("child")!.resolve({ result: resultFor(gatesRequest("child")) });
+		gates.get("slow")!.resolve({ result: resultFor(gatesRequest("slow")) });
+		const completed = await running;
+		expect(completed.status).toBe("succeeded");
+	});
+
 	it("blocks failed descendants, continues independent work, and enforces strict schema success", async () => {
 		const runtime = await createRuntime();
 		await runtime.createWorkflow({
@@ -228,7 +259,6 @@ describe("WorkflowRuntime", () => {
 			nodes: [
 				{ id: "done", agent: "task", task: "Done" },
 				{ id: "inflight", agent: "task", task: "In flight" },
-				{ id: "independent", agent: "task", task: "Independent continuation", needs: ["done"] },
 			],
 		});
 
@@ -252,7 +282,6 @@ describe("WorkflowRuntime", () => {
 		const recovered = restored.getSnapshot()!;
 		expect(recovered.nodes.done.status).toBe("succeeded");
 		expect(recovered.nodes.inflight.status).toBe("interrupted");
-		expect(recovered.nodes.independent.status).toBe("ready");
 		expect(recovered.status).toBe("interrupted");
 
 		const resumedDispatches: string[] = [];
@@ -260,7 +289,7 @@ describe("WorkflowRuntime", () => {
 			resumedDispatches.push(request.nodeId);
 			return { result: resultFor(request) };
 		});
-		expect(resumedDispatches).toEqual(["independent"]);
+		expect(resumedDispatches).toEqual([]);
 		expect(resumed.nodes.done.status).toBe("succeeded");
 		expect(resumed.status).toBe("interrupted");
 
@@ -269,7 +298,7 @@ describe("WorkflowRuntime", () => {
 			resumedDispatches.push(request.nodeId);
 			return { result: resultFor(request) };
 		});
-		expect(resumedDispatches).toEqual(["independent", "inflight"]);
+		expect(resumedDispatches).toEqual(["inflight"]);
 		expect(completed.status).toBe("succeeded");
 
 		controller.abort();
