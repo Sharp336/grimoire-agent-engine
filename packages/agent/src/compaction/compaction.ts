@@ -13,11 +13,13 @@ import {
 	type Context,
 	Effort,
 	type FetchImpl,
+	type MediaContent,
 	type Message,
 	type MessageAttribution,
 	type Model,
 	type ProviderSessionState,
 	type SimpleStreamOptions,
+	type TextContent,
 	type Tool,
 	type Usage,
 	withAuth,
@@ -352,6 +354,13 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
  * matching what providers typically bill for inline images.
  */
 const IMAGE_TOKEN_ESTIMATE = 1200;
+const AUDIO_TOKEN_ESTIMATE = 8_000;
+const VIDEO_TOKEN_ESTIMATE = 24_000;
+
+function estimateMediaTokens(content: MediaContent): number {
+	const minimum = content.type === "audio" ? AUDIO_TOKEN_ESTIMATE : VIDEO_TOKEN_ESTIMATE;
+	return Math.max(minimum, Math.ceil(content.data.length / 4));
+}
 
 /**
  * Estimate token count for a message using cl100k_base via the native
@@ -392,13 +401,17 @@ function computeMessageTokens(message: AgentMessage, options?: { excludeEncrypte
 
 	switch (message.role) {
 		case "user": {
-			const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
+			const content = (message as { content: string | Array<TextContent | MediaContent> }).content;
 			if (typeof content === "string") {
 				fragments.push(content);
 			} else if (Array.isArray(content)) {
 				for (const block of content) {
 					if (block.type === "text" && block.text) {
 						fragments.push(block.text);
+					} else if (block.type === "image") {
+						extra += IMAGE_TOKEN_ESTIMATE;
+					} else if (block.type === "audio" || block.type === "video") {
+						extra += estimateMediaTokens(block);
 					}
 				}
 			}
@@ -450,6 +463,8 @@ function computeMessageTokens(message: AgentMessage, options?: { excludeEncrypte
 						fragments.push(block.text);
 					} else if (block.type === "image") {
 						extra += IMAGE_TOKEN_ESTIMATE;
+					} else if (block.type === "audio" || block.type === "video") {
+						extra += estimateMediaTokens(block);
 					}
 				}
 			}

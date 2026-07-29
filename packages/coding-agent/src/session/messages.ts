@@ -1003,6 +1003,7 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
 	const textBlocks = message.content.filter((content): content is TextContent => content.type === "text");
 	const imageBlocks = message.content.filter((content): content is ImageContent => content.type === "image");
 	if (imageBlocks.length === 0) return undefined;
+	const mediaBlocks = message.content.filter((content): content is MediaContent => content.type !== "text");
 
 	const converted: Message[] = [];
 	if (textBlocks.length > 0) {
@@ -1015,7 +1016,7 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
 	}
 	converted.push({
 		role: "user",
-		content: [{ type: "text", text: `Images attached to ${message.customType}.` }, ...imageBlocks],
+		content: [{ type: "text", text: `Media attached to ${message.customType}.` }, ...mediaBlocks],
 		attribution: message.attribution,
 		timestamp: message.timestamp,
 	});

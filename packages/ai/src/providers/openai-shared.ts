@@ -1480,6 +1480,13 @@ function clampResponsesImageDetail(
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
 }
 
+export function openAIAudioFormat(mimeType: string): "wav" | "mp3" | undefined {
+	const normalized = mimeType.trim().toLowerCase();
+	if (normalized === "audio/wav" || normalized === "audio/x-wav") return "wav";
+	if (normalized === "audio/mp3" || normalized === "audio/mpeg") return "mp3";
+	return undefined;
+}
+
 export function convertResponsesInputContent(
 	content: string | Array<TextContent | MediaContent>,
 	supportsImages: boolean,
@@ -1492,6 +1499,10 @@ export function convertResponsesInputContent(
 	}
 
 	const normalizedContent: ResponseInputContent[] = [];
+	let omittedImages = false;
+	let omittedAudio = false;
+	let omittedUnsupportedAudio = false;
+	let omittedVideo = false;
 	for (const item of content) {
 		if (item.type === "text") {
 			const text = item.text.toWellFormed();
@@ -1506,31 +1517,46 @@ export function convertResponsesInputContent(
 					image_url: `data:${item.mimeType};base64,${item.data}`,
 				} satisfies ResponseInputImage);
 			} else {
-				normalizedContent.push({
-					type: "input_text",
-					text: NON_VISION_IMAGE_PLACEHOLDER,
-				} satisfies ResponseInputText);
+				omittedImages = true;
 			}
 			continue;
 		}
-		if (item.type === "audio" && supportsAudio) {
-			const normalizedMimeType = item.mimeType.trim().toLowerCase();
-			normalizedContent.push({
-				type: "input_audio",
-				input_audio: {
-					data: item.data,
-					format: normalizedMimeType === "audio/wav" || normalizedMimeType === "audio/x-wav" ? "wav" : "mp3",
-				},
-			} satisfies ResponseInputAudio);
-		} else {
-			normalizedContent.push({
-				type: "input_text",
-				text:
-					item.type === "audio"
-						? "[audio omitted: model does not support audio input]"
-						: "[video omitted: OpenAI Responses does not support video input]",
-			} satisfies ResponseInputText);
+		if (item.type === "audio") {
+			const format = openAIAudioFormat(item.mimeType);
+			if (supportsAudio && format) {
+				normalizedContent.push({
+					type: "input_audio",
+					input_audio: { data: item.data, format },
+				} satisfies ResponseInputAudio);
+			} else if (supportsAudio) {
+				omittedUnsupportedAudio = true;
+			} else {
+				omittedAudio = true;
+			}
+			continue;
 		}
+		omittedVideo = true;
+	}
+	if (omittedImages) {
+		normalizedContent.push({ type: "input_text", text: NON_VISION_IMAGE_PLACEHOLDER } satisfies ResponseInputText);
+	}
+	if (omittedAudio) {
+		normalizedContent.push({
+			type: "input_text",
+			text: "[audio omitted: model does not support audio input]",
+		} satisfies ResponseInputText);
+	}
+	if (omittedUnsupportedAudio) {
+		normalizedContent.push({
+			type: "input_text",
+			text: "[audio omitted: OpenAI supports only WAV and MP3 input]",
+		} satisfies ResponseInputText);
+	}
+	if (omittedVideo) {
+		normalizedContent.push({
+			type: "input_text",
+			text: "[video omitted: OpenAI Responses does not support video input]",
+		} satisfies ResponseInputText);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
@@ -1934,13 +1960,13 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	return outputItems;
 }
 
-const syntheticToolImageMessages = new WeakSet<object>();
+const syntheticToolMediaMessages = new WeakSet<object>();
 
 function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInput[number]): void {
 	let index = messages.length;
 	while (index > 0) {
 		const previous = messages[index - 1];
-		if (typeof previous !== "object" || previous === null || !syntheticToolImageMessages.has(previous)) {
+		if (typeof previous !== "object" || previous === null || !syntheticToolMediaMessages.has(previous)) {
 			break;
 		}
 		index -= 1;
@@ -1948,7 +1974,7 @@ function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInpu
 	messages.splice(index, 0, output);
 }
 
-/** Appends one tool result while keeping consecutive outputs ahead of its synthetic image messages. */
+/** Appends one tool result while keeping consecutive outputs ahead of its synthetic media messages. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
 	toolResult: ToolResultMessage,
@@ -1961,27 +1987,39 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	computerCallIds?: ReadonlySet<string>,
 ): void {
 	const supportsImages = model.input.includes("image");
+	const supportsAudio = model.input.includes("audio");
 	const textResult = toolResult.content
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text)
 		.join("\n");
 	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
 	const omittedImages = hasImages && !supportsImages;
+	const mediaContent = convertResponsesInputContent(
+		toolResult.content.filter((block): block is MediaContent => block.type !== "text"),
+		supportsImages,
+		supportsAudio,
+		supportsImageDetailOriginal,
+	);
+	const hasAttachedMedia =
+		mediaContent?.some(block => block.type === "input_image" || block.type === "input_audio") === true;
+	const hasAttachedAudio = mediaContent?.some(block => block.type === "input_audio") === true;
+	const mediaOmissionText = mediaContent
+		?.filter((block): block is ResponseInputText => block.type === "input_text")
+		.map(block => block.text)
+		.filter(text => !omittedImages || text !== NON_VISION_IMAGE_PLACEHOLDER)
+		.join("\n");
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	// "(see attached image)" is only truthful when the result actually carries
-	// images (they ride as a separate user message on the Responses API). A
-	// genuinely empty text result (empty file read, silent tool) must stay
-	// empty — the placeholder sent models chasing an attachment that never
-	// existed.
-	const output = (
-		omittedImages
-			? joinTextWithImagePlaceholder(textResult, true)
-			: textResult.length > 0
-				? textResult
-				: hasImages
-					? "(see attached image)"
-					: ""
-	).toWellFormed();
+	// "(see attached media)" is only truthful when the result actually carries
+	// supported media on a synthetic user message. A genuinely empty text result
+	// (empty file read, silent tool) must stay empty.
+	const output = [
+		omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult,
+		mediaOmissionText,
+		!textResult && !mediaOmissionText && hasAttachedMedia ? "(see attached media)" : "",
+	]
+		.filter(Boolean)
+		.join("\n")
+		.toWellFormed();
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
 		messages.push({
 			type: "message",
@@ -2044,25 +2082,20 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		});
 	}
 
-	if (!hasImages || !supportsImages) {
+	if (!hasAttachedMedia || !mediaContent?.length) {
 		return;
 	}
 
 	const contentParts: ResponseInputContent[] = [
-		{ type: "input_text", text: "Attached image(s) from tool result:" } satisfies ResponseInputText,
+		{
+			type: "input_text",
+			text: hasAttachedAudio ? "Attached media from tool result:" : "Attached image(s) from tool result:",
+		} satisfies ResponseInputText,
+		...mediaContent,
 	];
-	for (const block of toolResult.content) {
-		if (block.type === "image") {
-			contentParts.push({
-				type: "input_image",
-				detail: clampResponsesImageDetail(block.detail, supportsImageDetailOriginal),
-				image_url: `data:${block.mimeType};base64,${block.data}`,
-			} satisfies ResponseInputImage);
-		}
-	}
-	const imageMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
-	syntheticToolImageMessages.add(imageMessage);
-	messages.push(imageMessage);
+	const mediaMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
+	syntheticToolMediaMessages.add(mediaMessage);
+	messages.push(mediaMessage);
 }
 
 /**
