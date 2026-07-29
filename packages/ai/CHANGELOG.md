@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Centralized provider HTTP/2 pooling, Connect framing, proxy tunneling, and lifecycle cleanup in a shared transport.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
