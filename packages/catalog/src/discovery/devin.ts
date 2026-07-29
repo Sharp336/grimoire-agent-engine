@@ -6,16 +6,53 @@ import {
 	GetCliModelConfigsRequestSchema,
 	GetCliModelConfigsResponseSchema,
 } from "./devin-gen/exa/api_server_pb/api_server_pb";
-import { type ClientModelConfig, MetadataSchema } from "./devin-gen/exa/codeium_common_pb/codeium_common_pb";
+import {
+	type ClientModelConfig,
+	DisplayOption,
+	MetadataSchema,
+} from "./devin-gen/exa/codeium_common_pb/codeium_common_pb";
 
 const DEVIN_DEFAULT_BASE_URL = "https://server.codeium.com";
 const DEVIN_GET_CLI_MODEL_CONFIGS_PATH = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
-const DEVIN_IDE_VERSION = "3.2.23";
-const DEVIN_EXTENSION_VERSION = "1.48.2";
+const DEVIN_IDE_NAME = "chisel";
+const DEVIN_IDE_VERSION = "0.0.0-dev";
+const DEVIN_EXTENSION_NAME = "chisel";
+const DEVIN_EXTENSION_VERSION = "0.0.0-dev";
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
+
+export interface DevinCredential {
+	token: string;
+	apiEndpoint?: string;
+}
+
+export function parseDevinCredential(apiKey: string | undefined): DevinCredential {
+	if (!apiKey) return { token: "" };
+	try {
+		const value = JSON.parse(apiKey) as unknown;
+		if (value && typeof value === "object" && !Array.isArray(value)) {
+			const record = value as Record<string, unknown>;
+			if (typeof record.token === "string") {
+				return {
+					token: record.token,
+					apiEndpoint:
+						typeof record.apiEndpoint === "string" && record.apiEndpoint.length > 0
+							? record.apiEndpoint
+							: undefined,
+				};
+			}
+		}
+	} catch {
+		// Legacy credentials are opaque session tokens rather than JSON.
+	}
+	return { token: apiKey };
+}
+
+export function devinOs(platform: NodeJS.Platform = process.platform): string {
+	return platform === "win32" ? "windows" : platform;
+}
 
 /** Best-effort match for labels whose wording implies a thinking / reasoning-effort variant. */
 const REASONING_LABEL_PATTERN = /think|thinking|minimal|high|medium|low|xhigh|max|reasoning/i;
@@ -52,7 +89,11 @@ export async function fetchDevinModels(
 	options: DevinModelDiscoveryOptions,
 ): Promise<ModelSpec<"devin-agent">[] | null> {
 	const timeoutMs = options.timeoutMs ?? 5_000;
-	const resolvedBaseUrl = options.baseUrl ?? DEVIN_DEFAULT_BASE_URL;
+	const credential = parseDevinCredential(options.apiKey);
+	const resolvedBaseUrl =
+		credential.apiEndpoint && (!options.baseUrl || options.baseUrl === DEVIN_DEFAULT_BASE_URL)
+			? credential.apiEndpoint
+			: (options.baseUrl ?? DEVIN_DEFAULT_BASE_URL);
 	const requestUrl = `${resolvedBaseUrl.replace(/\/+$/, "")}${DEVIN_GET_CLI_MODEL_CONFIGS_PATH}`;
 
 	const controller = new AbortController();
@@ -60,13 +101,16 @@ export async function fetchDevinModels(
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
 
 	try {
+		const apiKey = normalizeDevinSessionToken(credential.token);
 		const request = create(GetCliModelConfigsRequestSchema, {
 			metadata: create(MetadataSchema, {
-				apiKey: normalizeDevinSessionToken(options.apiKey),
-				ideName: "windsurf",
+				apiKey,
+				ideName: DEVIN_IDE_NAME,
 				ideVersion: DEVIN_IDE_VERSION,
-				extensionName: "windsurf",
+				extensionName: DEVIN_EXTENSION_NAME,
 				extensionVersion: DEVIN_EXTENSION_VERSION,
+				locale: "en",
+				os: devinOs(),
 			}),
 		});
 		const body = toBinary(GetCliModelConfigsRequestSchema, request);
@@ -75,6 +119,7 @@ export async function fetchDevinModels(
 			"content-type": "application/proto",
 			"connect-protocol-version": "1",
 			accept: "*/*",
+			authorization: `Basic ${apiKey}`,
 		};
 
 		const fetchImpl = discoveryFetch(options.fetch);
@@ -88,7 +133,7 @@ export async function fetchDevinModels(
 			return null;
 		}
 
-		return normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl);
+		return normalizeDevinModels(decoded.clientModelConfigs, resolvedBaseUrl);
 	} catch {
 		return null;
 	} finally {
@@ -118,6 +163,14 @@ function decodeCliModelConfigsResponse(payload: Uint8Array) {
 	}
 }
 
+/** First candidate that is a finite positive number, else `undefined`. */
+function firstFinitePositive(...candidates: (number | undefined)[]): number | undefined {
+	for (const candidate of candidates) {
+		if (candidate !== undefined && Number.isFinite(candidate) && candidate > 0) return candidate;
+	}
+	return undefined;
+}
+
 function normalizeDevinModels(
 	configs: readonly ClientModelConfig[],
 	baseUrlOverride: string | undefined,
@@ -127,12 +180,22 @@ function normalizeDevinModels(
 		if (config.disabled) {
 			continue;
 		}
+		// Only surface the display options actually requested above. The server may
+		// still volunteer others (devin's internal `subagent-default` and
+		// `memory-migration-default` routers ride DISPLAY_OPTION 6), and those are
+		// plumbing, not user-selectable models.
+		const display = config.modelInfo?.displayOption ?? DisplayOption.UNSPECIFIED;
+		if (display !== DisplayOption.UNSPECIFIED && display !== DisplayOption.MODEL_ROUTER) {
+			continue;
+		}
 		const id = config.modelUid.trim();
 		if (!id) {
 			continue;
 		}
 		const input: ("text" | "image")[] = config.supportsImages ? ["text", "image"] : ["text"];
-		const contextWindow = config.maxTokens > 0 ? config.maxTokens : DEFAULT_CONTEXT_WINDOW;
+		const modelInfo = config.modelInfo;
+		const contextWindow = firstFinitePositive(modelInfo?.maxTokens, config.maxTokens) ?? DEFAULT_CONTEXT_WINDOW;
+		const maxTokens = firstFinitePositive(modelInfo?.maxOutputTokens, config.maxTokens) ?? DEFAULT_MAX_TOKENS;
 		byId.set(id, {
 			id,
 			name: config.label.trim() || id,
@@ -142,10 +205,30 @@ function normalizeDevinModels(
 			reasoning: supportsDevinThinking(config),
 			input,
 			supportsTools: true,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: devinModelCost(config),
 			contextWindow,
-			maxTokens: Math.min(config.maxTokens > 0 ? config.maxTokens : DEFAULT_MAX_TOKENS, DEFAULT_MAX_TOKENS),
+			maxTokens,
 		});
 	}
 	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function devinModelCost(config: ClientModelConfig): ModelSpec<"devin-agent">["cost"] {
+	let input = 0;
+	let cacheRead = 0;
+	let output = 0;
+	for (const dimension of config.modelDimensions) {
+		switch (dimension.label) {
+			case "Input":
+				input = dimension.value;
+				break;
+			case "Cached input":
+				cacheRead = dimension.value;
+				break;
+			case "Output":
+				output = dimension.value;
+				break;
+		}
+	}
+	return { input, output, cacheRead, cacheWrite: 0 };
 }

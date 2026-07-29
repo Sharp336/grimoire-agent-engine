@@ -1,20 +1,26 @@
 import * as AIError from "../../error";
 import { OAuthCallbackFlow } from "./callback-server";
+import { jwtExpiryMs } from "./jwt";
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 type FetchFunction = NonNullable<OAuthController["fetch"]>;
 
 const DEVIN_WEBAPP_URL = "https://app.devin.ai";
-const DEVIN_API_URL = "https://api.devin.ai";
+const DEVIN_API_URL = "https://server.codeium.com";
 const CALLBACK_PORT = 59653;
 const CALLBACK_PATH = "/callback";
-const TOKEN_PATH = "/auth/cli/token";
+const TOKEN_PATH = "/exa.seat_management_pb.SeatManagementService/ExchangePKCEAuthorizationCode";
 const FALLBACK_EXPIRES_MS = 365 * 24 * 60 * 60 * 1000;
 
 interface DevinPKCEParams {
 	verifier: string;
 	challenge: string;
+}
+
+export interface DevinCliTokenExchange {
+	apiKey: string;
+	apiServerUrl?: string;
 }
 
 export async function loginDevin(ctrl: OAuthController): Promise<OAuthCredentials> {
@@ -60,13 +66,13 @@ class DevinOAuthFlow extends OAuthCallbackFlow {
 				provider: "devin",
 			});
 		}
-		const token = await exchangeDevinCliToken(code, this.#pkce.verifier, this.ctrl.fetch);
+		const exchange = await exchangeDevinCliToken(code, this.#pkce.verifier, this.ctrl.fetch);
 
 		return {
-			access: token,
-			refresh: token,
-			expires: getTokenExpiry(token),
-			apiEndpoint: DEVIN_API_URL,
+			access: exchange.apiKey,
+			refresh: exchange.apiKey,
+			expires: getTokenExpiry(exchange.apiKey),
+			apiEndpoint: exchange.apiServerUrl || DEVIN_API_URL,
 			enterpriseUrl: DEVIN_WEBAPP_URL,
 		};
 	}
@@ -76,16 +82,17 @@ export async function exchangeDevinCliToken(
 	authorizationCode: string,
 	codeVerifier: string,
 	fetchImpl: FetchFunction = fetch,
-): Promise<string> {
+): Promise<DevinCliTokenExchange> {
 	const response = await fetchImpl(`${DEVIN_API_URL}${TOKEN_PATH}`, {
 		method: "POST",
 		headers: {
 			Accept: "application/json",
 			"Content-Type": "application/json",
+			"Connect-Protocol-Version": "1",
 		},
 		body: JSON.stringify({
-			code: authorizationCode,
-			code_verifier: codeVerifier,
+			authorizationCode,
+			codeVerifier,
 		}),
 	});
 
@@ -98,27 +105,22 @@ export async function exchangeDevinCliToken(
 		});
 	}
 
-	const data = (await response.json()) as { token?: unknown };
-	if (typeof data.token !== "string" || data.token.length === 0) {
+	const data = (await response.json()) as { apiKey?: unknown; apiServerUrl?: unknown };
+	if (typeof data.apiKey !== "string" || data.apiKey.length === 0) {
 		throw new AIError.OAuthError("Devin CLI token exchange returned an empty token", {
 			kind: "validation",
 			provider: "devin",
 		});
 	}
-	return data.token;
+	return {
+		apiKey: data.apiKey,
+		apiServerUrl:
+			typeof data.apiServerUrl === "string" && data.apiServerUrl.length > 0 ? data.apiServerUrl : undefined,
+	};
 }
 
+// A malformed or non-JWT Devin token keeps the conservative long-lived
+// fallback rather than forcing an immediate refresh.
 function getTokenExpiry(token: string): number {
-	try {
-		const [, payload] = token.split(".");
-		if (payload) {
-			const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: unknown };
-			if (typeof decoded.exp === "number" && Number.isFinite(decoded.exp)) {
-				return decoded.exp * 1000 - 5 * 60 * 1000;
-			}
-		}
-	} catch {
-		// Ignore malformed non-JWT tokens and use a conservative long-lived fallback.
-	}
-	return Date.now() + FALLBACK_EXPIRES_MS;
+	return jwtExpiryMs(token) ?? Date.now() + FALLBACK_EXPIRES_MS;
 }

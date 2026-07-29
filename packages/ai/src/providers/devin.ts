@@ -1,14 +1,11 @@
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gzipSync } from "node:zlib";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { devinOs, parseDevinCredential } from "@oh-my-pi/pi-catalog/discovery/devin";
 import {
 	ChatMessageRequestType,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
 } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import {
-	GetUserJwtRequestSchema,
-	GetUserJwtResponseSchema,
-} from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 import {
 	CacheControlType,
 	type ChatMessagePrompt,
@@ -30,6 +27,17 @@ import {
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import {
+	CONNECT_COMPRESSED_FLAG,
+	type ConnectFrame,
+	connectCodeToHttpStatus,
+	createConnectFrameReader,
+	encodeConnectFrame,
+	postH2Primary,
+	readConnectTrailerError,
+	registerTransportDisposer,
+	type TransportResponse,
+} from "../transport";
 import type {
 	Api,
 	AssistantMessage,
@@ -46,10 +54,11 @@ import type {
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
 import { transformMessages } from "./transform-messages";
 
-/** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
+/** Base host for the current Devin CLI's Codeium Connect RPCs. */
 export const DEVIN_API_URL = "https://server.codeium.com";
 
 export interface DevinOptions extends StreamOptions {
@@ -62,31 +71,38 @@ export interface DevinOptions extends StreamOptions {
 }
 
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
-const DEVIN_IDE_VERSION = "3.2.23";
-const DEVIN_EXTENSION_VERSION = "1.48.2";
+const DEVIN_IDE_NAME = "windsurf";
+const DEVIN_IDE_VERSION = "0.0.0-dev";
+const DEVIN_EXTENSION_NAME = "windsurf";
+const DEVIN_EXTENSION_VERSION = "0.0.0-dev";
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
-const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
-const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
+const DEVIN_DEFAULT_STOP_PATTERNS = [
+	"<|user|>",
+	"<|bot|>",
+	"<|context_request|>",
+	"<\u007cendoftext\u007c>",
+	"<|end_of_turn|>",
+];
 
-/** Connect streaming framing: flag byte bit 0x01 = gzip payload, 0x02 = end-of-stream JSON trailers. */
-const CONNECT_COMPRESSED_FLAG = 0x01;
-const CONNECT_END_STREAM_FLAG = 0x02;
-/**
- * Hard upper bound on a single Connect frame payload. The 4-byte length prefix
- * is otherwise attacker-controlled (up to `2**32 - 1`), so a malicious or buggy
- * peer could force {@link streamDevin}'s reader to buffer gigabytes via
- * `Buffer.concat` before the idle-timeout wrapper aborts. Well above any
- * legitimate Cascade response but tight enough that a corrupt length prefix
- * fails fast instead of consuming memory.
- */
-const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
-/**
- * Recovery heuristic for opaque Devin `invalid_argument` trailers. This is not
- * asserted to be the backend's hard limit: small requests can hit the same
- * intermittent error, while compactable message history this large is likely
- * to benefit from the existing context-overflow maintenance path.
- */
-const LARGE_HISTORY_RECOVERY_BYTES = 512 * 1024;
+interface ActiveDevinTransport {
+	abort: AbortController;
+	settled: Promise<void>;
+}
+
+const activeDevinTransports = new Set<ActiveDevinTransport>();
+
+async function disposeDevinTransports(): Promise<void> {
+	const active = [...activeDevinTransports];
+	for (const transport of active) transport.abort.abort(new Error("Devin transport disposed"));
+	await Promise.allSettled(active.map(transport => transport.settled));
+}
+
+let disposerRegistered = false;
+function ensureDisposerRegistered(): void {
+	if (disposerRegistered) return;
+	disposerRegistered = true;
+	registerTransportDisposer("devin", disposeDevinTransports);
+}
 
 export const streamDevin: StreamFunction<"devin-agent"> = (
 	model: Model<"devin-agent">,
@@ -94,6 +110,12 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 	options?: DevinOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const transportAbort = new AbortController();
+	const signal = options?.signal ? AbortSignal.any([options.signal, transportAbort.signal]) : transportAbort.signal;
+	const { promise: transportSettled, resolve: resolveTransportSettled } = Promise.withResolvers<void>();
+	const activeTransport = { abort: transportAbort, settled: transportSettled };
+	ensureDisposerRegistered();
+	activeDevinTransports.add(activeTransport);
 
 	(async () => {
 		const startTime = performance.now();
@@ -130,6 +152,8 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		const toolLastParseLen = new Map<string, number>();
 		let activeToolCallId: string | undefined;
 		let latestStopReason = StopReason.UNSPECIFIED;
+		let response: TransportResponse | undefined;
+		let debugResponseLogPromise: Promise<RequestDebugResponseLog> | undefined;
 
 		const markFirstToken = () => {
 			if (firstTokenTime === undefined) firstTokenTime = performance.now();
@@ -160,12 +184,14 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		};
 
 		try {
-			const fetchImpl = options?.fetch ?? fetch;
-			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
-			const apiKey = normalizeDevinSessionToken(options?.apiKey);
-			const auth = await fetchDevinAuthMetadata(apiKey, baseUrl, fetchImpl, options?.signal);
-			const chatBaseUrl = auth.baseUrl ?? baseUrl;
-			const request = buildDevinChatRequest(model, context, options, apiKey, auth.userJwt);
+			const credential = parseDevinCredential(options?.apiKey);
+			const baseUrl = (
+				credential.apiEndpoint && (!model.baseUrl || model.baseUrl === DEVIN_API_URL)
+					? credential.apiEndpoint
+					: model.baseUrl || DEVIN_API_URL
+			).replace(/\/+$/, "");
+			const apiKey = normalizeDevinSessionToken(credential.token);
+			const request = buildDevinChatRequest(model, context, options, apiKey);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
@@ -174,125 +200,79 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				requestBytes: reqBytes.byteLength,
 				compressedBytes: gz.byteLength,
 			});
-			const frame = Buffer.alloc(5 + gz.length);
-			frame[0] = CONNECT_COMPRESSED_FLAG;
-			frame.writeUInt32BE(gz.length, 1);
-			frame.set(gz, 5);
+			const frame = encodeConnectFrame(gz, CONNECT_COMPRESSED_FLAG);
+			const commonHeaders = {
+				"content-type": "application/connect+proto",
+				"connect-protocol-version": "1",
+				"connect-content-encoding": "gzip",
+				"accept-encoding": "identity",
+				authorization: `Basic ${apiKey}`,
+				"connect-accept-encoding": "gzip",
+				...(options?.headers ?? {}),
+				te: "trailers",
+			};
+			const debugSession = isRequestDebugEnabled()
+				? await createRequestDebugSession({
+						protocol: options?.fetch ? "http" : "http2",
+						method: "POST",
+						url: baseUrl + CHAT_MESSAGE_PATH,
+						headers: commonHeaders,
+						bodyBase64: Buffer.from(frame).toString("base64"),
+					})
+				: undefined;
 
-			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
-				method: "POST",
-				headers: {
-					"content-type": "application/connect+proto",
-					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
-					"accept-encoding": "identity",
-					"user-agent": "connect-go/1.18.1 (go1.26.3)",
-					"connect-accept-encoding": "gzip",
-					...(options?.headers ?? {}),
-				},
+			response = await postH2Primary({
+				url: baseUrl + CHAT_MESSAGE_PATH,
+				provider: model.provider,
+				headers: commonHeaders,
 				body: frame,
-				signal: options?.signal,
+				signal,
+				fetchOverride: options?.fetch,
 			});
-
-			if (!response.ok) {
-				const text = await response.text();
-				throw new AIError.DevinApiError(
-					`Devin API error ${response.status} ${response.statusText}: ${text}`,
-					response.status,
-				);
-			}
-			if (!response.body) {
-				throw new AIError.ProviderResponseError("Devin API error: response body is empty", {
-					provider: model.provider,
-					kind: "empty-body",
-				});
+			debugResponseLogPromise = debugSession?.openResponseLog(`HTTP ${response.status}`.trim(), response.headers);
+			if (response.status < 200 || response.status >= 300) {
+				const chunks: Uint8Array[] = [];
+				let totalBytes = 0;
+				for await (const chunk of response.body) {
+					if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log.write(chunk));
+					if (totalBytes >= 64 * 1024) break;
+					const bounded = chunk.subarray(0, 64 * 1024 - totalBytes);
+					chunks.push(bounded);
+					totalBytes += bounded.byteLength;
+				}
+				const text = new TextDecoder().decode(Buffer.concat(chunks));
+				const error = new AIError.DevinApiError(`Devin API error ${response.status}: ${text}`, response.status);
+				const overflowSignal = text.trim().toLowerCase();
+				if (
+					response.status === 413 &&
+					(overflowSignal === "request_too_large" || overflowSignal.startsWith("request_too_large:"))
+				) {
+					AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
+				}
+				throw error;
 			}
 			const body = response.body;
-
 			stream.push({ type: "start", partial: output });
-
-			const reader = body.getReader();
-			let pending = Buffer.alloc(0);
-
-			for (;;) {
-				const { done, value } = await reader.read();
-				if (value && value.length > 0) {
-					// Steady state drains fully per chunk; view the fresh reader chunk
-					// instead of copying it through Buffer.concat (see aws-eventstream.ts).
-					pending =
-						pending.length === 0
-							? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-							: Buffer.concat([pending, value]);
+			const frameReader = createConnectFrameReader();
+			for await (const chunk of body) {
+				if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log.write(chunk));
+				let frames: ConnectFrame[];
+				try {
+					frames = frameReader.push(chunk);
+				} catch (error) {
+					throw new AIError.ProviderResponseError(
+						`Devin ${error instanceof Error ? error.message : String(error)}`,
+						{ provider: model.provider, kind: "envelope" },
+					);
 				}
-
-				while (pending.length >= 5) {
-					const flag = pending[0];
-					const len = pending.readUInt32BE(1);
-					if (len > MAX_CONNECT_FRAME_PAYLOAD) {
-						throw new AIError.ProviderResponseError(
-							`Devin Connect frame length ${len} exceeds ${MAX_CONNECT_FRAME_PAYLOAD}-byte cap`,
-							{ provider: model.provider, kind: "envelope" },
-						);
-					}
-					if (pending.length < 5 + len) break;
-					const payload = pending.subarray(5, 5 + len);
-					pending = pending.subarray(5 + len);
-
-					if (flag & CONNECT_END_STREAM_FLAG) {
-						const trailerBytes = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
-						const trailerError = readConnectTrailerError(trailerBytes.toString("utf8").trim());
-						if (trailerError) {
-							const error = new AIError.ValidationError(trailerError.formatted);
-							if (
-								firstTokenTime === undefined &&
-								trailerError.code.toLowerCase() === "invalid_argument" &&
-								/\binternal error\b/i.test(trailerError.message)
-							) {
-								// The full protobuf also contains the system prompt and tool
-								// schemas, which history maintenance cannot shrink. Re-encode
-								// only the repeated history field before choosing recovery.
-								let activeTailCount = 0;
-								const lastRole = context.messages.at(-1)?.role;
-								if (lastRole === "user" || lastRole === "developer") {
-									activeTailCount = 1;
-									// A trailing developer message can accompany the current user
-									// prompt. Earlier user-role records may instead be flushed
-									// execution history and must remain eligible for compaction.
-									if (lastRole === "developer") {
-										for (let i = context.messages.length - 2; i >= 0; i--) {
-											const role = context.messages[i].role;
-											if (role !== "user" && role !== "developer") break;
-											activeTailCount++;
-										}
-									}
-								}
-								const shrinkablePrompts =
-									activeTailCount > 0
-										? request.chatMessagePrompts.slice(0, -activeTailCount)
-										: request.chatMessagePrompts;
-								const historyBytes = toBinary(
-									GetChatMessageRequestSchema,
-									create(GetChatMessageRequestSchema, {
-										chatMessagePrompts: shrinkablePrompts,
-									}),
-								).byteLength;
-								if (historyBytes >= LARGE_HISTORY_RECOVERY_BYTES) {
-									AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
-									logger.warn("devin: treating large-history invalid_argument as context overflow", {
-										model: model.id,
-										historyBytes,
-										requestBytes: reqBytes.byteLength,
-										compressedBytes: gz.byteLength,
-									});
-								}
-							}
-							throw error;
-						}
+				for (const connectFrame of frames) {
+					if (connectFrame.endOfStream) {
+						const trailerError = readConnectTrailerError(connectFrame.payload);
+						if (trailerError) throw devinConnectError(trailerError.code, trailerError.message);
 						continue;
 					}
 
-					const raw = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
-					const msg = fromBinary(GetChatMessageResponseSchema, raw);
+					const msg = fromBinary(GetChatMessageResponseSchema, connectFrame.payload);
 					if (msg.messageId && !output.responseId) output.responseId = msg.messageId;
 
 					if (msg.deltaThinking) {
@@ -390,9 +370,18 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 							output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					}
 				}
-
-				if (done) break;
 			}
+
+			try {
+				frameReader.finish();
+			} catch (error) {
+				throw new AIError.ProviderResponseError(`Devin ${error instanceof Error ? error.message : String(error)}`, {
+					provider: model.provider,
+					kind: "envelope",
+				});
+			}
+
+			if (signal.aborted) throw new AIError.AbortError();
 
 			endTextBlock();
 			endThinkingBlock();
@@ -418,7 +407,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stream.end();
 		} catch (error) {
 			logger.error("devin: stream failed", { error: String(error) });
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
+			const result = await AIError.finalize(error, { api: model.api, signal });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
@@ -427,67 +416,37 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
+		} finally {
+			try {
+				await response?.close();
+			} catch (error) {
+				logger.warn("devin: transport close failed", { error: String(error) });
+			} finally {
+				activeDevinTransports.delete(activeTransport);
+				const debugLog = await debugResponseLogPromise;
+				await debugLog?.close();
+				resolveTransportSettled();
+			}
 		}
 	})();
 
 	return stream;
 };
 
+function devinConnectError(code: string, message: string): AIError.DevinApiError {
+	const normalized = code.toLowerCase();
+	const status = connectCodeToHttpStatus(code);
+	const detail = `Devin stream error${code ? ` ${code}` : ""}: ${message}`;
+	const error = new AIError.DevinApiError(detail, status);
+	if (normalized === "resource_exhausted" && message.trimStart().toLowerCase().startsWith("request_too_large:")) {
+		AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
+	}
+	return error;
+}
+
 function normalizeDevinSessionToken(apiKey: string | undefined): string {
 	if (!apiKey) return "";
 	return apiKey.startsWith(DEVIN_SESSION_TOKEN_PREFIX) ? apiKey : `${DEVIN_SESSION_TOKEN_PREFIX}${apiKey}`;
-}
-
-async function fetchDevinAuthMetadata(
-	apiKey: string,
-	baseUrl: string,
-	fetchImpl: NonNullable<StreamOptions["fetch"]>,
-	signal: AbortSignal | undefined,
-): Promise<{ userJwt: string; baseUrl?: string }> {
-	const request = create(GetUserJwtRequestSchema, {
-		metadata: create(MetadataSchema, {
-			apiKey,
-			ideName: "windsurf",
-			ideVersion: DEVIN_IDE_VERSION,
-			extensionName: "windsurf",
-			extensionVersion: DEVIN_EXTENSION_VERSION,
-			locale: "en",
-		}),
-	});
-	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
-		method: "POST",
-		headers: {
-			"content-type": "application/proto",
-			"connect-protocol-version": "1",
-			accept: "*/*",
-		},
-		body: toBinary(GetUserJwtRequestSchema, request),
-		signal,
-	});
-	const payload = new Uint8Array(await response.arrayBuffer());
-	if (!response.ok) {
-		throw new AIError.DevinApiError(
-			`Devin auth error ${response.status} ${response.statusText}: ${new TextDecoder().decode(payload)}`,
-			response.status,
-		);
-	}
-	const decoded = decodeDevinUserJwtResponse(payload);
-	if (!decoded.userJwt) {
-		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
-			provider: "devin",
-			kind: "runtime",
-		});
-	}
-	const customBaseUrl = decoded.customApiServerUrl.trim();
-	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
-}
-
-function decodeDevinUserJwtResponse(payload: Uint8Array) {
-	try {
-		return fromBinary(GetUserJwtResponseSchema, payload);
-	} catch {
-		return fromBinary(GetUserJwtResponseSchema, gunzipSync(payload));
-	}
 }
 
 /**
@@ -500,7 +459,6 @@ function buildDevinChatRequest(
 	context: Context,
 	options: DevinOptions | undefined,
 	apiKey: string,
-	userJwt: string,
 ) {
 	const cascadeId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 	const stopPatterns =
@@ -511,12 +469,12 @@ function buildDevinChatRequest(
 	return create(GetChatMessageRequestSchema, {
 		metadata: create(MetadataSchema, {
 			apiKey,
-			userJwt,
-			ideName: "windsurf",
+			ideName: DEVIN_IDE_NAME,
+			extensionName: DEVIN_EXTENSION_NAME,
 			ideVersion: DEVIN_IDE_VERSION,
-			extensionName: "windsurf",
 			extensionVersion: DEVIN_EXTENSION_VERSION,
 			locale: "en",
+			os: devinOs(),
 		}),
 		prompt: (context.systemPrompt ?? []).join("\n\n"),
 		chatMessagePrompts: buildChatMessagePrompts(messages, cascadeId, model),
@@ -643,36 +601,4 @@ function buildChatMessagePrompts(
 		}
 	}
 	return prompts;
-}
-
-interface ConnectTrailerError {
-	code: string;
-	message: string;
-	formatted: string;
-}
-
-/**
- * Parse a Connect end-of-stream JSON trailer and return its structured error
- * when it carries `{ error: { code, message } }`, else `null`. The trailer is
- * untrusted server output, so the shape is checked with guards rather than asserted.
- */
-function readConnectTrailerError(text: string): ConnectTrailerError | null {
-	if (text.length === 0) return null;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch {
-		return null;
-	}
-	if (!parsed || typeof parsed !== "object" || !("error" in parsed)) return null;
-	const err = parsed.error;
-	if (!err || typeof err !== "object") return null;
-	const code = "code" in err && typeof err.code === "string" ? err.code : "";
-	const message = "message" in err && typeof err.message === "string" ? err.message : "";
-	if (!code && !message) return null;
-	return {
-		code,
-		message,
-		formatted: `Devin stream error${code ? ` ${code}` : ""}: ${message}`,
-	};
 }

@@ -15,6 +15,7 @@ import * as os from "node:os";
 import { $env } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import * as AIError from "../../error";
+import { jwtExpiryMs } from "./jwt";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const API_VERSION = "2.18";
@@ -25,34 +26,18 @@ const APP_USER_AGENT = "Perplexity/641 CFNetwork/1568 Darwin/25.2.0";
 // JWT helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Extract expiry from a JWT. Perplexity tokens generally lack an `exp` claim
- * (their sessions are server-side and effectively non-expiring from the client's
- * point of view), so we return a far-future sentinel when no `exp` is present.
- * When `exp` IS present, subtract a 5-minute safety margin.
- */
+// Perplexity tokens generally lack an `exp` claim — their sessions are
+// server-side and effectively non-expiring from the client's point of view —
+// so a token with no readable expiry maps to a far-future sentinel instead of
+// looking permanently stale.
 const NEVER_EXPIRES = 8.64e15; // max safe Date value
-function getJwtExpiry(token: string): number {
-	try {
-		const parts = token.split(".");
-		if (parts.length !== 3) return NEVER_EXPIRES;
-		const payload = parts[1] ?? "";
-		const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-		if (typeof decoded?.exp === "number" && Number.isFinite(decoded.exp)) {
-			return decoded.exp * 1000 - 5 * 60_000;
-		}
-	} catch {
-		// Ignore decode errors
-	}
-	return NEVER_EXPIRES;
-}
 
 /** Build OAuthCredentials from a Perplexity JWT string. */
 function jwtToCredentials(jwt: string, email?: string): OAuthCredentials {
 	return {
 		access: jwt,
 		refresh: jwt,
-		expires: getJwtExpiry(jwt),
+		expires: jwtExpiryMs(jwt) ?? NEVER_EXPIRES,
 		email,
 	};
 }

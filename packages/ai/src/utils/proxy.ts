@@ -1,3 +1,5 @@
+import * as http from "node:http";
+import * as https from "node:https";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import * as AIError from "../error";
@@ -143,10 +145,15 @@ export function getProxyForUrl(provider: string, url: URL): string | undefined {
  * Wraps a fetch implementation to inject proxy options for non-local hosts.
  */
 export function wrapFetchForProxy(fetchImpl: FetchImpl, provider: string): FetchImpl {
-	const proxyUrl = getProxyForProvider(provider);
-	if (!proxyUrl) {
-		return fetchImpl;
-	}
+	const providerProxy = getProxyForProvider(provider);
+	const hasGenericProxy =
+		Bun.env.HTTPS_PROXY ||
+		Bun.env.https_proxy ||
+		Bun.env.HTTP_PROXY ||
+		Bun.env.http_proxy ||
+		Bun.env.ALL_PROXY ||
+		Bun.env.all_proxy;
+	if (!providerProxy && !hasGenericProxy) return fetchImpl;
 
 	const wrapped = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const urlStr = input instanceof Request ? input.url : input.toString();
@@ -158,9 +165,8 @@ export function wrapFetchForProxy(fetchImpl: FetchImpl, provider: string): Fetch
 			return fetchImpl(input, init);
 		}
 
-		if (shouldBypassProxy(urlObj)) {
-			return fetchImpl(input, init);
-		}
+		const proxyUrl = getProxyForUrl(provider, urlObj);
+		if (!proxyUrl) return fetchImpl(input, init);
 
 		const mergedInit = { ...(init ?? {}), proxy: proxyUrl };
 		return fetchImpl(input, mergedInit);
@@ -177,6 +183,10 @@ export interface ConnectProxiedSocketOptions {
 	signal?: AbortSignal;
 	/** Maximum wall-clock time to establish the final TLS tunnel. Disabled when absent or non-positive. */
 	timeoutMs?: number;
+	/** ALPN protocols for TLS handshake (defaults to ["h2"]). */
+	alpnProtocols?: string[];
+	/** Additional certificate authorities for both proxy and target TLS handshakes. */
+	ca?: string | string[];
 }
 
 /**
@@ -199,7 +209,7 @@ export async function connectProxiedSocket(
 	const proxyPort = proxyUrl.port ? parseInt(proxyUrl.port, 10) : useProxySsl ? 443 : 80;
 	const proxyHost = proxyUrl.hostname;
 
-	const targetPort = targetUrl.port ? parseInt(targetUrl.port, 10) : 443;
+	const targetPort = targetUrl.port ? parseInt(targetUrl.port, 10) : targetUrl.protocol === "https:" ? 443 : 80;
 	const targetHost = targetUrl.hostname;
 
 	const { promise, resolve, reject } = Promise.withResolvers<tls.TLSSocket>();
@@ -208,7 +218,7 @@ export async function connectProxiedSocket(
 	let rawSocket: net.Socket | undefined;
 	let tunnelSocket: tls.TLSSocket | undefined;
 	let timeout: NodeJS.Timeout | undefined;
-	let responseData = "";
+	let responseData: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 	let settled = false;
 
 	const cleanup = (): void => {
@@ -245,26 +255,56 @@ export async function connectProxiedSocket(
 	const onTunnelError = (error: Error): void => rejectOnce(error);
 	const onTunnelReady = (): void => {
 		if (!tunnelSocket) return;
+		const alpnProtocols = options?.alpnProtocols ?? ["h2"];
+		if (alpnProtocols.includes("h2") && tunnelSocket.alpnProtocol !== "h2") {
+			const error = Object.assign(
+				new Error(`Proxy target TLS negotiated ALPN ${tunnelSocket.alpnProtocol || "none"}, expected h2`),
+				{ code: "ERR_HTTP2_ALPN" },
+			);
+			rejectOnce(error);
+			return;
+		}
 		resolveOnce(tunnelSocket);
 	};
 	const onProxyData = (chunk: Buffer): void => {
 		if (!rawSocket) return;
-		responseData += chunk.toString("binary");
-		if (!responseData.includes("\r\n\r\n")) return;
+		responseData = responseData.length === 0 ? chunk : Buffer.concat([responseData, chunk]);
+		const headerEndIndex = responseData.indexOf("\r\n\r\n");
+		if (headerEndIndex === -1) {
+			if (responseData.length > 64 * 1024) {
+				rejectOnce(new AIError.ValidationError("Proxy CONNECT response headers exceed 65536 bytes"));
+			}
+			return;
+		}
+		if (headerEndIndex + 4 > 64 * 1024) {
+			rejectOnce(new AIError.ValidationError("Proxy CONNECT response headers exceed 65536 bytes"));
+			return;
+		}
 
 		rawSocket.off("data", onProxyData);
 		rawSocket.off("error", onRawError);
 
-		const firstLine = responseData.split("\r\n")[0];
-		if (!firstLine.includes(" 200 ")) {
+		const firstLineEnd = responseData.indexOf("\r\n");
+		const firstLine = responseData.subarray(0, firstLineEnd).toString("latin1");
+		if (!/^HTTP\/1\.[01] 200(?:[ \t].*)?$/.test(firstLine)) {
 			rejectOnce(new AIError.ValidationError(`Proxy tunnel failed: ${firstLine}`));
+			return;
+		}
+
+		const unconsumedBytes = responseData.subarray(headerEndIndex + 4);
+		if (unconsumedBytes.length > 0) rawSocket.unshift(unconsumedBytes);
+
+		if (targetUrl.protocol === "http:") {
+			rawSocket.resume();
+			resolveOnce(rawSocket as tls.TLSSocket);
 			return;
 		}
 
 		tunnelSocket = tls.connect({
 			socket: rawSocket,
 			servername: targetHost,
-			ALPNProtocols: ["h2"],
+			ALPNProtocols: options?.alpnProtocols ?? ["h2"],
+			ca: options?.ca,
 		});
 		tunnelSocket.once("secureConnect", onTunnelReady);
 		tunnelSocket.once("error", onTunnelError);
@@ -298,6 +338,7 @@ export async function connectProxiedSocket(
 		? tls.connect({
 				host: proxyHost,
 				port: proxyPort,
+				ca: options?.ca,
 			})
 		: net.connect({
 				host: proxyHost,
@@ -307,4 +348,37 @@ export async function connectProxiedSocket(
 	rawSocket.once(readyEvent, onProxyReady);
 
 	return promise;
+}
+
+/** Create an HTTP/HTTPS agent whose connections are tunneled through an HTTP proxy. */
+export function createProxiedAgent(
+	proxyUrlStr: string,
+	targetUrlStr: string,
+	options?: ConnectProxiedSocketOptions,
+): http.Agent | https.Agent {
+	const targetUrl = new URL(targetUrlStr);
+	const AgentClass = targetUrl.protocol === "https:" ? https.Agent : http.Agent;
+	const agent = new AgentClass({
+		keepAlive: true,
+		lookup: (
+			_hostname: string,
+			_options: unknown,
+			callback: (error: Error | null, address: string, family: number) => void,
+		) => callback(null, "127.0.0.1", 4),
+	});
+	(agent as unknown as { createConnection: unknown }).createConnection = (
+		_options: http.RequestOptions | https.RequestOptions,
+		callback: (error: Error | null, socket?: net.Socket) => void,
+	) => {
+		connectProxiedSocket(proxyUrlStr, targetUrlStr, {
+			signal: options?.signal,
+			timeoutMs: options?.timeoutMs,
+			alpnProtocols: options?.alpnProtocols ?? ["http/1.1"],
+		}).then(
+			socket => callback(null, socket),
+			error => callback(error instanceof Error ? error : new Error(String(error))),
+		);
+		return undefined as unknown as net.Socket;
+	};
+	return agent;
 }

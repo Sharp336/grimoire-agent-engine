@@ -772,9 +772,13 @@ function streamDispatch<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const baseOptions = (options || {}) as StreamOptions;
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));
+	const { fetch: decoratedFetch, ...requestOptionFields } = debugOptions;
+	const usesExplicitFetch = baseOptions.fetch !== undefined;
 	const requestOptions = {
-		...debugOptions,
-		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
+		...requestOptionFields,
+		...((model.api !== "devin-agent" || usesExplicitFetch) && {
+			fetch: wrapFetchForProxy(decoratedFetch ?? (globalThis.fetch as FetchImpl), model.provider),
+		}),
 	} as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
