@@ -2883,7 +2883,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Hindsight",
 			label: "Hindsight API Token",
-			description: "Bearer token for authenticated Hindsight servers",
+			description: "Token for authenticated Hindsight servers (a user:password value uses Basic auth)",
 			condition: "hindsightActive",
 		},
 	},
