@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, toBinary } from "@bufbuild/protobuf";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import { __evictH2PoolEntry } from "@oh-my-pi/pi-ai/providers/cursor/h2-pool";
 import { __evictServerConfigEntry } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentServerMessageSchema,
@@ -113,7 +114,7 @@ const context: Context = {
 
 interface CollectResult {
 	eventTypes: string[];
-	stopReason: string;
+	message: AssistantMessage;
 	retryDelays: number[];
 }
 
@@ -132,7 +133,7 @@ async function collect(model: Model<"cursor-agent">, options?: { signal?: AbortS
 		eventTypes.push(event.type);
 	}
 	const result = await stream.result();
-	return { eventTypes, stopReason: result.stopReason, retryDelays };
+	return { eventTypes, message: result, retryDelays };
 }
 
 async function stopServer(): Promise<void> {
@@ -170,9 +171,9 @@ describe("Cursor Connect terminal behavior without the CLI retry feature signal"
 			stream.end();
 		};
 
-		const { stopReason, retryDelays } = await collect(makeModel(baseUrl));
+		const { message, retryDelays } = await collect(makeModel(baseUrl));
 
-		expect(stopReason).toBe("error");
+		expect(message.stopReason).toBe("error");
 		expect(attemptHeaders).toHaveLength(1);
 		expect(attemptHeaders[0]?.["x-request-id"]).toBeTruthy();
 		expect(attemptHeaders[0]?.["x-original-request-id"]).toBeTruthy();
@@ -200,6 +201,98 @@ describe("Cursor Connect terminal behavior without the CLI retry feature signal"
 
 		expect(result.stopReason).toBe("error");
 		expect(waited).toBe(false);
+		expect(attemptHeaders).toHaveLength(1);
+	});
+
+	it("preserves a current-protocol 413 body as a classified context-overflow error", async () => {
+		const baseUrl = await startServer();
+		const body = "request_too_large: input exceeds the context window for cursor-current-agent";
+		handleAttempt = (_attemptIndex, stream) => {
+			stream.respond({ ":status": 413, "content-type": "text/plain; charset=utf-8" });
+			stream.end(body);
+		};
+
+		const { eventTypes, message, retryDelays } = await collect(makeModel(baseUrl));
+
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(message.stopReason).toBe("error");
+		expect(message.errorStatus).toBe(413);
+		expect(message.errorMessage).toContain(body);
+		expect(AIError.is(message.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.isContextOverflow(message)).toBe(true);
+		expect(retryDelays).toEqual([]);
+		expect(attemptHeaders).toHaveLength(1);
+	});
+
+	it("keeps a terminal Connect overflow status authoritative over a trailing turn acknowledgment", async () => {
+		const baseUrl = await startServer();
+		const detail = "context_length_exceeded: input exceeds the model context window";
+		handleAttempt = (_attemptIndex, stream) => {
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			stream.end(Buffer.concat([connectEndErrorFrame("resource_exhausted", detail), turnEndedFrame()]));
+		};
+
+		const { eventTypes, message, retryDelays } = await collect(makeModel(baseUrl));
+
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toContain(detail);
+		expect(AIError.is(message.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.isContextOverflow(message)).toBe(true);
+		expect(retryDelays).toEqual([]);
+		expect(attemptHeaders).toHaveLength(1);
+	});
+
+	it("does not classify an unrelated current-protocol 413 as context overflow", async () => {
+		const baseUrl = await startServer();
+		const body = "policy denied this upload; reduce neither context nor payload";
+		handleAttempt = (_attemptIndex, stream) => {
+			stream.respond({ ":status": 413, "content-type": "text/plain; charset=utf-8" });
+			stream.end(body);
+		};
+
+		const { eventTypes, message, retryDelays } = await collect(makeModel(baseUrl));
+
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(message.stopReason).toBe("error");
+		expect(message.errorStatus).toBe(413);
+		expect(message.errorMessage).toContain(body);
+		expect(AIError.is(message.errorId, AIError.Flag.ContextOverflow)).toBe(false);
+		expect(AIError.isContextOverflow(message)).toBe(false);
+		expect(retryDelays).toEqual([]);
+		expect(attemptHeaders).toHaveLength(1);
+	});
+
+	it("keeps caller cancellation distinct from an overflow error", async () => {
+		const baseUrl = await startServer();
+		const received = Promise.withResolvers<void>();
+		handleAttempt = (_attemptIndex, stream) => {
+			received.resolve();
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+		};
+		const controller = new AbortController();
+		const retryDelays: number[] = [];
+		const stream = streamCursor(makeModel(baseUrl), context, {
+			apiKey: "test-token",
+			signal: controller.signal,
+			providerRetryWait: async delayMs => {
+				retryDelays.push(delayMs);
+			},
+		});
+		const eventTypes: string[] = [];
+		const drain = (async () => {
+			for await (const event of stream) eventTypes.push(event.type);
+		})();
+
+		await received.promise;
+		controller.abort();
+		await drain;
+		const message = await stream.result();
+
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(message.stopReason).toBe("aborted");
+		expect(AIError.is(message.errorId, AIError.Flag.ContextOverflow)).toBe(false);
+		expect(retryDelays).toEqual([]);
 		expect(attemptHeaders).toHaveLength(1);
 	});
 });

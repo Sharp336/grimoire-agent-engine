@@ -262,6 +262,15 @@ function parseConnectEndStream(data: Uint8Array): Error | null {
 	}
 }
 
+function createCursorHttpError(status: number, body: Uint8Array): Error {
+	const detail = new TextDecoder().decode(body);
+	const message = detail ? `Cursor HTTP ${status}: ${detail}` : `Cursor HTTP ${status} (no body)`;
+	if (status === 401 || status === 403) {
+		return new AIError.CursorCredentialError(message, status);
+	}
+	return new AIError.ProviderHttpError(message, status);
+}
+
 /**
  * Maps an opaque HTTP/2 negotiation failure into an actionable error.
  *
@@ -469,6 +478,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			let settled = false;
 			let sawTurnEnded = false;
 			let endStreamError: Error | null = null;
+			let httpErrorStatus: number | null = null;
+			const httpErrorBody: Buffer[] = [];
 			const trackedTasks = new Set<Promise<unknown>>();
 			let taskGroupError: unknown;
 			let activeHandlerPromise: Promise<unknown> | null = null;
@@ -744,12 +755,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					activeRequest.on("response", headers => {
 						const httpStatus = Number(headers[":status"]);
 						if (!endStreamError && Number.isFinite(httpStatus) && (httpStatus < 200 || httpStatus >= 300)) {
-							if (httpStatus === 401 || httpStatus === 403) {
-								endStreamError = new AIError.CursorCredentialError(`Cursor HTTP ${httpStatus}`, httpStatus);
-							} else {
-								endStreamError = new AIError.ProviderHttpError(`Cursor HTTP ${httpStatus}`, httpStatus);
-							}
-							activeRequest.close();
+							httpErrorStatus = httpStatus;
 						}
 						debugResponseLogPromise = debugSession?.openResponseLog(
 							`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
@@ -763,6 +769,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							void debugResponseLogPromise.then(debugLog => {
 								debugLog?.write(chunk);
 							});
+						}
+						if (httpErrorStatus !== null) {
+							httpErrorBody.push(chunk);
+							return;
 						}
 						pendingBuffer = Buffer.concat([pendingBuffer, chunk]);
 
@@ -795,7 +805,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					activeRequest.on("trailers", trailers => {
 						const status = trailers["grpc-status"];
 						const msg = trailers["grpc-message"];
-						if (status && status !== "0" && !endStreamError) {
+						if (status && status !== "0" && !endStreamError && httpErrorStatus === null) {
 							const numericStatus = Number(status);
 							const authStatus = grpcStatusToAuthStatus(numericStatus);
 							const decodedMessage = decodeURIComponent(String(msg || ""));
@@ -808,6 +818,9 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					});
 
 					activeRequest.on("end", () => {
+						if (httpErrorStatus !== null) {
+							endStreamError = createCursorHttpError(httpErrorStatus, Buffer.concat(httpErrorBody));
+						}
 						void closeDebugLog()
 							.then(() => settle())
 							.catch(error => settle(error));
