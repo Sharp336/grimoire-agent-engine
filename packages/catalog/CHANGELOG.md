@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added audio and video model input modalities for catalog discovery and validation.
+- Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
 
 ## [17.1.8] - 2026-07-28
 

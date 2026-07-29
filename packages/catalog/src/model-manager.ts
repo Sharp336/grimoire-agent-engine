@@ -478,12 +478,14 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// dynamic discovery also pre-applies the correct image fallback for omitted
 	// `supports.vision`, so its explicit `false` must not be OR-upgraded by the
 	// canonical bundled model.
-	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
-	const dynamicInputAuthoritative =
-		endpointChanged || (existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot");
-	const supportsImage = dynamicInputAuthoritative
-		? dynamicModel.input.includes("image")
-		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	const dynamicInputAuthoritative = existingModel.baseUrl !== dynamicModel.baseUrl;
+	const dynamicVendorInput = dynamicModel.vendorInput ?? dynamicModel.input;
+	const existingVendorInput = existingModel.vendorInput ?? existingModel.input;
+	const vendorInput = dynamicInputAuthoritative
+		? dynamicVendorInput
+		: (["text", "image", "audio", "video"] as const).filter(
+				modality => existingVendorInput.includes(modality) || dynamicVendorInput.includes(modality),
+			);
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({
@@ -491,7 +493,9 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		...dynamicModel,
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning: existingModel.reasoning || dynamicModel.reasoning,
-		input: supportsImage ? ["text", "image"] : ["text"],
+		input: [...vendorInput],
+		vendorInput: [...vendorInput],
+		vendorInputByWireModel: dynamicModel.vendorInputByWireModel ?? existingModel.vendorInputByWireModel,
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),

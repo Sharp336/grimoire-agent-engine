@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `.wav`, `.mp3`, and `.mp4` `@file` attachments as model media input.
+- Added `.wav`, `.mp3`, and `.mp4` `@file` attachments plus selected-route user/tool capability projection in model surfaces.
 
 ## [17.1.8] - 2026-07-28
 

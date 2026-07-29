@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added audio and video message-content support to agent state and compaction contracts.
+- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
 
 ## [17.1.7] - 2026-07-27
 

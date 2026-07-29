@@ -12,7 +12,7 @@ import type {
 	AssistantMessage,
 	Context,
 	FetchImpl,
-	MediaContent,
+	ImageContent,
 	Model,
 	ServiceTier,
 	StopReason,
@@ -39,7 +39,7 @@ import type {
 	ThinkingLevel,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type {
 	Content,
@@ -205,7 +205,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				const supportsAudio = model.input.includes("audio");
 				const supportsVideo = model.input.includes("video");
 				const parts: Part[] = [];
-				const omittedMedia = new Set<MediaContent["type"]>();
+				let omittedImages = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
@@ -213,24 +213,23 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						parts.push({ text });
 						continue;
 					}
-					if (
-						(item.type === "image" && supportsImages) ||
-						(item.type === "audio" && supportsAudio) ||
-						(item.type === "video" && supportsVideo)
-					) {
-						parts.push({ inlineData: { mimeType: item.mimeType, data: item.data } });
-					} else {
-						omittedMedia.add(item.type);
+					if (item.type === "image") {
+						if (supportsImages) {
+							parts.push({ inlineData: { mimeType: item.mimeType, data: item.data } });
+						} else {
+							omittedImages = true;
+						}
+						continue;
 					}
+					if ((item.type === "audio" && supportsAudio) || (item.type === "video" && supportsVideo)) {
+						parts.push({ inlineData: { mimeType: item.mimeType, data: item.data } });
+						continue;
+					}
+					throw new AIError.ValidationError(
+						`Google ${model.api} cannot encode ${item.type}; routed media preflight must reject it`,
+					);
 				}
-				for (const type of omittedMedia) {
-					parts.push({
-						text:
-							type === "image"
-								? NON_VISION_IMAGE_PLACEHOLDER
-								: `[${type} omitted: model does not support ${type} input]`,
-					});
-				}
+				if (omittedImages) parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
 				if (parts.length === 0) continue;
 				contents.push({
 					role: "user",
@@ -295,53 +294,32 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				parts,
 			});
 		} else if (msg.role === "toolResult") {
-			// Extract text and supported media content.
-			const supportsImages = model.input.includes("image");
-			const supportsAudio = model.input.includes("audio");
-			const supportsVideo = model.input.includes("video");
+			// Tool-result audio/video is not proven on any Google route.
+			const supportsImages = (model.toolResultInput ?? model.input).includes("image");
+			const unsupportedMedia = msg.content.find(c => c.type === "audio" || c.type === "video");
+			if (unsupportedMedia) {
+				throw new AIError.ValidationError(
+					`Google tool results cannot encode ${unsupportedMedia.type}; routed media preflight must reject it`,
+				);
+			}
 			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
 			const textResult = textContent.map(c => c.text).join("\n");
-			const mediaContent = msg.content.filter(
-				(c): c is MediaContent =>
-					(c.type === "image" && supportsImages) ||
-					(c.type === "audio" && supportsAudio) ||
-					(c.type === "video" && supportsVideo),
-			);
-			const omittedMedia = msg.content.filter(
-				(c): c is MediaContent =>
-					c.type !== "text" &&
-					!(
-						(c.type === "image" && supportsImages) ||
-						(c.type === "audio" && supportsAudio) ||
-						(c.type === "video" && supportsVideo)
-					),
-			);
+			const imageContent = supportsImages ? msg.content.filter((c): c is ImageContent => c.type === "image") : [];
+			const omittedImages = !supportsImages && msg.content.some(c => c.type === "image");
 
 			const hasText = textResult.length > 0;
-			const hasMedia = mediaContent.length > 0;
-
-			// Gemini 3+ models support multimodal function responses with inline media.
-			// Gemini < 3 still needs a separate user media turn.
+			const hasImages = imageContent.length > 0;
 			const modelSupportsMultimodalFunctionResponse = supportsMultimodalFunctionResponse(model.id);
-			const omissionText = omittedMedia
-				.map(media =>
-					media.type === "image"
-						? NON_VISION_IMAGE_PLACEHOLDER
-						: `[${media.type} omitted: model does not support ${media.type} input]`,
-				)
-				.join("\n");
-
-			// Use "output" key for success, "error" key for errors as per SDK documentation
-			const responseValue = omissionText
-				? [hasText ? textResult.toWellFormed() : "", omissionText].filter(Boolean).join("\n")
+			const responseValue = omittedImages
+				? joinTextWithImagePlaceholder(textResult, true)
 				: hasText
 					? textResult.toWellFormed()
-					: hasMedia
-						? "(see attached media)"
+					: hasImages
+						? "(see attached image)"
 						: "";
 
-			const mediaParts: Part[] = mediaContent.map(media => ({
-				inlineData: { mimeType: media.mimeType, data: media.data },
+			const imageParts: Part[] = imageContent.map(image => ({
+				inlineData: { mimeType: image.mimeType, data: image.data },
 			}));
 
 			const includeId = supportsFunctionPartId(model);
@@ -350,7 +328,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				functionResponse: {
 					name: emittedName ?? msg.toolName,
 					response: msg.isError ? { error: responseValue } : { output: responseValue },
-					...(hasMedia && modelSupportsMultimodalFunctionResponse && { parts: mediaParts }),
+					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
@@ -372,8 +350,8 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			}
 
 			// For Gemini < 3, buffer media for a separate user message after the functionResponse turn.
-			if (hasMedia && !modelSupportsMultimodalFunctionResponse) {
-				pendingToolImageParts.push({ text: "Tool result media:" }, ...mediaParts);
+			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
+				pendingToolImageParts.push({ text: "Tool result image:" }, ...imageParts);
 			}
 		}
 	}

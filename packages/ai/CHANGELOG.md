@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added audio and video input message content, with Gemini inline media, OpenAI audio input, and safe unsupported-media fallbacks.
+- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
 
 ## [17.1.8] - 2026-07-28
 

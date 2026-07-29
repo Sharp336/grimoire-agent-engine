@@ -16,6 +16,7 @@
  */
 
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { validateContextMedia } from "@oh-my-pi/pi-ai/media-input";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	createOpenAICodexCompactionRequestContext,
@@ -477,6 +478,9 @@ export function buildOpenAiNativeHistory(
 	model: Model,
 	previousReplacementHistory?: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+	const compactionWireModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
+	model = validateContextMedia({ ...model, api: compactionApi }, { messages }, undefined, compactionWireModel);
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
 		: [];
@@ -507,7 +511,12 @@ export function buildOpenAiNativeHistory(
 				continue;
 			}
 
-			const contentBlocks: Array<Record<string, unknown>> = [];
+			let contentBlocks: Array<Record<string, unknown>> = [];
+			const flushContent = (): void => {
+				if (contentBlocks.length === 0) return;
+				input.push({ type: "message", role: message.role, content: contentBlocks });
+				contentBlocks = [];
+			};
 			if (typeof message.content === "string") {
 				if (message.content.trim().length > 0) {
 					contentBlocks.push({ type: "input_text", text: message.content.toWellFormed() });
@@ -528,28 +537,16 @@ export function buildOpenAiNativeHistory(
 						continue;
 					}
 					if (block.type === "audio") {
+						flushContent();
 						const format = openAIAudioFormat(block.mimeType);
-						if (model.input.includes("audio") && format) {
-							contentBlocks.push({ type: "input_audio", input_audio: { data: block.data, format } });
-						} else {
-							contentBlocks.push({
-								type: "input_text",
-								text: format
-									? "[audio omitted during remote compaction: model does not support audio input]"
-									: "[audio omitted during remote compaction: OpenAI supports only WAV and MP3 input]",
-							});
-						}
+						if (!format) throw new Error(`Unsupported OpenAI compaction audio MIME: ${block.mimeType}`);
+						input.push({ type: "input_audio", input_audio: { data: block.data, format } });
 						continue;
 					}
-					contentBlocks.push({
-						type: "input_text",
-						text: "[video omitted during remote compaction: OpenAI Responses does not support video input]",
-					});
+					throw new Error("OpenAI remote compaction has no video encoder");
 				}
 			}
-			if (contentBlocks.length > 0) {
-				input.push({ type: "message", role: message.role, content: contentBlocks });
-			}
+			flushContent();
 			msgIndex++;
 			continue;
 		}
@@ -741,7 +738,7 @@ export function buildOpenAiNativeHistory(
 				output: outputText.toWellFormed(),
 			});
 
-			if (hasImages && model.input.includes("image")) {
+			if (hasImages && (model.toolResultInput ?? model.input).includes("image")) {
 				const contentBlocks: Array<Record<string, unknown>> = [
 					{ type: "input_text", text: TOOL_RESULT_IMAGE_ATTACHMENT_TEXT },
 				];

@@ -43,6 +43,7 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { resolveModelRoute, withResolvedModelRoute } from "@oh-my-pi/pi-catalog/media-capabilities";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
@@ -347,8 +348,6 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 	switch (block.type) {
 		case "text":
 		case "image":
-		case "audio":
-		case "video":
 			return { ...block };
 		case "thinking":
 			return { ...block };
@@ -1491,7 +1490,9 @@ async function prepareProviderCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedProviderCall> {
-	const model = config.getModel?.() ?? config.model;
+	const baseModel = config.getModel?.() ?? config.model;
+	const requestedEffort = config.getDisableReasoning?.() ? undefined : config.getReasoning?.();
+	const model = withResolvedModelRoute(baseModel, resolveModelRoute(baseModel, requestedEffort));
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);

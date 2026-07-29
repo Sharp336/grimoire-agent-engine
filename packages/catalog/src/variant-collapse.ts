@@ -35,7 +35,7 @@ import { buildCompat, buildModel } from "./build";
 import { Effort } from "./effort";
 import { stripThinkingVariantToken } from "./identity/family";
 import { resolveModelThinking } from "./model-thinking";
-import type { Api, InputModality, Model, ModelSpec, Provider, ThinkingConfig } from "./types";
+import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "./types";
 
 /**
  * Structural bound for collapse inputs: both raw `ModelSpec`s and built
@@ -900,18 +900,21 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 		if (hasRouting) thinking.effortRouting = routing;
 		if (family.suppressWhenOff) thinking.suppressWhenOff = true;
 
-		const input: InputModality[] = [];
-		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
-		if (memberSpecs.some(spec => spec.input.includes("image"))) input.push("image");
-		if (memberSpecs.some(spec => spec.input.includes("audio"))) input.push("audio");
-		if (memberSpecs.some(spec => spec.input.includes("video"))) input.push("video");
+		const vendorInputByWireModel = Object.fromEntries(
+			rawPresent.map((id, index) => {
+				const spec = memberSpecs[index];
+				return [id, [...(spec.vendorInput ?? spec.input)]];
+			}),
+		);
 
 		const collapsed: TSpec = {
 			...(memberSpecs[0] as TSpec),
 			id: family.id,
 			name: family.name,
 			reasoning,
-			input,
+			input: [...(memberSpecs[0].vendorInput ?? memberSpecs[0].input)],
+			vendorInput: [...(memberSpecs[0].vendorInput ?? memberSpecs[0].input)],
+			vendorInputByWireModel,
 			contextWindow: maxOrNull(memberSpecs.map(spec => spec.contextWindow)),
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
 		};
@@ -919,6 +922,9 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 		// equals the logical id (bare/thinking pairs) — `resolveWireModelId`
 		// falls back. Retired members never become the default.
 		const defaultWireId = rawPresent.find(id => !retired?.has(id)) ?? rawPresent[0];
+		const defaultVendorInput = vendorInputByWireModel[defaultWireId as string];
+		collapsed.input = [...defaultVendorInput];
+		collapsed.vendorInput = [...defaultVendorInput];
 		if (defaultWireId === family.id) {
 			if (usedAbsentEffortRoute) {
 				collapsed.requestModelId = defaultWireId as string;

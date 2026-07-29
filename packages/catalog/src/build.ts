@@ -14,6 +14,7 @@ import { buildAnthropicCompat } from "./compat/anthropic";
 import { buildBedrockCompat } from "./compat/bedrock";
 import { buildDevinCompat } from "./compat/devin";
 import { buildOpenAICompat, buildOpenAIResponsesCompat, buildOpenRouterCompat } from "./compat/openai";
+import { resolveEffectiveMediaCapabilities } from "./media-capabilities";
 import { resolveModelThinking } from "./model-thinking";
 import type { Api, CompatOf, Model, ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
@@ -61,9 +62,14 @@ function supportsOpenAIGAComputerUse(spec: ModelSpec<Api>, explicitSupport: bool
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const compat = buildCompat(spec) as CompatOf<TApi>;
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
+	const vendorInput = [...(spec.vendorInput ?? spec.input)];
+	const effective = resolveEffectiveMediaCapabilities(spec.api, vendorInput);
 	return {
 		...spec,
 		name: cleanModelName(spec.name),
+		vendorInput,
+		input: [...effective.input],
+		toolResultInput: [...effective.toolResultInput],
 		thinking: resolveModelThinking(spec, compat),
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, supportsComputerUseConfig),
 		supportsComputerUseConfig,
