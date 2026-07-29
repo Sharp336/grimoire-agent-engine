@@ -319,9 +319,22 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
+		const reason = parseRateLimitReason(cleanMessage);
+		// Concurrency caps (e.g. Vertex "Online prediction concurrent requests
+		// quota exceeded") are shed-and-backoff, not credential-rotatable —
+		// exclude them even when the quota-worded phrasing matches the generic
+		// usage-limit text matcher, whose `quota.?exceeded` arm would otherwise
+		// set Flag.UsageLimit and burn a healthy sibling credential. HTTP 402 is
+		// excluded from this gate: it is categorically an account-billing cap, so
+		// a 402 whose body merely mentions concurrency still classifies as a
+		// usage limit, mirroring isUsageLimitOutcome.
+		const isBillingCapStatus = statusClean === 402;
+		const concurrencyExcluded = reason === "CONCURRENT_LIMIT" && !isBillingCapStatus;
 		if (
-			matchesUsageLimitText(cleanMessage) ||
-			(isLimitStatus && (isOpaque || parseRateLimitReason(cleanMessage) === "QUOTA_EXHAUSTED"))
+			!concurrencyExcluded &&
+			(matchesUsageLimitText(cleanMessage) ||
+				(isLimitStatus &&
+					(isOpaque || reason === "QUOTA_EXHAUSTED" || (isBillingCapStatus && reason === "CONCURRENT_LIMIT"))))
 		) {
 			kinds |= Flag.UsageLimit;
 		}

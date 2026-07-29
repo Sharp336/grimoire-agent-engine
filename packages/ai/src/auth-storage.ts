@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
-import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import { $env, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
@@ -5927,8 +5927,13 @@ export class AuthStorage {
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 		if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
+			// Thread the provider-specified reset window (e.g. Devin "Your limit
+			// will reset in 13 minutes") into the block duration so the credential
+			// is not reselected and hammered while the cap remains active.
+			const retryAfterMs = extractRetryHint(undefined, message);
 			return (
 				await this.markUsageLimitReached(provider, sessionId, {
+					retryAfterMs,
 					modelId: options?.modelId,
 					apiKey: options?.apiKey,
 					credentialId: options?.credentialId,

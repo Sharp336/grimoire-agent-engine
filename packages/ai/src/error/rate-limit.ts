@@ -154,14 +154,23 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
  *  3. Body is absent or {@link isOpaqueStatusBody opaque} (just the status,
  *     empty JSON, HTTP framing only) → rotate conservatively: the server
  *     gave us nothing else to go on.
- *  4. Body has content → defer to {@link parseRateLimitReason}. Only
- *     `QUOTA_EXHAUSTED` rotates; `RATE_LIMIT_EXCEEDED` (`Too many requests`,
+ *  4. Body has content → defer to {@link parseRateLimitReason}. `QUOTA_EXHAUSTED`
+ *     rotates; for the categorical 402 billing cap a `CONCURRENT_LIMIT` body
+ *     also rotates (the cap is concurrent-worded but the status is still an
+ *     exhausted billing cap). `RATE_LIMIT_EXCEEDED` (`Too many requests`,
  *     per-minute caps), `MODEL_CAPACITY_EXHAUSTED` (`Service overloaded`),
  *     `SERVER_ERROR`, and `UNKNOWN` (`Please retry in 5s`) stay in the
  *     provider's own backoff layer so transient 429s don't burn sibling
  *     credentials.
  */
 export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
+	// Concurrency caps are shed-and-backoff, not credential-rotatable — but only
+	// for quota-worded 429 / other statuses. HTTP 402 is categorically an
+	// account-billing cap, so a 402 whose body happens to mention concurrency is
+	// still an exhausted billing cap and must rotate; gate the exclusion on the
+	// status not being that categorical billing cap.
+	const isBillingCapStatus = status === 402;
+	if (message && parseRateLimitReason(message) === "CONCURRENT_LIMIT" && !isBillingCapStatus) return false;
 	if (message && matchesUsageLimitText(message)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
 	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,
@@ -171,7 +180,9 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 	if (!isUsageLimitStatus(status)) return false;
 	if (!message || isOpaqueStatusBody(message)) return true;
 	const reason = parseRateLimitReason(message);
-	return reason === "QUOTA_EXHAUSTED";
+	// For the categorical 402 billing cap a concurrency-worded body is still an
+	// exhausted cap (rotate); for 429 / other only QUOTA_EXHAUSTED rotates.
+	return reason === "QUOTA_EXHAUSTED" || (isBillingCapStatus && reason === "CONCURRENT_LIMIT");
 }
 
 /**

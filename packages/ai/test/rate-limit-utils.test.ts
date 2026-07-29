@@ -270,6 +270,36 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(401, "Invalid API key")).toBe(false);
 		expect(isUsageLimitOutcome(400, "invalid_request_error: model unsupported")).toBe(false);
 	});
+
+	// Vertex returns "Online prediction concurrent requests quota exceeded" for a
+	// concurrent-request cap. The generic USAGE_LIMIT_PATTERN matches
+	// `quota.?exceeded`, but this is a concurrency cap (5s backoff, no rotation),
+	// not account quota exhaustion. CONCURRENT_LIMIT must take precedence so the
+	// credential is not burned.
+	it("does not rotate on Vertex quota-worded concurrency caps", () => {
+		const message = "Online prediction concurrent requests quota exceeded";
+		expect(parseRateLimitReason(message)).toBe("CONCURRENT_LIMIT");
+		expect(isUsageLimitOutcome(429, message)).toBe(false);
+		expect(isUsageLimit(message)).toBe(false);
+	});
+
+	// HTTP 402 is categorically an account-billing cap, so a 402 whose body is
+	// worded as a concurrency cap still rotates — the billing-cap status wins
+	// over the concurrency exclusion. The identical concurrency wording on a
+	// quota-worded 429 stays non-rotatable (5s backoff). This pins the
+	// 402-billing-cap > concurrency-exclusion precedence in both the rotation
+	// decision (isUsageLimitOutcome) and the Flag.UsageLimit classification
+	// (isUsageLimit).
+	it("rotates on 402 concurrency-worded billing caps but not 429 concurrency caps", () => {
+		const message = "concurrent requests limit reached";
+		expect(parseRateLimitReason(message)).toBe("CONCURRENT_LIMIT");
+		// 402 billing cap wins: rotate.
+		expect(isUsageLimitOutcome(402, message)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(message), { status: 402 }))).toBe(true);
+		// 429 concurrency cap: shed-and-backoff, do not rotate.
+		expect(isUsageLimitOutcome(429, message)).toBe(false);
+		expect(isUsageLimit(Object.assign(new Error(message), { status: 429 }))).toBe(false);
+	});
 });
 
 describe("calculateRateLimitBackoffMs", () => {
