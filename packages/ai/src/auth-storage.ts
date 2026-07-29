@@ -2046,10 +2046,9 @@ export class AuthStorage {
 				primaryUsed: this.#normalizeUsageFraction(primary),
 				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
-				hrwScore:
-					args.sessionId === undefined
-						? undefined
-						: this.#candidateHrwScore(args.sessionId, args.provider, selection.index),
+				hrwScore: args.sessionId
+					? this.#candidateHrwScore(args.sessionId, args.provider, selection.index)
+					: undefined,
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, "none");
@@ -4520,10 +4519,9 @@ export class AuthStorage {
 				primaryUsed: this.#normalizeUsageFraction(primary),
 				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
-				hrwScore:
-					args.sessionId === undefined
-						? undefined
-						: this.#candidateHrwScore(args.sessionId, args.provider, selection.index),
+				hrwScore: args.sessionId
+					? this.#candidateHrwScore(args.sessionId, args.provider, selection.index)
+					: undefined,
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, args.planRequirement);

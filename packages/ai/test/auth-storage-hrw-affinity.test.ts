@@ -158,6 +158,27 @@ describe("AuthStorage HRW credential affinity", () => {
 
 		expect(keys).toEqual(["key-a", "key-b", "key-c", "key-a", "key-b", "key-c"]);
 	});
+	test("round-robins empty sessionId as sessionless across equal-ranked candidates", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("zai", [
+			{ type: "api_key", key: "key-a", source: "login" },
+			{ type: "api_key", key: "key-b", source: "login" },
+			{ type: "api_key", key: "key-c", source: "login" },
+		]);
+
+		const keys: string[] = [];
+		for (let index = 0; index < 6; index += 1) {
+			const key = await authStorage.getApiKey("zai", "");
+			if (key) keys.push(key);
+		}
+
+		expect(keys.length).toBe(6);
+		expect(new Set(keys).size).toBe(3);
+		for (let index = 0; index < keys.length; index += 1) {
+			expect(keys[index]).toBe(keys[index % 3]);
+		}
+	});
 
 	test("never reorders across differing rank tiers", async () => {
 		if (!authStorage) throw new Error("test setup failed");
