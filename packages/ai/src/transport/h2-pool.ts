@@ -2,7 +2,7 @@ import type { ClientHttp2Stream } from "node:http2";
 import { constants as http2Constants } from "node:http2";
 import { Http2SessionManager } from "@connectrpc/connect-node";
 import * as AIError from "../error";
-import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
+import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { isTransportDisposed, registerTransportDisposer } from "./lifecycle";
 
 const POOL_SIZE = 4;
@@ -134,9 +134,12 @@ async function createSessionManager(
 function makeLease(entry: PoolEntry, slotIndex: number, slot: HealthySlot): H2Lease {
 	const { generation, manager } = slot;
 	let released = false;
+	let requested = false;
 	return {
 		async request(headers, options) {
 			if (released) throw new Error("Cannot request from a released HTTP/2 lease");
+			if (requested) throw new Error("An HTTP/2 lease owns exactly one active stream");
+			requested = true;
 			if (options?.signal?.aborted) throw new AIError.AbortError();
 			const method = headers[":method"] ?? "POST";
 			const path = headers[":path"];
@@ -240,7 +243,7 @@ export async function acquireH2Session(baseUrl: string, provider: string, signal
 	if (signal?.aborted) throw new AIError.AbortError();
 	const url = new URL(baseUrl);
 	const origin = `${url.protocol}//${url.host}`;
-	const proxyUrl = shouldBypassProxy(url) ? undefined : getProxyForProvider(provider);
+	const proxyUrl = getProxyForUrl(provider, url);
 	const key = `${origin}|${proxyUrl ?? ""}`;
 	let entry = pools.get(key);
 	if (!entry) {

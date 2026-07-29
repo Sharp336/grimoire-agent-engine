@@ -106,6 +106,32 @@ describe("shared Connect framing", () => {
 		expect(readConnectTrailerError(error)).toEqual({ code: "permission_denied", message: "account unavailable" });
 		expect(readConnectTrailerError(new TextEncoder().encode("{}"))).toBeNull();
 	});
+
+	it("rejects malformed and unknown Connect terminal payloads", () => {
+		expect(() => readConnectTrailerError(new TextEncoder().encode("{"))).toThrow("malformed JSON");
+		expect(() => readConnectTrailerError(new TextEncoder().encode('{\"unexpected\":true}'))).toThrow(
+			"unknown field",
+		);
+	});
+
+	it("rejects duplicate EOS, data after EOS, unknown flags, and EOF without EOS", () => {
+		const terminal = encodeConnectFrame(new Uint8Array(0), CONNECT_END_STREAM_FLAG);
+		const reader = createConnectFrameReader();
+		reader.push(terminal);
+		expect(() => reader.push(terminal)).toThrow("duplicate end-of-stream");
+
+		const combined = createConnectFrameReader();
+		expect(() => combined.push(Buffer.concat([terminal, encodeConnectFrame(new Uint8Array([1]))]))).toThrow(
+			"data after end-of-stream",
+		);
+
+		const unknown = encodeConnectFrame(new Uint8Array(0), 0x80);
+		expect(() => createConnectFrameReader().push(unknown)).toThrow("unknown flags");
+
+		const missing = createConnectFrameReader();
+		missing.push(encodeConnectFrame(new Uint8Array([1])));
+		expect(() => missing.finish()).toThrow("without end-of-stream");
+	});
 });
 
 describe("shared HTTP/1 bridge", () => {

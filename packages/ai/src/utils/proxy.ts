@@ -212,7 +212,7 @@ export async function connectProxiedSocket(
 	let rawSocket: net.Socket | undefined;
 	let tunnelSocket: tls.TLSSocket | undefined;
 	let timeout: NodeJS.Timeout | undefined;
-	let responseData = "";
+	let responseData = Buffer.alloc(0);
 	let settled = false;
 
 	const cleanup = (): void => {
@@ -249,27 +249,44 @@ export async function connectProxiedSocket(
 	const onTunnelError = (error: Error): void => rejectOnce(error);
 	const onTunnelReady = (): void => {
 		if (!tunnelSocket) return;
+		const alpnProtocols = options?.alpnProtocols ?? ["h2"];
+		if (alpnProtocols.includes("h2") && tunnelSocket.alpnProtocol !== "h2") {
+			const error = Object.assign(
+				new Error(`Proxy target TLS negotiated ALPN ${tunnelSocket.alpnProtocol || "none"}, expected h2`),
+				{ code: "ERR_HTTP2_ALPN" },
+			);
+			rejectOnce(error);
+			return;
+		}
 		resolveOnce(tunnelSocket);
 	};
 	const onProxyData = (chunk: Buffer): void => {
 		if (!rawSocket) return;
-		responseData += chunk.toString("binary");
+		responseData = responseData.length === 0 ? chunk : Buffer.concat([responseData, chunk]);
 		const headerEndIndex = responseData.indexOf("\r\n\r\n");
-		if (headerEndIndex === -1) return;
+		if (headerEndIndex === -1) {
+			if (responseData.length > 64 * 1024) {
+				rejectOnce(new AIError.ValidationError("Proxy CONNECT response headers exceed 65536 bytes"));
+			}
+			return;
+		}
+		if (headerEndIndex + 4 > 64 * 1024) {
+			rejectOnce(new AIError.ValidationError("Proxy CONNECT response headers exceed 65536 bytes"));
+			return;
+		}
 
 		rawSocket.off("data", onProxyData);
 		rawSocket.off("error", onRawError);
 
-		const firstLine = responseData.split("\r\n")[0];
-		if (!firstLine.includes(" 200 ")) {
+		const firstLineEnd = responseData.indexOf("\r\n");
+		const firstLine = responseData.subarray(0, firstLineEnd).toString("latin1");
+		if (!/^HTTP\/1\.[01] 200(?:[ \t].*)?$/.test(firstLine)) {
 			rejectOnce(new AIError.ValidationError(`Proxy tunnel failed: ${firstLine}`));
 			return;
 		}
 
-		const unconsumedBytes = Buffer.from(responseData.slice(headerEndIndex + 4), "binary");
-		if (unconsumedBytes.length > 0) {
-			rawSocket.unshift(unconsumedBytes);
-		}
+		const unconsumedBytes = responseData.subarray(headerEndIndex + 4);
+		if (unconsumedBytes.length > 0) rawSocket.unshift(unconsumedBytes);
 
 		if (targetUrl.protocol === "http:") {
 			rawSocket.resume();
