@@ -471,12 +471,16 @@ describe("Cursor request action encoding", () => {
 			],
 		});
 
-		expect(payload.mcpTools.mcpTools).toHaveLength(1);
-		expect(payload.mcpTools.mcpTools[0]).toMatchObject({
-			name: "mcp__weather",
-			providerIdentifier: "pi-agent",
-			toolName: "mcp__weather",
-		});
+	if (!payload.mcpTools) {
+		throw new Error("Expected AgentRunRequest to advertise MCP tools, but payload.mcpTools was missing");
+	}
+	const items = payload.mcpTools.mcpTools;
+	expect(items).toHaveLength(1);
+	expect(items[0]).toMatchObject({
+		name: "mcp__weather",
+		providerIdentifier: "pi-agent",
+		toolName: "mcp__weather",
+	});
 	});
 
 	it("uses a resume action when a tool result is the final context message", async () => {
