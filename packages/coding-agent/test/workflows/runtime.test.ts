@@ -30,6 +30,24 @@ class MemoryWorkflowStore implements WorkflowStore {
 	}
 }
 
+class RejectingCompletionStore extends MemoryWorkflowStore {
+	readonly failureObserved = Promise.withResolvers<void>();
+	rejected = false;
+
+	override async append(snapshot: WorkflowSnapshot): Promise<void> {
+		if (
+			!this.rejected &&
+			snapshot.nodes.other?.status === "succeeded" &&
+			snapshot.nodes.child?.status === "running"
+		) {
+			this.rejected = true;
+			this.failureObserved.resolve();
+			throw new Error("completion persistence failed");
+		}
+		await super.append(snapshot);
+	}
+}
+
 function resultFor(request: WorkflowDispatchRequest, overrides: Partial<SingleResult> = {}): SingleResult {
 	return {
 		index: 0,
@@ -173,6 +191,70 @@ describe("WorkflowRuntime", () => {
 		gates.get("slow")!.resolve({ result: resultFor(gatesRequest("slow")) });
 		const completed = await running;
 		expect(completed.status).toBe("succeeded");
+	});
+
+	it("retains execution persistence failures and drains active dispatches before rejecting", async () => {
+		const store = new RejectingCompletionStore();
+		const runtime = await createRuntime(store);
+		await runtime.createWorkflow({
+			objective: "Do not lose infrastructure failures",
+			nodes: [
+				{ id: "fast", agent: "task", task: "Fast root" },
+				{ id: "child", agent: "task", task: "Fast child", needs: ["fast"] },
+				{ id: "other", agent: "task", task: "Other root" },
+				{ id: "lingering", agent: "task", task: "Lingering root" },
+			],
+		});
+
+		const started: string[] = [];
+		const gates = new Map<string, OutcomeGate>();
+		let lingeringDrained = false;
+		const childStartPersisted = Promise.withResolvers<void>();
+		const releaseChildStart = Promise.withResolvers<void>();
+		const running = runtime.run(
+			(request, signal) => {
+				started.push(request.nodeId);
+				if (request.nodeId === "lingering") {
+					return new Promise(resolve => {
+						signal.addEventListener(
+							"abort",
+							() => {
+								lingeringDrained = true;
+								resolve({ status: "interrupted", error: "aborted" });
+							},
+							{ once: true },
+						);
+					});
+				}
+				const gate = Promise.withResolvers<WorkflowDispatchOutcome>();
+				gates.set(request.nodeId, gate);
+				return gate.promise;
+			},
+			{
+				onChange: async snapshot => {
+					if (snapshot.nodes.child.status !== "running" || snapshot.nodes.other.status !== "running") return;
+					gates.get("other")!.resolve({ result: resultFor(gatesRequest("other")) });
+					childStartPersisted.resolve();
+					await releaseChildStart.promise;
+				},
+			},
+		);
+		await waitFor(() => started.length === 3);
+		gates.get("fast")!.resolve({ result: resultFor(gatesRequest("fast")) });
+		await childStartPersisted.promise;
+		await store.failureObserved.promise;
+		await waitFor(() => lingeringDrained);
+		releaseChildStart.resolve();
+
+		await expect(running).rejects.toThrow("completion persistence failed");
+		expect(started).not.toContain("child");
+		expect(lingeringDrained).toBe(true);
+		const afterReturn = runtime.getSnapshot();
+		await Bun.sleep(5);
+		expect(runtime.getSnapshot()).toEqual(afterReturn);
+		await expect(runtime.run(async request => ({ result: resultFor(request) }))).resolves.toMatchObject({
+			status: "interrupted",
+		});
 	});
 
 	it("blocks failed descendants, continues independent work, and enforces strict schema success", async () => {
@@ -331,6 +413,34 @@ describe("WorkflowRuntime", () => {
 		expect(cancelled.nodes.first.status).toBe("cancelled");
 		expect(cancelled.nodes.second.status).toBe("cancelled");
 		expect(dispatched).toEqual(["first"]);
+	});
+
+	it("does not invoke a dispatcher when cancellation arrives during start persistence", async () => {
+		const runtime = await createRuntime();
+		await runtime.createWorkflow({
+			objective: "Cancel before dispatch",
+			nodes: [
+				{ id: "first", agent: "task", task: "First" },
+				{ id: "second", agent: "task", task: "Second", needs: ["first"] },
+			],
+		});
+		const dispatched: string[] = [];
+		const cancelled = await runtime.run(
+			async request => {
+				dispatched.push(request.nodeId);
+				return { result: resultFor(request) };
+			},
+			{
+				onChange: async snapshot => {
+					if (snapshot.nodes.first.status === "running") await runtime.cancel();
+				},
+			},
+		);
+
+		expect(dispatched).toEqual([]);
+		expect(cancelled.status).toBe("cancelled");
+		expect(cancelled.nodes.first.status).toBe("cancelled");
+		expect(cancelled.nodes.second.status).toBe("cancelled");
 	});
 });
 

@@ -188,6 +188,15 @@ export class WorkflowRuntime {
 			? AbortSignal.any([options.signal, this.#runAbort.signal])
 			: this.#runAbort.signal;
 		const inFlight = new Map<string, Promise<void>>();
+		let hasExecutionError = false;
+		let firstExecutionError: unknown;
+		const recordExecutionError = (error: unknown): void => {
+			if (!hasExecutionError) {
+				hasExecutionError = true;
+				firstExecutionError = error;
+			}
+			this.#runAbort?.abort(error);
+		};
 		try {
 			this.#refreshPendingStates();
 			const preflightRequests = snapshot.definition.nodes
@@ -197,53 +206,61 @@ export class WorkflowRuntime {
 				})
 				.map(node => this.#dispatchRequest(snapshot.definition, node, snapshot.nodes[node.id]!.attempts + 1));
 			await options.preflight?.(preflightRequests);
-			while (!dispatchSignal.aborted && !this.#cancelRequested) {
-				const ready = snapshot.definition.nodes.filter(node => snapshot.nodes[node.id]?.status === "ready");
-				if (ready.length > 0) {
-					const startedAt = this.#now();
-					for (const node of ready) {
-						const state = snapshot.nodes[node.id]!;
-						state.status = "running";
-						state.attempts += 1;
-						state.startedAt = startedAt;
-						delete state.finishedAt;
-						delete state.agentId;
-						delete state.outputRef;
-						delete state.historyRef;
-						delete state.error;
-					}
-					snapshot.status = "running";
-					await this.#persist(options.onChange);
-
-					for (const node of ready) {
-						const execution = (async () => {
+			try {
+				while (!dispatchSignal.aborted && !this.#cancelRequested) {
+					const ready = snapshot.definition.nodes.filter(node => snapshot.nodes[node.id]?.status === "ready");
+					if (ready.length > 0) {
+						const startedAt = this.#now();
+						for (const node of ready) {
 							const state = snapshot.nodes[node.id]!;
-							const request = this.#dispatchRequest(snapshot.definition, node, state.attempts);
-							let outcome: WorkflowDispatchOutcome;
-							try {
-								outcome = await dispatcher(request, dispatchSignal);
-							} catch (error) {
-								outcome = {
-									status: "interrupted",
-									error: error instanceof Error ? error.message : String(error),
-								};
-							}
-							this.#settleNode(node, outcome, options.signal?.aborted === true);
-							this.#refreshPendingStates();
-							this.#reconcileStatus(true);
-							await this.#persist(options.onChange);
-						})().finally(() => {
-							inFlight.delete(node.id);
-						});
-						inFlight.set(node.id, execution);
-					}
-				}
+							state.status = "running";
+							state.attempts += 1;
+							state.startedAt = startedAt;
+							delete state.finishedAt;
+							delete state.agentId;
+							delete state.outputRef;
+							delete state.historyRef;
+							delete state.error;
+						}
+						snapshot.status = "running";
+						await this.#persist(options.onChange);
+						if (dispatchSignal.aborted || this.#cancelRequested) continue;
 
-				if (inFlight.size === 0) break;
-				await Promise.race(inFlight.values());
+						for (const node of ready) {
+							const execution = (async () => {
+								const state = snapshot.nodes[node.id]!;
+								const request = this.#dispatchRequest(snapshot.definition, node, state.attempts);
+								let outcome: WorkflowDispatchOutcome;
+								try {
+									outcome = await dispatcher(request, dispatchSignal);
+								} catch (error) {
+									outcome = {
+										status: "interrupted",
+										error: error instanceof Error ? error.message : String(error),
+									};
+								}
+								this.#settleNode(node, outcome, options.signal?.aborted === true);
+								this.#refreshPendingStates();
+								this.#reconcileStatus(true);
+								await this.#persist(options.onChange);
+							})()
+								.catch(recordExecutionError)
+								.finally(() => {
+									inFlight.delete(node.id);
+								});
+							inFlight.set(node.id, execution);
+						}
+					}
+
+					if (inFlight.size === 0) break;
+					await Promise.race(inFlight.values());
+				}
+			} catch (error) {
+				recordExecutionError(error);
+			} finally {
+				await Promise.allSettled(inFlight.values());
 			}
 
-			await Promise.allSettled(inFlight.values());
 			if (dispatchSignal.aborted) {
 				for (const state of Object.values(snapshot.nodes)) {
 					if (state.status !== "running") continue;
@@ -254,7 +271,12 @@ export class WorkflowRuntime {
 				this.#refreshPendingStates();
 			}
 			this.#reconcileStatus(false);
-			await this.#persist(options.onChange);
+			try {
+				await this.#persist(options.onChange);
+			} catch (error) {
+				recordExecutionError(error);
+			}
+			if (hasExecutionError) throw firstExecutionError;
 			return cloneWorkflowSnapshot(snapshot);
 		} finally {
 			this.#runAbort = undefined;
