@@ -228,7 +228,7 @@ export async function runStorageRepair(
 			cleanupErrors.push(error);
 		}
 		try {
-			if (historySource === "sessions") await promptManifestStillMatches(prompts);
+			if (prompts) await promptManifestStillMatches(prompts);
 		} catch (error) {
 			cleanupErrors.push(error);
 		}
