@@ -505,10 +505,15 @@ describe("readArgsCollapseIntoGroup", () => {
 		expect(readArgsCollapseIntoGroup({ file_path: target })).toBe(true);
 	});
 
-	it("groups every native multi-target array so partial outcomes stay visible", () => {
+	it("groups multi-target arrays whose contents are safe to compact", () => {
 		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "https://example.com/second.ts"] })).toBe(true);
-		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "skill://my-skill"] })).toBe(true);
-		expect(readArgsCollapseIntoGroup({ path: ["skill://my-skill", "omp://docs/tools/read.md"] })).toBe(true);
+		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "xd://lsp"] })).toBe(true);
+	});
+
+	it("keeps batches containing handled internal resources as full tool executions", () => {
+		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "skill://my-skill"] })).toBe(false);
+		expect(readArgsCollapseIntoGroup({ path: ["skill://my-skill", "omp://docs/tools/read.md"] })).toBe(false);
+		expect(readArgsCollapseIntoGroup({ path: ["xd://lsp", "skill://my-skill"] })).toBe(false);
 	});
 
 	it("returns false for non-record / missing arguments", () => {

@@ -44,12 +44,11 @@ export function readArgsHaveIncompleteStreamedPathArray(args: unknown, partialJs
 export function readArgsCollapseIntoGroup(args: unknown): boolean {
 	const targets = extractPathArguments(args);
 	if (targets.length === 0) return false;
-	// Every multi-target read needs the grouped component's per-target status,
-	// including mixed local/internal batches. Single internal resources keep
-	// the full renderer so their resolved content remains prominent.
-	if (targets.length > 1) return true;
-	const target = targets[0]!;
-	return target.startsWith(XD_URL_PREFIX) || !InternalUrlRouter.instance().canHandle(target);
+	// A handled internal resource needs the full renderer so its resolved body
+	// remains visible. This holds for mixed and all-internal batches as well as
+	// singleton reads; filesystem, external, and xd:// targets stay compact.
+	const router = InternalUrlRouter.instance();
+	return targets.every(target => target.startsWith(XD_URL_PREFIX) || !router.canHandle(target));
 }
 
 /**
