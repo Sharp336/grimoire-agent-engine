@@ -965,16 +965,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		parts: string[],
 		notice: string,
 		suffixCache: SuffixMatchCache,
-		enforceAggregateBudget: boolean,
+		mode: "native-array" | "legacy-delimited",
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		const isNativeArray = mode === "native-array";
 		return executeReadBatch<ReadToolDetails>({
 			parts,
 			notice,
-			enforceAggregateBudget,
+			enforceAggregateBudget: isNativeArray,
 			signal,
 			readPart: (part, workerSignal) =>
-				this.#execute("read-batch-part", { path: part }, suffixCache, false, workerSignal),
+				this.#execute("read-batch-part", { path: part }, suffixCache, !isNativeArray, workerSignal),
 		});
 	}
 
@@ -987,7 +988,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (!parts) return null;
 
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
-		return this.#readPathBatch(parts, notice, suffixCache, false, signal);
+		return this.#readPathBatch(parts, notice, suffixCache, "legacy-delimited", signal);
 	}
 
 	/**
@@ -2246,7 +2247,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		if (Array.isArray(params.path)) {
 			const notice = `Note: read ${readPaths.length} paths: ${readPaths.join(", ")}`;
-			return this.#readPathBatch(readPaths, notice, suffixCache, true, signal);
+			return this.#readPathBatch(readPaths, notice, suffixCache, "native-array", signal);
 		}
 
 		let readPath = readPaths[0];

@@ -742,6 +742,33 @@ describe("tool path arrays", () => {
 		]);
 	});
 
+	it("preserves recursive mixed-delimiter recovery for scalar paths", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+		await Promise.all([
+			Bun.write(path.join(tempDir, "nested-one.txt"), "nested one\n"),
+			Bun.write(path.join(tempDir, "nested-two.txt"), "nested two\n"),
+			Bun.write(path.join(tempDir, "nested-three.txt"), "nested three\n"),
+		]);
+
+		const result = await tool.execute("read-scalar-mixed-delimiters", {
+			path: "nested-one.txt; nested-two.txt, nested-three.txt",
+		});
+		const text = getText(result);
+
+		expect(result.isError).not.toBe(true);
+		expect(text).toContain("nested one");
+		expect(text).toContain("nested two");
+		expect(text).toContain("nested three");
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.path)).toEqual([
+			"nested-one.txt",
+			"nested-two.txt",
+			"nested-three.txt",
+		]);
+	});
+
 	it("preserves selectors when suffix recovery corrects a batched path", async () => {
 		await fs.mkdir(path.join(tempDir, "nested-correction"), { recursive: true });
 		await Bun.write(
