@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Mistral models now resolve `promptCacheSessionHeader: "x-affinity"`, so requests carry a session-affinity hint that lets Mistral route to a warm backend replica prefix cache.
+
 ## [17.1.8] - 2026-07-28
 
 ### Added
