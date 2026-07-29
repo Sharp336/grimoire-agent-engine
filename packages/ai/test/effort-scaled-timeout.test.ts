@@ -35,4 +35,38 @@ describe("scaleIdleTimeoutByEffort", () => {
 	it("does not scale 'none' (Codex disables reasoning)", () => {
 		expect(scaleIdleTimeoutByEffort(120_000, "none")).toBe(120_000);
 	});
+
+	it("does not scale 'adaptive' (Anthropic delegates think budget to Claude)", () => {
+		// Adaptive effort is not a fixed-think-time tier; it delegates the think
+		// budget to Claude, so it must not inflate the watchdog.
+		expect(scaleIdleTimeoutByEffort(120_000, "adaptive")).toBe(120_000);
+	});
+});
+
+// Anthropic's mapOptionsForApi converts the caller's `reasoning` into
+// `effort` (e.g. "high") without preserving `reasoning` on AnthropicOptions.
+// The provider derives the effective effort via `options?.reasoning ?? options?.effort`
+// so the scaling actually applies on the primary code path.
+describe("Anthropic effective-effort fallback", () => {
+	it("scales via the effort field when reasoning is absent", () => {
+		// Simulates mapOptionsForApi output: reasoning=undefined, effort="high"
+		const reasoning: string | undefined = undefined;
+		const effort: string | undefined = "high";
+		const effectiveEffort = reasoning ?? effort;
+		expect(scaleIdleTimeoutByEffort(120_000, effectiveEffort)).toBe(240_000);
+	});
+
+	it("prefers reasoning when both are set (direct-caller path)", () => {
+		const reasoning: string | undefined = "max";
+		const effort: string | undefined = "high";
+		const effectiveEffort = reasoning ?? effort;
+		expect(scaleIdleTimeoutByEffort(120_000, effectiveEffort)).toBe(480_000);
+	});
+
+	it("does not scale when neither reasoning nor effort is set", () => {
+		const reasoning: string | undefined = undefined;
+		const effort: string | undefined = undefined;
+		const effectiveEffort = reasoning ?? effort;
+		expect(scaleIdleTimeoutByEffort(120_000, effectiveEffort)).toBe(120_000);
+	});
 });

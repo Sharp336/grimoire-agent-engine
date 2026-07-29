@@ -2011,8 +2011,12 @@ const streamAnthropicOnce = (
 			const baseIdleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const baseFirstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(baseIdleTimeoutMs);
-			const idleTimeoutMs = scaleIdleTimeoutByEffort(baseIdleTimeoutMs, options?.reasoning);
-			const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, options?.reasoning);
+			// mapOptionsForApi converts `reasoning` into `effort`/`thinkingEnabled`
+			// without preserving `reasoning` on AnthropicOptions, so derive the
+			// effective effort from whichever field is set.
+			const effectiveEffort = options?.reasoning ?? options?.effort;
+			const idleTimeoutMs = scaleIdleTimeoutByEffort(baseIdleTimeoutMs, effectiveEffort);
+			const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, effectiveEffort);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const blocks = output.content as Block[];

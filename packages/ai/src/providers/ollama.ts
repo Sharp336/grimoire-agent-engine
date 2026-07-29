@@ -23,7 +23,6 @@ import {
 	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
-	scaleIdleTimeoutByEffort,
 } from "../utils/idle-iterator";
 import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
@@ -556,13 +555,15 @@ const streamOllamaOnce = (
 			// the iterator-level watchdog) need a pre-response timer alongside
 			// `timeout: false`; otherwise an Ollama server that accepts the
 			// POST and never streams headers would hang forever (issue #2422).
-			const baseIdleTimeoutMs = options.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
-			const baseFirstEventTimeoutMs =
-				options.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(baseIdleTimeoutMs);
-			const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, options.reasoning);
+			const idleTimeoutMs = options.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
+			const firstEventTimeoutMs =
+				options.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
 			// Cleared the instant headers arrive (below) so the pre-response timer
 			// never aborts the actively streaming body — an absolute
-			// `AbortSignal.timeout` would (issue #2422).
+			// `AbortSignal.timeout` would (issue #2422). This guard measures
+			// time-to-first-byte (headers), which does not grow with reasoning
+			// effort — the silent-think window happens in the streamed body and
+			// is governed by the idle watchdog in register-builtins.forwardStream.
 			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
 			let response: Response;
 			try {
