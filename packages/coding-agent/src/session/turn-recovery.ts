@@ -36,6 +36,7 @@ import {
 } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { InitialRetryFallbackState } from "./agent-session-types";
+import type { CacheMutationTag } from "./cache-attribution";
 import { isEmptyErrorTurn } from "./messages";
 import {
 	type ActiveRetryFallbackState,
@@ -100,6 +101,8 @@ export interface TurnRecoveryHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	configWarnings: string[];
+	/** Record a prompt-cache mutation tag on the owning session's ledger. */
+	recordCacheMutation?(tag: CacheMutationTag): void;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
@@ -448,6 +451,7 @@ export class TurnRecovery {
 			});
 		}
 		if (recoveredErrors.length > 0) {
+			this.#host.recordCacheMutation?.("retry-recovery");
 			await this.#host.sessionManager.rewriteEntries();
 		}
 		return recoveredErrors;

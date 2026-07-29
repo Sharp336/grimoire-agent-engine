@@ -63,6 +63,7 @@ import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
+import type { CacheMutationTag } from "./cache-attribution";
 import { findCompactMode } from "./compact-modes";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
@@ -175,6 +176,8 @@ export interface SessionMaintenanceHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	/** Record a prompt-cache mutation tag on the owning session's ledger. */
+	recordCacheMutation?(tag: CacheMutationTag): void;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
@@ -821,6 +824,7 @@ export class SessionMaintenance {
 				fromExtension,
 				preserveData,
 			);
+			this.#host.recordCacheMutation?.("compaction");
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);

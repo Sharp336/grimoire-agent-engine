@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added prompt-cache invalidation attribution: the session records which prefix mutator (compaction, image-strip, obfuscation, …) rewrote the wire messages, and a cache-miss warn log now names the cause alongside the reprocessed-token count and the session-cumulative hit ratio.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

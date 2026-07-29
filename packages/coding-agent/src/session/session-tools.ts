@@ -32,6 +32,7 @@ import {
 	PERMISSION_OPTIONS_BY_ID,
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
+import type { CacheMutationTag } from "./cache-attribution";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
@@ -52,6 +53,8 @@ export interface SessionToolsHost {
 	model(): Model | undefined;
 	memoryBackendSession(): MemoryBackendStartOptions["session"];
 	clearInheritedProviderPromptCacheKey(): void;
+	/** Record a prompt-cache mutation tag on the owning session's ledger. */
+	recordCacheMutation?(tag: CacheMutationTag): void;
 	clearMemoryPromotionSnapshot(): void;
 	captureMemoryPromotionSnapshot(prompt: string[]): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -603,6 +606,7 @@ export class SessionTools {
 			if (this.#rebuildSystemPrompt) {
 				const signature = this.#computeAppliedToolSignature(validToolNames, tools);
 				if (signature !== this.#lastAppliedToolSignature) {
+					if (this.#lastAppliedToolSignature !== undefined) this.#host.recordCacheMutation?.("tool-signature");
 					const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
 					rebuiltSystemPrompt = built.systemPrompt;
 					rebuiltSignature = signature;

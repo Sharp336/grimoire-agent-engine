@@ -130,6 +130,7 @@ import {
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import { CacheMutationLedger } from "./session/cache-attribution";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
 	type CustomMessage,
@@ -2888,17 +2889,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// one mid-session — historical image blocks would otherwise be replayed to
 		// a provider that 400s on them (#5400). Read both dynamically so a `/model`
 		// switch or setting change takes effect on the next turn.
+		const cacheMutationLedger = new CacheMutationLedger();
 		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
 			const converted = convertToLlm(messages);
 			if (settings.get("images.blockImages")) {
-				return replaceLlmImagesWithText(converted, "Image reading is disabled.");
+				const stripped = replaceLlmImagesWithText(converted, "Image reading is disabled.");
+				if (stripped !== converted) cacheMutationLedger.record("image-strip");
+				return stripped;
 			}
 			const activeModel = agent?.state.model ?? model;
 			if (activeModel && !activeModel.input.includes("image")) {
-				return replaceLlmImagesWithText(
+				const stripped = replaceLlmImagesWithText(
 					converted,
 					"[image omitted: the active model does not support image input]",
 				);
+				if (stripped !== converted) cacheMutationLedger.record("image-strip");
+				return stripped;
 			}
 			return converted;
 		};
@@ -2908,12 +2914,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
 			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
 			if (!obfuscator?.hasSecrets()) return converted;
-			return obfuscateMessages(obfuscator, converted);
+			const obfuscated = obfuscateMessages(obfuscator, converted);
+			if (obfuscated !== converted) cacheMutationLedger.record("obfuscate");
+			return obfuscated;
 		};
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
-			return wrapSteeringForModel(withContext);
+			const wrapped = wrapSteeringForModel(withContext);
+			if (wrapped !== withContext) cacheMutationLedger.record("steering-wrap");
+			return wrapped;
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames, then
@@ -3189,6 +3199,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			advisorStreamFn: settingsAwareStreamFn,
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
+			cacheMutationLedger,
 			rebuildSystemPrompt,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
