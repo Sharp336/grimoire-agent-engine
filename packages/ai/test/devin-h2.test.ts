@@ -111,4 +111,49 @@ describe("Devin HTTP/2 transport", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "override" }]);
 	});
+	it("settles transport disposal even when response close rejects", async () => {
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { streamDevin } from "./src/providers/devin.ts";
+import { disposeTransports } from "./src/transport/lifecycle.ts";
+const terminal = new Uint8Array([2, 0, 0, 0, 0]);
+const response = new Response(terminal, { status: 200 });
+let closeCalls = 0;
+Object.defineProperty(response.body, "cancel", {
+	value: () => {
+		closeCalls++;
+		return Promise.reject(new Error("close failed"));
+	},
+});
+const model = {
+	id: "devin-close-test",
+	name: "Devin close test",
+	api: "devin-agent",
+	provider: "devin",
+	baseUrl: "http://127.0.0.1:1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 1,
+	maxTokens: 1,
+};
+const result = await streamDevin(model, { messages: [] }, {
+	apiKey: "token",
+	fetch: async () => response,
+}).result();
+await disposeTransports();
+process.stdout.write(JSON.stringify({ stopReason: result.stopReason, closeCalls }));`,
+			],
+			{ cwd: new URL("..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe" },
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({ stopReason: "stop", closeCalls: 2 });
+	});
 });

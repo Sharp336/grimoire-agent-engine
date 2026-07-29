@@ -118,24 +118,32 @@ describe("streamDevin shared HTTP/2 transport", () => {
 		expect(result.errorMessage).toContain("Connect frame payload 33554432 exceeds 16777216 bytes");
 	});
 
-	it("surfaces a Connect trailer error", async () => {
-		respond = stream => {
-			stream.respond({ ":status": 200 });
-			stream.end(
-				encodeConnectFrame(
-					new TextEncoder().encode(
-						JSON.stringify({
-							error: { code: "permission_denied", message: "Reached overall message rate limit" },
-						}),
+	it("maps Connect trailer codes to status-bearing provider errors", async () => {
+		for (const [code, status, transient, authFailed] of [
+			["unauthenticated", 401, false, true],
+			["permission_denied", 403, false, true],
+			["resource_exhausted", 429, true, false],
+			["unavailable", 503, true, false],
+			["internal", 500, true, false],
+		] as const) {
+			respond = stream => {
+				stream.respond({ ":status": 200 });
+				stream.end(
+					encodeConnectFrame(
+						new TextEncoder().encode(JSON.stringify({ error: { code, message: "service rejected request" } })),
+						CONNECT_END_STREAM_FLAG,
 					),
-					CONNECT_END_STREAM_FLAG,
-				),
-			);
-		};
+				);
+			};
 
-		const result = await streamDevin(model(), context, { apiKey: "token" }).result();
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Devin stream error permission_denied: Reached overall message rate limit");
+			const result = await streamDevin(model(), context, { apiKey: "token" }).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorStatus).toBe(status);
+			expect(result.errorMessage).toContain(`Devin stream error ${code}: service rejected request`);
+			expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(transient);
+			expect(AIError.is(result.errorId, AIError.Flag.AuthFailed)).toBe(authFailed);
+			expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
+		}
 	});
 
 	it("classifies a non-2xx HTTP/2 status as a transient provider error", async () => {

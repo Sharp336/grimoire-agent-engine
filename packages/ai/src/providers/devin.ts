@@ -94,7 +94,12 @@ async function disposeDevinTransports(): Promise<void> {
 	await Promise.allSettled(active.map(transport => transport.settled));
 }
 
-registerTransportDisposer("devin", disposeDevinTransports);
+let disposerRegistered = false;
+function ensureDisposerRegistered(): void {
+	if (disposerRegistered) return;
+	disposerRegistered = true;
+	registerTransportDisposer("devin", disposeDevinTransports);
+}
 
 export const streamDevin: StreamFunction<"devin-agent"> = (
 	model: Model<"devin-agent">,
@@ -106,6 +111,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 	const signal = options?.signal ? AbortSignal.any([options.signal, transportAbort.signal]) : transportAbort.signal;
 	const { promise: transportSettled, resolve: resolveTransportSettled } = Promise.withResolvers<void>();
 	const activeTransport = { abort: transportAbort, settled: transportSettled };
+	ensureDisposerRegistered();
 	activeDevinTransports.add(activeTransport);
 
 	(async () => {
@@ -241,17 +247,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				for (const connectFrame of frames) {
 					if (connectFrame.endOfStream) {
 						const trailerError = readConnectTrailerError(connectFrame.payload);
-						if (trailerError) {
-							const formatted = `Devin stream error${trailerError.code ? ` ${trailerError.code}` : ""}: ${trailerError.message}`;
-							const error = new AIError.ValidationError(formatted);
-							if (
-								trailerError.code.toLowerCase() === "resource_exhausted" &&
-								trailerError.message.trimStart().toLowerCase().startsWith("request_too_large:")
-							) {
-								AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
-							}
-							throw error;
-						}
+						if (trailerError) throw devinConnectError(trailerError.code, trailerError.message);
 						continue;
 					}
 
@@ -400,14 +396,49 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		} finally {
-			await response?.close();
-			activeDevinTransports.delete(activeTransport);
-			resolveTransportSettled();
+			try {
+				await response?.close();
+			} catch (error) {
+				logger.warn("devin: transport close failed", { error: String(error) });
+			} finally {
+				activeDevinTransports.delete(activeTransport);
+				resolveTransportSettled();
+			}
 		}
 	})();
 
 	return stream;
 };
+
+const CONNECT_HTTP_STATUS: Readonly<Record<string, number>> = {
+	canceled: 499,
+	unknown: 500,
+	invalid_argument: 400,
+	deadline_exceeded: 504,
+	not_found: 404,
+	already_exists: 409,
+	permission_denied: 403,
+	resource_exhausted: 429,
+	failed_precondition: 400,
+	aborted: 409,
+	out_of_range: 400,
+	unimplemented: 501,
+	internal: 500,
+	unavailable: 503,
+	data_loss: 500,
+	unauthenticated: 401,
+};
+
+function devinConnectError(code: string, message: string): AIError.DevinApiError {
+	const normalized = code.toLowerCase();
+	const status = CONNECT_HTTP_STATUS[normalized] ?? 500;
+	const detail = `Devin stream error${code ? ` ${code}` : ""}: ${message}`;
+	const error = new AIError.DevinApiError(detail, status);
+	if (normalized === "resource_exhausted" && message.trimStart().toLowerCase().startsWith("request_too_large:")) {
+		AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
+	}
+	return error;
+}
 
 function normalizeDevinSessionToken(apiKey: string | undefined): string {
 	if (!apiKey) return "";
