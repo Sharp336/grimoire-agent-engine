@@ -2,14 +2,15 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed live Devin model discovery to declare `MODEL_ROUTER` display support, which the server requires before it will return the `adaptive` router model. Discovery now returns the same catalog `devin models list` shows, and reads per-token pricing from the server's `modelDimensions` instead of reporting zero cost.
 ### Added
 
-- Added Cursor Bidi and server-configuration protocol descriptors used by HTTP/1 transport fallback and mode discovery.
+- Added Cursor Bidi and server-configuration protocol descriptors used by server-selected HTTP/1 fallback.
+- Added current `chisel` Devin discovery with provider-reported context/output limits and zero fabricated pricing.
 - Added dynamic discovery for the account-scoped Kiro model catalog.
-- Fixed Gemini 3.6 Flash requests to Antigravity Cloud Code Assist sending `thinkingLevel` instead of the endpoint's required per-tier `thinkingBudget`, which could yield repeated empty responses.
+
+### Fixed
+
+- Preserved the separate Gemini 3.6 Antigravity budget family and Gemini CLI thinking-level family.
 
 ## [17.1.8] - 2026-07-28
 

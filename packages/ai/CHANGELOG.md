@@ -4,25 +4,20 @@
 
 ### Added
 
-- Added a provider-neutral HTTP/1 Connect bridge and Cursor fallback with lifecycle-bound cancellation, poll deduplication, and credential-error normalization.
-- Added the Kiro provider with pooled HTTP/2 transport, AWS EventStream decoding, device login, tool streaming, and subscription usage reporting.
+- Added one provider-neutral HTTP/2/Connect transport with bounded proxy tunneling and typed pre-dispatch-only HTTP/1 fallback.
+- Added the Kiro provider with pooled HTTP/2 transport, strict AWS EventStream decoding, device login, tool streaming, and subscription usage reporting.
 
 ### Changed
 
-- Extracted Cursor's HTTP/2 pooling, lifecycle, transient-error classification, and Connect framing into a provider-neutral transport subsystem.
-- Moved Devin chat streaming onto the shared pooled HTTP/2 and Connect transport, with lifecycle-bound cancellation and HTTP/1 fallback.
-
-
-### Changed
-
-- Removed the obsolete Devin JWT preflight (`GetUserJwt`), which no longer exists in the current Devin CLI, and moved Devin chat streaming to HTTP/2 with proxy support.
-### Changed
-
-- Removed unobserved Antigravity sandbox failover and last-good-endpoint state from Cloud Code Assist generation; google-antigravity now uses the daily endpoint only.
+- Moved Cursor, Devin, Kiro, and Antigravity generation onto the shared transport lifecycle. Cursor selects HTTP/1 only when server configuration disables Bidi; Kiro remains HTTP/2-only.
+- Removed the obsolete Devin JWT preflight and matched the current CLI's Basic session-token protocol.
+- Removed Antigravity sandbox failover, empty-response replay, and last-good-endpoint state.
 
 ### Fixed
 
-- Fixed Gemini 3.6 Flash requests to Antigravity Cloud Code Assist sending `thinkingLevel` instead of the endpoint's required per-tier `thinkingBudget`, which could yield repeated empty responses.
+- Reject malformed, duplicate, trailing, or missing Connect terminals and Kiro completions without `END_TURN` before emitting completion events.
+- Preserve provider-authoritative context-overflow identities without generic message matching.
+- Send Gemini 3.6 Antigravity thinking budgets using the captured wire policy.
 
 ## [17.1.8] - 2026-07-28
 
