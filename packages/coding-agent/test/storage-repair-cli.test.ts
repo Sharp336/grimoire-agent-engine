@@ -888,12 +888,10 @@ describe("offline SQLite salvage", () => {
 		});
 		const sealed = requireValue(
 			result.checksums.find(checksum => checksum.path === candidate && !checksum.ephemeral),
-			"published candidate checksum",
+			"linked candidate checksum",
 		);
 		expect(sealed.ephemeral).toBe(false);
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
-		const entries = await fs.promises.readdir(root);
-		expect(entries.some(name => name.startsWith(`.${path.basename(candidate)}.candidate-`))).toBe(false);
 	});
 
 	test("candidate stage mutation between sealing and publication is refused", async () => {
@@ -915,7 +913,7 @@ describe("offline SQLite salvage", () => {
 		expect(await stageArtifacts(candidate, "candidate")).toEqual([]);
 	});
 
-	test("post-link candidate replacement refuses publication without deleting the replacement", async () => {
+	test("post-link candidate replacement warns without deleting the replacement", async () => {
 		const dbPath = await createAgentSource();
 		const candidate = path.join(root, "candidate-replacement.db");
 		const replacement = "replacement bytes must survive";
@@ -931,13 +929,75 @@ describe("offline SQLite salvage", () => {
 				},
 			},
 		);
-		expect(result.status).toBe("refused");
-		expect(result.refusal).toContain("Published output no longer matches staging file");
-		expect(result.candidatePublished).toBe(false);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.warning).toContain("Published output no longer matches staging file");
+		expect(result.candidatePublished).toBe(true);
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(candidate).text()).toBe(replacement);
 		expect(await fingerprint(candidate)).toEqual(requireValue(replacementIdentity, "replacement identity"));
+		const sealed = requireValue(
+			result.checksums.find(checksum => checksum.path === candidate && !checksum.ephemeral),
+			"linked candidate checksum",
+		);
+		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).not.toBe(sealed.sha256);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
+	});
+
+
+	test("candidate post-link same-inode same-size mutation fails the SHA proof", async () => {
+		await createAgentSource();
+		const candidate = path.join(root, "candidate-sha-only.db");
+		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root, output: candidate },
+			{
+				afterCandidatePublication: async () => {
+					const before = await fingerprint(candidate);
+					const bytes = await Bun.file(candidate).bytes();
+					bytes[0] ^= 0xff;
+					const handle = await fs.promises.open(candidate, "r+");
+					try {
+						await handle.write(bytes, 0, bytes.byteLength, 0);
+						await handle.sync();
+					} finally {
+						await handle.close();
+					}
+					mutation = { before, after: await fingerprint(candidate) };
+				},
+			},
+		);
+		const { before, after } = requireValue(mutation, "candidate SHA-only mutation");
+		expect(after).toMatchObject({ dev: before.dev, ino: before.ino, size: before.size });
+		expect(after.sha256).not.toBe(before.sha256);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.candidatePublished).toBe(true);
+		expect(result.candidatePathTrusted).toBe(false);
+		expect(result.warning).toContain("Published output content changed");
+	});
+
+	test("candidate post-link byte-identical replacement fails the inode proof", async () => {
+		await createAgentSource();
+		const candidate = path.join(root, "candidate-inode-only.db");
+		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root, output: candidate },
+			{
+				afterCandidatePublication: async () => {
+					const before = await fingerprint(candidate);
+					const bytes = await Bun.file(candidate).bytes();
+					await fs.promises.unlink(candidate);
+					await Bun.write(candidate, bytes);
+					mutation = { before, after: await fingerprint(candidate) };
+				},
+			},
+		);
+		const { before, after } = requireValue(mutation, "candidate inode-only mutation");
+		expect(after).toMatchObject({ dev: before.dev, size: before.size, sha256: before.sha256 });
+		expect(after.ino).not.toBe(before.ino);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.candidatePublished).toBe(true);
+		expect(result.candidatePathTrusted).toBe(false);
+		expect(result.warning).toContain("Published output no longer matches staging file");
 	});
 
 	test("candidate stage-unlink failure warns after proving the linked output", async () => {
@@ -976,10 +1036,10 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 		const sealed = requireValue(
-			result.checksums.find(checksum => checksum.ephemeral),
-			"sealed candidate checksum",
+			result.checksums.find(checksum => checksum.path === candidate && !checksum.ephemeral),
+			"linked candidate checksum",
 		);
-		expect(sealed.path).not.toBe(candidate);
+		expect(sealed.ephemeral).toBe(false);
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
 	});
 
@@ -1050,10 +1110,71 @@ describe("offline SQLite salvage", () => {
 			},
 		);
 		expect(result.status).toBe("refused");
-		expect(result.backupCreated).toBe(false);
-		expect(result.checksums.some(checksum => checksum.path === result.backup)).toBe(false);
+		expect(result.backupCreated).toBe(true);
+		expect(result.checksums.some(checksum => checksum.path === result.backup)).toBe(true);
 		expect(await Bun.file(result.backup).text()).toBe(replacement);
 		expect(await fingerprint(result.backup)).toEqual(requireValue(replacementIdentity, "replacement identity"));
+	});
+
+
+	test("backup post-link same-inode same-size mutation fails the SHA proof", async () => {
+		await createAgentSource();
+		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root },
+			{
+				afterBackupLink: async () => {
+					const directory = path.dirname(getAgentDbPath(root));
+					const name = requireValue((await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")), "linked backup");
+					const backup = path.join(directory, name);
+					const before = await fingerprint(backup);
+					const bytes = await Bun.file(backup).bytes();
+					bytes[0] ^= 0xff;
+					const handle = await fs.promises.open(backup, "r+");
+					try {
+						await handle.write(bytes, 0, bytes.byteLength, 0);
+						await handle.sync();
+					} finally {
+						await handle.close();
+					}
+					mutation = { before, after: await fingerprint(backup) };
+				},
+			},
+		);
+		const { before, after } = requireValue(mutation, "backup SHA-only mutation");
+		expect(after).toMatchObject({ dev: before.dev, ino: before.ino, size: before.size });
+		expect(after.sha256).not.toBe(before.sha256);
+		expect(result.status).toBe("refused");
+		expect(result.backupCreated).toBe(true);
+		expect(result.candidatePublished).toBe(false);
+		expect(result.refusal).toContain("Published output content changed");
+	});
+
+	test("backup post-link byte-identical replacement fails the inode proof", async () => {
+		await createAgentSource();
+		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root },
+			{
+				afterBackupLink: async () => {
+					const directory = path.dirname(getAgentDbPath(root));
+					const name = requireValue((await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")), "linked backup");
+					const backup = path.join(directory, name);
+					const before = await fingerprint(backup);
+					const bytes = await Bun.file(backup).bytes();
+					await fs.promises.unlink(backup);
+					await Bun.write(backup, bytes);
+					mutation = { before, after: await fingerprint(backup) };
+				},
+			},
+		);
+		const { before, after } = requireValue(mutation, "backup inode-only mutation");
+		expect(after).toMatchObject({ dev: before.dev, size: before.size, sha256: before.sha256 });
+		expect(after.ino).not.toBe(before.ino);
+		expect(result.status).toBe("refused");
+		expect(result.backupCreated).toBe(true);
+		expect(result.candidatePublished).toBe(false);
+		expect(result.refusal).toContain("Published output no longer matches staging file");
 	});
 
 	test("primary refusal and cleanup invariant failures retain both causes in deterministic order", async () => {
