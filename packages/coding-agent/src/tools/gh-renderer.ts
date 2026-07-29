@@ -14,7 +14,6 @@ import { formatShortSha } from "./gh-format";
 import {
 	formatExpandHint,
 	formatMoreItems,
-	formatStatusIcon,
 	formatToolWorkingDirectory,
 	PREVIEW_LIMITS,
 	replaceTabs,
@@ -397,26 +396,19 @@ function renderFallbackComponent(
 }
 
 function renderWatchCall(args: GithubToolRenderArgs, options: RenderResultOptions, theme: Theme): Component {
-	const icon =
-		options.spinnerFrame !== undefined
-			? formatStatusIcon("running", theme, options.spinnerFrame)
-			: formatStatusIcon("pending", theme);
-
+	const status: ToolUIStatus = options.spinnerFrame !== undefined ? "running" : "pending";
 	const runId = typeof args.run === "string" && args.run.trim().length > 0 ? args.run.trim() : undefined;
 	const branch = typeof args.branch === "string" && args.branch.trim().length > 0 ? args.branch.trim() : undefined;
-
-	const titleText = theme.fg("accent", "GitHub Run Watch");
-	let metaText: string;
-	if (runId) {
-		metaText = theme.fg("muted", `#${runId}`);
-	} else if (branch) {
-		metaText = theme.fg("text", branch);
-	} else {
-		metaText = theme.fg("muted", "current HEAD");
-	}
-
-	const cwdMeta = buildOpMeta(args);
-	const header = `${icon} ${titleText}  ${metaText}${cwdMeta.length > 0 ? `  ${theme.fg("muted", cwdMeta.join("  "))}` : ""}`;
+	const selector = runId ? `#${runId}` : (branch ?? "current HEAD");
+	const header = renderStatusLine(
+		{
+			icon: status,
+			spinnerFrame: options.spinnerFrame,
+			title: "GitHub Run Watch",
+			meta: [selector, ...buildOpMeta(args)],
+		},
+		theme,
+	);
 	const wait = theme.fg("dim", "waiting for workflow data...");
 	return new Text(`${header}\n${wait}`, 0, 0);
 }

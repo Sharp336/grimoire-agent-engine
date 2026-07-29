@@ -652,6 +652,21 @@ describe("github tool", () => {
 		expect(resultText).toContain("linked-feature");
 	});
 
+	it("flattens newline-bearing cwd metadata in the run_watch pending header", () => {
+		const args = {
+			op: "run_watch",
+			cwd: path.join(process.cwd(), "linked\nspoofed-header"),
+		};
+		const options = { expanded: false } as Parameters<typeof githubToolRenderer.renderCall>[1];
+		const lines = Bun.stripANSI(githubToolRenderer.renderCall(args, options, theme).render(120).join("\n")).split(
+			"\n",
+		);
+
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toContain("linked spoofed-header");
+		expect(lines[1]).toContain("waiting for workflow data");
+	});
+
 	it("reads repository files through the GitHub contents API", async () => {
 		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue('{"version":"16.3.11"}\n');
 		const tool = new GithubTool(createSession());
