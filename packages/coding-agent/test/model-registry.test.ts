@@ -3,7 +3,15 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort, streamSimple, type Context, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
+import {
+	type Context,
+	Effort,
+	type FetchImpl,
+	type Model,
+	type OpenAICompat,
+	streamSimple,
+	type ThinkingConfig,
+} from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -378,7 +386,11 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			for (const model of anthropicModels) {
 				const auth = await anthropicAuthHeader.getApiKeyAndHeaders(model);
-				expect(auth).toEqual({ ok: true, apiKey: "issue-929-key", headers: { Authorization: "Bearer issue-929-key" } });
+				expect(auth).toEqual({
+					ok: true,
+					apiKey: "issue-929-key",
+					headers: { Authorization: "Bearer issue-929-key" },
+				});
 			}
 		});
 
@@ -396,27 +408,18 @@ describe("ModelRegistry", () => {
 			if (!model) throw new Error("Expected bundled Anthropic model");
 
 			const selections = await Promise.all(
-				Array.from({ length: 64 }, async (_, index) => ({
-					sessionId: `auth-header-session-${index}`,
-					apiKey: await registry.getApiKey(model, `auth-header-session-${index}`),
-				})),
+				Array.from({ length: 64 }, async (_, index) => {
+					const sessionId = `auth-header-session-${index}`;
+					return { sessionId, apiKey: await registry.getApiKey(model, sessionId) };
+				}),
 			);
 			const first = selections[0];
 			const second = selections.find(selection => selection.apiKey !== first?.apiKey);
 			if (!first?.apiKey || !second?.apiKey) throw new Error("Expected two distinct configured API keys");
 
-			let releaseFirst!: () => void;
-			const firstRelease = new Promise<void>(resolve => {
-				releaseFirst = resolve;
-			});
-			let markFirstResolved!: () => void;
-			const firstResolved = new Promise<void>(resolve => {
-				markFirstResolved = resolve;
-			});
-			let markSecondResolved!: () => void;
-			const secondResolved = new Promise<void>(resolve => {
-				markSecondResolved = resolve;
-			});
+			const { promise: firstRelease, resolve: releaseFirst } = Promise.withResolvers<void>();
+			const { promise: firstResolved, resolve: markFirstResolved } = Promise.withResolvers<void>();
+			const { promise: secondResolved, resolve: markSecondResolved } = Promise.withResolvers<void>();
 
 			const firstKeyResolver = registry.resolver(model, first.sessionId);
 			const secondKeyResolver = registry.resolver(model, second.sessionId);
@@ -437,24 +440,39 @@ describe("ModelRegistry", () => {
 				const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
 				const bodyText = input instanceof Request ? await input.clone().text() : String(init?.body);
 				const body = JSON.parse(bodyText);
-				observedHeaders[body.messages[0].content] = headers.get("Authorization");
+				const requestContent = body.messages[0].content;
+				const requestText = typeof requestContent === "string" ? requestContent : requestContent[0].text;
+				observedHeaders[requestText] = headers.get("Authorization");
 				const events = [
 					{ type: "message_start", message: { id: "msg", usage: { input_tokens: 1, output_tokens: 0 } } },
 					{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
 					{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
 					{ type: "content_block_stop", index: 0 },
-					{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { input_tokens: 1, output_tokens: 1 } },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "end_turn" },
+						usage: { input_tokens: 1, output_tokens: 1 },
+					},
 					{ type: "message_stop" },
 				];
-				return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
-					headers: { "content-type": "text/event-stream" },
-				});
+				return new Response(
+					events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+					{
+						headers: { "content-type": "text/event-stream" },
+					},
+				);
 			};
 			const context = (content: string): Context => ({ messages: [{ role: "user", content, timestamp: 0 }] });
 
-			const firstStream = streamSimple(model, context("first"), { apiKey: firstResolver, fetch: fetchMock });
+			const firstStream = streamSimple(model, context("first"), {
+				apiKey: firstResolver,
+				fetch: fetchMock,
+			});
 			await firstResolved;
-			const secondStream = streamSimple(model, context("second"), { apiKey: secondResolver, fetch: fetchMock });
+			const secondStream = streamSimple(model, context("second"), {
+				apiKey: secondResolver,
+				fetch: fetchMock,
+			});
 			await secondResolved;
 			releaseFirst();
 			await Promise.all([firstStream.result(), secondStream.result()]);
