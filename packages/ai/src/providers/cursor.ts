@@ -160,7 +160,12 @@ import {
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import {
+	createRequestDebugSession,
+	isRequestDebugEnabled,
+	openResponseLogSafely,
+	type RequestDebugResponseLog,
+} from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
 import { buildCursorHeaders } from "./cursor/headers";
 import { type CursorHttp1Bridge, createCursorHttp1Bridge } from "./cursor/http1";
@@ -693,7 +698,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						void send.finally(() => inFlightDispatches.delete(send));
 					},
 				};
-				debugResponseLogPromise = debugSession?.openResponseLog("HTTP/1 Connect stream");
+				debugResponseLogPromise = openResponseLogSafely(debugSession, "HTTP/1 Connect stream");
 				for await (const serverMessage of h1Bridge.messages) {
 					if (debugResponseLogPromise) {
 						const responseFrame = encodeConnectFrame(toBinary(AgentServerMessageSchema, serverMessage));
@@ -711,7 +716,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				channel = h2Request;
 
 				h2Request.on("response", headers => {
-					debugResponseLogPromise = debugSession?.openResponseLog(
+					debugResponseLogPromise = openResponseLogSafely(
+						debugSession,
 						`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
 						headers,
 					);

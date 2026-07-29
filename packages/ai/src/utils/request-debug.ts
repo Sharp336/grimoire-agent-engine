@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 
 const REQUEST_DEBUG_ENV = "PI_REQ_DEBUG";
@@ -46,6 +47,27 @@ export interface RequestDebugSession {
 	readonly responsePath: string;
 	openResponseLog(statusLine: string, headers?: RequestDebugHeaders): Promise<RequestDebugResponseLog>;
 	wrapResponse(response: Response): Promise<Response>;
+}
+
+/**
+ * Open a response log that never rejects.
+ *
+ * Request debugging is diagnostics. Providers hold the returned promise and
+ * write to it fire-and-forget from stream loops and socket event callbacks, so a
+ * rejection from the underlying `openResponseLog` has nowhere to land: it
+ * surfaces as an unhandled rejection, and any teardown that awaits the same
+ * promise is skipped. Resolving to `undefined` keeps a failed log from
+ * escalating into a transport failure. Callers already write through `log?.`.
+ */
+export function openResponseLogSafely(
+	session: RequestDebugSession | undefined,
+	statusLine: string,
+	headers?: RequestDebugHeaders,
+): Promise<RequestDebugResponseLog | undefined> | undefined {
+	return session?.openResponseLog(statusLine, headers).catch(error => {
+		logger.warn("request-debug: response log unavailable", { error: String(error), statusLine });
+		return undefined;
+	});
 }
 
 function isRequestDebugEnvEnabled(): boolean {

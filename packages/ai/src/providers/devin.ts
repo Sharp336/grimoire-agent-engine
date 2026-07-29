@@ -54,7 +54,12 @@ import type {
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import {
+	createRequestDebugSession,
+	isRequestDebugEnabled,
+	openResponseLogSafely,
+	type RequestDebugResponseLog,
+} from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
 import { transformMessages } from "./transform-messages";
 
@@ -232,12 +237,11 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				signal,
 				fetchOverride: options?.fetch,
 			});
-			debugResponseLogPromise = debugSession
-				?.openResponseLog(`HTTP ${response.status}`.trim(), response.headers)
-				.catch(error => {
-					logger.warn("devin: response debug log unavailable", { error: String(error) });
-					return undefined;
-				});
+			debugResponseLogPromise = openResponseLogSafely(
+				debugSession,
+				`HTTP ${response.status}`.trim(),
+				response.headers,
+			);
 			if (response.status < 200 || response.status >= 300) {
 				const chunks: Uint8Array[] = [];
 				let totalBytes = 0;
