@@ -101,13 +101,14 @@ describe("caller-specific unreadable-exp policies", () => {
 	it("maps Perplexity opaque tokens to the far-future sentinel at login", async () => {
 		process.env.PI_AUTH_NO_BORROW = "1";
 		const prompts = ["user@example.com", "123456"];
-		vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+		const fetchMock = async (input: string | URL | Request): Promise<Response> => {
 			const url = String(input);
 			if (url.endsWith("/csrf")) return Response.json({ csrfToken: "csrf" });
 			if (url.endsWith("/signin-email")) return Response.json({ ok: true });
 			if (url.endsWith("/signin-otp")) return Response.json({ token: "opaque-perplexity-token" });
 			throw new Error(`unexpected Perplexity URL: ${url}`);
-		});
+		};
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock as typeof fetch);
 		const credentials = await loginPerplexity({
 			onPrompt: async () => prompts.shift() ?? "",
 		});
