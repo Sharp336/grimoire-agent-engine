@@ -713,9 +713,13 @@ describe("offline SQLite salvage", () => {
 	test("injected backup, verification, and no-replace publication failures clean staging and retain valid backup", async () => {
 		const dbPath = await createAgentSource();
 		const before = await fingerprint(dbPath);
+		let snapshotTempDir: string | undefined;
 		let result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root },
 			{
+				afterPristineCopy: tempDir => {
+					snapshotTempDir = tempDir;
+				},
 				beforeBackupWrite: () => {
 					throw new Error("backup injection");
 				},
@@ -724,10 +728,17 @@ describe("offline SQLite salvage", () => {
 		expect(result.status).toBe("refused");
 		expect(result.backupCreated).toBe(false);
 		expect(await fingerprint(dbPath)).toEqual(before);
+		await expect(fs.promises.lstat(requireValue(snapshotTempDir, "backup snapshot directory"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
 
+		snapshotTempDir = undefined;
 		result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root },
 			{
+				afterPristineCopy: tempDir => {
+					snapshotTempDir = tempDir;
+				},
 				beforeCandidateVerification: () => {
 					throw new Error("verification injection");
 				},
@@ -737,6 +748,9 @@ describe("offline SQLite salvage", () => {
 		expect(result.backupCreated).toBe(true);
 		expect(result.candidatePublished).toBe(false);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
+		await expect(fs.promises.lstat(requireValue(snapshotTempDir, "verification snapshot directory"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
 
 		const racedCandidate = path.join(root, "raced-candidate.db");
 		let racerIdentity: FileFingerprint | undefined;
@@ -765,9 +779,15 @@ describe("offline SQLite salvage", () => {
 	test("late source mismatch after candidate link publishes an untrusted sealed candidate", async () => {
 		const dbPath = await createAgentSource();
 		const candidate = path.join(root, "publication-race.db");
+		let snapshotTempDir: string | undefined;
 		const result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root, output: candidate },
-			{ afterCandidatePublication: () => fs.promises.appendFile(dbPath, "publication race") },
+			{
+				afterPristineCopy: tempDir => {
+					snapshotTempDir = tempDir;
+				},
+				afterCandidatePublication: () => fs.promises.appendFile(dbPath, "publication race"),
+			},
 		);
 		expect(result.status).toBe("published-with-warning");
 		expect(result.warning).toContain("Live source triplet changed during storage repair");
@@ -776,6 +796,9 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 		expect(await Bun.file(candidate).exists()).toBe(true);
+		await expect(fs.promises.lstat(requireValue(snapshotTempDir, "published warning snapshot directory"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
 		const sealed = requireValue(
 			result.checksums.find(checksum => checksum.path === candidate && !checksum.ephemeral),
 			"published candidate checksum",
