@@ -202,6 +202,35 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.error} ${twoPath}`);
 	});
 
+	it("keeps batched-read outcome rows visible with an inline preview", () => {
+		const component = new ReadToolGroupComponent({ showContentPreview: true });
+		const onePath = path.resolve("/tmp/preview-one.ts");
+		const warningPath = path.resolve("/tmp/preview-warning.ts");
+		const errorPath = path.resolve("/tmp/preview-error.ts");
+		component.updateArgs({ path: [onePath, warningPath, errorPath] }, "read-preview-outcomes");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "combined preview content" }],
+				details: {
+					readTargetOutcomes: [
+						{ path: onePath, resolvedPath: onePath, status: "success" },
+						{ path: warningPath, resolvedPath: warningPath, status: "warning", message: "truncated" },
+						{ path: errorPath, resolvedPath: errorPath, status: "error", message: "not found" },
+					],
+				},
+			},
+			false,
+			"read-preview-outcomes",
+		);
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
+		expect(plain).toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.warning} ${warningPath}`);
+		expect(plain).toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.error} ${errorPath}`);
+		expect(plain).toContain("combined preview content");
+	});
+
 	it("renders warning previews with warning styling instead of success styling", () => {
 		const component = new ReadToolGroupComponent({ showContentPreview: true });
 		const examplePath = path.resolve("/tmp/example.ts");

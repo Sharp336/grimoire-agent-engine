@@ -3,7 +3,6 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { DEFAULT_MAX_BYTES, truncateHeadBytes } from "../session/streaming-output";
 import { MAX_IMAGE_INPUT_BYTES } from "../utils/image-loading";
 import type { OutputMeta } from "./output-meta";
-import { splitPathAndSel } from "./path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -393,10 +392,9 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 					? "warning"
 					: "success";
 			const source = result.details?.meta?.source;
-			const partSelector = suffixResolution ? splitPathAndSel(part).sel : undefined;
 			const correctedPath =
-				suffixResolution && partSelector && !splitPathAndSel(suffixResolution.to).sel
-					? `${suffixResolution.to}:${partSelector}`
+				suffixResolution && part.startsWith(suffixResolution.from)
+					? `${suffixResolution.to}${part.slice(suffixResolution.from.length)}`
 					: (suffixResolution?.to ?? part);
 			owner = readTargetOutcomes.length;
 			readTargetOutcomes.push({

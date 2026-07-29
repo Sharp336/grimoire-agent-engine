@@ -461,7 +461,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		if (displayRows.length === 1) {
 			const row = displayRows[0]!;
-			if (!this.#shouldRenderPreviewRow(row)) {
+			if (
+				!this.#shouldRenderPreviewRow(row) ||
+				row.targets.some(target => (target.entry.targetOutcomes?.length ?? 0) > 1)
+			) {
 				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
 				const pathDisplay = this.#formatRowPath(row);
 				this.#text.setText(
@@ -477,8 +480,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		const header = `${theme.fg("toolTitle", theme.bold("Read"))}${theme.fg("dim", ` (${displayRows.length})`)}`;
 		const lines = [` ${theme.format.bullet} ${header}`];
-		const entriesWithoutPreview = entries.filter(entry => !this.#shouldRenderPreview(entry));
-		const summaryTargets = this.#displayTargetsForEntries(entriesWithoutPreview);
+		const summaryEntries = entries.filter(
+			entry => !this.#shouldRenderPreview(entry) || (entry.targetOutcomes?.length ?? 0) > 1,
+		);
+		const summaryTargets = this.#displayTargetsForEntries(summaryEntries);
 		const rows = this.#buildSummaryRows(summaryTargets);
 		for (const [index, row] of rows.entries()) {
 			this.#appendSummaryRow(lines, row, index, rows.length);

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -759,6 +760,35 @@ describe("tool path arrays", () => {
 		expect(corrected?.requestedPath).toBe("unique-corrected-target.txt");
 		expect(corrected?.resolvedPath).toBe(path.join(tempDir, "nested-correction", "unique-corrected-target.txt"));
 		expect(getText(result)).toContain("selected line");
+	});
+
+	it("preserves SQLite row selectors when suffix recovery corrects a batched database path", async () => {
+		const correctedDir = path.join(tempDir, "sqlite-correction");
+		const databasePath = path.join(correctedDir, "structured-corrected.db");
+		await fs.mkdir(correctedDir, { recursive: true });
+		const database = new Database(databasePath);
+		try {
+			database.exec(`
+				CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+				INSERT INTO notes (body) VALUES ('corrected structured target');
+			`);
+		} finally {
+			database.close();
+		}
+
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-corrected-structured-array", {
+			path: ["structured-corrected.db:notes:1"],
+		});
+		const corrected = result.details?.readTargetOutcomes?.[0];
+		expect(corrected?.path).toBe("sqlite-correction/structured-corrected.db:notes:1");
+		expect(corrected?.requestedPath).toBe("structured-corrected.db");
+		expect(corrected?.resolvedPath).toBe(databasePath);
+		expect(getText(result)).toContain("corrected structured target");
 	});
 
 	it("rejects empty and oversized native path arrays", async () => {
