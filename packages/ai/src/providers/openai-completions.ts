@@ -38,6 +38,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 	iterateWithTerminalGrace,
+	scaleIdleTimeoutByEffort,
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
@@ -628,10 +629,12 @@ const streamOpenAICompletionsOnce = (
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const idleTimeoutFallbackMs = model.compat.streamIdleTimeoutMs;
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(idleTimeoutFallbackMs);
-			const firstEventTimeoutMs =
+			const baseIdleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(idleTimeoutFallbackMs);
+			const baseFirstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ??
-				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
+				getOpenAIStreamFirstEventTimeoutMs(baseIdleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
+			const idleTimeoutMs = scaleIdleTimeoutByEffort(baseIdleTimeoutMs, options?.reasoning);
+			const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, options?.reasoning);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const { copilotPremiumRequests, baseUrl, headers, query, requestHeaders } = createRequestSetup(

@@ -58,7 +58,12 @@ import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
-import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+	scaleIdleTimeoutByEffort,
+} from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
@@ -2003,8 +2008,11 @@ const streamAnthropicOnce = (
 				| (AnthropicServerToolContent & { [kStreamingPartialJson]?: string })
 				| (ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number })
 			) & { [kStreamingBlockIndex]: number };
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
-			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+			const baseIdleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
+			const baseFirstEventTimeoutMs =
+				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(baseIdleTimeoutMs);
+			const idleTimeoutMs = scaleIdleTimeoutByEffort(baseIdleTimeoutMs, options?.reasoning);
+			const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, options?.reasoning);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const blocks = output.content as Block[];

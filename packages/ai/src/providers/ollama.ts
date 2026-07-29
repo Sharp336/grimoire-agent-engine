@@ -23,6 +23,7 @@ import {
 	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
+	scaleIdleTimeoutByEffort,
 } from "../utils/idle-iterator";
 import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
@@ -555,9 +556,10 @@ const streamOllamaOnce = (
 			// the iterator-level watchdog) need a pre-response timer alongside
 			// `timeout: false`; otherwise an Ollama server that accepts the
 			// POST and never streams headers would hang forever (issue #2422).
-			const idleTimeoutMs = options.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
-			const firstEventTimeoutMs =
-				options.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
+			const baseIdleTimeoutMs = options.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
+			const baseFirstEventTimeoutMs =
+				options.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(baseIdleTimeoutMs);
+			const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, options.reasoning);
 			// Cleared the instant headers arrive (below) so the pre-response timer
 			// never aborts the actively streaming body — an absolute
 			// `AbortSignal.timeout` would (issue #2422).

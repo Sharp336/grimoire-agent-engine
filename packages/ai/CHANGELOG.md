@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Streaming idle and first-event timeouts now scale with reasoning effort (high 2×, xhigh 3×, max 4×) so high-effort models that think silently for long periods are no longer killed mid-thought by the default 2-minute watchdog.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

@@ -91,6 +91,39 @@ export function getOpenAIStreamFirstEventTimeoutMs(
 }
 
 /**
+ * Multiplier applied to the streaming idle timeout when the model is using
+ * extended reasoning effort. High-effort models can think silently for
+ * 60–120+ seconds before emitting the first token; without scaling, the
+ * default 2-minute idle watchdog kills the stream mid-thought.
+ *
+ * Values: high → 2×, xhigh → 3×, max → 4×. Lower efforts are unscaled.
+ */
+const EFFORT_IDLE_TIMEOUT_MULTIPLIERS: Record<string, number> = {
+	high: 2,
+	xhigh: 3,
+	max: 4,
+};
+
+/**
+ * Scale a resolved idle timeout by the reasoning effort level.
+ *
+ * Returns the timeout unchanged when `effort` is undefined, empty,
+ * unrecognized, or maps to 1×. Returns `undefined` unchanged (disabled
+ * watchdog). The first-event timeout is also scaled by the same multiplier
+ * at the call site — long silent thinks delay the first event, not just
+ * subsequent inter-event gaps.
+ */
+export function scaleIdleTimeoutByEffort(
+	timeoutMs: number | undefined,
+	effort: string | undefined,
+): number | undefined {
+	if (timeoutMs === undefined) return undefined;
+	const multiplier = effort ? EFFORT_IDLE_TIMEOUT_MULTIPLIERS[effort] : undefined;
+	if (!multiplier || multiplier <= 1) return timeoutMs;
+	return timeoutMs * multiplier;
+}
+
+/**
  * Arms a clearable pre-response (time-to-first-byte) abort guard for a streaming
  * fetch, combined with the caller's signal.
  *
