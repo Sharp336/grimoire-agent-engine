@@ -789,6 +789,41 @@ describe("offline SQLite salvage", () => {
 		expect(result.refusal).toContain("Session directory changed");
 	});
 
+
+	test("a primary session discovery access error refuses without publishing artifacts", async () => {
+		const dbPath = await createHistorySource();
+		const sourceBefore = await fingerprint(dbPath);
+		const project = path.join(getSessionsDir(root), "denied");
+		await writeSession("denied", "session", [message("m", "2026-01-01T00:00:01.000Z", "prompt")]);
+		const candidate = path.join(root, "discovery-refused.db");
+		const accessError = Object.assign(new Error("session project access denied"), { code: "EACCES" });
+		const originalReaddir = fs.promises.readdir;
+		const readdirSpy = spyOn(fs.promises, "readdir").mockImplementation(
+			((directory, options) => {
+				if (directory === project) return Promise.reject(accessError);
+				return Reflect.apply(originalReaddir, fs.promises, [directory, options]);
+			}) as typeof fs.promises.readdir,
+		);
+		try {
+			const result = await runStorageRepair({
+				target: "history",
+				historySource: "sessions",
+				apply: true,
+				agentDir: root,
+				output: candidate,
+			});
+			expect(result.status).toBe("refused");
+			expect(result.refusal).toBe("session project access denied");
+			expect(result.backupCreated).toBe(false);
+			expect(result.candidatePublished).toBe(false);
+			expect(await Bun.file(result.backup).exists()).toBe(false);
+			expect(await Bun.file(result.candidate).exists()).toBe(false);
+			expect(await fingerprint(dbPath)).toEqual(sourceBefore);
+		} finally {
+			readdirSpy.mockRestore();
+		}
+	});
+
 	test("Windows publication skips directory fsync without weakening file verification", async () => {
 		await createAgentSource();
 		let directorySyncs = 0;
