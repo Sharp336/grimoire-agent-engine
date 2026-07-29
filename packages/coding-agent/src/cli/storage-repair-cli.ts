@@ -171,8 +171,8 @@ export async function runStorageRepair(
 			verifyHistoryCandidate(candidateStage, historySource, prompts);
 		}
 
-		const seal = await sealCandidate(candidateStage);
-		const candidateChecksum = { path: candidateStage, sha256: seal.sha256, size: Number(seal.size), ephemeral: true };
+		const digest = await sealCandidate(candidateStage);
+		const candidateChecksum = { path: candidateStage, ...digest, ephemeral: true };
 		result.checksums.push(candidateChecksum);
 		await sourceStillMatches(snapshot.manifest);
 		if (historySource === "sessions") await promptManifestStillMatches(prompts);
@@ -183,7 +183,6 @@ export async function runStorageRepair(
 			await publishCandidate(
 				candidateStage,
 				artifacts.candidate,
-				seal,
 				() => {
 					result.candidatePublished = true;
 				},

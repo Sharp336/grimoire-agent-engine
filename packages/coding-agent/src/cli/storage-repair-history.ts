@@ -52,24 +52,23 @@ function codeOf(error: unknown) {
 }
 
 async function sessionFiles(root: string) {
-	let projects: fs.Dirent[];
-	try {
-		projects = await fs.promises.readdir(root, { withFileTypes: true });
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
 	const result: string[] = [];
-	for (const project of projects) {
-		const projectPath = path.join(root, project.name);
-		assertInvariant(!project.isSymbolicLink(), `Session manifest refuses symbolic link: ${projectPath}`);
-		if (!project.isDirectory()) continue;
-		for (const file of await fs.promises.readdir(projectPath, { withFileTypes: true })) {
-			const filePath = path.join(projectPath, file.name);
-			assertInvariant(!file.isSymbolicLink(), `Session manifest refuses symbolic link: ${filePath}`);
-			if (file.isFile() && file.name.endsWith(".jsonl")) result.push(filePath);
+	async function visit(dir: string): Promise<void> {
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
+		} catch (error) {
+			if (codeOf(error) === "ENOENT" && dir === root) return;
+			throw error;
+		}
+		for (const entry of entries) {
+			const file = path.join(dir, entry.name);
+			assertInvariant(!entry.isSymbolicLink(), `Session manifest refuses symbolic link: ${file}`);
+			if (entry.isDirectory()) await visit(file);
+			else if (entry.isFile() && entry.name.endsWith(".jsonl")) result.push(file);
 		}
 	}
+	await visit(root);
 	return result.sort();
 }
 
@@ -202,7 +201,14 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 				`Invalid message in ${file.path}:${physicalLine}`,
 			);
 			const typed = message as Record<string, unknown>;
-			if (typed.role !== "user" || typed.attribution === "agent" || typed.synthetic === true) { continue; }
+			if (
+				typed.role !== "user" ||
+				typed.attribution === "agent" ||
+				typed.steering === true ||
+				typed.synthetic === true
+			) {
+				continue;
+			}
 			const prompt = promptContent(typed.content, `${file.path}:${physicalLine}`).trim();
 			if (prompt.length === 0) continue;
 			insert.run(BigInt(timestamp), file.canonicalPath, BigInt(recordOrdinal), prompt, header.cwd, header.id);

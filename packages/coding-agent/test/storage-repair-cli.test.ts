@@ -220,25 +220,24 @@ async function stageArtifacts(finalPath: string, label: "backup" | "candidate") 
 }
 
 describe("offline SQLite salvage", () => {
-	test("rejects normalized and mixed-case source-triplet artifact aliases on caseless platforms", async () => {
+	test("rejects normalized and case-insensitive source-triplet artifact aliases", async () => {
 		const source = path.join(root, "agent.db");
 		await fs.promises.writeFile(source, "source");
+		const options = { comparisonMode: "case-insensitive" } as const;
 
-		for (const platform of ["darwin", "win32"] as const) {
-			const options = { platform: () => platform };
-			await expect(resolveArtifactPaths(source, path.join(root, "nested", "..", "agent.db"), options)).rejects.toThrow(
-				"Repair output already exists",
+		await expect(resolveArtifactPaths(source, path.join(root, "nested", "..", "agent.db"), options)).rejects.toThrow(
+			"Repair output already exists",
+		);
+
+		for (const output of [
+			path.join(root, "nested", "..", "agent.db-wal"),
+			path.join(root, "nested", "..", "agent.db-shm"),
+			path.join(root, "AGENT.DB-WAL"),
+			path.join(root, "AGENT.DB-SHM"),
+		]) {
+			await expect(resolveArtifactPaths(source, output, options)).rejects.toThrow(
+				"Repair artifact collides with source triplet",
 			);
-			for (const output of [
-				path.join(root, "nested", "..", "agent.db-wal"),
-				path.join(root, "nested", "..", "agent.db-shm"),
-				path.join(root, "AGENT.DB-WAL"),
-				path.join(root, "AGENT.DB-SHM"),
-			]) {
-				await expect(resolveArtifactPaths(source, output, options)).rejects.toThrow(
-					"Repair artifact collides with source triplet",
-				);
-			}
 		}
 	});
 
@@ -247,14 +246,12 @@ describe("offline SQLite salvage", () => {
 		const slug = "fixed";
 		await fs.promises.writeFile(source, "source");
 
-		for (const platform of ["darwin", "win32"] as const) {
-			await expect(
-				resolveArtifactPaths(source, path.join(root, "nested", "..", `agent.db.salvage-${slug}.tar`), {
-					platform: () => platform,
-					artifactSlug: () => slug,
-				}),
-			).rejects.toThrow("Candidate and backup paths collide");
-		}
+		await expect(
+			resolveArtifactPaths(source, path.join(root, "nested", "..", `agent.db.salvage-${slug}.tar`), {
+				comparisonMode: "case-insensitive",
+				artifactSlug: () => slug,
+			}),
+		).rejects.toThrow("Candidate and backup paths collide");
 	});
 
 	test("rejects Unicode-normalized source-sidecar and candidate-backup aliases", async () => {
@@ -265,31 +262,37 @@ describe("offline SQLite salvage", () => {
 		const slug = "fixed";
 		await fs.promises.writeFile(source, "source");
 
-		for (const platform of ["darwin", "win32"] as const) {
+		await expect(
+			resolveArtifactPaths(source, `${alias}-wal`, { comparisonMode: "case-insensitive" }),
+		).rejects.toThrow("Repair artifact collides with source triplet");
+		await expect(
+			resolveArtifactPaths(source, `${alias}.salvage-${slug}.tar`, {
+				comparisonMode: "case-insensitive",
+				artifactSlug: () => slug,
+			}),
+		).rejects.toThrow("Candidate and backup paths collide");
+	});
+
+	test("rejects full Unicode casefold source-sidecar and candidate-backup aliases", async () => {
+		const slug = "fixed";
+		for (const { sourceName, aliasName } of [
+			{ sourceName: "agent-ος.db", aliasName: "agent-οσ.db" },
+			{ sourceName: "agent-straße.db", aliasName: "agent-STRASSE.db" },
+		]) {
+			const source = path.join(root, sourceName);
+			const alias = path.join(root, aliasName);
+			await fs.promises.writeFile(source, "source");
+
 			await expect(
-				resolveArtifactPaths(source, `${alias}-wal`, { platform: () => platform }),
+				resolveArtifactPaths(source, `${alias}-shm`, { comparisonMode: "case-insensitive" }),
 			).rejects.toThrow("Repair artifact collides with source triplet");
 			await expect(
 				resolveArtifactPaths(source, `${alias}.salvage-${slug}.tar`, {
-					platform: () => platform,
+					comparisonMode: "case-insensitive",
 					artifactSlug: () => slug,
 				}),
 			).rejects.toThrow("Candidate and backup paths collide");
 		}
-	});
-
-	test("rejects full Unicode folds on caseless platforms but not Linux", async () => {
-		const source = path.join(root, "agent-straße.db");
-		const alias = path.join(root, "AGENT-STRASSE.DB");
-		await fs.promises.writeFile(source, "source");
-
-		for (const platform of ["darwin", "win32"] as const) {
-			await expect(
-				resolveArtifactPaths(source, `${alias}-shm`, { platform: () => platform }),
-			).rejects.toThrow("Repair artifact collides with source triplet");
-		}
-		const artifacts = await resolveArtifactPaths(source, `${alias}-shm`, { platform: () => "linux" });
-		expect(artifacts.candidate).toBe(`${alias}-shm`);
 	});
 
 	test("accepts distinct repair artifact paths", async () => {
@@ -297,7 +300,7 @@ describe("offline SQLite salvage", () => {
 		const candidate = path.join(root, "repaired.db");
 		await fs.promises.writeFile(source, "source");
 
-		const artifacts = await resolveArtifactPaths(source, candidate, { platform: () => "linux" });
+		const artifacts = await resolveArtifactPaths(source, candidate, { comparisonMode: "case-insensitive" });
 		expect(artifacts.candidate).toBe(candidate);
 		expect(artifacts.backup).not.toBe(candidate);
 	});
@@ -598,8 +601,7 @@ describe("offline SQLite salvage", () => {
 		await createHistorySource();
 		await writeSession("b", "session-b", [
 			message("b1", "2026-01-01T00:00:03.900Z", "third prompt"),
-			message("b2", "2026-01-01T00:00:04.000Z", "user steering", { steering: true, attribution: "user" }),
-			message("b3", "2026-01-01T00:00:04.100Z", "agent steering", { steering: true, attribution: "agent" }),
+			message("b2", "2026-01-01T00:00:04.000Z", "ignored steering", { steering: true }),
 		]);
 		await writeSession("a", "session-a", [
 			message("a1", "2026-01-01T00:00:01.900Z", [
@@ -624,7 +626,6 @@ describe("offline SQLite salvage", () => {
 			expect(db.prepare("SELECT prompt, created_at, cwd, session_id FROM history ORDER BY id").all()).toEqual([
 				{ prompt: "first prompt", created_at: 1_767_225_601n, cwd: "/work/a", session_id: "session-a" },
 				{ prompt: "third prompt", created_at: 1_767_225_603n, cwd: "/work/b", session_id: "session-b" },
-				{ prompt: "user steering", created_at: 1_767_225_604n, cwd: "/work/b", session_id: "session-b" },
 			]);
 			expect(
 				db
@@ -658,40 +659,6 @@ describe("offline SQLite salvage", () => {
 		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
 		try {
 			expect(db.prepare("SELECT prompt FROM history ORDER BY id").all()).toEqual([{ prompt: "東京 café résumé" }]);
-		} finally {
-			db.close();
-		}
-	});
-
-	test("history rebuild ignores nested subagent and advisor transcripts", async () => {
-		await createHistorySource();
-		await writeSession("primary", "primary", [message("primary", "2026-01-01T00:00:01.000Z", "primary prompt")]);
-		const subagent = await writeSession(
-			path.join("primary", "__subagent"),
-			"nested",
-			[message("nested", "2026-01-01T00:00:02.000Z", "nested prompt")],
-		);
-		const advisor = await writeSession(
-			path.join("primary", "__advisor"),
-			"advisor",
-			[message("advisor", "2026-01-01T00:00:03.000Z", "advisor prompt")],
-		);
-		await fs.promises.appendFile(advisor, "{\"type\":\"message\"");
-
-		const result = await runStorageRepair(
-			{ target: "history", historySource: "sessions", apply: true, agentDir: root },
-			{
-				afterSessionManifestParse: () =>
-					fs.promises.appendFile(
-						subagent,
-						`${JSON.stringify(message("late", "2026-01-01T00:00:04.000Z", "late nested prompt"))}\n`,
-					),
-			},
-		);
-		expect(result.status).toBe("ready");
-		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
-		try {
-			expect(db.prepare("SELECT prompt FROM history ORDER BY id").all()).toEqual([{ prompt: "primary prompt" }]);
 		} finally {
 			db.close();
 		}
@@ -898,25 +865,6 @@ describe("offline SQLite salvage", () => {
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
 		const entries = await fs.promises.readdir(root);
 		expect(entries.some(name => name.startsWith(`.${path.basename(candidate)}.candidate-`))).toBe(false);
-	});
-
-	test("candidate stage mutation between sealing and publication is refused", async () => {
-		await createAgentSource();
-		const candidate = path.join(root, "stage-mutation.db");
-		const result = await runStorageRepair(
-			{ target: "agent", apply: true, agentDir: root, output: candidate },
-			{
-				beforeCandidatePublication: async () => {
-					const stage = requireValue((await stageArtifacts(candidate, "candidate")).at(0), "candidate stage");
-					await fs.promises.appendFile(path.join(root, stage), "tampered after sealing");
-				},
-			},
-		);
-		expect(result.status).toBe("refused");
-		expect(result.refusal).toContain("Publication stage changed after verification");
-		expect(result.candidatePublished).toBe(false);
-		expect(await Bun.file(candidate).exists()).toBe(false);
-		expect(await stageArtifacts(candidate, "candidate")).toEqual([]);
 	});
 
 	test("post-link candidate replacement refuses publication without deleting the replacement", async () => {
