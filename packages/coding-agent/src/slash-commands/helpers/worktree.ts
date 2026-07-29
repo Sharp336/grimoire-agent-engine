@@ -7,13 +7,13 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getWorktreeDir, getWorktreesDir, hashPath } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, getWorktreesDir } from "@oh-my-pi/pi-utils";
 import { resolveToCwd } from "../../tools/path-utils";
 import * as git from "../../utils/git";
 import {
+	managedWorktreeName,
 	resolveManagedWorktreePath,
 	scanWorktrees,
-	slugifyBranch,
 	type WorktreeEntry,
 } from "../../utils/managed-worktrees";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
@@ -86,8 +86,12 @@ async function handleCreate(rest: string, runtime: SlashCommandRuntime): Promise
 	if (checkedOut) return usage(`Branch ${branch} is already checked out at ${checkedOut.path}.`, runtime);
 
 	const branchExists = await git.ref.exists(primaryRoot, branchRef);
+	// Default base: the session checkout's HEAD, resolved to a SHA. Inside a
+	// linked worktree, `git worktree add … HEAD` run from primaryRoot would
+	// fork from the *primary* checkout's commit, not the caller's.
+	const startPoint = base ?? (await git.head.sha(runtime.cwd)) ?? "HEAD";
 	const worktreePath = await resolveManagedWorktreePath(
-		getWorktreeDir(`${slugifyBranch(branch)}-${hashPath(primaryRoot)}`),
+		getWorktreeDir(managedWorktreeName(branch, primaryRoot)),
 		existing.map(entry => entry.path),
 	);
 
@@ -98,7 +102,7 @@ async function handleCreate(rest: string, runtime: SlashCommandRuntime): Promise
 			if (branchExists) {
 				await git.worktree.add(primaryRoot, worktreePath, branch);
 			} else {
-				await git.worktree.add(primaryRoot, worktreePath, base ?? "HEAD", { newBranch: branch });
+				await git.worktree.add(primaryRoot, worktreePath, startPoint, { newBranch: branch });
 			}
 		});
 	} catch (err) {

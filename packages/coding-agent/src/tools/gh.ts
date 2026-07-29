@@ -10,12 +10,12 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 
-import { getWorktreeDir, hashPath, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { Settings } from "../config/settings";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
 import * as git from "../utils/git";
-import { resolveManagedWorktreePath } from "../utils/managed-worktrees";
+import { managedWorktreeName, resolveManagedWorktreePath } from "../utils/managed-worktrees";
 import type { ToolSession } from ".";
 import { formatShortSha } from "./gh-format";
 import { type CacheStatus, getOrFetchView, invalidateAllForNumber, resolveGithubCacheAuthKey } from "./github-cache";
@@ -3278,7 +3278,7 @@ async function checkoutPullRequest(
 	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
 	const primaryRepoRoot = await requirePrimaryGitRepoRoot(repoRoot, signal);
 	const localBranch = `pr-${prNumber}`;
-	const worktreePath = getWorktreeDir(`${prNumber}-${hashPath(primaryRepoRoot)}`);
+	const worktreePath = getWorktreeDir(managedWorktreeName(String(prNumber), primaryRepoRoot));
 
 	// Every git mutation against `repoRoot` from here on must run under the
 	// per-repo lock. Worktrees of the same primary repo share `.git/config`,

@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { handleWorktreeAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/worktree";
 import type { ParsedSlashCommand, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { hashPath } from "@oh-my-pi/pi-utils";
+import { managedWorktreeName } from "@oh-my-pi/pi-coding-agent/utils/managed-worktrees";
 import { $ } from "bun";
 
 const ENV_KEY = "OMP_WORKTREE_DIR";
@@ -61,7 +61,7 @@ afterEach(async () => {
 describe("/worktree command", () => {
 	it("create makes a new-branch worktree under the managed dir", async () => {
 		const out = await run("create feat/thing");
-		const expected = path.join(managedDir, `feat-thing-${hashPath(repoDir)}`);
+		const expected = path.join(managedDir, managedWorktreeName("feat/thing", repoDir));
 		expect(out).toContain(`Created worktree: ${expected}`);
 		expect(out).toContain("Branch: feat/thing (new, from HEAD)");
 		const branch = await $`git -C ${expected} branch --show-current`.text();
@@ -87,17 +87,34 @@ describe("/worktree command", () => {
 		await run("create theirs", otherRepo);
 
 		const scoped = await run("list");
-		expect(scoped).toContain(`mine-${hashPath(repoDir)}`);
+		expect(scoped).toContain(managedWorktreeName("mine", repoDir));
 		expect(scoped).not.toContain("theirs");
 
 		const all = await run("list --all");
-		expect(all).toContain(`mine-${hashPath(repoDir)}`);
-		expect(all).toContain(`theirs-${hashPath(otherRepo)}`);
+		expect(all).toContain(managedWorktreeName("mine", repoDir));
+		expect(all).toContain(managedWorktreeName("theirs", otherRepo));
+	});
+
+	it("create from a linked worktree bases the new branch on that worktree's HEAD", async () => {
+		await run("create first");
+		const firstPath = path.join(managedDir, managedWorktreeName("first", repoDir));
+		// Advance the linked worktree beyond the primary checkout.
+		await fs.writeFile(path.join(firstPath, "extra.txt"), "x");
+		await $`git -C ${firstPath} add extra.txt`.quiet();
+		await $`git -C ${firstPath} -c user.email=t@t.t -c user.name=t commit -m advance`.quiet();
+		const firstHead = (await $`git -C ${firstPath} rev-parse HEAD`.text()).trim();
+		const primaryHead = (await $`git -C ${repoDir} rev-parse HEAD`.text()).trim();
+		expect(firstHead).not.toBe(primaryHead);
+
+		await run("create second", firstPath);
+		const secondPath = path.join(managedDir, managedWorktreeName("second", repoDir));
+		const secondHead = (await $`git -C ${secondPath} rev-parse HEAD`.text()).trim();
+		expect(secondHead).toBe(firstHead);
 	});
 
 	it("remove deletes by branch; dirty trees need --force", async () => {
 		await run("create doomed");
-		const wtPath = path.join(managedDir, `doomed-${hashPath(repoDir)}`);
+		const wtPath = path.join(managedDir, managedWorktreeName("doomed", repoDir));
 		await fs.writeFile(path.join(wtPath, "dirty.txt"), "x");
 
 		const refused = await run("remove doomed");
@@ -110,7 +127,7 @@ describe("/worktree command", () => {
 
 	it("remove refuses the worktree the session is running in", async () => {
 		await run("create home");
-		const wtPath = path.join(managedDir, `home-${hashPath(repoDir)}`);
+		const wtPath = path.join(managedDir, managedWorktreeName("home", repoDir));
 		const out = await run(`remove ${wtPath} --force`, wtPath);
 		expect(out).toContain("session is running in");
 	});

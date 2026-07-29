@@ -17,7 +17,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getWorktreesDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
 
 export type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
 
@@ -120,6 +120,15 @@ export async function resolveManagedWorktreePath(basePath: string, registeredPat
 	throw new Error(
 		`could not find an unused worktree path under ${basePath} (tried ${WORKTREE_PATH_MAX_SUFFIX} suffixes)`,
 	);
+}
+
+/**
+ * Directory name for a managed worktree: `<branch-slug>-<repo-hash>`. The
+ * hash scopes the name to its primary repo so identical branch (or PR-number)
+ * segments from different repos never collide under the managed root.
+ */
+export function managedWorktreeName(branch: string, primaryRoot: string): string {
+	return `${slugifyBranch(branch)}-${hashPath(primaryRoot)}`;
 }
 
 /** Convert a branch name into a filesystem-safe worktree path segment. */

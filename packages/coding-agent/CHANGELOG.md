@@ -9,7 +9,7 @@
 
 ### Changed
 
-- Extracted the managed-worktree scanner and free-path resolution out of the `omp worktree` CLI into a shared `utils/managed-worktrees.ts` module, now consumed by the CLI, the `github` tool's PR checkout, and the new `/worktree` command.
+- Extracted the managed-worktree scanner, worktree naming (`managedWorktreeName`), and free-path resolution out of the `omp worktree` CLI into a shared `utils/managed-worktrees.ts` module, now consumed by the CLI, the `github` tool's PR checkout, and the new `/worktree` command.
 
 ## [17.1.6] - 2026-07-27
 
