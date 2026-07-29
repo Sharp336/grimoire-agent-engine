@@ -28,7 +28,7 @@ function model(baseUrl: string): Model<"cursor-agent"> {
 async function serve(wire: Uint8Array): Promise<string> {
 	const server = http2.createServer();
 	servers.add(server);
-	server.on("stream", stream => {
+	server.on("stream", (stream: http2.ServerHttp2Stream) => {
 		stream.on("data", () => {});
 		stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 		stream.end(wire);
@@ -48,7 +48,7 @@ afterEach(async () => {
 	await Promise.all(
 		Array.from(servers, server => {
 			const closed = Promise.withResolvers<void>();
-			server.close(closed.resolve);
+			server.close(error => (error ? closed.reject(error) : closed.resolve()));
 			return closed.promise;
 		}),
 	);
