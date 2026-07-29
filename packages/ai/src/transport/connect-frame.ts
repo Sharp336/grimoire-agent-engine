@@ -29,8 +29,37 @@ export function createConnectFrameReader(options?: { maxPayloadBytes?: number })
 	if (!Number.isSafeInteger(maxPayloadBytes) || maxPayloadBytes < 0) {
 		throw new RangeError("maxPayloadBytes must be a non-negative safe integer");
 	}
-	let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+	let buffer = new Uint8Array(0);
+	let readOffset = 0;
+	let writeOffset = 0;
 	let sawEndOfStream = false;
+
+	const pendingBytes = (): number => writeOffset - readOffset;
+	const append = (chunk: Uint8Array): void => {
+		if (chunk.byteLength === 0) return;
+		const pending = pendingBytes();
+		if (
+			buffer.byteLength - writeOffset < chunk.byteLength &&
+			readOffset > 0 &&
+			buffer.byteLength - pending >= chunk.byteLength
+		) {
+			buffer.copyWithin(0, readOffset, writeOffset);
+			readOffset = 0;
+			writeOffset = pending;
+		}
+		if (buffer.byteLength - writeOffset < chunk.byteLength) {
+			let capacity = Math.max(buffer.byteLength, 1024);
+			const required = pending + chunk.byteLength;
+			while (capacity < required) capacity *= 2;
+			const grown = new Uint8Array(capacity);
+			grown.set(buffer.subarray(readOffset, writeOffset));
+			buffer = grown;
+			readOffset = 0;
+			writeOffset = pending;
+		}
+		buffer.set(chunk, writeOffset);
+		writeOffset += chunk.byteLength;
+	};
 
 	return {
 		push(chunk: Uint8Array): ConnectFrame[] {
@@ -42,21 +71,11 @@ export function createConnectFrameReader(options?: { maxPayloadBytes?: number })
 						: "Connect stream contains data after end-of-stream",
 				);
 			}
-			if (chunk.byteLength > 0) {
-				if (pending.byteLength === 0) {
-					pending = chunk;
-				} else {
-					const joined = new Uint8Array(pending.byteLength + chunk.byteLength);
-					joined.set(pending);
-					joined.set(chunk, pending.byteLength);
-					pending = joined;
-				}
-			}
+			append(chunk);
 
 			const frames: ConnectFrame[] = [];
-			let offset = 0;
-			while (pending.byteLength - offset >= CONNECT_HEADER_BYTES) {
-				const view = new DataView(pending.buffer, pending.byteOffset + offset, CONNECT_HEADER_BYTES);
+			while (pendingBytes() >= CONNECT_HEADER_BYTES) {
+				const view = new DataView(buffer.buffer, buffer.byteOffset + readOffset, CONNECT_HEADER_BYTES);
 				const flags = view.getUint8(0);
 				if ((flags & ~(CONNECT_COMPRESSED_FLAG | CONNECT_END_STREAM_FLAG)) !== 0) {
 					throw new RangeError(`Connect frame uses unknown flags 0x${flags.toString(16)}`);
@@ -72,11 +91,11 @@ export function createConnectFrameReader(options?: { maxPayloadBytes?: number })
 				if (payloadLength > maxPayloadBytes) {
 					throw new RangeError(`Connect frame payload ${payloadLength} exceeds ${maxPayloadBytes} bytes`);
 				}
-				if (pending.byteLength - offset < CONNECT_HEADER_BYTES + payloadLength) break;
+				if (pendingBytes() < CONNECT_HEADER_BYTES + payloadLength) break;
 
-				const encoded = pending.subarray(
-					offset + CONNECT_HEADER_BYTES,
-					offset + CONNECT_HEADER_BYTES + payloadLength,
+				const encoded = buffer.slice(
+					readOffset + CONNECT_HEADER_BYTES,
+					readOffset + CONNECT_HEADER_BYTES + payloadLength,
 				);
 				const payload =
 					(flags & CONNECT_COMPRESSED_FLAG) !== 0
@@ -85,26 +104,30 @@ export function createConnectFrameReader(options?: { maxPayloadBytes?: number })
 				const endOfStream = (flags & CONNECT_END_STREAM_FLAG) !== 0;
 				if (endOfStream) sawEndOfStream = true;
 				frames.push({ flags, payload, endOfStream });
-				offset += CONNECT_HEADER_BYTES + payloadLength;
+				readOffset += CONNECT_HEADER_BYTES + payloadLength;
 			}
 
-			if (offset === pending.byteLength) pending = new Uint8Array(0);
-			else if (offset > 0) pending = pending.subarray(offset);
+			if (readOffset === writeOffset) {
+				readOffset = 0;
+				writeOffset = 0;
+			}
 			return frames;
 		},
 		finish(): void {
-			if (pending.byteLength > 0) {
-				if (pending.byteLength < CONNECT_HEADER_BYTES) {
+			const pending = pendingBytes();
+			if (pending > 0) {
+				if (pending < CONNECT_HEADER_BYTES) {
 					throw new RangeError(
-						`Connect stream ended with an incomplete frame header (${pending.byteLength} of ${CONNECT_HEADER_BYTES} bytes)`,
+						`Connect stream ended with an incomplete frame header (${pending} of ${CONNECT_HEADER_BYTES} bytes)`,
 					);
 				}
-				const payloadLength = new DataView(pending.buffer, pending.byteOffset, CONNECT_HEADER_BYTES).getUint32(
-					1,
-					false,
-				);
+				const payloadLength = new DataView(
+					buffer.buffer,
+					buffer.byteOffset + readOffset,
+					CONNECT_HEADER_BYTES,
+				).getUint32(1, false);
 				throw new RangeError(
-					`Connect stream ended with an incomplete frame payload (${pending.byteLength - CONNECT_HEADER_BYTES} of ${payloadLength} bytes)`,
+					`Connect stream ended with an incomplete frame payload (${pending - CONNECT_HEADER_BYTES} of ${payloadLength} bytes)`,
 				);
 			}
 			if (!sawEndOfStream) throw new RangeError("Connect stream ended without end-of-stream");
