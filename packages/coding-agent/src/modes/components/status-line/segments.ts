@@ -383,11 +383,13 @@ const prSegment: StatusLineSegment = {
 const subagentsSegment: StatusLineSegment = {
 	id: "subagents",
 	render(ctx) {
-		if (ctx.subagentCount === 0) {
+		if (ctx.subagentCount === 0 || !theme.icon.agents) {
 			return { content: "", visible: false };
 		}
-		const content = withIcon(theme.icon.agents, `${ctx.subagentCount}`);
-		return { content: theme.fg("statusLineSubagents", content), visible: true };
+		return {
+			content: theme.fg("statusLineSubagents", `${theme.icon.agents} ${ctx.subagentCount}`),
+			visible: true,
+		};
 	},
 };
 

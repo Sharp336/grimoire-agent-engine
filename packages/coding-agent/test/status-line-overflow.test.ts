@@ -163,26 +163,24 @@ describe("status line session accent", () => {
 });
 
 describe("Titanium Dracula counters", () => {
-	it("hides background jobs and keeps agent counts text-only", async () => {
+	it("hides background jobs, agent counts, and their separator", async () => {
 		const originalTheme = theme;
 		const titaniumDracula = await getThemeByName("titanium-dracula");
 		expect(titaniumDracula).toBeDefined();
 		setThemeInstance(titaniumDracula!);
 		try {
 			const component = new StatusLineComponent(createStatusLineSession("Hidden counters", undefined, 2));
-			component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: [] });
+			component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: ["subagents"] });
 			component.setSubagentCount(3);
 
 			const border = stripAnsi(component.getTopBorder(80).content);
-			expect(border).toContain("3 agents");
-			expect(border).not.toContain("2");
-			expect(border).not.toContain(theme.icon.vibe);
+			expect(border).toBe("");
 		} finally {
 			setThemeInstance(originalTheme);
 		}
 	});
 
-	it("keeps the Vibe preset icon when agent counts are text-only", async () => {
+	it("keeps the Vibe preset icon when agent counts are hidden", async () => {
 		const originalTheme = theme;
 		const titaniumDracula = await getThemeByName("titanium-dracula");
 		expect(titaniumDracula).toBeDefined();

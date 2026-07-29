@@ -129,11 +129,11 @@ describe("status line model segment compact thinking level", () => {
 			expect(Bun.stripANSI(regular.content)).toBe("Test Model\u00a0high");
 
 			const fixed = renderSegment("model", createThinkingContext(false, { fast: true }));
-			expect(Bun.stripANSI(fixed.content)).toBe("Test Model ϟhigh");
+			expect(Bun.stripANSI(fixed.content)).toBe("Test Model 󱐌high");
 			expect(fixed.content).toContain(titaniumDracula.thinking.high.replace("\u00a0", ""));
 
 			const auto = renderSegment("model", createThinkingContext(false, { auto: true, fast: true }));
-			expect(Bun.stripANSI(auto.content)).toBe("Test Model ϟauto");
+			expect(Bun.stripANSI(auto.content)).toBe("Test Model 󱐌auto");
 		} finally {
 			setThemeInstance(originalTheme);
 		}

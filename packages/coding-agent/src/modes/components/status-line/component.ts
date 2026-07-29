@@ -1301,11 +1301,10 @@ export class StatusLineComponent implements Component {
 	}
 
 	#subagentBadgeText(): string | undefined {
-		if (this.#subagentCount === 0) return undefined;
+		if (this.#subagentCount === 0 || !theme.icon.agents) return undefined;
 		const noun = this.#subagentCount === 1 ? "agent" : "agents";
 		const label = `${this.#subagentCount} ${noun}`;
-		const content = theme.icon.agents ? `${theme.icon.agents} ${label}` : label;
-		return theme.fg("statusLineSubagents", content);
+		return theme.fg("statusLineSubagents", `${theme.icon.agents} ${label}`);
 	}
 
 	#buildStatusLine(width: number): string {
