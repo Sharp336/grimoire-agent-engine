@@ -1086,6 +1086,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 
 export interface Context {
 	systemPrompt?: string[];
+	/** Number of leading system-prompt blocks safe to cache independently of volatile suffix blocks. */
+	stableSystemPromptBlockCount?: number;
 	messages: Message[];
 	tools?: Tool[];
 }

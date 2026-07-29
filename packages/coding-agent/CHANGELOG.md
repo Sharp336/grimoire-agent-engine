@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- System prompts now isolate the stable harness prefix from volatile project context, tool inventory, current date, and promoted memory so provider prompt caches remain warm across routine session changes.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

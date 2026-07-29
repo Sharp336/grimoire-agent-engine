@@ -113,6 +113,25 @@ describe("system prompt tool inventory", () => {
 		return text.slice(inventoryStart, inventoryEnd);
 	}
 
+	it("separates the stable harness prefix from volatile project and inventory blocks", async () => {
+		const result = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read", "bash"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			nativeTools: true,
+			inlineToolDescriptors: false,
+		});
+
+		expect(result.stableSystemPromptBlockCount).toBe(1);
+		expect(result.systemPrompt[0]).not.toContain("# Tool Inventory");
+		expect(result.systemPrompt.at(-1)).toContain("# Tool Inventory");
+		expect(result.systemPrompt.join("\n\n")).not.toContain("Today is ");
+	});
+
 	async function renderMountedWebSearch(opts: {
 		nativeTools: boolean;
 		directDefinition: boolean;

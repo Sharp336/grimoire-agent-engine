@@ -68,17 +68,6 @@ Special URLs for internal resources; with most FS/bash tools they auto-resolve t
 - `pr://<N>` (or `pr://<owner>/<repo>/<N>`): GitHub PR, same cache; `?comments=0` drops comments. Bare lists recent PRs; `?state=open|closed|merged|all&limit=&author=&label=`.
 - `omp://`: harness docs; AVOID unless the user asks about the harness itself.
 
-{{#if toolInfo.length}}
-{{#if toolListMode}}
-# Tool Inventory
-{{#each toolInfo}}
-- {{#if label}}{{label}}: `{{name}}`{{else}}`{{name}}`{{/if}}
-{{/each}}
-{{else}}
-{{toolInventory}}
-{{/if}}
-{{/if}}
-
 {{#has tools "computer"}}
 # Computer Use
 The `{{toolRefs.computer}}` tool is explicitly enabled and available in this session.

@@ -2780,11 +2780,15 @@ type SystemBlockOptions = {
 function applyClaudeCodeSystemCache(
 	blocks: AnthropicSystemBlock[],
 	cacheControl: AnthropicCacheControl | undefined,
+	cacheBreakpointIndex = blocks.length - 1,
 ): number {
 	if (!cacheControl || blocks.length === 0) return 0;
-	const lastIndex = blocks.length - 1;
-	if (blocks[lastIndex].cache_control != null) return 0;
-	blocks[lastIndex] = { ...blocks[lastIndex], cache_control: cloneAnthropicCacheControl(cacheControl) };
+	if (cacheBreakpointIndex < 0 || cacheBreakpointIndex >= blocks.length) return 0;
+	if (blocks[cacheBreakpointIndex].cache_control != null) return 0;
+	blocks[cacheBreakpointIndex] = {
+		...blocks[cacheBreakpointIndex],
+		cache_control: cloneAnthropicCacheControl(cacheControl),
+	};
 	return 1;
 }
 
@@ -3083,14 +3087,17 @@ type CacheControlBlock = {
 	cache_control?: AnthropicCacheControl | null;
 };
 
-function applyCacheControlToLastBlock<T extends CacheControlBlock>(
+function applyCacheControlToBlock<T extends CacheControlBlock>(
 	blocks: T[],
 	cacheControl: AnthropicCacheControl,
+	cacheBreakpointIndex = blocks.length - 1,
 ): boolean {
-	if (blocks.length === 0) return false;
-	const lastIndex = blocks.length - 1;
-	if (blocks[lastIndex].cache_control != null) return false;
-	blocks[lastIndex] = { ...blocks[lastIndex], cache_control: cloneAnthropicCacheControl(cacheControl) };
+	if (cacheBreakpointIndex < 0 || cacheBreakpointIndex >= blocks.length) return false;
+	if (blocks[cacheBreakpointIndex].cache_control != null) return false;
+	blocks[cacheBreakpointIndex] = {
+		...blocks[cacheBreakpointIndex],
+		cache_control: cloneAnthropicCacheControl(cacheControl),
+	};
 	return true;
 }
 
@@ -3098,27 +3105,35 @@ function applyCacheControlToLastTextBlock(
 	blocks: Array<ContentBlockParam & CacheControlBlock>,
 	cacheControl: AnthropicCacheControl,
 ): boolean {
-	if (blocks.length === 0) return false;
 	for (let i = blocks.length - 1; i >= 0; i--) {
-		if (blocks[i].type === "text") {
-			if (blocks[i].cache_control != null) return false;
-			blocks[i] = { ...blocks[i], cache_control: cloneAnthropicCacheControl(cacheControl) };
-			return true;
-		}
+		if (blocks[i].type !== "text") continue;
+		return applyCacheControlToBlock(blocks, cacheControl, i);
 	}
-	// No text block — fall back to the last block that accepts cache_control;
-	// thinking/redacted_thinking blocks reject the field with a 400.
 	for (let i = blocks.length - 1; i >= 0; i--) {
-		const type = blocks[i].type;
-		if (type === "thinking" || type === "redacted_thinking") continue;
-		if (blocks[i].cache_control != null) return false;
-		blocks[i] = { ...blocks[i], cache_control: cloneAnthropicCacheControl(cacheControl) };
-		return true;
+		if (blocks[i].type === "thinking" || blocks[i].type === "redacted_thinking") continue;
+		return applyCacheControlToBlock(blocks, cacheControl, i);
 	}
 	return false;
 }
 
-function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?: AnthropicCacheControl): void {
+function resolveSystemCacheBreakpointIndex(
+	systemBlocks: readonly AnthropicSystemBlock[] | undefined,
+	systemPrompt: readonly string[] | undefined,
+	stableSystemPromptBlockCount: number | undefined,
+): number | null | undefined {
+	if (stableSystemPromptBlockCount === undefined) return undefined;
+	if (stableSystemPromptBlockCount <= 0 || !systemBlocks) return null;
+	const promptBlockCount = normalizeSystemPrompts(systemPrompt).length;
+	if (promptBlockCount === 0) return null;
+	const prefixBlockCount = systemBlocks.length - promptBlockCount;
+	return prefixBlockCount + Math.min(stableSystemPromptBlockCount, promptBlockCount) - 1;
+}
+
+function applyPromptCaching(
+	params: MessageCreateParamsStreaming,
+	cacheControl?: AnthropicCacheControl,
+	systemCacheBreakpointIndex?: number | null,
+): void {
 	if (!cacheControl) return;
 
 	const MAX_CACHE_BREAKPOINTS = 4;
@@ -3130,13 +3145,20 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		isCCLayout =
 			params.system.length >= 3 &&
 			(params.system[0] as { text?: string }).text?.startsWith(CLAUDE_BILLING_HEADER_PREFIX) === true;
-		if (isCCLayout) {
+		if (systemCacheBreakpointIndex !== null && isCCLayout) {
 			const placed = Math.min(
 				MAX_CACHE_BREAKPOINTS - cacheBreakpointsUsed,
-				applyClaudeCodeSystemCache(params.system as AnthropicSystemBlock[], cacheControl),
+				applyClaudeCodeSystemCache(
+					params.system as AnthropicSystemBlock[],
+					cacheControl,
+					systemCacheBreakpointIndex,
+				),
 			);
 			cacheBreakpointsUsed += placed;
-		} else if (applyCacheControlToLastBlock(params.system, cacheControl)) {
+		} else if (
+			systemCacheBreakpointIndex !== null &&
+			applyCacheControlToBlock(params.system, cacheControl, systemCacheBreakpointIndex)
+		) {
 			cacheBreakpointsUsed++;
 		}
 	}
@@ -3389,6 +3411,11 @@ function buildParams(
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
 	});
+	const systemCacheBreakpointIndex = resolveSystemCacheBreakpointIndex(
+		systemBlocks,
+		context.systemPrompt,
+		context.stableSystemPromptBlockCount,
+	);
 
 	// Pre-compute tools.
 	let tools: AnthropicWireTool[] | undefined;
@@ -3579,7 +3606,7 @@ function buildParams(
 
 	disableThinkingIfToolChoiceForced(params, model);
 	ensureMaxTokensForThinking(params, maxOutputTokens);
-	applyPromptCaching(params, cacheControl);
+	applyPromptCaching(params, cacheControl, systemCacheBreakpointIndex);
 	enforceCacheControlLimit(params, 4);
 	normalizeCacheControlTtlOrdering(params);
 

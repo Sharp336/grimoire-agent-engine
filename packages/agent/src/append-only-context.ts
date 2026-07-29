@@ -26,6 +26,7 @@ import type { AgentContext } from "./types";
 /** Frozen system prompt + tool spec snapshot. */
 export interface StablePrefixSnapshot {
 	systemPrompt: string[];
+	stableSystemPromptBlockCount?: number;
 	tools: Tool[];
 	fingerprint: string;
 }
@@ -84,10 +85,14 @@ export class StablePrefix {
 	 * Returns the cached prefix.
 	 * @throws if `build()` was never called.
 	 */
-	toContext(): { systemPrompt: string[]; tools: Tool[] } {
+	toContext(): { systemPrompt: string[]; stableSystemPromptBlockCount?: number; tools: Tool[] } {
 		const s = this.#snapshot;
 		if (!s) throw new Error("StablePrefix.toContext() called before build()");
-		return { systemPrompt: s.systemPrompt, tools: s.tools };
+		return {
+			systemPrompt: s.systemPrompt,
+			stableSystemPromptBlockCount: s.stableSystemPromptBlockCount,
+			tools: s.tools,
+		};
 	}
 }
 
@@ -182,8 +187,8 @@ export class AppendOnlyContextManager {
 
 	build(context: AgentContext, options: BuildOptions): Context {
 		this.prefix.build(context, options);
-		const { systemPrompt, tools } = this.prefix.toContext();
-		return { systemPrompt, messages: this.log.toMessages(), tools };
+		const { systemPrompt, stableSystemPromptBlockCount, tools } = this.prefix.toContext();
+		return { systemPrompt, stableSystemPromptBlockCount, messages: this.log.toMessages(), tools };
 	}
 
 	/**
@@ -320,6 +325,7 @@ function takeSnapshot(context: AgentContext, options: BuildOptions): StablePrefi
 		normalizeTools(context.tools, options.intentTracing, options.exampleDialect, options.pruneToolDescriptions) ?? [];
 	return {
 		systemPrompt,
+		stableSystemPromptBlockCount: context.stableSystemPromptBlockCount,
 		tools,
 		fingerprint: computeFingerprint(systemPrompt, tools, options),
 	};

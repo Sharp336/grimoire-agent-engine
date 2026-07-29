@@ -679,7 +679,7 @@ describe("AgentSession message pipeline", () => {
 		await Bun.sleep(0);
 	});
 
-	it("keeps first-turn memory in the stable prompt on the next turn", async () => {
+	it("keeps promoted memory turn-bound instead of persisting it in the provider prefix", async () => {
 		const api = "test-injected-memory-append-only-cache";
 		const contexts: Context[] = [];
 		let remembered = false;
@@ -750,7 +750,7 @@ describe("AgentSession message pipeline", () => {
 		const firstSystemPrompt = contexts[0]!.systemPrompt;
 		expect(firstSystemPrompt).toBeDefined();
 		expect(firstSystemPrompt!.join("\n")).toContain(injected);
-		expect(contexts[1]!.systemPrompt).toEqual(firstSystemPrompt);
+		expect(contexts[1]!.systemPrompt?.join("\n")).not.toContain(injected);
 	});
 
 	it("preserves append-only prefixes in subagent sessions when context handlers rewrite prior turns", async () => {

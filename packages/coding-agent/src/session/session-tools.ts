@@ -15,6 +15,7 @@ import { deduplicateMCPToolsByName } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import turnContextPrompt from "../prompts/system/turn-context.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -52,8 +53,6 @@ export interface SessionToolsHost {
 	model(): Model | undefined;
 	memoryBackendSession(): MemoryBackendStartOptions["session"];
 	clearInheritedProviderPromptCacheKey(): void;
-	clearMemoryPromotionSnapshot(): void;
-	captureMemoryPromotionSnapshot(prompt: string[]): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
@@ -72,7 +71,10 @@ interface SessionToolsOptions {
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
-	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	rebuildSystemPrompt?: (
+		toolNames: string[],
+		tools: Map<string, AgentTool>,
+	) => Promise<{ systemPrompt: string[]; stableSystemPromptBlockCount?: number }>;
 	getLocalCalendarDate?: () => string;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
@@ -82,6 +84,11 @@ interface SessionToolsOptions {
 	skillWarnings?: SkillWarning[];
 	skillsSettings?: SkillsSettings;
 	skillsReloadable?: boolean;
+}
+
+interface SystemPromptForAgentStart {
+	systemPrompt: string[];
+	stableSystemPromptBlockCount: number | undefined;
 }
 
 export interface MountedMCPToolRouteSource {
@@ -175,6 +182,7 @@ export class SessionTools {
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
+	#stableSystemPromptBlockCount: number | undefined;
 	#lastAppliedToolSignature: string | undefined;
 	#mcpRefreshTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
@@ -209,6 +217,7 @@ export class SessionTools {
 		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
+		this.#stableSystemPromptBlockCount = this.#host.agent.state.stableSystemPromptBlockCount;
 		this.#skills = options.skills ?? [];
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
@@ -227,8 +236,9 @@ export class SessionTools {
 	}
 
 	/** Replaces the controller-owned base prompt without applying it to the agent. */
-	setBaseSystemPrompt(prompt: string[]): void {
+	setBaseSystemPrompt(prompt: string[], stableSystemPromptBlockCount?: number): void {
 		this.#baseSystemPrompt = prompt;
+		this.#stableSystemPromptBlockCount = stableSystemPromptBlockCount;
 	}
 
 	/** Skills currently rendered into the system prompt. */
@@ -598,6 +608,7 @@ export class SessionTools {
 		this.#setActiveToolNames?.(validToolNames);
 
 		let rebuiltSystemPrompt: string[] | undefined;
+		let rebuiltStableSystemPromptBlockCount: number | undefined;
 		let rebuiltSignature: string | undefined;
 		try {
 			if (this.#rebuildSystemPrompt) {
@@ -605,6 +616,7 @@ export class SessionTools {
 				if (signature !== this.#lastAppliedToolSignature) {
 					const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
 					rebuiltSystemPrompt = built.systemPrompt;
+					rebuiltStableSystemPromptBlockCount = built.stableSystemPromptBlockCount;
 					rebuiltSignature = signature;
 				}
 			}
@@ -625,8 +637,8 @@ export class SessionTools {
 		if (rebuiltSystemPrompt && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
 			this.#baseSystemPrompt = rebuiltSystemPrompt;
-			this.#host.clearMemoryPromotionSnapshot();
-			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
+			this.#stableSystemPromptBlockCount = rebuiltStableSystemPromptBlockCount;
+			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt, this.#stableSystemPromptBlockCount);
 			this.#lastAppliedToolSignature = rebuiltSignature;
 			this.#promptModelKey = this.#currentPromptModelKey();
 		}
@@ -964,14 +976,14 @@ export class SessionTools {
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
-		this.#host.clearMemoryPromotionSnapshot();
+		this.#stableSystemPromptBlockCount = built.stableSystemPromptBlockCount;
 		if (
 			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
 			previousBaseSystemPrompt.some((part, index) => part !== this.#baseSystemPrompt[index])
 		) {
 			this.#host.clearInheritedProviderPromptCacheKey();
 		}
-		this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
+		this.#host.agent.setSystemPrompt(this.#baseSystemPrompt, this.#stableSystemPromptBlockCount);
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we
@@ -982,43 +994,34 @@ export class SessionTools {
 		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(activeToolNames, activeTools);
 	}
 
-	/** Applies one-turn memory prompt injection before an agent run. */
-	async buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+	/** Builds the stable prompt plus volatile turn context before an agent run. */
+	async buildSystemPromptForAgentStart(promptText: string): Promise<SystemPromptForAgentStart> {
+		const turnContext = prompt.render(turnContextPrompt, { date: this.#getLocalCalendarDate() }).trim();
 		const backend = await resolveMemoryBackend(this.#host.settings);
-		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
+		if (!backend.beforeAgentStartPrompt) {
+			return {
+				systemPrompt: [...this.#baseSystemPrompt, turnContext],
+				stableSystemPromptBlockCount: this.#stableSystemPromptBlockCount,
+			};
+		}
 
 		try {
 			const injected = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
-			if (!injected) return this.#baseSystemPrompt;
-
-			const previousBaseSystemPrompt = this.#baseSystemPrompt;
-			try {
-				await this.refreshBaseSystemPrompt();
-			} catch (refreshErr) {
-				logger.debug("Memory backend prompt refresh after beforeAgentStartPrompt failed", {
-					backend: backend.id,
-					error: String(refreshErr),
-				});
-			}
-
-			if (
-				this.#baseSystemPrompt.length !== previousBaseSystemPrompt.length ||
-				this.#baseSystemPrompt.some((part, index) => part !== previousBaseSystemPrompt[index])
-			) {
-				return this.#baseSystemPrompt;
-			}
-
-			this.#host.captureMemoryPromotionSnapshot(previousBaseSystemPrompt);
-			const stablePrompt = [...previousBaseSystemPrompt, injected];
-			this.#baseSystemPrompt = stablePrompt;
-			this.#host.agent.setSystemPrompt(stablePrompt);
-			return stablePrompt;
+			return {
+				systemPrompt: injected
+					? [...this.#baseSystemPrompt, turnContext, injected]
+					: [...this.#baseSystemPrompt, turnContext],
+				stableSystemPromptBlockCount: this.#stableSystemPromptBlockCount,
+			};
 		} catch (err) {
 			logger.debug("Memory backend beforeAgentStartPrompt failed", {
 				backend: backend.id,
 				error: String(err),
 			});
-			return this.#baseSystemPrompt;
+			return {
+				systemPrompt: [...this.#baseSystemPrompt, turnContext],
+				stableSystemPromptBlockCount: this.#stableSystemPromptBlockCount,
+			};
 		}
 	}
 
@@ -1056,11 +1059,6 @@ export class SessionTools {
 	 * closure-captured ones cannot change at runtime regardless of skip behavior.
 	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
 	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.
-	 *
-	 * The current calendar date IS covered (appended as a segment) because
-	 * `buildSystemPrompt` injects it into the prompt body (`Today is '{{date}}'`).
-	 * Without this, a session spanning midnight with only tool-stable MCP
-	 * reconnects would keep yesterday's date indefinitely.
 	 */
 	#computeAppliedToolSignature(toolNames: string[], tools: AgentTool[]): string {
 		// Order-preserving join: any reorder must produce a different signature so
@@ -1094,8 +1092,7 @@ export class SessionTools {
 		// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
 		// exception above, bounded to the exact projection rendered in the global
 		// route guidance so churn wholly behind its fallback does not rebuild.
-		const date = this.#getLocalCalendarDate();
-		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}|${date}`;
+		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}`;
 	}
 
 	/**

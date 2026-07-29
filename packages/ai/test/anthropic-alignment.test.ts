@@ -277,6 +277,21 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 	});
 
+	it("places the system cache breakpoint at the stable prefix boundary", async () => {
+		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			systemPrompt: ["Stable harness instructions", "Volatile repository context"],
+			stableSystemPromptBlockCount: 1,
+			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+		})) as { system?: Array<{ type?: string; text?: string; cache_control?: unknown }> };
+
+		expect(payload.system?.[2]).toEqual({
+			type: "text",
+			text: "Stable harness instructions",
+			cache_control: { type: "ephemeral", ttl: "1h" },
+		});
+		expect(payload.system?.[3]).toEqual({ type: "text", text: "Volatile repository context" });
+	});
+
 	it("caches tool-result-only user messages in OAuth request payloads", async () => {
 		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
 			systemPrompt: ["Stay concise."],

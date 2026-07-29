@@ -777,7 +777,13 @@ export class Agent {
 					preferredDialect(model.id),
 					this.#pruneToolDescriptions,
 				) ?? []);
-		let context: Context = { systemPrompt, messages, tools };
+		let context: Context = {
+			systemPrompt,
+			stableSystemPromptBlockCount:
+				systemPrompt === this.#state.systemPrompt ? this.#state.stableSystemPromptBlockCount : undefined,
+			messages,
+			tools,
+		};
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
 		return context;
 	}
@@ -865,8 +871,9 @@ export class Agent {
 	}
 
 	// State mutators
-	setSystemPrompt(v: string[] | string) {
+	setSystemPrompt(v: string[] | string, stableSystemPromptBlockCount?: number) {
 		this.#state.systemPrompt = typeof v === "string" ? [v] : v;
+		this.#state.stableSystemPromptBlockCount = stableSystemPromptBlockCount;
 	}
 
 	setModel(m: Model) {
@@ -1211,6 +1218,7 @@ export class Agent {
 
 		const context: AgentContext = {
 			systemPrompt: this.#state.systemPrompt,
+			stableSystemPromptBlockCount: this.#state.stableSystemPromptBlockCount,
 			messages: this.#state.messages.slice(),
 			tools: this.#state.tools,
 		};
@@ -1323,6 +1331,7 @@ export class Agent {
 					await Bun.sleep(0);
 				}
 				context.systemPrompt = this.#state.systemPrompt;
+				context.stableSystemPromptBlockCount = this.#state.stableSystemPromptBlockCount;
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
 			},
 			beforeModelCall:

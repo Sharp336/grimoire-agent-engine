@@ -984,10 +984,6 @@ export class AgentSession {
 			setHindsightSessionState: state => this.setHindsightSessionState(state),
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
-			setBaseSystemPrompt: prompt => {
-				this.#tools.setBaseSystemPrompt(prompt);
-				this.agent.setSystemPrompt(prompt);
-			},
 			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
 			replaceMemoryTools: tools => this.#tools.replaceMemoryTools(tools),
 		};
@@ -1091,8 +1087,6 @@ export class AgentSession {
 			model: () => this.model,
 			memoryBackendSession: () => this,
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
-			clearMemoryPromotionSnapshot: () => this.#memory.clearPromotionSnapshot(),
-			captureMemoryPromotionSnapshot: prompt => this.#memory.capturePromotionSnapshot(prompt),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
@@ -4085,7 +4079,9 @@ export class AgentSession {
 		return this.#tools.refreshBaseSystemPrompt();
 	}
 
-	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+	#buildSystemPromptForAgentStart(
+		promptText: string,
+	): Promise<{ systemPrompt: string[]; stableSystemPromptBlockCount: number | undefined }> {
 		return this.#tools.buildSystemPromptForAgentStart(promptText);
 	}
 
@@ -5017,7 +5013,7 @@ export class AgentSession {
 				const result = await this.#extensionRunner.emitBeforeAgentStart(
 					expandedText,
 					options?.images,
-					beforeAgentStartSystemPrompt,
+					beforeAgentStartSystemPrompt.systemPrompt,
 				);
 				if (result?.messages) {
 					const promptAttribution: "user" | "agent" | undefined =
@@ -5048,10 +5044,16 @@ export class AgentSession {
 				if (result?.systemPrompt !== undefined) {
 					this.agent.setSystemPrompt(result.systemPrompt);
 				} else {
-					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+					this.agent.setSystemPrompt(
+						beforeAgentStartSystemPrompt.systemPrompt,
+						beforeAgentStartSystemPrompt.stableSystemPromptBlockCount,
+					);
 				}
 			} else {
-				this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+				this.agent.setSystemPrompt(
+					beforeAgentStartSystemPrompt.systemPrompt,
+					beforeAgentStartSystemPrompt.stableSystemPromptBlockCount,
+				);
 			}
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
@@ -7026,7 +7028,7 @@ export class AgentSession {
 		const previousTools = [...this.agent.state.tools];
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
 		const previousSystemPrompt = this.agent.state.systemPrompt;
-		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
+		const previousStableSystemPromptBlockCount = this.agent.state.stableSystemPromptBlockCount;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
 
@@ -7190,9 +7192,8 @@ export class AgentSession {
 			this.#syncAgentSessionId(previousSessionState.sessionId);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
-			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
-			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
-			this.agent.setSystemPrompt(previousSystemPrompt);
+			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt, previousStableSystemPromptBlockCount);
+			this.agent.setSystemPrompt(previousSystemPrompt, previousStableSystemPromptBlockCount);
 			this.agent.replaceMessages(previousAgentMessages);
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;

@@ -2762,6 +2762,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: options.systemPrompt;
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				stableSystemPromptBlockCount: undefined,
 			};
 		};
 
@@ -2870,7 +2871,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		setActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const { systemPrompt, stableSystemPromptBlockCount } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
@@ -2994,6 +2995,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
+				stableSystemPromptBlockCount,
 				model,
 				thinkingLevel: toReasoningEffort(effectiveThinkingLevel),
 				disableReasoning: shouldDisableReasoning(effectiveThinkingLevel),

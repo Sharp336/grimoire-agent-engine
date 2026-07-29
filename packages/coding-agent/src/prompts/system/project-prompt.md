@@ -48,7 +48,7 @@ This session also spans the additional directories below. This list is the CURRE
 {{/each}}
 </workspace-roots>
 {{/if}}
-Today is {{date}}, and the current working directory is '{{cwd}}'.
+The current working directory is '{{cwd}}'.
 
 <critical>
 - Each response MUST advance the task. There is no stopping condition other than completion.
