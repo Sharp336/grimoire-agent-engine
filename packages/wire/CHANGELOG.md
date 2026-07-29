@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Upgraded the collaboration protocol to version 4: new gated `ctl`/`ctl-result` control frames (`CollabControlCommand`) let external apps drive a session. Guests using version 3 are rejected during the handshake with the existing protocol-mismatch error.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

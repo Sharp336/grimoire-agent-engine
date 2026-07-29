@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `collab.allowRemoteControl` (default off): lets full-link collab peers change model and thinking level, compact, list and switch sessions on the host via the new wire control frames.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

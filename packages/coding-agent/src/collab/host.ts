@@ -15,6 +15,7 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
+	CollabControlCommand,
 	CollabUiRequest,
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
@@ -27,7 +28,9 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
+import { SessionManager } from "../session/session-manager";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
+import { parseConfiguredThinkingLevel } from "../thinking";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import {
@@ -349,6 +352,9 @@ export class CollabHost {
 			case "fetch-transcript":
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
 				break;
+			case "ctl":
+				this.#handleCtl(frame.reqId, frame.cmd, fromPeer);
+				break;
 			default:
 				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
 		}
@@ -668,6 +674,113 @@ export class CollabHost {
 		} catch (err) {
 			logger.debug("collab transcript read failed", { agentId, error: String(err) });
 			reply("", fromByte, String(err));
+		}
+	}
+
+	/**
+	 * Control surface for full-link peers: `ctl`/`ctl-result` frames let a
+	 * remote app change model, thinking level, compact, and switch sessions.
+	 * Every command requires a verified write token (read-only peers are
+	 * rejected) AND the host opt-in `collab.allowRemoteControl` (default off),
+	 * so no link already in circulation silently gains control. Replies
+	 * exactly once per `reqId` via `ctl-result`, including on throw; success
+	 * payloads are shrunk so a large `sessions-list`/`models-list` cannot
+	 * exceed the relay's per-frame ceiling and drop the frame.
+	 */
+	#handleCtl(reqId: number, cmd: CollabControlCommand, fromPeer: number): void {
+		const fail = (error: string, code?: string): void => {
+			this.#socket?.send(
+				code ? { t: "ctl-result", reqId, ok: false, error, code } : { t: "ctl-result", reqId, ok: false, error },
+				fromPeer,
+			);
+		};
+		// Control is a write capability: a read-only (view-only link) peer is
+		// denied the same way the host denies it prompt/abort. Reply via
+		// ctl-result so the caller's pending request resolves rather than hangs.
+		if (!this.#peers.get(fromPeer)?.canWrite) {
+			fail("control is disabled on a read-only link", "control-disabled");
+			return;
+		}
+		if (!this.#ctx.settings.get("collab.allowRemoteControl")) {
+			fail("remote control is disabled on the host (enable collab.allowRemoteControl)", "control-disabled");
+			return;
+		}
+		// A single try/catch in #runCtl spans the command, the shrink, and the
+		// send; this .catch is the last-resort reply so any throw still answers
+		// exactly once via ctl-result instead of an unhandled rejection.
+		void this.#runCtl(reqId, cmd, fromPeer).catch(err => {
+			logger.warn("collab control command failed", { cmd: cmd.k, error: String(err) });
+			this.#socket?.send(
+				{ t: "ctl-result", reqId, ok: false, error: err instanceof Error ? err.message : String(err) },
+				fromPeer,
+			);
+		});
+	}
+
+	/**
+	 * Run one control command and reply exactly once via `ctl-result`. A throw
+	 * here rejects the promise; #handleCtl's .catch turns it into a failure
+	 * reply, so every reqId is answered exactly once.
+	 */
+	async #runCtl(reqId: number, cmd: CollabControlCommand, fromPeer: number): Promise<void> {
+		const data = await this.#runControlCommand(cmd);
+		this.#socket?.send({ t: "ctl-result", reqId, ok: true, data: shrinkForReplication(data) }, fromPeer);
+	}
+
+	/** Execute a single control command against the host session surfaces (mirrors the RPC handlers). */
+	async #runControlCommand(cmd: CollabControlCommand): Promise<unknown> {
+		const session = this.#ctx.session;
+		switch (cmd.k) {
+			case "sessions-list": {
+				const limit = typeof cmd.limit === "number" ? Math.max(1, Math.min(5000, cmd.limit)) : 1000;
+				const sessions = await SessionManager.listAll();
+				const sorted = sessions.sort((l, r) => r.modified.getTime() - l.modified.getTime()).slice(0, limit);
+				return {
+					sessions: sorted.map(s => ({
+						sessionId: s.id,
+						cwd: s.cwd,
+						title: s.title,
+						updatedAt: s.modified.toISOString(),
+						_meta: { messageCount: s.messageCount, size: s.size },
+					})),
+					total: sessions.length,
+				};
+			}
+			case "models-list": {
+				await session.modelRegistry.awaitBackgroundRefresh();
+				return { models: session.getAvailableModels() };
+			}
+			case "session-stats":
+				return session.getSessionStats();
+			case "set-model": {
+				let model = session.getAvailableModels().find(m => m.provider === cmd.provider && m.id === cmd.modelId);
+				if (!model) {
+					await session.modelRegistry.awaitBackgroundRefresh();
+					model = session.getAvailableModels().find(m => m.provider === cmd.provider && m.id === cmd.modelId);
+				}
+				if (!model) throw new Error(`Model not found: ${cmd.provider}/${cmd.modelId}`);
+				await session.setModel(model);
+				return model;
+			}
+			case "set-thinking-level": {
+				// The wire carries an opaque `string`; validate it against the
+				// configured-thinking-level set at this trust boundary (mirrors the
+				// ACP #setThinkingLevelById validator, the only other string→level
+				// entry point). An unsupported value is rejected with a failed
+				// ctl-result instead of corrupting the session's thinking state. The
+				// throw routes through #handleCtl's .catch, which replies exactly
+				// once via ctl-result.
+				const level = parseConfiguredThinkingLevel(cmd.level);
+				if (!level) throw new Error(`Unknown thinking level: ${cmd.level}`);
+				session.setThinkingLevel(level);
+				return { level };
+			}
+			case "compact":
+				return await session.compact(cmd.customInstructions);
+			case "switch-session": {
+				const success = await session.switchSession(cmd.sessionPath);
+				return { cancelled: !success };
+			}
 		}
 	}
 
