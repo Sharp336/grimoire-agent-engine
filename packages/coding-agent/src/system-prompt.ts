@@ -549,17 +549,22 @@ export interface BuildSystemPromptOptions {
 }
 
 /** Result of building provider-facing system prompt messages. */
-export interface BuildSystemPromptResult {
+export interface SystemPromptPlan {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
 	/** Number of leading blocks that remain stable across project-context and tool changes. */
 	stableSystemPromptBlockCount?: number;
+	/** Whether turn-specific context may be appended to the bundled prompt. */
+	compositionPolicy: SystemPromptCompositionPolicy;
 }
 
+/** Controls whether the session may append turn-specific context to a prompt plan. */
+export type SystemPromptCompositionPolicy = "append-turn-context" | "verbatim";
+
 /** Build the system prompt with tools, guidelines, and context */
-export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
+export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<SystemPromptPlan> {
 	if ($env.NULL_PROMPT === "true") {
-		return { systemPrompt: [], stableSystemPromptBlockCount: 0 };
+		return { systemPrompt: [], stableSystemPromptBlockCount: 0, compositionPolicy: "verbatim" };
 	}
 
 	const {
@@ -893,5 +898,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPrompt.push(renderedToolInventory);
 	}
 
-	return { systemPrompt, stableSystemPromptBlockCount };
+	return {
+		systemPrompt,
+		stableSystemPromptBlockCount,
+		compositionPolicy: "append-turn-context",
+	};
 }

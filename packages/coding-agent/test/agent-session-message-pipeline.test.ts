@@ -18,6 +18,7 @@ import {
 	type SimpleStreamOptions,
 	type TextContent,
 } from "@oh-my-pi/pi-ai";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -77,6 +78,36 @@ async function withNativeDialectEnv<T>(fn: () => Promise<T>): Promise<T> {
 			Bun.env.PI_DIALECT = previous;
 		}
 	}
+}
+
+const ANTHROPIC_SERIALIZATION_MODEL = buildModel({
+	id: "claude-sonnet-4-5",
+	name: "Claude Sonnet 4.5",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 8_192,
+} as ModelSpec<"anthropic-messages">);
+
+function captureAnthropicSystemPrefix(context: Context): Promise<string> {
+	const { promise, resolve } = Promise.withResolvers<string>();
+	const controller = new AbortController();
+	controller.abort();
+	streamAnthropic(ANTHROPIC_SERIALIZATION_MODEL, context, {
+		apiKey: "sk-ant-oat-test",
+		isOAuth: true,
+		signal: controller.signal,
+		onPayload: payload => {
+			const system = (payload as { system?: Array<{ cache_control?: unknown }> }).system ?? [];
+			const breakpoint = system.findIndex(block => block.cache_control !== undefined);
+			resolve(breakpoint >= 0 ? JSON.stringify(system.slice(0, breakpoint + 1)) : "");
+		},
+	});
+	return promise;
 }
 
 describe("AgentSession message pipeline", () => {
@@ -339,6 +370,65 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.sessionId).toStartWith(`${session.sessionId}:side:`);
 	});
 
+	it("builds a fresh recalled prompt plan for every ephemeral side request", async () => {
+		const model = buildModel({
+			id: "side-fresh-prompt-model",
+			name: "Side Fresh Prompt Model",
+			api: "anthropic",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const contexts: Context[] = [];
+		const fakeBackend: MemoryBackend = {
+			id: "mnemopi",
+			async start() {},
+			async buildDeveloperInstructions() {
+				return undefined;
+			},
+			async clear() {},
+			async enqueue() {},
+			async beforeAgentStartPrompt(_session, promptText) {
+				return `<memories>recall for ${promptText}</memories>`;
+			},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["stable prefix"], messages: [], tools: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "memory.backend": "mnemopi" }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (_model, context) => {
+				contexts.push(context);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Side answer");
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		sessions.push(session);
+
+		await session.runEphemeralTurn({ promptText: "before the first main turn" });
+		// A completed main turn would leave this volatile suffix on the live agent.
+		// Side requests must rebuild from the stable plan rather than inherit it.
+		agent.setSystemPrompt(["stable prefix", "stale live volatile suffix"]);
+		await session.runEphemeralTurn({ promptText: "after recall" });
+
+		expect(contexts).toHaveLength(2);
+		expect(contexts[0]?.systemPrompt?.join("\n")).toContain("recall for before the first main turn");
+		expect(contexts[1]?.systemPrompt?.join("\n")).toContain("recall for after recall");
+		expect(contexts[1]?.systemPrompt?.join("\n")).not.toContain("stale live volatile suffix");
+	});
+
 	it("rotates ephemeral side-channel credentials on Google Resource exhausted", async () => {
 		const api = "test-ephemeral-google-resource-exhausted";
 		const googleErrorMessage = "Google API error (429): Resource exhausted. Please try again later.";
@@ -581,12 +671,96 @@ describe("AgentSession message pipeline", () => {
 			await agent.prompt("Main Question?");
 			await session.runEphemeralTurn({ promptText: `Side Question ${secret}?` });
 
-			// The static prefix (system prompt + tools) is left untouched, so it stays byte-identical
-			// between the main turn and the side turn and the prompt cache prefix survives.
-			expect(JSON.stringify(mainContext?.systemPrompt)).toBe(JSON.stringify(sideContext?.systemPrompt));
+			// The declared stable prefix must be byte-identical between the main turn
+			// and the side turn so the prompt cache prefix survives.
+			const boundary = sideContext?.stableSystemPromptBlockCount ?? 0;
+			expect(boundary).toBeGreaterThan(0);
+			const mainStable = (mainContext?.systemPrompt ?? []).slice(0, boundary);
+			const sideStable = (sideContext?.systemPrompt ?? []).slice(0, boundary);
+			expect(JSON.stringify(mainStable)).toBe(JSON.stringify(sideStable));
+			// The volatile suffix (after the stable boundary) carries turn context.
+			const sideVolatile = (sideContext?.systemPrompt ?? []).slice(boundary).join("\n");
+			expect(sideVolatile).toContain("Today is ");
 			expect(JSON.stringify(mainContext?.tools)).toBe(JSON.stringify(sideContext?.tools));
 			// The side turn's user prompt secret is redacted from the outbound messages.
 			expect(JSON.stringify(sideContext?.messages)).not.toContain(secret);
+		});
+	});
+
+	it("does not freeze an empty Anthropic billing seed before the first persisted user turn", async () => {
+		await withNativeDialectEnv(async () => {
+			const api = "test-ephemeral-empty-billing-seed";
+			const contexts: Context[] = [];
+			registerCustomApi(api, (_model, context, _options) => {
+				contexts.push(context);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Answer");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			});
+
+			const model = buildModel({
+				id: "side-model-empty-billing-seed",
+				name: "Side Model Empty Billing Seed",
+				api,
+				provider: "test-provider",
+				baseUrl: "",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 1024,
+			} as ModelSpec<Api>) as Model<Api>;
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["stable harness instructions"], messages: [], tools: [] },
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+			});
+			sessions.push(session);
+
+			// 1) Side request before any persisted user message: a transient empty seed
+			// is allowed, but it must NOT be frozen for the rest of the session.
+			await session.runEphemeralTurn({ promptText: "side request before main" });
+			// 2) The main turn persists a real first user message; the provider derives
+			// the OAuth billing header from that first user text itself.
+			await agent.prompt("Main request establishes this session seed");
+			// 3) A side request after the main turn must adopt the settled seed so its
+			// billing-header fingerprint matches the main turn's.
+			await session.runEphemeralTurn({ promptText: "side request after main" });
+
+			// Identify each captured context by its billing-seed signature rather than a
+			// fixed call index, so the test stays robust to any incidental internal calls.
+			// Main never carries a seed override (the provider derives it from messages);
+			// side requests always carry an explicit (possibly "") seed.
+			const preMainSide = contexts[0];
+			const mainContext = contexts.find(context => context.anthropicBillingSeed === undefined);
+			const postMainSide = contexts[contexts.length - 1];
+			// no-user case: a transient empty seed is allowed but never cached/frozen.
+			expect(preMainSide?.anthropicBillingSeed).toBe("");
+			// the main turn was captured and derives its seed from messages (no override).
+			expect(mainContext).toBeDefined();
+			expect(mainContext?.anthropicBillingSeed).toBeUndefined();
+			// a later side turn ran after the main turn.
+			expect(postMainSide).not.toBe(preMainSide);
+			const mainSeed = "Main request establishes this session seed";
+			// post-main side: adopted the settled first-user-text seed (NOT frozen "").
+			expect(postMainSide?.anthropicBillingSeed).toBe(mainSeed);
+
+			// Serialized provider proof: the post-main side and the main OAuth system
+			// prefixes through cache_control must be byte-identical.
+			const mainPrefix = await captureAnthropicSystemPrefix(mainContext!);
+			const sidePrefix = await captureAnthropicSystemPrefix(postMainSide!);
+			expect(mainPrefix.length).toBeGreaterThan(0);
+			expect(sidePrefix).toBe(mainPrefix);
+			// ...while their model-visible message arrays legitimately differ.
+			expect(JSON.stringify(mainContext!.messages)).not.toBe(JSON.stringify(postMainSide!.messages));
 		});
 	});
 
@@ -739,6 +913,7 @@ describe("AgentSession message pipeline", () => {
 				systemPrompt: remembered
 					? ["base", `static memory instructions\n\n${injected}`]
 					: ["base", "static memory instructions"],
+				compositionPolicy: "append-turn-context",
 			}),
 		});
 		sessions.push(session);
@@ -1021,6 +1196,7 @@ describe("AgentSession message pipeline", () => {
 				systemPrompt: remembered
 					? ["base", `static memory instructions\n\n${injected}`]
 					: ["base", "static memory instructions"],
+				compositionPolicy: "append-turn-context",
 			}),
 		});
 		sessions.push(session);
@@ -1110,6 +1286,7 @@ describe("AgentSession message pipeline", () => {
 				systemPrompt: remembered
 					? ["base", `static memory instructions\n\n${injected}`]
 					: ["base", "static memory instructions"],
+				compositionPolicy: "append-turn-context",
 			}),
 		});
 		sessions.push(session);
@@ -1203,6 +1380,7 @@ describe("AgentSession message pipeline", () => {
 				systemPrompt: remembered
 					? ["base", `static memory instructions\n\n${injected}`]
 					: ["base", "static memory instructions"],
+				compositionPolicy: "append-turn-context",
 			}),
 		});
 		sessions.push(session);
@@ -1224,6 +1402,192 @@ describe("AgentSession message pipeline", () => {
 		const forkedPrompt = contexts[1]!.systemPrompt?.join("\n") ?? "";
 		const occurrences = forkedPrompt.split(injected).length - 1;
 		expect(occurrences).toBe(1);
+	});
+
+	it("delivers a string systemPrompt override verbatim with no date or backend recall side effects", async () => {
+		using tempDir = TempDir.createSync("@pi-verbatim-string-");
+		const api = "test-verbatim-string-cache";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "verbatim-string-model",
+			name: "Verbatim String Model",
+			api,
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("test-provider", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const override = "You are a verbatim string override.";
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			systemPrompt: override,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		try {
+			await session.sendUserMessage("hello");
+			expect(contexts).toHaveLength(1);
+			const system = contexts[0]?.systemPrompt ?? [];
+			// Verbatim bytes — exactly the override string, no date or recall appended.
+			expect(system).toEqual([override]);
+			expect(system.join("\n")).not.toContain("Today is ");
+			expect(system.join("\n")).not.toContain("<memories>");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("delivers an array systemPrompt override verbatim with no date or backend recall side effects", async () => {
+		using tempDir = TempDir.createSync("@pi-verbatim-array-");
+		const api = "test-verbatim-array-cache";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "verbatim-array-model",
+			name: "Verbatim Array Model",
+			api,
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("test-provider", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const override = ["block one", "block two"];
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			systemPrompt: override,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		try {
+			await session.sendUserMessage("hello");
+			expect(contexts).toHaveLength(1);
+			const system = contexts[0]?.systemPrompt ?? [];
+			// Verbatim bytes — exactly the override array, no date or recall appended.
+			expect(system).toEqual(override);
+			expect(system.join("\n")).not.toContain("Today is ");
+			expect(system.join("\n")).not.toContain("<memories>");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("delivers a callback systemPrompt override verbatim with no date or backend recall side effects", async () => {
+		using tempDir = TempDir.createSync("@pi-verbatim-callback-");
+		const api = "test-verbatim-callback-cache";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "verbatim-callback-model",
+			name: "Verbatim Callback Model",
+			api,
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("test-provider", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const override = "You are a callback override.";
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			systemPrompt: () => override,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		try {
+			await session.sendUserMessage("hello");
+			expect(contexts).toHaveLength(1);
+			const system = contexts[0]?.systemPrompt ?? [];
+			// Verbatim bytes — exactly the callback return, no date or recall appended.
+			expect(system).toEqual([override]);
+			expect(system.join("\n")).not.toContain("Today is ");
+			expect(system.join("\n")).not.toContain("<memories>");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
 	});
 
 	it("ephemeral side-channel forwards native tools, injects developer reminder, leaves toolChoice auto", async () => {

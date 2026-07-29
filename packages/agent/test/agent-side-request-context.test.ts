@@ -202,4 +202,44 @@ describe("Agent — buildSideRequestContext", () => {
 		expect(transformSpy).toHaveBeenCalledTimes(1);
 		expect(context.systemPrompt).toEqual(["transformed-system"]);
 	});
+
+	it("preserves the declared cache boundary for an explicitly passed prompt", async () => {
+		// Models the handoff path: a freshly allocated prompt plan (a separate
+		// array, not the agent's live state reference) carries its own cache
+		// breakpoint structurally — no array-reference identity comparison.
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["live-turn-prompt"],
+				stableSystemPromptBlockCount: 3,
+				tools: [tool],
+			},
+		});
+
+		const context = await agent.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			{ systemPrompt: ["base-prompt"], stableSystemPromptBlockCount: 1 },
+		);
+
+		expect(context.systemPrompt).toEqual(["base-prompt"]);
+		expect(context.stableSystemPromptBlockCount).toBe(1);
+	});
+
+	it("inherits the live cache boundary for argument-less side requests", async () => {
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["live-prompt"],
+				stableSystemPromptBlockCount: 2,
+				tools: [tool],
+			},
+		});
+
+		const context = await agent.buildSideRequestContext([
+			{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() },
+		]);
+
+		expect(context.systemPrompt).toEqual(["live-prompt"]);
+		expect(context.stableSystemPromptBlockCount).toBe(2);
+	});
 });

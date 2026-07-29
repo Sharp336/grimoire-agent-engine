@@ -457,7 +457,11 @@ export class MnemopiSessionState {
 	}
 
 	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
-		if (!this.config.autoRecall || this.hasRecalledForFirstTurn) return undefined;
+		// Aliases never start recall; they replay the primary's cached snippet.
+		if (this.aliasOf) return this.aliasOf.lastRecallSnippet;
+
+		if (!this.config.autoRecall) return undefined;
+		if (this.hasRecalledForFirstTurn) return this.lastRecallSnippet;
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
 		const history = extractMessages(this.session.sessionManager);
@@ -579,11 +583,6 @@ export class MnemopiSessionState {
 		this.hasRecalledForFirstTurn = true;
 		if (!context) return;
 		this.lastRecallSnippet = context;
-		try {
-			await this.session.refreshBaseSystemPrompt();
-		} catch (error) {
-			if (this.config.debug) logger.debug("Mnemopi: prompt refresh after recall failed", { error: String(error) });
-		}
 	}
 
 	/**

@@ -756,14 +756,18 @@ export class Agent {
 	 * shape and avoiding tool-markup leakage). `llmMessages` is already converted
 	 * (and, in production, obfuscated) by the caller.
 	 *
-	 * `systemPrompt` defaults to the live agent prompt so the side request hits the
-	 * same cached prefix as the main loop. Callers that must pin a different prompt
-	 * (e.g. handoff generation, which uses the base prompt rather than a per-turn
-	 * `before_agent_start` hook override) pass it explicitly.
+	 * `prompt` defaults to the live agent state so the side request hits the
+	 * same cached prefix as the main loop. Callers that must pin a different
+	 * prompt (e.g. handoff generation, which uses the base prompt plan rather
+	 * than a per-turn `before_agent_start` hook override) pass it explicitly;
+	 * both `systemPrompt` and `stableSystemPromptBlockCount` are carried
+	 * structurally so the declared cache breakpoint survives regardless of
+	 * whether the prompt array is the live state's own reference.
 	 */
 	async buildSideRequestContext(
 		llmMessages: Message[],
-		systemPrompt: string[] = this.#state.systemPrompt,
+		prompt: Pick<AgentContext, "systemPrompt" | "stableSystemPromptBlockCount"> = this.#state,
+		options?: { anthropicBillingSeed?: string },
 	): Promise<Context> {
 		const model = this.#state.model;
 		if (!model) throw new Error("No active model on agent");
@@ -778,9 +782,9 @@ export class Agent {
 					this.#pruneToolDescriptions,
 				) ?? []);
 		let context: Context = {
-			systemPrompt,
-			stableSystemPromptBlockCount:
-				systemPrompt === this.#state.systemPrompt ? this.#state.stableSystemPromptBlockCount : undefined,
+			systemPrompt: prompt.systemPrompt,
+			stableSystemPromptBlockCount: prompt.stableSystemPromptBlockCount,
+			...(options?.anthropicBillingSeed !== undefined && { anthropicBillingSeed: options.anthropicBillingSeed }),
 			messages,
 			tools,
 		};

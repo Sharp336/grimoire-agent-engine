@@ -3123,10 +3123,20 @@ function resolveSystemCacheBreakpointIndex(
 ): number | null | undefined {
 	if (stableSystemPromptBlockCount === undefined) return undefined;
 	if (stableSystemPromptBlockCount <= 0 || !systemBlocks) return null;
-	const promptBlockCount = normalizeSystemPrompts(systemPrompt).length;
-	if (promptBlockCount === 0) return null;
-	const prefixBlockCount = systemBlocks.length - promptBlockCount;
-	return prefixBlockCount + Math.min(stableSystemPromptBlockCount, promptBlockCount) - 1;
+	// The built systemBlocks carry only the normalized (blank-dropped) prompts,
+	// so the provider-added prefix offset (billing header + Claude Code
+	// instruction + extra instructions) is systemBlocks.length minus the full
+	// normalized prompt count.
+	const normalizedTotal = normalizeSystemPrompts(systemPrompt);
+	if (normalizedTotal.length === 0) return null;
+	// Normalize the raw leading slice independently: a blank entry inside the
+	// stable region is dropped, so the stable count is the normalized length of
+	// the raw slice(0, stableSystemPromptBlockCount) — not the raw boundary
+	// itself. Slicing clamps the boundary to the available prompts.
+	const stableCount = normalizeSystemPrompts(systemPrompt?.slice(0, stableSystemPromptBlockCount)).length;
+	if (stableCount === 0) return null;
+	const prefixBlockCount = systemBlocks.length - normalizedTotal.length;
+	return prefixBlockCount + stableCount - 1;
 }
 
 function applyPromptCaching(
@@ -3405,7 +3415,7 @@ function buildParams(
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
 	const shouldInjectClaudeCodeInstruction = isOAuthToken && !model.id.startsWith("claude-3-5-haiku");
 	const firstUserMessageText = shouldInjectClaudeCodeInstruction
-		? extractClaudeCodeFirstUserMessageText(context.messages)
+		? (context.anthropicBillingSeed ?? extractClaudeCodeFirstUserMessageText(context.messages))
 		: "";
 	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,

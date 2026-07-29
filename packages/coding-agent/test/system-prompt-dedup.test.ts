@@ -59,11 +59,11 @@ describe("SYSTEM.md prompt assembly", () => {
 
 		const promptText = systemPrompt.join("\n\n");
 		const normalizedProjectDir = projectDir.replace(/\\/g, "/");
+		// The date lives in the volatile turn-context suffix, not the stable base;
+		// buildSystemPrompt must not render "Today is" — only the cwd line.
+		expect(promptText).not.toContain("Today is ");
 		expect(promptText).toMatch(
-			new RegExp(
-				`^Today is [^,\\n]+, and the current working directory is '${escapeRegExp(normalizedProjectDir)}'\\.$`,
-				"m",
-			),
+			new RegExp(`The current working directory is '${escapeRegExp(normalizedProjectDir)}'\\.`),
 		);
 	});
 
@@ -162,15 +162,12 @@ describe("SYSTEM.md prompt assembly", () => {
 		const promptText = systemPrompt.join("\n\n");
 		const normalizedProjectDir = projectDir.replace(/\\/g, "/");
 		const appendMatches = promptText.match(new RegExp(escapeRegExp(appendPrompt), "g")) ?? [];
-		expect(systemPrompt).toHaveLength(2);
 		expect(promptText).toContain("CLI custom prompt");
 		expect(promptText).toContain("<workspace-tree>");
 		expect(promptText).toContain("<dir-context>");
+		expect(promptText).not.toContain("Today is ");
 		expect(promptText).toMatch(
-			new RegExp(
-				`^Today is [^,\\n]+, and the current working directory is '${escapeRegExp(normalizedProjectDir)}'\\.$`,
-				"m",
-			),
+			new RegExp(`The current working directory is '${escapeRegExp(normalizedProjectDir)}'\\.`),
 		);
 		expect(appendMatches).toHaveLength(1);
 		expect(promptText).not.toContain("Discovered project SYSTEM prompt");
@@ -293,5 +290,53 @@ describe("SYSTEM.md prompt assembly", () => {
 		const promptText = systemPrompt.join("\n\n");
 		const matches = promptText.match(new RegExp(escapeRegExp(sharedContent), "g")) ?? [];
 		expect(matches).toHaveLength(1);
+	});
+});
+
+describe("SystemPromptPlan composition policy", () => {
+	let originalNullPrompt: string | undefined;
+
+	beforeEach(() => {
+		originalNullPrompt = Bun.env.NULL_PROMPT;
+	});
+
+	afterEach(() => {
+		if (originalNullPrompt === undefined) delete Bun.env.NULL_PROMPT;
+		else Bun.env.NULL_PROMPT = originalNullPrompt;
+	});
+
+	it("returns an empty verbatim plan under NULL_PROMPT", async () => {
+		Bun.env.NULL_PROMPT = "true";
+		const plan = await buildSystemPrompt({
+			cwd: os.tmpdir(),
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+		});
+		expect(plan.systemPrompt).toEqual([]);
+		expect(plan.stableSystemPromptBlockCount).toBe(0);
+		expect(plan.compositionPolicy).toBe("verbatim");
+	});
+
+	it("returns append-turn-context policy for a normal build", async () => {
+		delete Bun.env.NULL_PROMPT;
+		const plan = await buildSystemPrompt({
+			cwd: os.tmpdir(),
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			workspaceTree: {
+				rootPath: os.tmpdir(),
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+		});
+		expect(plan.compositionPolicy).toBe("append-turn-context");
+		expect(plan.stableSystemPromptBlockCount).toBeGreaterThan(0);
+		expect(plan.stableSystemPromptBlockCount).toBeLessThan(plan.systemPrompt.length);
 	});
 });

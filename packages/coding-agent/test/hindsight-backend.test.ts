@@ -338,7 +338,9 @@ describe("hindsightBackend first-turn injection", () => {
 		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block);
 	});
 
-	it("keeps the <memories> wrapper in buildDeveloperInstructions", async () => {
+	it("excludes recall payload from buildDeveloperInstructions", async () => {
+		// Volatile recall context must never enter the stable developer
+		// instructions; it is injected per turn via beforeAgentStartPrompt only.
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",
 			"hindsight.apiUrl": "http://localhost:8888",
@@ -354,18 +356,20 @@ describe("hindsightBackend first-turn injection", () => {
 
 		const state = session.getHindsightSessionState();
 		expect(state).toBeDefined();
-		state!.lastRecallSnippet = "<memories>\nremembered fact\n</memories>";
+		if (!state) return;
+		state.lastRecallSnippet = "<memories>\nremembered fact\n</memories>";
 
 		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", settings, session as never);
-		expect(prompt).toContain("<memories>");
-		expect(prompt).toContain("</memories>");
-		expect(prompt).toContain("remembered fact");
+		expect(prompt).toBeDefined();
+		// The static instructions mention `<memories>` in prose, but the
+		// actual recalled payload ("remembered fact") must be absent.
+		expect(prompt).not.toContain("remembered fact");
+		expect(prompt).not.toContain("<memories>\nremembered fact");
 	});
 
-	it("places the <mental_models> block above the <memories> recall block in developer instructions", async () => {
-		// Stable, curated semantic memory must come first so the LLM's prior is
-		// anchored on it; the volatile per-turn recall block follows. Ordering
-		// is part of the integration's behavioural contract.
+	it("keeps mental_models in developer instructions but excludes recall payload", async () => {
+		// Stable, curated semantic memory stays in the stable prefix; the
+		// volatile per-turn recall block is injected via the hook only.
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",
 			"hindsight.apiUrl": "http://localhost:8888",
@@ -381,19 +385,90 @@ describe("hindsightBackend first-turn injection", () => {
 		});
 		const state = session.getHindsightSessionState();
 		expect(state).toBeDefined();
-		state!.mentalModelsSnippet = "<mental_models>\n# User Preferences\nprefers tabs\n</mental_models>";
-		state!.lastRecallSnippet = "<memories>\nrecalled fact\n</memories>";
+		if (!state) return;
+		state.mentalModelsSnippet = "<mental_models>\n# User Preferences\nprefers tabs\n</mental_models>";
+		state.lastRecallSnippet = "<memories>\nrecalled fact\n</memories>";
 
 		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", settings, session as never);
 		expect(prompt).toBeDefined();
-		// `<memories>` and `<mental_models>` are mentioned in STATIC_INSTRUCTIONS
-		// bullets too. Match the actual injected block opener (tag + newline)
-		// to disambiguate documentation prose from the injected payloads.
-		const mmIdx = prompt!.indexOf("<mental_models>\n");
-		const memIdx = prompt!.indexOf("<memories>\n");
+		if (!prompt) return;
+		// Mental models block is stable and present.
+		const mmIdx = prompt.indexOf("<mental_models>\n");
 		expect(mmIdx).toBeGreaterThanOrEqual(0);
-		expect(memIdx).toBeGreaterThanOrEqual(0);
-		expect(mmIdx).toBeLessThan(memIdx);
+		// The recalled payload must not appear in the stable prefix.
+		expect(prompt).not.toContain("recalled fact");
+		expect(prompt).not.toContain("<memories>\nrecalled fact");
+	});
+
+	it("calls recall exactly once and replays the cached snippet on repeated hook calls", async () => {
+		// A successful recall is replayed once per turn until the transcript
+		// resets; the underlying recall API must not be hit again.
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		const session = makeFakeSession({
+			sessionId: "s-replay",
+			entries: [{ role: "assistant", text: "previous assistant context" }],
+		});
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const recallSpy = vi.spyOn(HindsightApi.prototype, "recall").mockResolvedValue({
+			results: [{ id: "1", text: "Can prefers concise communication" }],
+		} as never);
+
+		const first = await hindsightBackend.beforeAgentStartPrompt?.(
+			session as never,
+			"What do I know about this user?",
+		);
+		expect(first).toContain("<memories>");
+		expect(first).toContain("Can prefers concise communication");
+		expect(recallSpy).toHaveBeenCalledTimes(1);
+
+		// Subsequent calls replay the cached snippet without re-calling recall.
+		const second = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "another prompt this turn");
+		expect(second).toBe(first);
+		expect(recallSpy).toHaveBeenCalledTimes(1);
+
+		const third = await hindsightBackend.beforeAgentStartPrompt?.(
+			session as never,
+			"What do I know about this user?",
+		);
+		expect(third).toBe(first);
+		expect(recallSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns undefined from the hook when auto recall is off", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.autoRecall": false,
+		});
+		const session = makeFakeSession({ sessionId: "s-noauto" });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const recallSpy = vi.spyOn(HindsightApi.prototype, "recall").mockResolvedValue({
+			results: [{ id: "1", text: "should not appear" }],
+		} as never);
+
+		const block = await hindsightBackend.beforeAgentStartPrompt?.(
+			session as never,
+			"What do I know about this user?",
+		);
+		expect(block).toBeUndefined();
+		expect(recallSpy).not.toHaveBeenCalled();
 	});
 
 	it("reloadMentalModelsForSession refreshes the cached snippet and base prompt", async () => {

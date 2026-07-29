@@ -47,7 +47,7 @@ async function createMode(opts: { flushFails?: boolean } = {}): Promise<{
 		settings,
 		modelRegistry,
 		toolRegistry,
-		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
+		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"], compositionPolicy: "append-turn-context" }),
 	});
 	const mode = new InteractiveMode(session, "test");
 	vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);

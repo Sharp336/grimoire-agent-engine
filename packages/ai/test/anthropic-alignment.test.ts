@@ -292,6 +292,179 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.system?.[3]).toEqual({ type: "text", text: "Volatile repository context" });
 	});
 
+	it("keeps the OAuth system prefix through cache_control stable for a side request", async () => {
+		const mainPayload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			systemPrompt: ["Stable harness instructions", "Volatile turn context"],
+			stableSystemPromptBlockCount: 1,
+			messages: [{ role: "user", content: "Main request establishes this session seed", timestamp: Date.now() }],
+		})) as {
+			system?: Array<{ cache_control?: unknown }>;
+			messages?: unknown[];
+		};
+		const sidePayload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			systemPrompt: ["Stable harness instructions", "Fresh side-turn context"],
+			stableSystemPromptBlockCount: 1,
+			anthropicBillingSeed: "Main request establishes this session seed",
+			messages: [
+				{ role: "developer", content: "Do not call tools.", timestamp: Date.now() },
+				{ role: "user", content: "A side request with different model-visible content", timestamp: Date.now() },
+			],
+		})) as {
+			system?: Array<{ cache_control?: unknown }>;
+			messages?: unknown[];
+		};
+
+		const mainBreakpoint = mainPayload.system?.findIndex(block => block.cache_control !== undefined) ?? -1;
+		const sideBreakpoint = sidePayload.system?.findIndex(block => block.cache_control !== undefined) ?? -1;
+		expect(mainBreakpoint).toBeGreaterThanOrEqual(0);
+		expect(sideBreakpoint).toBe(mainBreakpoint);
+		// This is the provider-facing serialized cache prefix, not source shape.
+		expect(JSON.stringify(mainPayload.system?.slice(0, mainBreakpoint + 1))).toBe(
+			JSON.stringify(sidePayload.system?.slice(0, sideBreakpoint + 1)),
+		);
+		expect(JSON.stringify(sidePayload.messages)).not.toBe(JSON.stringify(mainPayload.messages));
+	});
+
+	it("lands cache_control on the stable block, never the volatile suffix, when a blank sits inside the stable raw slice (OAuth)", async () => {
+		// Raw prompts ["stable", "", "volatile"] with raw boundary 2. The blank
+		// entry is dropped by normalizeSystemPrompts, so the normalized stable
+		// slice is just ["stable"] (count 1). The breakpoint must land on the
+		// stable block — never on the volatile suffix.
+		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			systemPrompt: ["stable", "", "volatile"],
+			stableSystemPromptBlockCount: 2,
+			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+		})) as { system?: Array<{ type?: string; text?: string; cache_control?: unknown }> };
+
+		// OAuth layout: [billing, claudeCodeInstruction, "stable", "volatile"].
+		expect(payload.system?.[2]).toEqual({
+			type: "text",
+			text: "stable",
+			cache_control: { type: "ephemeral", ttl: "1h" },
+		});
+		expect(payload.system?.[3]).toEqual({ type: "text", text: "volatile" });
+		expect(payload.system?.[3]?.cache_control).toBeUndefined();
+	});
+
+	it("lands cache_control on the stable block for the blank-in-stable-slice case with API-key (no provider prefix)", async () => {
+		// API-key layout has no billing/instruction prefix, so system blocks are
+		// just the normalized prompts: ["stable", "volatile"]. The breakpoint
+		// must land on index 0 ("stable"), not index 1 ("volatile").
+		const payload = (await captureAnthropicPayload(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["stable", "", "volatile"],
+				stableSystemPromptBlockCount: 2,
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			{ isOAuth: false },
+		)) as { system?: Array<{ type?: string; text?: string; cache_control?: unknown }> };
+
+		expect(payload.system?.[0]).toEqual({
+			type: "text",
+			text: "stable",
+			cache_control: { type: "ephemeral", ttl: "1h" },
+		});
+		expect(payload.system?.[1]).toEqual({ type: "text", text: "volatile" });
+		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+	});
+
+	it("returns null (no system breakpoint) when stableSystemPromptBlockCount is 0", async () => {
+		// A boundary of 0 disables the system cache breakpoint. The system blocks
+		// should still be built, but none of them should carry cache_control from
+		// the stable-prefix path — only the trailing-default path may place one.
+		const payload = (await captureAnthropicPayload(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["stable", "volatile"],
+				stableSystemPromptBlockCount: 0,
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			{ isOAuth: false },
+		)) as { system?: Array<{ type?: string; text?: string; cache_control?: unknown }> };
+
+		// With boundary 0 the resolver returns null, so applyPromptCaching skips
+		// the system array entirely (both branches gate on !== null) and
+		// buildAnthropicSystemBlocks was called without cacheControl. No system
+		// block should carry cache_control; the breakpoint goes to the message
+		// level instead.
+		expect(payload.system?.[0]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+	});
+
+	it("keeps the byte-identical serialized stable prefix across volatile suffix changes (OAuth)", async () => {
+		// Two turns that differ only in the volatile suffix must produce
+		// byte-identical serialized system blocks up to and including the
+		// cache_control breakpoint. We compare the JSON-serialized prefix slice.
+		const baseContext: Context = {
+			systemPrompt: ["stable harness", "", "volatile-turn-one"],
+			stableSystemPromptBlockCount: 2,
+			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+		};
+		const payloadA = (await captureAnthropicPayload(ANTHROPIC_MODEL, baseContext)) as {
+			system?: Array<{ type?: string; text?: string; cache_control?: unknown }>;
+		};
+		const payloadB = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			...baseContext,
+			systemPrompt: ["stable harness", "", "volatile-turn-two"],
+		})) as { system?: Array<{ type?: string; text?: string; cache_control?: unknown }> };
+
+		// The stable prefix is blocks [0..2] (billing, instruction, "stable harness").
+		// The breakpoint sits on block 2. Blocks 0-2 must be byte-identical.
+		const prefixA = JSON.stringify(payloadA.system?.slice(0, 3));
+		const prefixB = JSON.stringify(payloadB.system?.slice(0, 3));
+		expect(prefixB).toBe(prefixA);
+		// The volatile suffix differs.
+		expect(payloadA.system?.[3]?.text).toBe("volatile-turn-one");
+		expect(payloadB.system?.[3]?.text).toBe("volatile-turn-two");
+	});
+
+	it("keeps serialized bytes through Anthropic's cache breakpoint across date and recall turn suffixes (OAuth)", async () => {
+		// These contexts model consecutive session turns after the cacheable harness
+		// plan has been built. Date and recall are intentionally different on each
+		// turn; only the serialized blocks through the provider's cache breakpoint
+		// may remain byte-identical.
+		const firstTurn: Context = {
+			systemPrompt: [
+				"stable harness",
+				"Today is 2026-07-29.",
+				"<memories>\n<fact>first recalled fact</fact>\n</memories>",
+			],
+			stableSystemPromptBlockCount: 1,
+			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+		};
+		const payloadA = (await captureAnthropicPayload(ANTHROPIC_MODEL, firstTurn)) as {
+			system?: Array<{ type?: string; text?: string; cache_control?: unknown }>;
+		};
+		const payloadB = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			...firstTurn,
+			systemPrompt: [
+				"stable harness",
+				"Today is 2026-07-30.",
+				"<memories>\n<fact>second recalled fact</fact>\n</memories>",
+			],
+		})) as { system?: Array<{ type?: string; text?: string; cache_control?: unknown }> };
+
+		const breakpointA = payloadA.system?.findIndex(block => block.cache_control !== undefined);
+		const breakpointB = payloadB.system?.findIndex(block => block.cache_control !== undefined);
+		expect(breakpointA).toBe(2);
+		expect(breakpointB).toBe(breakpointA);
+
+		// This is the provider-wire measurement: compare actual JSON bytes through
+		// the block carrying cache_control, rather than a pre-provider prompt array.
+		const prefixA = JSON.stringify(payloadA.system?.slice(0, breakpointA! + 1));
+		const prefixB = JSON.stringify(payloadB.system?.slice(0, breakpointB! + 1));
+		expect(prefixB).toBe(prefixA);
+		expect(payloadA.system?.slice(breakpointA! + 1).map(block => block.text)).toEqual([
+			"Today is 2026-07-29.",
+			"<memories>\n<fact>first recalled fact</fact>\n</memories>",
+		]);
+		expect(payloadB.system?.slice(breakpointB! + 1).map(block => block.text)).toEqual([
+			"Today is 2026-07-30.",
+			"<memories>\n<fact>second recalled fact</fact>\n</memories>",
+		]);
+	});
+
 	it("caches tool-result-only user messages in OAuth request payloads", async () => {
 		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
 			systemPrompt: ["Stay concise."],

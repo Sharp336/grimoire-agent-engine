@@ -15,6 +15,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeSwitchResult } from "../extensibility/extensions";
 import { obfuscateProviderContext, type SecretObfuscator } from "../secrets/obfuscator";
+import type { SystemPromptPlan } from "../system-prompt";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { BashSessionTransition } from "./bash-runner";
 import type { SessionContext } from "./session-context";
@@ -42,7 +43,7 @@ export interface SessionHandoffHost {
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
 	sessionFile(): string | undefined;
-	baseSystemPrompt(): string[];
+	baseSystemPromptPlan(): SystemPromptPlan;
 	assertVibeSessionTransitionAllowed(action: string): void;
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
@@ -168,7 +169,7 @@ export class SessionHandoff {
 			// hook state. Matches the prompt the old handoff path sent.
 			const handoffContext = await this.#host.agent.buildSideRequestContext(
 				handoffLlmMessages,
-				this.#host.baseSystemPrompt(),
+				this.#host.baseSystemPromptPlan(),
 			);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{

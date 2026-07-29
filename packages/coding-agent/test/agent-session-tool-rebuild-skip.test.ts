@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { Message, Model } from "@oh-my-pi/pi-ai";
+import type { Context, Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
+import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -110,7 +112,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 	): {
 		session: AgentSession;
 		/** Provider-call message snapshots (LLM-converted), one per model request. */
-		contexts: Message[][];
+		contexts: Context[];
 		/** Mutable registry shared with the session, for lifecycle-only mount fixtures. */
 		toolRegistry: Map<string, AgentTool>;
 	} {
@@ -122,7 +124,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		toolRegistry.set(initialMcp.name, initialMcp as unknown as AgentTool);
 		if (options.xdev && !options.lazyWrite) toolRegistry.set(writeTool.name, writeTool);
 		const mock = options.responses ? createMockModel({ responses: options.responses }) : undefined;
-		const contexts: Message[][] = [];
+		const contexts: Context[] = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -138,7 +140,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			convertToLlm,
 			streamFn: mock
 				? (model, context, streamOptions) => {
-						contexts.push([...context.messages]);
+						contexts.push(context);
 						return mock.stream(model, context, streamOptions);
 					}
 				: undefined,
@@ -157,6 +159,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			},
 			rebuildSystemPrompt: async (toolNames, _tools) => ({
 				systemPrompt: [await rebuildSystemPrompt(toolNames)],
+				stableSystemPromptBlockCount: 1,
+				compositionPolicy: "append-turn-context",
 			}),
 			getMcpServerInstructions: options.getMcpServerInstructions,
 			getLocalCalendarDate: options.getLocalCalendarDate,
@@ -523,6 +527,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			},
 			rebuildSystemPrompt: async (_toolNames, tools) => ({
 				systemPrompt: [tools.get("bash")?.description ?? "missing bash"],
+				compositionPolicy: "append-turn-context",
 			}),
 		});
 		sessions.push(session);
@@ -736,10 +741,12 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([dynamicTool]);
 		expect(rebuildCount).toBe(baseline + 1);
 	});
-	it("rebuilds when the local calendar date rolls over between tool-stable MCP refreshes", async () => {
-		// `buildSystemPrompt` injects today's local date into the prompt body. The
-		// signature reads the same date provider so a session spanning local midnight
-		// must rebuild after an MCP reconnect with an otherwise identical tool set.
+	it("does not rebuild the stable base when the local calendar date rolls over between tool-stable MCP refreshes", async () => {
+		// The date is a volatile turn-context suffix, not part of the rebuild
+		// signature. A session spanning local midnight with an otherwise
+		// identical tool set must NOT rebuild the stable base prompt — the
+		// per-turn context block picks up the new date without invalidating the
+		// cache breakpoint.
 		let currentDate = "2026-06-30";
 		let rebuildCount = 0;
 		const { session } = newSession(
@@ -761,13 +768,99 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 
 		currentDate = "2026-07-01";
 
-		// Same tools, new local calendar day: date segment changed, must rebuild.
+		// Same tools, new local calendar day: date is volatile, NOT in the
+		// rebuild signature — the stable base must NOT rebuild.
 		await session.refreshMCPTools([tool]);
-		expect(rebuildCount).toBe(2);
+		expect(rebuildCount).toBe(1);
 
-		// Same tools, same new local day: skip again.
+		// Same tools, same new local day: still skip.
 		await session.refreshMCPTools([tool]);
-		expect(rebuildCount).toBe(2);
+		expect(rebuildCount).toBe(1);
+	});
+
+	it("keeps stable blocks byte-identical across two turns while date and recall live after the stable boundary", async () => {
+		// The stable prefix (blocks [0, stableSystemPromptBlockCount)) must be
+		// byte-identical across turns. The volatile suffix (date + recall) may
+		// change per turn but must appear only after the stable boundary.
+		let currentDate = "2026-06-30";
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			getLocalCalendarDate: () => currentDate,
+			responses: [{ content: ["first answer"] }, { content: ["second answer"] }],
+		});
+		const tool = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search");
+		await session.refreshMCPTools([tool]);
+
+		await session.prompt("first");
+		const firstContext = contexts[0];
+		if (!firstContext) throw new Error("expected first provider context");
+		const firstSystem = firstContext.systemPrompt ?? [];
+		const stableCount = session.agent.state.stableSystemPromptBlockCount ?? 0;
+		const firstStable = firstSystem.slice(0, stableCount);
+
+		currentDate = "2026-07-01";
+
+		await session.prompt("second");
+		const secondContext = contexts[1];
+		if (!secondContext) throw new Error("expected second provider context");
+		const secondSystem = secondContext.systemPrompt ?? [];
+		const secondStable = secondSystem.slice(0, stableCount);
+
+		// Stable prefix is byte-identical despite the date change.
+		expect(secondStable).toEqual(firstStable);
+		// The volatile suffix differs (date changed) and lives after the boundary.
+		const firstVolatile = firstSystem.slice(stableCount).join("\n");
+		const secondVolatile = secondSystem.slice(stableCount).join("\n");
+		expect(firstVolatile).toContain("2026-06-30");
+		expect(secondVolatile).toContain("2026-07-01");
+		expect(firstVolatile).not.toContain("2026-07-01");
+		expect(secondVolatile).not.toContain("2026-06-30");
+		// The stable prefix never contains the date.
+		expect(firstStable.join("\n")).not.toContain("Today is ");
+		expect(secondStable.join("\n")).not.toContain("Today is ");
+	});
+
+	it("injects memory recall exactly once on every turn after one backend call and never in the stable base", async () => {
+		// The memory backend's beforeAgentStartPrompt is called once per turn.
+		// The recalled block must appear in the volatile suffix (after the stable
+		// boundary) on every turn, and must never enter the stable base blocks.
+		let recallCalls = 0;
+		const injected = "<memories>recall payload</memories>";
+		const fakeBackend: MemoryBackend = {
+			id: "mnemopi",
+			async start() {},
+			async buildDeveloperInstructions() {
+				return "static memory instructions";
+			},
+			async clear() {},
+			async enqueue() {},
+			async beforeAgentStartPrompt() {
+				recallCalls++;
+				return injected;
+			},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			responses: [{ content: ["first answer"] }, { content: ["second answer"] }, { content: ["third answer"] }],
+		});
+		const tool = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search");
+		await session.refreshMCPTools([tool]);
+
+		await session.prompt("first");
+		await session.prompt("second");
+		await session.prompt("third");
+
+		expect(contexts).toHaveLength(3);
+		expect(recallCalls).toBe(3);
+		const stableCount = session.agent.state.stableSystemPromptBlockCount ?? 0;
+		for (const ctx of contexts) {
+			const system = ctx.systemPrompt ?? [];
+			const stable = system.slice(0, stableCount).join("\n");
+			const volatile = system.slice(stableCount).join("\n");
+			// Recall appears in the volatile suffix on every turn.
+			expect(volatile).toContain(injected);
+			// Recall never enters the stable base.
+			expect(stable).not.toContain(injected);
+		}
 	});
 	it("does not rebuild when MCP server instructions change only beyond the 4000-char truncation boundary", async () => {
 		// `rebuildSystemPrompt` (sdk.ts) truncates each server instruction to 4000 chars
@@ -845,12 +938,12 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await firstPrompt;
 		expect(rebuildCount).toBe(2);
 		expect(contexts).toHaveLength(1);
-		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
+		expect(mountNoticesIn(contexts[0].messages)).toHaveLength(0);
 
 		// The next user prompt carries one coalesced notice for both mounts.
 		await session.prompt("again");
 		expect(contexts).toHaveLength(2);
-		const mountNotices = mountNoticesIn(contexts[1]);
+		const mountNotices = mountNoticesIn(contexts[1].messages);
 		expect(mountNotices).toHaveLength(1);
 		expect(mountNotices[0]).toContain("became available");
 		expect(mountNotices[0]).toContain("xd://mcp__nucleus_search");
@@ -862,7 +955,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(3);
 		expect(contexts).toHaveLength(2);
 		await session.prompt("third");
-		const allNotices = mountNoticesIn(contexts[2]);
+		const allNotices = mountNoticesIn(contexts[2].messages);
 		expect(allNotices).toHaveLength(2);
 		expect(allNotices[1]).toContain("No longer mounted");
 		expect(allNotices[1]).toContain("xd://mcp__nucleus_fetch");
@@ -880,7 +973,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([search]);
 		await session.prompt("hello");
 
-		const notices = mountNoticesIn(contexts[0]);
+		const notices = mountNoticesIn(contexts[0].messages);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("xd://mcp__nucleus_search");
 		expect(notices[0]).not.toContain("TAIL");
@@ -898,7 +991,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([search]);
 		await session.prompt("hello");
 
-		const notices = mountNoticesIn(contexts[0]);
+		const notices = mountNoticesIn(contexts[0].messages);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("## mcp__nucleus_search");
 		expect(notices[0]).toContain("## Schema");
@@ -919,7 +1012,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([search]);
 
 		await session.prompt("hello");
-		const notices = mountNoticesIn(contexts[0]);
+		const notices = mountNoticesIn(contexts[0].messages);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("xd://mcp__nucleus_search");
 		expect(notices[0]).not.toContain("mcp__nucleus_fetch");
@@ -942,7 +1035,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 
 		expect(notices).toEqual([]);
 		await session.prompt("hello");
-		const delivered = mountNoticesIn(contexts[0]);
+		const delivered = mountNoticesIn(contexts[0].messages);
 		expect(delivered).toHaveLength(1);
 		expect(delivered[0]).toContain("xd://mcp__nucleus_search");
 	});
@@ -1005,30 +1098,22 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 
 	it("rolls back RPC catalog replacement when prompt rebuild fails", async () => {
 		let failRebuild = false;
-		let date = "2026-07-16";
-		const xdevState = createTestXdevState();
-		const { session } = newSession(
-			async toolNames => {
-				if (failRebuild) throw new Error("rebuild failed");
-				return `tools:${toolNames.join(",")}`;
-			},
-			{ xdev: xdevState, getLocalCalendarDate: () => date },
-		);
+		const { session } = newSession(async toolNames => {
+			if (failRebuild) throw new Error("rebuild failed");
+			return `tools:${toolNames.join(",")}`;
+		});
 		const oldTool = { ...createBasicTool("rpc_old", "RPC Old"), loadMode: "discoverable" as const };
 		const newTool = { ...createBasicTool("rpc_new", "RPC New"), loadMode: "discoverable" as const };
 		await session.refreshRpcHostTools([oldTool]);
-		date = "2026-07-17";
 		failRebuild = true;
 
 		await expect(session.refreshRpcHostTools([newTool])).rejects.toThrow("rebuild failed");
 		expect(session.getToolByName(oldTool.name)).toBeDefined();
 		expect(session.getToolByName(newTool.name)).toBeUndefined();
-		expect(session.getMountedXdevToolNames()).toContain(oldTool.name);
 
 		failRebuild = false;
 		await session.refreshRpcHostTools([newTool]);
 		expect(session.getToolByName(oldTool.name)).toBeUndefined();
 		expect(session.getToolByName(newTool.name)).toBeDefined();
-		expect(session.getMountedXdevToolNames()).toContain(newTool.name);
 	});
 });

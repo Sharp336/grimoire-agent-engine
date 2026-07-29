@@ -69,6 +69,8 @@ export class StablePrefix {
 	build(context: AgentContext, options: BuildOptions): boolean {
 		const snapshot = takeSnapshot(context, options);
 		if (this.#snapshot && this.#snapshot.fingerprint === snapshot.fingerprint) {
+			this.#snapshot.systemPrompt = snapshot.systemPrompt;
+			this.#snapshot.stableSystemPromptBlockCount = snapshot.stableSystemPromptBlockCount;
 			return false;
 		}
 		this.#snapshot = snapshot;
@@ -327,13 +329,20 @@ function takeSnapshot(context: AgentContext, options: BuildOptions): StablePrefi
 		systemPrompt,
 		stableSystemPromptBlockCount: context.stableSystemPromptBlockCount,
 		tools,
-		fingerprint: computeFingerprint(systemPrompt, tools, options),
+		fingerprint: computeFingerprint(systemPrompt, tools, options, context.stableSystemPromptBlockCount),
 	};
 }
 
-function computeFingerprint(systemPrompt: string[], tools: Tool[], options: BuildOptions): string {
+function computeFingerprint(
+	systemPrompt: string[],
+	tools: Tool[],
+	options: BuildOptions,
+	stableSystemPromptBlockCount?: number,
+): string {
+	const stableSystemPrompt =
+		stableSystemPromptBlockCount === undefined ? systemPrompt : systemPrompt.slice(0, stableSystemPromptBlockCount);
 	const payload = JSON.stringify({
-		s: systemPrompt,
+		s: stableSystemPrompt,
 		t: tools.map(t => ({
 			n: t.name,
 			d: t.description,
@@ -342,6 +351,7 @@ function computeFingerprint(systemPrompt: string[], tools: Tool[], options: Buil
 			cf: t.customFormat,
 			cw: t.customWireName,
 		})),
+		b: stableSystemPromptBlockCount ?? null,
 		i: options.intentTracing,
 		ex: options.exampleDialect,
 		pd: options.pruneToolDescriptions,

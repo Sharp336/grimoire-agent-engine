@@ -110,12 +110,11 @@ export const mnemopiBackend: MemoryBackend = {
 		}
 	},
 
-	async buildDeveloperInstructions(_agentDir, settings, session): Promise<string | undefined> {
-		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
-		const parts = [STATIC_INSTRUCTIONS];
-		if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
-		const rendered = parts.join("\n\n").trim();
+	async buildDeveloperInstructions(_agentDir, settings, _session): Promise<string | undefined> {
+		// Stable developer instructions only: static instructions. Volatile
+		// recall context is injected per turn via `beforeAgentStartPrompt` and
+		// never enters the stable prefix.
+		const rendered = STATIC_INSTRUCTIONS.trim();
 		if (!rendered) return undefined;
 		return truncateApproxTokens(rendered, settings.get("mnemopi.injectionTokenLimit"));
 	},

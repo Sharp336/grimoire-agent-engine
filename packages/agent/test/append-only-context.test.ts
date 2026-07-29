@@ -146,6 +146,66 @@ describe("StablePrefix", () => {
 		p.build(makeContext({ systemPrompt: ["V2"] }), BUILD_OPTS);
 		expect(p.version).toBe(2); // unchanged = no increment
 	});
+	it("rebuilds, increments version, and changes fingerprint when only stableSystemPromptBlockCount changes", () => {
+		const p = new StablePrefix();
+		const base = { systemPrompt: ["Hello"], tools: [makeTool("read")] };
+
+		p.build(makeContext({ ...base, stableSystemPromptBlockCount: 1 }), BUILD_OPTS);
+		const fp1 = p.fingerprint;
+		expect(p.version).toBe(1);
+		expect(p.toContext().stableSystemPromptBlockCount).toBe(1);
+
+		const changed2 = p.build(makeContext({ ...base, stableSystemPromptBlockCount: 2 }), BUILD_OPTS);
+		expect(changed2).toBe(true);
+		const fp2 = p.fingerprint;
+		expect(fp2).not.toBe(fp1);
+		expect(p.version).toBe(2);
+		expect(p.toContext().stableSystemPromptBlockCount).toBe(2);
+
+		const changed3 = p.build(makeContext({ ...base, stableSystemPromptBlockCount: undefined }), BUILD_OPTS);
+		expect(changed3).toBe(true);
+		expect(p.fingerprint).not.toBe(fp2);
+		expect(p.version).toBe(3);
+		expect(p.toContext().stableSystemPromptBlockCount).toBeUndefined();
+	});
+	it("keeps prefix stable and updates the volatile system-prompt suffix", () => {
+		const p = new StablePrefix();
+		const tools = [makeTool("read")];
+
+		p.build(
+			makeContext({ systemPrompt: ["Stable", "Volatile A"], stableSystemPromptBlockCount: 1, tools }),
+			BUILD_OPTS,
+		);
+		const fp = p.fingerprint;
+		const version = p.version;
+
+		const changed = p.build(
+			makeContext({ systemPrompt: ["Stable", "Volatile B"], stableSystemPromptBlockCount: 1, tools }),
+			BUILD_OPTS,
+		);
+		expect(changed).toBe(false);
+		expect(p.version).toBe(version);
+		expect(p.fingerprint).toBe(fp);
+		expect(p.toContext().systemPrompt).toEqual(["Stable", "Volatile B"]);
+	});
+
+	it("rebuilds when the stable system block changes", () => {
+		const p = new StablePrefix();
+		const tools = [makeTool("read")];
+
+		p.build(makeContext({ systemPrompt: ["Old", "Volatile"], stableSystemPromptBlockCount: 1, tools }), BUILD_OPTS);
+		const fp = p.fingerprint;
+		const version = p.version;
+
+		const changed = p.build(
+			makeContext({ systemPrompt: ["New", "Volatile"], stableSystemPromptBlockCount: 1, tools }),
+			BUILD_OPTS,
+		);
+		expect(changed).toBe(true);
+		expect(p.version).toBe(version + 1);
+		expect(p.fingerprint).not.toBe(fp);
+		expect(p.toContext().systemPrompt).toEqual(["New", "Volatile"]);
+	});
 });
 
 // ---------------------------------------------------------------------------
