@@ -11,11 +11,12 @@
 
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabControlCommand,
+	CollabPublicModel,
 	CollabUiRequest,
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
@@ -102,6 +103,20 @@ function isWireAgentEvent(event: AgentSessionEvent): event is AgentSessionEvent 
 function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEntry & WireSessionEntry {
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
 }
+
+/** Project a raw model through the collab wire's deliberately small public allowlist. */
+function toCollabPublicModel(model: Model): CollabPublicModel {
+	return {
+		provider: model.provider,
+		id: model.id,
+		name: model.name,
+		reasoning: model.reasoning,
+		input: [...model.input],
+		...(model.supportsTools === undefined ? {} : { supportsTools: model.supportsTools }),
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+	};
+}
 const CONNECT_TIMEOUT_MS = 15_000;
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
 export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
@@ -132,6 +147,7 @@ export class CollabHost {
 	#sessionId = "";
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	#ctlTail: Promise<void> = Promise.resolve();
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -141,6 +157,7 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
+	#resumingSession = false;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -325,6 +342,7 @@ export class CollabHost {
 	#broadcast(frame: CollabFrame): void {
 		if (this.#stopped || !this.#socket) return;
 		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+			if (this.#resumingSession) return;
 			void this.stop("session switched");
 			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
 			return;
@@ -384,7 +402,18 @@ export class CollabHost {
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		this.#sendWelcomeSnapshot(fromPeer, canWrite);
+		this.#ctx.session.emitNotice(
+			"info",
+			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
+			"collab",
+		);
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
 
+	/** Send a complete replacement snapshot without changing room membership or peer permissions. */
+	#sendWelcomeSnapshot(fromPeer: number, canWrite: boolean): void {
 		// Snapshot and send synchronously: no awaits between snapshot, welcome,
 		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
 		// queue behind the snapshot on the same socket and the guest can't
@@ -418,13 +447,6 @@ export class CollabHost {
 				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
-		this.#ctx.session.emitNotice(
-			"info",
-			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
-			"collab",
-		);
-		this.#updateStatusSegment();
-		this.#scheduleStateBroadcast();
 	}
 
 	/**
@@ -694,9 +716,6 @@ export class CollabHost {
 				fromPeer,
 			);
 		};
-		// Control is a write capability: a read-only (view-only link) peer is
-		// denied the same way the host denies it prompt/abort. Reply via
-		// ctl-result so the caller's pending request resolves rather than hangs.
 		if (!this.#peers.get(fromPeer)?.canWrite) {
 			fail("control is disabled on a read-only link", "control-disabled");
 			return;
@@ -705,16 +724,18 @@ export class CollabHost {
 			fail("remote control is disabled on the host (enable collab.allowRemoteControl)", "control-disabled");
 			return;
 		}
-		// A single try/catch in #runCtl spans the command, the shrink, and the
-		// send; this .catch is the last-resort reply so any throw still answers
-		// exactly once via ctl-result instead of an unhandled rejection.
-		void this.#runCtl(reqId, cmd, fromPeer).catch(err => {
-			logger.warn("collab control command failed", { cmd: cmd.k, error: String(err) });
-			this.#socket?.send(
-				{ t: "ctl-result", reqId, ok: false, error: err instanceof Error ? err.message : String(err) },
-				fromPeer,
-			);
-		});
+
+		// Every accepted ctl command shares one tail, matching RPC's command queue.
+		// The task catches internally, so a failed request cannot poison later work.
+		const run = async (): Promise<void> => {
+			try {
+				await this.#runCtl(reqId, cmd, fromPeer);
+			} catch (err) {
+				logger.warn("collab control command failed", { cmd: cmd.k, error: String(err) });
+				fail(err instanceof Error ? err.message : String(err));
+			}
+		};
+		this.#ctlTail = this.#ctlTail.then(run, run);
 	}
 
 	/**
@@ -748,7 +769,7 @@ export class CollabHost {
 			}
 			case "models-list": {
 				await session.modelRegistry.awaitBackgroundRefresh();
-				return { models: session.getAvailableModels() };
+				return { models: session.getAvailableModels().map(toCollabPublicModel) };
 			}
 			case "session-stats":
 				return session.getSessionStats();
@@ -760,7 +781,7 @@ export class CollabHost {
 				}
 				if (!model) throw new Error(`Model not found: ${cmd.provider}/${cmd.modelId}`);
 				await session.setModel(model);
-				return model;
+				return toCollabPublicModel(model);
 			}
 			case "set-thinking-level": {
 				// The wire carries an opaque `string`; validate it against the
@@ -778,8 +799,24 @@ export class CollabHost {
 			case "compact":
 				return await session.compact(cmd.customInstructions);
 			case "switch-session": {
-				const success = await session.switchSession(cmd.sessionPath);
-				return { cancelled: !success };
+				const target = (await SessionManager.listAll()).find(candidate => candidate.id === cmd.sessionId);
+				if (!target) throw new Error(`Session not found: ${cmd.sessionId}`);
+				const previousSessionId = this.#sessionId;
+				this.#resumingSession = true;
+				try {
+					const success = await this.#ctx.handleResumeSession(target.path);
+					if (!success) return { cancelled: true };
+					return { cancelled: false };
+				} finally {
+					this.#resumingSession = false;
+					const sessionId = this.#ctx.sessionManager.getSessionId();
+					if (sessionId !== previousSessionId) {
+						this.#sessionId = sessionId;
+						this.#lastStateJson = "";
+						for (const [peer, { canWrite }] of this.#peers) this.#sendWelcomeSnapshot(peer, canWrite);
+						this.#scheduleStateBroadcast();
+					}
+				}
 			}
 		}
 	}

@@ -37,6 +37,14 @@ interface HostState {
 	setThinkingCalls: unknown[];
 	compactCalls: unknown[];
 	switchCalls: string[];
+	sessionId: string;
+	cwd: string;
+	resumeTargets: Map<string, { id: string; cwd: string }>;
+	controlOrder: string[];
+	compactBlock?: Promise<void>;
+	compactStarted?: () => void;
+	emitSessionEvent?: () => void;
+	resumeAfterSwitchFailure?: { id: string; cwd: string; error: Error };
 }
 
 interface HostHarness {
@@ -55,22 +63,42 @@ interface HostHarness {
 function makeHostContext(): HostHarness {
 	const state: HostState = {
 		allowControl: false,
-		models: [{ provider: "test", id: "alpha" }],
+		models: [
+			{
+				provider: "test",
+				id: "alpha",
+				name: "Alpha",
+				reasoning: true,
+				input: ["text"],
+				supportsTools: true,
+				contextWindow: 200_000,
+				maxTokens: 16_000,
+				headers: { Authorization: "Bearer collab-model-secret" },
+				api: "anthropic-messages",
+				baseUrl: "https://private.example.test",
+				compat: { private: true },
+				compatConfig: { private: true },
+			},
+		],
 		sessionStats: { tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } },
 		setModelCalls: [],
 		setThinkingCalls: [],
 		compactCalls: [],
 		switchCalls: [],
+		sessionId: "sess-1",
+		cwd: "/tmp",
+		resumeTargets: new Map(),
+		controlOrder: [],
 	};
 	const ctx = {
 		settings: {
 			get: (key: string): unknown => (key === "collab.allowRemoteControl" ? state.allowControl : ""),
 		},
 		sessionManager: {
-			getSessionId: () => "sess-1",
-			getCwd: () => "/tmp",
+			getSessionId: () => state.sessionId,
+			getCwd: () => state.cwd,
 			snapshotForReplication: () => ({
-				header: { type: "session", id: "sess-1", timestamp: new Date().toISOString(), cwd: "/tmp" },
+				header: { type: "session", id: state.sessionId, timestamp: new Date().toISOString(), cwd: state.cwd },
 				entries: [],
 			}),
 			onEntryAppended: undefined,
@@ -82,7 +110,12 @@ function makeHostContext(): HostHarness {
 			sessionName: "test",
 			model: undefined,
 			thinkingLevel: undefined,
-			subscribe: () => () => {},
+			subscribe: (listener: (event: { type: "agent_start" }) => void) => {
+				state.emitSessionEvent = () => listener({ type: "agent_start" });
+				return () => {
+					state.emitSessionEvent = undefined;
+				};
+			},
 			emitNotice: () => {},
 			getAvailableModels: () => state.models,
 			getSessionStats: () => state.sessionStats,
@@ -96,11 +129,15 @@ function makeHostContext(): HostHarness {
 			},
 			compact: (instructions?: string) => {
 				state.compactCalls.push(instructions);
-				return Promise.resolve({ summary: "compacted" });
+				state.controlOrder.push("compact:start");
+				state.compactStarted?.();
+				return (state.compactBlock ?? Promise.resolve()).then(() => {
+					state.controlOrder.push("compact:end");
+					return { summary: "compacted" };
+				});
 			},
-			switchSession: (sessionPath: string) => {
-				state.switchCalls.push(sessionPath);
-				return Promise.resolve(true);
+			switchSession: () => {
+				throw new Error("collab controls must use handleResumeSession");
 			},
 		},
 		eventBus: undefined,
@@ -111,6 +148,24 @@ function makeHostContext(): HostHarness {
 		},
 		ui: { requestRender: () => {} },
 		showStatus: () => {},
+		handleResumeSession: (sessionPath: string) => {
+			state.switchCalls.push(sessionPath);
+			state.controlOrder.push("switch");
+			const target = state.resumeTargets.get(sessionPath);
+			if (target) {
+				state.sessionId = target.id;
+				state.cwd = target.cwd;
+			}
+			const failure = state.resumeAfterSwitchFailure;
+			if (failure) {
+				state.sessionId = failure.id;
+				state.cwd = failure.cwd;
+				state.emitSessionEvent?.();
+				return Promise.reject(failure.error);
+			}
+			state.emitSessionEvent?.();
+			return Promise.resolve(true);
+		},
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
 	return { ctx, state };
@@ -206,6 +261,30 @@ function failResult(frame: CollabFrame): Extract<CtlResult, { ok: false }> {
 	return r;
 }
 
+/** Collect ordered ctl results while permitting a session-switch resync welcome between them. */
+async function ctlResults(guest: TestGuest, count: number): Promise<CtlResult[]> {
+	const results: CtlResult[] = [];
+	while (results.length < count) {
+		const frame = await guest.nextFrame();
+		if (frame.t === "ctl-result") results.push(frame);
+	}
+	return results;
+}
+
+function sessionInfo(id: string, cwd = "/resumed-project"): SessionInfo {
+	return {
+		path: `/tmp/${id}.jsonl`,
+		id,
+		cwd,
+		created: new Date(),
+		modified: new Date(),
+		messageCount: 1,
+		size: 1,
+		firstMessage: "",
+		allMessagesText: "",
+	};
+}
+
 /** Narrow a wire `unknown` payload into an object map; throws a clear error if it isn't one. */
 function obj(data: unknown): Record<string, unknown> {
 	if (!data || typeof data !== "object") throw new Error(`expected object payload, got ${typeof data}`);
@@ -275,6 +354,173 @@ describe("collab control frames", () => {
 		const result = okResult(await guest.nextFrame());
 		const models = arr(obj(result.data).models);
 		expect(models).toHaveLength(1);
+	});
+
+	it("projects models-list through the public DTO without credentials or transport fields", async () => {
+		harness.state.allowControl = true;
+		const guest = await joinAsGuest(host.link, "writer");
+		guestCleanups.push(() => guest.socket.close());
+		await guest.nextFrame(); // welcome
+
+		guest.socket.send({ t: "ctl", reqId: 30, cmd: { k: "models-list" } });
+		const result = okResult(await guest.nextFrame());
+		const serialized = JSON.stringify(result.data);
+		expect(serialized).not.toContain("collab-model-secret");
+		expect(serialized).not.toContain("Authorization");
+		expect(serialized).not.toContain("headers");
+		expect(serialized).not.toContain("compat");
+		expect(serialized).not.toContain("baseUrl");
+		expect(serialized).not.toContain("api");
+		expect(obj(arr(obj(result.data).models)[0]).id).toBe("alpha");
+	});
+
+	it("switches by session ID through interactive resume and keeps the room live on the new snapshot", async () => {
+		harness.state.allowControl = true;
+		const target = sessionInfo("resumed-session");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // initial welcome
+
+			guest.socket.send({ t: "ctl", reqId: 31, cmd: { k: "switch-session", sessionId: target.id } });
+			const resync = await guest.nextFrame();
+			expect(resync.t).toBe("welcome");
+			if (resync.t === "welcome") {
+				expect(resync.header.id).toBe(target.id);
+				expect(resync.state.cwd).toBe(target.cwd);
+			}
+			expect(obj(okResult(await guest.nextFrame()).data).cancelled).toBe(false);
+			expect(harness.state.switchCalls).toEqual([target.path]);
+			expect(host.participants).toHaveLength(2);
+
+			guest.socket.send({ t: "ctl", reqId: 32, cmd: { k: "session-stats" } });
+			expect(okResult(await guest.nextFrame()).reqId).toBe(32);
+		} finally {
+			listSpy.mockRestore();
+		}
+	});
+
+	it("rebinds and resyncs the room when resume changes the ID twice then rejects", async () => {
+		harness.state.allowControl = true;
+		const target = sessionInfo("intermediate-session");
+		const finalSession = { id: "resumed-before-failure", cwd: "/tmp/resumed-before-failure" };
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		harness.state.resumeAfterSwitchFailure = {
+			...finalSession,
+			error: new Error("resume render failed"),
+		};
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // initial welcome
+
+			guest.socket.send({ t: "ctl", reqId: 39, cmd: { k: "switch-session", sessionId: target.id } });
+			const resync = await guest.nextFrame();
+			expect(resync.t).toBe("welcome");
+			if (resync.t === "welcome") {
+				expect(resync.header.id).toBe(finalSession.id);
+				expect(resync.state.cwd).toBe(finalSession.cwd);
+			}
+			const failed = failResult(await guest.nextFrame());
+			expect(failed.reqId).toBe(39);
+			expect(failed.error).toBe("resume render failed");
+
+			harness.state.emitSessionEvent?.();
+			const manager = harness.ctx.sessionManager as unknown as { onEntryAppended?: (entry: unknown) => void };
+			manager.onEntryAppended?.({
+				id: "entry-after-resume-failure",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				type: "model_change",
+				model: "test/alpha",
+			});
+			await Bun.sleep(150);
+			expect(host.participants).toHaveLength(2);
+
+			guest.socket.send({ t: "ctl", reqId: 40, cmd: { k: "session-stats" } });
+			expect(okResult(await guest.nextFrame()).reqId).toBe(40);
+		} finally {
+			harness.state.resumeAfterSwitchFailure = undefined;
+			listSpy.mockRestore();
+		}
+	});
+
+	it("serializes a concurrent switch followed by compact in arrival order", async () => {
+		harness.state.allowControl = true;
+		harness.state.controlOrder.length = 0;
+		const target = sessionInfo("switch-before-compact");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // welcome
+
+			guest.socket.send({ t: "ctl", reqId: 33, cmd: { k: "switch-session", sessionId: target.id } });
+			guest.socket.send({ t: "ctl", reqId: 34, cmd: { k: "compact" } });
+			const results = await ctlResults(guest, 2);
+			expect(results.map(result => result.reqId)).toEqual([33, 34]);
+			expect(harness.state.controlOrder).toEqual(["switch", "compact:start", "compact:end"]);
+		} finally {
+			listSpy.mockRestore();
+		}
+	});
+
+	it("continues the control queue after a failed command", async () => {
+		harness.state.allowControl = true;
+		harness.state.controlOrder.length = 0;
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => []);
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // welcome
+
+			guest.socket.send({ t: "ctl", reqId: 37, cmd: { k: "switch-session", sessionId: "missing" } });
+			guest.socket.send({ t: "ctl", reqId: 38, cmd: { k: "compact" } });
+			const [failed, compacted] = await ctlResults(guest, 2);
+			expect(failed?.reqId).toBe(37);
+			expect(failed?.ok).toBe(false);
+			expect(compacted?.reqId).toBe(38);
+			expect(compacted?.ok).toBe(true);
+			expect(harness.state.controlOrder).toEqual(["compact:start", "compact:end"]);
+		} finally {
+			listSpy.mockRestore();
+		}
+	});
+
+	it("serializes a concurrent compact followed by switch in arrival order", async () => {
+		harness.state.allowControl = true;
+		harness.state.controlOrder.length = 0;
+		const compactGate = Promise.withResolvers<void>();
+		const compactStarted = Promise.withResolvers<void>();
+		harness.state.compactBlock = compactGate.promise;
+		harness.state.compactStarted = compactStarted.resolve;
+		const target = sessionInfo("compact-before-switch");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // welcome
+
+			guest.socket.send({ t: "ctl", reqId: 35, cmd: { k: "compact" } });
+			guest.socket.send({ t: "ctl", reqId: 36, cmd: { k: "switch-session", sessionId: target.id } });
+			await compactStarted.promise;
+			expect(harness.state.controlOrder).toEqual(["compact:start"]);
+			expect(harness.state.switchCalls).not.toContain(target.path);
+			compactGate.resolve();
+
+			const results = await ctlResults(guest, 2);
+			expect(results.map(result => result.reqId)).toEqual([35, 36]);
+			expect(harness.state.controlOrder).toEqual(["compact:start", "compact:end", "switch"]);
+		} finally {
+			harness.state.compactBlock = undefined;
+			harness.state.compactStarted = undefined;
+			listSpy.mockRestore();
+		}
 	});
 
 	it("shrinks an oversized sessions-list response instead of dropping it", async () => {
@@ -388,6 +634,6 @@ const _allCommands: CollabControlCommand[] = [
 	{ k: "set-model", provider: "p", modelId: "m" },
 	{ k: "set-thinking-level", level: "high" },
 	{ k: "compact", customInstructions: "c" },
-	{ k: "switch-session", sessionPath: "/x" },
+	{ k: "switch-session", sessionId: "session-id" },
 ];
 void _allCommands;
