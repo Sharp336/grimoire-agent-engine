@@ -294,6 +294,39 @@ describe("offline SQLite salvage", () => {
 		).rejects.toThrow("Candidate and backup paths collide");
 	});
 
+	test("rejects Win32 aliases in an existing intermediate parent component", async () => {
+		const sourceParent = path.join(root, "artifacts");
+		const aliasParent = `${sourceParent}. `;
+		const source = path.join(sourceParent, "agent.db");
+		const sourceSidecarAlias = path.join(aliasParent, "agent.db-wal");
+		const slug = "fixed";
+		const candidateBackupAlias = path.join(aliasParent, `agent.db.salvage-${slug}.tar`);
+		await Promise.all([fs.promises.mkdir(sourceParent), fs.promises.mkdir(aliasParent)]);
+		await fs.promises.writeFile(source, "source");
+
+		await expect(resolveArtifactPaths(source, sourceSidecarAlias, { platform: () => "win32" })).rejects.toThrow(
+			"Repair artifact collides with source triplet",
+		);
+		await expect(
+			resolveArtifactPaths(source, candidateBackupAlias, {
+				platform: () => "win32",
+				artifactSlug: () => slug,
+			}),
+		).rejects.toThrow("Candidate and backup paths collide");
+
+		for (const platform of ["darwin", "linux"] as const) {
+			const sidecarArtifacts = await resolveArtifactPaths(source, sourceSidecarAlias, {
+				platform: () => platform,
+			});
+			expect(sidecarArtifacts.candidate).toBe(sourceSidecarAlias);
+			const backupArtifacts = await resolveArtifactPaths(source, candidateBackupAlias, {
+				platform: () => platform,
+				artifactSlug: () => slug,
+			});
+			expect(backupArtifacts.candidate).toBe(candidateBackupAlias);
+		}
+	});
+
 	test("keeps trailing-dot and trailing-space artifact paths distinct on Darwin and Linux", async () => {
 		const source = path.join(root, "agent.db");
 		const output = path.join(root, "AGENT.DB-WAL. ");
