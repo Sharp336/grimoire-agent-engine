@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
+import * as net from "node:net";
 import { gzipSync } from "node:zlib";
 import { Code, ConnectError, type Transport } from "@connectrpc/connect";
+import * as publicTransport from "@oh-my-pi/pi-ai/transport";
 import {
 	acquireH2Session,
 	CONNECT_COMPRESSED_FLAG,
@@ -70,6 +72,19 @@ describe("shared Connect framing", () => {
 		const frames = reader.push(wire.subarray(3));
 		expect(frames.map(frame => new TextDecoder().decode(frame.payload))).toEqual(["alpha", "beta"]);
 		expect(frames.map(frame => frame.endOfStream)).toEqual([false, true]);
+	});
+
+	it("decodes a large frame fragmented into tiny chunks", () => {
+		const payload = new Uint8Array(2 * 1024 * 1024).fill(0x5a);
+		const wire = encodeConnectFrame(payload, CONNECT_END_STREAM_FLAG);
+		const reader = createConnectFrameReader();
+		let frames: ReturnType<typeof reader.push> = [];
+		for (let offset = 0; offset < wire.byteLength; offset += 1024) {
+			frames = frames.concat(reader.push(wire.subarray(offset, offset + 1024)));
+		}
+		expect(frames).toHaveLength(1);
+		expect(frames[0]?.payload).toEqual(payload);
+		expect(() => reader.finish()).not.toThrow();
 	});
 
 	it("rejects a declared payload above the configured bound before buffering it", () => {
@@ -201,6 +216,34 @@ describe("shared HTTP/1 bridge", () => {
 		expect(executions).toBe(2);
 	});
 
+	it("rejects poll streams that end before an EOF frame", async () => {
+		for (const frames of [[], [{ seqno: 0n, data: "partial", eof: false }]]) {
+			const bridge = await createHttp1Bridge({
+				baseUrl: "http://127.0.0.1",
+				provider: "transport-test",
+				headers: {},
+				requestBytes: new Uint8Array(),
+				createRpc() {
+					return {
+						async append() {},
+						async *receive() {
+							yield* [];
+						},
+						async *poll() {
+							yield* frames;
+						},
+						decodePoll(data) {
+							return data;
+						},
+					};
+				},
+			});
+			const iterator = bridge.messages[Symbol.asyncIterator]();
+			if (frames.length > 0) expect(await iterator.next()).toEqual({ value: "partial", done: false });
+			await expect(iterator.next()).rejects.toThrow("poll stream ended before EOF frame");
+		}
+	});
+
 	it("surfaces poll sequence violations as fatal errors", async () => {
 		const bridge = await createHttp1Bridge({
 			baseUrl: "http://127.0.0.1",
@@ -309,15 +352,85 @@ describe("shared HTTP/2 pool", () => {
 		});
 		server.on("session", session => sessions.push(session));
 
-		for (let index = 0; index < 5; index++) {
-			const lease = await acquireH2Session(baseUrl, "transport-test");
+		const leases = await Promise.all(Array.from({ length: 5 }, () => acquireH2Session(baseUrl, "transport-test")));
+		for (const lease of leases) {
 			const request = await lease.request({ ":method": "POST", ":path": "/run" });
 			request.end();
 			expect(await readAll(request)).toBe("ok");
+		}
+		for (const lease of leases) {
 			lease.release();
 			lease.release();
 		}
-		expect(sessions).toHaveLength(4);
+		expect(sessions).toHaveLength(1);
+	});
+
+	it("closes an acquired stream when abort wins after request creation", async () => {
+		const { baseUrl } = await listen(stream => {
+			stream.respond({ ":status": 200 });
+		});
+		const lease = await acquireH2Session(baseUrl, "transport-test");
+		let additions = 0;
+		let aborted = false;
+		const targetSignal = new AbortController().signal;
+		const signal = new Proxy(targetSignal, {
+			get(target, property) {
+				if (property === "aborted") return aborted;
+				if (property === "addEventListener") {
+					return (...args: Parameters<AbortSignal["addEventListener"]>) => {
+						additions++;
+						if (additions === 2) aborted = true;
+						target.addEventListener(...args);
+					};
+				}
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		await expect(lease.request({ ":method": "POST", ":path": "/race" }, { signal })).rejects.toThrow();
+		expect(additions).toBe(2);
+	});
+
+	it("tries only one fresh slot when HTTP/2 establishment fails", async () => {
+		let connections = 0;
+		const server = net.createServer(socket => {
+			connections++;
+			socket.destroy();
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") throw new Error("expected TCP fixture port");
+			await expect(acquireH2Session(`https://127.0.0.1:${address.port}`, "transport-test")).rejects.toThrow();
+			expect(connections).toBe(1);
+		} finally {
+			await new Promise<void>(resolve => server.close(() => resolve()));
+		}
+	});
+
+	it("evicts an idle manager when its final lease is released", async () => {
+		let sessionCount = 0;
+		const sessionClosed = Promise.withResolvers<void>();
+		const { baseUrl, server } = await listen(stream => {
+			stream.respond({ ":status": 200 });
+			stream.end("ok");
+		});
+		server.on("session", session => {
+			sessionCount++;
+			if (sessionCount === 1) session.once("close", sessionClosed.resolve);
+		});
+		const lease = await acquireH2Session(baseUrl, "transport-test");
+		const request = await lease.request({ ":method": "POST", ":path": "/idle" });
+		request.end();
+		await readAll(request);
+		lease.release();
+		await sessionClosed.promise;
+		const next = await acquireH2Session(baseUrl, "transport-test");
+		expect(sessionCount).toBe(2);
+		next.release();
 	});
 
 	it("preserves the originating connection error when every slot fails", async () => {
@@ -356,6 +469,32 @@ describe("shared HTTP/2 pool", () => {
 });
 
 describe("shared transport lifecycle", () => {
+	it("does not publish the unsafe synchronous bridge reset seam", () => {
+		expect("__resetHttp1Bridges" in publicTransport).toBeFalse();
+	});
+	it("provider imports do not register transport cleanup", async () => {
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { postmortem } from "@oh-my-pi/pi-utils";
+import { isTransportDisposed } from "./src/transport/lifecycle.ts";
+import "./src/providers/devin.ts";
+import "./src/providers/cursor/server-config.ts";
+await postmortem.cleanup();
+process.stdout.write(String(isTransportDisposed()));`,
+			],
+			{ cwd: new URL("..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe" },
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(stdout).toBe("false");
+	});
+
 	it("awaits registered disposers before resolving", async () => {
 		const child = Bun.spawn(
 			[

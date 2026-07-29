@@ -227,7 +227,10 @@ export async function createHttp1Bridge<TMessage>(
 						return;
 					}
 					acceptedDuplicate = true;
-					if (frame.eof) await closeBridge("success");
+					if (frame.eof) {
+						await closeBridge("success");
+						return;
+					}
 					continue;
 				} else if (frame.seqno === expectedSeq + 1n) {
 					expectedSeq = frame.seqno;
@@ -243,7 +246,9 @@ export async function createHttp1Bridge<TMessage>(
 					return;
 				}
 			}
-			await closeBridge("success");
+			if (state.kind === "open") {
+				await closeBridge("fatal", new Error("HTTP/1 poll stream ended before EOF frame"));
+			}
 		} catch (error) {
 			if (state.kind === "open") await closeBridge("fatal", normalizeError(error));
 		}

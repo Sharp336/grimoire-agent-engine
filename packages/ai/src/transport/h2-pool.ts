@@ -17,6 +17,7 @@ type SlotState =
 	| HealthySlot;
 
 interface PoolEntry {
+	key: string;
 	slots: SlotState[];
 	roundRobin: number;
 }
@@ -135,6 +136,29 @@ function makeLease(entry: PoolEntry, slotIndex: number, slot: HealthySlot): H2Le
 	const { generation, manager } = slot;
 	let released = false;
 	let requested = false;
+	const release = (): void => {
+		if (released) return;
+		released = true;
+		const current = entry.slots[slotIndex];
+		if (current.kind === "healthy" && current.generation === generation) {
+			current.leases = Math.max(0, current.leases - 1);
+			if (current.leases === 0) {
+				entry.slots[slotIndex] = { kind: "vacant" };
+				closeManager(current.manager);
+				if (entry.slots.every(candidate => candidate.kind === "vacant")) pools.delete(entry.key);
+			}
+			return;
+		}
+		for (const retiring of retiringManagers) {
+			if (retiring.manager !== manager) continue;
+			retiring.leases = Math.max(0, retiring.leases - 1);
+			if (retiring.leases === 0) {
+				retiringManagers.delete(retiring);
+				closeManager(retiring.manager);
+			}
+			return;
+		}
+	};
 	return {
 		async request(headers, options) {
 			if (released) throw new Error("Cannot request from a released HTTP/2 lease");
@@ -153,27 +177,15 @@ function makeLease(entry: PoolEntry, slotIndex: number, slot: HealthySlot): H2Le
 			const onAbort = (): void => stream.close(http2Constants.NGHTTP2_CANCEL);
 			signal?.addEventListener("abort", onAbort, { once: true });
 			stream.once("close", () => signal?.removeEventListener("abort", onAbort));
+			if (signal?.aborted) {
+				onAbort();
+				release();
+				throw new AIError.AbortError();
+			}
 			stream.on("data", () => manager.notifyResponseByteRead(stream));
 			return stream;
 		},
-		release() {
-			if (released) return;
-			released = true;
-			const current = entry.slots[slotIndex];
-			if (current.kind === "healthy" && current.generation === generation) {
-				current.leases = Math.max(0, current.leases - 1);
-				return;
-			}
-			for (const retiring of retiringManagers) {
-				if (retiring.manager !== manager) continue;
-				retiring.leases = Math.max(0, retiring.leases - 1);
-				if (retiring.leases === 0) {
-					retiringManagers.delete(retiring);
-					closeManager(retiring.manager);
-				}
-				return;
-			}
-		},
+		release,
 	};
 }
 
@@ -184,16 +196,21 @@ async function acquireFromSlot(
 	origin: string,
 	proxyUrl: string | undefined,
 	signal: AbortSignal | undefined,
+	allowFreshEstablishment: boolean,
 ): Promise<H2Lease> {
 	let slot = entry.slots[slotIndex];
 	if (slot.kind === "healthy" && (slot.manager.state() === "error" || slot.manager.state() === "closed")) {
+		const error = slot.manager.error() ?? new Error(`HTTP/2 connection to ${origin} is unavailable`);
 		retireManager(entry, slotIndex, slot);
+		if (!allowFreshEstablishment) throw error;
 		slot = entry.slots[slotIndex];
 	}
 	if (slot.kind === "healthy") {
 		const state = await waitWithSignal(slot.manager.connect(), signal);
 		if (state === "error") {
+			const error = slot.manager.error() ?? new Error(`HTTP/2 connection to ${origin} failed`);
 			retireManager(entry, slotIndex, slot);
+			if (!allowFreshEstablishment) throw error;
 			slot = entry.slots[slotIndex];
 		}
 	}
@@ -260,16 +277,29 @@ export async function acquireH2Session(baseUrl: string, provider: string, signal
 	const key = `${origin}|${proxyUrl ?? ""}`;
 	let entry = pools.get(key);
 	if (!entry) {
-		entry = { slots: Array.from({ length: POOL_SIZE }, () => ({ kind: "vacant" })), roundRobin: 0 };
+		entry = { key, slots: Array.from({ length: POOL_SIZE }, () => ({ kind: "vacant" })), roundRobin: 0 };
 		pools.set(key, entry);
 	}
 
+	const slotOrder = Array.from({ length: POOL_SIZE }, (_, attempt) => (entry.roundRobin + attempt) % POOL_SIZE);
+	const occupied = slotOrder.filter(slotIndex => entry.slots[slotIndex]?.kind !== "vacant");
 	let originatingError: unknown;
-	for (let attempt = 0; attempt < POOL_SIZE; attempt++) {
-		const slotIndex = (entry.roundRobin + attempt) % POOL_SIZE;
+	for (const slotIndex of occupied) {
 		try {
-			const lease = await acquireFromSlot(entry, slotIndex, baseUrl, origin, proxyUrl, signal);
+			const lease = await acquireFromSlot(entry, slotIndex, baseUrl, origin, proxyUrl, signal, false);
 			entry.roundRobin = (slotIndex + 1) % POOL_SIZE;
+			return lease;
+		} catch (error) {
+			if (error instanceof AIError.AbortError) throw error;
+			originatingError ??= error;
+		}
+	}
+
+	const vacantIndex = slotOrder.find(slotIndex => entry.slots[slotIndex]?.kind === "vacant");
+	if (vacantIndex !== undefined) {
+		try {
+			const lease = await acquireFromSlot(entry, vacantIndex, baseUrl, origin, proxyUrl, signal, true);
+			entry.roundRobin = (vacantIndex + 1) % POOL_SIZE;
 			return lease;
 		} catch (error) {
 			if (error instanceof AIError.AbortError) throw error;

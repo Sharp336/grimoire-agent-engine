@@ -117,6 +117,10 @@ export async function establishH2Request(options: EstablishH2RequestOptions): Pr
 
 export interface H2PostOptions extends EstablishH2RequestOptions {
 	body: Uint8Array | string;
+	/**
+	 * Explicit caller-selected transport seam. When provided, no H2 attempt or
+	 * automatic protocol decision occurs; the caller owns the injected fetch.
+	 */
 	fetchOverride?: FetchImpl;
 }
 
@@ -179,6 +183,10 @@ async function postFetch(options: H2PostOptions, fetchImpl: FetchImpl): Promise<
 	};
 }
 
+/**
+ * Post without an implicit protocol downgrade. Production uses H2 exclusively;
+ * an explicit `fetchOverride` is the caller's chosen transport/test seam.
+ */
 export async function postH2Only(options: H2PostOptions): Promise<TransportResponse> {
 	if (options.fetchOverride) return postFetch(options, options.fetchOverride);
 	const exchange = await establishH2Request(options);
