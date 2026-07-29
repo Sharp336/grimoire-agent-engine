@@ -25,7 +25,8 @@ type Scenario =
 	| { kind: "http-status"; status: number }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-transport-error"; responseFinished: PromiseWithResolvers<void> }
-	| { kind: "exec-then-hang" };
+	| { kind: "exec-then-hang" }
+	| { kind: "malformed-frame-before-turn-ended" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -106,6 +107,10 @@ function execAndTurnEndedFrame(): Buffer {
 	return Buffer.concat([execRequestFrame(), turnEndedFrame()]);
 }
 
+
+function malformedProtobufFrame(): Buffer {
+	return frameConnectMessage(Buffer.from([0x0a]));
+}
 async function startServer(): Promise<string> {
 	server = http2.createServer();
 	server.on("session", session => {
@@ -154,6 +159,12 @@ async function startServer(): Promise<string> {
 
 		if (scenario.kind === "end-before-turn") {
 			stream.write(textDeltaFrame("partial"));
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "malformed-frame-before-turn-ended") {
+			stream.write(Buffer.concat([textDeltaFrame("partial"), malformedProtobufFrame(), turnEndedFrame()]));
 			stream.end();
 			return;
 		}
@@ -327,6 +338,17 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
+	});
+
+	it("rejects malformed protobuf frames before a queued turnEnded without emitting done", async () => {
+		scenario = { kind: "malformed-frame-before-turn-ended" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Cursor protocol error: malformed response frame");
 	});
 
 	it("aborts without emitting done when the signal fires", async () => {

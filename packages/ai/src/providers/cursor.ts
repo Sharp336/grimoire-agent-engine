@@ -481,7 +481,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			stream.push({ type: "start", partial: output });
 
 			const frameReader = createConnectFrameReader();
-
 			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentToolCall: ToolCallState | null = null;
@@ -640,6 +639,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							h2Request?.close();
 							return;
 						}
+
 					}
 				});
 
