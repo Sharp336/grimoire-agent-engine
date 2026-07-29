@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import * as fs from "node:fs";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -648,7 +648,7 @@ const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 function readFilesystemLocation(raw: string, cwd?: string): string {
 	const literalPath = toAcpLocationPath(raw, cwd);
-	if (existsSync(literalPath)) return raw;
+	if (fs.existsSync(literalPath)) return raw;
 	const archivePath = parseArchivePathCandidates(raw)[0]?.archivePath;
 	if (archivePath) return archivePath;
 	const sqlitePath = parseSqlitePathCandidates(raw)[0]?.sqlitePath;
