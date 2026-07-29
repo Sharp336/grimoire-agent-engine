@@ -271,13 +271,10 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 	 */
 	requestModelId?: string;
 	projectId?: string;
-	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
-	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	providerSessionState?: Map<string, ProviderSessionState>;
 }
 
 export interface AntigravityProviderSessionState extends ProviderSessionState {
-	lastGoodEndpoint?: string;
 	/**
 	 * Per-conversation request-envelope identity that mirrors the real
 	 * Antigravity client. `sessionId` is the signed-decimal session id;
@@ -312,8 +309,6 @@ export function getAntigravityProviderSessionState(
 
 const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-const ANTIGRAVITY_ENDPOINT_FALLBACKS = [ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_SANDBOX_ENDPOINT] as const;
 
 export {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
@@ -328,7 +323,7 @@ const BASE_DELAY_MS = 1000;
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 const GOOGLE_GEMINI_REFRESH_SKEW_MS = 60_000;
-const ANTIGRAVITY_REFRESH_SKEW_MS = 60_000;
+const ANTIGRAVITY_REFRESH_SKEW_MS = 30_000;
 
 const CLOUD_CODE_OVERSIZED_REQUEST_PATTERN =
 	/\b(?:request|payload)(?:\s+payload)?\s+(?:size\s+)?(?:is\s+)?(?:too\s+large|exceeds?(?:\s+the)?\s+(?:maximum\s+)?(?:size|limit))\b/i;
@@ -565,39 +560,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				: undefined;
 
 			if (isAntigravity) {
-				const mode = options?.antigravityEndpointMode ?? "auto";
-				if (mode === "sandbox") {
-					endpoints = [ANTIGRAVITY_SANDBOX_ENDPOINT];
-					if (providerState) providerState.lastGoodEndpoint = undefined;
-				} else if (mode === "production") {
-					endpoints = [ANTIGRAVITY_DAILY_ENDPOINT];
-					if (providerState) providerState.lastGoodEndpoint = undefined;
-				} else {
-					// auto mode
-					if (baseUrl) {
-						const cleanUrl = baseUrl.replace(/\/+$/, "");
-						if (cleanUrl !== ANTIGRAVITY_DAILY_ENDPOINT && cleanUrl !== ANTIGRAVITY_SANDBOX_ENDPOINT) {
-							endpoints = [baseUrl];
-							if (providerState) providerState.lastGoodEndpoint = undefined;
-						} else {
-							const defaultFallbacks = [...ANTIGRAVITY_ENDPOINT_FALLBACKS] as string[];
-							const lastGood = providerState?.lastGoodEndpoint;
-							if (lastGood && defaultFallbacks.includes(lastGood)) {
-								endpoints = [lastGood, ...defaultFallbacks.filter(e => e !== lastGood)];
-							} else {
-								endpoints = defaultFallbacks;
-							}
-						}
-					} else {
-						const defaultFallbacks = [...ANTIGRAVITY_ENDPOINT_FALLBACKS] as string[];
-						const lastGood = providerState?.lastGoodEndpoint;
-						if (lastGood && defaultFallbacks.includes(lastGood)) {
-							endpoints = [lastGood, ...defaultFallbacks.filter(e => e !== lastGood)];
-						} else {
-							endpoints = defaultFallbacks;
-						}
-					}
-				}
+				endpoints = [ANTIGRAVITY_DAILY_ENDPOINT];
 			} else {
 				endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT];
 			}
@@ -1044,13 +1007,6 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						);
 					}
 
-					// Succeeded! Break the endpoints loop.
-					if (
-						providerState &&
-						(options?.antigravityEndpointMode === "auto" || !options?.antigravityEndpointMode)
-					) {
-						providerState.lastGoodEndpoint = endpoint;
-					}
 					// Commit after a fully successful attempt (content + finish reason);
 					// used as the next request's last_execution_id. Overwrite even when
 					// undefined so a response without an id can't leave a stale value.

@@ -5,6 +5,11 @@
 ### Added
 
 - Added a per-request Cursor HTTP/1 transport preference, with HTTP/2 remaining the default.
+- Added the independently selectable `antigravity` web-search provider. It uses only google-antigravity OAuth and the captured daily `generateContent` Google Search grounding executor, preserves grounded citations, and defaults to `gemini-3.6-flash-low` (configurable with `providers.webSearchAntigravityModel` or `ANTIGRAVITY_SEARCH_MODEL`).
+
+### Changed
+
+- Separated Gemini and Antigravity web-search credential/model ownership and removed the unobserved Antigravity sandbox endpoint-mode fallback from search, chat, and image routing.
 
 ## [17.1.8] - 2026-07-28
 

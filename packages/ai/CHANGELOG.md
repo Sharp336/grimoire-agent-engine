@@ -16,6 +16,10 @@
 ### Changed
 
 - Removed the obsolete Devin JWT preflight (`GetUserJwt`), which no longer exists in the current Devin CLI, and moved Devin chat streaming to HTTP/2 with proxy support.
+### Changed
+
+- Removed unobserved Antigravity sandbox failover and last-good-endpoint state from Cloud Code Assist generation; google-antigravity now uses the daily endpoint only.
+
 ### Fixed
 
 - Fixed Gemini 3.6 Flash requests to Antigravity Cloud Code Assist sending `thinkingLevel` instead of the endpoint's required per-tier `thinkingBudget`, which could yield repeated empty responses.

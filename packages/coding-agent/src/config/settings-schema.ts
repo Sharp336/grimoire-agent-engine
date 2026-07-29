@@ -4825,32 +4825,14 @@ export const SETTINGS_SCHEMA = {
 			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
 		},
 	},
-	"providers.antigravityEndpoint": {
-		type: "enum",
-		values: ["auto", "production", "sandbox"] as const,
-		default: "auto",
+	"providers.webSearchAntigravityModel": {
+		type: "string",
+		default: undefined,
 		ui: {
 			tab: "providers",
 			group: "Services",
-			label: "Antigravity Endpoint Mode",
-			description: "Endpoint routing strategy for google-antigravity providers (chat, search, image, discovery)",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Try production endpoint, fail over to sandbox on 5xx/429",
-				},
-				{
-					value: "production",
-					label: "Production Only",
-					description: "Force production endpoint only",
-				},
-				{
-					value: "sandbox",
-					label: "Sandbox Only",
-					description: "Force sandbox endpoint only",
-				},
-			],
+			label: "Antigravity web_search model",
+			description: "Model ID for Antigravity Google Search grounding. Defaults to gemini-3.6-flash-low.",
 		},
 	},
 	"providers.imageOrder": {

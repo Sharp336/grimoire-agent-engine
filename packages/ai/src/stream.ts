@@ -1752,7 +1752,6 @@ function mapOptionsForApi<TApi extends Api>(
 						},
 						hideThinkingSummary: options?.hideThinkingSummary,
 						toolChoice,
-						antigravityEndpointMode: options?.antigravityEndpointMode,
 					});
 				}
 
@@ -1775,7 +1774,6 @@ function mapOptionsForApi<TApi extends Api>(
 						thinking: { enabled: true, budgetTokens: thinkingBudget },
 						hideThinkingSummary: options?.hideThinkingSummary,
 						toolChoice,
-						antigravityEndpointMode: options?.antigravityEndpointMode,
 					});
 				}
 				// Budget clamped to zero — fall through to the thinking-off path.
@@ -1792,7 +1790,6 @@ function mapOptionsForApi<TApi extends Api>(
 				requestModelId: resolveWireModelId(model, undefined),
 				thinking,
 				toolChoice,
-				antigravityEndpointMode: options?.antigravityEndpointMode,
 			});
 		}
 

@@ -18,7 +18,12 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{
 		value: "gemini",
 		label: "Gemini",
-		description: "Google Search grounding via Gemini (uses google-gemini-cli or google-antigravity OAuth)",
+		description: "Google Search grounding via Gemini (uses Gemini CLI OAuth or a Google Developer API key)",
+	},
+	{
+		value: "antigravity",
+		label: "Antigravity",
+		description: "Google Search grounding via google-antigravity OAuth",
 	},
 	{
 		value: "anthropic",
