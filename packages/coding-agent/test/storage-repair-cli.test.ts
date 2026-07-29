@@ -864,6 +864,25 @@ describe("offline SQLite salvage", () => {
 		expect(entries.some(name => name.startsWith(`.${path.basename(candidate)}.candidate-`))).toBe(false);
 	});
 
+	test("candidate stage mutation between sealing and publication is refused", async () => {
+		await createAgentSource();
+		const candidate = path.join(root, "stage-mutation.db");
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root, output: candidate },
+			{
+				beforeCandidatePublication: async () => {
+					const stage = requireValue((await stageArtifacts(candidate, "candidate")).at(0), "candidate stage");
+					await fs.promises.appendFile(path.join(root, stage), "tampered after sealing");
+				},
+			},
+		);
+		expect(result.status).toBe("refused");
+		expect(result.refusal).toContain("Publication stage changed after verification");
+		expect(result.candidatePublished).toBe(false);
+		expect(await Bun.file(candidate).exists()).toBe(false);
+		expect(await stageArtifacts(candidate, "candidate")).toEqual([]);
+	});
+
 	test("post-link candidate replacement refuses publication without deleting the replacement", async () => {
 		const dbPath = await createAgentSource();
 		const candidate = path.join(root, "candidate-replacement.db");
