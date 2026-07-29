@@ -1397,6 +1397,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}),
 	);
 	let model = options.model;
+	// Set only where the `default` role actually chooses the model, so a later config
+	// reload can rebind that and nothing else. Left false for an explicit `--model`, a
+	// restored session's own model, and `pickDefaultAvailableModel`'s arbitrary pick.
+	let modelFromDefaultRole = false;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	// Identify session model strings to restore in fallback order. We do an
@@ -1448,6 +1452,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// defaultRoleSpec.model already comes from modelRegistry.getAvailable(),
 			// so re-validating auth here just repeats the expensive lookup path.
 			model = settingsDefaultModel;
+			modelFromDefaultRole = true;
 		});
 	}
 
@@ -2381,6 +2386,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				defaultRoleSpec = reResolvedRoleSpec;
 				const resolvedDefaultModel = reResolvedRoleSpec.model;
 				model = resolvedDefaultModel;
+				modelFromDefaultRole = true;
 				modelFallbackMessage = undefined;
 				// Recompute the thinking level against the now-real model.
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,
@@ -3136,6 +3142,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
+			// Tracked at the actual role assignments rather than inferred, so an explicit
+			// `--model`, a restored session's model, and an arbitrary availability pick all
+			// stay put when `modelRoles.default` later changes.
+			modelFromDefaultRole,
 			prewalk: options.prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
