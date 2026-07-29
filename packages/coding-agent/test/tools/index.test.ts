@@ -198,17 +198,24 @@ describe("createTools", () => {
 	});
 
 	it("registers workflow only for persistent top-level sessions", async () => {
-		const persistent = createTestSession({ sessionManager: createSessionManager() });
+		const createPersistentSession = (overrides: Partial<ToolSession> = {}) =>
+			createTestSession({
+				sessionManager: createSessionManager(),
+				getSessionFile: () => "/tmp/test/session.jsonl",
+				...overrides,
+			});
+
+		const persistent = createPersistentSession();
 		expect((await createTools(persistent, ["workflow"])).map(tool => tool.name)).toEqual(["workflow", "task"]);
 
-		const nested = createTestSession({ sessionManager: createSessionManager(), taskDepth: 1 });
+		const nested = createPersistentSession({ taskDepth: 1 });
 		expect(await createTools(nested, ["workflow"])).toEqual([]);
 
-		const restricted = createTestSession({
-			sessionManager: createSessionManager(),
-			restrictToolNames: true,
-		});
+		const restricted = createPersistentSession({ restrictToolNames: true });
 		expect(await createTools(restricted, ["workflow"])).toEqual([]);
+
+		const noSessionFile = createTestSession({ sessionManager: createSessionManager() });
+		expect((await createTools(noSessionFile, ["workflow"])).map(tool => tool.name)).toEqual(["task"]);
 
 		expect(await createTools(createTestSession(), ["workflow"])).toEqual([]);
 	});
