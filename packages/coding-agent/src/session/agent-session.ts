@@ -399,8 +399,7 @@ type SetSessionNameWithTrigger = (
 	trigger?: SessionNameTrigger,
 ) => Promise<boolean>;
 
-export class AgentSession {
-	readonly agent: Agent;
+export class AgentSession { readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
@@ -4085,6 +4084,10 @@ export class AgentSession {
 		return this.#tools.buildSystemPromptForAgentStart(promptText);
 	}
 
+	#buildSystemPromptForSideRequest(promptText: string): Promise<SystemPromptPlan> {
+		return this.#tools.buildSystemPromptForSideRequest(promptText);
+	}
+
 	/** Replaces connected MCP tools and enables them immediately. */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		return this.#tools.refreshMCPTools(mcpTools);
@@ -6826,7 +6829,7 @@ export class AgentSession {
 		const cacheSessionId = this.sessionId;
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
-		const systemPromptPlan = await this.#buildSystemPromptForAgentStart(args.promptText);
+		const systemPromptPlan = await this.#buildSystemPromptForSideRequest(args.promptText);
 		const context = await this.agent.buildSideRequestContext(llmMessages, systemPromptPlan, {
 			anthropicBillingSeed: this.#getSideRequestAnthropicBillingSeed(cacheSessionId),
 		});
@@ -8431,5 +8434,4 @@ export class AgentSession {
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
-	}
-}
+	} }

@@ -153,6 +153,13 @@ export interface MemoryBackend {
 	beforeAgentStartPrompt?(session: AgentSession, promptText: string): Promise<string | undefined>;
 
 	/**
+	 * Inject volatile recall context for an ephemeral side request. This operation
+	 * MUST recall for `promptText` each time and MUST NOT replace the snippet
+	 * cached by `beforeAgentStartPrompt` for normal agent turns.
+	 */
+	beforeSideRequestPrompt(session: AgentSession, promptText: string): Promise<string | undefined>;
+
+	/**
 	 * Optional hook to splice extra context into a compaction summarization.
 	 *
 	 * Called from the compaction call site before the LLM summary is requested.

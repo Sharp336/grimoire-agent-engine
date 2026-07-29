@@ -395,6 +395,9 @@ describe("AgentSession message pipeline", () => {
 			async beforeAgentStartPrompt(_session, promptText) {
 				return `<memories>recall for ${promptText}</memories>`;
 			},
+			async beforeSideRequestPrompt(_session, promptText) {
+				return `<memories>recall for ${promptText}</memories>`;
+			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
 		const agent = new Agent({
@@ -871,6 +874,9 @@ describe("AgentSession message pipeline", () => {
 				remembered = true;
 				return injected;
 			},
+			async beforeSideRequestPrompt() {
+				return undefined;
+			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
 		registerCustomApi(api, (_model, context) => {
@@ -1150,6 +1156,9 @@ describe("AgentSession message pipeline", () => {
 				remembered = true;
 				return injected;
 			},
+			async beforeSideRequestPrompt() {
+				return undefined;
+			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
 		registerCustomApi(api, (_model, context) => {
@@ -1239,6 +1248,9 @@ describe("AgentSession message pipeline", () => {
 				if (remembered || !recallAvailable) return undefined;
 				remembered = true;
 				return injected;
+			},
+			async beforeSideRequestPrompt() {
+				return undefined;
 			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
@@ -1333,6 +1345,9 @@ describe("AgentSession message pipeline", () => {
 				if (remembered) return undefined;
 				remembered = true;
 				return injected;
+			},
+			async beforeSideRequestPrompt() {
+				return undefined;
 			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);

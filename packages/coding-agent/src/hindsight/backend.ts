@@ -106,6 +106,11 @@ export const hindsightBackend: MemoryBackend = {
 		return await state.beforeAgentStartPrompt(promptText);
 	},
 
+	async beforeSideRequestPrompt(session: AgentSession, promptText: string): Promise<string | undefined> {
+		const state = session.getHindsightSessionState();
+		return await state?.beforeSideRequestPrompt(promptText);
+	},
+
 	async clear(_agentDir, _cwd, session): Promise<void> {
 		// Hindsight memory is server-side. The local cache is what we can wipe —
 		// operators who want to delete the upstream bank should use the Hindsight

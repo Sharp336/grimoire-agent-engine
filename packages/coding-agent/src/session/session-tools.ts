@@ -1031,6 +1031,32 @@ export class SessionTools {
 		}
 	}
 
+	/** Builds the stable prompt plus side-request recall context for an ephemeral turn. */
+	async buildSystemPromptForSideRequest(promptText: string): Promise<SystemPromptPlan> {
+		if (this.#systemPromptPlan.compositionPolicy === "verbatim") return this.#systemPromptPlan;
+
+		const turnContext = prompt.render(turnContextPrompt, { date: this.#getLocalCalendarDate() }).trim();
+		const backend = await resolveMemoryBackend(this.#host.settings);
+		try {
+			const injected = await backend.beforeSideRequestPrompt(this.#host.memoryBackendSession(), promptText);
+			return {
+				...this.#systemPromptPlan,
+				systemPrompt: injected
+					? [...this.#systemPromptPlan.systemPrompt, turnContext, injected]
+					: [...this.#systemPromptPlan.systemPrompt, turnContext],
+			};
+		} catch (err) {
+			logger.debug("Memory backend beforeSideRequestPrompt failed", {
+				backend: backend.id,
+				error: String(err),
+			});
+			return {
+				...this.#systemPromptPlan,
+				systemPrompt: [...this.#systemPromptPlan.systemPrompt, turnContext],
+			};
+		}
+	}
+
 	/**
 	 * Compose a stable signature for the inputs that `rebuildSystemPrompt` reads.
 	 * Two calls producing identical signatures are guaranteed to produce identical

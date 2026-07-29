@@ -456,6 +456,19 @@ export class HindsightSessionState {
 		return context;
 	}
 
+	async beforeSideRequestPrompt(promptText: string): Promise<string | undefined> {
+		if (!this.config.autoRecall) return undefined;
+		const latestPrompt = promptText.trim();
+		if (!latestPrompt) return undefined;
+
+		const history = extractMessages(this.session.sessionManager);
+		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
+		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
+		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
+		const { context, ok } = await this.recallForContext(truncated);
+		return ok ? context ?? undefined : undefined;
+	}
+
 	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {
 		const lastUser = messages.findLast(m => m.role === "user");
 		if (!lastUser) return undefined;

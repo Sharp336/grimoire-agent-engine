@@ -475,6 +475,18 @@ export class MnemopiSessionState {
 		return context;
 	}
 
+	async beforeSideRequestPrompt(promptText: string): Promise<string | undefined> {
+		if (!this.config.autoRecall) return undefined;
+		const latestPrompt = promptText.trim();
+		if (!latestPrompt) return undefined;
+
+		const history = extractMessages(this.session.sessionManager);
+		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
+		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
+		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
+		return await this.recallForContext(truncated);
+	}
+
 	async recallForCompaction(messages: AgentMessage[]): Promise<string | undefined> {
 		const flat = flattenAgentMessages(messages);
 		const lastUser = flat.findLast(message => message.role === "user");

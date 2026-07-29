@@ -24,6 +24,9 @@ export const localBackend: MemoryBackend = {
 	async buildDeveloperInstructions(agentDir, settings, session) {
 		return buildMemoryToolDeveloperInstructions(agentDir, settings, session);
 	},
+	async beforeSideRequestPrompt() {
+		return undefined;
+	},
 	async clear(agentDir, cwd, session) {
 		clearMemoryToolDeveloperInstructionsCache(session);
 		await clearMemoryData(agentDir, cwd);

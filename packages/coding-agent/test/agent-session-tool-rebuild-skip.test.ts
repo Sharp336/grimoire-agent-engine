@@ -837,6 +837,9 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 				recallCalls++;
 				return injected;
 			},
+			async beforeSideRequestPrompt() {
+				return undefined;
+			},
 		};
 		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
 		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {

@@ -444,6 +444,40 @@ describe("hindsightBackend first-turn injection", () => {
 		expect(recallSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("recalls independently for side prompts without replacing the main cached snippet", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		const session = makeFakeSession({
+			sessionId: "s-side-recall",
+			entries: [{ role: "assistant", text: "previous assistant context" }],
+		});
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const recallSpy = vi.spyOn(HindsightApi.prototype, "recall").mockImplementation(async (_bankId, query) => ({
+			results: [{ id: query, text: `memory for ${query}` }],
+		}) as never);
+		const main = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "main prompt");
+		const sideOne = await hindsightBackend.beforeSideRequestPrompt(session as never, "first side prompt");
+		const sideTwo = await hindsightBackend.beforeSideRequestPrompt(session as never, "second side prompt");
+		const replayedMain = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "later main prompt");
+
+		expect(recallSpy).toHaveBeenCalledTimes(3);
+		expect(recallSpy.mock.calls[1]?.[1]).toContain("first side prompt");
+		expect(recallSpy.mock.calls[2]?.[1]).toContain("second side prompt");
+		expect(sideOne).toContain("first side prompt");
+		expect(sideTwo).toContain("second side prompt");
+		expect(replayedMain).toBe(main);
+		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(main);
+	});
+
 	it("returns undefined from the hook when auto recall is off", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",

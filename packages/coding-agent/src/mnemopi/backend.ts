@@ -124,6 +124,11 @@ export const mnemopiBackend: MemoryBackend = {
 		return await state?.beforeAgentStartPrompt(promptText);
 	},
 
+	async beforeSideRequestPrompt(session, promptText): Promise<string | undefined> {
+		const state = getMnemopiSessionState(session);
+		return await state?.beforeSideRequestPrompt(promptText);
+	},
+
 	async clear(agentDir, _cwd, session): Promise<void> {
 		const previous = session ? setMnemopiSessionState(session, undefined) : undefined;
 		await previous?.dispose({ consolidate: false });
