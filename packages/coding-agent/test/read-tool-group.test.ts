@@ -95,6 +95,60 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).not.toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.enabled}`);
 	});
 
+	it("nests one usage row beneath the last path from each read-only turn", () => {
+		const component = new ReadToolGroupComponent();
+		const onePath = path.resolve("/tmp/one.ts");
+		const twoPath = path.resolve("/tmp/two.ts");
+		const threePath = path.resolve("/tmp/three.ts");
+		component.updateArgs({ path: onePath }, "read-one");
+		component.updateArgs({ path: twoPath }, "read-two");
+		component.updateArgs({ path: threePath }, "read-three");
+		component.updateResult({ content: [{ type: "text", text: "one" }] }, false, "read-one");
+		component.updateResult({ content: [{ type: "text", text: "two" }] }, false, "read-two");
+		component.updateResult({ content: [{ type: "text", text: "three" }] }, false, "read-three");
+
+		const firstUsage = {
+			input: 1111,
+			output: 11,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1122,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const parallelUsage = {
+			input: 2222,
+			output: 22,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2244,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		component.attachUsage(["read-one"], firstUsage, 1000, 500, new Date(2026, 0, 2, 3, 4, 5).getTime());
+		component.attachUsage(
+			["read-two", "read-three"],
+			parallelUsage,
+			2000,
+			600,
+			new Date(2026, 0, 2, 3, 4, 6).getTime(),
+		);
+
+		const lines = Bun.stripANSI(component.render(120).join("\n")).split("\n");
+		const onePathIndex = lines.findIndex(line => line.includes(onePath));
+		const twoPathIndex = lines.findIndex(line => line.includes(twoPath));
+		const threePathIndex = lines.findIndex(line => line.includes(threePath));
+		const firstUsageIndex = lines.findIndex(line => line.includes("2026-01-02 03:04:05"));
+		const parallelUsageIndices = lines
+			.map((line, index) => (line.includes("2026-01-02 03:04:06") ? index : -1))
+			.filter(index => index >= 0);
+
+		expect(firstUsageIndex).toBe(onePathIndex + 1);
+		expect(lines[firstUsageIndex]?.startsWith(`   ${themeModule.theme.tree.vertical}  `)).toBe(true);
+		expect(twoPathIndex).toBeGreaterThan(firstUsageIndex);
+		expect(threePathIndex).toBeGreaterThan(twoPathIndex);
+		expect(parallelUsageIndices).toEqual([threePathIndex + 1]);
+		expect(lines[parallelUsageIndices[0]!]?.startsWith("      ")).toBe(true);
+	});
+
 	it("splits a single selector-delimited read argument into child rows", () => {
 		const component = new ReadToolGroupComponent();
 		const onePath = path.resolve("/tmp/one.ts");
