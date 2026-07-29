@@ -898,6 +898,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
+			releaseCacheEntry?.();
+			releaseCacheEntry = undefined;
 			if (dispatchAbortListener && options?.signal) {
 				options.signal.removeEventListener("abort", dispatchAbortListener);
 				dispatchAbortListener = undefined;
@@ -918,7 +920,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			}
 			h2Request?.close();
 			h2Lease?.release();
-			releaseCacheEntry?.();
 		}
 	})();
 

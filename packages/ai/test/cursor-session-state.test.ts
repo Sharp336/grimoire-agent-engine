@@ -210,7 +210,9 @@ describe("Cursor conversation state isolation", () => {
 
 	it("does not evict a checkpoint written by an in-flight request", async () => {
 		const releaseFirst = Promise.withResolvers<void>();
-		const endpoint = await startServer(true, () => releaseFirst.promise);
+		const endpoint = await startServer(true, requestNumber =>
+			requestNumber === 1 ? releaseFirst.promise : undefined,
+		);
 		const inFlight = run(endpoint.baseUrl, "pinned-credential", "pinned");
 		await endpoint.firstRequest;
 		for (let index = 0; index < 64; index++) {
@@ -240,6 +242,99 @@ describe("Cursor conversation state isolation", () => {
 		releaseRequests.resolve();
 		await Promise.all(requests);
 		expect(getCursorConversationCacheSizesForTest()).toEqual({ idle: 64, inFlight: 0 });
+	});
+
+	it("releases conversation state before rejecting debug-log cleanup", async () => {
+		const endpoint = await startServer(true);
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"--unhandled-rejections=warn",
+				"-e",
+				`import { open, readdir, unlink } from "node:fs/promises";
+import {
+	getCursorConversationCacheSizesForTest,
+	streamCursor,
+} from "@oh-my-pi/pi-ai/providers/cursor";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+
+process.removeAllListeners("unhandledRejection");
+
+const baseUrl = ${JSON.stringify(endpoint.baseUrl)};
+const model = buildModel({
+	id: "cursor-cleanup-rejection",
+	name: "Cursor cleanup rejection",
+	api: "cursor-agent",
+	provider: "cursor",
+	baseUrl,
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 1,
+	maxTokens: 1,
+});
+const context = { messages: [{ role: "user", content: "cleanup rejection", timestamp: 1 }] };
+const run = conversationId => streamCursor(model, context, {
+	apiKey: "cleanup-credential",
+	conversationId,
+}).result();
+
+const probePath = \`/dev/shm/cursor-session-state-\${crypto.randomUUID()}\`;
+const probe = await open(probePath, "w");
+const fileHandlePrototype = Object.getPrototypeOf(probe);
+const originalClose = fileHandlePrototype.close;
+await probe.close();
+await unlink(probePath);
+
+const existingDebugFiles = new Set((await readdir(".")).filter(path => path.startsWith("rr-session-")));
+let closeCount = 0;
+fileHandlePrototype.close = async function () {
+	await originalClose.call(this);
+	closeCount++;
+	if (closeCount === 2) throw new Error("injected debug-log close failure");
+};
+Bun.env.PI_REQ_DEBUG = "1";
+
+const failedResult = await run("cleanup-rejection");
+const cleanupTurn = Promise.withResolvers();
+setImmediate(cleanupTurn.resolve);
+await cleanupTurn.promise;
+const cleanupError = "Error: injected debug-log close failure";
+const afterReject = getCursorConversationCacheSizesForTest();
+fileHandlePrototype.close = originalClose;
+delete Bun.env.PI_REQ_DEBUG;
+for (const path of await readdir(".")) {
+	if (path.startsWith("rr-session-") && !existingDebugFiles.has(path)) await unlink(path);
+}
+
+await Promise.all(Array.from({ length: 64 }, (_, index) => run(\`cleanup-competing-\${index}\`)));
+await run("cleanup-rejection");
+const final = getCursorConversationCacheSizesForTest();
+process.stdout.write(JSON.stringify({
+	stopReason: failedResult.stopReason,
+	cleanupError: String(cleanupError),
+	afterReject,
+	final,
+}));
+process.exit(0);`,
+			],
+			{ cwd: new URL("../../..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe" },
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		expect(stderr).toContain("UnhandledPromiseRejectionWarning: Error: injected debug-log close failure");
+		expect(JSON.parse(stdout)).toEqual({
+			stopReason: "error",
+			cleanupError: "Error: injected debug-log close failure",
+			afterReject: { idle: 1, inFlight: 0 },
+			final: { idle: 64, inFlight: 0 },
+		});
+		expect(endpoint.requests.at(-1)?.todos).toEqual([]);
 	});
 
 	it("removes every per-request abort listener after a successful turn", async () => {
