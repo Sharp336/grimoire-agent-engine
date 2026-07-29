@@ -69,6 +69,8 @@ export function estimatePromptTokens(
 					tokens += IMAGE_TOKEN_ESTIMATE;
 				} else if (block.type === "thinking") {
 					tokens += estimateTextTokens(block.thinking);
+				} else if (block.type === "redactedThinking") {
+					tokens += estimateTextTokens(block.data);
 				} else if (block.type === "toolCall") {
 					tokens += estimateTextTokens(JSON.stringify({ name: block.name, arguments: block.arguments }));
 				}

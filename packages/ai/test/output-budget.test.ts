@@ -156,6 +156,12 @@ describe("estimatePromptTokens", () => {
 		const expected = (Buffer.byteLength(thinking, "utf-8") + 3) >> 2;
 		expect(estimatePromptTokens(undefined, [msg])).toBe(expected);
 	});
+	it("counts redactedThinking blocks in array content", () => {
+		const data = "x".repeat(100_000);
+		const msg = assistantMessage([{ type: "redactedThinking", data }]);
+		const expected = (Buffer.byteLength(data, "utf-8") + 3) >> 2;
+		expect(estimatePromptTokens(undefined, [msg])).toBe(expected);
+	});
 
 	it("counts toolCall blocks in array content", () => {
 		const arguments_ = { command: "ls -la /workspace", cwd: "/home" };
