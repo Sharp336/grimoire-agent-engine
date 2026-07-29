@@ -599,7 +599,9 @@ describe("offline SQLite salvage", () => {
 					const stage = requireValue((await stageArtifacts(candidate, "candidate")).at(0), "candidate stage");
 					const stagedDb = new Database(path.join(root, stage), { safeIntegers: true });
 					try {
-						stagedDb.prepare("UPDATE ext_notes SET payload = ? WHERE key = ?").run(new Uint8Array([255, 1, 0]), "note");
+						stagedDb
+							.prepare("UPDATE ext_notes SET payload = ? WHERE key = ?")
+							.run(new Uint8Array([255, 1, 0]), "note");
 					} finally {
 						closeWal(stagedDb);
 					}

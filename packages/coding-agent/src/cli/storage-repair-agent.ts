@@ -288,7 +288,10 @@ function copyTableRows(source: Database, destination: Database, table: string) {
 
 function equalSqliteValues(source: SqliteValue, candidate: SqliteValue) {
 	if (source instanceof Uint8Array || candidate instanceof Uint8Array) {
-		if (!(source instanceof Uint8Array && candidate instanceof Uint8Array) || source.byteLength !== candidate.byteLength) {
+		if (
+			!(source instanceof Uint8Array && candidate instanceof Uint8Array) ||
+			source.byteLength !== candidate.byteLength
+		) {
 			return false;
 		}
 		for (let index = 0; index < source.byteLength; index += 1) {

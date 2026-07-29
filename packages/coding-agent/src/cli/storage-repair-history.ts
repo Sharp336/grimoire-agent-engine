@@ -6,12 +6,7 @@ import { getSessionsDir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import { HistoryStorage } from "../session/history-storage";
 import { CURRENT_SESSION_VERSION, SESSION_TITLE_SLOT_BYTES } from "../session/session-entries";
 import { parseTitleSlotLine } from "../session/session-title-slot";
-import {
-	assertInvariant,
-	checkpointCandidate,
-	stableJson,
-	verifyCommonCandidate,
-} from "./storage-repair-files";
+import { assertInvariant, checkpointCandidate, stableJson, verifyCommonCandidate } from "./storage-repair-files";
 import type { HistoryRepairSource, StorageRepairObjectResult, StorageRepairTestHooks } from "./storage-repair-types";
 
 const COPY_BUFFER_BYTES = 1024 * 1024;
