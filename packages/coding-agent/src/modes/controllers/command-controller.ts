@@ -1314,20 +1314,7 @@ export class CommandController {
 					: undefined;
 			await this.ctx.session.compact(instructions, options);
 
-			compactingLoader.stop();
-			this.ctx.statusContainer.disposeChildren();
-			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
-
-			this.ctx.statusLine.invalidate();
-			// Same as the auto-compaction rebuild: a collapsed transcript is an
-			// intentional replacement, so drop the stale pre-compaction scrollback
-			// instead of repainting the shrunken frame below it. With collapse
-			// disabled the full history stays inline and scrollback is kept.
-			if (this.ctx.settings.get("display.collapseCompacted")) {
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
-			} else {
-				this.ctx.ui.requestRender();
-			}
+			this.finishCompaction();
 		} catch (error) {
 			if (error instanceof CompactionCancelledError) {
 				outcome = "cancelled";
@@ -1348,6 +1335,21 @@ export class CommandController {
 		if (beforeFlush) await beforeFlush(outcome);
 		await this.ctx.flushCompactionQueue({ willRetry: false });
 		return outcome;
+	}
+
+	finishCompaction(): void {
+		if (this.ctx.loadingAnimation) {
+			this.ctx.loadingAnimation.stop();
+			this.ctx.loadingAnimation = undefined;
+		}
+		this.ctx.statusContainer.disposeChildren();
+		this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
+		this.ctx.statusLine.invalidate();
+		if (this.ctx.settings.get("display.collapseCompacted")) {
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
+		} else {
+			this.ctx.ui.requestRender();
+		}
 	}
 
 	async handleHandoffCommand(customInstructions?: string): Promise<void> {
