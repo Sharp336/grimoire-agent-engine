@@ -906,11 +906,6 @@ export async function readArchiveEntries(source: ArchiveSource): Promise<Map<str
 	return entries;
 }
 
-/** Open tar members through Bun's native archive parser. */
-export async function readTarArchiveFiles(source: Blob): Promise<Map<string, File>> {
-	return new Bun.Archive(await source.bytes()).files();
-}
-
 /**
  * Extract a tar from a file-backed mapping. Bun 1.3.14 materializes
  * `Bun.Archive(Bun.file(...))` incorrectly, while a mapped byte view remains
