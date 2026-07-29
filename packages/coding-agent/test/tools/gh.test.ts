@@ -147,11 +147,13 @@ async function createSubmoduleContextFixture(): Promise<{
 	runGit(parentRoot, ["commit", "-am", "add submodule"]);
 
 	const submoduleRoot = path.join(parentRoot, "submodule");
+	const submoduleHead = runGit(submoduleRoot, ["rev-parse", "HEAD"]);
+	runGit(submoduleRoot, ["checkout", "--detach", submoduleHead]);
 	return {
 		baseDir,
 		parentRoot,
 		submoduleRoot,
-		submoduleHead: runGit(submoduleRoot, ["rev-parse", "HEAD"]),
+		submoduleHead,
 	};
 }
 
@@ -590,7 +592,7 @@ describe("github tool", () => {
 		}
 	});
 
-	it("uses the selected submodule repository, branch, and HEAD for run_watch", async () => {
+	it("uses the selected detached submodule HEAD for run_watch", async () => {
 		const fixture = await createSubmoduleContextFixture();
 		const textSpy = vi
 			.spyOn(git.github, "text")
@@ -600,18 +602,22 @@ describe("github tool", () => {
 			const tool = new GithubTool(createSession(fixture.parentRoot));
 			const abort = new AbortController();
 			let details: { repo?: string; branch?: string; headSha?: string } | undefined;
+			let text: string | undefined;
 			await tool
 				.execute("watch-submodule", { op: "run_watch", cwd: "submodule" }, abort.signal, update => {
 					details = update.details;
+					const content = update.content[0];
+					if (content?.type === "text") text = content.text;
 					abort.abort();
 				})
 				.catch(() => {});
 
 			expect(details).toMatchObject({
 				repo: "owner/submodule",
-				branch: "submodule-main",
 				headSha: fixture.submoduleHead,
 			});
+			expect(details?.branch).toBeUndefined();
+			expect(text).toContain("Branch: detached HEAD");
 			expect(textSpy.mock.calls.filter(call => call[0] === fixture.submoduleRoot)).toHaveLength(2);
 			expect(jsonSpy.mock.calls.some(call => call[0] === fixture.submoduleRoot)).toBe(true);
 		} finally {

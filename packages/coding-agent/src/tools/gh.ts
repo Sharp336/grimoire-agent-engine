@@ -1539,7 +1539,7 @@ function formatCommitRunWatchSnapshot(
 	const completedRuns = runs.filter(run => run.status === "completed").length;
 	const lines: string[] = [`# Watching GitHub Actions for ${formatShortSha(headSha) ?? headSha}`, ""];
 	pushLine(lines, "Repository", repo);
-	pushLine(lines, "Branch", branch);
+	pushLine(lines, "Branch", branch ?? "detached HEAD");
 	pushLine(lines, "Commit", headSha);
 	pushLine(lines, "Poll", pollCount);
 	pushLine(lines, "Runs", runs.length);
@@ -3825,7 +3825,7 @@ async function executeRunWatch(
 		}
 	}
 
-	let branch: string;
+	let branch: string | undefined;
 	let headSha: string;
 	if (branchInput) {
 		branch = branchInput;
@@ -3844,8 +3844,8 @@ async function executeRunWatch(
 				`Cannot infer the watched commit for ${repo}: current checkout is ${cwdRepo ?? "not a GitHub repository"}. Pass \`branch\` or \`run\` to scope the watch.`,
 			);
 		}
-		branch = await requireCurrentGitBranch(cwd, signal);
 		headSha = await requireCurrentGitHead(cwd, signal);
+		branch = (await git.branch.current(cwd, signal)) ?? undefined;
 	}
 	let pollCount = 0;
 	let settledSuccessSignature: string | undefined;
