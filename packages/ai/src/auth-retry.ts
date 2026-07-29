@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import type { OAuthAccess } from "./auth-storage";
+import type { ApiKeyResolution, OAuthAccess } from "./auth-storage";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isUsageLimit } from "./error/flags";
@@ -30,19 +30,25 @@ export interface ApiKeyResolveContext {
 	error: unknown;
 	/** Bearer used by the failed attempt, when the caller can expose it. */
 	previousKey?: string;
+	/** SQLite credential row used by the failed attempt, when known. */
+	previousCredentialId?: number;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
+}
+
+/** Normalizes legacy string resolvers into a request-scoped selection. */
+export function toApiKeyResolution(value: ApiKeyResolution | string | undefined): ApiKeyResolution | undefined {
+	if (value === undefined || value === "") return undefined;
+	return typeof value === "string" ? { apiKey: value } : value;
 }
 
 /**
  * Resolves the API key to send for a request, retried through the a/b/c policy
  * described on {@link ApiKeyResolveContext}.
  */
-export interface ApiKeyResolver {
-	(ctx: ApiKeyResolveContext): Promise<string | undefined> | string | undefined;
-	/** SQLite credential row selected for the most recent resolution, if stored. */
-	credentialId?: number;
-}
+export type ApiKeyResolver = (
+	ctx: ApiKeyResolveContext,
+) => Promise<ApiKeyResolution | string | undefined> | ApiKeyResolution | string | undefined;
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
@@ -57,9 +63,17 @@ export function isApiKeyResolver(key: ApiKey | undefined): key is ApiKeyResolver
  * `lastChance: false`). Static keys pass through unchanged.
  */
 export async function resolveApiKeyOnce(key: ApiKey | undefined, signal?: AbortSignal): Promise<string | undefined> {
+	return (await resolveApiKeyResolutionOnce(key, signal))?.apiKey;
+}
+
+/** Resolves an API key together with request-scoped credential identity. */
+export async function resolveApiKeyResolutionOnce(
+	key: ApiKey | undefined,
+	signal?: AbortSignal,
+): Promise<ApiKeyResolution | undefined> {
 	if (key === undefined) return undefined;
-	if (isApiKeyResolver(key)) return (await key({ lastChance: false, error: undefined, signal })) || undefined;
-	return key;
+	if (isApiKeyResolver(key)) return toApiKeyResolution(await key({ lastChance: false, error: undefined, signal }));
+	return { apiKey: key };
 }
 
 /**
@@ -70,19 +84,18 @@ export async function resolveApiKeyOnce(key: ApiKey | undefined, signal?: AbortS
  * first initial resolution reuses `seed`, and all later resolutions delegate to
  * `resolver`.
  */
-export function seedApiKeyResolver(seed: string | undefined, resolver: ApiKeyResolver): ApiKeyResolver {
+export function seedApiKeyResolver(
+	seed: ApiKeyResolution | string | undefined,
+	resolver: ApiKeyResolver,
+): ApiKeyResolver {
 	let seedPending = seed !== undefined;
-	const seeded: ApiKeyResolver = async ctx => {
+	return ctx => {
 		if (seedPending && ctx.error === undefined) {
 			seedPending = false;
-			seeded.credentialId = resolver.credentialId;
 			return seed;
 		}
-		const resolved = await resolver(ctx);
-		seeded.credentialId = resolver.credentialId;
-		return resolved;
+		return resolver(ctx);
 	};
-	return seeded;
 }
 
 // Re-exported from the error module (its new home); see error/auth-classify.ts.
@@ -109,6 +122,25 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	return isUsageLimitOutcome(status, message);
 }
 
+/** Resolve one retry step with its exact credential identity. */
+export async function resolveRetryApiKey(
+	resolver: ApiKeyResolver,
+	lastChance: boolean,
+	error: unknown,
+	signal?: AbortSignal,
+	previousKey?: string,
+	previousCredentialId?: number,
+): Promise<ApiKeyResolution | undefined> {
+	try {
+		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
+		return toApiKeyResolution(
+			await resolver({ lastChance: rotateSibling, error, signal, previousKey, previousCredentialId }),
+		);
+	} catch {
+		return undefined;
+	}
+}
+
 /** Resolve a single retry step, swallowing resolver failures into `undefined`. */
 export async function resolveRetryKey(
 	resolver: ApiKeyResolver,
@@ -116,13 +148,9 @@ export async function resolveRetryKey(
 	error: unknown,
 	signal?: AbortSignal,
 	previousKey?: string,
+	previousCredentialId?: number,
 ): Promise<string | undefined> {
-	try {
-		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
-		return (await resolver({ lastChance: rotateSibling, error, signal, previousKey })) || undefined;
-	} catch {
-		return undefined;
-	}
+	return (await resolveRetryApiKey(resolver, lastChance, error, signal, previousKey, previousCredentialId))?.apiKey;
 }
 
 export interface AuthRetryKeyState {
@@ -130,6 +158,8 @@ export interface AuthRetryKeyState {
 	attemptedKeys: Set<string>;
 	/** Bearer used by the most recent failed attempt. */
 	lastKey: string;
+	/** SQLite credential row used by the most recent failed attempt, when known. */
+	lastCredentialId?: number;
 	/** Whether the current credential already consumed its 401 refresh-same retry. */
 	refreshedCurrent: boolean;
 	/** Whether the legacy non-usage auth path already switched to one sibling. */
@@ -138,21 +168,28 @@ export interface AuthRetryKeyState {
 	attempts: number;
 }
 
-export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
+export function createAuthRetryKeyState(initialKey: string, initialCredentialId?: number): AuthRetryKeyState {
 	return {
 		attemptedKeys: new Set([initialKey]),
 		lastKey: initialKey,
+		lastCredentialId: initialCredentialId,
 		refreshedCurrent: false,
 		legacyAuthSwitchUsed: false,
 		attempts: 1,
 	};
 }
 
-function acceptRetryKey(state: AuthRetryKeyState, key: string, refreshedCurrent: boolean): string | undefined {
+function acceptRetryKey(
+	state: AuthRetryKeyState,
+	key: string,
+	refreshedCurrent: boolean,
+	credentialId?: number,
+): string | undefined {
 	if (state.attemptedKeys.has(key) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
 	state.attemptedKeys.add(key);
 	state.attempts += 1;
 	state.lastKey = key;
+	state.lastCredentialId = credentialId;
 	state.refreshedCurrent = refreshedCurrent;
 	return key;
 }
@@ -163,28 +200,47 @@ export async function resolveNextAuthRetryKey(
 	error: unknown,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	if (signal?.aborted) return undefined;
-	if (state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
+	return (await resolveNextAuthRetryApiKey(state, resolver, error, signal))?.apiKey;
+}
+
+/** Resolves the next auth retry key with the credential identity selected for that attempt. */
+export async function resolveNextAuthRetryApiKey(
+	state: AuthRetryKeyState,
+	resolver: ApiKeyResolver,
+	error: unknown,
+	signal?: AbortSignal,
+): Promise<ApiKeyResolution | undefined> {
+	if (signal?.aborted || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
 	const directRotation = isDirectCredentialRotationError(error);
 	if (!directRotation) {
 		if (state.legacyAuthSwitchUsed) return undefined;
 		if (!state.refreshedCurrent) {
-			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey);
+			const refreshed = await resolveRetryApiKey(
+				resolver,
+				false,
+				error,
+				signal,
+				state.lastKey,
+				state.lastCredentialId,
+			);
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
 			if (refreshed !== undefined) {
-				const accepted = acceptRetryKey(state, refreshed, true);
-				if (accepted !== undefined) return accepted;
+				const accepted = acceptRetryKey(state, refreshed.apiKey, true, refreshed.credentialId);
+				if (accepted !== undefined) return refreshed;
 			}
 		}
 	}
 
 	if (signal?.aborted) return undefined;
-	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey);
+	const rotated = await resolveRetryApiKey(resolver, true, error, signal, state.lastKey, state.lastCredentialId);
 	if (signal?.aborted || rotated === undefined) return undefined;
-	const accepted = acceptRetryKey(state, rotated, !directRotation);
-	if (accepted !== undefined && !directRotation) state.legacyAuthSwitchUsed = true;
-	return accepted;
+	const accepted = acceptRetryKey(state, rotated.apiKey, !directRotation, rotated.credentialId);
+	if (accepted !== undefined) {
+		if (!directRotation) state.legacyAuthSwitchUsed = true;
+		return rotated;
+	}
+	return undefined;
 }
 
 function oauthCredentialIdentity(access: OAuthAccess): string {
@@ -234,23 +290,23 @@ export async function withAuth<T>(
 
 	const resolver = key;
 	const signal = opts?.signal;
-	const initialKey = await resolveRetryKey(resolver, false, undefined, signal);
-	if (initialKey === undefined) throw missingKey();
+	const initial = await resolveRetryApiKey(resolver, false, undefined, signal);
+	if (initial === undefined) throw missingKey();
 
-	const state = createAuthRetryKeyState(initialKey);
+	const state = createAuthRetryKeyState(initial.apiKey, initial.credentialId);
 	let lastError: unknown;
 	try {
-		return await attempt(initialKey);
+		return await attempt(initial.apiKey);
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
 		lastError = error;
 	}
 
 	while (true) {
-		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal);
-		if (nextKey === undefined) break;
+		const next = await resolveNextAuthRetryApiKey(state, resolver, lastError, signal);
+		if (next === undefined) break;
 		try {
-			return await attempt(nextKey);
+			return await attempt(next.apiKey);
 		} catch (error) {
 			if (!isAuthError(error)) throw error;
 			lastError = error;

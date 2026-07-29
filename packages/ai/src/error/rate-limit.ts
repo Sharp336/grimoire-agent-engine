@@ -24,7 +24,7 @@ const INSUFFICIENT_BALANCE_PATTERN = /insufficient.?balance/i;
 const SPEND_LIMIT_PATTERN = /spend.?limit/i;
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
 const CONCURRENT_LIMIT_PATTERN =
-	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|request|invocation|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b/i;
+	/\bconcurrent_(?:request_)?limit(?:_[a-z0-9]+)*\b|\bconcurren[a-z0-9]*(?:_[a-z0-9]+)*\b[^\n]{0,60}\b(?:limit|quota|request|invocation|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren[a-z0-9]*(?:_[a-z0-9]+)*\b/i;
 const ACCOUNT_SCOPED_403_PATTERN =
 	/\b(?:overall|account|organization|team|workspace)\b[^\n]{0,40}\b(?:message |request )?rate.?limit\b|\blimit will reset\b|\bwill reset in\b/i;
 

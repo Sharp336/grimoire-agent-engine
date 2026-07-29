@@ -45,12 +45,11 @@ describe("isApiKeyResolver / resolveApiKeyOnce", () => {
 	});
 
 	it("keeps a preflight resolver credential id when reusing its seed", async () => {
-		const resolver = Object.assign(() => "stored", { credentialId: 17 });
+		const resolver = () => ({ apiKey: "stored", credentialId: 17 });
 		const seed = await resolveApiKeyOnce(resolver);
-		const seeded = seedApiKeyResolver(seed, resolver);
+		const seeded = seedApiKeyResolver({ apiKey: seed!, credentialId: 17 }, resolver);
 
-		expect(await seeded({ lastChance: false, error: undefined })).toBe("stored");
-		expect(seeded.credentialId).toBe(17);
+		expect(await seeded({ lastChance: false, error: undefined })).toEqual({ apiKey: "stored", credentialId: 17 });
 	});
 });
 

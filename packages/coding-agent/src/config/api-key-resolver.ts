@@ -58,16 +58,15 @@ export function createApiKeyResolver(
 	const resolve = async (requestOptions: {
 		forceRefresh?: boolean;
 		signal?: AbortSignal;
-	}): Promise<string | undefined> => {
+	}): Promise<{ apiKey: string; credentialId?: number } | undefined> => {
 		const resolved = registry.getApiKeyResolutionForProvider
 			? await registry.getApiKeyResolutionForProvider(provider, sessionId, { baseUrl, modelId, ...requestOptions })
 			: undefined;
-		resolver.credentialId = resolved?.credentialId;
-		return (
-			resolved?.apiKey ?? registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, ...requestOptions })
-		);
+		if (resolved) return resolved;
+		const apiKey = await registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, ...requestOptions });
+		return apiKey === undefined ? undefined : { apiKey };
 	};
-	const resolver: ApiKeyResolver = async ({ lastChance, error, signal, previousKey }) => {
+	const resolver: ApiKeyResolver = async ({ lastChance, error, signal, previousKey, previousCredentialId }) => {
 		if (error === undefined) return resolve({ signal });
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
@@ -80,7 +79,7 @@ export function createApiKeyResolver(
 				modelId,
 				signal,
 				apiKey: previousKey,
-				credentialId: resolver.credentialId,
+				credentialId: previousCredentialId,
 			});
 			if (!switched) {
 				const status = AIError.status(error);

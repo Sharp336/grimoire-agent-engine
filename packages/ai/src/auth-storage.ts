@@ -6040,18 +6040,14 @@ export class AuthStorage {
 		const resolve = async (requestOptions: {
 			forceRefresh?: boolean;
 			signal?: AbortSignal;
-		}): Promise<string | undefined> => {
-			const apiKey = await this.getApiKey(provider, sessionId, { baseUrl, modelId, ...requestOptions });
-			const selected = this.#getSessionCredential(provider, sessionId);
-			resolver.credentialId =
-				this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)
-					? undefined
-					: selected
-						? this.#getStoredCredentials(provider)[selected.index]?.id
-						: undefined;
-			return apiKey;
+		}): Promise<{ apiKey: string; credentialId?: number } | undefined> => {
+			if (this.getApiKey !== AuthStorage.prototype.getApiKey) {
+				const apiKey = await this.getApiKey(provider, sessionId, { baseUrl, modelId, ...requestOptions });
+				return apiKey === undefined ? undefined : { apiKey };
+			}
+			return this.getApiKeyResolution(provider, sessionId, { baseUrl, modelId, ...requestOptions });
 		};
-		const resolver: ApiKeyResolver = async ({ lastChance, error, signal, previousKey }) => {
+		const resolver: ApiKeyResolver = async ({ lastChance, error, signal, previousKey, previousCredentialId }) => {
 			if (error === undefined) return resolve({ signal });
 			if (lastChance) {
 				const switched = await this.rotateSessionCredential(provider, sessionId, {
@@ -6059,7 +6055,7 @@ export class AuthStorage {
 					modelId,
 					signal,
 					apiKey: previousKey,
-					credentialId: resolver.credentialId,
+					credentialId: previousCredentialId,
 				});
 				if (!switched) {
 					const status = AIError.status(error);

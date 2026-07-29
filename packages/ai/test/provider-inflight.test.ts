@@ -335,6 +335,104 @@ describe("provider in-flight request limits", () => {
 		expect(mock.calls).toHaveLength(0);
 	});
 
+	test("adapts static API keys after a concurrent-limit response", async () => {
+		registerMockApi();
+		const mock = createMockModel({
+			provider: "tests",
+			responses: [{ errorMessage: "concurrent_limit_reached", stopReason: "error" }, { content: ["recovered"] }],
+		});
+		const waits: number[] = [];
+
+		const result = await streamSimple(mock.model, context(), {
+			apiKey: "static-key",
+			maxInFlightRequests: { tests: 2 },
+			providerRetryWait: async delayMs => void waits.push(delayMs),
+		}).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(mock.calls.map(call => call.options?.apiKey)).toEqual(["static-key", "static-key"]);
+		expect(waits).toEqual([5_000]);
+	});
+
+	test("adapts keyless direct providers after a concurrent-limit response", async () => {
+		registerMockApi();
+		const mock = createMockModel({
+			provider: "tests",
+			responses: [{ errorMessage: "concurrent_limit_reached", stopReason: "error" }, { content: ["recovered"] }],
+		});
+		const waits: number[] = [];
+
+		await expect(
+			streamSimple(mock.model, context(), {
+				maxInFlightRequests: { tests: 2 },
+				providerRetryWait: async delayMs => void waits.push(delayMs),
+			}).result(),
+		).resolves.toMatchObject({ content: [{ type: "text", text: "recovered" }] });
+		expect(mock.calls).toHaveLength(2);
+		expect(waits).toEqual([5_000]);
+	});
+
+	test("does not let a learned cap exceed a lowered live static-key cap", async () => {
+		registerMockApi();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		const mock = createMockModel({
+			provider: "tests",
+			handler: async () => {
+				calls += 1;
+				if (calls === 1) return { errorMessage: "concurrent_request_limit_reached", stopReason: "error" };
+				if (calls === 2) return { content: ["learned"] };
+				if (calls === 3) {
+					started.resolve();
+					await release.promise;
+				}
+				return { content: ["done"] };
+			},
+		});
+
+		await streamSimple(mock.model, context(), {
+			apiKey: "static-key",
+			maxInFlightRequests: { tests: 3 },
+			providerRetryWait: async () => {},
+		}).result();
+		const first = streamSimple(mock.model, context(), { apiKey: "static-key", maxInFlightRequests: { tests: 1 } });
+		await started.promise;
+		const second = streamSimple(mock.model, context(), { apiKey: "static-key", maxInFlightRequests: { tests: 1 } });
+		await Bun.sleep(20);
+		expect(calls).toBe(3);
+
+		release.resolve();
+		await Promise.all([first.result(), second.result()]);
+		expect(calls).toBe(4);
+	});
+
+	test("aborts a static-key concurrent-limit backoff without waiting", async () => {
+		registerMockApi();
+		const controller = new AbortController();
+		const backoffStarted = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			provider: "tests",
+			responses: [{ errorMessage: "concurrent_limit_reached", stopReason: "error" }],
+		});
+		const stream = streamSimple(mock.model, context(), {
+			apiKey: "static-key",
+			maxInFlightRequests: { tests: 1 },
+			signal: controller.signal,
+			providerRetryWait: async (_delayMs, signal) => {
+				backoffStarted.resolve();
+				await new Promise<never>((_resolve, reject) =>
+					signal?.addEventListener("abort", () => reject(signal.reason), { once: true }),
+				);
+			},
+		});
+		const result = stream.result();
+		await backoffStarted.promise;
+		controller.abort();
+		await expect(result).rejects.toMatchObject({ name: "AbortError" });
+		expect(mock.calls).toHaveLength(1);
+	});
+
 	test("uses opaque path segments for provider ids", async () => {
 		const dir = limiterDir("..");
 		const relative = path.relative(limiterRoot!, dir);

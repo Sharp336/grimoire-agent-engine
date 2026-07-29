@@ -217,11 +217,12 @@ describe("AuthStorage account rotation", () => {
 		const refreshed = await resolver({
 			lastChance: true,
 			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-			previousKey: initial,
+			previousKey: typeof initial === "string" ? initial : initial?.apiKey,
+			previousCredentialId: typeof initial === "string" ? undefined : initial?.credentialId,
 		});
 
-		expect(initial).toBe("stale-access");
-		expect(refreshed).toBe("refreshed-access");
+		expect(initial).toEqual({ apiKey: "stale-access" });
+		expect(refreshed).toEqual({ apiKey: "refreshed-access" });
 		expect(rotationTargets).toEqual(["stale-access"]);
 	});
 
@@ -241,8 +242,10 @@ describe("AuthStorage account rotation", () => {
 		};
 		const resolver = createApiKeyResolver(registry, "openai-codex");
 
-		expect(await resolver({ lastChance: false, error: undefined })).toBe("stored-key");
-		expect(resolver.credentialId).toBe(17);
+		expect(await resolver({ lastChance: false, error: undefined })).toEqual({
+			apiKey: "stored-key",
+			credentialId: 17,
+		});
 	});
 
 	test("API key resolver stops when a usage-limit rotation has no unblocked sibling", async () => {

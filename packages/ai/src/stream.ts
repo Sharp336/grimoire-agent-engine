@@ -17,7 +17,12 @@ import { CATALOG_PROVIDERS, type ProviderCatalogEntry } from "@oh-my-pi/pi-catal
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getConfigRootDir, isEnoent, logger, withExtraCaFetch } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolveNextAuthRetryApiKey,
+	toApiKeyResolution,
+} from "./auth-retry";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isInvalidatedOAuthTokenError } from "./error/auth-classify";
@@ -180,7 +185,8 @@ function resolveProviderInFlightLimit(
 	const value = limits[provider];
 	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
 	const configuredLimit = Math.max(1, Math.floor(value));
-	return reducedProviderInFlightLimits.get(providerInFlightKey(provider, options?.credentialId)) ?? configuredLimit;
+	const learnedLimit = reducedProviderInFlightLimits.get(providerInFlightKey(provider, options?.credentialId));
+	return learnedLimit === undefined ? configuredLimit : Math.min(learnedLimit, configuredLimit);
 }
 
 function providerInFlightKey(provider: string, credentialId: number | undefined): string {
@@ -1027,9 +1033,111 @@ function createAssistantAuthError(message: AssistantMessage): Error {
 }
 
 function emitBufferedEvents(stream: AssistantMessageEventStream, events: AssistantMessageEvent[]): void {
-	for (const event of events) {
-		stream.push(event);
-	}
+	for (const event of events) stream.push(event);
+}
+
+const adaptiveConcurrencyRetryDispatch = Symbol("adaptiveConcurrencyRetryDispatch");
+type InternalSimpleStreamOptions = SimpleStreamOptions & {
+	[adaptiveConcurrencyRetryDispatch]?: true;
+};
+
+function withAdaptiveConcurrencyRetry(
+	model: Model<Api>,
+	options: InternalSimpleStreamOptions,
+	dispatch: () => AssistantMessageEventStream,
+): AssistantMessageEventStream {
+	const outer = new AssistantMessageEventStream();
+	const signal = options.signal;
+	const runAttempt = async (): Promise<AuthRetryFailure | undefined> => {
+		const bufferedEvents: AssistantMessageEvent[] = [];
+		let emittedReplayUnsafeEvent = false;
+		const flush = (): void => {
+			emitBufferedEvents(outer, bufferedEvents);
+			bufferedEvents.length = 0;
+		};
+		try {
+			const inner = dispatch();
+			for await (const event of inner) {
+				if (!emittedReplayUnsafeEvent && event.type === "start") {
+					bufferedEvents.push(event);
+					continue;
+				}
+				if (
+					!emittedReplayUnsafeEvent &&
+					event.type === "error" &&
+					(isConcurrentLimitError(event.error.errorMessage) ||
+						isRetryableUpstreamError(
+							event.error,
+							extractStatusFromAssistantError(event.error),
+							event.error.errorMessage,
+						))
+				) {
+					return {
+						error: createAssistantAuthError(event.error),
+						bufferedEvents,
+						terminalEvent: event,
+						concurrentLimit: isConcurrentLimitError(event.error.errorMessage),
+					};
+				}
+				flush();
+				emittedReplayUnsafeEvent = true;
+				outer.push(event);
+				if (outer.done) return undefined;
+			}
+			flush();
+			if (!outer.done) outer.end(await inner.result());
+		} catch (error) {
+			const message = error instanceof Error ? error.message : undefined;
+			if (
+				!emittedReplayUnsafeEvent &&
+				(isConcurrentLimitError(message) || isRetryableUpstreamError(error, AIError.status(error), message))
+			) {
+				return { error, bufferedEvents, concurrentLimit: isConcurrentLimitError(message) };
+			}
+			flush();
+			outer.fail(error);
+		}
+		return undefined;
+	};
+	const emitFailure = (failure: AuthRetryFailure): void => {
+		emitBufferedEvents(outer, failure.bufferedEvents);
+		if (failure.terminalEvent) {
+			outer.push(failure.terminalEvent);
+		} else {
+			outer.fail(failure.error);
+		}
+	};
+
+	void (async () => {
+		let failure = await runAttempt();
+		if (!failure) return;
+		if (failure.concurrentLimit) {
+			reduceProviderInFlightLimit(model.provider, options);
+			try {
+				if (options.providerRetryWait) {
+					await options.providerRetryWait(calculateRateLimitBackoffMs("CONCURRENT_LIMIT"), signal);
+				} else {
+					await scheduler.wait(calculateRateLimitBackoffMs("CONCURRENT_LIMIT"), { signal });
+				}
+			} catch (error) {
+				if (signal?.aborted) outer.fail(signal.reason ?? new AIError.AbortError());
+				else outer.fail(error);
+				return;
+			}
+			if (signal?.aborted) {
+				outer.fail(signal.reason ?? new AIError.AbortError());
+				return;
+			}
+			failure = await runAttempt();
+			if (!failure) return;
+			if (failure.concurrentLimit) {
+				emitFailure(failure);
+				return;
+			}
+		}
+		emitFailure(failure);
+	})();
+	return outer;
 }
 
 export function streamSimple<TApi extends Api>(
@@ -1065,7 +1173,12 @@ export function streamSimple<TApi extends Api>(
 			};
 
 			try {
-				const inner = streamSimple(model, context, { ...requestOptions, apiKey, credentialId });
+				const inner = streamSimple(model, context, {
+					...requestOptions,
+					apiKey,
+					credentialId,
+					[adaptiveConcurrencyRetryDispatch]: true,
+				} as InternalSimpleStreamOptions);
 				for await (const event of inner) {
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -1118,11 +1231,55 @@ export function streamSimple<TApi extends Api>(
 		};
 
 		void (async () => {
+			// One credential attempt followed by the bounded, cancellation-aware
+			// adaptive-concurrency backoff. A concurrent-limit failure reduces THIS
+			// credential's learned in-flight limit, waits once, then retries the SAME
+			// credential — never rotating a busy sibling away. A second concurrent
+			// failure is `concurrent-exhausted` so the caller emits instead of
+			// burning another sibling; any other failure is `rotatable` and enters
+			// auth rotation as before. Retry stays bounded (one wait per credential)
+			// and request-scoped.
+			type AttemptOutcome =
+				| { kind: "finalized" }
+				| { kind: "success" }
+				| { kind: "concurrent-exhausted"; failure: AuthRetryFailure }
+				| { kind: "rotatable"; failure: AuthRetryFailure };
+			const attemptWithConcurrentBackoff = async (
+				apiKey: string,
+				credentialId: number | undefined,
+			): Promise<AttemptOutcome> => {
+				let failure = await runAttempt(apiKey, credentialId);
+				if (!failure) return { kind: "success" };
+				if (!failure.concurrentLimit) return { kind: "rotatable", failure };
+				reduceProviderInFlightLimit(model.provider, { ...requestOptions, credentialId });
+				const delay = calculateRateLimitBackoffMs("CONCURRENT_LIMIT");
+				try {
+					if (requestOptions.providerRetryWait) {
+						await requestOptions.providerRetryWait(delay, signal);
+					} else {
+						await scheduler.wait(delay, { signal });
+					}
+				} catch (error) {
+					outer.fail(signal?.aborted ? (signal.reason ?? new AIError.AbortError()) : error);
+					return { kind: "finalized" };
+				}
+				if (signal?.aborted) {
+					outer.fail(signal.reason ?? new AIError.AbortError());
+					return { kind: "finalized" };
+				}
+				const retry = await runAttempt(apiKey, credentialId);
+				if (!retry) return { kind: "success" };
+				return retry.concurrentLimit
+					? { kind: "concurrent-exhausted", failure: retry }
+					: { kind: "rotatable", failure: retry };
+			};
+
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			try {
-				lastKey = (await apiKeyResolver({ lastChance: false, error: undefined, signal })) || undefined;
-				credentialId = apiKeyResolver.credentialId;
+				const resolved = toApiKeyResolution(await apiKeyResolver({ lastChance: false, error: undefined, signal }));
+				lastKey = resolved?.apiKey;
+				credentialId = resolved?.credentialId;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1138,37 +1295,45 @@ export function streamSimple<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId);
-			if (!failure) return;
-			if (failure.concurrentLimit) {
-				reduceProviderInFlightLimit(model.provider, { ...requestOptions, credentialId });
-				await Bun.sleep(calculateRateLimitBackoffMs("CONCURRENT_LIMIT"));
-				if (signal?.aborted) {
-					emitFailure(failure);
-					return;
-				}
-				failure = await runAttempt(lastKey, credentialId);
-				if (!failure) return;
-				if (failure.concurrentLimit) {
-					emitFailure(failure);
-					return;
-				}
+			const retryState = createAuthRetryKeyState(lastKey, credentialId);
+			let outcome = await attemptWithConcurrentBackoff(lastKey, credentialId);
+			if (outcome.kind === "finalized" || outcome.kind === "success") return;
+			if (outcome.kind === "concurrent-exhausted") {
+				emitFailure(outcome.failure);
+				return;
 			}
+			let failure = outcome.failure;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				const nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal);
-				if (nextKey === undefined) break;
-				credentialId = apiKeyResolver.credentialId;
-				const next = await runAttempt(nextKey, credentialId);
-				if (!next) return;
-				failure = next;
+				const next = await resolveNextAuthRetryApiKey(retryState, apiKeyResolver, failure.error, signal);
+				if (next === undefined) break;
+				credentialId = next.credentialId;
+				outcome = await attemptWithConcurrentBackoff(next.apiKey, credentialId);
+				if (outcome.kind === "finalized" || outcome.kind === "success") return;
+				if (outcome.kind === "concurrent-exhausted") {
+					emitFailure(outcome.failure);
+					return;
+				}
+				failure = outcome.failure;
 			}
 			emitFailure(failure);
 		})();
 		return outer;
+	}
+
+	const internalRequestOptions = requestOptions as InternalSimpleStreamOptions;
+	if (
+		!internalRequestOptions[adaptiveConcurrencyRetryDispatch] &&
+		resolveProviderInFlightLimit(model.provider, internalRequestOptions) !== undefined
+	) {
+		return withAdaptiveConcurrencyRetry(model, internalRequestOptions, () =>
+			streamSimple(model, context, {
+				...internalRequestOptions,
+				[adaptiveConcurrencyRetryDispatch]: true,
+			} as InternalSimpleStreamOptions),
+		);
 	}
 
 	// Pi-native transport short-circuits the per-provider dispatch entirely:

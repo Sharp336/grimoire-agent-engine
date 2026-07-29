@@ -84,6 +84,63 @@ describe("streamSimple resolver auth retry", () => {
 		unregisterCustomApis(SOURCE_ID);
 	});
 
+	it("keeps credential identity scoped to each concurrent resolver invocation", async () => {
+		const bothResolving = Promise.withResolvers<void>();
+		const releaseResolutions = Promise.withResolvers<void>();
+		const bothDispatched = Promise.withResolvers<void>();
+		const releaseDispatches = Promise.withResolvers<void>();
+		const dispatched: Array<{ apiKey: unknown; credentialId: number | undefined }> = [];
+		let active = 0;
+		let maxActive = 0;
+		let resolves = 0;
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				dispatched.push({ apiKey: options?.apiKey, credentialId: options?.credentialId });
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					active += 1;
+					maxActive = Math.max(maxActive, active);
+					if (active === 2) bothDispatched.resolve();
+					await releaseDispatches.promise;
+					active -= 1;
+					ok(stream);
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const resolver = async () => {
+			const index = resolves++;
+			if (resolves === 2) bothResolving.resolve();
+			await releaseResolutions.promise;
+			return { apiKey: `key-${index}`, credentialId: index + 10 };
+		};
+
+		const first = streamSimple(model(), context, {
+			apiKey: resolver,
+			maxInFlightRequests: { "test-provider": 1 },
+		}).result();
+		const second = streamSimple(model(), context, {
+			apiKey: resolver,
+			maxInFlightRequests: { "test-provider": 1 },
+		}).result();
+		await bothResolving.promise;
+		releaseResolutions.resolve();
+		await bothDispatched.promise;
+		expect(maxActive).toBe(2);
+		releaseDispatches.resolve();
+		await Promise.all([first, second]);
+
+		expect(dispatched).toHaveLength(2);
+		expect(dispatched).toEqual(
+			expect.arrayContaining([
+				{ apiKey: "key-0", credentialId: 10 },
+				{ apiKey: "key-1", credentialId: 11 },
+			]),
+		);
+	});
+
 	it("retries with a refreshed key when a 401 is thrown before the first event", async () => {
 		const keys: unknown[] = [];
 		const contexts: ApiKeyResolveContext[] = [];
@@ -719,5 +776,125 @@ describe("streamSimple resolver auth retry", () => {
 
 		expect((caught as Error).message).toMatch(/No API key for provider/);
 		expect(attempts).toBe(0);
+	});
+
+	it("waits and retries a sibling that hits the concurrency cap instead of rotating away", async () => {
+		const keys: unknown[] = [];
+		const waits: number[] = [];
+		const unexpected: string[] = [];
+		let bAttempts = 0;
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const key = options?.apiKey;
+					if (key === "credential-A") {
+						// First credential is invalid → rotates to a sibling.
+						stream.push({ type: "start", partial: assistant() });
+						stream.push({
+							type: "error",
+							reason: "error",
+							error: assistantError(
+								'{"type":"error","error":{"type":"authentication_error","message":"Invalid credentials"}}',
+								401,
+							),
+						});
+						return;
+					}
+					if (key === "credential-B") {
+						bAttempts += 1;
+						if (bAttempts === 1) {
+							stream.push({ type: "start", partial: assistant() });
+							stream.push({
+								type: "error",
+								reason: "error",
+								error: assistantError("concurrent_limit_reached"),
+							});
+							return;
+						}
+						ok(stream);
+						return;
+					}
+					unexpected.push(key as string);
+					ok(stream);
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => (ctx.error === undefined ? "credential-A" : "credential-B"),
+			providerRetryWait: async delayMs => void waits.push(delayMs),
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		// credential-A rotated to credential-B, which hit the concurrency cap, had
+		// its learned limit reduced, waited once, then retried the SAME sibling.
+		expect(keys).toEqual(["credential-A", "credential-B", "credential-B"]);
+		expect(bAttempts).toBe(2);
+		expect(unexpected).toEqual([]);
+		expect(waits).toEqual([5_000]);
+	});
+
+	it("aborts a sibling concurrent-limit backoff without retrying or rotating", async () => {
+		const controller = new AbortController();
+		const keys: unknown[] = [];
+		const backoffStarted = Promise.withResolvers<void>();
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const key = options?.apiKey;
+					if (key === "credential-A") {
+						stream.push({ type: "start", partial: assistant() });
+						stream.push({
+							type: "error",
+							reason: "error",
+							error: assistantError(
+								'{"type":"error","error":{"type":"authentication_error","message":"Invalid credentials"}}',
+								401,
+							),
+						});
+						return;
+					}
+					// credential-B is saturated: every attempt reports the cap. The
+					// bounded backoff wait is what we abort.
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError("concurrent_limit_reached"),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => (ctx.error === undefined ? "credential-A" : "credential-B"),
+			signal: controller.signal,
+			providerRetryWait: async (_delayMs, signal) => {
+				backoffStarted.resolve();
+				await new Promise<never>((_resolve, reject) =>
+					signal?.addEventListener("abort", () => reject(signal.reason), { once: true }),
+				);
+			},
+		});
+		const result = stream.result();
+		await backoffStarted.promise;
+		controller.abort();
+		await expect(result).rejects.toMatchObject({ name: "AbortError" });
+		// credential-B was dispatched once (the saturating attempt) but the aborted
+		// wait never retried it and never rotated to a third credential.
+		expect(keys).toEqual(["credential-A", "credential-B"]);
 	});
 });

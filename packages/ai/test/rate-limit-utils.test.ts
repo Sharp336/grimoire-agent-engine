@@ -38,6 +38,8 @@ describe("parseRateLimitReason", () => {
 	it("classifies concurrent request caps separately from rate limits and quota exhaustion", () => {
 		expect(parseRateLimitReason("Number of concurrent requests exceeded")).toBe("CONCURRENT_LIMIT");
 		expect(parseRateLimitReason("Maximum concurrent invocation limit reached")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("concurrent_limit_reached")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("concurrent_request_limit_reached")).toBe("CONCURRENT_LIMIT");
 		expect(parseRateLimitReason("Rate limit reached for gpt-4o")).toBe("RATE_LIMIT_EXCEEDED");
 		expect(parseRateLimitReason("Your quota will reset at 07-28")).toBe("QUOTA_EXHAUSTED");
 	});

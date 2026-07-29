@@ -168,8 +168,8 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			previousKey: failed,
 		});
 
-		expect(retry).toBe(sticky);
-		expect(retry).not.toBe(failed);
+		expect(retry).toEqual(expect.objectContaining({ apiKey: sticky }));
+		expect(retry).not.toEqual(expect.objectContaining({ apiKey: failed }));
 
 		const laterSelections = new Set<string>();
 		for (let index = 0; index < 6; index += 1) {
@@ -209,7 +209,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			previousKey,
 		});
 
-		expect(retry).toBe(sibling.credential.access);
+		expect(retry).toEqual(expect.objectContaining({ apiKey: sibling.credential.access }));
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(sibling.credential.access);
 	});
 
@@ -238,7 +238,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			previousKey,
 		});
 
-		expect(retry).toBe(refreshedKey);
+		expect(retry).toEqual(expect.objectContaining({ apiKey: refreshedKey }));
 		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe(refreshedKey);
 		expect(
 			store
