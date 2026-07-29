@@ -1,6 +1,6 @@
-import { type AuthStorage, type FetchImpl, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { type AuthStorage, type FetchImpl, postH2Primary, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { fetchWithRetry } from "@oh-my-pi/pi-utils";
+import antigravitySearchPrompt from "../../../prompts/web-search-antigravity.md" with { type: "text" };
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery, type StructuredQuery } from "../query";
 import type { SearchResponse } from "../types";
 import { SearchProviderError } from "../types";
@@ -12,9 +12,6 @@ import { classifyProviderHttpError, withHardTimeout } from "./utils";
 const ANTIGRAVITY_OAUTH_PROVIDER = "google-antigravity";
 const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const DEFAULT_MODEL = "gemini-3.6-flash-low";
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1000;
-const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 
 export interface AntigravitySearchParams {
 	query: string;
@@ -26,6 +23,8 @@ export interface AntigravitySearchParams {
 	sessionId?: string;
 	fetch?: FetchImpl;
 	antigravityModel?: string;
+	maxOutputTokens?: number;
+	temperature?: number;
 }
 
 function resolveAntigravitySearchModel(configuredModel: string | undefined): string {
@@ -64,31 +63,43 @@ async function callAntigravitySearch(
 	model: string,
 	query: string,
 	systemPrompt: string | undefined,
+	maxOutputTokens: number | undefined,
+	temperature: number | undefined,
 	fetchImpl: FetchImpl | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<SearchResponse> {
-	const instruction = [ANTIGRAVITY_SYSTEM_INSTRUCTION, systemPrompt?.toWellFormed()].filter(Boolean).join("\n");
+	const instruction = [ANTIGRAVITY_SYSTEM_INSTRUCTION, antigravitySearchPrompt.trim(), systemPrompt?.toWellFormed()]
+		.filter(Boolean)
+		.join("\n");
 	const request = {
 		systemInstruction: { role: "user", parts: [{ text: instruction }] },
 		contents: [{ role: "user", parts: [{ text: query }] }],
-		generationConfig: { candidateCount: 1 },
+		generationConfig: {
+			candidateCount: 1,
+			...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+			...(temperature !== undefined ? { temperature } : {}),
+		},
 		tools: [{ googleSearch: { enhancedContent: { imageSearch: { maxResultCount: 5 } } } }],
 	};
-	const response = await fetchWithRetry(() => `${ANTIGRAVITY_DAILY_ENDPOINT}/v1internal:generateContent`, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${accessToken}`,
-			"User-Agent": getAntigravityUserAgent(),
-			"Content-Type": "application/json",
-			"Accept-Encoding": "gzip",
-		},
-		body: JSON.stringify({ model, project: projectId, request, requestType: "agent", userAgent: "antigravity" }),
+	const url = `${ANTIGRAVITY_DAILY_ENDPOINT}/v1internal:generateContent`;
+	const headers = {
+		Authorization: `Bearer ${accessToken}`,
+		"User-Agent": getAntigravityUserAgent(),
+		"Content-Type": "application/json",
+		"Accept-Encoding": "gzip",
+	};
+	const body = new TextEncoder().encode(
+		JSON.stringify({ model, project: projectId, request, requestType: "agent", userAgent: "antigravity" }),
+	);
+	const transport = await postH2Primary({
+		url,
+		provider: "google-antigravity",
+		headers,
+		body,
 		signal: withHardTimeout(signal),
-		fetch: fetchImpl,
-		maxAttempts: MAX_RETRIES + 1,
-		defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-		maxDelayMs: RATE_LIMIT_BUDGET_MS,
+		fetchOverride: fetchImpl,
 	});
+	const response = new Response(transport.body, { status: transport.status, headers: transport.headers });
 	if (!response.ok) {
 		const body = await response.text();
 		throw (
@@ -151,6 +162,8 @@ export async function searchAntigravity(params: AntigravitySearchParams): Promis
 				model,
 				query,
 				params.systemPrompt,
+				params.maxOutputTokens,
+				params.temperature,
 				params.fetch,
 				params.signal,
 			),
@@ -178,6 +191,8 @@ export class AntigravityProvider extends SearchProvider {
 			sessionId: params.sessionId,
 			fetch: params.fetch,
 			antigravityModel: params.antigravityModel,
+			maxOutputTokens: params.maxOutputTokens,
+			temperature: params.temperature,
 		});
 	}
 }

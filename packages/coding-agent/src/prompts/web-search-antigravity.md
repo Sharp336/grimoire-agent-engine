@@ -1,0 +1,1 @@
+Use Google Search grounding to answer the query. Return a concise factual synthesis supported by the grounding metadata. Do not invent sources, citations, or URLs. If grounding is unavailable, fail rather than answering from memory.
