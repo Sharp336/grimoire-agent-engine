@@ -1320,6 +1320,55 @@ describe("github tool", () => {
 			expect(textSpy.mock.calls[0]?.[1]).toEqual(["issue", "reopen", "12", "--repo", "owner/repo"]);
 		});
 
+		it("accepts matching host-qualified GHES repositories", async () => {
+			const repo = "ghe.example.test/owner/repo";
+			const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({
+				number: 12,
+				state: "CLOSED",
+				stateReason: "COMPLETED",
+				url: "https://ghe.example.test/owner/repo/issues/12",
+			} as never);
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("reopened");
+
+			await new GithubTool(createSession()).execute("issue-state-reopen-ghes", {
+				op: "issue_state",
+				repo,
+				issue: "12",
+				state: "open",
+			});
+
+			expect(jsonSpy.mock.calls[0]?.[1]).toEqual([
+				"issue",
+				"view",
+				"12",
+				"--repo",
+				repo,
+				"--json",
+				"number,state,stateReason,url",
+			]);
+			expect(textSpy.mock.calls[0]?.[1]).toEqual(["issue", "reopen", "12", "--repo", repo]);
+		});
+
+		it("rejects host-qualified repositories when the canonical issue host differs", async () => {
+			vi.spyOn(git.github, "json").mockResolvedValue({
+				number: 12,
+				state: "OPEN",
+				stateReason: null,
+				url: "https://other.example.test/owner/repo/issues/12",
+			} as never);
+			const textSpy = vi.spyOn(git.github, "text");
+
+			await expect(
+				new GithubTool(createSession()).execute("issue-state-reject-ghes-host", {
+					op: "issue_state",
+					repo: "ghe.example.test/owner/repo",
+					issue: "12",
+					state: "closed",
+				}),
+			).rejects.toThrow(/canonical same-repository issue URL/);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
 		it("reopens with the state-reason field fallback on older GitHub CLI versions", async () => {
 			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
 				if (args.at(-1)?.includes("stateReason")) {

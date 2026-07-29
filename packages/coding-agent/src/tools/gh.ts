@@ -67,7 +67,7 @@ const githubSchema = type({
 	op: type(
 		"'repo_view' | 'file_read' | 'issue_create' | 'issue_state' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
 	).describe("github operation"),
-	"repo?": type("string").describe("owner/repo"),
+	"repo?": type("string").describe("[host/]owner/repo"),
 	"branch?": type("string").describe("branch"),
 	"path?": type("string").describe("repository-relative file path"),
 	"pr?": type("string | string[]").describe("pr number, url, or branch"),
@@ -171,6 +171,7 @@ export interface GhRunWatchViewDetails {
 
 
 
+
 export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {
 	readonly name = "github";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -268,5 +269,6 @@ async function executeFileRead(
 	const sourceUrl = `https://github.com/${repo}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
 	return buildTextResult(text, sourceUrl, { repo, branch });
 }
+
 
 
