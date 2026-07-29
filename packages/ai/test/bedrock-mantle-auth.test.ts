@@ -147,8 +147,9 @@ describe("bedrock-mantle authentication", () => {
 		});
 		const authorization = captured.authorization[0];
 		expect(authorization).toStartWith("AWS4-HMAC-SHA256 Credential=");
-		// Signed for the `bedrock` service in the resolved region — not `bedrock-mantle`.
-		expect(authorization).toContain(`/us-east-1/bedrock/aws4_request`);
+		// Mantle is its own IAM service prefix, so the credential scope is
+		// `bedrock-mantle` — not the `bedrock` the Converse path signs for.
+		expect(authorization).toContain(`/us-east-1/bedrock-mantle/aws4_request`);
 		// The catalog's `Bearer <sentinel>` default must never reach the wire.
 		expect(authorization).not.toContain("<authenticated>");
 	});
@@ -205,6 +206,6 @@ describe("bedrock-mantle authentication", () => {
 			AWS_REGION: "us-west-2",
 		});
 		expect(captured.urls[0]).toStartWith("https://bedrock-mantle.us-west-2.api.aws/openai/v1");
-		expect(captured.authorization[0]).toContain("/us-west-2/bedrock/aws4_request");
+		expect(captured.authorization[0]).toContain("/us-west-2/bedrock-mantle/aws4_request");
 	});
 });

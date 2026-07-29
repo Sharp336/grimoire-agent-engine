@@ -1155,6 +1155,18 @@ export function streamSimple<TApi extends Api>(
 		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
 	} as SimpleStreamOptions;
 
+	// `bedrock-mantle` credentials come from the AWS chain, so it must bypass key
+	// resolution entirely — ahead of the resolver block below, not just the static
+	// gate further down. A `ModelRegistry.resolver(...)` (the ordinary
+	// coding-agent / auth-gateway path) returns `undefined` when the only valid
+	// credentials live in `~/.aws/credentials` / SSO / IMDS, which the registry env
+	// probe cannot see, and that would fail before `stream()` ever gets to call
+	// `resolveAwsCredentials`. A caller-supplied static key still flows through
+	// `mapOptionsForApi` and is used as the bearer token.
+	if (model.provider === "bedrock-mantle") {
+		return stream(model, context, mapOptionsForApi(model, requestOptions, undefined));
+	}
+
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
@@ -1285,14 +1297,6 @@ export function streamSimple<TApi extends Api>(
 		return stream(model, context, providerOptions);
 	} else if (model.api === "bedrock-converse-stream") {
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
-		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
-		return stream(model, context, providerOptions);
-	} else if (model.provider === "bedrock-mantle") {
-		// Same reason as the Converse branch: credentials come from the AWS chain,
-		// whose `~/.aws/credentials` profiles / SSO / IMDS sources the registry env
-		// probe cannot see. Gating on a key here would fail `completeSimple()` and
-		// the auth-gateway utility calls before `stream()` gets to resolve them.
-		// `mapOptionsForApi` keeps a caller-supplied key when one is present.
 		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
 		return stream(model, context, providerOptions);
 	}
