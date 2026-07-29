@@ -25,7 +25,7 @@ function messageEntry(id: string, message: AssistantMessage | ToolResultMessage)
 	};
 }
 
-function assistantReadCall(toolCallId: string, path: string): SessionMessageEntry {
+function assistantReadCall(toolCallId: string, path: string | string[]): SessionMessageEntry {
 	return messageEntry(`assistant-${toolCallId}`, {
 		role: "assistant",
 		content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: { path } }],
@@ -88,6 +88,41 @@ describe("conditional tool-result protection", () => {
 
 		expect(regions).toHaveLength(1);
 		expect(regions[0]?.kind).toBe("toolResult");
+		expect(regions[0]?.entry).toBe(fileResult);
+	});
+
+	it("prunes regular reads but keeps batches containing skill:// intact", () => {
+		const skillBatchText = "batched skill output that must remain intact ".repeat(20);
+		const skillBatchResult = readResult("skill-batch", skillBatchText);
+		const fileResult = readResult("file-read", "file read output that can be pruned ".repeat(20));
+		const entries = [
+			assistantReadCall("skill-batch", ["src/component.ts", "skill://react"]),
+			skillBatchResult,
+			assistantReadCall("file-read", ["src/index.ts", "src/other.ts"]),
+			fileResult,
+		];
+
+		const result = pruneToolOutputs(entries, { ...DEFAULT_PRUNE_CONFIG, protectTokens: 0, minimumSavings: 0 });
+
+		expect(result.prunedCount).toBe(1);
+		expect((skillBatchResult.message as ToolResultMessage).prunedAt).toBeUndefined();
+		expect((skillBatchResult.message as ToolResultMessage).content).toEqual([{ type: "text", text: skillBatchText }]);
+		expect(typeof (fileResult.message as ToolResultMessage).prunedAt).toBe("number");
+	});
+
+	it("excludes batches containing skill:// from shake regions", () => {
+		const skillBatchResult = readResult("skill-batch", "batched skill output that must not be shaken ".repeat(40));
+		const fileResult = readResult("file-read", "file read output that is eligible for shake ".repeat(40));
+		const entries = [
+			assistantReadCall("skill-batch", ["skill://react", "src/component.ts"]),
+			skillBatchResult,
+			assistantReadCall("file-read", ["src/index.ts", "src/other.ts"]),
+			fileResult,
+		];
+
+		const regions = collectShakeRegions(entries, AGGRESSIVE_SHAKE_CONFIG);
+
+		expect(regions).toHaveLength(1);
 		expect(regions[0]?.entry).toBe(fileResult);
 	});
 });

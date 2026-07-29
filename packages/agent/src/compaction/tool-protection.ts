@@ -24,19 +24,40 @@ export function collectToolCallsById(entries: readonly SessionEntry[]): Map<stri
 	return toolCalls;
 }
 
-/**
- * Extract the `path` argument from a paired `read` tool call, when the result
- * is a `read` result carrying a string path. Returns `undefined` otherwise.
- * Shared primitive for read-targeted protection matchers (skills, plans, …).
- */
-export function getReadToolPath({ toolResult, toolCall }: ProtectedToolContext): string | undefined {
+function getReadToolPathArgument({ toolResult, toolCall }: ProtectedToolContext): unknown {
 	if (toolResult.toolName !== "read" || toolCall?.name !== "read") return undefined;
-	const path = (toolCall.arguments as Record<string, unknown>).path;
+	return (toolCall.arguments as Record<string, unknown>).path;
+}
+
+/**
+ * Extract the scalar `path` argument from a paired `read` tool call. Native
+ * path arrays return `undefined`; use {@link getReadToolPaths} when either
+ * input shape is valid.
+ */
+export function getReadToolPath(context: ProtectedToolContext): string | undefined {
+	const path = getReadToolPathArgument(context);
 	return typeof path === "string" ? path : undefined;
 }
 
+/**
+ * Extract every path from a paired scalar or native-array `read` tool call.
+ * Malformed and empty path arguments return `undefined`.
+ */
+export function getReadToolPaths(context: ProtectedToolContext): readonly string[] | undefined {
+	const path = getReadToolPathArgument(context);
+	if (typeof path === "string") return path.length > 0 ? [path] : undefined;
+	if (
+		!Array.isArray(path) ||
+		path.length === 0 ||
+		!path.every((target): target is string => typeof target === "string" && target.length > 0)
+	) {
+		return undefined;
+	}
+	return path;
+}
+
 export function isSkillReadToolResult(context: ProtectedToolContext): boolean {
-	return getReadToolPath(context)?.startsWith(SKILL_INTERNAL_URL_PREFIX) ?? false;
+	return getReadToolPaths(context)?.some(path => path.startsWith(SKILL_INTERNAL_URL_PREFIX)) ?? false;
 }
 
 export function isProtectedToolResult(

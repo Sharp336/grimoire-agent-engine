@@ -7,7 +7,11 @@ import type { ProtectedToolContext } from "@oh-my-pi/pi-agent-core/compaction/to
 import type { AssistantMessage, TextContent, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { createPlanReadMatcher } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-protection";
 
-function context(opts: { toolName?: string; callName?: string | undefined; path?: string }): ProtectedToolContext {
+function context(opts: {
+	toolName?: string;
+	callName?: string | undefined;
+	path?: string | string[];
+}): ProtectedToolContext {
 	const toolResult = {
 		role: "toolResult",
 		toolCallId: "c1",
@@ -48,6 +52,13 @@ describe("createPlanReadMatcher", () => {
 		expect(matcher(context({ path: "local://PLAN.md:raw" }))).toBe(true);
 		expect(matcher(context({ path: "local:/PLAN.md" }))).toBe(true);
 		expect(matcher(context({ path: "local://wp-migration.md:10-20" }))).toBe(true);
+	});
+
+	it("protects native read arrays containing a plan target", () => {
+		const matcher = createPlanReadMatcher(() => "local://wp-migration.md");
+		expect(matcher(context({ path: ["src/index.ts", "local://wp-migration.md"] }))).toBe(true);
+		expect(matcher(context({ path: ["local://PLAN.md", "src/index.ts"] }))).toBe(true);
+		expect(matcher(context({ path: ["local://scratch.md", "src/index.ts"] }))).toBe(false);
 	});
 
 	it("reflects a mid-session retitle at match time", () => {
@@ -93,7 +104,7 @@ function entry(id: string, message: AssistantMessage | ToolResultMessage): Sessi
 	return { type: "message", id, parentId: null, timestamp: "2026-06-03T00:00:00.000Z", message };
 }
 
-function readCall(toolCallId: string, path: string): SessionMessageEntry {
+function readCall(toolCallId: string, path: string | string[]): SessionMessageEntry {
 	return entry(`assistant-${toolCallId}`, {
 		role: "assistant",
 		content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: { path } }],
