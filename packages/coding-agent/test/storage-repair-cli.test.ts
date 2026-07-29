@@ -569,7 +569,10 @@ describe("offline SQLite salvage", () => {
 				{ target: "agent", apply: true, agentDir: root, output: candidate },
 				{
 					beforeCandidateVerification: async () => {
-						const stage = requireValue((await stageArtifacts(candidate, "candidate")).at(0), "candidate stage");
+						const stage = requireValue(
+							(await stageArtifacts(candidate, "candidate")).find(name => name.endsWith(".stage")),
+							"candidate database stage",
+						);
 						const stagedDb = new Database(path.join(root, stage), { safeIntegers: true });
 						try {
 							mutate(stagedDb);
@@ -596,7 +599,10 @@ describe("offline SQLite salvage", () => {
 			{ target: "agent", apply: true, agentDir: root, output: candidate },
 			{
 				beforeCandidateVerification: async () => {
-					const stage = requireValue((await stageArtifacts(candidate, "candidate")).at(0), "candidate stage");
+					const stage = requireValue(
+						(await stageArtifacts(candidate, "candidate")).find(name => name.endsWith(".stage")),
+						"candidate database stage",
+					);
 					const stagedDb = new Database(path.join(root, stage), { safeIntegers: true });
 					try {
 						stagedDb
