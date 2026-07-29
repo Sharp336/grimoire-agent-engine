@@ -11,6 +11,7 @@ from omp_rpc import (
     OperationCompletedEvent,
     OperationFailedEvent,
     OperationStartedEvent,
+    ReadyEvent,
     SessionState,
     TodoReminderEvent,
     assistant_text,
@@ -71,6 +72,33 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(failed.code, "prompt_scheduling_failed")
         self.assertIsInstance(cancelled, OperationCancelledEvent)
         self.assertEqual(cancelled.reason, "user")
+    def test_parse_ready_capability_manifest(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "capabilities": {
+                    "applicationApiVersion": 1,
+                    "commands": [
+                        {
+                            "name": "abort",
+                            "version": 1,
+                            "scheduling": "control",
+                        }
+                    ],
+                    "events": ["ready", "agent_end"],
+                    "extensionUiMethods": ["confirm"],
+                    "hostProtocols": ["tools", "uris"],
+                },
+            }
+        )
+
+        self.assertIsInstance(notification, ReadyEvent)
+        self.assertIsNotNone(notification.capabilities)
+        assert notification.capabilities is not None
+        self.assertEqual(notification.capabilities.application_api_version, 1)
+        self.assertEqual(notification.capabilities.commands[0].name, "abort")
+        self.assertEqual(notification.capabilities.commands[0].scheduling, "control")
 
     def test_parse_session_state(self) -> None:
         state = parse_session_state(

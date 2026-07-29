@@ -28,6 +28,7 @@ import type { RpcMessagesPage } from "./rpc-messages";
 export type RpcCommand =
 	// Protocol
 	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
+	| { id?: string; type: "get_capabilities" }
 
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
@@ -233,12 +234,30 @@ export interface RpcExtensionErrorFrame {
 	error: string;
 }
 
+export type RpcCommandSchedulingClass = "serial" | "concurrent" | "control";
+
+export interface RpcCommandCapability {
+	name: RpcCommandType;
+	version: number;
+	scheduling: RpcCommandSchedulingClass;
+}
+
+export interface RpcCapabilityManifest {
+	applicationApiVersion: number;
+	commands: RpcCommandCapability[];
+	events: string[];
+	extensionUiMethods: string[];
+	hostProtocols: string[];
+}
+
 export interface RpcReadyFrame {
 	type: "ready";
 	protocolVersion: 1;
 	supportedProtocolVersions: [1, 2];
 	maxFrameBytes: number;
 	maxReassembledFrameBytes: number;
+	/** Present on servers with application-level capability discovery. */
+	capabilities?: RpcCapabilityManifest;
 }
 
 export interface RpcChunkFrame {
@@ -293,6 +312,13 @@ export type RpcResponse =
 			command: "negotiate_protocol";
 			success: true;
 			data: { protocolVersion: 2 };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_capabilities";
+			success: true;
+			data: RpcCapabilityManifest;
 	  }
 
 	// Prompting (async - events follow)

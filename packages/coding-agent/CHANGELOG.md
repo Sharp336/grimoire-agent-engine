@@ -248,6 +248,7 @@
 
 - Added server-owned RPC operation lifecycles with accepted/started timing, exactly-once completed, failed, or cancelled outcomes, targeted idempotent cancellation, and bounded operation snapshots for reconciliation.
 - Added an authoritative RPC `get_state.activityPhase` (`provider`, `maintenance`, or `idle`) so hosts can distinguish provider completion from post-turn maintenance and terminal idle without changing legacy `isStreaming` semantics.
+- Added a runtime-validated RPC command registry and capability manifest, including explicit serial, concurrent, and control scheduling metadata in the ready frame and TypeScript/Python client APIs.
 
 ### Fixed
 
