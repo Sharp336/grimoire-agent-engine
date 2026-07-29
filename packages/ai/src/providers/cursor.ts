@@ -120,6 +120,7 @@ import {
 	type H2Lease,
 	isTransientTransportError,
 	readConnectTrailerError,
+	registerTransportDisposer,
 } from "../transport";
 import type {
 	Api,
@@ -166,8 +167,46 @@ import { type CursorTransportMode, resolveCursorTransportMode } from "./cursor/s
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export { CURSOR_DEFAULT_CLIENT_VERSION as CURSOR_CLIENT_VERSION } from "./cursor/headers";
 
-const conversationStateCache = new Map<string, ConversationStateStructure>();
-const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
+interface CursorConversationCacheEntry {
+	blobStore: Map<string, Uint8Array>;
+	conversationState?: ConversationStateStructure;
+}
+
+const CURSOR_CONVERSATION_CACHE_LIMIT = 64;
+const cursorConversationCache = new Map<string, CursorConversationCacheEntry>();
+let conversationCacheDisposerRegistered = false;
+
+function ensureConversationCacheDisposerRegistered(): void {
+	if (conversationCacheDisposerRegistered) return;
+	conversationCacheDisposerRegistered = true;
+	registerTransportDisposer("cursor-conversation-cache", async () => {
+		cursorConversationCache.clear();
+	});
+}
+
+function cursorConversationCacheKey(baseUrl: string, apiKey: string, conversationId: string): string {
+	const endpoint = new URL(baseUrl);
+	const normalizedEndpoint = `${endpoint.origin}${endpoint.pathname.replace(/\/+$/, "")}`;
+	const credentialHash = createHash("sha256").update(apiKey).digest("hex");
+	return `${normalizedEndpoint}\0${credentialHash}\0${conversationId}`;
+}
+
+function getCursorConversationCacheEntry(key: string): CursorConversationCacheEntry {
+	const existing = cursorConversationCache.get(key);
+	if (existing) {
+		cursorConversationCache.delete(key);
+		cursorConversationCache.set(key, existing);
+		return existing;
+	}
+	while (cursorConversationCache.size >= CURSOR_CONVERSATION_CACHE_LIMIT) {
+		const oldest = cursorConversationCache.keys().next().value;
+		if (oldest === undefined) break;
+		cursorConversationCache.delete(oldest);
+	}
+	const created: CursorConversationCacheEntry = { blobStore: new Map() };
+	cursorConversationCache.set(key, created);
+	return created;
+}
 
 export interface CursorOptions extends StreamOptions {
 	customSystemPrompt?: string;
@@ -388,6 +427,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		// nothing that could still be delivered.
 		let dispatchError: unknown;
 		let abortSettled: Promise<void> | undefined;
+		let dispatchAbortListener: (() => void) | undefined;
 		const drainInFlightDispatches = async (): Promise<void> => {
 			const signal = options?.signal;
 			while (inFlightDispatches.size > 0) {
@@ -399,7 +439,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				}
 				abortSettled ??= (() => {
 					const { promise, resolve } = Promise.withResolvers<void>();
-					signal.addEventListener("abort", () => resolve(), { once: true });
+					dispatchAbortListener = resolve;
+					signal.addEventListener("abort", dispatchAbortListener, { once: true });
 					return promise;
 				})();
 				await Promise.race([settled, abortSettled]);
@@ -410,6 +451,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let h2Request: http2.ClientHttp2Stream | null = null;
 		let h1Bridge: CursorHttp1Bridge | null = null;
 		let heartbeatTimer: NodeJS.Timeout | null = null;
+		let requestAbortListener: (() => void) | undefined;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
@@ -447,18 +489,19 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			}
 
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
-			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
-			conversationBlobStores.set(conversationId, blobStore);
-			const cachedState = conversationStateCache.get(conversationId);
+			const baseUrl = model.baseUrl || CURSOR_API_URL;
+			ensureConversationCacheDisposerRegistered();
+			const cacheKey = cursorConversationCacheKey(baseUrl, apiKey, conversationId);
+			const cacheEntry = getCursorConversationCacheEntry(cacheKey);
+			const blobStore = cacheEntry.blobStore;
 			const { requestBytes, conversationState } = buildGrpcRequest(model, context, options, {
 				conversationId,
 				blobStore,
-				conversationState: cachedState,
+				conversationState: cacheEntry.conversationState,
 			});
-			conversationStateCache.set(conversationId, conversationState);
+			cacheEntry.conversationState = conversationState;
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
 
-			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const originalRequestId = crypto.randomUUID();
 			const requestId = crypto.randomUUID();
 			const { mode } = await resolveCursorTransportMode({
@@ -536,7 +579,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			};
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				conversationStateCache.set(conversationId, checkpoint);
+				getCursorConversationCacheEntry(cacheKey).conversationState = checkpoint;
 			};
 
 			let channel: CursorChannel;
@@ -743,13 +786,19 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					void closeDebugLog().finally(() => settleH2(error));
 				});
 
-				if (options?.signal) {
-					options.signal.addEventListener("abort", () => {
+				const callerSignal = options?.signal;
+				if (callerSignal) {
+					requestAbortListener = () => {
 						h2Request?.close();
 						void closeDebugLog().finally(() => {
 							settleH2(new AIError.AbortError());
 						});
-					});
+					};
+					callerSignal.addEventListener("abort", requestAbortListener, { once: true });
+					if (callerSignal.aborted) {
+						requestAbortListener();
+						throw new AIError.AbortError();
+					}
 				}
 
 				h2Request.write(encodeConnectFrame(requestBytes));
@@ -813,6 +862,14 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
+			if (dispatchAbortListener && options?.signal) {
+				options.signal.removeEventListener("abort", dispatchAbortListener);
+				dispatchAbortListener = undefined;
+			}
+			if (requestAbortListener && options?.signal) {
+				options.signal.removeEventListener("abort", requestAbortListener);
+				requestAbortListener = undefined;
+			}
 			const log = await debugResponseLogPromise;
 			await log?.close();
 			if (heartbeatTimer) {
