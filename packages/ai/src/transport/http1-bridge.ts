@@ -5,6 +5,7 @@ import { isTransportDisposed, registerTransportDisposer } from "./lifecycle";
 
 const MAX_IN_FLIGHT = 16;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
+const DEFAULT_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
 export interface Http1PollFrame {
 	seqno: bigint;
@@ -34,6 +35,7 @@ export interface Http1BridgeOptions<TMessage> {
 	createRpc(transport: Transport): Http1BridgeRpc<TMessage>;
 	heartbeatBytes?: Uint8Array;
 	heartbeatIntervalMs?: number;
+	proxyTunnelTimeoutMs?: number;
 	signal?: AbortSignal;
 	isRecoverableReceiveError?(error: unknown): boolean;
 	normalizeError?(error: unknown): Error;
@@ -46,11 +48,6 @@ export async function disposeHttp1Bridges(): Promise<void> {
 	const bridges = Array.from(activeBridges);
 	activeBridges.clear();
 	await Promise.allSettled(bridges.map(bridge => bridge.close("dispose")));
-}
-
-/** Test seam for suites that provide their own bridge lifecycle. */
-export function __resetHttp1Bridges(): void {
-	activeBridges.clear();
 }
 
 let disposerRegistered = false;
@@ -90,7 +87,11 @@ export async function createHttp1Bridge<TMessage>(
 	const target = new URL(options.baseUrl);
 	const proxyUrl = getProxyForUrl(options.provider, target);
 	const agent = proxyUrl
-		? createProxiedAgent(proxyUrl, options.baseUrl, { signal: receiveSignal, alpnProtocols: ["http/1.1"] })
+		? createProxiedAgent(proxyUrl, options.baseUrl, {
+				signal: receiveSignal,
+				alpnProtocols: ["http/1.1"],
+				timeoutMs: options.proxyTunnelTimeoutMs ?? DEFAULT_PROXY_TUNNEL_TIMEOUT_MS,
+			})
 		: undefined;
 	const headerInterceptor: Interceptor = next => async request => {
 		const headers = new Headers(request.header);
@@ -117,6 +118,7 @@ export async function createHttp1Bridge<TMessage>(
 	let heartbeatTimer: NodeJS.Timeout | undefined;
 	let waitResolve: (() => void) | undefined;
 	const closed = Promise.withResolvers<void>();
+	let closingPromise: Promise<void> | undefined;
 
 	function notify(): void {
 		const resolve = waitResolve;
@@ -131,24 +133,28 @@ export async function createHttp1Bridge<TMessage>(
 	}
 
 	async function closeBridge(reason: "success" | "fatal" | "abort" | "dispose", error?: Error): Promise<void> {
-		if (state.kind !== "open") return;
-		const fatalError = reason === "fatal" ? (error ?? new Error("HTTP/1 bridge closed fatally")) : undefined;
-		state = { kind: "closing", reason, error: fatalError };
-		activeBridges.delete(bridge as Http1Bridge<unknown>);
-		bridgeAbort.abort(fatalError ?? new Error(`HTTP/1 bridge closing: ${reason}`));
-		agent?.destroy();
-		if (heartbeatTimer) {
-			clearInterval(heartbeatTimer);
-			heartbeatTimer = undefined;
-		}
-		const closeError = fatalError ?? new Error(`HTTP/1 bridge closing: ${reason}`);
-		for (const pending of appendQueue) pending.reject(closeError);
-		appendQueue.length = 0;
-		closed.resolve();
-		notify();
-		await Promise.allSettled(Array.from(inFlight));
-		state = { kind: "closed", error: fatalError };
-		notify();
+		if (closingPromise) return closingPromise;
+		if (state.kind === "closed") return Promise.resolve();
+		closingPromise = (async () => {
+			const fatalError = reason === "fatal" ? (error ?? new Error("HTTP/1 bridge closed fatally")) : undefined;
+			state = { kind: "closing", reason, error: fatalError };
+			activeBridges.delete(bridge as Http1Bridge<unknown>);
+			bridgeAbort.abort(fatalError ?? new Error(`HTTP/1 bridge closing: ${reason}`));
+			agent?.destroy();
+			if (heartbeatTimer) {
+				clearInterval(heartbeatTimer);
+				heartbeatTimer = undefined;
+			}
+			const closeError = fatalError ?? new Error(`HTTP/1 bridge closing: ${reason}`);
+			for (const pending of appendQueue) pending.reject(closeError);
+			appendQueue.length = 0;
+			closed.resolve();
+			notify();
+			await Promise.allSettled(Array.from(inFlight));
+			state = { kind: "closed", error: fatalError };
+			notify();
+		})();
+		return closingPromise;
 	}
 
 	function startAppends(): void {

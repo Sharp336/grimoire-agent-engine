@@ -29,6 +29,7 @@ const FIXTURE_MODEL_IDS = [
 
 let server: http2.Http2Server;
 let baseUrl: string;
+let lastHeaders: http2.IncomingHttpHeaders | undefined;
 
 beforeAll(async () => {
 	const response = create(GetUsableModelsResponseSchema, {
@@ -38,6 +39,7 @@ beforeAll(async () => {
 
 	server = http2.createServer();
 	server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+		lastHeaders = headers;
 		stream.on("data", () => {});
 		stream.on("end", () => {
 			if (headers[":path"] !== "/agent.v1.AgentService/GetUsableModels") {
@@ -98,6 +100,17 @@ describe("cursor discovery input modalities (issue #4726)", () => {
 		expect(spec?.contextWindow).toBe(200_000);
 		expect(spec?.maxTokens).toBe(64_000);
 		expect(spec?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+	it("uses the runtime client-version override for model discovery", async () => {
+		const previous = Bun.env.CURSOR_CLIENT_VERSION;
+		Bun.env.CURSOR_CLIENT_VERSION = "cli-runtime-override";
+		try {
+			await discover();
+			expect(lastHeaders?.["x-cursor-client-version"]).toBe("cli-runtime-override");
+		} finally {
+			if (previous === undefined) delete Bun.env.CURSOR_CLIENT_VERSION;
+			else Bun.env.CURSOR_CLIENT_VERSION = previous;
+		}
 	});
 });
 

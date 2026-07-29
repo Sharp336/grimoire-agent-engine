@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import http2 from "node:http2";
+import * as os from "node:os";
+import * as path from "node:path";
 import { create, toBinary } from "@bufbuild/protobuf";
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
@@ -75,6 +78,69 @@ describe("Devin HTTP/2 transport", () => {
 			const closed = Promise.withResolvers<void>();
 			server.close(error => (error ? closed.reject(error) : closed.resolve()));
 			await closed.promise;
+		}
+	});
+
+	it("records native HTTP/2 requests when request debugging is enabled", async () => {
+		const payload = connectFrame(
+			toBinary(
+				GetChatMessageResponseSchema,
+				create(GetChatMessageResponseSchema, { deltaText: "debugged", stopReason: StopReason.STOP_PATTERN }),
+			),
+		);
+		const server = http2.createServer();
+		server.on("stream", (request: http2.ServerHttp2Stream) => {
+			request.on("data", () => {});
+			request.on("end", () => {
+				request.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				request.end(Buffer.concat([payload, connectFrame(new Uint8Array(), 0x02)]));
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected HTTP/2 test server address");
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "devin-h2-debug-"));
+		try {
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					"-e",
+					`import { stream } from "@oh-my-pi/pi-ai/stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+process.chdir(Bun.env.TEST_TEMP_DIR);
+const model = buildModel({ id: "debug", name: "debug", api: "devin-agent", provider: "devin", baseUrl: Bun.env.TEST_BASE_URL, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1, maxTokens: 1 });
+const result = await stream(model, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { apiKey: "token" }).result();
+process.stdout.write(result.stopReason);`,
+				],
+				{
+					cwd: new URL("..", import.meta.url).pathname,
+					env: {
+						...process.env,
+						PI_REQ_DEBUG: "1",
+						TEST_TEMP_DIR: tempDir,
+						TEST_BASE_URL: `http://127.0.0.1:${address.port}`,
+					},
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
+			const [exitCode, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect(exitCode, stderr).toBe(0);
+			expect(stdout).toBe("stop");
+			const files = await fs.readdir(tempDir);
+			expect(files.some(file => /^rr-session-\d+\.json$/.test(file))).toBeTrue();
+			expect(files.some(file => /^rr-session-\d+\.res\.log$/.test(file))).toBeTrue();
+		} finally {
+			const closed = Promise.withResolvers<void>();
+			server.close(() => closed.resolve());
+			await closed.promise;
+			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 

@@ -23,6 +23,37 @@ const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
 
+export interface DevinCredential {
+	token: string;
+	apiEndpoint?: string;
+}
+
+export function parseDevinCredential(apiKey: string | undefined): DevinCredential {
+	if (!apiKey) return { token: "" };
+	try {
+		const value = JSON.parse(apiKey) as unknown;
+		if (value && typeof value === "object" && !Array.isArray(value)) {
+			const record = value as Record<string, unknown>;
+			if (typeof record.token === "string") {
+				return {
+					token: record.token,
+					apiEndpoint:
+						typeof record.apiEndpoint === "string" && record.apiEndpoint.length > 0
+							? record.apiEndpoint
+							: undefined,
+				};
+			}
+		}
+	} catch {
+		// Legacy credentials are opaque session tokens rather than JSON.
+	}
+	return { token: apiKey };
+}
+
+export function devinOs(platform: NodeJS.Platform = process.platform): string {
+	return platform === "win32" ? "windows" : platform;
+}
+
 /** Best-effort match for labels whose wording implies a thinking / reasoning-effort variant. */
 const REASONING_LABEL_PATTERN = /think|thinking|minimal|high|medium|low|xhigh|max|reasoning/i;
 const NO_REASONING_LABEL_PATTERN = /\bno thinking\b/i;
@@ -58,7 +89,11 @@ export async function fetchDevinModels(
 	options: DevinModelDiscoveryOptions,
 ): Promise<ModelSpec<"devin-agent">[] | null> {
 	const timeoutMs = options.timeoutMs ?? 5_000;
-	const resolvedBaseUrl = options.baseUrl ?? DEVIN_DEFAULT_BASE_URL;
+	const credential = parseDevinCredential(options.apiKey);
+	const resolvedBaseUrl =
+		credential.apiEndpoint && (!options.baseUrl || options.baseUrl === DEVIN_DEFAULT_BASE_URL)
+			? credential.apiEndpoint
+			: (options.baseUrl ?? DEVIN_DEFAULT_BASE_URL);
 	const requestUrl = `${resolvedBaseUrl.replace(/\/+$/, "")}${DEVIN_GET_CLI_MODEL_CONFIGS_PATH}`;
 
 	const controller = new AbortController();
@@ -66,7 +101,7 @@ export async function fetchDevinModels(
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
 
 	try {
-		const apiKey = normalizeDevinSessionToken(options.apiKey);
+		const apiKey = normalizeDevinSessionToken(credential.token);
 		const request = create(GetCliModelConfigsRequestSchema, {
 			metadata: create(MetadataSchema, {
 				apiKey,
@@ -75,7 +110,7 @@ export async function fetchDevinModels(
 				extensionName: DEVIN_EXTENSION_NAME,
 				extensionVersion: DEVIN_EXTENSION_VERSION,
 				locale: "en",
-				os: process.platform,
+				os: devinOs(),
 			}),
 		});
 		const body = toBinary(GetCliModelConfigsRequestSchema, request);
@@ -98,7 +133,7 @@ export async function fetchDevinModels(
 			return null;
 		}
 
-		return normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl);
+		return normalizeDevinModels(decoded.clientModelConfigs, resolvedBaseUrl);
 	} catch {
 		return null;
 	} finally {

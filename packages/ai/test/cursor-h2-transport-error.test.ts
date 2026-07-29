@@ -1,10 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import { isTransientTransportError } from "@oh-my-pi/pi-ai/transport";
+import { isH2UnavailableBeforeDispatch, isTransientTransportError } from "@oh-my-pi/pi-ai/transport";
 
 describe("Cursor shared HTTP/2 transport classification", () => {
 	it("recognizes an ALPN negotiation failure as transient", () => {
 		const error = Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" });
 		expect(isTransientTransportError(error)).toBeTrue();
+	});
+
+	it("allows HTTP/1 fallback for the standard unsupported-H2 error", () => {
+		const error = Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" });
+		expect(isH2UnavailableBeforeDispatch(error)).toBeTrue();
 	});
 
 	it("recognizes HTTP/2 stream resets and common socket failures", () => {

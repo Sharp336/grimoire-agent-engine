@@ -29,6 +29,9 @@ export function decodeJwtPayload(token: string): Record<string, unknown> | null 
 	if (parts.length !== 3) return null;
 	const payload = parts[1];
 	if (!payload) return null;
+	if (!/^[A-Za-z0-9_-]+={0,2}$/.test(payload)) return null;
+	const unpaddedLength = payload.indexOf("=") === -1 ? payload.length : payload.indexOf("=");
+	if (unpaddedLength % 4 === 1 || (payload.includes("=") && payload.length % 4 !== 0)) return null;
 	try {
 		const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
 		return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded)

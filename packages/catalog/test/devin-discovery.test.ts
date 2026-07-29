@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import { fetchDevinModels } from "../src/discovery/devin";
+import { devinOs, fetchDevinModels } from "../src/discovery/devin";
 import {
 	GetCliModelConfigsRequestSchema,
 	GetCliModelConfigsResponseSchema,
@@ -33,12 +33,16 @@ describe("fetchDevinModels", () => {
 			return new Response(toBinary(GetCliModelConfigsResponseSchema, response), { status: 200 });
 		};
 
-		const models = await fetchDevinModels({ apiKey: "fixture", baseUrl: "https://example.test", fetch });
+		const models = await fetchDevinModels({
+			apiKey: JSON.stringify({ token: "fixture", apiEndpoint: "https://regional.devin.example" }),
+			baseUrl: "https://server.codeium.com",
+			fetch,
+		});
 
 		expect(models).toEqual([
 			expect.objectContaining({ id: "observed-model", contextWindow: 1_000_000, maxTokens: 128_000 }),
 		]);
-		expect(requestUrl).toBe("https://example.test/exa.api_server_pb.ApiServerService/GetCliModelConfigs");
+		expect(requestUrl).toBe("https://regional.devin.example/exa.api_server_pb.ApiServerService/GetCliModelConfigs");
 		expect(requestHeaders?.get("authorization")).toBe(`Basic ${SESSION_TOKEN}`);
 		expect(requestHeaders?.get("content-type")).toBe("application/proto");
 		if (!requestBody) throw new Error("Devin discovery did not submit a request body");
@@ -50,7 +54,12 @@ describe("fetchDevinModels", () => {
 			extensionName: "chisel",
 			extensionVersion: "0.0.0-dev",
 			locale: "en",
-			os: process.platform,
+			os: devinOs(),
 		});
+	});
+
+	it("normalizes the Windows wire identity", () => {
+		expect(devinOs("win32")).toBe("windows");
+		expect(devinOs("linux")).toBe("linux");
 	});
 });

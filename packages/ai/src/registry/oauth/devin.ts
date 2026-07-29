@@ -18,6 +18,11 @@ interface DevinPKCEParams {
 	challenge: string;
 }
 
+export interface DevinCliTokenExchange {
+	apiKey: string;
+	apiServerUrl?: string;
+}
+
 export async function loginDevin(ctrl: OAuthController): Promise<OAuthCredentials> {
 	const flow = new DevinOAuthFlow(ctrl);
 	return flow.login();
@@ -61,13 +66,13 @@ class DevinOAuthFlow extends OAuthCallbackFlow {
 				provider: "devin",
 			});
 		}
-		const token = await exchangeDevinCliToken(code, this.#pkce.verifier, this.ctrl.fetch);
+		const exchange = await exchangeDevinCliToken(code, this.#pkce.verifier, this.ctrl.fetch);
 
 		return {
-			access: token,
-			refresh: token,
-			expires: getTokenExpiry(token),
-			apiEndpoint: DEVIN_API_URL,
+			access: exchange.apiKey,
+			refresh: exchange.apiKey,
+			expires: getTokenExpiry(exchange.apiKey),
+			apiEndpoint: exchange.apiServerUrl || DEVIN_API_URL,
 			enterpriseUrl: DEVIN_WEBAPP_URL,
 		};
 	}
@@ -77,7 +82,7 @@ export async function exchangeDevinCliToken(
 	authorizationCode: string,
 	codeVerifier: string,
 	fetchImpl: FetchFunction = fetch,
-): Promise<string> {
+): Promise<DevinCliTokenExchange> {
 	const response = await fetchImpl(`${DEVIN_API_URL}${TOKEN_PATH}`, {
 		method: "POST",
 		headers: {
@@ -100,14 +105,18 @@ export async function exchangeDevinCliToken(
 		});
 	}
 
-	const data = (await response.json()) as { apiKey?: unknown };
+	const data = (await response.json()) as { apiKey?: unknown; apiServerUrl?: unknown };
 	if (typeof data.apiKey !== "string" || data.apiKey.length === 0) {
 		throw new AIError.OAuthError("Devin CLI token exchange returned an empty token", {
 			kind: "validation",
 			provider: "devin",
 		});
 	}
-	return data.apiKey;
+	return {
+		apiKey: data.apiKey,
+		apiServerUrl:
+			typeof data.apiServerUrl === "string" && data.apiServerUrl.length > 0 ? data.apiServerUrl : undefined,
+	};
 }
 
 // A malformed or non-JWT Devin token keeps the conservative long-lived

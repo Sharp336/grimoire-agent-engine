@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as http from "node:http";
 import * as http2 from "node:http2";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { connectNodeAdapter } from "@connectrpc/connect-node";
 import {
 	disposeCursorConversationCache,
 	getCursorConversationCacheSizesForTest,
 	streamCursor,
 } from "@oh-my-pi/pi-ai/providers/cursor";
-import { disposeH2Pool, encodeConnectFrame } from "@oh-my-pi/pi-ai/transport";
+import { encodeConnectFrame } from "@oh-my-pi/pi-ai/transport";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -17,10 +19,17 @@ import {
 	InteractionUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+import {
+	AgentUrlConfigSchema,
+	GetServerConfigResponseSchema,
+	Http2Config,
+	ServerConfigService,
+} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/server_config_pb";
 
 const CONNECT_END_STREAM_FLAG = 0x02;
 const context: Context = { messages: [{ role: "user", content: "state isolation", timestamp: 1 }] };
 const servers = new Set<http2.Http2Server>();
+const configServers = new Set<http.Server>();
 
 interface CapturedRequest {
 	authorization: string;
@@ -127,13 +136,37 @@ async function startServer(
 			stream.end(successResponse(checkpoint));
 		});
 	});
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(0, "127.0.0.1", resolve);
-	});
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
 	const address = server.address();
 	if (!address || typeof address === "string") throw new Error("expected Cursor state fixture port");
 	return { baseUrl: `http://127.0.0.1:${address.port}`, requests, firstRequest: firstRequest.promise };
+}
+
+async function startConfigServer(agentUrl: string): Promise<string> {
+	const server = http.createServer(
+		connectNodeAdapter({
+			routes: router => {
+				router.service(ServerConfigService, {
+					getServerConfig: () =>
+						create(GetServerConfigResponseSchema, {
+							http2Config: Http2Config.FORCE_ALL_ENABLED,
+							agentUrlConfig: create(AgentUrlConfigSchema, { agentUrl }),
+						}),
+				});
+			},
+		}),
+	);
+	configServers.add(server);
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("expected config fixture port");
+	return `http://127.0.0.1:${address.port}`;
 }
 
 async function run(baseUrl: string, apiKey: string, conversationId = "shared-caller-id"): Promise<void> {
@@ -155,19 +188,32 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	await disposeCursorConversationCache();
-	await disposeH2Pool();
 	await Promise.all(
-		[...servers].map(
-			server =>
-				new Promise<void>(resolve => {
-					server.close(() => resolve());
-				}),
-		),
+		[...servers].map(server => {
+			const closed = Promise.withResolvers<void>();
+			server.close(() => closed.resolve());
+			return closed.promise;
+		}),
 	);
+	await Promise.all(
+		[...configServers].map(server => {
+			const closed = Promise.withResolvers<void>();
+			server.close(() => closed.resolve());
+			return closed.promise;
+		}),
+	);
+	configServers.clear();
 	servers.clear();
 });
 
 describe("Cursor conversation state isolation", () => {
+	it("routes Run through the server-provided agent endpoint", async () => {
+		const endpoint = await startServer(false);
+		const discoveryUrl = await startConfigServer(endpoint.baseUrl);
+		await run(discoveryUrl, "routed-credential", "routed-conversation");
+		expect(endpoint.requests.map(request => request.authorization)).toEqual(["Bearer routed-credential"]);
+	});
+
 	it("scopes checkpoints by endpoint and hashed credential, not caller conversation id alone", async () => {
 		const firstEndpoint = await startServer(true);
 		await run(firstEndpoint.baseUrl, "credential-a");

@@ -21,6 +21,29 @@ export interface ConnectFrame {
 
 export type ConnectTerminal = { kind: "success" } | { kind: "provider-error"; code: string; message: string };
 
+const CONNECT_HTTP_STATUS: Readonly<Record<string, number>> = {
+	canceled: 499,
+	unknown: 500,
+	invalid_argument: 400,
+	deadline_exceeded: 504,
+	not_found: 404,
+	already_exists: 409,
+	permission_denied: 403,
+	resource_exhausted: 429,
+	failed_precondition: 400,
+	aborted: 409,
+	out_of_range: 400,
+	unimplemented: 501,
+	internal: 500,
+	unavailable: 503,
+	data_loss: 500,
+	unauthenticated: 401,
+};
+
+export function connectCodeToHttpStatus(code: string): number {
+	return CONNECT_HTTP_STATUS[code.toLowerCase()] ?? 500;
+}
+
 export function createConnectFrameReader(options?: { maxPayloadBytes?: number }): {
 	push(chunk: Uint8Array): ConnectFrame[];
 	finish(): void;
@@ -147,11 +170,6 @@ export function decodeConnectTerminal(payload: Uint8Array): ConnectTerminal {
 		throw new RangeError("Connect end-of-stream payload must be an object");
 	}
 	const record = value as Record<string, unknown>;
-	for (const key of Object.keys(record)) {
-		if (key !== "error" && key !== "metadata") {
-			throw new RangeError(`Connect end-of-stream payload has unknown field ${key}`);
-		}
-	}
 	if (!("error" in record) || record.error === null || record.error === undefined) return { kind: "success" };
 	if (!record.error || typeof record.error !== "object" || Array.isArray(record.error)) {
 		throw new RangeError("Connect end-of-stream error must be an object");

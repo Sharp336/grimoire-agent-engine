@@ -1,7 +1,9 @@
 import type { ClientHttp2Stream, IncomingHttpHeaders } from "node:http2";
 import { constants as http2Constants } from "node:http2";
+import { resolveExtraCaWithSystemRoots, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
+import { wrapFetchForProxy } from "../utils/proxy";
 import { acquireH2Session, type H2Lease } from "./h2-pool";
 
 const PRE_DISPATCH_CODES: Record<string, true> = {
@@ -14,6 +16,7 @@ const PRE_DISPATCH_CODES: Record<string, true> = {
 	ENOTFOUND: true,
 	ETIMEDOUT: true,
 	ERR_HTTP2_ALPN: true,
+	ERR_HTTP2_ERROR: true,
 	ERR_HTTP2_INVALID_SESSION: true,
 };
 
@@ -26,12 +29,12 @@ export class H2UnavailableBeforeDispatchError extends Error {
 	}
 }
 
-function isPreDispatchUnavailable(error: unknown): boolean {
+export function isH2UnavailableBeforeDispatch(error: unknown): boolean {
 	if (error instanceof AIError.AbortError || error instanceof AIError.ValidationError) return false;
 	const code = (error as { code?: unknown } | null)?.code;
 	if (typeof code === "string" && PRE_DISPATCH_CODES[code]) return true;
 	const message = error instanceof Error ? error.message : String(error);
-	return /alpn.*(?:h2|http\/2)|http\/2.*(?:not supported|unavailable)|failed to connect|network is unreachable/i.test(
+	return /alpn.*(?:h2|http\/2)|(?:h2|http\/2).*(?:not supported|unavailable)|failed to connect|network is unreachable/i.test(
 		message,
 	);
 }
@@ -55,7 +58,10 @@ export async function establishH2Request(options: EstablishH2RequestOptions): Pr
 	let stream: ClientHttp2Stream | undefined;
 	try {
 		const url = new URL(options.url);
-		lease = await acquireH2Session(url.origin, options.provider, options.signal);
+		lease = await acquireH2Session(url.origin, options.provider, {
+			signal: options.signal,
+			ca: resolveExtraCaWithSystemRoots(),
+		});
 		stream = await lease.request(
 			{
 				":method": "POST",
@@ -66,7 +72,7 @@ export async function establishH2Request(options: EstablishH2RequestOptions): Pr
 		);
 	} catch (error) {
 		lease?.release();
-		if (isPreDispatchUnavailable(error)) throw new H2UnavailableBeforeDispatchError(error);
+		if (isH2UnavailableBeforeDispatch(error)) throw new H2UnavailableBeforeDispatchError(error);
 		throw error;
 	}
 
@@ -212,6 +218,7 @@ export async function postH2Primary(options: H2PostOptions): Promise<TransportRe
 		return await postH2Only(options);
 	} catch (error) {
 		if (!(error instanceof H2UnavailableBeforeDispatchError)) throw error;
-		return postFetch(options, fetch);
+		const proxyFetch = wrapFetchForProxy(fetch, options.provider);
+		return postFetch(options, wrapFetchForExtraCa(proxyFetch));
 	}
 }

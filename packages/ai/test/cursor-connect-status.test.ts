@@ -4,7 +4,6 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import { __evictServerConfigEntry } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
-import { disposeH2Pool } from "@oh-my-pi/pi-ai/transport";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -155,7 +154,6 @@ afterEach(async () => {
 		stream.end();
 	};
 	if (activeBaseUrl) {
-		await disposeH2Pool();
 		__evictServerConfigEntry(activeBaseUrl, "test-token");
 		activeBaseUrl = undefined;
 	}
@@ -174,6 +172,7 @@ describe("Cursor Connect terminal behavior without the CLI retry feature signal"
 		const { message, retryDelays } = await collect(makeModel(baseUrl));
 
 		expect(message.stopReason).toBe("error");
+		expect(message.errorStatus).toBe(503);
 		expect(attemptHeaders).toHaveLength(1);
 		expect(attemptHeaders[0]?.["x-request-id"]).toBeTruthy();
 		expect(attemptHeaders[0]?.["x-original-request-id"]).toBeTruthy();
@@ -294,5 +293,30 @@ describe("Cursor Connect terminal behavior without the CLI retry feature signal"
 		expect(AIError.is(message.errorId, AIError.Flag.ContextOverflow)).toBe(false);
 		expect(retryDelays).toEqual([]);
 		expect(attemptHeaders).toHaveLength(1);
+	});
+
+	it("observes H2 completion when abort wins immediately after listener registration", async () => {
+		const baseUrl = await startServer();
+		let additions = 0;
+		let aborted = false;
+		const target = new AbortController().signal;
+		const signal = new Proxy(target, {
+			get(inner, property) {
+				if (property === "aborted") return aborted;
+				if (property === "addEventListener") {
+					return (...args: Parameters<AbortSignal["addEventListener"]>) => {
+						additions++;
+						if (additions === 5) aborted = true;
+						inner.addEventListener(...args);
+					};
+				}
+				const value = Reflect.get(inner, property);
+				return typeof value === "function" ? value.bind(inner) : value;
+			},
+		});
+
+		const { message } = await collect(makeModel(baseUrl), { signal });
+		expect(additions).toBe(5);
+		expect(message.stopReason).toBe("aborted");
 	});
 });

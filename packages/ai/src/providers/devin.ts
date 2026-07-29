@@ -1,5 +1,6 @@
 import { gzipSync } from "node:zlib";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { devinOs, parseDevinCredential } from "@oh-my-pi/pi-catalog/discovery/devin";
 import {
 	ChatMessageRequestType,
 	GetChatMessageRequestSchema,
@@ -29,6 +30,7 @@ import * as AIError from "../error";
 import {
 	CONNECT_COMPRESSED_FLAG,
 	type ConnectFrame,
+	connectCodeToHttpStatus,
 	createConnectFrameReader,
 	encodeConnectFrame,
 	postH2Primary,
@@ -52,6 +54,7 @@ import type {
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
 import { transformMessages } from "./transform-messages";
 
@@ -150,6 +153,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		let activeToolCallId: string | undefined;
 		let latestStopReason = StopReason.UNSPECIFIED;
 		let response: TransportResponse | undefined;
+		let debugResponseLogPromise: Promise<RequestDebugResponseLog> | undefined;
 
 		const markFirstToken = () => {
 			if (firstTokenTime === undefined) firstTokenTime = performance.now();
@@ -180,8 +184,13 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		};
 
 		try {
-			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
-			const apiKey = normalizeDevinSessionToken(options?.apiKey);
+			const credential = parseDevinCredential(options?.apiKey);
+			const baseUrl = (
+				credential.apiEndpoint && (!model.baseUrl || model.baseUrl === DEVIN_API_URL)
+					? credential.apiEndpoint
+					: model.baseUrl || DEVIN_API_URL
+			).replace(/\/+$/, "");
+			const apiKey = normalizeDevinSessionToken(credential.token);
 			const request = buildDevinChatRequest(model, context, options, apiKey);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
@@ -202,6 +211,15 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				...(options?.headers ?? {}),
 				te: "trailers",
 			};
+			const debugSession = isRequestDebugEnabled()
+				? await createRequestDebugSession({
+						protocol: options?.fetch ? "http" : "http2",
+						method: "POST",
+						url: baseUrl + CHAT_MESSAGE_PATH,
+						headers: commonHeaders,
+						bodyBase64: Buffer.from(frame).toString("base64"),
+					})
+				: undefined;
 
 			response = await postH2Primary({
 				url: baseUrl + CHAT_MESSAGE_PATH,
@@ -211,10 +229,12 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				signal,
 				fetchOverride: options?.fetch,
 			});
+			debugResponseLogPromise = debugSession?.openResponseLog(`HTTP ${response.status}`.trim(), response.headers);
 			if (response.status < 200 || response.status >= 300) {
 				const chunks: Uint8Array[] = [];
 				let totalBytes = 0;
 				for await (const chunk of response.body) {
+					if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log.write(chunk));
 					if (totalBytes >= 64 * 1024) break;
 					const bounded = chunk.subarray(0, 64 * 1024 - totalBytes);
 					chunks.push(bounded);
@@ -235,6 +255,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stream.push({ type: "start", partial: output });
 			const frameReader = createConnectFrameReader();
 			for await (const chunk of body) {
+				if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log.write(chunk));
 				let frames: ConnectFrame[];
 				try {
 					frames = frameReader.push(chunk);
@@ -402,6 +423,8 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				logger.warn("devin: transport close failed", { error: String(error) });
 			} finally {
 				activeDevinTransports.delete(activeTransport);
+				const debugLog = await debugResponseLogPromise;
+				await debugLog?.close();
 				resolveTransportSettled();
 			}
 		}
@@ -410,28 +433,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 	return stream;
 };
 
-const CONNECT_HTTP_STATUS: Readonly<Record<string, number>> = {
-	canceled: 499,
-	unknown: 500,
-	invalid_argument: 400,
-	deadline_exceeded: 504,
-	not_found: 404,
-	already_exists: 409,
-	permission_denied: 403,
-	resource_exhausted: 429,
-	failed_precondition: 400,
-	aborted: 409,
-	out_of_range: 400,
-	unimplemented: 501,
-	internal: 500,
-	unavailable: 503,
-	data_loss: 500,
-	unauthenticated: 401,
-};
-
 function devinConnectError(code: string, message: string): AIError.DevinApiError {
 	const normalized = code.toLowerCase();
-	const status = CONNECT_HTTP_STATUS[normalized] ?? 500;
+	const status = connectCodeToHttpStatus(code);
 	const detail = `Devin stream error${code ? ` ${code}` : ""}: ${message}`;
 	const error = new AIError.DevinApiError(detail, status);
 	if (normalized === "resource_exhausted" && message.trimStart().toLowerCase().startsWith("request_too_large:")) {
@@ -443,11 +447,6 @@ function devinConnectError(code: string, message: string): AIError.DevinApiError
 function normalizeDevinSessionToken(apiKey: string | undefined): string {
 	if (!apiKey) return "";
 	return apiKey.startsWith(DEVIN_SESSION_TOKEN_PREFIX) ? apiKey : `${DEVIN_SESSION_TOKEN_PREFIX}${apiKey}`;
-}
-
-function devinOs(): string {
-	if (process.platform === "win32") return "windows";
-	return process.platform;
 }
 
 /**

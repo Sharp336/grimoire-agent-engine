@@ -21,7 +21,7 @@ import { CursorServerConfigService, GetServerConfigRequestSchema } from "./trans
 
 type ConfigState =
 	| { kind: "fetching"; controller: AbortController; promise: Promise<ServerConfigResult> }
-	| { kind: "ready"; result: ServerConfigResult };
+	| { kind: "ready"; result: ServerConfigResult; retryAt?: number };
 
 export interface ServerConfigResult {
 	/** Server-forced HTTP/2 policy, or UNSPECIFIED if discovery failed. */
@@ -44,6 +44,7 @@ function ensureDisposerRegistered(): void {
 
 /** Upper bound on a single server-config discovery round trip. */
 const DISCOVERY_TIMEOUT_MS = 10_000;
+const TRANSIENT_RETRY_MS = 5_000;
 
 function configKey(baseUrl: string, apiKey: string): string {
 	const url = new URL(baseUrl);
@@ -78,6 +79,10 @@ export async function resolveCursorTransportMode(
 	ensureDisposerRegistered();
 	const key = configKey(opts.baseUrl, opts.apiKey);
 	let entry = configCache.get(key);
+	if (entry?.state.kind === "ready" && entry.state.retryAt !== undefined && entry.state.retryAt <= Date.now()) {
+		configCache.delete(key);
+		entry = undefined;
+	}
 
 	if (!entry) {
 		// Start a fresh fetch. The shared fetch promise settles on its own
@@ -98,11 +103,12 @@ export async function resolveCursorTransportMode(
 					configCache.delete(key);
 					throw normalized;
 				}
-				// Ordinary failure: cache neutral result.
+				// Keep neutral briefly so a provider turn burst does not repeat a
+				// failing discovery handshake, then retry after the bounded TTL.
 				const neutral: ServerConfigResult = { http2Config: Http2Config.UNSPECIFIED };
 				const current = configCache.get(key);
-				if (current && current.state.kind === "fetching") {
-					current.state = { kind: "ready", result: neutral };
+				if (current && current.state.kind === "fetching" && current.state.promise === fetchPromise) {
+					current.state = { kind: "ready", result: neutral, retryAt: Date.now() + TRANSIENT_RETRY_MS };
 				}
 				return neutral;
 			},
@@ -252,4 +258,10 @@ export function __evictServerConfigEntry(baseUrl: string, apiKey: string): void 
 		entry.state.controller.abort(new Error("Test evicted server config"));
 	}
 	configCache.delete(key);
+}
+
+/** Test-only: make a transient neutral entry eligible for immediate retry. */
+export function __expireServerConfigEntry(baseUrl: string, apiKey: string): void {
+	const state = configCache.get(configKey(baseUrl, apiKey))?.state;
+	if (state?.kind === "ready" && state.retryAt !== undefined) state.retryAt = 0;
 }

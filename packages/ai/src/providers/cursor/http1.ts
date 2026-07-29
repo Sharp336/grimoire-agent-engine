@@ -31,6 +31,7 @@ export async function createCursorHttp1Bridge(options: {
 	ghostMode?: boolean;
 	requestBytes: Uint8Array;
 	signal?: AbortSignal;
+	proxyTunnelTimeoutMs?: number;
 }): Promise<CursorHttp1Bridge> {
 	const requestId = create(BidiRequestIdSchema, { requestId: options.requestId });
 	const heartbeat = create(AgentClientMessageSchema, {
@@ -50,6 +51,7 @@ export async function createCursorHttp1Bridge(options: {
 		requestBytes: options.requestBytes,
 		heartbeatBytes: toBinary(AgentClientMessageSchema, heartbeat),
 		signal: options.signal,
+		proxyTunnelTimeoutMs: options.proxyTunnelTimeoutMs,
 		normalizeError: normalizeCursorConnectError,
 		isRecoverableReceiveError(error) {
 			if (error instanceof ConnectError && (error.code === Code.NotFound || error.code === Code.Unimplemented)) {

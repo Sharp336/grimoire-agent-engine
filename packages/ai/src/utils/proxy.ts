@@ -145,10 +145,15 @@ export function getProxyForUrl(provider: string, url: URL): string | undefined {
  * Wraps a fetch implementation to inject proxy options for non-local hosts.
  */
 export function wrapFetchForProxy(fetchImpl: FetchImpl, provider: string): FetchImpl {
-	const proxyUrl = getProxyForProvider(provider);
-	if (!proxyUrl) {
-		return fetchImpl;
-	}
+	const providerProxy = getProxyForProvider(provider);
+	const hasGenericProxy =
+		Bun.env.HTTPS_PROXY ||
+		Bun.env.https_proxy ||
+		Bun.env.HTTP_PROXY ||
+		Bun.env.http_proxy ||
+		Bun.env.ALL_PROXY ||
+		Bun.env.all_proxy;
+	if (!providerProxy && !hasGenericProxy) return fetchImpl;
 
 	const wrapped = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const urlStr = input instanceof Request ? input.url : input.toString();
@@ -160,9 +165,8 @@ export function wrapFetchForProxy(fetchImpl: FetchImpl, provider: string): Fetch
 			return fetchImpl(input, init);
 		}
 
-		if (shouldBypassProxy(urlObj)) {
-			return fetchImpl(input, init);
-		}
+		const proxyUrl = getProxyForUrl(provider, urlObj);
+		if (!proxyUrl) return fetchImpl(input, init);
 
 		const mergedInit = { ...(init ?? {}), proxy: proxyUrl };
 		return fetchImpl(input, mergedInit);
@@ -181,6 +185,8 @@ export interface ConnectProxiedSocketOptions {
 	timeoutMs?: number;
 	/** ALPN protocols for TLS handshake (defaults to ["h2"]). */
 	alpnProtocols?: string[];
+	/** Additional certificate authorities for both proxy and target TLS handshakes. */
+	ca?: string | string[];
 }
 
 /**
@@ -298,6 +304,7 @@ export async function connectProxiedSocket(
 			socket: rawSocket,
 			servername: targetHost,
 			ALPNProtocols: options?.alpnProtocols ?? ["h2"],
+			ca: options?.ca,
 		});
 		tunnelSocket.once("secureConnect", onTunnelReady);
 		tunnelSocket.once("error", onTunnelError);
@@ -331,6 +338,7 @@ export async function connectProxiedSocket(
 		? tls.connect({
 				host: proxyHost,
 				port: proxyPort,
+				ca: options?.ca,
 			})
 		: net.connect({
 				host: proxyHost,

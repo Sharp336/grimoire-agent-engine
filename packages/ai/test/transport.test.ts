@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as http2 from "node:http2";
+import * as https from "node:https";
 import * as net from "node:net";
 import { gzipSync } from "node:zlib";
 import { Code, ConnectError, type Transport } from "@connectrpc/connect";
@@ -9,24 +10,26 @@ import {
 	acquireH2Session,
 	CONNECT_COMPRESSED_FLAG,
 	CONNECT_END_STREAM_FLAG,
+	type ConnectFrame,
 	createConnectFrameReader,
 	createHttp1Bridge,
 	disposeH2Pool,
-	disposeHttp1Bridges,
 	encodeConnectFrame,
+	getH2PoolSizeForTest,
 	isTransientTransportError,
 	normalizeConnectAuthError,
+	postH2Only,
 	postH2Primary,
 	readConnectTrailerError,
 } from "@oh-my-pi/pi-ai/transport";
+import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
 import { CursorCredentialError } from "../src/error";
+import * as proxyUtils from "../src/utils/proxy";
 
 const servers = new Set<http2.Http2Server>();
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	await disposeHttp1Bridges();
-	await disposeH2Pool();
 	await Promise.all(
 		[...servers].map(server => {
 			const { promise, resolve } = Promise.withResolvers<void>();
@@ -69,6 +72,23 @@ function fetchSpy(implementation: (...args: Parameters<typeof fetch>) => Promise
 	return Object.assign(implementation, { preconnect: fetch.preconnect });
 }
 
+async function runInIsolatedProcess(testName: string): Promise<boolean> {
+	if (Bun.env.OMP_ISOLATED_H2_MANAGER_TEST === "1") return false;
+	const child = Bun.spawn([process.execPath, "test", import.meta.path, "-t", testName], {
+		cwd: new URL("..", import.meta.url).pathname,
+		env: { ...process.env, TMPDIR: "/dev/shm", OMP_ISOLATED_H2_MANAGER_TEST: "1" },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	if (exitCode !== 0) throw new Error(`${stderr}\n${stdout}`);
+	return true;
+}
+
 describe("shared Connect framing", () => {
 	it("decodes fragmented and compressed frames without losing boundaries", () => {
 		const first = encodeConnectFrame(new TextEncoder().encode("alpha"));
@@ -85,7 +105,7 @@ describe("shared Connect framing", () => {
 		const payload = new Uint8Array(2 * 1024 * 1024).fill(0x5a);
 		const wire = encodeConnectFrame(payload, CONNECT_END_STREAM_FLAG);
 		const reader = createConnectFrameReader();
-		let frames: ReturnType<typeof reader.push> = [];
+		let frames: ConnectFrame[] = [];
 		for (let offset = 0; offset < wire.byteLength; offset += 1024) {
 			frames = frames.concat(reader.push(wire.subarray(offset, offset + 1024)));
 		}
@@ -118,7 +138,7 @@ describe("shared Connect framing", () => {
 		const frames = reader.push(encodeConnectFrame(new Uint8Array(0), CONNECT_END_STREAM_FLAG));
 		expect(frames).toHaveLength(1);
 		expect(frames[0]?.endOfStream).toBe(true);
-		expect(() => reader.finish()).not.toThrow();
+		reader.finish();
 	});
 
 	it("extracts structured trailer errors and ignores successful trailers", () => {
@@ -129,9 +149,14 @@ describe("shared Connect framing", () => {
 		expect(readConnectTrailerError(new TextEncoder().encode("{}"))).toBeNull();
 	});
 
-	it("rejects malformed and unknown Connect terminal payloads", () => {
+	it("rejects malformed terminal JSON but ignores forward-compatible top-level fields", () => {
 		expect(() => readConnectTrailerError(new TextEncoder().encode("{"))).toThrow("malformed JSON");
-		expect(() => readConnectTrailerError(new TextEncoder().encode('{"unexpected":true}'))).toThrow("unknown field");
+		expect(readConnectTrailerError(new TextEncoder().encode('{"unexpected":true}'))).toBeNull();
+		expect(
+			readConnectTrailerError(
+				new TextEncoder().encode('{"unexpected":{"version":2},"error":{"code":"unavailable","message":"retry"}}'),
+			),
+		).toEqual({ code: "unavailable", message: "retry" });
 	});
 
 	it("rejects duplicate EOS, data after EOS, unknown flags, and EOF without EOS", () => {
@@ -155,9 +180,10 @@ describe("shared Connect framing", () => {
 });
 
 describe("shared HTTP/1 bridge", () => {
-	it("cancels an in-flight append before close resolves", async () => {
+	it("makes concurrent close callers await the same in-flight append drain", async () => {
 		const appendStarted = Promise.withResolvers<void>();
-		let appendAborted = false;
+		const appendAborted = Promise.withResolvers<void>();
+		const releaseAppend = Promise.withResolvers<void>();
 		const bridge = await createHttp1Bridge({
 			baseUrl: "http://127.0.0.1",
 			provider: "transport-test",
@@ -170,7 +196,8 @@ describe("shared HTTP/1 bridge", () => {
 						try {
 							await abortPromise(signal);
 						} catch {
-							appendAborted = true;
+							appendAborted.resolve();
+							await releaseAppend.promise;
 							throw new Error("append aborted");
 						}
 					},
@@ -188,8 +215,16 @@ describe("shared HTTP/1 bridge", () => {
 			},
 		});
 		await appendStarted.promise;
-		await bridge.close("dispose");
-		expect(appendAborted).toBeTrue();
+		const firstClose = bridge.close("dispose");
+		await appendAborted.promise;
+		let secondClosed = false;
+		const secondClose = bridge.close("dispose").then(() => {
+			secondClosed = true;
+		});
+		await Promise.resolve();
+		expect(secondClosed).toBeFalse();
+		releaseAppend.resolve();
+		await Promise.all([firstClose, secondClose]);
 	});
 
 	it("does not decode or re-enqueue an accepted poll retransmission", async () => {
@@ -398,6 +433,27 @@ describe("shared HTTP/2 pool", () => {
 		second.release();
 	});
 
+	it("retires a session initializer after its final waiter aborts", async () => {
+		if (await runInIsolatedProcess("retires a session initializer after its final waiter aborts")) return;
+		const connecting = Promise.withResolvers<"open">();
+		const connectStarted = Promise.withResolvers<void>();
+		const abort = vi.spyOn(Http2SessionManager.prototype, "abort").mockImplementation(() => {});
+		vi.spyOn(Http2SessionManager.prototype, "connect").mockImplementation(() => {
+			connectStarted.resolve();
+			return connecting.promise;
+		});
+		const controller = new AbortController();
+		const acquiring = acquireH2Session("https://abandoned.example", "transport-test", {
+			signal: controller.signal,
+		});
+		await connectStarted.promise;
+		controller.abort();
+		await expect(acquiring).rejects.toThrow();
+		connecting.resolve("open");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(abort).toHaveBeenCalledTimes(1);
+	});
 	it("closes an acquired stream when abort wins after request creation", async () => {
 		const { baseUrl } = await listen(stream => {
 			stream.respond({ ":status": 200 });
@@ -430,17 +486,38 @@ describe("shared HTTP/2 pool", () => {
 			connections++;
 			socket.destroy();
 		});
-		await new Promise<void>((resolve, reject) => {
-			server.once("error", reject);
-			server.listen(0, "127.0.0.1", resolve);
-		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
 		try {
 			const address = server.address();
 			if (!address || typeof address === "string") throw new Error("expected TCP fixture port");
 			await expect(acquireH2Session(`https://127.0.0.1:${address.port}`, "transport-test")).rejects.toThrow();
 			expect(connections).toBe(1);
 		} finally {
-			await new Promise<void>(resolve => server.close(() => resolve()));
+			const closed = Promise.withResolvers<void>();
+			server.close(() => closed.resolve());
+			await closed.promise;
+		}
+	});
+
+	it("evicts a pool entry after its only initializer fails", async () => {
+		expect(getH2PoolSizeForTest()).toBe(0);
+		const server = net.createServer(socket => socket.destroy());
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") throw new Error("expected TCP fixture port");
+			await expect(acquireH2Session(`https://127.0.0.1:${address.port}`, "pool-eviction-test")).rejects.toThrow();
+			expect(getH2PoolSizeForTest()).toBe(0);
+		} finally {
+			const closed = Promise.withResolvers<void>();
+			server.close(() => closed.resolve());
+			await closed.promise;
 		}
 	});
 
@@ -483,6 +560,7 @@ describe("shared HTTP/2 pool", () => {
 	});
 
 	it("disposal closes active streams before it resolves", async () => {
+		if (await runInIsolatedProcess("disposal closes active streams before it resolves")) return;
 		const { baseUrl } = await listen(stream => {
 			stream.respond({ ":status": 200 });
 		});
@@ -622,13 +700,15 @@ describe("HTTP/2 primary fallback boundary", () => {
 		});
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 		const unavailable = net.createServer();
-		await new Promise<void>((resolve, reject) => {
-			unavailable.once("error", reject);
-			unavailable.listen(0, "127.0.0.1", resolve);
-		});
+		const listening = Promise.withResolvers<void>();
+		unavailable.once("error", listening.reject);
+		unavailable.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
 		const address = unavailable.address();
 		if (!address || typeof address === "string") throw new Error("expected unavailable port");
-		await new Promise<void>(resolve => unavailable.close(() => resolve()));
+		const closed = Promise.withResolvers<void>();
+		unavailable.close(() => closed.resolve());
+		await closed.promise;
 		const response = await postH2Primary({
 			url: `http://127.0.0.1:${address.port}/dispatch`,
 			provider: "transport-test",
@@ -637,6 +717,89 @@ describe("HTTP/2 primary fallback boundary", () => {
 		});
 		expect(response.status).toBe(200);
 		expect(fetchAttempts).toBe(1);
+	});
+	it("passes inline extra CAs to native HTTP/2 sessions", async () => {
+		if (await runInIsolatedProcess("passes inline extra CAs to native HTTP/2 sessions")) return;
+		const previousCa = Bun.env.NODE_EXTRA_CA_CERTS;
+		Bun.env.NODE_EXTRA_CA_CERTS = "-----BEGIN CERTIFICATE-----\\nMIIB-test-extra-ca\\n-----END CERTIFICATE-----";
+		__resetExtraCaCache();
+		let sessionOptions: { ca?: string | string[] } | undefined;
+		vi.spyOn(Http2SessionManager.prototype, "connect").mockImplementation(function (this: Http2SessionManager) {
+			const options: unknown = Reflect.get(this, "http2SessionOptions");
+			if (options && typeof options === "object" && "ca" in options) {
+				const ca = options.ca;
+				if (typeof ca === "string" || (Array.isArray(ca) && ca.every(value => typeof value === "string"))) {
+					sessionOptions = { ca };
+				}
+			}
+			return Promise.reject(Object.assign(new Error("stop after option capture"), { code: "TEST_CAPTURE" }));
+		});
+		try {
+			await expect(
+				postH2Only({
+					url: "https://extra-ca.example/request",
+					provider: "devin",
+					headers: {},
+					body: "body",
+				}),
+			).rejects.toThrow("stop after option capture");
+			expect(sessionOptions?.ca).toContain(
+				"-----BEGIN CERTIFICATE-----\nMIIB-test-extra-ca\n-----END CERTIFICATE-----",
+			);
+		} finally {
+			if (previousCa === undefined) delete Bun.env.NODE_EXTRA_CA_CERTS;
+			else Bun.env.NODE_EXTRA_CA_CERTS = previousCa;
+			__resetExtraCaCache();
+		}
+	});
+
+	it("preserves the provider proxy on a pre-dispatch HTTP/1 fallback", async () => {
+		const requests: string[] = [];
+		if (await runInIsolatedProcess("preserves the provider proxy on a pre-dispatch HTTP/1 fallback")) return;
+		const sockets = new Set<net.Socket>();
+		const proxy = net.createServer(socket => {
+			sockets.add(socket);
+			socket.on("data", chunk => {
+				const request = chunk.toString("latin1");
+				requests.push(request);
+				if (request.startsWith("CONNECT ")) {
+					socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+					return;
+				}
+				socket.end("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		proxy.once("error", listening.reject);
+		proxy.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = proxy.address();
+		if (!address || typeof address === "string") throw new Error("expected proxy fixture port");
+		const previousProxy = Bun.env.PI_PROXY_TRANSPORT_TEST;
+		Bun.env.PI_PROXY_TRANSPORT_TEST = `http://127.0.0.1:${address.port}`;
+		proxyUtils.__resetProxyCache();
+		try {
+			vi.spyOn(Http2SessionManager.prototype, "connect").mockRejectedValue(
+				Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" }),
+			);
+			const response = await postH2Primary({
+				url: "http://provider.example/dispatch",
+				provider: "transport-test",
+				headers: {},
+				body: "body",
+			});
+			expect(response.status).toBe(200);
+			expect(requests.some(request => request.includes("provider.example"))).toBeTrue();
+			await response.close();
+		} finally {
+			for (const socket of sockets) socket.destroy();
+			const closed = Promise.withResolvers<void>();
+			proxy.close(() => closed.resolve());
+			await closed.promise;
+			if (previousProxy === undefined) delete Bun.env.PI_PROXY_TRANSPORT_TEST;
+			else Bun.env.PI_PROXY_TRANSPORT_TEST = previousProxy;
+			proxyUtils.__resetProxyCache();
+		}
 	});
 
 	it("never attempts HTTP/1 after request creation or body dispatch", async () => {
@@ -692,5 +855,45 @@ describe("HTTP/2 primary fallback boundary", () => {
 			await response.close();
 		}
 		expect(fetchAttempts).toBe(0);
+	});
+
+	it("passes a bounded timeout to proxy tunnel establishment", async () => {
+		const previousProxy = Bun.env.PI_PROXY_TRANSPORT_TEST;
+		Bun.env.PI_PROXY_TRANSPORT_TEST = "http://proxy.example:8080";
+		proxyUtils.__resetProxyCache();
+		let timeoutMs: number | undefined;
+		vi.spyOn(proxyUtils, "createProxiedAgent").mockImplementation((_proxy, _target, options) => {
+			timeoutMs = options?.timeoutMs;
+			return new https.Agent();
+		});
+		try {
+			const bridge = await createHttp1Bridge({
+				baseUrl: "https://provider.example",
+				provider: "transport-test",
+				headers: {},
+				requestBytes: new Uint8Array(),
+				proxyTunnelTimeoutMs: 20,
+				createRpc() {
+					return {
+						async append() {},
+						async *receive() {
+							yield* [];
+						},
+						async *poll() {
+							yield* [];
+						},
+						decodePoll(data) {
+							return data;
+						},
+					};
+				},
+			});
+			expect(timeoutMs).toBe(20);
+			await bridge.close("dispose");
+		} finally {
+			if (previousProxy === undefined) delete Bun.env.PI_PROXY_TRANSPORT_TEST;
+			else Bun.env.PI_PROXY_TRANSPORT_TEST = previousProxy;
+			proxyUtils.__resetProxyCache();
+		}
 	});
 });

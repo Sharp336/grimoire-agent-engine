@@ -107,7 +107,8 @@ function buildRequestHeaders(options: CursorModelDiscoveryOptions): Record<strin
 		te: "trailers",
 		authorization: `Bearer ${options.apiKey}`,
 		"x-ghost-mode": "true",
-		"x-cursor-client-version": options.clientVersion ?? CURSOR_DEFAULT_CLIENT_VERSION,
+		"x-cursor-client-version":
+			options.clientVersion || Bun.env.CURSOR_CLIENT_VERSION || CURSOR_DEFAULT_CLIENT_VERSION,
 		"x-cursor-client-type": "cli",
 	};
 }

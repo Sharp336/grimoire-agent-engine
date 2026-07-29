@@ -76,7 +76,7 @@ let cacheValue: string | undefined;
  *   path, matching Node's "extensionless filename is still a path" contract.
  *   `ENOENT` becomes {@link ExtraCaError}; other I/O errors bubble.
  */
-function resolveExtraCa(): string | undefined {
+export function resolveExtraCa(): string | undefined {
 	const raw = $env.NODE_EXTRA_CA_CERTS?.trim();
 	if (!raw) return undefined;
 
@@ -108,6 +108,12 @@ function resolveExtraCa(): string | undefined {
 	return cacheValue;
 }
 
+/** Resolve the configured extra CA with the system trust store Node TLS otherwise supplies. */
+export function resolveExtraCaWithSystemRoots(): string[] | undefined {
+	const extraCa = resolveExtraCa();
+	return extraCa ? [...tls.rootCertificates, extraCa] : undefined;
+}
+
 /** Test seam: drop the cached PEM so a follow-up call re-reads the env. */
 export function __resetExtraCaCache(): void {
 	cacheKey = undefined;
@@ -127,7 +133,7 @@ function withExtraCaInit(init: RequestInit | undefined, extraCa: string): Reques
 	const existingCa = existingTls?.ca;
 	let mergedCa: string[];
 	if (existingCa === undefined) {
-		mergedCa = [...tls.rootCertificates, extraCa];
+		mergedCa = resolveExtraCaWithSystemRoots() ?? [extraCa];
 	} else if (Array.isArray(existingCa)) {
 		mergedCa = [...existingCa, extraCa];
 	} else {

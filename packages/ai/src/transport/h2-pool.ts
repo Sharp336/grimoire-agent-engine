@@ -11,10 +11,21 @@ const PING_TIMEOUT_MS = 20_000;
 const PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
 type HealthySlot = { kind: "healthy"; generation: number; manager: Http2SessionManager; leases: number };
-type SlotState =
-	| { kind: "vacant" }
-	| { kind: "initializing"; generation: number; promise: Promise<Http2SessionManager>; abort: AbortController }
-	| HealthySlot;
+type InitializingSlot = {
+	kind: "initializing";
+	generation: number;
+	promise: Promise<Http2SessionManager>;
+	abort: AbortController;
+	waiters: number;
+};
+type SlotState = { kind: "vacant" } | InitializingSlot | HealthySlot;
+
+type Http2ConnectState = "open" | "idle" | "error";
+
+export interface H2SessionOptions {
+	signal?: AbortSignal;
+	ca?: string | string[];
+}
 
 interface PoolEntry {
 	key: string;
@@ -115,6 +126,7 @@ async function createSessionManager(
 	baseUrl: string,
 	origin: string,
 	proxyUrl: string | undefined,
+	ca: string | string[] | undefined,
 	signal: AbortSignal,
 ): Promise<Http2SessionManager> {
 	const pingOptions = {
@@ -127,10 +139,11 @@ async function createSessionManager(
 		const socket = await connectProxiedSocket(proxyUrl, baseUrl, {
 			signal,
 			timeoutMs: PROXY_TUNNEL_TIMEOUT_MS,
+			ca,
 		});
 		manager = new Http2SessionManager(origin, pingOptions, { createConnection: () => socket });
 	} else {
-		manager = new Http2SessionManager(origin, pingOptions);
+		manager = new Http2SessionManager(origin, pingOptions, ca ? { ca } : undefined);
 	}
 	const state = await manager.connect();
 	if (state === "error") {
@@ -206,12 +219,23 @@ function makeLease(entry: PoolEntry, slotIndex: number, slot: HealthySlot): H2Le
 	};
 }
 
+async function waitForInitializer(slot: InitializingSlot, signal: AbortSignal | undefined): Promise<void> {
+	slot.waiters++;
+	try {
+		await waitWithSignal(slot.promise, signal);
+	} finally {
+		slot.waiters--;
+		if (slot.waiters === 0 && signal?.aborted) slot.abort.abort(new AIError.AbortError());
+	}
+}
+
 async function acquireFromSlot(
 	entry: PoolEntry,
 	slotIndex: number,
 	baseUrl: string,
 	origin: string,
 	proxyUrl: string | undefined,
+	ca: string | string[] | undefined,
 	signal: AbortSignal | undefined,
 	allowFreshEstablishment: boolean,
 ): Promise<H2Lease> {
@@ -226,7 +250,7 @@ async function acquireFromSlot(
 	if (slot.kind === "healthy") {
 		reservedSlot = slot;
 		slot.leases++;
-		let state: Awaited<ReturnType<Http2SessionManager["connect"]>>;
+		let state: Http2ConnectState;
 		try {
 			state = await waitWithSignal(slot.manager.connect(), signal);
 		} catch (error) {
@@ -249,8 +273,9 @@ async function acquireFromSlot(
 	if (slot.kind === "vacant") {
 		const generation = nextGeneration++;
 		const abort = new AbortController();
-		const promise = createSessionManager(baseUrl, origin, proxyUrl, abort.signal);
-		entry.slots[slotIndex] = { kind: "initializing", generation, promise, abort };
+		const promise = createSessionManager(baseUrl, origin, proxyUrl, ca, abort.signal);
+		const initializing: InitializingSlot = { kind: "initializing", generation, promise, abort, waiters: 0 };
+		entry.slots[slotIndex] = initializing;
 		promise.then(
 			manager => {
 				const current = entry.slots[slotIndex];
@@ -269,15 +294,16 @@ async function acquireFromSlot(
 				const current = entry.slots[slotIndex];
 				if (current.kind === "initializing" && current.generation === generation) {
 					entry.slots[slotIndex] = { kind: "vacant" };
+					if (entry.slots.every(candidate => candidate.kind === "vacant")) pools.delete(entry.key);
 				}
 			},
 		);
-		await waitWithSignal(promise, signal);
+		await waitForInitializer(initializing, signal);
 		slot = entry.slots[slotIndex];
 	}
 
 	if (slot.kind === "initializing") {
-		await waitWithSignal(slot.promise, signal);
+		await waitForInitializer(slot, signal);
 		slot = entry.slots[slotIndex];
 	}
 	if (slot.kind !== "healthy") throw new Error("HTTP/2 pool slot did not become healthy");
@@ -296,7 +322,16 @@ function ensureDisposerRegistered(): void {
 	registerTransportDisposer("h2-pool", disposeH2Pool);
 }
 
-export async function acquireH2Session(baseUrl: string, provider: string, signal?: AbortSignal): Promise<H2Lease> {
+/** Test seam for asserting that failed origins and proxy credentials are not retained. */
+export function getH2PoolSizeForTest(): number {
+	return pools.size;
+}
+
+export async function acquireH2Session(
+	baseUrl: string,
+	provider: string,
+	options?: H2SessionOptions,
+): Promise<H2Lease> {
 	// Registered on first use, not at import: `@oh-my-pi/pi-ai` re-exports this
 	// module, so registering at module scope would install a process-level
 	// postmortem hook in every consumer that merely imports the package —
@@ -304,11 +339,14 @@ export async function acquireH2Session(baseUrl: string, provider: string, signal
 	// until a session exists.
 	ensureDisposerRegistered();
 	if (poolDisposing || isTransportDisposed()) throw new Error("HTTP/2 transport has been disposed");
+	const signal = options?.signal;
 	if (signal?.aborted) throw new AIError.AbortError();
 	const url = new URL(baseUrl);
 	const origin = `${url.protocol}//${url.host}`;
 	const proxyUrl = getProxyForUrl(provider, url);
-	const key = `${origin}|${proxyUrl ?? ""}`;
+	const ca = options?.ca;
+	const caKey = ca ? Bun.hash(Array.isArray(ca) ? ca.join("\0") : ca) : "";
+	const key = `${origin}|${proxyUrl ?? ""}|${caKey}`;
 	let entry = pools.get(key);
 	if (!entry) {
 		entry = { key, slots: Array.from({ length: POOL_SIZE }, () => ({ kind: "vacant" })), roundRobin: 0 };
@@ -320,7 +358,7 @@ export async function acquireH2Session(baseUrl: string, provider: string, signal
 	let originatingError: unknown;
 	for (const slotIndex of occupied) {
 		try {
-			const lease = await acquireFromSlot(entry, slotIndex, baseUrl, origin, proxyUrl, signal, false);
+			const lease = await acquireFromSlot(entry, slotIndex, baseUrl, origin, proxyUrl, ca, signal, false);
 			entry.roundRobin = (slotIndex + 1) % POOL_SIZE;
 			return lease;
 		} catch (error) {
@@ -332,7 +370,7 @@ export async function acquireH2Session(baseUrl: string, provider: string, signal
 	const vacantIndex = slotOrder.find(slotIndex => entry.slots[slotIndex]?.kind === "vacant");
 	if (vacantIndex !== undefined) {
 		try {
-			const lease = await acquireFromSlot(entry, vacantIndex, baseUrl, origin, proxyUrl, signal, true);
+			const lease = await acquireFromSlot(entry, vacantIndex, baseUrl, origin, proxyUrl, ca, signal, true);
 			entry.roundRobin = (vacantIndex + 1) % POOL_SIZE;
 			return lease;
 		} catch (error) {

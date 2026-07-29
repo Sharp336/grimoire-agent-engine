@@ -27,6 +27,8 @@ describe("decodeJwtPayload", () => {
 		expect(decodeJwtPayload("two.segments")).toBeNull();
 		expect(decodeJwtPayload("header..signature")).toBeNull();
 		expect(decodeJwtPayload("header.%%%.signature")).toBeNull();
+		const validPayload = Buffer.from(JSON.stringify({ exp: 1_900_000_000 })).toString("base64url");
+		expect(decodeJwtPayload(`header.${validPayload}*.signature`)).toBeNull();
 		// A bare array or scalar payload is structurally valid base64url JSON but
 		// is not a claims object, so callers never see one.
 		expect(decodeJwtPayload(`header.${Buffer.from("[1,2]").toString("base64url")}.signature`)).toBeNull();

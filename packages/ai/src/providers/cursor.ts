@@ -115,9 +115,11 @@ import * as AIError from "../error";
 import {
 	acquireH2Session,
 	type ConnectFrame,
+	connectCodeToHttpStatus,
 	createConnectFrameReader,
 	encodeConnectFrame,
 	type H2Lease,
+	isH2UnavailableBeforeDispatch,
 	isTransientTransportError,
 	readConnectTrailerError,
 	registerTransportDisposer,
@@ -285,7 +287,7 @@ function cursorConnectError(code: string, message: string): Error {
 	const detail = `Connect error ${code || "unknown"}: ${message || "Unknown error"}`;
 	if (normalized === "unauthenticated") return new AIError.CursorCredentialError(detail, 401);
 	if (normalized === "permission_denied") return new AIError.CursorCredentialError(detail, 403);
-	const error = new AIError.ProviderResponseError(detail, { kind: "envelope" });
+	const error = new AIError.ProviderHttpError(detail, connectCodeToHttpStatus(code));
 	if (
 		normalized === "resource_exhausted" &&
 		message.trimStart().toLowerCase().startsWith("context_length_exceeded:")
@@ -523,9 +525,9 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			}
 
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
-			const baseUrl = model.baseUrl || CURSOR_API_URL;
+			const discoveryBaseUrl = model.baseUrl || CURSOR_API_URL;
 			ensureConversationCacheDisposerRegistered();
-			const cacheKey = cursorConversationCacheKey(baseUrl, apiKey, conversationId);
+			const cacheKey = cursorConversationCacheKey(discoveryBaseUrl, apiKey, conversationId);
 			const acquiredCacheEntry = acquireCursorConversationCacheEntry(cacheKey);
 			const cacheEntry = acquiredCacheEntry.entry;
 			releaseCacheEntry = acquiredCacheEntry.release;
@@ -538,19 +540,26 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			cacheEntry.conversationState = conversationState;
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
 
-			const originalRequestId = crypto.randomUUID();
-			const requestId = crypto.randomUUID();
-			const { mode } = await resolveCursorTransportMode({
-				baseUrl,
+			const resolvedTransport = await resolveCursorTransportMode({
+				baseUrl: discoveryBaseUrl,
 				apiKey,
 				provider: model.provider,
 				clientVersion: options?.clientVersion,
 				signal: options?.signal,
-			}).catch((error: unknown): { mode: CursorTransportMode } => {
+			}).catch((error: unknown): { mode: CursorTransportMode; agentUrlConfig?: undefined } => {
 				if (options?.signal?.aborted) throw new AIError.AbortError();
 				if (error instanceof AIError.CursorCredentialError || error instanceof AIError.AbortError) throw error;
 				return { mode: "http2" };
 			});
+			let mode = resolvedTransport.mode;
+			const configuredAgentUrl =
+				resolvedTransport.agentUrlConfig?.agentUrl || resolvedTransport.agentUrlConfig?.agentnUrl;
+			const baseUrl = configuredAgentUrl
+				? new URL(configuredAgentUrl, discoveryBaseUrl).toString().replace(/\/$/, "")
+				: discoveryBaseUrl;
+
+			const originalRequestId = crypto.randomUUID();
+			const requestId = crypto.randomUUID();
 			const requestPath = "/agent.v1.AgentService/Run";
 			const requestHeaders = {
 				":method": "POST",
@@ -565,6 +574,18 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					requestId,
 				}),
 			};
+			if (mode === "http2") {
+				try {
+					h2Lease = await acquireH2Session(baseUrl, model.provider, { signal: options?.signal });
+					h2Request = await h2Lease.request(requestHeaders, { signal: options?.signal });
+				} catch (error) {
+					h2Lease?.release();
+					h2Lease = null;
+					h2Request = null;
+					if (!isH2UnavailableBeforeDispatch(error)) throw error;
+					mode = "http1";
+				}
+			}
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
 						protocol: mode === "http1" ? "http" : "http2",
@@ -672,15 +693,21 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						void send.finally(() => inFlightDispatches.delete(send));
 					},
 				};
-				for await (const serverMessage of h1Bridge.messages) dispatchServerMessage(serverMessage);
+				debugResponseLogPromise = debugSession?.openResponseLog("HTTP/1 Connect stream");
+				for await (const serverMessage of h1Bridge.messages) {
+					if (debugResponseLogPromise) {
+						const responseFrame = encodeConnectFrame(toBinary(AgentServerMessageSchema, serverMessage));
+						void debugResponseLogPromise.then(responseLog => responseLog?.write(responseFrame));
+					}
+					dispatchServerMessage(serverMessage);
+				}
 				if (!sawTurnEnded) {
 					throw new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
 						kind: "incomplete-stream",
 					});
 				}
 			} else {
-				h2Lease = await acquireH2Session(baseUrl, model.provider, options?.signal);
-				h2Request = await h2Lease.request(requestHeaders, { signal: options?.signal });
+				if (!h2Request || !h2Lease) throw new Error("Cursor HTTP/2 transport was not established");
 				channel = h2Request;
 
 				h2Request.on("response", headers => {
@@ -833,7 +860,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					callerSignal.addEventListener("abort", requestAbortListener, { once: true });
 					if (callerSignal.aborted) {
 						requestAbortListener();
-						throw new AIError.AbortError();
+						await h2Completion.promise;
 					}
 				}
 

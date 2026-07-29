@@ -9,15 +9,21 @@ describe("Devin CLI login", () => {
 		const fetchImpl: FetchImpl = async (url, init) => {
 			requestUrl = String(url);
 			requestInit = init;
-			return new Response(JSON.stringify({ apiKey: "devin-api-key" }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
+			return new Response(
+				JSON.stringify({ apiKey: "devin-api-key", apiServerUrl: "https://regional.devin.example" }),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 		};
 
-		const token = await exchangeDevinCliToken("callback-code", "pkce-verifier", fetchImpl);
+		const exchange = await exchangeDevinCliToken("callback-code", "pkce-verifier", fetchImpl);
 
-		expect(token).toBe("devin-api-key");
+		expect(exchange).toEqual({
+			apiKey: "devin-api-key",
+			apiServerUrl: "https://regional.devin.example",
+		});
 		expect(requestUrl).toBe(
 			"https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangePKCEAuthorizationCode",
 		);
