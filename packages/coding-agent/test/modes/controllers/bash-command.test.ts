@@ -38,12 +38,12 @@ function createCwdContext(sourceDir: string, isStreaming = false) {
 		session: {
 			isStreaming,
 			executeBash,
+			moveSession: vi.fn(async (cwd: string) => {
+				state.cwd = cwd;
+			}),
 		},
 		sessionManager: {
 			getCwd: () => state.cwd,
-			moveTo: vi.fn(async (cwd: string) => {
-				state.cwd = cwd;
-			}),
 		},
 		chatContainer: createContainer(),
 		pendingMessagesContainer,
