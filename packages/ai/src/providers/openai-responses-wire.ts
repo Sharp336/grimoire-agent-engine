@@ -2833,8 +2833,10 @@ export type ResponseInput = Array<ResponseInputItem>;
  */
 export interface ResponseInputAudio {
 	input_audio: ResponseInputAudio.InputAudio;
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 	/**
-	 * The type of the input item. Always `input_audio`.
+	 * The type of input item. Always `input_audio`.
 	 */
 	type: "input_audio";
 }
@@ -2978,6 +2980,7 @@ export interface ResponseInputImageContent {
 export type ResponseInputItem =
 	| EasyInputMessage
 	| ResponseInputItem.Message
+	| ResponseInputAudio
 	| ResponseOutputMessage
 	| ResponseFileSearchToolCall
 	| ResponseComputerToolCall

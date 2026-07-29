@@ -22,6 +22,7 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	ImageContent,
+	MediaContent,
 	Model,
 	ModelSpec,
 	ProviderResponseMetadata,
@@ -831,7 +832,7 @@ interface ToolResultEventBase {
 	type: "tool_result";
 	toolCallId: string;
 	input: Record<string, unknown>;
-	content: (TextContent | ImageContent)[];
+	content: (TextContent | MediaContent)[];
 	isError: boolean;
 }
 
@@ -1208,7 +1209,7 @@ export interface ExtensionAPI {
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set. */
 	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
+		content: string | (TextContent | MediaContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
@@ -1410,7 +1411,7 @@ export type SendMessageHandler = <T = unknown>(
 ) => void;
 
 export type SendUserMessageHandler = (
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | MediaContent)[],
 	options?: { deliverAs?: "steer" | "followUp" },
 ) => void;
 

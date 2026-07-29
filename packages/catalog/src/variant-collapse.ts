@@ -900,16 +900,21 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 		if (hasRouting) thinking.effortRouting = routing;
 		if (family.suppressWhenOff) thinking.suppressWhenOff = true;
 
-		const input: ("text" | "image")[] = [];
-		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
-		if (memberSpecs.some(spec => spec.input.includes("image"))) input.push("image");
+		const vendorInputByWireModel = Object.fromEntries(
+			rawPresent.map((id, index) => {
+				const spec = memberSpecs[index];
+				return [id, [...(spec.vendorInput ?? spec.input)]];
+			}),
+		);
 
 		const collapsed: TSpec = {
 			...(memberSpecs[0] as TSpec),
 			id: family.id,
 			name: family.name,
 			reasoning,
-			input,
+			input: [...(memberSpecs[0].vendorInput ?? memberSpecs[0].input)],
+			vendorInput: [...(memberSpecs[0].vendorInput ?? memberSpecs[0].input)],
+			vendorInputByWireModel,
 			contextWindow: maxOrNull(memberSpecs.map(spec => spec.contextWindow)),
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
 		};
@@ -917,6 +922,9 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 		// equals the logical id (bare/thinking pairs) — `resolveWireModelId`
 		// falls back. Retired members never become the default.
 		const defaultWireId = rawPresent.find(id => !retired?.has(id)) ?? rawPresent[0];
+		const defaultVendorInput = vendorInputByWireModel[defaultWireId as string];
+		collapsed.input = [...defaultVendorInput];
+		collapsed.vendorInput = [...defaultVendorInput];
 		if (defaultWireId === family.id) {
 			if (usedAbsentEffortRoute) {
 				collapsed.requestModelId = defaultWireId as string;

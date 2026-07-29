@@ -30,6 +30,7 @@ import type {
 	CodexCompactionRequestContext,
 	Context,
 	FetchImpl,
+	MediaContent,
 	Model,
 	ProviderSessionState,
 	RawSseEvent,
@@ -4250,7 +4251,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 
 function normalizeInputMessageContent(
 	model: Model<"openai-codex-responses">,
-	content: string | Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string }>,
+	content: string | Array<TextContent | MediaContent>,
 ): ResponseInputContent[] {
 	if (typeof content === "string") {
 		if (!content || content.trim() === "") return [];
@@ -4258,8 +4259,12 @@ function normalizeInputMessageContent(
 	}
 
 	return (
-		convertResponsesInputContent(content, model.input.includes("image"), model.compat.supportsImageDetailOriginal) ??
-		[]
+		convertResponsesInputContent(
+			content,
+			model.input.includes("image"),
+			model.input.includes("audio"),
+			model.compat.supportsImageDetailOriginal,
+		) ?? []
 	);
 }
 

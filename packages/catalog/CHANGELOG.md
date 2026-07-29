@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
+
 ## [17.1.8] - 2026-07-28
 
 ### Added

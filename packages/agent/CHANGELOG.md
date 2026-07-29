@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed

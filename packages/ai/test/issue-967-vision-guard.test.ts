@@ -175,6 +175,7 @@ describe("issue #967 vision guard", () => {
 				{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 			],
 			false,
+			false,
 			model.compat.supportsImageDetailOriginal,
 		);
 		expect(countTaggedValues(userContent, "input_image")).toBe(0);
@@ -203,6 +204,20 @@ describe("issue #967 vision guard", () => {
 				output: `saved plot to /tmp/plot.png\n${NON_VISION_IMAGE_PLACEHOLDER}`,
 			},
 		]);
+	});
+
+	it("emits one Responses placeholder for repeated unsupported images", () => {
+		const content = convertResponsesInputContent(
+			[
+				{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
+				{ type: "image", mimeType: "image/png", data: "ZmFrZTI=" },
+			],
+			false,
+			false,
+			false,
+		);
+
+		expect(content).toEqual([{ type: "input_text", text: NON_VISION_IMAGE_PLACEHOLDER }]);
 	});
 
 	it("strips non-vision images from Codex responses user and tool-result payloads", () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

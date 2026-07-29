@@ -41,6 +41,7 @@ import {
 	type ComputerToolCallMetadata,
 	type Context,
 	type ImageContent,
+	type MediaContent,
 	type Message,
 	type MessageAttribution,
 	type Model,
@@ -96,6 +97,7 @@ import type {
 	ResponseCustomToolCall,
 	ResponseFunctionToolCall,
 	ResponseInput,
+	ResponseInputAudio,
 	ResponseInputContent,
 	ResponseInputImage,
 	ResponseInputItem,
@@ -107,7 +109,7 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 /**
  * Keyless-provider sentinel. Custom providers configured with `auth: none`
@@ -1478,9 +1480,17 @@ function clampResponsesImageDetail(
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
 }
 
+export function openAIAudioFormat(mimeType: string): "wav" | "mp3" | undefined {
+	const normalized = mimeType.trim().toLowerCase();
+	if (normalized === "audio/wav" || normalized === "audio/x-wav") return "wav";
+	if (normalized === "audio/mp3" || normalized === "audio/mpeg") return "mp3";
+	return undefined;
+}
+
 export function convertResponsesInputContent(
-	content: string | Array<TextContent | ImageContent>,
+	content: string | Array<TextContent | MediaContent>,
 	supportsImages: boolean,
+	_supportsAudio: boolean,
 	supportsImageDetailOriginal: boolean,
 ): ResponseInputContent[] | undefined {
 	if (typeof content === "string") {
@@ -1488,30 +1498,85 @@ export function convertResponsesInputContent(
 		return [{ type: "input_text", text: content.toWellFormed() } satisfies ResponseInputText];
 	}
 
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
 	const normalizedContent: ResponseInputContent[] = [];
-	for (const item of textBlocks) {
-		const text = item.text.toWellFormed();
-		if (text.trim().length === 0) continue;
-		normalizedContent.push({
-			type: "input_text",
-			text,
-		} satisfies ResponseInputText);
-	}
-	for (const item of imageBlocks) {
-		normalizedContent.push({
-			type: "input_image",
-			detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
-			image_url: `data:${item.mimeType};base64,${item.data}`,
-		} satisfies ResponseInputImage);
+	let omittedImages = false;
+	for (const item of content) {
+		if (item.type === "text") {
+			const text = item.text.toWellFormed();
+			if (text.trim().length > 0) normalizedContent.push({ type: "input_text", text } satisfies ResponseInputText);
+			continue;
+		}
+		if (item.type === "image") {
+			if (supportsImages) {
+				normalizedContent.push({
+					type: "input_image",
+					detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
+					image_url: `data:${item.mimeType};base64,${item.data}`,
+				} satisfies ResponseInputImage);
+			} else {
+				omittedImages = true;
+			}
+			continue;
+		}
+		throw new AIError.ValidationError(
+			`${item.type} cannot be nested in Responses message content; routed media preflight must handle it`,
+		);
 	}
 	if (omittedImages) {
-		normalizedContent.push({
-			type: "input_text",
-			text: NON_VISION_IMAGE_PLACEHOLDER,
-		} satisfies ResponseInputText);
+		normalizedContent.push({ type: "input_text", text: NON_VISION_IMAGE_PLACEHOLDER } satisfies ResponseInputText);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
+}
+
+function appendResponsesUserInput(
+	messages: ResponseInput,
+	content: string | Array<TextContent | MediaContent>,
+	supportsImages: boolean,
+	supportsAudio: boolean,
+	supportsImageDetailOriginal: boolean,
+	developerStringContent: boolean,
+	isDeveloper: boolean,
+): void {
+	if (typeof content === "string") {
+		const converted = convertResponsesInputContent(
+			content,
+			supportsImages,
+			supportsAudio,
+			supportsImageDetailOriginal,
+		);
+		if (!converted) return;
+		messages.push({
+			role: "user",
+			content: developerStringContent && isDeveloper ? content.toWellFormed() : converted,
+		});
+		return;
+	}
+	let pending: Array<TextContent | ImageContent> = [];
+	const flush = (): void => {
+		if (pending.length === 0) return;
+		const converted = convertResponsesInputContent(pending, supportsImages, false, supportsImageDetailOriginal);
+		pending = [];
+		if (converted) messages.push({ role: "user", content: converted });
+	};
+	for (const block of content) {
+		if (block.type === "text" || block.type === "image") {
+			pending.push(block);
+			continue;
+		}
+		if (block.type === "video") {
+			throw new AIError.ValidationError("Responses has no video input encoder");
+		}
+		flush();
+		const format = supportsAudio ? openAIAudioFormat(block.mimeType) : undefined;
+		if (!format) {
+			throw new AIError.ValidationError(`Unsupported Responses audio MIME type: ${block.mimeType}`);
+		}
+		messages.push({
+			type: "input_audio",
+			input_audio: { data: block.data, format },
+		} satisfies ResponseInputAudio);
+	}
+	flush();
 }
 
 /**
@@ -1663,19 +1728,15 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				msgIndex++;
 				continue;
 			}
-			const content = convertResponsesInputContent(
+			appendResponsesUserInput(
+				messages,
 				msg.content,
 				options.model.input.includes("image"),
+				options.model.input.includes("audio"),
 				supportsImageDetailOriginal,
+				options.developerStringContent === true,
+				msg.role === "developer",
 			);
-			if (!content) continue;
-			messages.push({
-				role: "user",
-				content:
-					options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
-						? msg.content.toWellFormed()
-						: content,
-			});
 		} else if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			// Providers replay stale native items even when the current request has
@@ -1912,13 +1973,13 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	return outputItems;
 }
 
-const syntheticToolImageMessages = new WeakSet<object>();
+const syntheticToolMediaMessages = new WeakSet<object>();
 
 function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInput[number]): void {
 	let index = messages.length;
 	while (index > 0) {
 		const previous = messages[index - 1];
-		if (typeof previous !== "object" || previous === null || !syntheticToolImageMessages.has(previous)) {
+		if (typeof previous !== "object" || previous === null || !syntheticToolMediaMessages.has(previous)) {
 			break;
 		}
 		index -= 1;
@@ -1926,7 +1987,7 @@ function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInpu
 	messages.splice(index, 0, output);
 }
 
-/** Appends one tool result while keeping consecutive outputs ahead of its synthetic image messages. */
+/** Appends one tool result while keeping consecutive outputs ahead of its synthetic media messages. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
 	toolResult: ToolResultMessage,
@@ -1939,27 +2000,42 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	computerCallIds?: ReadonlySet<string>,
 ): void {
 	const supportsImages = model.input.includes("image");
+	const unsupportedMedia = toolResult.content.find(block => block.type === "audio" || block.type === "video");
+	if (unsupportedMedia) {
+		throw new AIError.ValidationError(
+			`Responses tool results cannot encode ${unsupportedMedia.type}; routed media preflight must reject it`,
+		);
+	}
 	const textResult = toolResult.content
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text)
 		.join("\n");
 	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
 	const omittedImages = hasImages && !supportsImages;
+	const mediaContent = convertResponsesInputContent(
+		toolResult.content.filter((block): block is ImageContent => block.type === "image"),
+		supportsImages,
+		false,
+		supportsImageDetailOriginal,
+	);
+	const hasAttachedMedia = mediaContent?.some(block => block.type === "input_image") === true;
+	const mediaOmissionText = mediaContent
+		?.filter((block): block is ResponseInputText => block.type === "input_text")
+		.map(block => block.text)
+		.filter(text => !omittedImages || text !== NON_VISION_IMAGE_PLACEHOLDER)
+		.join("\n");
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	// "(see attached image)" is only truthful when the result actually carries
-	// images (they ride as a separate user message on the Responses API). A
-	// genuinely empty text result (empty file read, silent tool) must stay
-	// empty — the placeholder sent models chasing an attachment that never
-	// existed.
-	const output = (
-		omittedImages
-			? joinTextWithImagePlaceholder(textResult, true)
-			: textResult.length > 0
-				? textResult
-				: hasImages
-					? "(see attached image)"
-					: ""
-	).toWellFormed();
+	// "(see attached media)" is only truthful when the result actually carries
+	// supported media on a synthetic user message. A genuinely empty text result
+	// (empty file read, silent tool) must stay empty.
+	const output = [
+		omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult,
+		mediaOmissionText,
+		!textResult && !mediaOmissionText && hasAttachedMedia ? "(see attached media)" : "",
+	]
+		.filter(Boolean)
+		.join("\n")
+		.toWellFormed();
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
 		messages.push({
 			type: "message",
@@ -2022,25 +2098,20 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		});
 	}
 
-	if (!hasImages || !supportsImages) {
+	if (!hasAttachedMedia || !mediaContent?.length) {
 		return;
 	}
 
 	const contentParts: ResponseInputContent[] = [
-		{ type: "input_text", text: "Attached image(s) from tool result:" } satisfies ResponseInputText,
+		{
+			type: "input_text",
+			text: "Attached image(s) from tool result:",
+		} satisfies ResponseInputText,
+		...mediaContent,
 	];
-	for (const block of toolResult.content) {
-		if (block.type === "image") {
-			contentParts.push({
-				type: "input_image",
-				detail: clampResponsesImageDetail(block.detail, supportsImageDetailOriginal),
-				image_url: `data:${block.mimeType};base64,${block.data}`,
-			} satisfies ResponseInputImage);
-		}
-	}
-	const imageMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
-	syntheticToolImageMessages.add(imageMessage);
-	messages.push(imageMessage);
+	const mediaMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
+	syntheticToolMediaMessages.add(mediaMessage);
+	messages.push(mediaMessage);
 }
 
 /**

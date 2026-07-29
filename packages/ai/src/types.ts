@@ -706,6 +706,20 @@ export interface ImageContent {
 	detail?: "auto" | "low" | "high" | "original";
 }
 
+export interface AudioContent {
+	type: "audio";
+	data: string; // base64 encoded audio data
+	mimeType: string; // e.g., "audio/mpeg", "audio/wav"
+}
+
+export interface VideoContent {
+	type: "video";
+	data: string; // base64 encoded video data
+	mimeType: string; // e.g., "video/mp4"
+}
+
+export type MediaContent = ImageContent | AudioContent | VideoContent;
+
 export type ComputerAction =
 	| {
 			type: "click";
@@ -788,7 +802,7 @@ export type ProviderPayload = OpenAIResponsesHistoryPayload;
 
 export interface UserMessage {
 	role: "user";
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | MediaContent)[];
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
@@ -802,7 +816,7 @@ export interface UserMessage {
 
 export interface DeveloperMessage {
 	role: "developer";
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | MediaContent)[];
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
@@ -887,7 +901,7 @@ export interface ToolResultMessage<TDetails = unknown> {
 	role: "toolResult";
 	toolCallId: string;
 	toolName: string;
-	content: (TextContent | ImageContent)[]; // Supports text and images
+	content: (TextContent | MediaContent)[]; // Supports text and media
 	details?: TDetails;
 	isError: boolean;
 	/** Who initiated this message for billing/attribution semantics. */

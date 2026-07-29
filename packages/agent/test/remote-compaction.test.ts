@@ -20,6 +20,7 @@ import {
 	trimRemoteCompactionInputToContextWindow,
 } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { UnsupportedMediaError } from "@oh-my-pi/pi-ai/error";
 import { getOpenAICodexTransportDetails } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type {
 	AssistantMessage,
@@ -211,6 +212,44 @@ describe("buildOpenAiNativeHistory custom tool calls", () => {
 		const call = items.find(item => item.type === "function_call");
 
 		expect(call?.arguments).toBe('{"rowId":"9007199254740993"}');
+	});
+});
+
+describe("buildOpenAiNativeHistory media", () => {
+	test("emits supported user audio as a top-level Responses item", () => {
+		const items = buildOpenAiNativeHistory(
+			[
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "before" },
+						{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" },
+						{ type: "text", text: "after" },
+					],
+					timestamp: 1,
+				},
+			],
+			makeOpenAiModel({ input: ["text", "audio"] }),
+		);
+		expect(items).toEqual([
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "before" }] },
+			{ type: "input_audio", input_audio: { data: "UklGRg==", format: "wav" } },
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "after" }] },
+		]);
+	});
+
+	test("rejects tool-result audio before remote compaction can issue a request", () => {
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_audio",
+			toolName: "record",
+			content: [{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" }],
+			isError: false,
+			timestamp: 1,
+		};
+		expect(() => buildOpenAiNativeHistory([toolResult], makeOpenAiModel({ input: ["text", "audio"] }))).toThrow(
+			UnsupportedMediaError,
+		);
 	});
 });
 

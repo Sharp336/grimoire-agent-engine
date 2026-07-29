@@ -6,7 +6,7 @@
  * - `omp --mode json "prompt"` - JSON event stream
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
@@ -25,8 +25,8 @@ export interface PrintModeOptions {
 	messages?: string[];
 	/** First message to send (may contain @file content) */
 	initialMessage?: string;
-	/** Images to attach to the initial message */
-	initialImages?: ImageContent[];
+	/** Media attachments to include with the initial message. */
+	initialImages?: MediaContent[];
 	/** If true, include thinking blocks in text output */
 	printThoughts?: boolean;
 }
@@ -186,7 +186,9 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// Send initial message with attachments
 	if (initialMessage !== undefined) {
 		writeTextWorkingIndicator();
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
+		const images = initialImages?.filter((attachment): attachment is ImageContent => attachment.type === "image");
+		const attachments = initialImages?.filter(attachment => attachment.type !== "image");
+		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images, attachments }));
 	}
 
 	// Send remaining messages

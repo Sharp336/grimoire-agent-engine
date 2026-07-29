@@ -22,6 +22,7 @@ import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isUsageLimitOutcome } from "./error/rate-limit";
+import { validateContextMedia } from "./media-input";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { CursorOptions } from "./providers/cursor";
@@ -760,8 +761,17 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
-	return withGeminiThinkingLoopGuard(model, options, opts =>
-		withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+	const directOptions = options as
+		| { effort?: Effort; reasoning?: Effort; requestModelId?: string; chatModelUid?: string }
+		| undefined;
+	const routedModel = validateContextMedia(
+		model,
+		context,
+		directOptions?.effort ?? directOptions?.reasoning,
+		directOptions?.requestModelId ?? directOptions?.chatModelUid,
+	);
+	return withGeminiThinkingLoopGuard(routedModel, options, opts =>
+		withProviderInFlightLimit(routedModel, opts, () => streamDispatch(routedModel, context, opts)),
 	);
 }
 
@@ -1006,6 +1016,15 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 }
 
 export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	const routedModel = validateContextMedia(model, context, options?.reasoning);
+	return streamSimpleResolved(routedModel, context, options);
+}
+
+function streamSimpleResolved<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,

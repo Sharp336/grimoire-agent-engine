@@ -6,7 +6,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
-	ImageContent,
+	MediaContent,
 	Model,
 	ServiceTier,
 	ServiceTierByFamily,
@@ -227,7 +227,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
+		content: string | (TextContent | MediaContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void {
 		this.runtime.sendUserMessage(content, options);
