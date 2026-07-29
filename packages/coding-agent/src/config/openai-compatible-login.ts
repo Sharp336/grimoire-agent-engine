@@ -6,7 +6,7 @@ import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { withTimeoutSignal } from "../utils/fetch-timeout";
 import { withFileLock } from "./file-lock";
-import { encodeLiteralConfigValue } from "./literal-config-value";
+import { OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD } from "./openai-compatible-api-key";
 import { normalizeOpenAIModelsListBaseUrl } from "./model-discovery";
 import { ModelsConfigFile } from "./models-config";
 import type { ModelsConfig } from "./models-config-schema";
@@ -143,6 +143,7 @@ async function writeModelsConfigAtomically(
 	config: ModelsConfig,
 	providerName: string,
 	apiKey: string,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const resolvedPath = await fs.realpath(filePath).catch(error => {
 		if (isEnoent(error)) return filePath;
@@ -157,7 +158,7 @@ async function writeModelsConfigAtomically(
 				...config.providers,
 				[providerName]: {
 					...config.providers?.[providerName],
-					apiKey: apiKeyMarker,
+					[OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD]: apiKeyMarker,
 				},
 			},
 		},
@@ -166,7 +167,9 @@ async function writeModelsConfigAtomically(
 	);
 	const content = serialized.replace(apiKeyMarker, JSON.stringify(apiKey));
 	try {
+		signal?.throwIfAborted();
 		await fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
+		signal?.throwIfAborted();
 		await fs.rename(tempPath, resolvedPath);
 	} catch (error) {
 		await fs.rm(tempPath, { force: true }).catch(() => {});
@@ -181,6 +184,7 @@ async function writeModelsConfigAtomically(
 export async function writeOpenAICompatibleProvider(
 	endpoint: OpenAICompatibleEndpoint & { api?: string },
 	modelsPath: string = ModelsConfigFile.path(),
+	signal?: AbortSignal,
 ): Promise<void> {
 	const providerName = validateOpenAICompatibleProviderName(endpoint.providerName);
 	const baseUrl = normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl);
@@ -189,11 +193,19 @@ export async function writeOpenAICompatibleProvider(
 	const api = validateOpenAICompatibleApi(endpoint.api);
 	await fs.mkdir(path.dirname(modelsPath), { recursive: true, mode: 0o700 });
 	await withFileLock(modelsPath, async () => {
+		signal?.throwIfAborted();
 		ModelsConfigFile.relocate(modelsPath).load();
 		const current = await readModelsConfigForWrite(modelsPath);
 		const providers = isRecord(current.providers) ? current.providers : {};
 		const existing = isRecord(providers[providerName]) ? providers[providerName] : {};
-		const { auth: _auth, models: _models, transport: _transport, ...preservedProviderFields } = existing;
+		const {
+			auth: _auth,
+			models: _models,
+			transport: _transport,
+			apiKey: _apiKey,
+			[OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD]: _openAICompatibleApiKey,
+			...preservedProviderFields
+		} = existing;
 		const candidate: Record<string, unknown> = {
 			...current,
 			providers: {
@@ -201,7 +213,7 @@ export async function writeOpenAICompatibleProvider(
 				[providerName]: {
 					...preservedProviderFields,
 					baseUrl,
-					apiKey,
+					[OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD]: apiKey,
 					api,
 					authHeader: true,
 					discovery: { type: "openai-models-list" },
@@ -216,7 +228,8 @@ export async function writeOpenAICompatibleProvider(
 			modelsPath,
 			validated as ModelsConfig,
 			providerName,
-			encodeLiteralConfigValue(apiKey),
+			apiKey,
+			signal,
 		);
 	});
 }

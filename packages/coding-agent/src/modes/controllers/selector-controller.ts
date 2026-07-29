@@ -1609,8 +1609,10 @@ export class SelectorController {
 				if (action === "Cancel") return false;
 			}
 
-			await writeOpenAICompatibleProvider({ providerName, baseUrl, apiKey, api });
+			await writeOpenAICompatibleProvider({ providerName, baseUrl, apiKey, api }, undefined, dialog.signal);
+			if (dialog.signal.aborted) return false;
 			await this.ctx.session.modelRegistry.refreshProvider(providerName, "online");
+			if (dialog.signal.aborted) return false;
 			const block = new TranscriptBlock();
 			block.addChild(
 				new Text(
@@ -1624,6 +1626,7 @@ export class SelectorController {
 					0,
 				),
 			);
+			if (dialog.signal.aborted) return false;
 			this.ctx.present(block);
 			return true;
 		} catch (error: unknown) {

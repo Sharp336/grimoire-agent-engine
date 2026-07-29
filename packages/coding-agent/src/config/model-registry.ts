@@ -33,7 +33,6 @@ import {
 	getVariantAliasSources,
 	resolveVariantAlias,
 } from "@oh-my-pi/pi-catalog/variant-collapse";
-import { decodeLiteralConfigValue, isLiteralConfigValue } from "./literal-config-value";
 
 const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
@@ -131,6 +130,7 @@ interface ProviderOverride {
 	baseUrl?: string;
 	headers?: Record<string, string>;
 	apiKey?: string;
+	literalApiKey?: string;
 	authHeader?: boolean;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
@@ -294,7 +294,7 @@ const COMMAND_FAILURE_RETRY_MS = 30_000;
 const commandFailureRetryAt = new Map<string, number>();
 
 function isCommandConfigValue(valueConfig: string | undefined): valueConfig is string {
-	return !isLiteralConfigValue(valueConfig) && valueConfig?.startsWith("!") === true;
+	return valueConfig?.startsWith("!") === true;
 }
 
 function resolveCommandConfig(command: string): string | undefined {
@@ -328,7 +328,6 @@ interface CommandApiKeyResolution {
  * checked first and the input falls back to a literal value.
  */
 function resolveConfigValue(valueConfig: string): string | undefined {
-	if (isLiteralConfigValue(valueConfig)) return decodeLiteralConfigValue(valueConfig);
 	if (valueConfig.startsWith("!")) return resolveCommandConfig(valueConfig.slice(1).trim());
 	const envValue = Bun.env[valueConfig];
 	if (envValue) return envValue;
@@ -340,6 +339,7 @@ type HeaderSource = Record<string, string> | undefined;
 interface HeaderResolutionOptions {
 	authHeader?: boolean;
 	apiKeyConfig?: string;
+	literalApiKey?: string;
 }
 
 function materializeConfigHeaderSources(
@@ -354,8 +354,8 @@ function materializeConfigHeaderSources(
 			if (next) resolved[key] = next;
 		}
 	}
-	if (options?.authHeader && options.apiKeyConfig) {
-		const resolvedKey = resolveConfigValue(options.apiKeyConfig);
+	if (options?.authHeader && (options.apiKeyConfig || options.literalApiKey)) {
+		const resolvedKey = options.literalApiKey ?? resolveConfigValue(options.apiKeyConfig!);
 		if (resolvedKey) resolved.Authorization = `Bearer ${resolvedKey}`;
 	}
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
@@ -366,7 +366,7 @@ function createLiveConfigHeaders(
 	options?: HeaderResolutionOptions,
 ): Record<string, string> | undefined {
 	const liveSources = sources.filter((source): source is Record<string, string> => source !== undefined);
-	if (liveSources.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
+	if (liveSources.length === 0 && (!options?.authHeader || (!options.apiKeyConfig && !options.literalApiKey))) return undefined;
 
 	const localHeaders: Record<string, string> = {};
 	const allSources = [...liveSources, localHeaders];
@@ -607,16 +607,18 @@ function mergeCustomModelHeaders(
 	modelHeaders: Record<string, string> | undefined,
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
+	literalApiKey?: string,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader, apiKeyConfig, literalApiKey });
 }
 
 function mergeAuthHeaderSources(
 	sources: readonly HeaderSource[],
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
+	literalApiKey?: string,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders(sources, { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders(sources, { authHeader, apiKeyConfig, literalApiKey });
 }
 
 /**
@@ -787,7 +789,7 @@ export class ModelRegistry {
 	#cachedAuthoritativeProviders: Set<string> = new Set();
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
-	#customProviderApiKeys: Map<string, string> = new Map();
+	#customProviderApiKeys: Map<string, { value: string; literal: boolean }> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
 	#customModelOverlays: CustomModelOverlay[] = [];
@@ -817,8 +819,8 @@ export class ModelRegistry {
 
 	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		if (!isCommandConfigValue(keyConfig)) return { configured: false };
-		const value = resolveConfigValue(keyConfig);
+		if (!keyConfig || keyConfig.literal || !isCommandConfigValue(keyConfig.value)) return { configured: false };
+		const value = resolveConfigValue(keyConfig.value);
 		if (value) {
 			this.authStorage.setConfigApiKey(provider, value);
 			return { configured: true, value };
@@ -828,13 +830,18 @@ export class ModelRegistry {
 	}
 
 	#installProviderApiKey(provider: string, keyConfig: string): void {
-		this.#customProviderApiKeys.set(provider, keyConfig);
+		this.#customProviderApiKeys.set(provider, { value: keyConfig, literal: false });
 		const resolved = resolveConfigValue(keyConfig);
 		if (resolved) {
 			this.authStorage.setConfigApiKey(provider, resolved);
 		} else if (isCommandConfigValue(keyConfig)) {
 			this.authStorage.removeConfigApiKey(provider);
 		}
+	}
+
+	#installLiteralProviderApiKey(provider: string, key: string): void {
+		this.#customProviderApiKeys.set(provider, { value: key, literal: true });
+		this.authStorage.setConfigApiKey(provider, key);
 	}
 
 	/**
@@ -872,7 +879,7 @@ export class ModelRegistry {
 		this.authStorage.setFallbackResolver(provider => {
 			const keyConfig = this.#customProviderApiKeys.get(provider);
 			if (!keyConfig) return undefined;
-			return resolveConfigValue(keyConfig);
+			return keyConfig.literal ? keyConfig.value : resolveConfigValue(keyConfig.value);
 		});
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
@@ -1498,11 +1505,13 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		for (const [providerName, providerConfig] of providerEntries) {
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
+			const literalApiKey = providerConfig.openaiCompatibleApiKey;
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/transport are present
 			if (
 				providerConfig.baseUrl ||
 				resolvedProviderHeaders ||
 				providerConfig.apiKey ||
+				literalApiKey ||
 				providerConfig.authHeader !== undefined ||
 				providerConfig.compat ||
 				providerConfig.disableStrictTools ||
@@ -1517,6 +1526,7 @@ export class ModelRegistry {
 							: providerConfig.baseUrl,
 					headers: resolvedProviderHeaders,
 					apiKey: providerConfig.apiKey,
+					literalApiKey,
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
@@ -1550,7 +1560,9 @@ export class ModelRegistry {
 			// so it wins over OAuth tokens from the broker — when the user pins a
 			// bearer in models.yml (e.g. for an auth-gateway baseUrl), that bearer
 			// must authenticate the outbound request.
-			if (providerConfig.apiKey) {
+			if (literalApiKey) {
+				this.#installLiteralProviderApiKey(providerName, literalApiKey);
+			} else if (providerConfig.apiKey) {
 				this.#installProviderApiKey(providerName, providerConfig.apiKey);
 			}
 
@@ -2012,9 +2024,11 @@ export class ModelRegistry {
 	}
 
 	#mergeProviderOverride(baseOverride: ProviderOverride | undefined, override: ProviderOverride): ProviderOverride {
+		const hasOverrideApiKey = override.apiKey !== undefined || override.literalApiKey !== undefined;
 		return {
 			baseUrl: override.baseUrl ?? baseOverride?.baseUrl,
-			apiKey: override.apiKey ?? baseOverride?.apiKey,
+			apiKey: hasOverrideApiKey ? override.apiKey : baseOverride?.apiKey,
+			literalApiKey: hasOverrideApiKey ? override.literalApiKey : baseOverride?.literalApiKey,
 			authHeader: override.authHeader ?? baseOverride?.authHeader,
 			headers: override.headers
 				? createLiveConfigHeaders([baseOverride?.headers, override.headers])
@@ -2030,13 +2044,14 @@ export class ModelRegistry {
 		entry: T,
 		override: Pick<
 			ProviderOverride,
-			"baseUrl" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
+			"baseUrl" | "headers" | "authHeader" | "apiKey" | "literalApiKey" | "remoteCompaction" | "transport"
 		>,
 	): T {
 		const headers = mergeAuthHeaderSources(
 			override.headers ? [entry.headers, override.headers] : [entry.headers],
 			override.authHeader,
 			override.apiKey,
+			override.literalApiKey,
 		);
 		return {
 			...entry,
@@ -2052,7 +2067,7 @@ export class ModelRegistry {
 		model: Model<Api>,
 		override: Pick<
 			ProviderOverride,
-			"baseUrl" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
+			"baseUrl" | "headers" | "authHeader" | "apiKey" | "literalApiKey" | "remoteCompaction" | "transport"
 		>,
 	): Model<Api> {
 		return buildModel(this.#applyProviderTransportOverride(toModelSpec(model), override));
@@ -2224,7 +2239,7 @@ export class ModelRegistry {
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
-			isCommandConfigValue(keyConfig) ||
+			(keyConfig !== undefined && !keyConfig.literal && isCommandConfigValue(keyConfig.value)) ||
 			this.#keylessProviders.has(model.provider) ||
 			this.authStorage.hasAuth(model.provider)
 		);
@@ -2238,7 +2253,7 @@ export class ModelRegistry {
 	 */
 	hasCommandBackedApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		return isCommandConfigValue(keyConfig);
+		return keyConfig !== undefined && !keyConfig.literal && isCommandConfigValue(keyConfig.value);
 	}
 
 	getDiscoverableProviders(): string[] {

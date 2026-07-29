@@ -7,6 +7,8 @@ import { YAML } from "bun";
 // The config singleton resolves its default path at module initialization, so
 // load the login modules only after this test's agent directory is isolated.
 const { ModelsConfigFile } = await import("../src/config/models-config");
+const { ModelRegistry } = await import("../src/config/model-registry");
+const { AuthStorage } = await import("../src/session/auth-storage");
 const {
 	normalizeOpenAICompatibleBaseUrl,
 	OPENAI_COMPATIBLE_API_IDS,
@@ -45,13 +47,13 @@ test("writes a schema-valid dynamically discovered OpenAI-compatible provider an
 		);
 
 		const content = await fs.readFile(modelsPath, "utf-8");
-		expect(content).toContain('apiKey: "\\\\apikey-next"');
+		expect(content).toContain('openaiCompatibleApiKey: "apikey-next"');
 		const emitted = YAML.parse(content) as { providers: Record<string, unknown> };
 		expect(emitted).toEqual({
 			providers: {
 				"team-proxy": {
 					baseUrl: "https://next.example.test/v1",
-					apiKey: "\\apikey-next",
+					openaiCompatibleApiKey: "apikey-next",
 					api: "openai-responses",
 					authHeader: true,
 					discovery: { type: "openai-models-list" },
@@ -66,6 +68,87 @@ test("writes a schema-valid dynamically discovered OpenAI-compatible provider an
 		if (loaded.status !== "ok") throw loaded.error;
 		expect(Object.keys(loaded.value.providers ?? {})).toEqual(["team-proxy"]);
 	} finally {
+		await tempDir.remove().catch(() => {});
+	}
+});
+
+test("stores compatible keys in a scoped literal field without rewriting legacy backslashes", async () => {
+	const tempDir = TempDir.createSync("@openai-compatible-login-");
+	const modelsPath = path.join(tempDir.path(), "models.yml");
+	try {
+		await fs.writeFile(
+			modelsPath,
+			YAML.stringify({
+				providers: {
+					legacySingle: { apiKey: "\\legacy" },
+					legacyMultiple: { apiKey: "\\\\legacy" },
+				},
+			}),
+		);
+
+		await writeOpenAICompatibleProvider(
+			{
+				providerName: "team-proxy",
+				baseUrl: "https://models.example.test/v1",
+				apiKey: "!literal-compatible-key",
+			},
+			modelsPath,
+		);
+
+		const emitted = YAML.parse(await fs.readFile(modelsPath, "utf-8")) as {
+			providers: Record<string, Record<string, string>>;
+		};
+		expect(emitted.providers.legacySingle.apiKey).toBe("\\legacy");
+		expect(emitted.providers.legacyMultiple.apiKey).toBe("\\\\legacy");
+		expect(emitted.providers["team-proxy"]).toMatchObject({
+			openaiCompatibleApiKey: "!literal-compatible-key",
+		});
+		expect(emitted.providers["team-proxy"]).not.toHaveProperty("apiKey");
+
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		try {
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			expect(await registry.getApiKeyForProvider("team-proxy")).toBe("!literal-compatible-key");
+			expect(await registry.getApiKeyForProvider("legacySingle")).toBe("\\legacy");
+			expect(await registry.getApiKeyForProvider("legacyMultiple")).toBe("\\\\legacy");
+		} finally {
+			authStorage.close();
+		}
+	} finally {
+		await tempDir.remove().catch(() => {});
+	}
+});
+
+test("cancels an atomic compatible-provider write before rename and removes its temp file", async () => {
+	const tempDir = TempDir.createSync("@openai-compatible-login-");
+	const modelsPath = path.join(tempDir.path(), "models.yml");
+	const original = "providers:\n  existing:\n    apiKey: existing-key\n";
+	const controller = new AbortController();
+	const writeFile = fs.writeFile;
+	try {
+		await fs.writeFile(modelsPath, original);
+		const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (...args) => {
+			if (String(args[0]).endsWith(".tmp")) controller.abort();
+			await writeFile(...args);
+		});
+
+		await expect(
+			writeOpenAICompatibleProvider(
+				{
+					providerName: "team-proxy",
+					baseUrl: "https://models.example.test/v1",
+					apiKey: "new-key",
+				},
+				modelsPath,
+				controller.signal,
+			),
+		).rejects.toThrow();
+		writeSpy.mockRestore();
+
+		expect(await fs.readFile(modelsPath, "utf-8")).toBe(original);
+		expect((await fs.readdir(tempDir.path())).filter(entry => entry.endsWith(".tmp"))).toEqual([]);
+	} finally {
+		vi.restoreAllMocks();
 		await tempDir.remove().catch(() => {});
 	}
 });
@@ -220,7 +303,7 @@ test("passes cancellation into the bounded endpoint probe", async () => {
 	expect(result.ok).toBe(false);
 });
 
-test("keeps inline keys literal and removes incompatible retained transport", async () => {
+test("stores inline keys in the scoped field and removes incompatible retained transport", async () => {
 	const tempDir = TempDir.createSync("@openai-compatible-literal-");
 	const modelsPath = path.join(tempDir.path(), "models.yml");
 	try {
@@ -236,7 +319,8 @@ test("keeps inline keys literal and removes incompatible retained transport", as
 			YAML.parse(await fs.readFile(modelsPath, "utf-8")) as { providers: Record<string, Record<string, unknown>> }
 		).providers.proxy;
 		expect(provider).toBeDefined();
-		expect(provider?.apiKey).toBe("\\!not-a-command");
+		expect(provider?.openaiCompatibleApiKey).toBe("!not-a-command");
+		expect(provider?.apiKey).toBeUndefined();
 		expect(provider?.transport).toBeUndefined();
 	} finally {
 		await tempDir.remove().catch(() => {});
