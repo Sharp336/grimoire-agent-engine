@@ -3020,18 +3020,11 @@ function createClient(
 	return { client, isOAuthToken: oauthToken };
 }
 
-type ThinkingParams = {
-	max_tokens?: MessageCreateParamsStreaming["max_tokens"];
-	thinking?: MessageCreateParamsStreaming["thinking"];
-	output_config?: MessageCreateParamsStreaming["output_config"];
-	context_management?: MessageCreateParamsStreaming["context_management"];
-};
-
 /** Drop thinking (and its context-management directive) from a request.
  *  Adaptive-only models can't be switched off by omitting `thinking`, so their
  *  effort is pinned to the lowest level instead. Shared by the forced-tool-choice
  *  and thinking-budget reconciliation paths so they disable thinking identically. */
-function disableThinking(params: ThinkingParams, model: Model<"anthropic-messages">): void {
+function disableThinking(params: MessageCreateParamsStreaming, model: Model<"anthropic-messages">): void {
 	delete params.thinking;
 	delete params.context_management;
 
@@ -3068,7 +3061,7 @@ function disableThinkingIfToolChoiceForced(
 	disableThinking(params, model);
 }
 
-function ensureMaxTokensForThinking(params: ThinkingParams, maxAllowedTokens: number): void {
+function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAllowedTokens: number): void {
 	const thinking = params.thinking;
 	if (thinking?.type !== "enabled") return;
 
@@ -3105,7 +3098,10 @@ const MIN_THINKING_BUDGET_TOKENS = 1024;
  * thinking is disabled when too little headroom remains for a viable budget,
  * while mandatory-thinking models retain every positive clamped budget.
  */
-function reconcileThinkingForClampedMaxTokens(params: ThinkingParams, model: Model<"anthropic-messages">): void {
+function reconcileThinkingForClampedMaxTokens(
+	params: MessageCreateParamsStreaming,
+	model: Model<"anthropic-messages">,
+): void {
 	const thinking = params.thinking;
 	if (thinking?.type !== "enabled") return;
 	const maxTokens = params.max_tokens;
@@ -3616,8 +3612,6 @@ function buildParams(
 
 	disableThinkingIfToolChoiceForced(params, model);
 	ensureMaxTokensForThinking(params, maxOutputTokens);
-	// Clamp every output budget against the same prompt estimate so each server-side
-	// fallback stays within its own model window.
 	const estimatedPromptTokens = estimatePromptTokens(
 		context.systemPrompt?.join("\n"),
 		context.messages,
@@ -3629,29 +3623,6 @@ function buildParams(
 		estimatedPromptTokens,
 	});
 	reconcileThinkingForClampedMaxTokens(params, model);
-	if (params.fallbacks) {
-		params.fallbacks = params.fallbacks.map(fallback => {
-			const bundledFallbackModel = getBundledModel("anthropic", fallback.model);
-			const fallbackModel =
-				bundledFallbackModel?.api === "anthropic-messages"
-					? (bundledFallbackModel as Model<"anthropic-messages">)
-					: model;
-			const hasMaxTokensOverride = fallback.max_tokens !== undefined;
-			const fallbackParams: FallbackParam = {
-				...fallback,
-				...(fallback.thinking?.type === "enabled" && { thinking: { ...fallback.thinking } }),
-				...(fallback.output_config && { output_config: { ...fallback.output_config } }),
-				max_tokens: clampMaxTokensToContext({
-					requestedMaxTokens: fallback.max_tokens ?? params.max_tokens,
-					contextWindow: fallbackModel.contextWindow ?? model.contextWindow ?? undefined,
-					estimatedPromptTokens,
-				}),
-			};
-			reconcileThinkingForClampedMaxTokens(fallbackParams, fallbackModel);
-			if (!hasMaxTokensOverride && fallbackParams.max_tokens === params.max_tokens) delete fallbackParams.max_tokens;
-			return fallbackParams;
-		});
-	}
 
 	// Opus 4.7+ and Fable/Mythos 5 reject non-default sampling parameters with 400 error.
 	const thinkingType = params.thinking?.type;

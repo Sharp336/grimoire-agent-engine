@@ -1,11 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { FallbackParam } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { clampMaxTokensToContext, estimatePromptTokens } from "@oh-my-pi/pi-ai/utils/output-budget";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // ─── clampMaxTokensToContext ─────────────────────────────────────────────────
 
@@ -238,7 +236,6 @@ function makeThinkingModel(
 }
 
 type CapturePayloadOptions = {
-	fallbacks?: FallbackParam[];
 	temperature?: number;
 	topP?: number;
 	topK?: number;
@@ -257,7 +254,6 @@ function capturePayload(
 		signal: createAbortedSignal(),
 		maxTokens,
 		...(thinking && { thinkingEnabled: thinking.enabled, thinkingBudgetTokens: thinking.budgetTokens }),
-		...(payloadOptions?.fallbacks && { fallbacks: payloadOptions.fallbacks }),
 		...(payloadOptions?.temperature !== undefined && { temperature: payloadOptions.temperature }),
 		...(payloadOptions?.topP !== undefined && { topP: payloadOptions.topP }),
 		...(payloadOptions?.topK !== undefined && { topK: payloadOptions.topK }),
@@ -335,30 +331,6 @@ describe("anthropic output-budget clamp integration", () => {
 		expect(payload.thinking).toBeUndefined();
 	});
 
-	it("clamps an explicit fallback max_tokens override independently", async () => {
-		const model = makeModel(10_000, 8_192);
-		const context: Context = {
-			messages: [{ role: "user", content: "x".repeat(24_000), timestamp: Date.now() }],
-		};
-		const payload = await capturePayload(model, context, 8192, undefined, {
-			fallbacks: [{ model: "unknown-fallback", max_tokens: 8192 }],
-		});
-		expect(payload.fallbacks).toEqual([{ model: "unknown-fallback", max_tokens: 1 }]);
-	});
-
-	it("reconciles fallback thinking against an inherited clamped max_tokens", async () => {
-		const model = makeThinkingModel(16_000, 8_192);
-		const context: Context = {
-			messages: [{ role: "user", content: "x".repeat(24_000), timestamp: Date.now() }],
-		};
-		const payload = await capturePayload(model, context, 8192, undefined, {
-			fallbacks: [{ model: "unknown-fallback", thinking: { type: "enabled", budget_tokens: 4000 } }],
-		});
-		expect(payload.fallbacks).toEqual([
-			{ model: "unknown-fallback", thinking: { type: "enabled", budget_tokens: 1904 } },
-		]);
-	});
-
 	it("restores supported sampling parameters after a tight clamp disables optional thinking", async () => {
 		const model = makeThinkingModel(10_000, 8_192, false, true);
 		const context: Context = {
@@ -378,30 +350,6 @@ describe("anthropic output-budget clamp integration", () => {
 			top_k: 42,
 		});
 		expect(payload.thinking).toBeUndefined();
-	});
-	it("retains a materialized inherited fallback max only when the fallback context window requires a stricter clamp", async () => {
-		const primary = getBundledModel<"anthropic-messages">("anthropic", "claude-fable-5");
-		const fallback = getBundledModel<"anthropic-messages">("anthropic", "claude-haiku-4-5");
-		if (!primary || !fallback) throw new Error("Expected bundled Anthropic models to exist");
-
-		const smallContext: Context = {
-			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
-		};
-		const smallPayload = await capturePayload(primary, smallContext, undefined, undefined, {
-			fallbacks: [{ model: fallback.id }],
-		});
-		expect(smallPayload.max_tokens).toBe(128_000);
-		expect(smallPayload.fallbacks).toEqual([{ model: fallback.id }]);
-
-		const bigText = "x".repeat(280_000);
-		const largeContext: Context = {
-			messages: [{ role: "user", content: bigText, timestamp: Date.now() }],
-		};
-		const largePayload = await capturePayload(primary, largeContext, undefined, undefined, {
-			fallbacks: [{ model: fallback.id }],
-		});
-		expect(largePayload.max_tokens).toBe(128_000);
-		expect(largePayload.fallbacks).toEqual([{ model: fallback.id, max_tokens: 125_904 }]);
 	});
 });
 
