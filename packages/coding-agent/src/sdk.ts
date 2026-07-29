@@ -34,7 +34,7 @@ import {
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
 } from "./advisor";
-import { AsyncJobManager } from "./async";
+import { AsyncJobManager, createScopedAsyncJobs } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
@@ -847,6 +847,7 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 	return {
 		sessionManager: ctx.sessionManager,
 		modelRegistry: ctx.modelRegistry,
+		asyncJobs: ctx.asyncJobs,
 		model: ctx.model,
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
@@ -2504,6 +2505,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
 		// is unreachable; unconditional runner construction keeps that invariant explicit and
 		// prevents future optional extensions from silently re-opening the hole.)
+		const asyncJobs = scopedAsyncJobManager
+			? createScopedAsyncJobs(scopedAsyncJobManager, resolvedAgentId)
+			: undefined;
 		const extensionRunner: ExtensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
@@ -2513,6 +2517,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
 			localProtocolOptions,
+			asyncJobs,
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -2524,6 +2529,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const getSessionContext = () => ({
 			sessionManager,
 			modelRegistry,
+			asyncJobs,
 			model: agent.state.model,
 			isIdle: () => !session.isStreaming,
 			hasQueuedMessages: () => session.queuedMessageCount > 0,

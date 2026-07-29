@@ -5,6 +5,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { ScopedAsyncJobs } from "../../async";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
@@ -392,6 +393,7 @@ export class ExtensionRunner {
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
+		private readonly asyncJobs?: ScopedAsyncJobs,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -663,6 +665,7 @@ export class ExtensionRunner {
 	createContext(model?: Model): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
 		return {
+			asyncJobs: this.asyncJobs,
 			ui: this.#uiContext,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),

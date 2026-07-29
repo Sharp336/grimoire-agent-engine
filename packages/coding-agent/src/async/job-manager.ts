@@ -5,6 +5,13 @@ const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_RUNNING_JOBS = 15;
+const ASYNC_JOB_KIND_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,63}$/;
+const ASYNC_JOB_KIND_ERROR =
+	"Background job kind must be 1-64 lowercase ASCII letters, digits, dots, underscores, colons, or hyphens.";
+
+function assertValidAsyncJobKind(kind: string): void {
+	if (!ASYNC_JOB_KIND_PATTERN.test(kind)) throw new Error(ASYNC_JOB_KIND_ERROR);
+}
 
 /**
  * Adaptive ("smart") `hub` poll-wait ladder (ms). A tight poll loop climbs
@@ -29,7 +36,7 @@ interface PollEscalationState {
 
 export interface AsyncJob {
 	id: string;
-	type: "bash" | "task";
+	type: string;
 	status: "running" | "completed" | "failed" | "cancelled";
 	startTime: number;
 	label: string;
@@ -105,6 +112,31 @@ export interface AsyncJobRegisterOptions {
 	queued?: boolean;
 }
 
+export interface AsyncJobRunContext {
+	jobId: string;
+	signal: AbortSignal;
+	reportProgress: (text: string, details?: Record<string, unknown>) => Promise<void>;
+	/** Clear the queued flag once the job actually starts executing. */
+	markRunning: () => void;
+}
+
+export type ScopedAsyncJobRegisterOptions = Omit<AsyncJobRegisterOptions, "ownerId" | "agentId">;
+
+/**
+ * Owner-bound background-job surface exposed to plugins and custom tools.
+ * The caller cannot override ownership, so hub visibility, cancellation, and
+ * completion delivery remain isolated to the session's agent.
+ */
+export interface ScopedAsyncJobs {
+	register(
+		/** Stable display identifier; lowercase ASCII letters, digits, `.`, `_`, `:`, or `-`, up to 64 characters. */
+		kind: string,
+		label: string,
+		run: (ctx: AsyncJobRunContext) => Promise<string>,
+		options?: ScopedAsyncJobRegisterOptions,
+	): string;
+}
+
 /**
  * Filter applied to job query/cancel APIs. With `ownerId`, results are
  * restricted to jobs registered by that agent (registry id from
@@ -148,7 +180,7 @@ export class AsyncJobManager {
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		const ownerId = filter?.ownerId;
-		if (!ownerId) return Array.from(jobs);
+		if (ownerId === undefined) return Array.from(jobs);
 		const out: AsyncJob[] = [];
 		for (const job of jobs) {
 			if (job.ownerId === ownerId) out.push(job);
@@ -174,20 +206,15 @@ export class AsyncJobManager {
 	}
 
 	register(
-		type: "bash" | "task",
+		kind: string,
 		label: string,
-		run: (ctx: {
-			jobId: string;
-			signal: AbortSignal;
-			reportProgress: (text: string, details?: Record<string, unknown>) => Promise<void>;
-			/** Clear the queued flag once the job actually starts executing. */
-			markRunning: () => void;
-		}) => Promise<string>,
+		run: (ctx: AsyncJobRunContext) => Promise<string>,
 		options?: AsyncJobRegisterOptions,
 	): string {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}
+		assertValidAsyncJobKind(kind);
 		// Queued jobs hold no execution slot yet — only count jobs that are
 		// actually running so a large parked batch cannot starve registration.
 		let activeCount = 0;
@@ -207,7 +234,7 @@ export class AsyncJobManager {
 
 		const job: AsyncJob = {
 			id,
-			type,
+			type: kind,
 			status: "running",
 			startTime,
 			label,
@@ -275,7 +302,7 @@ export class AsyncJobManager {
 	cancel(id: string, filter?: AsyncJobFilter): boolean {
 		const job = this.#jobs.get(id);
 		if (!job) return false;
-		if (filter?.ownerId && job.ownerId !== filter.ownerId) return false;
+		if (filter?.ownerId !== undefined && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
 		job.abortController.abort();
@@ -818,4 +845,15 @@ export class AsyncJobManager {
 		const jitterMs = Math.floor(Math.random() * DELIVERY_RETRY_JITTER_MS);
 		return Math.min(DELIVERY_RETRY_MAX_MS, backoffMs + jitterMs);
 	}
+}
+
+/** Bind an async manager to one immutable owner identity. */
+export function createScopedAsyncJobs(manager: AsyncJobManager, ownerId: string): ScopedAsyncJobs {
+	return {
+		register: (kind, label, run, options) =>
+			manager.register(kind, label, run, {
+				...options,
+				ownerId,
+			}),
+	};
 }

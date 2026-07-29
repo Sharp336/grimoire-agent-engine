@@ -38,6 +38,7 @@ import type { AutocompleteItem, AutocompleteProvider, Component, EditorTheme, Ke
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { Type as arktype } from "arktype";
 import type * as zod from "zod/v4";
+import type { ScopedAsyncJobs } from "../../async";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "../../edit";
@@ -411,6 +412,8 @@ export interface ExtensionModelQuery {
 }
 
 export interface ExtensionContext {
+	/** Owner-scoped background jobs surfaced through hub jobs/wait/cancel. */
+	asyncJobs?: ScopedAsyncJobs;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Get current context usage for the active model. */

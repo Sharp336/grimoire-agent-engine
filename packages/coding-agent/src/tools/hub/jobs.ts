@@ -73,7 +73,7 @@ export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: st
 	for (const id of ids) {
 		const job = manager.getJob(id);
 		if (!job) continue;
-		if (ownerId && job.ownerId !== ownerId) continue;
+		if (ownerId !== undefined && job.ownerId !== ownerId) continue;
 		out.push(job);
 	}
 	return out;
@@ -132,7 +132,7 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 
 interface TrackedJobLike {
 	id: string;
-	type: "bash" | "task";
+	type: string;
 	status: string;
 	label: string;
 	startTime: number;
