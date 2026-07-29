@@ -800,9 +800,13 @@ describe("offline SQLite salvage", () => {
 
 		const racedCandidate = path.join(root, "raced-candidate.db");
 		let racerIdentity: FileFingerprint | undefined;
+		snapshotTempDir = undefined;
 		result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root, output: racedCandidate },
 			{
+				afterPristineCopy: tempDir => {
+					snapshotTempDir = tempDir;
+				},
 				beforeCandidatePublication: async () => {
 					await Bun.write(racedCandidate, "racer");
 					racerIdentity = await fingerprint(racedCandidate);
@@ -821,6 +825,11 @@ describe("offline SQLite salvage", () => {
 		expect(staged.path).not.toBe(result.candidate);
 		expect(await fingerprint(racedCandidate)).toEqual(requireValue(racerIdentity, "racer identity"));
 		expect(await stageArtifacts(result.candidate, "candidate")).toEqual([]);
+		await expect(
+			fs.promises.lstat(requireValue<string>(snapshotTempDir, "no-replace publication snapshot directory")),
+		).rejects.toMatchObject({
+			code: "ENOENT",
+		});
 	});
 
 	test("late source mismatch after candidate link publishes an untrusted sealed candidate", async () => {
