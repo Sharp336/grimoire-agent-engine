@@ -468,12 +468,20 @@ function kiroResponseError(prefix: string, status: number, body: string, headerC
 }
 
 function kiroStreamErrorStatus(code: string | undefined): number {
-	switch (code?.toLowerCase()) {
+	const normalized = code?.split(/[#:]/).at(-1)?.toLowerCase();
+	switch (normalized) {
 		case "internalserverexception":
 		case "serviceunavailableexception":
 			return 503;
 		case "throttlingexception":
 			return 429;
+		case "unauthorizedexception":
+		case "expiredtokenexception":
+		case "tokenexpiredexception":
+		case "invalidtokenexception":
+			return 401;
+		case "accessdeniedexception":
+			return 403;
 		default:
 			return 400;
 	}

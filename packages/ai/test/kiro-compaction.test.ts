@@ -216,6 +216,29 @@ describe("Kiro oversized-request classification", () => {
 		expect(AIError.isContextOverflow(result)).toBe(false);
 	});
 
+	it("maps streamed authentication and authorization exceptions to credential statuses", async () => {
+		const cases = [
+			["UnauthorizedException", 401],
+			["ExpiredTokenException", 401],
+			["TokenExpiredException", 401],
+			["InvalidTokenException", 401],
+			["AccessDeniedException", 403],
+		] as const;
+		for (const [exceptionType, expectedStatus] of cases) {
+			scenario = {
+				kind: "eventstream-exception",
+				exceptionType,
+				body: JSON.stringify({ message: `${exceptionType} fixture` }),
+			};
+			const { eventTypes, result } = await collectStream(makeModel(await startServer()));
+
+			expectTerminalError(eventTypes, result);
+			expect(result.errorStatus).toBe(expectedStatus);
+			expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
+			await stopServer();
+		}
+	});
+
 	it("keeps an opaque EventStream service exception transient rather than treating it as overflow", async () => {
 		const detail = "execution engine unavailable";
 		scenario = {
