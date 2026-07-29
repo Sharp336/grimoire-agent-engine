@@ -137,6 +137,16 @@ function assistantText(messages: AgentMessage[]): string {
 		.join("\n");
 }
 
+/** Extract the nested `details.value.value` from the yield toolResult for a
+ *  given tool call id. The yield tool wraps `params.result.data` into
+ *  `details.value`, and the mock response nests the value under `data.value`. */
+function yieldToolResultValue(messages: AgentMessage[], toolCallId: string): unknown {
+	const result = messages.find(message => message.role === "toolResult" && message.toolCallId === toolCallId);
+	if (result?.role !== "toolResult") return undefined;
+	const details = result.details as { value?: { value?: unknown } } | undefined;
+	return details?.value?.value;
+}
+
 afterEach(async () => {
 	for (const harness of activeHarnesses.splice(0)) {
 		await harness.session.dispose();
@@ -194,6 +204,37 @@ describe("AgentSession yield empty-stop suppression", () => {
 		// empty-stop reminder injected on the second run.
 		expect(mock.calls).toHaveLength(4);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+
+	it("emits each terminal yield completion before the following prompt", async () => {
+		const { session, mock } = await createHarness([
+			yieldCall("first-result", "call-yield-turn-1"),
+			yieldCall("second-result", "call-yield-turn-2"),
+			emptyStop(),
+		]);
+		const completedYieldCallIds: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "tool_execution_end" && event.toolName === "yield") {
+				completedYieldCallIds.push(event.toolCallId);
+			}
+		});
+
+		await session.prompt("yield the first result");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+		expect(completedYieldCallIds).toEqual(["call-yield-turn-1"]);
+		expect(yieldToolResultValue(session.agent.state.messages, "call-yield-turn-1")).toBe("first-result");
+
+		await session.prompt("yield the second result");
+		await session.waitForIdle();
+
+		// The next turn stopped at its own yield; its scripted empty continuation
+		// was never consumed. Each completed yield has already emitted the event
+		// that consumes the synchronous termination marker.
+		expect(mock.calls).toHaveLength(2);
+		expect(completedYieldCallIds).toEqual(["call-yield-turn-1", "call-yield-turn-2"]);
+		expect(yieldToolResultValue(session.agent.state.messages, "call-yield-turn-2")).toBe("second-result");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("treats an idle IRC wake after a yielded run as a fresh turn for empty-stop retry", async () => {
