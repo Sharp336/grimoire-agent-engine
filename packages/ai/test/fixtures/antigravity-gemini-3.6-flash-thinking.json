@@ -1,0 +1,14 @@
+{
+  "source": "agy 1.1.7 capture against daily-cloudcode-pa.googleapis.com on 2026-07-29",
+  "model": "gemini-3.6-flash-high",
+  "generationConfig": {
+    "maxOutputTokens": 65536,
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": 10000
+    }
+  },
+  "labels": {
+    "model_enum": "MODEL_PLACEHOLDER_M71"
+  }
+}

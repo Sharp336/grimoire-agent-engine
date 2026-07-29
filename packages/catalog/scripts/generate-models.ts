@@ -19,6 +19,7 @@ import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from ".
 import { fetchCodexModels } from "../src/discovery/codex";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
 import { createModelManager } from "../src/model-manager";
+import { applyGeneratedModelPolicies as applyGeneratedThinkingPolicies } from "../src/model-thinking";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
 import {
@@ -661,6 +662,7 @@ async function generateModels() {
 	// entries are already collapsed (rebake skips them); this pass folds
 	// previous-snapshot raw members into their logical families.
 	allModels = collapseEffortVariantsAcrossProviders(allModels);
+	applyGeneratedThinkingPolicies(allModels);
 	// Fill remaining null endpoint limits from each model's canonical-family
 	// reference. Runs last so canonical ids and explicit policy limits are final.
 	applyCanonicalLimitFallback(allModels);

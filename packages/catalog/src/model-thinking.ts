@@ -109,6 +109,13 @@ const MIMO_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
 	[Effort.XHigh]: "high",
 };
 
+const ANTIGRAVITY_GEMINI_36_FLASH_EFFORT_BUDGETS: Readonly<Partial<Record<Effort, number>>> = {
+	[Effort.Minimal]: 1000,
+	[Effort.Low]: 1000,
+	[Effort.Medium]: 4000,
+	[Effort.High]: 10000,
+};
+
 const MINIMAX_ANTHROPIC_ADAPTIVE_EFFORT_MAP: Readonly<EffortMap> = {
 	[Effort.Low]: "adaptive",
 	[Effort.Medium]: "adaptive",
@@ -118,6 +125,23 @@ const MINIMAX_ANTHROPIC_ADAPTIVE_EFFORT_MAP: Readonly<EffortMap> = {
 // ---------------------------------------------------------------------------
 // Build-time derivation (buildModel + catalog generator only)
 // ---------------------------------------------------------------------------
+
+/**
+ * Apply generated thinking policies that depend on the final, collapsed model
+ * identity. This runs after variant collapse so it cannot be overwritten by a
+ * family-level projection.
+ */
+export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
+	for (const model of models) {
+		if (model.provider !== "google-antigravity" || model.id !== "gemini-3.6-flash") continue;
+		if (!model.thinking) continue;
+		model.thinking = {
+			...model.thinking,
+			mode: "budget",
+			effortBudgets: ANTIGRAVITY_GEMINI_36_FLASH_EFFORT_BUDGETS,
+		};
+	}
+}
 
 /**
  * Resolve the canonical thinking metadata for a spec. Called exactly once per

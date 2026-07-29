@@ -126,8 +126,14 @@ describe("collapseEffortVariants", () => {
 		expect(flash?.name).toBe("Gemini 3.6 Flash");
 		expect(flash?.requestModelId).toBe("gemini-3.6-flash-low");
 		expect(flash?.thinking).toEqual({
-			mode: "google-level",
+			mode: "budget",
 			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			effortBudgets: {
+				minimal: 1000,
+				low: 1000,
+				medium: 4000,
+				high: 10000,
+			},
 			requiresEffort: true,
 			effortRouting: {
 				minimal: "gemini-3.6-flash-low",

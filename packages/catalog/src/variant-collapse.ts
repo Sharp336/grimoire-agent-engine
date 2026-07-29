@@ -231,8 +231,8 @@ const GEMINI_3_PRO_FAMILY_BUDGETS: Readonly<Partial<Record<Effort, number>>> = {
  * different thinking transports: `google-antigravity` (daily-cloudcode-pa)
  * sends captured `thinkingBudget` values, while `google-gemini-cli`
  * (cloudcode-pa) follows the official Gemini CLI and uses `thinkingLevel`.
- * Gemini 3.6 exposes one wire id per level and uses `thinkingLevel` on both
- * endpoints.
+ * Gemini 3.6 follows the same endpoint-specific transport: Antigravity uses
+ * captured thinking budgets, while the official Gemini CLI uses thinking levels.
  */
 function geminiFlashFamily(mode: "budget" | "google-level"): EffortVariantFamily {
 	const budget = mode === "budget";
@@ -276,8 +276,9 @@ const GEMINI_36_FLASH_FAMILY: EffortVariantFamily = {
 		[Effort.High]: "gemini-3.6-flash-high",
 	},
 	thinking: {
-		mode: "google-level",
+		mode: "budget",
 		efforts: GEMINI_3_FLASH_FAMILY_EFFORTS,
+		effortBudgets: GEMINI_3_FLASH_FAMILY_BUDGETS,
 		requiresEffort: true,
 	},
 };

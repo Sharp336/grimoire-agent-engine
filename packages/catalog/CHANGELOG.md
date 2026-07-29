@@ -9,6 +9,7 @@
 
 - Added Cursor Bidi and server-configuration protocol descriptors used by HTTP/1 transport fallback and mode discovery.
 - Added dynamic discovery for the account-scoped Kiro model catalog.
+- Fixed Gemini 3.6 Flash requests to Antigravity Cloud Code Assist sending `thinkingLevel` instead of the endpoint's required per-tier `thinkingBudget`, which could yield repeated empty responses.
 
 ## [17.1.8] - 2026-07-28
 
