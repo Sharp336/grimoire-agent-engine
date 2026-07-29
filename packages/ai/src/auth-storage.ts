@@ -6373,8 +6373,21 @@ type SerializedCredentialRecord = {
 	identityKey: string | null;
 };
 
-const AUTH_SCHEMA_VERSION = 6;
+export const AUTH_SCHEMA_VERSION = 6;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
+
+/** Tables owned by the authentication subsystem in agent.db. */
+export const AUTH_STORAGE_TABLES = {
+	auth_schema_version: "authoritative",
+	cache: "rebuildable",
+	usage_history: "rebuildable",
+	usage_cost_history: "rebuildable",
+	clients: "authoritative",
+	client_usage: "rebuildable",
+	auth_credentials: "authoritative",
+	auth_credential_blocks: "authoritative",
+	auth_credential_refresh_leases: "rebuildable",
+} as const satisfies Record<string, "authoritative" | "rebuildable">;
 
 /**
  * SQLite's busy result code family — base `SQLITE_BUSY` plus the extended
@@ -6786,6 +6799,33 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#listUsageCostsStmt = this.#db.prepare(
 			"SELECT recorded_at, provider, account_key, cost_usd FROM usage_cost_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) AND (? IS NULL OR account_key = ?) ORDER BY recorded_at ASC",
 		);
+	}
+
+	/** Validates auth-owned tables without migrations, backfills, or singleton state. */
+	static validateExactPath(dbPath: string): void {
+		const db = new Database(dbPath, { readonly: true, safeIntegers: true });
+		try {
+			const version = db.prepare("SELECT id, version FROM auth_schema_version ORDER BY id").values();
+			if (version.length !== 1 || version[0]?.[0] !== 1n || version[0]?.[1] !== BigInt(AUTH_SCHEMA_VERSION)) {
+				throw new Error(`Auth storage candidate schema version is not ${AUTH_SCHEMA_VERSION}`);
+			}
+			db.prepare("SELECT key, value, expires_at FROM cache LIMIT 1").get();
+			db.prepare("SELECT * FROM usage_history LIMIT 1").get();
+			db.prepare("SELECT * FROM usage_cost_history LIMIT 1").get();
+			db.prepare("SELECT install_id, hostname, first_seen, last_seen FROM clients LIMIT 1").get();
+			db.prepare("SELECT * FROM client_usage LIMIT 1").get();
+			db.prepare(
+				"SELECT id, provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at FROM auth_credentials LIMIT 1",
+			).get();
+			db.prepare(
+				"SELECT credential_id, provider_key, block_scope, blocked_until_ms, updated_at FROM auth_credential_blocks LIMIT 1",
+			).get();
+			db.prepare(
+				"SELECT credential_id, owner, expires_at_ms, updated_at FROM auth_credential_refresh_leases LIMIT 1",
+			).get();
+		} finally {
+			db.close();
+		}
 	}
 
 	static async open(dbPath: string = getAgentDbPath()): Promise<SqliteAuthCredentialStore> {

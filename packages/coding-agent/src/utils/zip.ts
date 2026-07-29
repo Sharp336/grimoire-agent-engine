@@ -70,8 +70,20 @@ export type ArchiveFormat = "zip" | "tar" | "tar.gz";
  */
 export type ArchiveSource = string | { bytes: Uint8Array; format: ArchiveFormat };
 
+/** Content for a filesystem-backed tar member. */
+export interface ArchiveFileMember {
+	kind: "file";
+	path: string;
+	size: number;
+}
+
 /** Content for a member when packing or extracting an archive. */
-export type ArchiveMemberContent = string | Uint8Array | Blob;
+export type ArchiveMemberContent = string | Uint8Array | Blob | ArchiveFileMember;
+
+/** Describe a file-backed member without eagerly reading it. */
+export function archiveFileMember(filePath: string, size: number): ArchiveFileMember {
+	return { kind: "file", path: filePath, size };
+}
 
 export interface ArchivePathCandidate {
 	archivePath: string;
@@ -849,10 +861,26 @@ async function resolveArchiveBytes(source: ArchiveSource): Promise<{ bytes: Uint
 	return { bytes: await Bun.file(source).bytes(), format };
 }
 
+function isArchiveFileMember(content: ArchiveMemberContent): content is ArchiveFileMember {
+	return !(typeof content === "string" || content instanceof Uint8Array || content instanceof Blob);
+}
+
+function mapArchiveFile(member: ArchiveFileMember): Uint8Array {
+	if (!Number.isSafeInteger(member.size) || member.size < 0) {
+		throw new ToolError(`Invalid archive member size: ${member.path}`);
+	}
+	const bytes = member.size === 0 ? new Uint8Array() : Bun.mmap(member.path);
+	if (bytes.byteLength !== member.size) {
+		throw new ToolError(`Archive member changed while being opened: ${member.path}`);
+	}
+	return bytes;
+}
+
 async function memberToBytes(content: ArchiveMemberContent): Promise<Uint8Array> {
 	if (typeof content === "string") return ENCODER.encode(content);
 	if (content instanceof Uint8Array) return content;
-	return new Uint8Array(await content.arrayBuffer());
+	if (content instanceof Blob) return new Uint8Array(await content.arrayBuffer());
+	return Bun.file(content.path).bytes();
 }
 
 /**
@@ -879,6 +907,16 @@ export async function readArchiveEntries(source: ArchiveSource): Promise<Map<str
 }
 
 /**
+ * Extract a tar from a file-backed mapping. Bun 1.3.14 materializes
+ * `Bun.Archive(Bun.file(...))` incorrectly, while a mapped byte view remains
+ * file-backed and is accepted by the native parser.
+ */
+export async function extractFileBackedTar(sourcePath: string, size: number, destDir: string): Promise<number> {
+	const bytes = mapArchiveFile(archiveFileMember(sourcePath, size));
+	return new Bun.Archive(bytes).extract(destDir);
+}
+
+/**
  * Serialize `entries` into an archive of `format` and write it to `destPath`.
  * ZIP is framed in memory, tar / tar.gz via `Bun.Archive` (gzip for tar.gz).
  * String members are encoded as UTF-8.
@@ -897,9 +935,17 @@ export async function writeArchive(
 		return;
 	}
 
-	const record: Record<string, ArchiveMemberContent> = {};
+	const record: Record<string, string | Uint8Array | Blob> = {};
+	const mappings: Uint8Array[] = [];
 	for (const [name, content] of entries) {
-		record[name.replace(/\\/g, "/")] = content;
+		const normalized = name.replace(/\\/g, "/");
+		if (isArchiveFileMember(content)) {
+			const mapping = mapArchiveFile(content);
+			mappings.push(mapping);
+			record[normalized] = mapping;
+		} else {
+			record[normalized] = content;
+		}
 	}
 	await Bun.Archive.write(destPath, record, format === "tar.gz" ? { compress: "gzip" } : undefined);
 }
@@ -919,7 +965,7 @@ export async function extractArchive(source: ArchiveSource, destDir: string): Pr
 		if (!outputPath.startsWith(extractRoot + path.sep)) {
 			throw new ToolError(`Archive entry escapes extraction dir: ${name}`);
 		}
-		await Bun.write(outputPath, content);
+		await Bun.write(outputPath, isArchiveFileMember(content) ? Bun.file(content.path) : content);
 		count++;
 	}
 	return count;

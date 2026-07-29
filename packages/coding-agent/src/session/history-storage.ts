@@ -22,6 +22,14 @@ type HistoryRow = {
 
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
+/** Current history.db objects; FTS shadow objects are owned by history_fts. */
+export const HISTORY_STORAGE_OBJECTS = {
+	history: "authoritative",
+	idx_history_created_at: "authoritative",
+	history_fts: "derived",
+	history_ai: "derived",
+} as const satisfies Record<string, "authoritative" | "derived">;
+
 // Escape LIKE wildcards so user input is treated as literal text.
 // Matches the `ESCAPE '\\'` clause used by substring-search statements.
 function escapeLikePattern(text: string): string {
@@ -109,6 +117,29 @@ CREATE TRIGGER IF NOT EXISTS history_ai AFTER INSERT ON history BEGIN
 			HistoryStorage.#instance = new HistoryStorage(dbPath);
 		}
 		return HistoryStorage.#instance;
+	}
+
+	/** Initializes a caller-owned candidate without registering the singleton. */
+	static initializeExactPath(dbPath: string): void {
+		const storage = new HistoryStorage(dbPath);
+		storage.#close();
+	}
+
+	/** Validates current history/FTS objects through a read-only exact-path handle. */
+	static validateExactPath(dbPath: string): void {
+		const db = new Database(dbPath, { readonly: true, safeIntegers: true });
+		try {
+			db.prepare("SELECT id, prompt, created_at, cwd, session_id FROM history LIMIT 1").get();
+			db.prepare("SELECT rowid, prompt FROM history_fts LIMIT 1").get();
+			const objects = db
+				.prepare(
+					"SELECT name FROM sqlite_schema WHERE name IN ('history', 'idx_history_created_at', 'history_fts', 'history_ai')",
+				)
+				.values();
+			if (objects.length !== 4) throw new Error("History storage candidate schema is incomplete");
+		} finally {
+			db.close();
+		}
 	}
 
 	/** @internal Reset the singleton and close its database — test-only. */

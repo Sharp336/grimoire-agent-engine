@@ -14,6 +14,15 @@ export default class Gc extends Command {
 		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
 		archive: Flags.boolean({ description: "Archive cold sessions" }),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
+		"repair-storage": Flags.string({
+			description: "Build an offline salvage candidate for agent or history storage",
+			options: ["agent", "history"],
+		}),
+		"history-source": Flags.string({
+			description: "History rebuild source: sessions (default) or fresh",
+			options: ["sessions", "fresh"],
+		}),
+		output: Flags.string({ description: "Candidate output path (repair only)" }),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
 		"retain-newest-per-cwd": Flags.integer({ description: "Always keep this many newest sessions per cwd active" }),
@@ -21,6 +30,14 @@ export default class Gc extends Command {
 
 	async run(): Promise<void> {
 		const { flags } = await this.parse(Gc);
+		const repairStorage = flags["repair-storage"];
+		if (repairStorage !== undefined && repairStorage !== "agent" && repairStorage !== "history") {
+			throw new Error(`Invalid storage repair target: ${repairStorage}`);
+		}
+		const historySource = flags["history-source"];
+		if (historySource !== undefined && historySource !== "sessions" && historySource !== "fresh") {
+			throw new Error(`Invalid history repair source: ${historySource}`);
+		}
 		const cmd: GcCommandArgs = {
 			flags: {
 				apply: flags.apply,
@@ -29,6 +46,9 @@ export default class Gc extends Command {
 				blobs: flags.blobs,
 				archive: flags.archive,
 				wal: flags.wal,
+				repairStorage,
+				historySource,
+				output: flags.output,
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],
 				retainNewestPerCwd: flags["retain-newest-per-cwd"],

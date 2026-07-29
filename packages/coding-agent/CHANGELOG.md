@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added dry-run-first `omp gc --repair-storage agent|history` maintenance to create verified SQLite salvage candidates and byte-exact backups without changing live stores; it is an explicit opt-in salvage path, not corruption prevention ([#7004](https://github.com/can1357/oh-my-pi/issues/7004)).
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
