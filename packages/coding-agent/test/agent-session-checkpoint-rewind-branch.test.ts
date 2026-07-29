@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Message, ThinkingContent } from "@oh-my-pi/pi-ai";
 import { z } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockContent, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -98,6 +99,7 @@ afterEach(async () => {
 		harness?.authStorage.close();
 		harness?.tempDir.removeSync();
 	}
+	vi.restoreAllMocks();
 });
 
 function signedThinking(thinking: string, thinkingSignature: string): MockContent {
@@ -686,5 +688,65 @@ describe("AgentSession checkpoint rewind branch context", () => {
 				report: "post-resume findings",
 			}),
 		).resolves.toMatchObject({ details: { report: "post-resume findings", rewound: true } });
+	});
+
+	it("persists a replayed rewind tool result after compaction drops its stale branch entry", async () => {
+		const report = "rewind, compact, then replay";
+		const { session, mock } = await createHarness([
+			{
+				content: [
+					{
+						type: "toolCall",
+						id: "checkpoint-before-compaction",
+						name: "checkpoint",
+						arguments: { goal: "inspect" },
+					},
+				],
+				stopReason: "toolUse",
+			},
+			{
+				content: [
+					{ type: "toolCall", id: "rewind-replayed-after-compaction", name: "rewind", arguments: { report } },
+				],
+				stopReason: "toolUse",
+			},
+			{ content: ["rewound"], stopReason: "stop" },
+			{
+				content: [
+					{
+						type: "toolCall",
+						id: "rewind-replayed-after-compaction",
+						name: "rewind",
+						arguments: { report: "replayed" },
+					},
+				],
+				stopReason: "toolUse",
+			},
+			{ content: ["replayed"], stopReason: "stop" },
+		]);
+
+		await session.prompt("checkpoint then rewind");
+		const firstKeptEntryId = session.sessionManager.getBranch()[0]?.id;
+		if (!firstKeptEntryId) throw new Error("Expected a branch entry before compaction");
+		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.keepRecentTokens", 1);
+		vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "compacted",
+			shortSummary: undefined,
+			firstKeptEntryId,
+			tokensBefore: 1,
+			details: {},
+		});
+		await session.compact();
+
+		await session.prompt("replay the rewind result");
+		expect(mock.calls).toHaveLength(5);
+		expect(
+			session.sessionManager
+				.buildSessionContext()
+				.messages.some(
+					message => message.role === "toolResult" && message.toolCallId === "rewind-replayed-after-compaction",
+				),
+		).toBe(true);
 	});
 });

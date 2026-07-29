@@ -9,7 +9,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { type AfterToolCallContext, Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { z } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -194,6 +194,32 @@ describe("AgentSession yield empty-stop suppression", () => {
 		// empty-stop reminder injected on the second run.
 		expect(mock.calls).toHaveLength(4);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+
+	it("clears stale terminal-yield dedupe before a new prompt", async () => {
+		const { session } = await createHarness([{ content: ["fresh turn"], stopReason: "stop" }]);
+		const abort = vi.spyOn(session.agent, "abort").mockImplementation(() => {});
+		const afterToolCall = session.agent.afterToolCall;
+		if (!afterToolCall) throw new Error("Expected AgentSession to register an afterToolCall hook");
+		const staleToolCallId = "stale-yield-dedupe";
+
+		afterToolCall({
+			toolCall: { id: staleToolCallId, name: "yield", arguments: {} },
+			result: { content: [], details: {} },
+			isError: false,
+		} as unknown as AfterToolCallContext);
+		expect(abort).toHaveBeenCalledTimes(1);
+		abort.mockClear();
+
+		await session.prompt("start fresh");
+		session.agent.emitExternalEvent({
+			type: "tool_execution_end",
+			toolCallId: staleToolCallId,
+			toolName: "yield",
+			result: { details: {} },
+		});
+		await Bun.sleep(0);
+		expect(abort).toHaveBeenCalledTimes(1);
 	});
 
 	it("treats an idle IRC wake after a yielded run as a fresh turn for empty-stop retry", async () => {

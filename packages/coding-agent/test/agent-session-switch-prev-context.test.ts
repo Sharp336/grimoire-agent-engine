@@ -158,4 +158,31 @@ describe("AgentSession.switchSession previous-context build", () => {
 			{ sessionFile: sessionFile!, transcript: undefined },
 		]);
 	});
+
+	it("drops listeners owned by the previous logical session", async () => {
+		const tempDir = TempDir.createSync("@pi-switch-listener-cleanup-");
+		tempDirs.push(tempDir);
+
+		const { session, sessionManager } = buildSession(tempDir);
+		sessionManager.appendMessage({ role: "user", content: "previous", timestamp: 1 });
+		await sessionManager.flush();
+
+		const otherManager = SessionManager.create(tempDir.path(), tempDir.path());
+		otherManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await otherManager.flush();
+		const targetSessionFile = otherManager.getSessionFile();
+		expect(targetSessionFile).toBeString();
+		await otherManager.close();
+
+		const events: string[] = [];
+		session.subscribe(event => events.push(event.type));
+		expect(await session.switchSession(targetSessionFile!)).toBe(true);
+
+		session.agent.emitExternalEvent({
+			type: "message_start",
+			message: { role: "user", content: "after switch", timestamp: 3 },
+		});
+		await Bun.sleep(0);
+		expect(events).toEqual([]);
+	});
 });

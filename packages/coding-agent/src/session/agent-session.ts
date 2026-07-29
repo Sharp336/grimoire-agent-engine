@@ -592,6 +592,18 @@ export class AgentSession {
 	#resetPromptMaintenanceState(): void {
 		this.#recovery.resetForNewPrompt();
 		this.#yieldTerminationPending = false;
+		this.#synchronouslyTerminatedYieldToolCallIds.clear();
+	}
+
+	#pruneRewoundToolResultIds(messages: readonly AgentMessage[]): void {
+		if (this.#rewoundToolResultIds.size === 0) return;
+		const activeToolResultIds = new Set<string>();
+		for (const message of messages) {
+			if (message.role === "toolResult") activeToolResultIds.add(message.toolCallId);
+		}
+		for (const toolCallId of this.#rewoundToolResultIds) {
+			if (!activeToolResultIds.has(toolCallId)) this.#rewoundToolResultIds.delete(toolCallId);
+		}
 	}
 
 	#acquirePowerAssertion(): void {
@@ -1341,6 +1353,7 @@ export class AgentSession {
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
+			pruneRewoundToolResultIds: messages => this.#pruneRewoundToolResultIds(messages),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
@@ -7155,9 +7168,8 @@ export class AgentSession {
 
 			if (switchingToDifferentSession) {
 				await this.#memory.resetContextForNewTranscript();
-			}
-			if (switchingToDifferentSession) {
 				this.#clearSessionScopedToolState();
+				this.#eventListeners = [];
 			}
 			this.#reconnectToAgent();
 			try {

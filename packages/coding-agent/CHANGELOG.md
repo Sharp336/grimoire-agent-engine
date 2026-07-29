@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Bounded session-scoped rewind, terminal-yield, and subscriber state so long-lived recursive sessions release stale entries after compaction, a new prompt, or a session switch.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
