@@ -238,7 +238,20 @@ async function acquireFromSlot(
 	return makeLease(entry, slotIndex, slot);
 }
 
+let disposerRegistered = false;
+function ensureDisposerRegistered(): void {
+	if (disposerRegistered) return;
+	disposerRegistered = true;
+	registerTransportDisposer("h2-pool", disposeH2Pool);
+}
+
 export async function acquireH2Session(baseUrl: string, provider: string, signal?: AbortSignal): Promise<H2Lease> {
+	// Registered on first use, not at import: `@oh-my-pi/pi-ai` re-exports this
+	// module, so registering at module scope would install a process-level
+	// postmortem hook in every consumer that merely imports the package —
+	// including ones that never open a connection. Nothing needs disposing
+	// until a session exists.
+	ensureDisposerRegistered();
 	if (poolDisposing || isTransportDisposed()) throw new Error("HTTP/2 transport has been disposed");
 	if (signal?.aborted) throw new AIError.AbortError();
 	const url = new URL(baseUrl);
@@ -293,5 +306,3 @@ export function disposeH2Pool(): Promise<void> {
 	})();
 	return poolDisposalPromise;
 }
-
-registerTransportDisposer("h2-pool", disposeH2Pool);

@@ -53,6 +53,13 @@ export function __resetHttp1Bridges(): void {
 	activeBridges.clear();
 }
 
+let disposerRegistered = false;
+function ensureDisposerRegistered(): void {
+	if (disposerRegistered) return;
+	disposerRegistered = true;
+	registerTransportDisposer("http1-bridges", disposeHttp1Bridges);
+}
+
 type BridgeState =
 	| { kind: "open"; phase: "receive" | "poll"; nextSeqno: bigint }
 	| { kind: "closing"; reason: "success" | "fatal" | "abort" | "dispose"; error?: Error }
@@ -72,6 +79,8 @@ interface PendingAppend {
 export async function createHttp1Bridge<TMessage>(
 	options: Http1BridgeOptions<TMessage>,
 ): Promise<Http1Bridge<TMessage>> {
+	// Registered on first bridge, not at import — see the note in `h2-pool.ts`.
+	ensureDisposerRegistered();
 	if (isTransportDisposed()) throw new Error("Transport disposed");
 
 	// The controller must exist before proxy setup so close/disposal also aborts a
@@ -282,5 +291,3 @@ export async function createHttp1Bridge<TMessage>(
 	void receive();
 	return bridge;
 }
-
-registerTransportDisposer("http1-bridges", disposeHttp1Bridges);
