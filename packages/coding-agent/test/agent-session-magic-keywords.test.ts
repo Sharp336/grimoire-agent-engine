@@ -123,7 +123,7 @@ describe("AgentSession magic keyword settings", () => {
 		]);
 	});
 
-	it("renders the eval-specific workflowz notice", async () => {
+	it("renders the workflowz orchestration notice", async () => {
 		const created = await createMagicKeywordSession(root);
 		session = created.session;
 		authStorage = created.authStorage;
@@ -134,7 +134,8 @@ describe("AgentSession magic keyword settings", () => {
 
 		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
 		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
-		expect(notice).toContain("Author the orchestration in the `eval` tool");
+		expect(notice).toContain("Use the session-durable `workflow` tool");
+		expect(notice).toContain("Use `eval` for one-turn dynamic orchestration");
 		expect(notice).toContain("Every eval call has:");
 		expect(notice).toContain("`parallel(thunks)`");
 		expect(notice).toContain("**Python (`eval`, Python backend):**");

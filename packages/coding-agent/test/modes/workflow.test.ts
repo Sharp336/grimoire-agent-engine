@@ -65,9 +65,10 @@ describe("workflow keyword highlighting", () => {
 });
 
 describe("workflow notice", () => {
-	it("renders the Workflowz trigger with eval orchestration helper guidance", () => {
+	it("renders the Workflowz trigger with workflow and eval routing guidance", () => {
 		expect(WORKFLOW_NOTICE).toContain("**workflowz** keyword");
-		expect(WORKFLOW_NOTICE).toContain("Author the orchestration in the `eval` tool");
+		expect(WORKFLOW_NOTICE).toContain("Use the session-durable `workflow` tool");
+		expect(WORKFLOW_NOTICE).toContain("Use `eval` for one-turn dynamic orchestration");
 		expect(WORKFLOW_NOTICE).toContain("JavaScript (`eval`, JavaScript backend):");
 		expect(WORKFLOW_NOTICE).toContain("Use ordinary code between calls to flatten/map/filter");
 		expect(WORKFLOW_NOTICE).toContain("State persists across eval calls");
@@ -76,10 +77,11 @@ describe("workflow notice", () => {
 		expect(WORKFLOW_NOTICE).toContain("await budget.remaining()");
 	});
 
-	it("renders the same eval notice when task.batch is disabled", () => {
+	it("renders the same routing notice when task.batch is disabled", () => {
 		const notice = renderWorkflowNotice({ taskBatch: false });
 		expect(notice).toContain("**workflowz** keyword");
-		expect(notice).toContain("Author the orchestration in the `eval` tool");
+		expect(notice).toContain("Use the session-durable `workflow` tool");
+		expect(notice).toContain("Use `eval` for one-turn dynamic orchestration");
 		expect(notice).toContain("JavaScript (`eval`, JavaScript backend):");
 		expect(notice).toContain("State persists across eval calls");
 		expect(notice).toContain("`parallel(thunks)`");
