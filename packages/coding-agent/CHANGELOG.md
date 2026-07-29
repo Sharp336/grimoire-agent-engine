@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed lowering task.softRequestBudget having no effect on bundled scout and sonic subagents, whose built-in budget previously replaced the configured value instead of acting as a ceiling.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
