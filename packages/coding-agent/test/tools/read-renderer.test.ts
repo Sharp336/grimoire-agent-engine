@@ -110,6 +110,27 @@ describe("readToolRenderer hyperlinks", () => {
 		expect(Bun.stripANSI(result.render(200).join("\n"))).toContain("Read (2)");
 	});
 
+	it("renders a one-URL native array through the batch read renderer", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const component = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "hello" }],
+				details: {
+					readTargetOutcomes: [{ path: "https://example.com/one", status: "success" }],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme!,
+			{ path: ["https://example.com/one"] },
+		);
+
+		const rendered = Bun.stripANSI(component.render(200).join("\n"));
+		expect(rendered).toContain("Read (1)");
+		expect(rendered).not.toContain("Content-Type:");
+	});
+
 	it("links HTTP read result headers to the final URL", async () => {
 		settings.override("tui.hyperlinks", "always");
 		const theme = await getThemeByName("dark");

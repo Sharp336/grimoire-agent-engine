@@ -26,6 +26,7 @@ import { InternalUrlRouter } from "../../src/internal-urls";
 import type { ProtocolHandler } from "../../src/internal-urls/types";
 import { grepToolRenderer } from "../../src/tools/grep";
 import type { ReadTargetOutcome } from "../../src/tools/read";
+import { executeReadBatch, type ReadBatchPartDetails } from "../../src/tools/read-batch";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -893,6 +894,67 @@ describe("tool path arrays", () => {
 		} finally {
 			releaseFirst.resolve();
 			router.unregister(scheme);
+		}
+	});
+
+	it("incorporates ordered results before releasing completed-buffer reservations", async () => {
+		const parts = Array.from({ length: 22 }, (_, index) => `custom-part-${index}`);
+		const releaseFirst = Promise.withResolvers<void>();
+		const releaseLast = Promise.withResolvers<void>();
+		const completionQueueSaturated = Promise.withResolvers<void>();
+		const lastPartStarted = Promise.withResolvers<void>();
+		const started = new Set<number>();
+		let firstDetailsAccessed = false;
+		let firstDetailsAccessedWhenLastStarted = false;
+		const firstDetails: ReadBatchPartDetails = {
+			get notes() {
+				firstDetailsAccessed = true;
+				return ["custom-part-0 incorporated"];
+			},
+		};
+
+		const pendingResult = executeReadBatch<ReadBatchPartDetails>({
+			parts,
+			notice: "custom batch",
+			enforceAggregateBudget: true,
+			async readPart(part) {
+				const index = Number(part.slice("custom-part-".length));
+				started.add(index);
+				if (started.size === 20) completionQueueSaturated.resolve();
+				if (index === 0) await releaseFirst.promise;
+				if (index === parts.length - 1) {
+					firstDetailsAccessedWhenLastStarted = firstDetailsAccessed;
+					lastPartStarted.resolve();
+					await releaseLast.promise;
+				}
+				return {
+					content: [{ type: "text", text: `ordered-custom-part-${index}` }],
+					details: index === 0 ? firstDetails : undefined,
+				};
+			},
+		});
+
+		try {
+			await completionQueueSaturated.promise;
+			const lastStartedBeforeFirstRelease = started.has(parts.length - 1);
+			releaseFirst.resolve();
+			await lastPartStarted.promise;
+			releaseLast.resolve();
+			const result = await pendingResult;
+			const text = getText(result);
+
+			expect(lastStartedBeforeFirstRelease).toBe(false);
+			expect(firstDetailsAccessedWhenLastStarted).toBe(true);
+			expect(result.isError).not.toBe(true);
+			expect(result.details?.readTargetOutcomes?.map(outcome => outcome.path)).toEqual(parts);
+			for (let index = 1; index < parts.length; index++) {
+				expect(text.indexOf(`ordered-custom-part-${index - 1}`)).toBeLessThan(
+					text.indexOf(`ordered-custom-part-${index}`),
+				);
+			}
+		} finally {
+			releaseFirst.resolve();
+			releaseLast.resolve();
 		}
 	});
 

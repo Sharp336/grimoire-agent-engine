@@ -3563,7 +3563,7 @@ export const readToolRenderer = {
 	): Component {
 		const rawPaths = extractPathArguments(args);
 		const rawPath = rawPaths[0] ?? "";
-		const isBatch = rawPaths.length > 1;
+		const isBatch = Array.isArray(args?.path) || rawPaths.length > 1;
 		const urlDetails = result.details as ReadUrlToolDetails | undefined;
 		if (!isBatch && (urlDetails?.kind === "url" || isReadableUrlPath(rawPath))) {
 			return renderReadUrlResult(

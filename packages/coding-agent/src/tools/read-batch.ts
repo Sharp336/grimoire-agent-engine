@@ -6,6 +6,7 @@ import type { OutputMeta } from "./output-meta";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
+/** Maximum independent targets accepted by one native read array, shared by schema and runtime validation. */
 export const MAX_READ_PATHS = 32;
 const READ_PATH_CONCURRENCY = 4;
 const READ_BATCH_MAX_TEXT_BYTES = DEFAULT_MAX_BYTES;
@@ -14,8 +15,10 @@ const READ_BATCH_MAX_COMPLETED_RESULTS = 16;
 const READ_BATCH_MAX_COMPLETED_BYTES =
 	2 * (READ_BATCH_MAX_TEXT_BYTES + Math.ceil((READ_BATCH_MAX_IMAGE_BYTES * 4) / 3));
 
+/** Per-target severity used to aggregate batch status and render outcome icons. */
 export type ReadTargetStatus = "success" | "warning" | "error";
 
+/** Stable metadata for one target in a batched or delimiter-recovered read. */
 export interface ReadTargetOutcome {
 	/** Path shown in the grouped read UI, including any inline selector. */
 	path: string;
@@ -28,6 +31,7 @@ export interface ReadTargetOutcome {
 	message?: string;
 }
 
+/** Aggregate metadata exposed to renderers and protocol consumers for a multi-target read. */
 export interface ReadBatchDetails {
 	notes?: string[];
 	meta?: OutputMeta;
@@ -37,6 +41,7 @@ export interface ReadBatchDetails {
 	readTargetOutcomes?: ReadTargetOutcome[];
 }
 
+/** Minimum per-part details the batch consumer needs to preserve resolution and warning metadata. */
 export interface ReadBatchPartDetails extends ReadBatchDetails {
 	resolvedPath?: string;
 	suffixResolution?: { from: string; to: string };
@@ -55,6 +60,7 @@ interface BufferedBatchPartResult<TDetails extends ReadBatchPartDetails> {
 	bufferBytes: number;
 }
 
+/** Inputs for the ordered, bounded executor used by native arrays and recovered path lists. */
 export interface ExecuteReadBatchOptions<TDetails extends ReadBatchPartDetails> {
 	parts: string[];
 	notice: string;
@@ -218,7 +224,98 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 		? Math.max(0, READ_BATCH_MAX_TEXT_BYTES - Buffer.byteLength(notice, "utf8"))
 		: Number.MAX_SAFE_INTEGER;
 	let remainingImageBytes = enforceAggregateBudget ? READ_BATCH_MAX_IMAGE_BYTES : Number.MAX_SAFE_INTEGER;
-	const results: Array<PromiseSettledResult<LimitedBatchPartResult<TDetails>> | undefined> = new Array(parts.length);
+	let pendingText = notice;
+	let pendingTextOwner: number | undefined;
+	let deferredFatal: { reason: unknown } | undefined;
+
+	const flushText = () => {
+		if (pendingText.length === 0) return;
+		content.push({ type: "text", text: pendingText });
+		contentOwners.push(pendingTextOwner);
+		pendingText = "";
+		pendingTextOwner = undefined;
+	};
+	const appendText = (text: string, owner?: number) => {
+		const ownerChanged = pendingText.length > 0 && pendingTextOwner !== owner;
+		if (ownerChanged) flushText();
+		pendingText = pendingText.length > 0 ? `${pendingText}\n\n${text}` : ownerChanged ? `\n\n${text}` : text;
+		pendingTextOwner = owner;
+	};
+	const consumeSettledResult = (index: number, settled: PromiseSettledResult<LimitedBatchPartResult<TDetails>>) => {
+		const part = parts[index];
+		if (part === undefined) throw new ToolError(`Read batch did not execute slot ${index}`);
+		if (settled.status === "rejected") {
+			const error = settled.reason;
+			if (error instanceof ToolAbortError) throw error;
+			throwIfAborted(signal);
+			const message = error instanceof Error ? error.message : String(error);
+			const errorNote = `Could not read ${part}: ${message}`;
+			notes.push(errorNote);
+			const owner = readTargetOutcomes.length;
+			readTargetOutcomes.push({ path: part, status: "error", message });
+			appendText(`[${errorNote}]`, owner);
+			return;
+		}
+
+		const prepared = settled.value;
+		const limited = limitBatchPartResult(prepared.result, part, remainingTextBytes, remainingImageBytes);
+		if (enforceAggregateBudget) {
+			remainingTextBytes -= limited.textBytes;
+			remainingImageBytes -= limited.imageBytes;
+		}
+		const budgetNotes = [...new Set([...prepared.budgetNotes, ...limited.budgetNotes])];
+		const { result } = limited;
+		for (const nestedNote of result.details?.notes ?? []) {
+			if (!notes.includes(nestedNote)) notes.push(nestedNote);
+		}
+		const nestedOutcomes = result.details?.readTargetOutcomes;
+		let owner: number;
+		if (nestedOutcomes?.length) {
+			for (const outcome of nestedOutcomes) {
+				readTargetOutcomes.push(
+					budgetNotes.length > 0 && outcome.status === "success"
+						? { ...outcome, status: "warning", message: budgetNotes.join(" ") }
+						: outcome,
+				);
+			}
+			owner = readTargetOutcomes.length - 1;
+		} else {
+			const suffixResolution = result.details?.suffixResolution;
+			const status: ReadTargetStatus = result.isError
+				? "error"
+				: budgetNotes.length > 0 || suffixResolution !== undefined || (result.details?.conflictCount ?? 0) > 0
+					? "warning"
+					: "success";
+			const source = result.details?.meta?.source;
+			const correctedPath =
+				suffixResolution && part.startsWith(suffixResolution.from)
+					? `${suffixResolution.to}${part.slice(suffixResolution.from.length)}`
+					: (suffixResolution?.to ?? part);
+			owner = readTargetOutcomes.length;
+			readTargetOutcomes.push({
+				path: correctedPath,
+				status,
+				requestedPath: suffixResolution?.from,
+				resolvedPath: result.details?.resolvedPath ?? (source?.type === "path" ? source.value : undefined),
+				conflictCount: result.details?.conflictCount,
+				message: budgetNotes.length > 0 ? budgetNotes.join(" ") : undefined,
+			});
+		}
+		for (const block of result.content) {
+			if (block.type === "text") {
+				appendText(block.text, owner);
+				continue;
+			}
+			flushText();
+			content.push(block);
+			contentOwners.push(owner);
+		}
+		for (const budgetNote of budgetNotes) {
+			notes.push(budgetNote);
+			appendText(`[${budgetNote}]`, owner);
+		}
+	};
+
 	const slots: Array<PromiseWithResolvers<BufferedBatchPartResult<TDetails> | undefined> | undefined> = Array.from(
 		{ length: parts.length },
 		() => Promise.withResolvers<BufferedBatchPartResult<TDetails> | undefined>(),
@@ -301,125 +398,35 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 	});
 
 	for (const [index, slot] of slots.entries()) {
-		if (!slot) throw new ToolError(`Read batch lost result slot ${index}`);
+		if (!slot) {
+			deferredFatal ??= { reason: new ToolError(`Read batch lost result slot ${index}`) };
+			consumeIndex++;
+			wakeBufferWaiters();
+			continue;
+		}
 		const buffered = await slot.promise;
 		slots[index] = undefined;
 		if (!buffered) {
+			if (!workerSignal.aborted) {
+				deferredFatal ??= {
+					reason: new ToolError(`Read batch did not execute path '${parts[index] ?? ""}'`),
+				};
+			}
 			consumeIndex++;
 			wakeBufferWaiters();
 			continue;
 		}
 		try {
-			if (buffered.settled.status === "rejected") {
-				results[index] = buffered.settled;
-				continue;
-			}
-			const prepared = buffered.settled.value;
-			const limited = limitBatchPartResult(
-				prepared.result,
-				parts[index] ?? "",
-				remainingTextBytes,
-				remainingImageBytes,
-			);
-			if (enforceAggregateBudget) {
-				remainingTextBytes -= limited.textBytes;
-				remainingImageBytes -= limited.imageBytes;
-			}
-			const budgetNotes = [...new Set([...prepared.budgetNotes, ...limited.budgetNotes])];
-			results[index] = { status: "fulfilled", value: { ...limited, budgetNotes } };
+			consumeSettledResult(index, buffered.settled);
+		} catch (reason) {
+			deferredFatal ??= { reason };
 		} finally {
 			releaseCompletedBuffer(buffered.bufferBytes);
 		}
 	}
 	await workersDone;
-	if (workerSignal.aborted) throwIfAborted(signal);
-
-	let pendingText = notice;
-	let pendingTextOwner: number | undefined;
-	const flushText = () => {
-		if (pendingText.length === 0) return;
-		content.push({ type: "text", text: pendingText });
-		contentOwners.push(pendingTextOwner);
-		pendingText = "";
-		pendingTextOwner = undefined;
-	};
-	const appendText = (text: string, owner?: number) => {
-		const ownerChanged = pendingText.length > 0 && pendingTextOwner !== owner;
-		if (ownerChanged) flushText();
-		pendingText = pendingText.length > 0 ? `${pendingText}\n\n${text}` : ownerChanged ? `\n\n${text}` : text;
-		pendingTextOwner = owner;
-	};
-
-	for (const [index, part] of parts.entries()) {
-		const settled = results[index];
-		if (!settled) {
-			throwIfAborted(signal);
-			throw new ToolError(`Read batch did not execute path '${part}'`);
-		}
-		if (settled.status === "rejected") {
-			const error = settled.reason;
-			if (error instanceof ToolAbortError) throw error;
-			throwIfAborted(signal);
-			const message = error instanceof Error ? error.message : String(error);
-			const errorNote = `Could not read ${part}: ${message}`;
-			notes.push(errorNote);
-			const owner = readTargetOutcomes.length;
-			readTargetOutcomes.push({ path: part, status: "error", message });
-			appendText(`[${errorNote}]`, owner);
-			continue;
-		}
-
-		const { result, budgetNotes } = settled.value;
-		for (const nestedNote of result.details?.notes ?? []) {
-			if (!notes.includes(nestedNote)) notes.push(nestedNote);
-		}
-		const nestedOutcomes = result.details?.readTargetOutcomes;
-		let owner: number;
-		if (nestedOutcomes?.length) {
-			for (const outcome of nestedOutcomes) {
-				readTargetOutcomes.push(
-					budgetNotes.length > 0 && outcome.status === "success"
-						? { ...outcome, status: "warning", message: budgetNotes.join(" ") }
-						: outcome,
-				);
-			}
-			owner = readTargetOutcomes.length - 1;
-		} else {
-			const suffixResolution = result.details?.suffixResolution;
-			const status: ReadTargetStatus = result.isError
-				? "error"
-				: budgetNotes.length > 0 || suffixResolution !== undefined || (result.details?.conflictCount ?? 0) > 0
-					? "warning"
-					: "success";
-			const source = result.details?.meta?.source;
-			const correctedPath =
-				suffixResolution && part.startsWith(suffixResolution.from)
-					? `${suffixResolution.to}${part.slice(suffixResolution.from.length)}`
-					: (suffixResolution?.to ?? part);
-			owner = readTargetOutcomes.length;
-			readTargetOutcomes.push({
-				path: correctedPath,
-				status,
-				requestedPath: suffixResolution?.from,
-				resolvedPath: result.details?.resolvedPath ?? (source?.type === "path" ? source.value : undefined),
-				conflictCount: result.details?.conflictCount,
-				message: budgetNotes.length > 0 ? budgetNotes.join(" ") : undefined,
-			});
-		}
-		for (const block of result.content) {
-			if (block.type === "text") {
-				appendText(block.text, owner);
-				continue;
-			}
-			flushText();
-			content.push(block);
-			contentOwners.push(owner);
-		}
-		for (const budgetNote of budgetNotes) {
-			notes.push(budgetNote);
-			appendText(`[${budgetNote}]`, owner);
-		}
-	}
+	throwIfAborted(signal);
+	if (deferredFatal) throw deferredFatal.reason;
 	flushText();
 
 	const cappedContent = enforceAggregateBudget
