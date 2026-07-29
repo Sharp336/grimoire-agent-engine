@@ -6,7 +6,11 @@ import {
 	reportCacheInvalidation,
 } from "@oh-my-pi/pi-coding-agent/modes/components/cache-invalidation-marker";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { addPromptTraffic, CacheMutationLedger } from "@oh-my-pi/pi-coding-agent/session/cache-attribution";
+import {
+	addPromptTraffic,
+	CacheMutationLedger,
+	projectSystemAndToolsWireBytes,
+} from "@oh-my-pi/pi-coding-agent/session/cache-attribution";
 
 function usage(parts: { input?: number; cacheRead?: number; cacheWrite?: number; output?: number }): Usage {
 	const input = parts.input ?? 0;
@@ -191,6 +195,152 @@ describe("cache attribution timing", () => {
 		});
 
 		expect(tags).toEqual([...expectedTags]);
+	});
+
+	describe("provider-boundary mutations", () => {
+		it("projects only system and tool bytes for each built-in payload shape", () => {
+			const topLevel = {
+				instructions: "Main system",
+				tools: [{ type: "function", function: { name: "read" } }],
+				tool_choice: "auto",
+				input: [{ role: "user", content: "do not fingerprint me" }],
+			};
+			const googleOrVertex = {
+				contents: [{ role: "user", parts: [{ text: "do not fingerprint me" }] }],
+				config: {
+					systemInstruction: { parts: [{ text: "Google system" }] },
+					tools: [{ functionDeclarations: [{ name: "read" }] }],
+					toolConfig: { functionCallingConfig: { mode: "ANY" } },
+				},
+			};
+			const geminiCli = {
+				project: "project",
+				request: {
+					contents: [{ role: "user", parts: [{ text: "do not fingerprint me" }] }],
+					systemInstruction: { parts: [{ text: "CLI system" }] },
+					tools: [{ functionDeclarations: [{ name: "read" }] }],
+					toolConfig: { functionCallingConfig: { mode: "VALIDATED" } },
+				},
+			};
+
+			expect(JSON.parse(projectSystemAndToolsWireBytes(topLevel))).toEqual({
+				instructions: "Main system",
+				tools: topLevel.tools,
+				tool_choice: "auto",
+			});
+			expect(JSON.parse(projectSystemAndToolsWireBytes(googleOrVertex))).toEqual({ config: googleOrVertex.config });
+			expect(JSON.parse(projectSystemAndToolsWireBytes(geminiCli))).toEqual({
+				request: {
+					systemInstruction: geminiCli.request.systemInstruction,
+					tools: geminiCli.request.tools,
+					toolConfig: geminiCli.request.toolConfig,
+				},
+			});
+			expect(projectSystemAndToolsWireBytes(topLevel)).toBe(
+				projectSystemAndToolsWireBytes({ ...topLevel, input: [{ role: "user", content: "different user bytes" }] }),
+			);
+		});
+
+		it("compares only main emissions for each provider cache identity", () => {
+			const ledger = new CacheMutationLedger();
+			const main = "openai:main-cache";
+
+			ledger.recordMainProviderToolSignature(main, "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+			// A→B→A rebuilds before send preserve the actually emitted A baseline.
+			const rebuiltB = "system-and-tools:B";
+			const rebuiltA = "system-and-tools:A";
+			expect(rebuiltB).not.toBe(rebuiltA);
+			ledger.recordMainProviderToolSignature(main, rebuiltA);
+			expect(ledger.consume()).toEqual([]);
+			ledger.recordMainProviderToolSignature(main, rebuiltB);
+			expect(ledger.consume()).toEqual(["tool-signature"]);
+			ledger.recordMainProviderToolSignature(main, rebuiltB);
+			expect(ledger.consume()).toEqual([]);
+
+			// A different main cache identity begins with its own empty baseline.
+			ledger.recordMainProviderToolSignature("google:other-cache", "system-and-tools:advisor");
+			expect(ledger.consume()).toEqual([]);
+			ledger.queueForNextProviderRequest("shake");
+			// Advisor/capture callbacks do not own this ledger and cannot consume pending tags.
+			expect(ledger.tags).toEqual([]);
+			ledger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(ledger.consume()).toEqual(["shake"]);
+		});
+
+		it("fingerprints only emitted obfuscated bytes across clones and ordinary context growth", () => {
+			const ledger = new CacheMutationLedger();
+			const source = [{ role: "user", content: "secret-a" }];
+			const obfuscated = [{ role: "user", content: "[redacted-a]" }];
+
+			ledger.recordObfuscationAtWire(source, obfuscated);
+			expect(ledger.consume()).toEqual(["obfuscate"]);
+
+			const clonedSource = structuredClone(source);
+			const clonedObfuscated = structuredClone(clonedSource);
+			clonedObfuscated[0] = { role: "user", content: "[redacted-a]" };
+			ledger.recordObfuscationAtWire(clonedSource, clonedObfuscated);
+			expect(ledger.consume()).toEqual([]);
+
+			const grownSource = [...structuredClone(source), { role: "user", content: "ordinary context growth" }];
+			const grownObfuscated = [...grownSource];
+			grownObfuscated[0] = { role: "user", content: "[redacted-a]" };
+			ledger.recordObfuscationAtWire(grownSource, grownObfuscated);
+			expect(ledger.consume()).toEqual([]);
+
+			const changedSecret = structuredClone(source);
+			const changedOutput = structuredClone(changedSecret);
+			changedOutput[0] = { role: "user", content: "[redacted-b]" };
+			ledger.recordObfuscationAtWire(changedSecret, changedOutput);
+			expect(ledger.consume()).toEqual(["obfuscate"]);
+
+			ledger.recordObfuscationAtWire(changedSecret, changedSecret);
+			expect(ledger.consume()).toEqual([]);
+			ledger.recordObfuscationAtWire(source, obfuscated);
+			expect(ledger.consume()).toEqual(["obfuscate"]);
+		});
+
+		it("compares tool signatures only at the provider boundary", () => {
+			const ledger = new CacheMutationLedger();
+
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+
+			// A rebuild briefly produces B, then returns to A before any request.
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:B");
+			expect(ledger.consume()).toEqual(["tool-signature"]);
+
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual(["tool-signature"]);
+		});
+
+		it("does not advance the emitted tool baseline for a failed rebuild", () => {
+			const ledger = new CacheMutationLedger();
+
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+			// No provider-boundary call occurs for the failed B rebuild.
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+		});
+
+		it("delivers queued rewrites once at the next provider boundary", () => {
+			const ledger = new CacheMutationLedger();
+			ledger.queueForNextProviderRequest("shake");
+			ledger.queueForNextProviderRequest("shake");
+
+			// A response already in flight, including a zero-usage one, sees no tag.
+			expect(
+				reportCacheInvalidation({ prev: undefined, current: usage({}), ledger, logger: { warn: () => {} } }),
+			).toBeUndefined();
+			ledger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(ledger.consume()).toEqual(["shake"]);
+			ledger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(ledger.consume()).toEqual([]);
+		});
 	});
 });
 

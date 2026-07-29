@@ -125,4 +125,126 @@ describe("SDK steering cache attribution", () => {
 		await session.prompt("restored steering request");
 		expect(session.cacheMutationLedger.consume()).toEqual(["steering-wrap"]);
 	});
+
+	it("keeps the main cache ledger unchanged through advisor and capture side hooks", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const settings = Settings.isolated({
+			"advisor.enabled": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const created = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			model,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = created.session;
+		const ledger = session.cacheMutationLedger;
+		const mainIdentity = `${model.provider}/${model.id}:main`;
+
+		ledger.recordMainProviderToolSignature(mainIdentity, "system-and-tools:A");
+		expect(ledger.consume()).toEqual([]);
+		ledger.queueForNextProviderRequest("shake");
+
+		// Advisor and auto-learn capture both use these session-side hooks.
+		await session.convertMessagesToLlm([{ role: "user", content: "capture input", timestamp: 1 }]);
+		await session
+			.prepareSimpleStreamOptions({})
+			.onPayload?.({ system: "advisor system", tools: [{ name: "advisor-tool" }] }, model);
+		expect(ledger.tags).toEqual([]);
+
+		ledger.recordMainProviderToolSignature(mainIdentity, "system-and-tools:A");
+		ledger.recordQueuedMutationsAtMainProviderBoundary();
+		expect(ledger.consume()).toEqual(["shake"]);
+	});
+
+	it("only retags image stripping when emitted placeholders change", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const settings = Settings.isolated({
+			"advisor.enabled": false,
+			"compaction.enabled": false,
+			"images.blockImages": true,
+			"retry.enabled": false,
+			"todo.enabled": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const created = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			model,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = created.session;
+		session.agent.streamFn = requestedModel => {
+			const stream = new AssistantMessageEventStream();
+			const message = response(requestedModel);
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		session.agent.state.messages.push({
+			role: "user",
+			content: [{ type: "image", data: "first", mimeType: "image/png" }],
+			timestamp: 1,
+		});
+		await session.prompt("first request");
+		expect(session.cacheMutationLedger.consume()).toEqual(["image-strip"]);
+
+		await session.prompt("ordinary context growth");
+		expect(session.cacheMutationLedger.consume()).toEqual([]);
+
+		for (const message of session.agent.state.messages) {
+			if (message.role !== "user" || !Array.isArray(message.content)) continue;
+			for (const part of message.content) {
+				if (part.type === "image") part.data = "changed-but-still-omitted";
+			}
+		}
+		await session.prompt("same placeholder bytes");
+		expect(session.cacheMutationLedger.consume()).toEqual([]);
+
+		for (const message of session.agent.state.messages) {
+			if (message.role !== "user" || !Array.isArray(message.content)) continue;
+			message.content = message.content.filter(part => part.type !== "image");
+		}
+		await session.prompt("image removed");
+		expect(session.cacheMutationLedger.consume()).toEqual([]);
+
+		session.agent.state.messages.push({
+			role: "user",
+			content: [{ type: "image", data: "restored", mimeType: "image/png" }],
+			timestamp: 2,
+		});
+		await session.prompt("image restored");
+		expect(session.cacheMutationLedger.consume()).toEqual(["image-strip"]);
+	});
 });
