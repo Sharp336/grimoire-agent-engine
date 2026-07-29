@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed xd:// device summaries reaching the system prompt with control characters intact and bounded only by character count, which let a multi-byte summary carry several times its intended budget; summaries are now stripped, bounded in UTF-8 bytes on a code point boundary, and the prompt states that dynamic device summaries are untrusted metadata.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
