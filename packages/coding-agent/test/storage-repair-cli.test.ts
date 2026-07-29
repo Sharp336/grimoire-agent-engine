@@ -257,6 +257,46 @@ describe("offline SQLite salvage", () => {
 		}
 	});
 
+
+	test("rejects Win32 trailing-dot and trailing-space source-triplet aliases", async () => {
+		const source = path.join(root, "agent.db");
+		await fs.promises.writeFile(source, "source");
+
+		for (const output of [
+			path.join(root, "AGENT.DB. "),
+			path.join(root, "AGENT.DB-WAL. "),
+			path.join(root, "AGENT.DB-SHM. "),
+		]) {
+			await expect(resolveArtifactPaths(source, output, { platform: () => "win32" })).rejects.toThrow(
+				"Repair artifact collides with source triplet",
+			);
+		}
+	});
+
+	test("rejects a Win32 trailing-dot candidate alias of the backup", async () => {
+		const source = path.join(root, "agent.db");
+		const slug = "fixed";
+		await fs.promises.writeFile(source, "source");
+
+		await expect(
+			resolveArtifactPaths(source, path.join(root, `agent.db.salvage-${slug}.tar. `), {
+				platform: () => "win32",
+				artifactSlug: () => slug,
+			}),
+		).rejects.toThrow("Candidate and backup paths collide");
+	});
+
+	test("keeps trailing-dot and trailing-space artifact paths distinct on Darwin and Linux", async () => {
+		const source = path.join(root, "agent.db");
+		const output = path.join(root, "AGENT.DB-WAL. ");
+		await fs.promises.writeFile(source, "source");
+
+		for (const platform of ["darwin", "linux"] as const) {
+			const artifacts = await resolveArtifactPaths(source, output, { platform: () => platform });
+			expect(artifacts.candidate).toBe(output);
+		}
+	});
+
 	test("rejects Unicode-normalized source-sidecar and candidate-backup aliases", async () => {
 		const sourceName = "agent-é.db";
 		const normalizedAlias = "agent-e\u0301.db";
