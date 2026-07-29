@@ -6,9 +6,6 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { withEnv } from "./helpers";
 
-const { getAgentDir, setAgentDir, TempDir } = piUtils;
-
-const originalAgentDir = getAgentDir();
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
 
 beforeEach(() => {
@@ -17,7 +14,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	setAgentDir(originalAgentDir);
 	__resetProxyCache();
 	vi.restoreAllMocks();
 });
@@ -77,8 +73,6 @@ interface CapturedRequest {
 }
 
 async function runAndCaptureRequest(): Promise<CapturedRequest> {
-	const tempDir = TempDir.createSync("@pi-codex-zstd-");
-	setAgentDir(tempDir.path());
 	const token = createCodexTestToken();
 	const model = createCodexTestModel();
 
