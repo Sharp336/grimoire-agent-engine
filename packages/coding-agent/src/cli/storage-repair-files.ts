@@ -2,6 +2,7 @@ import { Database, constants as sqliteConstants } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import { type ArchiveMemberContent, archiveFileMember, extractFileBackedTar, writeArchive } from "../utils/zip";
 import type {
 	CanonicalSchemaObject,
@@ -401,20 +402,50 @@ async function canonicalNewPath(target: string): Promise<string> {
 	return canonical;
 }
 
+export type ArtifactPathComparisonMode = "platform" | "case-insensitive";
+
+export interface ResolveArtifactPathOptions {
+	comparisonMode?: ArtifactPathComparisonMode;
+	artifactSlug?: () => string;
+}
+
+function pathsAlias(left: string, right: string, comparisonMode: ArtifactPathComparisonMode): boolean {
+	const normalizedLeft = normalizePathForComparison(left).normalize("NFC");
+	const normalizedRight = normalizePathForComparison(right).normalize("NFC");
+	if (comparisonMode === "case-insensitive" || (comparisonMode === "platform" && process.platform === "darwin")) {
+		return (
+			normalizedLeft.toUpperCase().toLowerCase().normalize("NFC") ===
+			normalizedRight.toUpperCase().toLowerCase().normalize("NFC")
+		);
+	}
+	return normalizedLeft === normalizedRight;
+}
+
 export async function resolveArtifactPaths(
 	source: string,
 	output?: string,
+	options: ResolveArtifactPathOptions = {},
 ): Promise<{ backup: string; candidate: string }> {
-	const slug = `${new Date().toISOString().replace(/[-:.TZ]/gu, "")}-${crypto.randomUUID().slice(0, 8)}`;
+	const slug =
+		options.artifactSlug?.() ??
+		`${new Date().toISOString().replace(/[-:.TZ]/gu, "")}-${crypto.randomUUID().slice(0, 8)}`;
 	const candidate = await canonicalNewPath(output ?? `${source}.salvage-${slug}.db`);
 	const backup = await canonicalNewPath(`${source}.salvage-${slug}.tar`);
-	const canonicalSource = path.join(await fs.promises.realpath(path.dirname(source)), path.basename(source));
+	const sourceAbsolute = path.resolve(source);
+	const canonicalSource = path.join(
+		await fs.promises.realpath(path.dirname(sourceAbsolute)),
+		path.basename(sourceAbsolute),
+	);
+	const comparisonMode = options.comparisonMode ?? "platform";
 	const forbidden = [canonicalSource, `${canonicalSource}-wal`, `${canonicalSource}-shm`];
 	assertInvariant(
-		!forbidden.includes(candidate) && !forbidden.includes(backup),
+		!forbidden.some(
+			forbiddenPath =>
+				pathsAlias(candidate, forbiddenPath, comparisonMode) || pathsAlias(backup, forbiddenPath, comparisonMode),
+		),
 		"Repair artifact collides with source triplet",
 	);
-	assertInvariant(candidate !== backup, "Candidate and backup paths collide");
+	assertInvariant(!pathsAlias(candidate, backup, comparisonMode), "Candidate and backup paths collide");
 	return { backup, candidate };
 }
 

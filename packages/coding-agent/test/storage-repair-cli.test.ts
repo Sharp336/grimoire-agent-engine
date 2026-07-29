@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { collectGcErrors, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { runStorageRepair, type StorageRepairResult } from "@oh-my-pi/pi-coding-agent/cli/storage-repair-cli";
+import { resolveArtifactPaths } from "@oh-my-pi/pi-coding-agent/cli/storage-repair-files";
 import { initializeMemoryStorageExactPath } from "@oh-my-pi/pi-coding-agent/memories/storage";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
@@ -214,6 +215,91 @@ function artifactModes(result: { backup: string; candidate: string }) {
 }
 
 describe("offline SQLite salvage", () => {
+	test("rejects normalized and case-insensitive source-triplet artifact aliases", async () => {
+		const source = path.join(root, "agent.db");
+		await fs.promises.writeFile(source, "source");
+		const options = { comparisonMode: "case-insensitive" } as const;
+
+		await expect(resolveArtifactPaths(source, path.join(root, "nested", "..", "agent.db"), options)).rejects.toThrow(
+			"Repair output already exists",
+		);
+
+		for (const output of [
+			path.join(root, "nested", "..", "agent.db-wal"),
+			path.join(root, "nested", "..", "agent.db-shm"),
+			path.join(root, "AGENT.DB-WAL"),
+			path.join(root, "AGENT.DB-SHM"),
+		]) {
+			await expect(resolveArtifactPaths(source, output, options)).rejects.toThrow(
+				"Repair artifact collides with source triplet",
+			);
+		}
+	});
+
+	test("rejects a normalized candidate alias of the backup before publication", async () => {
+		const source = path.join(root, "agent.db");
+		const slug = "fixed";
+		await fs.promises.writeFile(source, "source");
+
+		await expect(
+			resolveArtifactPaths(source, path.join(root, "nested", "..", `agent.db.salvage-${slug}.tar`), {
+				comparisonMode: "case-insensitive",
+				artifactSlug: () => slug,
+			}),
+		).rejects.toThrow("Candidate and backup paths collide");
+	});
+
+	test("rejects Unicode-normalized source-sidecar and candidate-backup aliases", async () => {
+		const sourceName = "agent-é.db";
+		const normalizedAlias = "agent-e\u0301.db";
+		const source = path.join(root, sourceName);
+		const alias = path.join(root, normalizedAlias);
+		const slug = "fixed";
+		await fs.promises.writeFile(source, "source");
+
+		await expect(
+			resolveArtifactPaths(source, `${alias}-wal`, { comparisonMode: "case-insensitive" }),
+		).rejects.toThrow("Repair artifact collides with source triplet");
+		await expect(
+			resolveArtifactPaths(source, `${alias}.salvage-${slug}.tar`, {
+				comparisonMode: "case-insensitive",
+				artifactSlug: () => slug,
+			}),
+		).rejects.toThrow("Candidate and backup paths collide");
+	});
+
+	test("rejects full Unicode casefold source-sidecar and candidate-backup aliases", async () => {
+		const slug = "fixed";
+		for (const { sourceName, aliasName } of [
+			{ sourceName: "agent-ος.db", aliasName: "agent-οσ.db" },
+			{ sourceName: "agent-straße.db", aliasName: "agent-STRASSE.db" },
+		]) {
+			const source = path.join(root, sourceName);
+			const alias = path.join(root, aliasName);
+			await fs.promises.writeFile(source, "source");
+
+			await expect(
+				resolveArtifactPaths(source, `${alias}-shm`, { comparisonMode: "case-insensitive" }),
+			).rejects.toThrow("Repair artifact collides with source triplet");
+			await expect(
+				resolveArtifactPaths(source, `${alias}.salvage-${slug}.tar`, {
+					comparisonMode: "case-insensitive",
+					artifactSlug: () => slug,
+				}),
+			).rejects.toThrow("Candidate and backup paths collide");
+		}
+	});
+
+	test("accepts distinct repair artifact paths", async () => {
+		const source = path.join(root, "agent.db");
+		const candidate = path.join(root, "repaired.db");
+		await fs.promises.writeFile(source, "source");
+
+		const artifacts = await resolveArtifactPaths(source, candidate, { comparisonMode: "case-insensitive" });
+		expect(artifacts.candidate).toBe(candidate);
+		expect(artifacts.backup).not.toBe(candidate);
+	});
+
 	test("physical corruption fixture reproduces normal owner-open failure", async () => {
 		const dbPath = await createAgentSource();
 		closeWal(new Database(dbPath));
