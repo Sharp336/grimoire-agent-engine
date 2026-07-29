@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed usage-based credential ranking treating a missing long-window metric as the short-window metric. Anthropic accounts whose 7-day bucket is not yet reported now keep the missing window neutral instead of letting 5-hour reset urgency shadow a sibling with reported weekly headroom ([#6980](https://github.com/can1357/oh-my-pi/pull/6980) by [@joswha](https://github.com/joswha)).
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

@@ -2391,7 +2391,7 @@ function createClaudeLimit(args: {
 function createClaudeUsageReport(args: {
 	accountId: string;
 	primary: { usedFraction: number; resetInMs?: number };
-	secondary: { usedFraction: number; resetInMs?: number };
+	secondary?: { usedFraction: number; resetInMs?: number };
 	fableSecondary?: { usedFraction: number; resetInMs?: number };
 }): UsageReport {
 	const limits = [
@@ -2401,13 +2401,17 @@ function createClaudeUsageReport(args: {
 			usedFraction: args.primary.usedFraction,
 			resetInMs: args.primary.resetInMs,
 		}),
-		createClaudeLimit({
-			key: "7d",
-			durationMs: WEEK_MS,
-			usedFraction: args.secondary.usedFraction,
-			resetInMs: args.secondary.resetInMs,
-		}),
 	];
+	if (args.secondary) {
+		limits.push(
+			createClaudeLimit({
+				key: "7d",
+				durationMs: WEEK_MS,
+				usedFraction: args.secondary.usedFraction,
+				resetInMs: args.secondary.resetInMs,
+			}),
+		);
+	}
 	if (args.fableSecondary) {
 		limits.push(
 			createClaudeLimit({
@@ -2526,6 +2530,36 @@ describe("AuthStorage claude oauth ranking", () => {
 
 		const apiKey = await authStorage.getApiKey("anthropic", "session-claude-clockless");
 		expect(apiKey).toBe("api-acct-clocked");
+	});
+
+	test("does not rank a missing weekly window as the account's 5h window", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-missing-weekly", "missing@example.com") },
+			{ type: "oauth", ...createCredential("acct-complete", "complete@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-missing-weekly",
+			createClaudeUsageReport({
+				accountId: "acct-missing-weekly",
+				primary: { usedFraction: 0.8, resetInMs: 3 * HOUR_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-complete",
+			createClaudeUsageReport({
+				accountId: "acct-complete",
+				primary: { usedFraction: 0 },
+				secondary: { usedFraction: 0 },
+			}),
+		);
+
+		const apiKey = await authStorage.getApiKey("anthropic", "session-claude-missing-weekly", {
+			modelId: "claude-opus-4-8",
+		});
+		expect(apiKey).toBe("api-acct-complete");
 	});
 
 	test("resolves equal-priority accounts to one deterministic pick", async () => {
