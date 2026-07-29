@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Reduced bash, grep, and glob tool guidance while making shell/eval boundaries, broad-search timeout avoidance, and local-only glob routing explicit.
+- Reduced bash, grep, and glob tool guidance while preserving supported internal-URL routes and making shell/eval boundaries and broad-search timeout avoidance explicit.
 
 ## [17.1.8] - 2026-07-28
 

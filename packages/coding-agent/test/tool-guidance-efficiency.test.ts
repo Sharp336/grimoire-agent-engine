@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import * as prompt from "../../utils/src/prompt";
+import { prompt } from "@oh-my-pi/pi-utils";
 import bashPrompt from "../src/prompts/tools/bash.md" with { type: "text" };
 import globPrompt from "../src/prompts/tools/glob.md" with { type: "text" };
 import grepPrompt from "../src/prompts/tools/grep.md" with { type: "text" };
@@ -25,6 +25,8 @@ describe("tool guidance efficiency", () => {
 	test("routes shell work without contradicting the eval boundary", () => {
 		expect(bash).toMatch(/order-dependent[^\n]*`&&`[^\n]*one call/iu);
 		expect(bash).not.toMatch(/inline scripts[^\n]*`&&`/iu);
+		expect(bash).not.toMatch(/Need inline\?[^\n]*async/iu);
+		expect(bash).toMatch(/\bNEVER\b[^\n]*shell `grep`\/`rg`/u);
 
 		const advertisedUtilities = bash.split("\n").find(line => line.includes("aux utils available"));
 		expect(advertisedUtilities).toBeDefined();
@@ -35,10 +37,14 @@ describe("tool guidance efficiency", () => {
 		expect(grep).toMatch(/broad searches[^\n]*time out[^\n]*(?:narrow|scope)/iu);
 	});
 
-	test("routes remote and internal URI discovery away from glob", () => {
-		expect(glob).toMatch(/local filesystem/iu);
+	test("preserves supported search and glob routes", () => {
+		expect(glob).toMatch(/path-backed internal URLs/iu);
 		expect(glob).toMatch(/`ssh:\/\/`[^\n]*`read`/iu);
-		expect(glob).toMatch(/internal URI/iu);
+		expect(glob).toMatch(/`memory:\/\/`[^\n]*support/iu);
+		expect(glob).not.toMatch(/internal URI globs are unsupported/iu);
+		expect(grep).toMatch(/internal URL/iu);
+		expect(grep).not.toMatch(/^Searches local files/iu);
+		expect(grep).toMatch(/\bMUST\b[^\n]*shell `grep`\/`rg`/u);
 	});
 
 	test("keeps the corrected guidance smaller than the previous prompt set", () => {

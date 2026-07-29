@@ -1,8 +1,8 @@
-Globs the local filesystem with fast pattern matching.
+Globs files, directories, and path-backed internal URLs with fast pattern matching.
 
 <instruction>
-- `path`: glob, file, or directory; separate targets with `;` (`src/**/*.ts; test/**/*.ts`).
-- Local filesystem only. For `ssh://` paths or internal URI discovery, use `read`; internal URI globs are unsupported.
+- `path`: glob, file, directory, or path-backed internal URL; separate targets with `;` (`src/**/*.ts; test/**/*.ts`).
+- `memory://` glob patterns are supported. `ssh://` has no local path; use `read`. Other internal URLs accept exact paths only.
 - `gitignore` defaults `true`. Set `false` for ignored files such as `.env*`, logs, or build output.
 - `hidden` defaults `true`; pair it with `gitignore: false` for ignored dotfiles.
 </instruction>
