@@ -19,9 +19,10 @@ import {
 	resolveModelRoleValue,
 } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
-import { MODELS_CONFIG_API_IDS } from "../../config/models-config-schema-bundle";
+
 import {
 	normalizeOpenAICompatibleBaseUrl,
+	OPENAI_COMPATIBLE_API_IDS,
 	OPENAI_COMPATIBLE_LOGIN_ID,
 	probeOpenAICompatibleEndpoint,
 	validateOpenAICompatibleApi,
@@ -1580,19 +1581,20 @@ export class SelectorController {
 			const baseUrl = normalizeOpenAICompatibleBaseUrl(
 				await dialog.showPrompt("OpenAI-compatible base URL:", "https://api.example.com/v1"),
 			);
-			const apiKey = (await dialog.showPrompt("API key:")).trim();
+			const apiKey = (await dialog.showPrompt("API key:", undefined, { secret: true })).trim();
 			if (!apiKey) throw new Error("API key is required.");
 			const api = validateOpenAICompatibleApi(
 				await dialog.showSelect(
 					"API:",
-					[...MODELS_CONFIG_API_IDS],
-					MODELS_CONFIG_API_IDS.indexOf("openai-completions"),
+					[...OPENAI_COMPATIBLE_API_IDS],
+					OPENAI_COMPATIBLE_API_IDS.indexOf("openai-completions"),
 				),
 			);
 
 			let modelCount: number | undefined;
 			for (;;) {
-				const probe = await probeOpenAICompatibleEndpoint({ baseUrl, apiKey });
+				const probe = await probeOpenAICompatibleEndpoint({ baseUrl, apiKey }, fetch, dialog.signal);
+				if (dialog.signal.aborted) return false;
 				if (probe.ok) {
 					modelCount = probe.models.length;
 					break;
@@ -1602,6 +1604,7 @@ export class SelectorController {
 					"Save anyway",
 					"Cancel",
 				]);
+				if (dialog.signal.aborted) return false;
 				if (action === "Save anyway") break;
 				if (action === "Cancel") return false;
 			}

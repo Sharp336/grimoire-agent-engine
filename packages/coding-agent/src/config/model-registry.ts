@@ -33,6 +33,7 @@ import {
 	getVariantAliasSources,
 	resolveVariantAlias,
 } from "@oh-my-pi/pi-catalog/variant-collapse";
+import { decodeLiteralConfigValue, isLiteralConfigValue } from "./literal-config-value";
 
 const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
@@ -293,7 +294,7 @@ const COMMAND_FAILURE_RETRY_MS = 30_000;
 const commandFailureRetryAt = new Map<string, number>();
 
 function isCommandConfigValue(valueConfig: string | undefined): valueConfig is string {
-	return valueConfig?.startsWith("!") === true;
+	return !isLiteralConfigValue(valueConfig) && valueConfig?.startsWith("!") === true;
 }
 
 function resolveCommandConfig(command: string): string | undefined {
@@ -327,6 +328,7 @@ interface CommandApiKeyResolution {
  * checked first and the input falls back to a literal value.
  */
 function resolveConfigValue(valueConfig: string): string | undefined {
+	if (isLiteralConfigValue(valueConfig)) return decodeLiteralConfigValue(valueConfig);
 	if (valueConfig.startsWith("!")) return resolveCommandConfig(valueConfig.slice(1).trim());
 	const envValue = Bun.env[valueConfig];
 	if (envValue) return envValue;

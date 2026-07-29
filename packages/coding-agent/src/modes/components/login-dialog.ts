@@ -126,6 +126,7 @@ export class LoginDialogComponent extends Container {
 	 */
 	showManualInput(prompt: string): Promise<string> {
 		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
+		this.#input.mask = false;
 		// Invalid pastes re-prompt (the OAuth callback loop calls this again), so
 		// reuse the already-mounted input instead of stacking duplicate prompt and
 		// hint lines beneath the dialog. Reset the value so each retry starts clean.
@@ -148,16 +149,16 @@ export class LoginDialogComponent extends Container {
 	 * Called by onPrompt callback - show prompt and wait for input
 	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
 	 */
-	showPrompt(message: string, placeholder?: string): Promise<string> {
+	showPrompt(message: string, placeholder?: string, options?: { secret?: boolean }): Promise<string> {
 		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
+		this.#input.mask = options?.secret === true;
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
 		if (placeholder) {
 			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0));
 		}
-		if (!this.#contentContainer.children.includes(this.#input)) {
-			this.#contentContainer.addChild(this.#input);
-		}
+		if (this.#contentContainer.children.includes(this.#input)) this.#contentContainer.removeChild(this.#input);
+		this.#contentContainer.addChild(this.#input);
 		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 1, 0));
 
 		this.#input.setValue("");

@@ -1,15 +1,20 @@
 import { randomUUID } from "node:crypto";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
+import { type FetchImpl, PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
 import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { withTimeoutSignal } from "../utils/fetch-timeout";
 import { withFileLock } from "./file-lock";
+import { encodeLiteralConfigValue } from "./literal-config-value";
+import { normalizeOpenAIModelsListBaseUrl } from "./model-discovery";
 import { ModelsConfigFile } from "./models-config";
 import type { ModelsConfig } from "./models-config-schema";
 import { MODELS_CONFIG_API_IDS } from "./models-config-schema-bundle";
 
 export const OPENAI_COMPATIBLE_LOGIN_ID = "openai-compatible";
+export const OPENAI_COMPATIBLE_API_IDS = ["openai-completions", "openai-responses"] as const;
+const OPENAI_COMPATIBLE_PROBE_TIMEOUT_MS = 10_000;
 
 export interface OpenAICompatibleEndpoint {
 	providerName: string;
@@ -40,14 +45,14 @@ export function normalizeOpenAICompatibleBaseUrl(value: string): string {
 		throw new Error("Base URL must not include a query string or fragment.");
 	}
 	url.pathname = url.pathname.replace(/\/+$/, "");
-	return url.toString().replace(/\/$/, "");
+	return normalizeOpenAIModelsListBaseUrl(url.toString());
 }
 
 /** Rejects names that would replace a bundled provider rather than add a custom one. */
 export function validateOpenAICompatibleProviderName(value: string): string {
 	const providerName = value.trim();
 	if (!providerName) throw new Error("Provider name is required.");
-	if (PROVIDER_REGISTRY.some(provider => provider.id === providerName)) {
+	if (PROVIDER_REGISTRY.some(provider => provider.id.toLowerCase() === providerName.toLowerCase())) {
 		throw new Error(`Provider name "${providerName}" is built in. Choose a different name.`);
 	}
 	return providerName;
@@ -56,8 +61,10 @@ export function validateOpenAICompatibleProviderName(value: string): string {
 /** Validates an API identifier through the same schema used for models.yml. */
 export function validateOpenAICompatibleApi(value: string | undefined): string {
 	const api = value?.trim() || "openai-completions";
-	if (!MODELS_CONFIG_API_IDS.includes(api as (typeof MODELS_CONFIG_API_IDS)[number])) {
-		throw new Error(`API "${api}" is not accepted by models.yml.`);
+	const isCompatible = OPENAI_COMPATIBLE_API_IDS.includes(api as (typeof OPENAI_COMPATIBLE_API_IDS)[number]);
+	const isSchemaValid = MODELS_CONFIG_API_IDS.includes(api as (typeof MODELS_CONFIG_API_IDS)[number]);
+	if (!isCompatible || !isSchemaValid) {
+		throw new Error(`API "${api}" is not supported by OpenAI-compatible endpoints.`);
 	}
 	return api;
 }
@@ -65,21 +72,25 @@ export function validateOpenAICompatibleApi(value: string | undefined): string {
 /** Probes the standard OpenAI `GET /models` endpoint and returns usable model ids. */
 export async function probeOpenAICompatibleEndpoint(
 	endpoint: Pick<OpenAICompatibleEndpoint, "baseUrl" | "apiKey">,
-	fetchImpl: typeof fetch = fetch,
+	fetchImpl: FetchImpl = fetch,
+	signal?: AbortSignal,
 ): Promise<OpenAICompatibleProbeResult> {
+	const baseUrl = normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl);
 	let response: Response;
+	let body: string;
 	try {
-		response = await fetchImpl(`${endpoint.baseUrl}/models`, {
+		response = await fetchImpl(`${baseUrl}/models`, {
 			headers: { Authorization: `Bearer ${endpoint.apiKey}` },
+			signal: withTimeoutSignal(OPENAI_COMPATIBLE_PROBE_TIMEOUT_MS, signal),
 		});
+		body = await response.text();
 	} catch (error) {
 		return {
 			ok: false,
-			error: `Could not reach ${endpoint.baseUrl}/models: ${error instanceof Error ? error.message : String(error)}`,
+			error: `Could not reach ${baseUrl}/models: ${error instanceof Error ? error.message : String(error)}`,
 		};
 	}
 
-	const body = await response.text();
 	if (!response.ok) {
 		return { ok: false, error: `GET /models failed (${response.status}): ${formatResponseBody(body)}` };
 	}
@@ -107,7 +118,7 @@ export async function probeOpenAICompatibleEndpoint(
 async function readModelsConfigForWrite(filePath: string): Promise<Record<string, unknown>> {
 	let content: string;
 	try {
-		content = await fs.promises.readFile(filePath, "utf-8");
+		content = await fs.readFile(filePath, "utf-8");
 	} catch (error) {
 		if (isEnoent(error)) return {};
 		throw error;
@@ -133,7 +144,11 @@ async function writeModelsConfigAtomically(
 	providerName: string,
 	apiKey: string,
 ): Promise<void> {
-	const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+	const resolvedPath = await fs.realpath(filePath).catch(error => {
+		if (isEnoent(error)) return filePath;
+		throw error;
+	});
+	const tempPath = `${resolvedPath}.${process.pid}.${randomUUID()}.tmp`;
 	const apiKeyMarker = `__OMP_OPENAI_COMPAT_API_KEY_${randomUUID()}__`;
 	const serialized = YAML.stringify(
 		{
@@ -151,10 +166,10 @@ async function writeModelsConfigAtomically(
 	);
 	const content = serialized.replace(apiKeyMarker, JSON.stringify(apiKey));
 	try {
-		await fs.promises.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
-		await fs.promises.rename(tempPath, filePath);
+		await fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
+		await fs.rename(tempPath, resolvedPath);
 	} catch (error) {
-		await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+		await fs.rm(tempPath, { force: true }).catch(() => {});
 		throw error;
 	}
 }
@@ -172,12 +187,13 @@ export async function writeOpenAICompatibleProvider(
 	const apiKey = endpoint.apiKey.trim();
 	if (!apiKey) throw new Error("API key is required.");
 	const api = validateOpenAICompatibleApi(endpoint.api);
-	await fs.promises.mkdir(path.dirname(modelsPath), { recursive: true, mode: 0o700 });
+	await fs.mkdir(path.dirname(modelsPath), { recursive: true, mode: 0o700 });
 	await withFileLock(modelsPath, async () => {
+		ModelsConfigFile.relocate(modelsPath).load();
 		const current = await readModelsConfigForWrite(modelsPath);
 		const providers = isRecord(current.providers) ? current.providers : {};
 		const existing = isRecord(providers[providerName]) ? providers[providerName] : {};
-		const { auth: _auth, models: _models, ...preservedProviderFields } = existing;
+		const { auth: _auth, models: _models, transport: _transport, ...preservedProviderFields } = existing;
 		const candidate: Record<string, unknown> = {
 			...current,
 			providers: {
@@ -196,6 +212,11 @@ export async function writeOpenAICompatibleProvider(
 		if (validated instanceof Error) {
 			throw new Error(`Cannot update ${modelsPath}: the resulting models.yml is invalid: ${validated.message}`);
 		}
-		await writeModelsConfigAtomically(modelsPath, validated as ModelsConfig, providerName, apiKey);
+		await writeModelsConfigAtomically(
+			modelsPath,
+			validated as ModelsConfig,
+			providerName,
+			encodeLiteralConfigValue(apiKey),
+		);
 	});
 }

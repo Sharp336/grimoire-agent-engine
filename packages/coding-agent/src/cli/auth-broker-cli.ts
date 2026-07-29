@@ -277,10 +277,11 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 async function runOpenAICompatibleLocalLogin(): Promise<void> {
 	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 	const ask = (message: string) => promptLine(rl, `${message} `);
+	const askSecret = (message: string) => promptLine(rl, `${message} `, { secret: true });
 	try {
 		const providerName = validateOpenAICompatibleProviderName(await ask("Provider name (models.yml key):"));
 		const baseUrl = normalizeOpenAICompatibleBaseUrl(await ask("OpenAI-compatible base URL:"));
-		const apiKey = (await ask("API key:")).trim();
+		const apiKey = (await askSecret("API key:")).trim();
 		if (!apiKey) throw new Error("API key is required.");
 		const api = validateOpenAICompatibleApi(await ask("API (openai-completions; e.g. openai-responses):"));
 
@@ -311,12 +312,50 @@ async function runOpenAICompatibleLocalLogin(): Promise<void> {
  * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
  * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
  */
-function promptLine(rl: readline.Interface, question: string): Promise<string> {
+function promptLine(rl: readline.Interface, question: string, options: { secret?: boolean } = {}): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const input = process.stdin as NodeJS.ReadStream;
 	const supportsRawMode = input.isTTY && typeof input.setRawMode === "function";
 	const wasRaw = supportsRawMode ? input.isRaw : false;
 	let settled = false;
+
+	if (options.secret && supportsRawMode) {
+		let value = "";
+		const onData = (data: Buffer | string) => {
+			const chunk = data.toString();
+			if (chunk === "\u0003" || chunk === "\u0004" || chunk === "\u001b") {
+				finish(() => reject(new Error("Login cancelled")));
+				return;
+			}
+			if (chunk === "\r" || chunk === "\n") {
+				finish(() => resolve(value));
+				return;
+			}
+			if (chunk === "\u007f" || chunk === "\b") {
+				value = value.slice(0, -1);
+				return;
+			}
+			value += chunk.replace(/[\u0000-\u001f\u007f]/g, "");
+		};
+		const cleanupSecret = () => {
+			input.off("data", onData);
+			input.setRawMode?.(wasRaw);
+			rl.resume();
+		};
+		const finish = (result: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanupSecret();
+			process.stdout.write("\n");
+			result();
+		};
+		rl.pause();
+		input.setRawMode(true);
+		input.on("data", onData);
+		input.resume();
+		process.stdout.write(question);
+		return promise;
+	}
 
 	const cleanup = () => {
 		rl.off("SIGINT", onSigint);
