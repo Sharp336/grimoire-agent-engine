@@ -35,6 +35,12 @@ interface CacheEntry {
 }
 
 const configCache = new Map<string, CacheEntry>();
+let disposerRegistered = false;
+function ensureDisposerRegistered(): void {
+	if (disposerRegistered) return;
+	disposerRegistered = true;
+	registerTransportDisposer("cursor-server-config", disposeServerConfigCache);
+}
 
 /** Upper bound on a single server-config discovery round trip. */
 const DISCOVERY_TIMEOUT_MS = 10_000;
@@ -69,6 +75,7 @@ export async function resolveCursorTransportMode(
 	if (isTransportDisposed()) {
 		throw new Error("Transport disposed");
 	}
+	ensureDisposerRegistered();
 	const key = configKey(opts.baseUrl, opts.apiKey);
 	let entry = configCache.get(key);
 
@@ -246,5 +253,3 @@ export function __evictServerConfigEntry(baseUrl: string, apiKey: string): void 
 	}
 	configCache.delete(key);
 }
-
-registerTransportDisposer("cursor-server-config", disposeServerConfigCache);
