@@ -48,7 +48,7 @@ export interface StorageRepairResult {
 
 /** Fault and race seams used only by focused storage-repair tests. */
 export interface StorageRepairTestHooks {
-	afterPristineCopy?: () => void | Promise<void>;
+	afterPristineCopy?: (tempDir: string) => void | Promise<void>;
 	afterSessionManifestParse?: () => void | Promise<void>;
 	beforeBackupWrite?: () => void | Promise<void>;
 	afterBackupLink?: () => void | Promise<void>;

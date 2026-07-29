@@ -347,7 +347,7 @@ export async function sourceStillMatches(pre: SourceTripletManifest): Promise<vo
 export async function preparePristineSnapshot(
 	source: string,
 	inspectSqlite: boolean,
-	afterPristineCopy?: () => void | Promise<void>,
+	afterPristineCopy?: (tempDir: string) => void | Promise<void>,
 ): Promise<PristineSnapshot> {
 	const manifest = await manifestTriplet(source);
 	const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-storage-repair-"));
@@ -359,7 +359,7 @@ export async function preparePristineSnapshot(
 		await fs.promises.mkdir(workingDir, { mode: 0o700 });
 		const pristine = await copyTriplet(manifest, pristineDir, true);
 		await sealTriplet(manifest, pristine);
-		await afterPristineCopy?.();
+		await afterPristineCopy?.(tempDir);
 		await sourceStillMatches(manifest);
 		const copiedManifest: SourceTripletManifest = {
 			...manifest,
