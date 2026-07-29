@@ -13,7 +13,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { $env, $flag, fetchWithRetry, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
-import { OUTPUT_FALLBACK_BUFFER } from "../stream";
+import { MIN_OUTPUT_TOKENS } from "../stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -1067,7 +1067,7 @@ const MIN_BEDROCK_THINKING_BUDGET_TOKENS = 1024;
  * context-window clamp shrinks `inferenceConfig.maxTokens`. Bedrock exposes the
  * Anthropic thinking budget inside `additionalModelRequestFields.thinking`,
  * which must stay below `maxTokens` or the request is rejected with HTTP 400.
- * Uses the same buffer as the anthropic path and disables thinking entirely when
+ * Reserves Bedrock's minimum output capacity and disables optional thinking when
  * too little headroom remains for a viable budget.
  */
 function reconcileBedrockThinkingBudget(
@@ -1077,8 +1077,8 @@ function reconcileBedrockThinkingBudget(
 	const thinking = additionalModelRequestFields?.thinking as { type?: string; budget_tokens?: number } | undefined;
 	if (thinking?.type !== "enabled") return additionalModelRequestFields;
 	const budgetTokens = thinking.budget_tokens ?? 0;
-	if (budgetTokens + OUTPUT_FALLBACK_BUFFER <= maxTokens) return additionalModelRequestFields;
-	const clampedBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
+	if (budgetTokens + MIN_OUTPUT_TOKENS <= maxTokens) return additionalModelRequestFields;
+	const clampedBudget = maxTokens - MIN_OUTPUT_TOKENS;
 	if (clampedBudget >= MIN_BEDROCK_THINKING_BUDGET_TOKENS) {
 		thinking.budget_tokens = clampedBudget;
 		return additionalModelRequestFields;

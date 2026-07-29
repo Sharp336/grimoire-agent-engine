@@ -205,7 +205,11 @@ function makeModel(contextWindow: number, maxTokens: number): Model<"anthropic-m
 }
 
 /** Reasoning-capable variant so extended-thinking params are built on the wire. */
-function makeThinkingModel(contextWindow: number, maxTokens: number): Model<"anthropic-messages"> {
+function makeThinkingModel(
+	contextWindow: number,
+	maxTokens: number,
+	requiresThinkingEnabled = false,
+): Model<"anthropic-messages"> {
 	return buildModel({
 		id: "claude-sonnet-4-5",
 		name: "Claude Sonnet 4.5",
@@ -217,6 +221,7 @@ function makeThinkingModel(contextWindow: number, maxTokens: number): Model<"ant
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
 		maxTokens,
+		...(requiresThinkingEnabled && { compat: { requiresThinkingEnabled: true } }),
 	});
 }
 
@@ -279,6 +284,19 @@ describe("anthropic output-budget clamp integration", () => {
 		expect((payload.max_tokens as number) > (thinking?.budget_tokens ?? 0)).toBe(true);
 	});
 
+	it("keeps mandatory thinking enabled with a sub-floor clamped budget", async () => {
+		// contextWindow=14596, prompt≈6000 tokens, requested=8192.
+		// clamp: min(8192, max(1, 14596 - 6000 - 4096)) = 4500.
+		// Mandatory thinking retains the positive clamped budget: 4500 - 4000 = 500.
+		const model = makeThinkingModel(14_596, 8_192, true);
+		const context: Context = {
+			messages: [{ role: "user", content: "x".repeat(24_000), timestamp: Date.now() }],
+		};
+		const payload = await capturePayload(model, context, 8192);
+		expect(payload.max_tokens).toBe(4500);
+		expect(payload.thinking).toMatchObject({ type: "enabled", budget_tokens: 500 });
+	});
+
 	it("disables thinking when the window is too tight for a viable budget", async () => {
 		// contextWindow=10000, prompt≈6000 tokens, requested=8192, thinkingBudget=4000.
 		// clamp budget = max(1, 10000 - 6000 - 4096) = 1 → max_tokens = 1.
@@ -330,25 +348,26 @@ function captureBedrockPayload(
 }
 
 describe("bedrock output-budget clamp integration", () => {
-	it("reconciles the thinking budget under the clamped maxTokens", async () => {
-		// contextWindow=16000, prompt≈6000 tokens, requested=8192, effort medium (budget 8192).
-		// clamp: min(8192, max(1, 16000 - 6000 - 4096)) = 5904.
-		// reconcile: 8192 + 4000 > 5904 → budget = 5904 - 4000 = 1904 (≥ 1024 floor).
-		const model = makeBedrockModel(16_000, 8_192);
+	it("keeps a viable thinking budget with Bedrock's output reserve", async () => {
+		// contextWindow=14096, prompt≈6000 tokens, requested=8192, effort medium (budget 8192).
+		// clamp: min(8192, max(1, 14096 - 6000 - 4096)) = 4000.
+		// Bedrock reserves 1024 output tokens, so budget becomes 4000 - 1024 = 2976.
+		// Anthropic's 4000-token buffer would instead drop thinking entirely.
+		const model = makeBedrockModel(14_096, 8_192);
 		const bigText = "x".repeat(24_000);
 		const context: Context = {
 			messages: [{ role: "user", content: bigText, timestamp: Date.now() }],
 		};
 		const payload = await captureBedrockPayload(model, context, { maxTokens: 8192, reasoning: "medium" });
-		expect(payload.inferenceConfig).toMatchObject({ maxTokens: 5904 });
+		expect(payload.inferenceConfig).toMatchObject({ maxTokens: 4000 });
 		expect(payload.additionalModelRequestFields).toMatchObject({
-			thinking: { type: "enabled", budget_tokens: 1904 },
+			thinking: { type: "enabled", budget_tokens: 2976 },
 		});
 	});
 
 	it("drops thinking and the interleaved beta when the window is too tight", async () => {
 		// contextWindow=10000, prompt≈6000 tokens → clamp to 1.
-		// reconcile: 1 - 4000 < 1024 → thinking dropped; the interleaved beta must
+		// reconcile: 1 - 1024 < 1024 → thinking dropped; the interleaved beta must
 		// not survive without it, leaving no additional fields at all.
 		const model = makeBedrockModel(10_000, 8_192);
 		const bigText = "x".repeat(24_000);

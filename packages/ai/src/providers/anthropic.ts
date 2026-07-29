@@ -3086,17 +3086,17 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAll
 	thinking.budget_tokens = clampedBudget;
 }
 
-/** Minimum viable Anthropic extended-thinking budget; below this the API offers
- *  no useful reasoning, so the turn is better off with thinking disabled. */
+/** Minimum viable optional Anthropic extended-thinking budget; below this the API
+ *  offers no useful reasoning, so the turn is better off with thinking disabled. */
 const MIN_THINKING_BUDGET_TOKENS = 1024;
 
 /**
  * Restore the `max_tokens > thinking.budget_tokens` invariant after the
  * context-window clamp shrinks `max_tokens`. {@link ensureMaxTokensForThinking}
  * guarantees `budget + OUTPUT_FALLBACK_BUFFER <= max` before the clamp runs;
- * this re-establishes it on the clamped value using the same buffer, reducing
- * the budget when it still fits and disabling thinking entirely when too little
- * headroom remains for a viable budget.
+ * this re-establishes it on the clamped value using the same buffer. Optional
+ * thinking is disabled when too little headroom remains for a viable budget,
+ * while mandatory-thinking models retain every positive clamped budget.
  */
 function reconcileThinkingForClampedMaxTokens(
 	params: MessageCreateParamsStreaming,
@@ -3109,6 +3109,15 @@ function reconcileThinkingForClampedMaxTokens(
 	const budgetTokens = thinking.budget_tokens ?? 0;
 	if (budgetTokens + OUTPUT_FALLBACK_BUFFER <= maxTokens) return;
 	const clampedBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
+	if (model.compat.requiresThinkingEnabled) {
+		if (clampedBudget <= 0) {
+			throw new AIError.ConfigurationError(
+				`Anthropic thinking budget requires max_tokens greater than ${OUTPUT_FALLBACK_BUFFER}; got ${maxTokens}`,
+			);
+		}
+		thinking.budget_tokens = clampedBudget;
+		return;
+	}
 	if (clampedBudget >= MIN_THINKING_BUDGET_TOKENS) {
 		thinking.budget_tokens = clampedBudget;
 		return;
