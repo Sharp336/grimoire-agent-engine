@@ -31,6 +31,7 @@ import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import {
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
+	BEDROCK_MANTLE_STATIC_MODELS,
 	buildFireworksFastSeed,
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
@@ -53,6 +54,7 @@ import {
 	applyCanonicalLimitFallback,
 	applyGeneratedModelPolicies,
 	CLOUDFLARE_FALLBACK_MODEL,
+	dropBedrockConverseOnlyOpenAIIds,
 	dropUnsupportedBedrockGeoIds,
 	linkOpenAIPromotionTargets,
 } from "./generated-policies";
@@ -553,6 +555,10 @@ async function generateModels() {
 	// Seed Meta's documented Muse model so first-run selection does not depend on
 	// credentials or live discovery.
 	allModels.push(...META_MUSE_STATIC_MODELS);
+	// Seed the OpenAI GPT-5.6 models AWS serves on the `bedrock-mantle` endpoint.
+	// They are absent from models.dev under this provider, and the endpoint has no
+	// list-models discovery we use, so the documented rows are the only source.
+	allModels.push(...BEDROCK_MANTLE_STATIC_MODELS);
 	// Seed Sakana's documented Fugu models so the provider is usable when
 	// catalog generation has no live API key. If live `/v1/models` succeeds,
 	// Sakana is authoritative and stale seed IDs must stay out.
@@ -643,6 +649,7 @@ async function generateModels() {
 	allModels = dropUnusableZaiContextTierIds(allModels);
 	allModels = dropXiaomiAudioOnlyIds(allModels);
 	allModels = dropUnsupportedBedrockGeoIds(allModels);
+	allModels = dropBedrockConverseOnlyOpenAIIds(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added authentication and region resolution for the new `bedrock-mantle` provider. Requests reuse the existing `openai-responses` transport, with `{region}` in the base URL resolved from the explicit option, `AWS_REGION`, `AWS_DEFAULT_REGION`, then `us-east-1`, and credentials supplied either as a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) or via SigV4 over the standard AWS credential chain.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
