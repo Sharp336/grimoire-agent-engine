@@ -428,10 +428,11 @@ function gitSpawnSyncText(
 			windowsHide: true,
 			timeout: timeoutMs,
 		});
-		// `null` exitCode means the child was killed (deadline or signal) rather
-		// than exiting normally; report it as a timeout so read-only callers
-		// degrade instead of treating partial/empty stdout as success.
-		const exitCode = result.exitCode ?? GIT_COMMAND_TIMEOUT_EXIT_CODE;
+		// Bun's timeout marker is authoritative even when process cleanup reports
+		// exit code zero, so render-path callers never trust partial output.
+		const exitCode = result.exitedDueToTimeout
+			? GIT_COMMAND_TIMEOUT_EXIT_CODE
+			: (result.exitCode ?? GIT_COMMAND_TIMEOUT_EXIT_CODE);
 		return { exitCode, stdout: new TextDecoder().decode(result.stdout).trim() };
 	} catch (err) {
 		if (isEnoent(err)) return { exitCode: GIT_SPAWN_ENOENT_EXIT_CODE, stdout: "" };

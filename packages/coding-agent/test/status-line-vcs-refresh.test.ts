@@ -12,6 +12,9 @@
  * same callback is covered by status-line-dispose-async-leak.test.ts.)
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
@@ -174,7 +177,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 			gitEntryPath: "/fake/.git",
 			headPath: "/fake/.git/HEAD",
 			repoRoot: "/fake",
-		} as GitRepository;
+		} satisfies GitRepository;
 		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
 		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
 		// Keep the sibling async fetches quiet so only the branch resolve drives
@@ -236,5 +239,81 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		expect(git.head.resolve).toHaveBeenCalledTimes(2);
 
 		component.dispose();
+	});
+
+	it("aborts an invalidated resolve and starts only one replacement resolve", async () => {
+		const fakeRepo = {
+			commonDir: "/fake/.git",
+			gitDir: "/fake/.git",
+			gitEntryPath: "/fake/.git",
+			headPath: "/fake/.git/HEAD",
+			repoRoot: "/fake",
+		} satisfies GitRepository;
+		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
+		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
+		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
+		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
+
+		const signals: AbortSignal[] = [];
+		vi.spyOn(git.head, "resolve").mockImplementation((_cwd, signal) => {
+			if (!signal) throw new Error("reftable resolve must receive an abort signal");
+			signals.push(signal);
+			return new Promise<GitHeadState | null>((_resolve, reject) => {
+				signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+			});
+		});
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.getTopBorder(80);
+		expect(git.head.resolve).toHaveBeenCalledTimes(1);
+
+		component.invalidate();
+		expect(signals[0]?.aborted).toBe(true);
+		component.invalidate();
+		component.getTopBorder(80);
+		component.getTopBorder(80);
+		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+
+		component.dispose();
+		expect(signals[1]?.aborted).toBe(true);
+		await Promise.resolve();
+	});
+
+	it("does not query an ancestor jj workspace while nested Git HEAD resolution is pending", async () => {
+		const jjRootDir = await fs.mkdtemp(path.join(os.tmpdir(), "status-line-jj-root-"));
+		const nestedGitCwd = path.join(jjRootDir, "nested-ordinary-git");
+		await fs.mkdir(nestedGitCwd);
+		const fakeRepo = {
+			commonDir: `${nestedGitCwd}/.git`,
+			gitDir: `${nestedGitCwd}/.git`,
+			gitEntryPath: `${nestedGitCwd}/.git`,
+			headPath: `${nestedGitCwd}/.git/HEAD`,
+			repoRoot: nestedGitCwd,
+		} satisfies GitRepository;
+		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
+		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
+		vi.spyOn(git.head, "resolve").mockReturnValue(Promise.withResolvers<GitHeadState | null>().promise);
+		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
+		const jjRoot = vi.spyOn(jj.repo, "rootSync").mockReturnValue("/workspace/jj-root");
+		const jjLabel = vi.spyOn(jj.workingCopy, "label").mockReturnValue(Promise.resolve("ancestor-bookmark"));
+		const jjStatus = vi
+			.spyOn(jj.status, "summary")
+			.mockReturnValue(Promise.resolve({ staged: 0, unstaged: 0, untracked: 0 }));
+		setProjectDir(nestedGitCwd);
+
+		try {
+			const component = new StatusLineComponent(makeSession());
+			component.updateSettings(gitSegment);
+			component.getTopBorder(80);
+			expect(git.head.resolve).toHaveBeenCalledTimes(1);
+			expect(jjRoot).not.toHaveBeenCalled();
+			expect(jjLabel).not.toHaveBeenCalled();
+			expect(jjStatus).not.toHaveBeenCalled();
+			component.dispose();
+		} finally {
+			setProjectDir(originalProjectDir);
+			await fs.rm(jjRootDir, { recursive: true, force: true });
+		}
 	});
 });

@@ -174,6 +174,12 @@ interface ActiveRepoCache {
 	worktree: WorktreeContext | null;
 }
 
+interface BranchResolveRequest {
+	id: number;
+	cwd: string;
+	controller: AbortController;
+}
+
 interface WorktreeContext {
 	/** Primary-checkout (project) name shown by the path segment. */
 	projectName: string;
@@ -254,7 +260,7 @@ export class StatusLineComponent implements Component {
 	// two live resolves can share a cwd string across an invalidation, and a
 	// stale one must never free (or poison) a slot it no longer owns.
 	#branchResolveSeq = 0;
-	#branchResolveActive: number | undefined = undefined;
+	#branchResolveActive: BranchResolveRequest | undefined = undefined;
 	// Bumped on every branch-cache reset (#invalidateGitCaches — a HEAD move or
 	// repo-context change). An in-flight reftable resolve captures this at
 	// launch; a mismatch on resolve means the cache was invalidated underneath
@@ -607,6 +613,8 @@ export class StatusLineComponent implements Component {
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#branchResolveActive?.controller.abort();
+		this.#branchResolveActive = undefined;
 		this.#onBranchChange = null;
 		this.#clearUsageStartTimer();
 		if (this.#gitWatcher) {
@@ -638,10 +646,9 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranch = undefined;
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedBranchCwd = undefined;
-		// Release the in-flight slot and bump the generation so any pending
-		// reftable resolve drops itself on resolve (see #getCurrentBranch): its
-		// result is now stale, and clearing the slot lets the next render start a
-		// fresh resolve immediately instead of waiting for the superseded one.
+		// Abort before releasing the in-flight slot. Releasing alone would allow
+		// repeated invalidations to fan out still-running git subprocesses.
+		this.#branchResolveActive?.controller.abort();
 		this.#branchResolveActive = undefined;
 		this.#branchCacheGeneration++;
 		this.#cachedPrContext = undefined;
@@ -672,10 +679,16 @@ export class StatusLineComponent implements Component {
 		const repository = git.repo.resolveSync(gitCwd);
 		if (repository && git.repo.isReftableSync(repository)) {
 			if (this.#branchResolveActive !== undefined) {
-				return this.#cachedBranchCwd === gitCwd ? (this.#cachedBranch ?? null) : null;
+				return this.#branchResolveActive.cwd === gitCwd && this.#cachedBranchCwd === gitCwd
+					? (this.#cachedBranch ?? null)
+					: null;
 			}
-			const requestId = ++this.#branchResolveSeq;
-			this.#branchResolveActive = requestId;
+			const request: BranchResolveRequest = {
+				id: ++this.#branchResolveSeq,
+				cwd: gitCwd,
+				controller: new AbortController(),
+			};
+			this.#branchResolveActive = request;
 			// Capture the cache generation at launch. #invalidateGitCaches bumps it
 			// on a HEAD move and clears the in-flight slot, so a fresher resolve can
 			// start while this one is still pending. Without a generation check the
@@ -687,7 +700,7 @@ export class StatusLineComponent implements Component {
 				let next: string | null = null;
 				let repoId: string | null = null;
 				try {
-					const headState = await git.head.resolve(gitCwd);
+					const headState = await git.head.resolve(gitCwd, request.controller.signal);
 					repoId = headState?.headPath ?? null;
 					next = !headState
 						? null
@@ -701,7 +714,7 @@ export class StatusLineComponent implements Component {
 					// invalidation a fresher resolve may hold it, and freeing that
 					// slot here would let a third same-generation resolve launch and
 					// race the fresh one to the cache commit.
-					if (this.#branchResolveActive === requestId) this.#branchResolveActive = undefined;
+					if (this.#branchResolveActive?.id === request.id) this.#branchResolveActive = undefined;
 				}
 				// Only the latest generation may update the cache; a mismatch means a
 				// newer resolve superseded this one (or the component disposed).
@@ -1281,11 +1294,11 @@ export class StatusLineComponent implements Component {
 			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, worktree: null };
 		let gitBranch = includeGit || includePr ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
 		// A jj repo has no git branch to read: git HEAD is detached (colocated) or
-		// absent. Gate BOTH the jj branch label and the jj status counts on that
-		// same condition, captured before the label overlay rewrites gitBranch, so
-		// a nested ordinary git checkout under a parent jj workspace keeps its own
-		// git branch AND its own git status instead of the ancestor jj status.
-		const gitHeadIsJjLike = gitBranch === "detached" || gitBranch === null;
+		// absent. A pending reftable resolve owns this cwd as an explicit Git repo,
+		// so it must not be mistaken for an absent Git checkout and fall through to
+		// an ancestor jj workspace.
+		const gitHeadResolvePending = this.#branchResolveActive?.cwd === activeRepoCache.effectiveGitCwd;
+		const gitHeadIsJjLike = !gitHeadResolvePending && (gitBranch === "detached" || gitBranch === null);
 		if (includeGit && gitHeadIsJjLike) {
 			gitBranch = this.#getJjBranch(activeRepoCache.effectiveGitCwd) ?? gitBranch;
 		}

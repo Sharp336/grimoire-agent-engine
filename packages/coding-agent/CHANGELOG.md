@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed random multi-second TUI freezes in reftable-format repos: status-line branch resolution moved off the render path onto the async-with-cache shape its siblings use, and synchronous git spawns gained a 5 s deadline.
+- Fixed random multi-second TUI freezes in reftable-format repos: status-line branch resolution moved off the render path onto the async-with-cache shape its siblings use, and synchronous git spawns gained a 5 s deadline ([#6997](https://github.com/can1357/oh-my-pi/pull/6997) by [@metaphorics](https://github.com/metaphorics)).
 
 ## [17.1.8] - 2026-07-28
 
