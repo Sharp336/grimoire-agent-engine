@@ -598,7 +598,8 @@ describe("offline SQLite salvage", () => {
 		await createHistorySource();
 		await writeSession("b", "session-b", [
 			message("b1", "2026-01-01T00:00:03.900Z", "third prompt"),
-			message("b2", "2026-01-01T00:00:04.000Z", "ignored steering", { steering: true }),
+			message("b2", "2026-01-01T00:00:04.000Z", "user steering", { steering: true, attribution: "user" }),
+			message("b3", "2026-01-01T00:00:04.100Z", "agent steering", { steering: true, attribution: "agent" }),
 		]);
 		await writeSession("a", "session-a", [
 			message("a1", "2026-01-01T00:00:01.900Z", [
@@ -623,6 +624,7 @@ describe("offline SQLite salvage", () => {
 			expect(db.prepare("SELECT prompt, created_at, cwd, session_id FROM history ORDER BY id").all()).toEqual([
 				{ prompt: "first prompt", created_at: 1_767_225_601n, cwd: "/work/a", session_id: "session-a" },
 				{ prompt: "third prompt", created_at: 1_767_225_603n, cwd: "/work/b", session_id: "session-b" },
+				{ prompt: "user steering", created_at: 1_767_225_604n, cwd: "/work/b", session_id: "session-b" },
 			]);
 			expect(
 				db
