@@ -1,10 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import {
-	decodeJwtPayload,
-	isJwtExpiringWithin,
-	JWT_EXPIRY_SKEW_MS,
-	jwtExpiryMs,
-} from "../../../src/registry/oauth/jwt";
+import { isCursorTokenExpiringSoon } from "../../../src/registry/oauth/cursor";
+import { decodeJwtPayload, JWT_EXPIRY_SKEW_MS, jwtExpiryMs, jwtExpirySeconds } from "../../../src/registry/oauth/jwt";
 
 function jwt(payload: Record<string, unknown>): string {
 	return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
@@ -47,16 +43,33 @@ describe("jwtExpiryMs", () => {
 	});
 });
 
-describe("isJwtExpiringWithin", () => {
-	it("compares exp against the threshold and treats an unreadable token as expiring", () => {
-		const now = Math.floor(Date.now() / 1000);
-		expect(isJwtExpiringWithin(jwt({ exp: now + 3600 }), 300)).toBe(false);
-		expect(isJwtExpiringWithin(jwt({ exp: now + 60 }), 300)).toBe(true);
-		expect(isJwtExpiringWithin(jwt({ exp: now - 60 }), 300)).toBe(true);
+describe("jwtExpirySeconds", () => {
+	it("reports the raw exp only when it is finite, leaving the meaning to callers", () => {
+		const exp = 1_900_000_000;
+		expect(jwtExpirySeconds(jwt({ exp }))).toBe(exp);
 
-		// Refreshing an opaque credential is the safe direction, so a token with
-		// no readable expiry counts as expiring.
-		expect(isJwtExpiringWithin("opaque-api-key", 300)).toBe(true);
-		expect(isJwtExpiringWithin(jwt({}), 300)).toBe(true);
+		// Absence is reported as `undefined` rather than resolved here: Cursor
+		// reads it as "not expiring", other callers as "refresh now".
+		expect(jwtExpirySeconds(jwt({}))).toBeUndefined();
+		expect(jwtExpirySeconds(jwt({ exp: "soon" }))).toBeUndefined();
+		expect(jwtExpirySeconds("opaque-api-key")).toBeUndefined();
+	});
+});
+
+describe("isCursorTokenExpiringSoon", () => {
+	it("refreshes only on a real deadline or an unreadable payload", () => {
+		const now = Math.floor(Date.now() / 1000);
+		expect(isCursorTokenExpiringSoon(jwt({ exp: now + 3600 }))).toBe(false);
+		expect(isCursorTokenExpiringSoon(jwt({ exp: now + 60 }))).toBe(true);
+
+		// A decodable payload that states no usable deadline must NOT trigger a
+		// refresh — Cursor accepts long-lived pasted keys, and churning those on
+		// every request is the regression this pins.
+		expect(isCursorTokenExpiringSoon(jwt({}))).toBe(false);
+		expect(isCursorTokenExpiringSoon(jwt({ exp: "soon" }))).toBe(false);
+
+		// A payload that cannot be read at all still forces a refresh.
+		expect(isCursorTokenExpiringSoon("opaque-api-key")).toBe(true);
+		expect(isCursorTokenExpiringSoon("header.%%%.signature")).toBe(true);
 	});
 });

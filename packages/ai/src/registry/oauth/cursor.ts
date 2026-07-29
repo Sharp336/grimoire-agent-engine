@@ -1,5 +1,5 @@
 import * as AIError from "../../error";
-import { isJwtExpiringWithin, jwtExpiryMs } from "./jwt";
+import { decodeJwtPayload, jwtExpiryMs, jwtExpirySeconds } from "./jwt";
 import { generatePKCE } from "./pkce";
 import type { OAuthCredentials } from "./types";
 
@@ -146,6 +146,13 @@ function getTokenExpiry(token: string): number {
 	return jwtExpiryMs(token) ?? Date.now() + 3600 * 1000;
 }
 
+// A token whose payload decodes but states no usable `exp` is NOT treated as
+// expiring: Cursor accepts long-lived pasted keys, and refreshing those on
+// every request would churn a credential that never expires. Only a payload
+// that cannot be read at all forces a refresh.
 export function isCursorTokenExpiringSoon(token: string, thresholdSeconds = 300): boolean {
-	return isJwtExpiringWithin(token, thresholdSeconds);
+	if (decodeJwtPayload(token) === null) return true;
+	const exp = jwtExpirySeconds(token);
+	if (exp === undefined) return false;
+	return exp - Math.floor(Date.now() / 1000) < thresholdSeconds;
 }

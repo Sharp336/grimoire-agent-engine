@@ -39,7 +39,12 @@ export function decodeJwtPayload(token: string): Record<string, unknown> | null 
 	}
 }
 
-function expSeconds(token: string): number | undefined {
+/**
+ * The token's `exp` claim in seconds, or `undefined` when it states no finite
+ * one. What that absence *means* is provider policy — Cursor treats it as
+ * "not expiring", others as "refresh now" — so it stays at the call site.
+ */
+export function jwtExpirySeconds(token: string): number | undefined {
 	const exp = decodeJwtPayload(token)?.exp;
 	return typeof exp === "number" && Number.isFinite(exp) ? exp : undefined;
 }
@@ -50,17 +55,6 @@ function expSeconds(token: string): number | undefined {
  * for its provider.
  */
 export function jwtExpiryMs(token: string, skewMs = JWT_EXPIRY_SKEW_MS): number | undefined {
-	const exp = expSeconds(token);
+	const exp = jwtExpirySeconds(token);
 	return exp === undefined ? undefined : exp * 1000 - skewMs;
-}
-
-/**
- * Whether the token expires within `thresholdSeconds`. A token with no
- * readable `exp` counts as expiring: callers use this to decide whether to
- * refresh, and refreshing an opaque token is the safe direction.
- */
-export function isJwtExpiringWithin(token: string, thresholdSeconds: number): boolean {
-	const exp = expSeconds(token);
-	if (exp === undefined) return true;
-	return exp - Math.floor(Date.now() / 1000) < thresholdSeconds;
 }
