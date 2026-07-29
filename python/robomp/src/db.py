@@ -478,6 +478,7 @@ class Database:
         payload: Mapping[str, Any],
         state: EventState = "queued",
         allowed_existing_states: tuple[EventState, ...],
+        platform: str = "github",
     ) -> bool:
         """Replace an existing event only when its current state is permitted."""
         now = _utcnow()
@@ -493,8 +494,8 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO events
-                  (delivery_id, event_type, repo, issue_key, payload_json, received_at, state)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                  (delivery_id, event_type, repo, issue_key, payload_json, received_at, state, platform)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     delivery_id,
@@ -504,6 +505,7 @@ class Database:
                     json.dumps(payload, separators=(",", ":")),
                     now,
                     state,
+                    platform,
                 ),
             )
             return True

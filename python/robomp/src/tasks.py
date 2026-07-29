@@ -11,7 +11,6 @@ from robomp import persona
 from robomp.config import Settings
 from robomp.db import Database, IssueRow, IssueState, issue_key
 from robomp.github_backend import GitHubBackend
-from robomp.github_events import normalize_review_to_comment
 from robomp.github_client import (
     CommentInfo,
     GitHubError,
@@ -20,6 +19,7 @@ from robomp.github_client import (
     RepoInfo,
     parse_issue_payload,
 )
+from robomp.github_events import normalize_review_to_comment
 from robomp.sandbox import GitTransport, SandboxManager
 from robomp.worker import DirectiveInfo, TaskInputs, ThreadMessage, run_task
 
@@ -658,6 +658,8 @@ async def handle_review(
             try:
                 fetched = await github.get_review_comment(repo_full, int(comment_id))
                 body = fetched.body.strip()
+                comment["path"] = str(fetched.path or "")
+                comment["line"] = fetched.line
                 log.info(
                     "forgejo_7935_workaround",
                     extra={"repo": repo_full, "pr": pr_number, "comment_id": comment_id},
