@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import { disposeCursorConversationCache, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import {
+	disposeCursorConversationCache,
+	getCursorConversationCacheSizesForTest,
+	streamCursor,
+} from "@oh-my-pi/pi-ai/providers/cursor";
 import { disposeH2Pool, encodeConnectFrame } from "@oh-my-pi/pi-ai/transport";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -76,7 +80,7 @@ function successResponse(checkpoint?: ConversationStateStructure): Buffer {
 
 async function startServer(
 	checkpointRequests: boolean | ReadonlySet<number>,
-	holdFirstRequest?: Promise<void>,
+	holdRequest?: (requestNumber: number) => Promise<void> | undefined,
 ): Promise<{ baseUrl: string; requests: CapturedRequest[]; firstRequest: Promise<void> }> {
 	const requests: CapturedRequest[] = [];
 	const firstRequest = Promise.withResolvers<void>();
@@ -104,10 +108,8 @@ async function startServer(
 				todos: request.conversationState?.todos ?? [],
 			});
 			const requestNumber = requests.length;
-			if (requestNumber === 1) {
-				firstRequest.resolve();
-				await holdFirstRequest;
-			}
+			if (requestNumber === 1) firstRequest.resolve();
+			await holdRequest?.(requestNumber);
 			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 			const shouldCheckpoint =
 				checkpointRequests === true
@@ -208,7 +210,7 @@ describe("Cursor conversation state isolation", () => {
 
 	it("does not evict a checkpoint written by an in-flight request", async () => {
 		const releaseFirst = Promise.withResolvers<void>();
-		const endpoint = await startServer(true, releaseFirst.promise);
+		const endpoint = await startServer(true, () => releaseFirst.promise);
 		const inFlight = run(endpoint.baseUrl, "pinned-credential", "pinned");
 		await endpoint.firstRequest;
 		for (let index = 0; index < 64; index++) {
@@ -218,6 +220,26 @@ describe("Cursor conversation state isolation", () => {
 		await inFlight;
 		await run(endpoint.baseUrl, "pinned-credential", "pinned");
 		expect(endpoint.requests.at(-1)?.todos).toEqual([new Uint8Array([42])]);
+	});
+
+	it("bounds retained state after more than 64 conversations complete concurrently", async () => {
+		const releaseRequests = Promise.withResolvers<void>();
+		const allStarted = Promise.withResolvers<void>();
+		const endpoint = await startServer(true, requestNumber => {
+			if (requestNumber === 66) allStarted.resolve();
+			return requestNumber === 1 ? undefined : releaseRequests.promise;
+		});
+		await run(endpoint.baseUrl, "concurrent-credential", "retained");
+
+		const requests = Array.from({ length: 65 }, (_, index) =>
+			run(endpoint.baseUrl, "concurrent-credential", `concurrent-${index}`),
+		);
+		await allStarted.promise;
+		expect(getCursorConversationCacheSizesForTest()).toEqual({ idle: 1, inFlight: 65 });
+
+		releaseRequests.resolve();
+		await Promise.all(requests);
+		expect(getCursorConversationCacheSizesForTest()).toEqual({ idle: 64, inFlight: 0 });
 	});
 
 	it("removes every per-request abort listener after a successful turn", async () => {

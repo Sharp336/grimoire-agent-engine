@@ -175,6 +175,7 @@ interface CursorConversationCacheEntry {
 
 const CURSOR_CONVERSATION_CACHE_LIMIT = 64;
 const cursorConversationCache = new Map<string, CursorConversationCacheEntry>();
+const cursorInFlightConversations = new Map<string, CursorConversationCacheEntry>();
 let conversationCacheDisposerRegistered = false;
 
 function ensureConversationCacheDisposerRegistered(): void {
@@ -185,19 +186,23 @@ function ensureConversationCacheDisposerRegistered(): void {
 
 export function disposeCursorConversationCache(): Promise<void> {
 	cursorConversationCache.clear();
+	cursorInFlightConversations.clear();
 	return Promise.resolve();
+}
+
+/** Exported for tests: reports the distinct retained and in-flight cache states. */
+export function getCursorConversationCacheSizesForTest(): { idle: number; inFlight: number } {
+	return {
+		idle: cursorConversationCache.size,
+		inFlight: cursorInFlightConversations.size,
+	};
 }
 
 function evictCursorConversationCache(): void {
 	while (cursorConversationCache.size > CURSOR_CONVERSATION_CACHE_LIMIT) {
-		let evicted = false;
-		for (const [key, entry] of cursorConversationCache) {
-			if (entry.pins !== 0) continue;
-			cursorConversationCache.delete(key);
-			evicted = true;
-			break;
-		}
-		if (!evicted) return;
+		const oldestKey = cursorConversationCache.keys().next().value;
+		if (oldestKey === undefined) return;
+		cursorConversationCache.delete(oldestKey);
 	}
 }
 
@@ -205,15 +210,15 @@ function acquireCursorConversationCacheEntry(key: string): {
 	entry: CursorConversationCacheEntry;
 	release: () => void;
 } {
-	let entry = cursorConversationCache.get(key);
+	let entry = cursorInFlightConversations.get(key);
 	if (entry) {
-		cursorConversationCache.delete(key);
+		entry.pins++;
 	} else {
-		entry = { blobStore: new Map(), pins: 0 };
+		entry = cursorConversationCache.get(key) ?? { blobStore: new Map(), pins: 0 };
+		cursorConversationCache.delete(key);
+		entry.pins = 1;
+		cursorInFlightConversations.set(key, entry);
 	}
-	entry.pins++;
-	cursorConversationCache.set(key, entry);
-	evictCursorConversationCache();
 	let released = false;
 	return {
 		entry,
@@ -221,6 +226,9 @@ function acquireCursorConversationCacheEntry(key: string): {
 			if (released) return;
 			released = true;
 			entry.pins--;
+			if (entry.pins !== 0 || cursorInFlightConversations.get(key) !== entry) return;
+			cursorInFlightConversations.delete(key);
+			cursorConversationCache.set(key, entry);
 			evictCursorConversationCache();
 		},
 	};
