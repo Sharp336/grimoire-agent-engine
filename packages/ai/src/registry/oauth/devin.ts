@@ -7,10 +7,10 @@ import type { OAuthController, OAuthCredentials } from "./types";
 type FetchFunction = NonNullable<OAuthController["fetch"]>;
 
 const DEVIN_WEBAPP_URL = "https://app.devin.ai";
-const DEVIN_API_URL = "https://api.devin.ai";
+const DEVIN_API_URL = "https://server.codeium.com";
 const CALLBACK_PORT = 59653;
 const CALLBACK_PATH = "/callback";
-const TOKEN_PATH = "/auth/cli/token";
+const TOKEN_PATH = "/exa.seat_management_pb.SeatManagementService/ExchangePKCEAuthorizationCode";
 const FALLBACK_EXPIRES_MS = 365 * 24 * 60 * 60 * 1000;
 
 interface DevinPKCEParams {
@@ -38,14 +38,14 @@ class DevinOAuthFlow extends OAuthCallbackFlow {
 		return crypto.randomUUID();
 	}
 
-	async generateAuthUrl(state: string, _redirectUri: string): Promise<{ url: string; instructions?: string }> {
+	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		this.#pkce = await generatePKCE();
 		const params = new URLSearchParams({
+			redirect_uri: redirectUri,
 			state,
 			prompt: "select_account",
 			code_challenge: this.#pkce.challenge,
 			code_challenge_method: "S256",
-			cli_pkce_marker: "1",
 		});
 
 		return {
@@ -83,10 +83,11 @@ export async function exchangeDevinCliToken(
 		headers: {
 			Accept: "application/json",
 			"Content-Type": "application/json",
+			"Connect-Protocol-Version": "1",
 		},
 		body: JSON.stringify({
-			code: authorizationCode,
-			code_verifier: codeVerifier,
+			authorizationCode,
+			codeVerifier,
 		}),
 	});
 
@@ -99,14 +100,14 @@ export async function exchangeDevinCliToken(
 		});
 	}
 
-	const data = (await response.json()) as { token?: unknown };
-	if (typeof data.token !== "string" || data.token.length === 0) {
+	const data = (await response.json()) as { apiKey?: unknown };
+	if (typeof data.apiKey !== "string" || data.apiKey.length === 0) {
 		throw new AIError.OAuthError("Devin CLI token exchange returned an empty token", {
 			kind: "validation",
 			provider: "devin",
 		});
 	}
-	return data.token;
+	return data.apiKey;
 }
 
 // A malformed or non-JWT Devin token keeps the conservative long-lived

@@ -1,19 +1,19 @@
 import { describe, expect, it } from "bun:test";
 import { create, toBinary } from "@bufbuild/protobuf";
+import { CONNECT_END_STREAM_FLAG, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 import {
 	ChatToolCallSchema,
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/codeium_common_pb/codeium_common_pb";
 
-function frameConnectMessage(payload: Uint8Array): Uint8Array {
+function frameConnectMessage(payload: Uint8Array, flags = 0): Uint8Array {
 	const out = new Uint8Array(5 + payload.length);
 	const view = new DataView(out.buffer);
-	view.setUint8(0, 0);
+	view.setUint8(0, flags);
 	view.setUint32(1, payload.length, false);
 	out.set(payload, 5);
 	return out;
@@ -45,15 +45,13 @@ const context: Context = { messages: [{ role: "user", content: "call tool", time
 
 describe("streamDevin args streaming", () => {
 	it("throttles tiny mid-stream arg reparses but flushes final args", async () => {
-		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 		const chunks = [
 			toolCallDelta(`{"agent":"task","note":"initial"`),
 			toolCallDelta(`{"agent":"task","note":"initial","step":1`),
 			toolCallDelta(`{"agent":"task","note":"initial","step":12`, StopReason.FUNCTION_CALL),
+			frameConnectMessage(new Uint8Array(0), CONNECT_END_STREAM_FLAG),
 		];
-		const fetchImpl = (async (input: string | URL | Request) => {
-			const url = String(input);
-			if (url.includes("GetUserJwt")) return new Response(authPayload);
+		const fetchImpl: FetchImpl = async () => {
 			let index = 0;
 			return new Response(
 				new ReadableStream<Uint8Array>({
@@ -66,7 +64,7 @@ describe("streamDevin args streaming", () => {
 				}),
 				{ status: 200 },
 			);
-		}) as typeof fetch;
+		};
 
 		const stream = streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl });
 		const snapshots: unknown[] = [];
