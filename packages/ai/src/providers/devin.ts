@@ -659,31 +659,33 @@ async function openDevinChatResponse(
 	request.once("response", resolve);
 	const onAbort = () => request.destroy(new AIError.AbortError());
 	options?.signal?.addEventListener("abort", onAbort, { once: true });
+	const close = () => {
+		options?.signal?.removeEventListener("abort", onAbort);
+		request.close();
+		client.close();
+	};
 	request.end(frame);
 
 	let responseHeaders: http2.IncomingHttpHeaders;
 	try {
 		responseHeaders = await promise;
 	} catch (error) {
-		request.close();
-		client.close();
+		close();
 		throw error;
 	}
 	const status = Number(responseHeaders[":status"] ?? 0);
 	if (status < 200 || status >= 300) {
-		const body = await readDevinH2Body(request);
-		request.close();
-		client.close();
-		throw new AIError.DevinApiError(`Devin API error ${status}: ${body}`, status);
+		try {
+			const body = await readDevinH2Body(request);
+			throw new AIError.DevinApiError(`Devin API error ${status}: ${body}`, status);
+		} finally {
+			close();
+		}
 	}
 
 	return {
 		body: h2ResponseChunks(request, baseUrl),
-		close: () => {
-			options?.signal?.removeEventListener("abort", onAbort);
-			request.close();
-			client.close();
-		},
+		close,
 	};
 }
 

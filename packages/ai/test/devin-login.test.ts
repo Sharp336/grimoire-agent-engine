@@ -9,7 +9,7 @@ describe("Devin CLI login", () => {
 		const fetchImpl: FetchImpl = async (url, init) => {
 			requestUrl = String(url);
 			requestInit = init;
-			return new Response(JSON.stringify({ token: "devin-jwt" }), {
+			return new Response(JSON.stringify({ apiKey: "devin-api-key" }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
 			});
@@ -17,18 +17,19 @@ describe("Devin CLI login", () => {
 
 		const token = await exchangeDevinCliToken("callback-code", "pkce-verifier", fetchImpl);
 
-		expect(token).toBe("devin-jwt");
+		expect(token).toBe("devin-api-key");
 		expect(requestUrl).toBe(
-			"https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode",
+			"https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangePKCEAuthorizationCode",
 		);
 		expect(requestInit?.method).toBe("POST");
 		expect(requestInit?.headers).toEqual({
 			Accept: "application/json",
 			"Content-Type": "application/json",
+			"Connect-Protocol-Version": "1",
 		});
 		expect(JSON.parse(String(requestInit?.body))).toEqual({
-			code: "callback-code",
-			code_verifier: "pkce-verifier",
+			authorizationCode: "callback-code",
+			codeVerifier: "pkce-verifier",
 		});
 	});
 });

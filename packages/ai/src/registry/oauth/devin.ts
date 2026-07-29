@@ -9,7 +9,7 @@ const DEVIN_WEBAPP_URL = "https://app.devin.ai";
 const DEVIN_API_URL = "https://server.codeium.com";
 const CALLBACK_PORT = 59653;
 const CALLBACK_PATH = "/callback";
-const TOKEN_PATH = "/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode";
+const TOKEN_PATH = "/exa.seat_management_pb.SeatManagementService/ExchangePKCEAuthorizationCode";
 const FALLBACK_EXPIRES_MS = 365 * 24 * 60 * 60 * 1000;
 
 interface DevinPKCEParams {
@@ -82,10 +82,11 @@ export async function exchangeDevinCliToken(
 		headers: {
 			Accept: "application/json",
 			"Content-Type": "application/json",
+			"Connect-Protocol-Version": "1",
 		},
 		body: JSON.stringify({
-			code: authorizationCode,
-			code_verifier: codeVerifier,
+			authorizationCode,
+			codeVerifier,
 		}),
 	});
 
@@ -98,14 +99,14 @@ export async function exchangeDevinCliToken(
 		});
 	}
 
-	const data = (await response.json()) as { token?: unknown };
-	if (typeof data.token !== "string" || data.token.length === 0) {
+	const data = (await response.json()) as { apiKey?: unknown };
+	if (typeof data.apiKey !== "string" || data.apiKey.length === 0) {
 		throw new AIError.OAuthError("Devin CLI token exchange returned an empty token", {
 			kind: "validation",
 			provider: "devin",
 		});
 	}
-	return data.token;
+	return data.apiKey;
 }
 
 function getTokenExpiry(token: string): number {
