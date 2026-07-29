@@ -131,13 +131,34 @@ describe("reconcileGuestSnapshotHostState", () => {
 		now += 5_000;
 		expect(statusLine.getActiveMs()).toBe(5_000);
 
+		const ensureLoadingAnimation = mock(() => {});
 		const ctx: GuestSnapshotActivityReconcilerCtx = {
 			statusLine,
 			loadingAnimation: undefined,
+			ensureLoadingAnimation,
 		};
 		reconcileGuestSnapshotHostState(ctx, false);
 		const stoppedAt = statusLine.getActiveMs();
 		now += 60_000;
 		expect(statusLine.getActiveMs()).toBe(stoppedAt);
+		expect(ensureLoadingAnimation).not.toHaveBeenCalled();
+	});
+
+	it("starts the working loader when a state frame reports the host streaming", () => {
+		// Regression (F4): a guest that missed the earlier `agent_start` — most
+		// often a reconnect dropped it mid-stream — showed no spinner while the
+		// host kept working, so the loader vanished mid-turn. The host builds
+		// its `state` frame at fire time, so `isStreaming` is never stale here.
+		const statusLine = new StatusLineComponent(makeSession());
+		const markActivityStart = vi.spyOn(statusLine, "markActivityStart");
+		const ensureLoadingAnimation = mock(() => {});
+		const ctx: GuestSnapshotActivityReconcilerCtx = {
+			statusLine,
+			loadingAnimation: undefined,
+			ensureLoadingAnimation,
+		};
+		reconcileGuestSnapshotHostState(ctx, true);
+		expect(markActivityStart).toHaveBeenCalledTimes(1);
+		expect(ensureLoadingAnimation).toHaveBeenCalledTimes(1);
 	});
 });

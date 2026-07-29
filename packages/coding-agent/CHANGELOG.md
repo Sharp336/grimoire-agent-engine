@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the TUI collab guest never starting its loader when it joins or reconnects mid-turn: every host `state` frame now reconciles liveness in both directions.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
