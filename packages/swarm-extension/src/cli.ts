@@ -119,7 +119,7 @@ await stateTracker.init([...def.agents.keys()], def.targetCount, def.mode);
 // Auth + settings
 const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
-const settings = Settings.isolated();
+const settings = await Settings.init({ cwd: projectDir });
 
 // Progress display
 let lastProgressDump = 0;

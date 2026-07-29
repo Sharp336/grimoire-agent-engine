@@ -160,8 +160,9 @@ describe("G1 — Process presence: relay-link discovery", () => {
 // G2 — Dashboard → control plane: gate submit (known-open)
 // ============================================================================
 
-it.todo(
+it.skip(
 	"G2: gate-response command socket delivery — broker has no state-dir bridge; delivery is a deferred seam",
+	() => { /* deferred */ },
 );
 
 // ============================================================================
