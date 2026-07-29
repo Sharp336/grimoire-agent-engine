@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Turn recovery now classifies a failed turn that already streamed visible (non-whitespace) assistant text as replay-unsafe, so credential rotation and model fallback no longer re-stream duplicated output. Thinking-only and whitespace-only partial turns remain retriable.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
