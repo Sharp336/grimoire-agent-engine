@@ -402,17 +402,21 @@ async function canonicalNewPath(target: string): Promise<string> {
 	return canonical;
 }
 
-export type ArtifactPathComparisonMode = "platform" | "case-insensitive";
+
 
 export interface ResolveArtifactPathOptions {
-	comparisonMode?: ArtifactPathComparisonMode;
 	artifactSlug?: () => string;
+	platform?: () => NodeJS.Platform;
 }
 
-function pathsAlias(left: string, right: string, comparisonMode: ArtifactPathComparisonMode): boolean {
+function caselessFilesystem(platform: NodeJS.Platform): boolean {
+	return platform === "darwin" || platform === "win32";
+}
+
+function pathsAlias(left: string, right: string, caseless: boolean): boolean {
 	const normalizedLeft = normalizePathForComparison(left).normalize("NFC");
 	const normalizedRight = normalizePathForComparison(right).normalize("NFC");
-	if (comparisonMode === "case-insensitive" || (comparisonMode === "platform" && process.platform === "darwin")) {
+	if (caseless) {
 		return (
 			normalizedLeft.toUpperCase().toLowerCase().normalize("NFC") ===
 			normalizedRight.toUpperCase().toLowerCase().normalize("NFC")
@@ -436,16 +440,15 @@ export async function resolveArtifactPaths(
 		await fs.promises.realpath(path.dirname(sourceAbsolute)),
 		path.basename(sourceAbsolute),
 	);
-	const comparisonMode = options.comparisonMode ?? "platform";
+	const caseless = caselessFilesystem(options.platform?.() ?? process.platform);
 	const forbidden = [canonicalSource, `${canonicalSource}-wal`, `${canonicalSource}-shm`];
 	assertInvariant(
 		!forbidden.some(
-			forbiddenPath =>
-				pathsAlias(candidate, forbiddenPath, comparisonMode) || pathsAlias(backup, forbiddenPath, comparisonMode),
+			forbiddenPath => pathsAlias(candidate, forbiddenPath, caseless) || pathsAlias(backup, forbiddenPath, caseless),
 		),
 		"Repair artifact collides with source triplet",
 	);
-	assertInvariant(!pathsAlias(candidate, backup, comparisonMode), "Candidate and backup paths collide");
+	assertInvariant(!pathsAlias(candidate, backup, caseless), "Candidate and backup paths collide");
 	return { backup, candidate };
 }
 
