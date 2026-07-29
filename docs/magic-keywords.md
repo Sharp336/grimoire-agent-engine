@@ -8,7 +8,7 @@ Magic keywords are standalone words in a user prompt that add a hidden instructi
 |---|---|
 | `ultrathink` | Asks the agent to reason carefully through a multi-step task. When automatic thinking is active, it also selects the highest reasoning effort supported by the current model for that turn. |
 | `orchestrate` | Switches the agent to the multi-agent orchestration contract: scope the full task, delegate substantial independent work in parallel, verify each phase, and continue until the request is complete. |
-| `workflowz` | Asks the agent to build and run a deterministic multi-subagent workflow with the `task` tool. It is intended for broad research, reviews, migrations, or other work that benefits from parallel coverage. The keyword only adds its instruction when `task` is available in the active tool set. |
+| `workflowz` | Asks the agent to build and run a deterministic multi-subagent workflow. It uses the session-durable `workflow` tool for static dependency graphs and `eval` for dynamic one-turn orchestration. It is intended for broad research, reviews, migrations, or other work that benefits from parallel coverage. The keyword only adds its instruction when Task-backed orchestration is available in the active tool set. |
 
 Use the keyword anywhere in the prose of the prompt:
 

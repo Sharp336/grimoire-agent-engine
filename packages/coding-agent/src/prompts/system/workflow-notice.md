@@ -1,5 +1,7 @@
 <system-notice>
-The user's message above contains the **workflowz** keyword: drive this task as a deterministic multi-subagent workflow. Author the orchestration in the `eval` tool and fan out subagents — to be comprehensive (decompose and cover in parallel), to be confident (independent perspectives and adversarial checks before you commit), or to take on scale one context can't hold (audits, migrations, broad sweeps). This overrides any default tendency to do the whole task inline when fanning out would be more thorough.
+The user's message above contains the **workflowz** keyword: drive this task as a deterministic multi-subagent workflow. Fan out subagents — to be comprehensive (decompose and cover in parallel), to be confident (independent perspectives and adversarial checks before you commit), or to take on scale one context can't hold (audits, migrations, broad sweeps). This overrides any default tendency to do the whole task inline when fanning out would be more thorough.
+
+Use the session-durable `workflow` tool when later nodes have explicit dependencies whose status must survive another turn or a process restart. Use `eval` for one-turn dynamic orchestration, especially when ordinary code needs to inspect, filter, or reshape intermediate results before deciding the next calls. If `workflow` is mounted as a discoverable device, invoke it through `write xd://workflow`.
 
 <when>
 Worth it when the task benefits from decomposition + parallel coverage, or from independent/adversarial cross-checking before you commit. For a quick lookup or single edit, just do it directly — don't spin up agents. Scout inline FIRST (list the files, scope the diff, find the call sites) to discover the work-list, then fan out over it — you don't need to know the shape before the *task*, only before the *fan-out*. Common shapes, each a well-scoped `eval` call you can chain across turns:
@@ -20,7 +22,7 @@ State persists across eval calls, so scout in one call and fan out in the next. 
 - `log(message)` — emit a progress line above the status tree. `phase(title)` — start a phase; the status lines that follow group under it.
 - `budget` — `budget.total` (output-token ceiling, or `None` when none is set), `budget.spent()` (tokens spent this turn — main loop + eval subagents), `budget.remaining()` (`math.inf` when total is `None`), `budget.hard` (whether it's enforced). A ceiling is set by the user: `+Nk` in their message is advisory (you self-limit via `budget.remaining()`), `+Nk!` (or Goal Mode) is hard — `agent()` refuses to spawn once spent reaches it. Gate loops on `budget.total` first, since it's `None` when the user set no budget.
 
-Everything runs INLINE and synchronously inside the eval call — no background mode, no resume, no separate progress app. Each eval call is one well-scoped fan-out; chain several across calls and turns for multi-phase work, reading each result before you decide the next phase.
+Everything in `eval` runs INLINE and synchronously inside the eval call — no background mode, no resume, no separate progress app. Each eval call is one well-scoped fan-out; chain several across calls and turns for dynamic multi-phase work, or materialize a static dependency graph with `workflow` when restart-safe state matters.
 </helpers>
 
 <structure>

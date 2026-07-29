@@ -404,6 +404,7 @@ ${chalk.bold("Available Tools (default-enabled unless noted):")}
   browser       - Browser automation (Puppeteer)
   computer      - Native host desktop capture and input (disabled by default)
   task          - Launch sub-agents for parallel tasks
+  workflow      - Run session-durable dependency graphs through Task
   todo          - Manage todo/task lists
   web_search    - Search the web
   ask           - Ask user questions (interactive mode only)

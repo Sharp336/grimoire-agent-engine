@@ -7,6 +7,8 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/task.md`
 - Key collaborators:
   - `packages/coding-agent/src/task/types.ts` — dynamic schema, progress/result types, output caps.
+  - `packages/coding-agent/src/task/dispatch-contract.ts` — shared spawn validation and normalization.
+  - `packages/coding-agent/src/task/dispatch-service.ts` — shared policy preflight plus settled internal dispatch for durable schedulers.
   - `packages/coding-agent/src/task/discovery.ts` — discover project/user/plugin/bundled agents.
   - `packages/coding-agent/src/task/agents.ts` — bundled agent definitions and frontmatter parsing.
   - `packages/coding-agent/src/task/executor.ts` — create child sessions, run subagents, collect output, hand finished sessions to the lifecycle manager.
@@ -77,7 +79,7 @@ Artifacts and side channels:
 
 ## Flow
 1. `TaskTool.create(...)` discovers agents once per cwd through a process-level memo (`discoverAgentsForCreate`) to render the dynamic prompt description.
-2. `execute(...)` repairs raw params (`repairTaskParams`), then validates: `schema` is always rejected; `tasks`/`context` are rejected unless `task.batch` is on; batch calls need a non-empty `tasks` (a `task` per item, unique provided names), a non-empty shared `context`, and no top-level `task` alongside `tasks`; flat calls need `task`. The call is then normalized into its spawn list (`resolveSpawnItems`).
+2. `execute(...)` repairs raw params (`repairTaskParams`), then validates: `schema` is always rejected; `tasks`/`context` are rejected unless `task.batch` is on; batch calls need a non-empty `tasks` (a `task` per item, unique provided names), a non-empty shared `context`, and no top-level `task` alongside `tasks`; flat calls need `task`. The call is then normalized into its spawn list (`resolveSpawnItems`) and all policies are resolved through the session's shared `TaskDispatchService` before any item launches.
 3. Per-item execution split: items whose agent type declares `blocking: true` run inline; the rest become background jobs. The whole call runs sync when `async.enabled=false`, the session has no `AsyncJobManager` (orphaned host), or every item is blocking; inline spawns run through `#executeSync(...)` under the session-scoped semaphore.
 4. Background execution (any non-blocking item with `async.enabled=true` and an `AsyncJobManager`):
    - agent ids are allocated up front via `AgentOutputManager.allocate(...)` — each item's `name`, or a generated AdjectiveNoun name — one per spawn;

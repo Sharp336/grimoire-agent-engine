@@ -29,11 +29,13 @@ import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
+import type { TaskDispatchService } from "../task/dispatch-service";
 import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";
+import { WorkflowTool } from "../workflows/tools/workflow-tool";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
@@ -72,6 +74,7 @@ export * from "../lsp";
 export * from "../session/streaming-output";
 export * from "../task";
 export * from "../web/search";
+export * from "../workflows";
 export * from "./ask";
 export * from "./ast-edit";
 export * from "./ast-grep";
@@ -282,6 +285,8 @@ export interface ToolSession {
 	modelRegistry?: import("../config/model-registry").ModelRegistry;
 	/** Agent output manager for unique agent:// IDs across task invocations */
 	agentOutputManager?: AgentOutputManager;
+	/** Shared Task policy/concurrency/isolation dispatch used by durable internal schedulers. */
+	taskDispatchService?: TaskDispatchService;
 	/**
 	 * Async job manager scoped to this session.
 	 *
@@ -422,6 +427,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	task: s => TaskTool.create(s),
+	workflow: WorkflowTool.createIf,
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
@@ -528,6 +534,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Auto-include AST counterparts when their text-based sibling is present.
 	// Restricted callers own the active list and must not have it widened.
 	if (requestedTools && !restrictToolNames) {
+		if (
+			requestedTools.includes("workflow") &&
+			!requestedTools.includes("task") &&
+			session.sessionManager &&
+			(session.taskDepth ?? 0) === 0
+		) {
+			requestedTools.push("task");
+		}
 		if (goalModeActive && !requestedTools.includes("goal")) {
 			requestedTools.push("goal");
 		}
@@ -626,6 +640,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
+		}
+		if (name === "workflow") {
+			return (
+				!restrictToolNames &&
+				(session.taskDepth ?? 0) === 0 &&
+				canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0)
+			);
 		}
 		return true;
 	};

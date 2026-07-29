@@ -596,6 +596,32 @@ describe("task.batch spawning", () => {
 		]);
 	});
 
+	it("settles a programmatic spawn through Task even when model-facing batches are disabled", async () => {
+		mockDiscovery();
+		let capturedContext: string | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			capturedContext = options.context;
+			return makeResult(options.id ?? "?");
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: { "async.enabled": true, "task.batch": false },
+			}),
+		);
+		const result = await tool.dispatchService.executeSettledSpawn("workflow:research", {
+			context: "Durable workflow objective and dependency references.",
+			item: { name: "WorkflowResearch", agent: "task", task: "Research the assigned question." },
+		});
+
+		expect(result.details?.results.map(item => item.id)).toEqual(["WorkflowResearch"]);
+		expect(result.details?.async).toBeUndefined();
+		expect(manager.getJob("WorkflowResearch")).toBeUndefined();
+		expect(capturedContext).toBe("Durable workflow objective and dependency references.");
+	});
+
 	it("settles the batch async aggregate when a queued spawn is cancelled mid-flight", async () => {
 		mockDiscovery();
 		const started: string[] = [];

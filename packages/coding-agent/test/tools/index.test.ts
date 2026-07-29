@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { SessionEntry } from "../../src/session/session-entries";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -21,6 +22,29 @@ function createSettingsWithOverrides(overrides: Partial<Record<SettingPath, unkn
 		"bashInterceptor.enabled": true,
 		...overrides,
 	});
+}
+
+function createSessionManager(): NonNullable<ToolSession["sessionManager"]> {
+	const entries: SessionEntry[] = [];
+	let nextId = 0;
+	return {
+		appendCustomEntry: (customType, data) => {
+			const id = `entry-${++nextId}`;
+			entries.push({
+				type: "custom",
+				id,
+				parentId: entries.at(-1)?.id ?? null,
+				timestamp: new Date(nextId).toISOString(),
+				customType,
+				data,
+			});
+			return id;
+		},
+		ensureOnDisk: async () => {},
+		flush: async () => {},
+		getBranch: () => entries,
+		getEntries: () => entries,
+	};
 }
 
 function createActiveGoalState() {
@@ -171,6 +195,22 @@ describe("createTools", () => {
 		const names = tools.map(t => t.name);
 
 		expect(names).toEqual(["yield"]);
+	});
+
+	it("registers workflow only for persistent top-level sessions", async () => {
+		const persistent = createTestSession({ sessionManager: createSessionManager() });
+		expect((await createTools(persistent, ["workflow"])).map(tool => tool.name)).toEqual(["workflow", "task"]);
+
+		const nested = createTestSession({ sessionManager: createSessionManager(), taskDepth: 1 });
+		expect(await createTools(nested, ["workflow"])).toEqual([]);
+
+		const restricted = createTestSession({
+			sessionManager: createSessionManager(),
+			restrictToolNames: true,
+		});
+		expect(await createTools(restricted, ["workflow"])).toEqual([]);
+
+		expect(await createTools(createTestSession(), ["workflow"])).toEqual([]);
 	});
 
 	it("includes yield tool when required", async () => {

@@ -111,6 +111,9 @@
 ### Removed
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
+### Added
+
+- Added a session-durable `workflow` tool for static dependency graphs, with Task-backed concurrent execution, restart-safe node state, explicit retry, cancellation, and persisted `agent://` / `history://` references ([#6947](https://github.com/can1357/oh-my-pi/issues/6947)).
 
 ## [17.1.8] - 2026-07-28
 

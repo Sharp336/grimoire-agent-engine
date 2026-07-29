@@ -107,7 +107,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - Authoring + registry: [custom-tools.md](../../docs/custom-tools.md)
 - Output/artifacts: [blob-artifact-architecture.md](../../docs/blob-artifact-architecture.md)
 - Gating/approval: [approval-mode.md](../../docs/approval-mode.md), [resolve-tool-runtime.md](../../docs/resolve-tool-runtime.md)
-- Per-tool reference: [`docs/tools/`](../../docs/tools/) — `read`, `write`, `edit`, `ast-edit`, `ast-grep`, `grep`, `glob`, `bash`, `eval`, `hub`, `lsp`, `debug`, `task`, `web_search`, `browser`, `github`, `inspect_image`, `ask`, `todo`, `recall`, `retain`, `reflect`, `checkpoint`, `rewind`
+- Per-tool reference: [`docs/tools/`](../../docs/tools/) — `read`, `write`, `edit`, `ast-edit`, `ast-grep`, `grep`, `glob`, `bash`, `eval`, `hub`, `lsp`, `debug`, `task`, `workflow`, `web_search`, `browser`, `github`, `inspect_image`, `ask`, `todo`, `recall`, `retain`, `reflect`, `checkpoint`, `rewind`
 
 ### Execution backends
 - [bash-tool-runtime.md](../../docs/bash-tool-runtime.md), [tools/bash.md](../../docs/tools/bash.md)
@@ -115,7 +115,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - [tools/debug.md](../../docs/tools/debug.md), [tools/lsp.md](../../docs/tools/lsp.md), [lsp-config.md](../../docs/lsp-config.md)
 
 ### Task delegation and subagents
-- [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md)
+- [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md), [tools/workflow.md](../../docs/tools/workflow.md)
 - [collab.md](../../docs/collab.md), [tools/hub.md](../../docs/tools/hub.md)
 
 ### Web I/O and retrieval

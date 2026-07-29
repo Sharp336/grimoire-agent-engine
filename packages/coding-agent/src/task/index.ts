@@ -23,7 +23,6 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
-import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
@@ -45,12 +44,14 @@ import type { AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
+import { resolveSpawnItems, spawnParamsFor, validateSpawnParams } from "./dispatch-contract";
+import { TaskDispatchService } from "./dispatch-service";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
-import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import { runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -237,97 +238,6 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
  * policy later, in `spawnParamsFor`. Returns a problem description, or
  * undefined when valid.
  */
-
-/** Reject an out-of-range `effort` selector on internal/stale-transcript calls that bypass the wire schema. */
-function validateEffort(effort: TaskEffort | undefined, label: string): string | undefined {
-	if (effort === undefined || TASK_EFFORTS.includes(effort)) return undefined;
-	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
-}
-
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
-	const hasTask = typeof params.task === "string" && params.task.trim() !== "";
-	const tasks = params.tasks;
-	if (batchEnabled && tasks !== undefined) {
-		if (!Array.isArray(tasks) || tasks.length === 0) {
-			return "Missing `tasks`. Provide at least one task item ({ name?, agent?, task }).";
-		}
-		if (hasTask) {
-			return "Top-level `task` is not part of the batch shape. Put the work in `tasks[]` items.";
-		}
-		for (let i = 0; i < tasks.length; i++) {
-			const item = tasks[i];
-			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
-				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
-			}
-			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
-			if (effortError) return effortError;
-		}
-		const seen = new Map<string, string>();
-		for (const item of tasks) {
-			const name = item.name?.trim();
-			if (!name) continue;
-			const key = name.toLowerCase();
-			const existing = seen.get(key);
-			if (existing !== undefined) {
-				return `Duplicate task name ${existing === name ? `\`${name}\`` : `\`${existing}\` / \`${name}\``}. Provided names must be unique within a call (case-insensitive).`;
-			}
-			seen.set(key, name);
-		}
-		if (typeof params.context !== "string" || params.context.trim() === "") {
-			return "Missing `context`. Provide the shared background for this batch — goal, constraints, and any contract the tasks share.";
-		}
-		return undefined;
-	}
-	if (!hasTask) {
-		return batchEnabled
-			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
-			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
-	}
-	return validateEffort(params.effort, "The call");
-}
-
-/**
- * Normalize a validated call into its spawn list: the `tasks[]` batch when
- * provided, otherwise the single top-level spawn. The flat form's `isolated`
- * flag is only materialized when the caller sent one — `#runSpawn`
- * distinguishes an absent key from an explicit value.
- */
-function resolveSpawnItems(params: TaskParams): TaskItem[] {
-	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
-		return params.tasks;
-	}
-	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
-	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
-	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
-	if ("effort" in params) item.effort = params.effort;
-	if ("isolated" in params) item.isolated = params.isolated;
-	return [item];
-}
-
-/**
- * Per-spawn params handed to the executor path: top-level call fields with the
- * item's identity substituted in. Each spawn's `agent` resolves here —
- * the item's own value, else `defaultAgent` from the session spawn policy.
- * `tasks` never leaks into a spawn; the shared `context` rides along
- * unchanged. Keys are only materialized when present — `#runSpawn`
- * distinguishes an absent `isolated` from an explicit one. The item's
- * `isolated` (batch form) wins over the top-level flag (flat form).
- */
-function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string): TaskParams {
-	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
-	if (item.name !== undefined) spawn.name = item.name;
-	if (item.task !== undefined) spawn.task = item.task;
-	if (params.context !== undefined) spawn.context = params.context;
-	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
-	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
-	if ("effort" in item) spawn.effort = item.effort;
-	if (item.isolated !== undefined) {
-		spawn.isolated = item.isolated;
-	} else if ("isolated" in params) {
-		spawn.isolated = params.isolated;
-	}
-	return spawn;
-}
 
 /** One sync-executed spawn: its item, position in the original call, and (for mixed calls) a pre-claimed agent id. */
 interface SyncSpawnRef {
@@ -571,6 +481,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	// so the task renders as ONE block that transitions in place — not a pending
 	// call frame stacked above the result frame. Mirrors `taskToolRenderer`.
 	readonly mergeCallAndResult = true;
+	readonly dispatchService: TaskDispatchService;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
 	/**
@@ -621,6 +532,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
+		this.dispatchService = new TaskDispatchService(
+			session,
+			(toolCallId, params, item, defaultAgent, signal, onUpdate) =>
+				this.#executeSyncFanout(toolCallId, params, [{ item, index: 0 }], defaultAgent, signal, onUpdate),
+		);
+		session.taskDispatchService = this.dispatchService;
 	}
 
 	#isBatchEnabled(): boolean {
@@ -642,30 +559,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	/**
-	 * Resolve the shared policy before detached work exists. The resulting
-	 * policy intentionally stays local: executor dispatch resolves again from
-	 * normalized task params rather than smuggling internal policy over the
-	 * task wire contract.
-	 */
-	#resolveSpawnPreflight(params: TaskParams) {
-		return resolveEffectiveSubagentPolicy({
-			session: this.session,
-			invocationKind: "task",
-			assignment: (params.task ?? "").trim(),
-			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
-			agent: params.agent,
-			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
-			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
-			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
-			blockedAgent: this.#blockedAgent,
-			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
-			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-			maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
-		});
-	}
-
-	/**
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
@@ -683,7 +576,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		const batchEnabled = this.#isBatchEnabled();
 		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
 		if (validationError) {
@@ -691,28 +583,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 
 		const spawnItems = resolveSpawnItems(params);
-		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
-		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
 		// Resolve every item before choosing an execution path. No executor or
 		// job manager may observe a batch unless every effective policy is valid.
-		const preflights = await Promise.all(
-			normalizedSpawnParams.map(async spawn => {
-				try {
-					return { policy: await this.#resolveSpawnPreflight(spawn) };
-				} catch (error) {
-					return { error: error instanceof StructuredSubagentError ? error.message : String(error) };
-				}
-			}),
-		);
-		const preflightFailures = preflights
-			.map((preflight, index) => ("error" in preflight ? { index, error: preflight.error } : undefined))
-			.filter((failure): failure is { index: number; error: string } => failure !== undefined);
-		if (preflightFailures.length > 0) {
+		const preflight = await this.dispatchService.preflight(params, spawnItems);
+		if (!preflight.ok) {
 			if (!batchEnabled) {
-				return createTaskModeError(`Task execution failed: ${preflightFailures[0]!.error}`);
+				return createTaskModeError(`Task execution failed: ${preflight.failures[0]!.error}`);
 			}
 			return createTaskModeError(
-				preflightFailures
+				preflight.failures
 					.map(({ index, error }) => {
 						const item = spawnItems[index]!;
 						return `Task ${item.name?.trim() || `#${index + 1}`} failed preflight: ${error}`;
@@ -720,7 +599,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					.join("\n"),
 			);
 		}
-		const policies = preflights.map(preflight => preflight.policy!);
+		const { defaultAgent, resolvedAgents, policies } = preflight;
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
 		// Execution mode is per item: an item whose agent type declares
@@ -1401,7 +1280,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
-		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
+		const context = params.context?.trim() || undefined;
 		let latestProgress: AgentProgress | undefined;
 		try {
 			const execution = await runStructuredSubagent({
