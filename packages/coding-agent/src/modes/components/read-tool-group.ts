@@ -43,27 +43,30 @@ export function readArgsCollapseIntoGroup(args: unknown): boolean {
 }
 
 /**
- * Return the collapsed read calls that can own a turn's usage row. Visible
- * assistant content and mixed-tool turns keep their usage as a standalone row
- * so the metrics are not misleadingly attributed to one tool.
+ * Return the collapsed read calls that can own a turn's usage row. Mixed-tool
+ * turns and visible content after a read keep the standalone row so request
+ * metrics retain their transcript ordering.
  */
 export function groupedReadUsageCallIds(message: AssistantMessage): string[] | undefined {
-	const hasVisibleContent = message.content.some(
-		content =>
-			content.type === "image" ||
-			(content.type === "text" && canonicalizeMessage(content.text)) ||
-			(content.type === "thinking" && canonicalizeMessage(content.thinking)),
-	);
-	if (hasVisibleContent) return undefined;
-
-	const toolCalls = message.content.filter(content => content.type === "toolCall");
-	if (
-		toolCalls.length === 0 ||
-		toolCalls.some(content => content.name !== "read" || !readArgsCollapseIntoGroup(content.arguments))
-	) {
-		return undefined;
+	const toolCallIds: string[] = [];
+	let sawToolCall = false;
+	for (const content of message.content) {
+		if (content.type === "toolCall") {
+			if (content.name !== "read" || !readArgsCollapseIntoGroup(content.arguments)) return undefined;
+			sawToolCall = true;
+			toolCallIds.push(content.id);
+			continue;
+		}
+		if (
+			sawToolCall &&
+			(content.type === "image" ||
+				(content.type === "text" && canonicalizeMessage(content.text)) ||
+				(content.type === "thinking" && canonicalizeMessage(content.thinking)))
+		) {
+			return undefined;
+		}
 	}
-	return toolCalls.map(content => content.id);
+	return toolCallIds.length > 0 ? toolCallIds : undefined;
 }
 
 type ReadRenderArgs = {
@@ -122,6 +125,7 @@ type ReadEntry = {
 };
 
 type ReadUsageRow = {
+	toolCallIds: readonly string[];
 	usage: Usage;
 	durationMs?: number;
 	ttftMs?: number;
@@ -325,6 +329,7 @@ function formatMergedSelectorParts(selectors: string[]): string {
 export class ReadToolGroupComponent extends Container implements ToolExecutionHandle {
 	#entries = new Map<string, ReadEntry>();
 	#usageRows = new Map<string, ReadUsageRow>();
+	#usageBatchByToolCallId = new Map<string, string>();
 	#text: Text;
 	#expanded = false;
 	#showContentPreview: boolean;
@@ -440,16 +445,18 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		ttftMs?: number,
 		timestamp?: number,
 	): boolean {
+		const attachedToolCallIds: string[] = [];
 		let anchorId: string | undefined;
-		for (let index = toolCallIds.length - 1; index >= 0; index--) {
-			const toolCallId = toolCallIds[index]!;
-			if (this.#entries.has(toolCallId)) {
-				anchorId = toolCallId;
-				break;
-			}
+		for (const toolCallId of toolCallIds) {
+			if (!this.#entries.has(toolCallId)) continue;
+			attachedToolCallIds.push(toolCallId);
+			anchorId = toolCallId;
 		}
 		if (!anchorId) return false;
-		this.#usageRows.set(anchorId, { usage, durationMs, ttftMs, timestamp });
+		for (const toolCallId of attachedToolCallIds) {
+			this.#usageBatchByToolCallId.set(toolCallId, anchorId);
+		}
+		this.#usageRows.set(anchorId, { toolCallIds: attachedToolCallIds, usage, durationMs, ttftMs, timestamp });
 		this.#updateDisplay();
 		return true;
 	}
@@ -544,27 +551,37 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#buildSummaryRows(targets: ReadDisplayTarget[]): ReadSummaryRow[] {
-		const selectorTargetsByBasePath = new Map<string, ReadDisplayTarget[]>();
+		const selectorTargetsByBasePathAndBatch = new Map<string, Map<string | undefined, ReadDisplayTarget[]>>();
 		for (const target of targets) {
 			if (!target.selector) continue;
-			const existing = selectorTargetsByBasePath.get(target.basePath);
+			let targetsByBatch = selectorTargetsByBasePathAndBatch.get(target.basePath);
+			if (!targetsByBatch) {
+				targetsByBatch = new Map<string | undefined, ReadDisplayTarget[]>();
+				selectorTargetsByBasePathAndBatch.set(target.basePath, targetsByBatch);
+			}
+			const batchId = this.#usageBatchByToolCallId.get(target.entry.toolCallId);
+			const existing = targetsByBatch.get(batchId);
 			if (existing) existing.push(target);
-			else selectorTargetsByBasePath.set(target.basePath, [target]);
+			else targetsByBatch.set(batchId, [target]);
 		}
 
-		const mergeableBasePaths = new Set<string>();
-		for (const [basePath, baseTargets] of selectorTargetsByBasePath) {
-			if (basePath && baseTargets.length > 1) {
-				mergeableBasePaths.add(basePath);
+		const mergedTargetsByTarget = new Map<ReadDisplayTarget, ReadDisplayTarget[]>();
+		for (const [basePath, targetsByBatch] of selectorTargetsByBasePathAndBatch) {
+			if (!basePath) continue;
+			for (const groupedTargets of targetsByBatch.values()) {
+				if (groupedTargets.length <= 1) continue;
+				for (const target of groupedTargets) {
+					mergedTargetsByTarget.set(target, groupedTargets);
+				}
 			}
 		}
 
-		const emittedMergedRows = new Set<string>();
+		const emittedMergedTargets = new Set<ReadDisplayTarget[]>();
 		const rows: ReadSummaryRow[] = [];
 		for (const target of targets) {
-			if (target.selector && mergeableBasePaths.has(target.basePath)) {
-				if (!emittedMergedRows.has(target.basePath)) {
-					const mergedTargets = selectorTargetsByBasePath.get(target.basePath) ?? [target];
+			const mergedTargets = mergedTargetsByTarget.get(target);
+			if (mergedTargets) {
+				if (!emittedMergedTargets.has(mergedTargets)) {
 					rows.push({
 						targetPath: `${target.basePath}:${formatMergedSelectorParts(
 							mergedTargets
@@ -574,7 +591,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						basePath: target.basePath,
 						targets: mergedTargets,
 					});
-					emittedMergedRows.add(target.basePath);
+					emittedMergedTargets.add(mergedTargets);
 				}
 				continue;
 			}
@@ -602,16 +619,26 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#usageRowsBySummaryRow(rows: ReadSummaryRow[]): Map<number, ReadUsageRow[]> {
-		const usageRowsByIndex = new Map<number, ReadUsageRow[]>();
-		for (const [toolCallId, usageRow] of this.#usageRows) {
-			for (let index = rows.length - 1; index >= 0; index--) {
-				const row = rows[index]!;
-				if (!row.targets.some(target => target.entry.toolCallId === toolCallId)) continue;
-				const usageRows = usageRowsByIndex.get(index);
-				if (usageRows) usageRows.push(usageRow);
-				else usageRowsByIndex.set(index, [usageRow]);
-				break;
+		const lastRowIndexByToolCallId = new Map<string, number>();
+		for (const [index, row] of rows.entries()) {
+			for (const target of row.targets) {
+				lastRowIndexByToolCallId.set(target.entry.toolCallId, index);
 			}
+		}
+
+		const usageRowsByIndex = new Map<number, ReadUsageRow[]>();
+		for (const usageRow of this.#usageRows.values()) {
+			let lastRowIndex: number | undefined;
+			for (const toolCallId of usageRow.toolCallIds) {
+				const index = lastRowIndexByToolCallId.get(toolCallId);
+				if (index !== undefined && (lastRowIndex === undefined || index > lastRowIndex)) {
+					lastRowIndex = index;
+				}
+			}
+			if (lastRowIndex === undefined) continue;
+			const usageRows = usageRowsByIndex.get(lastRowIndex);
+			if (usageRows) usageRows.push(usageRow);
+			else usageRowsByIndex.set(lastRowIndex, [usageRow]);
 		}
 		return usageRowsByIndex;
 	}

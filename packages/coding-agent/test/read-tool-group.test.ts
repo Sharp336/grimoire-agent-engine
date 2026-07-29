@@ -101,8 +101,8 @@ describe("ReadToolGroupComponent", () => {
 		const twoPath = path.resolve("/tmp/two.ts");
 		const threePath = path.resolve("/tmp/three.ts");
 		component.updateArgs({ path: onePath }, "read-one");
-		component.updateArgs({ path: twoPath }, "read-two");
-		component.updateArgs({ path: threePath }, "read-three");
+		component.updateArgs({ path: `${twoPath}:1-2,${threePath}:1-2` }, "read-two");
+		component.updateArgs({ path: `${twoPath}:3-4` }, "read-three");
 		component.updateResult({ content: [{ type: "text", text: "one" }] }, false, "read-one");
 		component.updateResult({ content: [{ type: "text", text: "two" }] }, false, "read-two");
 		component.updateResult({ content: [{ type: "text", text: "three" }] }, false, "read-three");
@@ -278,6 +278,35 @@ describe("ReadToolGroupComponent", () => {
 		const matches = rendered.split(`Read ${examplePath}:L10-L20`).length - 1;
 
 		expect(matches).toBe(1);
+	});
+
+	it("keeps usage below an inline preview when the summary row is suppressed", () => {
+		const component = new ReadToolGroupComponent({ showContentPreview: true });
+		const examplePath = path.resolve("/tmp/example.ts");
+		component.updateArgs({ path: examplePath }, "read-preview");
+		component.updateResult({ content: [{ type: "text", text: "line 1\nline 2" }] }, false, "read-preview");
+		component.attachUsage(
+			["read-preview"],
+			{
+				input: 1234,
+				output: 7,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1241,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			1000,
+			500,
+			new Date(2026, 0, 2, 3, 4, 5).getTime(),
+		);
+
+		const lines = Bun.stripANSI(component.render(120).join("\n")).split("\n");
+		const previewIndex = lines.findIndex(line => line.includes("line 2"));
+		const usageIndices = lines
+			.map((line, index) => (line.includes("2026-01-02 03:04:05") ? index : -1))
+			.filter(index => index >= 0);
+		expect(usageIndices).toHaveLength(1);
+		expect(usageIndices[0]).toBeGreaterThan(previewIndex);
 	});
 
 	it("links grouped summary paths to resolved filesystem paths and selector lines", () => {

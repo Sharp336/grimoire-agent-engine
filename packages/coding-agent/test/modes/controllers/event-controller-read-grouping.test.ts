@@ -135,7 +135,7 @@ describe("EventController read-group accretion", () => {
 	it("nests a read-only completion's usage inside the active group", async () => {
 		settings.set("display.showTokenUsage", true);
 		const { controller, chatContainer } = createFixture();
-		const message = assistantMessage([read("usage.ts:1-50")]);
+		const message = assistantMessage([thinking("Reviewing the target"), read("usage.ts:1-50")]);
 		message.usage = {
 			input: 1234,
 			output: 7,
@@ -156,6 +156,33 @@ describe("EventController read-group accretion", () => {
 			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
 		);
 		expect(usageBlocks).toEqual([group!]);
+	});
+
+	it("keeps usage standalone when visible content follows a read", async () => {
+		settings.set("display.showTokenUsage", true);
+		const { controller, chatContainer } = createFixture();
+		const message = assistantMessage([read("usage.ts:1-50"), thinking("Read complete")]);
+		message.usage = {
+			input: 1234,
+			output: 7,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1241,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
+
+		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
+
+		const [group] = readGroups(chatContainer);
+		expect(group).toBeDefined();
+		const usageBlocks = chatContainer.children.filter(component =>
+			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
+		);
+		expect(usageBlocks).toHaveLength(1);
+		expect(usageBlocks[0]).not.toBe(group!);
 	});
 
 	it("starts a new group after a completion that renders visible reasoning", async () => {
