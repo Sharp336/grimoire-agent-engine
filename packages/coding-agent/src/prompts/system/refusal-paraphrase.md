@@ -1,0 +1,1 @@
+Rewrite the user's request to preserve its legitimate intent while using clear, neutral wording that avoids a false-positive safety classifier refusal. Do not add capabilities, instructions, or claims. Return only the rewritten request.

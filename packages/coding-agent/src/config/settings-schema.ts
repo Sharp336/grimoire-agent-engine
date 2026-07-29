@@ -1507,6 +1507,32 @@ export const SETTINGS_SCHEMA = {
 			description: "Allow retry recovery to switch to configured fallback models",
 		},
 	},
+	"retry.refusalParaphrase": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Refusal Paraphrase",
+			description:
+				"On an Anthropic content refusal, paraphrase the triggering prompt with a fast model and retry once before falling back.",
+		},
+	},
+	"retry.refusalParaphraseRole": {
+		type: "enum",
+		values: ["tiny", "smol"] as const,
+		default: "smol",
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Refusal Paraphrase Model",
+			description: "Role used to rewrite a false-positive Anthropic refusal before one same-model retry.",
+			options: [
+				{ value: "tiny", label: "Tiny" },
+				{ value: "smol", label: "Smol" },
+			],
+		},
+	},
 	"retry.usageAwareFallback": {
 		type: "boolean",
 		default: false,
@@ -5587,6 +5613,8 @@ export interface RetrySettings {
 	baseDelayMs: number;
 	maxDelayMs: number;
 	modelFallback: boolean;
+	refusalParaphrase: boolean;
+	refusalParaphraseRole: "tiny" | "smol";
 	usageAwareFallback: boolean;
 	usageReservePct: number;
 	usageReservePolicy: "confirm" | "auto" | "fail-closed";
