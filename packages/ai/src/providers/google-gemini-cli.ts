@@ -4,7 +4,6 @@
  * Uses the Cloud Code Assist API endpoint to access Gemini and Claude models.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
@@ -12,9 +11,10 @@ import {
 	getAntigravityUserAgent,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import * as AIError from "../error";
+import { postH2Primary } from "../transport";
 import type {
 	Api,
 	AssistantMessage,
@@ -40,11 +40,9 @@ import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "./googl
 import {
 	convertMessages,
 	convertTools,
-	EMPTY_STREAM_BASE_DELAY_MS,
 	type GoogleThinkingLevel,
 	hasMeaningfulGoogleContent,
 	isThinkingPart,
-	MAX_EMPTY_STREAM_RETRIES,
 	mapStopReasonString,
 	mapToolChoice,
 	nextToolCallId,
@@ -554,16 +552,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				);
 			}
 			const baseUrl = model.baseUrl?.trim();
-			let endpoints: string[];
-			const providerState = isAntigravity
-				? getAntigravityProviderSessionState(options?.providerSessionState)
-				: undefined;
-
-			if (isAntigravity) {
-				endpoints = [ANTIGRAVITY_DAILY_ENDPOINT];
-			} else {
-				endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT];
-			}
+			const endpoint = baseUrl || (isAntigravity ? ANTIGRAVITY_DAILY_ENDPOINT : DEFAULT_ENDPOINT);
 
 			let requestBody = buildRequest(model, context, projectId, options, isAntigravity);
 			const replacementPayload = await options?.onPayload?.(requestBody, model);
@@ -882,153 +871,74 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				return hasMeaningfulGoogleContent(output);
 			};
 
-			let receivedContent = false;
+			started = false;
+			resetOutput();
 
-			for (let i = 0; i < endpoints.length; i++) {
-				const endpoint = endpoints[i];
-				const isLastEndpoint = i === endpoints.length - 1;
-				try {
-					started = false;
-					resetOutput();
-
-					// Per attempt: arm a pre-response (TTFT) timer, cleared the instant
-					// headers arrive so it never aborts the actively streaming body —
-					// an absolute `AbortSignal.timeout` would (issue #2422).
-					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
-					let response: Response;
-					try {
-						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-							method: "POST",
-							headers: requestHeaders,
-							body: requestBodyJson,
-							signal: watchdog.signal,
-							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
-							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: options?.fetch,
-							timeout: false,
-						});
-					} finally {
-						watchdog.clear();
-					}
-
-					if (!response.ok) {
-						if (AIError.isTransientStatus(response.status)) {
-							if (!isLastEndpoint) {
-								continue;
-							}
-						}
-						const errorText = await response.text();
-						const validationUrl = extractGoogleValidationUrl(errorText);
-						const errorMessage = validationUrl
-							? formatGoogleValidationRequiredMessage(
-									validationUrl,
-									"retry your request",
-									parsedCredentials.email,
-								)
-							: errorText;
-						throw createCloudCodeApiError(
-							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
-							response.status,
-							response.headers,
-						);
-					}
-
-					const requestUrl = response.url;
-					let currentResponse = response;
-
-					for (let emptyAttempt = 0; emptyAttempt <= MAX_EMPTY_STREAM_RETRIES; emptyAttempt++) {
-						if (options?.signal?.aborted) {
-							throw new AIError.AbortError("Request was aborted");
-						}
-
-						if (emptyAttempt > 0) {
-							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
-							try {
-								await scheduler.wait(backoffMs, { signal: options?.signal });
-							} catch {
-								throw new AIError.AbortError("Request was aborted");
-							}
-
-							if (!requestUrl) {
-								throw new AIError.ConfigurationError("Missing request URL");
-							}
-
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
-								method: "POST",
-								headers: requestHeaders,
-								body: requestBodyJson,
-								signal: options?.signal,
-							});
-
-							if (!currentResponse.ok) {
-								const retryErrorText = await currentResponse.text();
-								throw createCloudCodeApiError(
-									`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`,
-									currentResponse.status,
-									currentResponse.headers,
-								);
-							}
-						}
-
-						const streamed = await streamResponse(currentResponse);
-						if (output.stopReason !== "stop" || streamed) {
-							receivedContent = streamed;
-							break;
-						}
-
-						if (emptyAttempt < MAX_EMPTY_STREAM_RETRIES) {
-							resetOutput();
-						}
-					}
-
-					if (output.stopReason === "aborted" || output.stopReason === "error") {
-						throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
-							provider: model.provider,
-							kind: "output",
-						});
-					}
-
-					if (!receivedContent) {
-						throw new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
-							provider: model.provider,
-							kind: "empty-body",
-						});
-					}
-
-					if (options?.signal?.aborted) {
-						throw new AIError.AbortError("Request was aborted");
-					}
-
-					if (!sawFinishReason) {
-						throw new AIError.ProviderResponseError(
-							"Cloud Code Assist stream ended without a finish reason (connection dropped or response truncated)",
-							{ provider: model.provider, kind: "incomplete-stream" },
-						);
-					}
-
-					// Commit after a fully successful attempt (content + finish reason);
-					// used as the next request's last_execution_id. Overwrite even when
-					// undefined so a response without an id can't leave a stale value.
-					if (providerState) {
-						providerState.lastExecutionId = lastResponseId;
-					}
-					break;
-				} catch (error) {
-					const status = extractHttpStatusFromError(error);
-					if (
-						!isLastEndpoint &&
-						!started &&
-						(AIError.isTransientStatus(status) ||
-							(status === undefined &&
-								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
-								AIError.retriable(AIError.classify(error))))
-					) {
-						continue;
-					}
-					throw error;
+			const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+			let response: Response;
+			try {
+				const url = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
+				if (isAntigravity) {
+					const transport = await postH2Primary({
+						url,
+						provider: model.provider,
+						headers: requestHeaders,
+						body: new TextEncoder().encode(requestBodyJson),
+						signal: watchdog.signal,
+						fetchOverride: options?.fetch,
+					});
+					response = new Response(transport.body, { status: transport.status, headers: transport.headers });
+				} else {
+					response = await fetchWithRetry(url, {
+						method: "POST",
+						headers: requestHeaders,
+						body: requestBodyJson,
+						signal: watchdog.signal,
+						maxAttempts: MAX_RETRIES + 1,
+						defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+						maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+						fetch: options?.fetch,
+						timeout: false,
+					});
 				}
+			} finally {
+				watchdog.clear();
 			}
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				const validationUrl = extractGoogleValidationUrl(errorText);
+				const errorMessage = validationUrl
+					? formatGoogleValidationRequiredMessage(validationUrl, "retry your request", parsedCredentials.email)
+					: errorText;
+				throw createCloudCodeApiError(
+					`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
+					response.status,
+					response.headers,
+				);
+			}
+
+			const receivedContent = await streamResponse(response);
+			if (output.stopReason === "aborted" || output.stopReason === "error") {
+				throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+					provider: model.provider,
+					kind: "output",
+				});
+			}
+			if (!receivedContent) {
+				throw new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
+					provider: model.provider,
+					kind: "empty-body",
+				});
+			}
+			if (options?.signal?.aborted) throw new AIError.AbortError("Request was aborted");
+			if (!sawFinishReason) {
+				throw new AIError.ProviderResponseError(
+					"Cloud Code Assist stream ended without a finish reason (connection dropped or response truncated)",
+					{ provider: model.provider, kind: "incomplete-stream" },
+				);
+			}
+			if (providerState) providerState.lastExecutionId = lastResponseId;
 
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {

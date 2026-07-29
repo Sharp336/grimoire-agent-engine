@@ -620,9 +620,18 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 					for (const frame of frames) {
 						if (frame.endOfStream) {
-							const trailerError = readConnectTrailerError(frame.payload);
-							if (trailerError) {
-								endStreamError = cursorConnectError(trailerError.code, trailerError.message);
+							try {
+								const trailerError = readConnectTrailerError(frame.payload);
+								if (trailerError) {
+									endStreamError = cursorConnectError(trailerError.code, trailerError.message);
+									settleH2(endStreamError);
+									h2Request?.close();
+								}
+							} catch (error) {
+								endStreamError = new AIError.ProviderResponseError(
+									`Cursor protocol error: ${error instanceof Error ? error.message : String(error)}`,
+									{ provider: model.provider, kind: "envelope", cause: error },
+								);
 								settleH2(endStreamError);
 								h2Request?.close();
 							}
@@ -686,8 +695,16 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				});
 
 				h2Request.on("end", () => {
+					try {
+						frameReader.finish();
+					} catch (error) {
+						endStreamError = new AIError.ProviderResponseError(
+							`Cursor protocol error: ${error instanceof Error ? error.message : String(error)}`,
+							{ provider: model.provider, kind: "envelope", cause: error },
+						);
+					}
 					void closeDebugLog()
-						.then(() => settleH2())
+						.then(() => settleH2(endStreamError ?? undefined))
 						.catch(error => settleH2(error));
 				});
 

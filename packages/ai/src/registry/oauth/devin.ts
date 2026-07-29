@@ -6,10 +6,10 @@ import type { OAuthController, OAuthCredentials } from "./types";
 type FetchFunction = NonNullable<OAuthController["fetch"]>;
 
 const DEVIN_WEBAPP_URL = "https://app.devin.ai";
-const DEVIN_API_URL = "https://server.codeium.com";
+const DEVIN_API_URL = "https://api.devin.ai";
 const CALLBACK_PORT = 59653;
 const CALLBACK_PATH = "/callback";
-const TOKEN_PATH = "/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode";
+const TOKEN_PATH = "/auth/cli/token";
 const FALLBACK_EXPIRES_MS = 365 * 24 * 60 * 60 * 1000;
 
 interface DevinPKCEParams {

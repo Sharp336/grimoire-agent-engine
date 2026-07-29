@@ -1,10 +1,8 @@
-import type * as http2 from "node:http2";
-import * as nodeStream from "node:stream";
 import { parseKiroCredentials } from "@oh-my-pi/pi-catalog/discovery/kiro";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isRecord, parseStreamingJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { acquireH2Session, type H2Lease, isTransientTransportError } from "../transport";
+import { postH2Only, type TransportResponse } from "../transport";
 import type {
 	AssistantMessage,
 	Context,
@@ -16,6 +14,7 @@ import type {
 	ThinkingContent,
 	ToolCall,
 	ToolResultMessage,
+	UserMessage,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
@@ -97,8 +96,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 		const toolBlocks = new Map<string, ToolCall>();
 		const toolPartialJson = new Map<string, string>();
 		let sawEndTurn = false;
-		let h2Lease: H2Lease | undefined;
-		let h2Request: http2.ClientHttp2Stream | undefined;
+		let response: TransportResponse | undefined;
 		let completed = false;
 		try {
 			const credentials = parseKiroCredentials(options?.apiKey, options?.profileArn);
@@ -107,51 +105,36 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 			options?.onPayload?.(request, model);
 			const region = options?.region ?? KIRO_DEFAULT_REGION;
 			const requestUrl = new URL(model.baseUrl ?? `https://runtime.${region}.kiro.dev`);
-			const responseHeaders = Promise.withResolvers<http2.IncomingHttpHeaders>();
-			let sawResponse = false;
-			h2Lease = await acquireH2Session(requestUrl.origin, model.provider, options?.signal);
-			h2Request = await h2Lease.request(
-				{
-					":method": "POST",
-					":path": `${requestUrl.pathname}${requestUrl.search}`,
+			response = await postH2Only({
+				url: requestUrl.toString(),
+				provider: model.provider,
+				headers: {
 					authorization: `Bearer ${credentials.accessToken}`,
 					accept: "application/vnd.amazon.eventstream",
 					"content-type": "application/x-amz-json-1.0",
 					"x-amz-target": KIRO_GENERATE_TARGET,
 					...(options?.headers ?? {}),
 				},
-				{ signal: options?.signal },
-			);
-			h2Request.once("response", headers => {
-				sawResponse = true;
-				responseHeaders.resolve(headers);
+				body: new TextEncoder().encode(JSON.stringify(request)),
+				signal: options?.signal,
+				fetchOverride: options?.fetch,
 			});
-			h2Request.once("error", error => responseHeaders.reject(error));
-			h2Request.once("close", () => {
-				if (!sawResponse) {
-					responseHeaders.reject(
-						new AIError.ProviderResponseError("Kiro HTTP/2 stream closed before response headers", {
-							provider: model.provider,
-							kind: "incomplete-stream",
-						}),
-					);
-				}
-			});
-			h2Request.end(JSON.stringify(request));
-
-			const headers = await responseHeaders.promise;
-			const status = Number(headers[":status"] ?? 0);
-			if (status < 200 || status >= 300) {
+			if (response.status < 200 || response.status >= 300) {
 				const chunks: Uint8Array[] = [];
-				for await (const chunk of h2Request) {
-					chunks.push(typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk));
+				let totalBytes = 0;
+				for await (const chunk of response.body) {
+					if (totalBytes >= 1_000) break;
+					const remaining = 1_000 - totalBytes;
+					const bounded = chunk.subarray(0, remaining);
+					chunks.push(bounded);
+					totalBytes += bounded.byteLength;
 				}
-				const body = Buffer.concat(chunks).toString("utf8").slice(0, 1_000);
-				throw new AIError.ProviderHttpError(`Kiro API error ${status}: ${body}`, status);
+				const body = Buffer.concat(chunks).toString("utf8");
+				throw new AIError.ProviderHttpError(`Kiro API error ${response.status}: ${body}`, response.status);
 			}
 
 			stream.push({ type: "start", partial: output });
-			const body = nodeStream.Readable.toWeb(h2Request) as ReadableStream<Uint8Array>;
+			const body = response.body;
 			for await (const frame of decodeEventStream(body)) {
 				const messageType = frame.headers[":message-type"];
 				if (messageType === "exception" || messageType === "error") {
@@ -165,9 +148,9 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 					);
 				}
 				if (messageType !== "event") continue;
-				const payload = parseEventPayload(frame.payload);
-				if (!payload) continue;
-				switch (frame.headers[":event-type"]) {
+				const eventType = frame.headers[":event-type"];
+				const payload = parseEventPayload(frame.payload, eventType);
+				switch (eventType) {
 					case "reasoningContentEvent": {
 						if (typeof payload.text !== "string" || payload.text.length === 0) break;
 						if (!thinkingBlock) {
@@ -293,14 +276,8 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 			stream.push({ type: "done", reason: doneReason, message: output });
 			stream.end();
 		} catch (error) {
-			if (!completed) h2Request?.close();
-			const classifiedError = isTransientTransportError(error)
-				? AIError.attach(
-						error instanceof Error ? error : new Error(String(error)),
-						AIError.create(AIError.Flag.Transient),
-					)
-				: error;
-			const result = await AIError.finalize(classifiedError, { api: model.api, signal: options?.signal });
+			if (!completed) await response?.close();
+			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
@@ -310,7 +287,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
-			h2Lease?.release();
+			await response?.close();
 		}
 	})();
 	return stream;
@@ -415,20 +392,29 @@ function toKiroHistoryMessage(message: Message, modelId: string): KiroWireHistor
 	return content ? [{ userInputMessage: { content, origin: "KIRO_CLI", modelId } }] : [];
 }
 
-function userContent(
-	content: string | readonly ({ type: "text"; text: string } | { type: "image"; mimeType: string })[],
-): string {
+function userContent(content: UserMessage["content"]): string {
 	if (typeof content === "string") return content;
-	return content.map(block => (block.type === "text" ? block.text : `[${block.mimeType} image]`)).join("\n");
+	return content.map(block => (block.type === "text" ? block.text : `[${block.mimeType} ${block.type}]`)).join("\n");
 }
 
-function parseEventPayload(payload: Uint8Array): Record<string, unknown> | undefined {
+function parseEventPayload(payload: Uint8Array, eventType: string | undefined): Record<string, unknown> {
+	let parsed: unknown;
 	try {
-		const parsed: unknown = JSON.parse(TEXT_DECODER.decode(payload));
-		return isRecord(parsed) ? parsed : undefined;
-	} catch {
-		return undefined;
+		parsed = JSON.parse(TEXT_DECODER.decode(payload));
+	} catch (error) {
+		throw new AIError.ProviderResponseError(`Kiro ${eventType ?? "event"} payload is invalid JSON`, {
+			provider: "kiro",
+			kind: "envelope",
+			cause: error,
+		});
 	}
+	if (!isRecord(parsed)) {
+		throw new AIError.ProviderResponseError(`Kiro ${eventType ?? "event"} payload must be an object`, {
+			provider: "kiro",
+			kind: "envelope",
+		});
+	}
+	return parsed;
 }
 
 function kiroStreamErrorStatus(code: string | undefined): number {

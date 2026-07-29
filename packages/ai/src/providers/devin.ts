@@ -1,4 +1,3 @@
-import type { ClientHttp2Stream, IncomingHttpHeaders } from "node:http2";
 import { gzipSync } from "node:zlib";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
@@ -28,15 +27,14 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import {
-	acquireH2Session,
 	CONNECT_COMPRESSED_FLAG,
 	type ConnectFrame,
 	createConnectFrameReader,
 	encodeConnectFrame,
-	type H2Lease,
-	isTransientTransportError,
+	postH2Primary,
 	readConnectTrailerError,
 	registerTransportDisposer,
+	type TransportResponse,
 } from "../transport";
 import type {
 	Api,
@@ -153,8 +151,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		const toolLastParseLen = new Map<string, number>();
 		let activeToolCallId: string | undefined;
 		let latestStopReason = StopReason.UNSPECIFIED;
-		let h2Lease: H2Lease | undefined;
-		let h2Request: ClientHttp2Stream | undefined;
+		let response: TransportResponse | undefined;
 
 		const markFirstToken = () => {
 			if (firstTokenTime === undefined) firstTokenTime = performance.now();
@@ -187,8 +184,6 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		try {
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
 			const apiKey = normalizeDevinSessionToken(options?.apiKey);
-			const fetchImpl = options?.fetch ?? fetch;
-			const chatBaseUrl = baseUrl;
 			const request = buildDevinChatRequest(model, context, options, apiKey);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
@@ -209,66 +204,27 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				...(options?.headers ?? {}),
 			};
 
-			let body: AsyncIterable<Uint8Array>;
-			if (options?.fetch) {
-				body = await fetchDevinChatBody({
-					url: baseUrl + CHAT_MESSAGE_PATH,
-					headers: commonHeaders,
-					frame,
-					fetchImpl,
-					signal,
-					provider: model.provider,
-				});
-			} else {
-				try {
-					h2Lease = await acquireH2Session(baseUrl, model.provider, signal);
-					h2Request = await h2Lease.request(
-						{
-							":method": "POST",
-							":path": CHAT_MESSAGE_PATH,
-							...commonHeaders,
-							te: "trailers",
-						},
-						{ signal },
-					);
-					const responseHeaders = Promise.withResolvers<IncomingHttpHeaders>();
-					h2Request.once("response", headers => responseHeaders.resolve(headers));
-					h2Request.once("error", error => responseHeaders.reject(error));
-					h2Request.once("close", () => {
-						responseHeaders.reject(
-							new AIError.ProviderResponseError("Devin HTTP/2 stream closed before response headers", {
-								provider: model.provider,
-								kind: "incomplete-stream",
-							}),
-						);
-					});
-					h2Request.end(frame);
-					const headers = await responseHeaders.promise;
-					const status = Number(headers[":status"] ?? 0);
-					if (status < 200 || status >= 300) {
-						const chunks: Uint8Array[] = [];
-						for await (const chunk of h2Request) chunks.push(chunk);
-						const text = new TextDecoder().decode(Buffer.concat(chunks));
-						throw new AIError.DevinApiError(`Devin API error ${status}: ${text}`, status);
-					}
-					body = h2Request;
-				} catch (error) {
-					h2Request?.close();
-					h2Request = undefined;
-					h2Lease?.release();
-					h2Lease = undefined;
-					if (error instanceof AIError.DevinApiError || !isTransientTransportError(error)) throw error;
-					logger.warn("devin: HTTP/2 unavailable, falling back to HTTP/1", { error: String(error) });
-					body = await fetchDevinChatBody({
-						url: baseUrl + CHAT_MESSAGE_PATH,
-						headers: commonHeaders,
-						frame,
-						fetchImpl,
-						signal,
-						provider: model.provider,
-					});
+			response = await postH2Primary({
+				url: baseUrl + CHAT_MESSAGE_PATH,
+				provider: model.provider,
+				headers: commonHeaders,
+				body: frame,
+				signal,
+				fetchOverride: options?.fetch,
+			});
+			if (response.status < 200 || response.status >= 300) {
+				const chunks: Uint8Array[] = [];
+				let totalBytes = 0;
+				for await (const chunk of response.body) {
+					if (totalBytes >= 64 * 1024) break;
+					const bounded = chunk.subarray(0, 64 * 1024 - totalBytes);
+					chunks.push(bounded);
+					totalBytes += bounded.byteLength;
 				}
+				const text = new TextDecoder().decode(Buffer.concat(chunks));
+				throw new AIError.DevinApiError(`Devin API error ${response.status}: ${text}`, response.status);
 			}
+			const body = response.body;
 			stream.push({ type: "start", partial: output });
 			const frameReader = createConnectFrameReader();
 			for await (const chunk of body) {
@@ -444,12 +400,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				});
 			}
 
-			if (h2Request && !h2Request.readableEnded) {
-				throw new AIError.ProviderResponseError("Devin HTTP/2 stream closed before the response ended", {
-					provider: model.provider,
-					kind: "incomplete-stream",
-				});
-			}
+			if (signal.aborted) throw new AIError.AbortError();
 
 			endTextBlock();
 			endThinkingBlock();
@@ -475,13 +426,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stream.end();
 		} catch (error) {
 			logger.error("devin: stream failed", { error: String(error) });
-			const classifiedError = isTransientTransportError(error)
-				? AIError.attach(
-						error instanceof Error ? error : new Error(String(error)),
-						AIError.create(AIError.Flag.Transient),
-					)
-				: error;
-			const result = await AIError.finalize(classifiedError, { api: model.api, signal });
+			const result = await AIError.finalize(error, { api: model.api, signal });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
@@ -491,10 +436,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		} finally {
-			h2Request?.close();
-			h2Request = undefined;
-			h2Lease?.release();
-			h2Lease = undefined;
+			await response?.close();
 			activeDevinTransports.delete(activeTransport);
 			resolveTransportSettled();
 		}
@@ -513,35 +455,6 @@ function devinOs(): string {
 	return process.platform;
 }
 
-async function fetchDevinChatBody(options: {
-	url: string;
-	headers: Record<string, string>;
-	frame: Uint8Array;
-	fetchImpl: NonNullable<StreamOptions["fetch"]>;
-	signal: AbortSignal;
-	provider: string;
-}): Promise<ReadableStream<Uint8Array>> {
-	const response = await options.fetchImpl(options.url, {
-		method: "POST",
-		headers: options.headers,
-		body: options.frame,
-		signal: options.signal,
-	});
-	if (!response.ok) {
-		const text = await response.text();
-		throw new AIError.DevinApiError(
-			`Devin API error ${response.status} ${response.statusText}: ${text}`,
-			response.status,
-		);
-	}
-	if (!response.body) {
-		throw new AIError.ProviderResponseError("Devin API error: response body is empty", {
-			provider: options.provider,
-			kind: "empty-body",
-		});
-	}
-	return response.body;
-}
 
 /**
  * Build a {@link GetChatMessageRequest} for one Cascade turn. Auth rides inside
