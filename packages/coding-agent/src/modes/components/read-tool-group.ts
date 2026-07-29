@@ -24,6 +24,17 @@ export function readArgsHaveTarget(args: unknown): boolean {
 }
 
 /**
+ * Whether a permissive streaming parse has exposed completed elements from a
+ * read path array before the array itself has closed. Renderer selection must
+ * wait for the complete array because later targets can change its UI shape.
+ */
+export function readArgsHaveIncompleteStreamedPathArray(args: unknown, partialJson: string | undefined): boolean {
+	if (!partialJson || typeof args !== "object" || args === null) return false;
+	const { path, file_path: filePath } = args as { path?: unknown; file_path?: unknown };
+	return Array.isArray(path ?? filePath);
+}
+
+/**
  * Whether a read collapses into the compact {@link ReadToolGroupComponent}
  * rather than a full tool execution. Filesystem/external targets always
  * collapse; other internal URLs (`skill://`, `agent://`, …) render full so
