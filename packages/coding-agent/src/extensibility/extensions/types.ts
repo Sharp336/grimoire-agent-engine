@@ -609,6 +609,7 @@ export type {
 	SessionCompactingEvent,
 	SessionEvent,
 	SessionShutdownEvent,
+	SessionShutdownReason,
 	SessionStartEvent,
 	SessionSwitchEvent,
 	SessionTreeEvent,

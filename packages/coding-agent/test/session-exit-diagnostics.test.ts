@@ -6,7 +6,10 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionFactory, ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { SessionShutdownEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
 import { createSessionTeardown } from "@oh-my-pi/pi-coding-agent/modes/session-teardown";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -46,6 +49,18 @@ const pendingAssistant: AssistantMessage = {
 	timestamp: Date.now(),
 };
 
+function captureShutdownEvents(): { events: SessionShutdownEvent[]; runner: ExtensionRunner } {
+	const events: SessionShutdownEvent[] = [];
+	const runner = {
+		hasHandlers: (eventType: string) => eventType === "session_shutdown",
+		emit: async (event: SessionShutdownEvent) => {
+			events.push(event);
+		},
+		clearManagedTimers: () => {},
+	} as unknown as ExtensionRunner;
+	return { events, runner };
+}
+
 describe("session exit diagnostics", () => {
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage | undefined;
@@ -77,11 +92,13 @@ describe("session exit diagnostics", () => {
 			},
 			convertToLlm,
 		});
+		const shutdown = captureShutdownEvents();
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
+			extensionRunner: shutdown.runner,
 		});
 
 		agent.emitExternalEvent({ type: "message_end", message: pendingAssistant });
@@ -116,6 +133,7 @@ describe("session exit diagnostics", () => {
 
 		await session.dispose();
 		session = undefined;
+		expect(shutdown.events).toEqual([{ type: "session_shutdown", reason: "dispose" }]);
 		const exitEntry = sessionManager
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
@@ -150,11 +168,13 @@ describe("session exit diagnostics", () => {
 			},
 			convertToLlm,
 		});
+		const shutdown = captureShutdownEvents();
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
+			extensionRunner: shutdown.runner,
 		});
 		const activeSession = session;
 
@@ -186,6 +206,7 @@ describe("session exit diagnostics", () => {
 
 		await teardown(postmortem.Reason.SIGTERM);
 		session = undefined;
+		expect(shutdown.events).toEqual([{ type: "session_shutdown", reason: "signal" }]);
 
 		const exitEntry = sessionManager
 			.getEntries()
@@ -195,6 +216,72 @@ describe("session exit diagnostics", () => {
 			reason: "sigterm",
 			kind: "signal",
 		});
+	});
+
+	it("preserves the teardown reason through the createAgentSession disposal wrapper", async () => {
+		tempDir = TempDir.createSync("@pi-session-exit-sdk-wrapper-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const shutdownEvents: SessionShutdownEvent[] = [];
+		const extension: ExtensionFactory = pi => {
+			pi.on("session_shutdown", event => {
+				shutdownEvents.push(event);
+			});
+		};
+		const created = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		session = created.session;
+
+		await session.dispose({ reason: postmortem.Reason.SIGTERM });
+		session = undefined;
+
+		expect(shutdownEvents).toEqual([{ type: "session_shutdown", reason: "signal" }]);
+	});
+
+	it("classifies fatal postmortem teardown in the shutdown event", async () => {
+		tempDir = TempDir.createSync("@pi-session-exit-fatal-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			convertToLlm,
+		});
+		const shutdown = captureShutdownEvents();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			extensionRunner: shutdown.runner,
+		});
+
+		await session.dispose({ reason: postmortem.Reason.UNCAUGHT_EXCEPTION });
+		session = undefined;
+
+		expect(shutdown.events).toEqual([{ type: "session_shutdown", reason: "fatal" }]);
 	});
 
 	it("does not materialize an empty session just to write an exit marker", async () => {

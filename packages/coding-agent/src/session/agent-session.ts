@@ -134,6 +134,7 @@ import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
+import type { SessionShutdownReason } from "../extensibility/shared-events";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
@@ -397,6 +398,26 @@ type SetSessionNameWithTrigger = (
 	source?: SessionTitleSource,
 	trigger?: SessionNameTrigger,
 ) => Promise<boolean>;
+
+function sessionShutdownReason(reason: postmortem.Reason | undefined): SessionShutdownReason {
+	if (reason === undefined) return "dispose";
+	switch (reason) {
+		case postmortem.Reason.SIGINT:
+		case postmortem.Reason.SIGTERM:
+		case postmortem.Reason.SIGHUP:
+			return "signal";
+		case postmortem.Reason.UNCAUGHT_EXCEPTION:
+		case postmortem.Reason.UNHANDLED_REJECTION:
+			return "fatal";
+		case postmortem.Reason.PRE_EXIT:
+		case postmortem.Reason.EXIT:
+		case postmortem.Reason.MANUAL:
+			return "dispose";
+		default:
+			reason satisfies never;
+			return "dispose";
+	}
+}
 
 export class AgentSession {
 	readonly agent: Agent;
@@ -3454,6 +3475,7 @@ export class AgentSession {
 	 * call this before their first await — otherwise work started in that async
 	 * gap slips past the disposal guards.
 	 */
+
 	beginDispose(): void {
 		this.#isDisposed = true;
 		this.#memory.cancelLocalMemoryStartup();
@@ -3565,7 +3587,7 @@ export class AgentSession {
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		try {
-			await emitSessionShutdownEvent(this.#extensionRunner);
+			await emitSessionShutdownEvent(this.#extensionRunner, sessionShutdownReason(options.reason));
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}

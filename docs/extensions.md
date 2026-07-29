@@ -231,6 +231,8 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_tree` / `session_tree`
 - `session_shutdown`
 
+`session_shutdown` carries `reason: "dispose" | "signal" | "fatal"`. These are broad lifecycle causes, not user-intent values: `"dispose"` includes `/quit`, test cleanup, subagent completion, and other programmatic disposal.
+
 Cancelable pre-events:
 
 - `session_before_switch` → `{ cancel?: boolean }`

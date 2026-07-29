@@ -88,9 +88,17 @@ export interface SessionCompactEvent {
 	fromExtension: boolean;
 }
 
-/** Fired on process exit (SIGINT/SIGTERM) */
+/** Stable public cause categories for session teardown. */
+export type SessionShutdownReason = "dispose" | "signal" | "fatal";
+
+/** Fired when a session is disposed during normal or process-level teardown. */
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
+	/**
+	 * Broad teardown cause. `"dispose"` includes `/quit`, test cleanup, subagent
+	 * completion, and other programmatic disposal; it does not imply user intent.
+	 */
+	reason: SessionShutdownReason;
 }
 
 /** Fired when a main-agent turn is about to settle; handlers may request one continuation turn. */

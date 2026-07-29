@@ -3252,7 +3252,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		hasRegistered = true;
 		{
 			const originalDispose = session.dispose.bind(session);
-			session.dispose = async () => {
+			session.dispose = async options => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
@@ -3276,7 +3276,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
 						await AgentLifecycleManager.global().dispose();
 					}
-					await originalDispose();
+					await originalDispose(options);
 				} finally {
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();
