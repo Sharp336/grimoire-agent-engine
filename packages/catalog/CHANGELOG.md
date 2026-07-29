@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated Cursor discovery to decode the current server configuration used for transport selection.
+
 ## [17.1.8] - 2026-07-28
 
 ### Added

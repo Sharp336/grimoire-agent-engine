@@ -5,6 +5,7 @@
 ### Changed
 
 - Centralized provider HTTP/2 pooling, Connect framing, proxy tunneling, and lifecycle cleanup in a shared transport.
+- Updated Cursor to its live HTTP/2 Connect contract with strict terminal framing and HTTP/1.1 fallback only when HTTP/2 is unavailable before dispatch or server discovery reports `BIDI_DISABLED`.
 
 ## [17.1.8] - 2026-07-28
 
