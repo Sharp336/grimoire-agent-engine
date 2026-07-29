@@ -6,7 +6,7 @@ import {
 	reportCacheInvalidation,
 } from "@oh-my-pi/pi-coding-agent/modes/components/cache-invalidation-marker";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { CacheMutationLedger } from "@oh-my-pi/pi-coding-agent/session/cache-attribution";
+import { addPromptTraffic, CacheMutationLedger } from "@oh-my-pi/pi-coding-agent/session/cache-attribution";
 
 function usage(parts: { input?: number; cacheRead?: number; cacheWrite?: number; output?: number }): Usage {
 	const input = parts.input ?? 0;
@@ -92,6 +92,105 @@ describe("CacheInvalidationMarkerComponent", () => {
 		const dividerWidth = Bun.stringWidth(lines[1]);
 		expect(dividerWidth).toBeGreaterThan(0);
 		expect(dividerWidth).toBeLessThan(80);
+	});
+});
+
+describe("cache attribution timing", () => {
+	const thinkingAssistant = {
+		role: "assistant",
+		id: "assistant-1",
+		content: [{ type: "thinking", thinking: "unfinished reasoning" }],
+	};
+	const thinkingContinuity = {
+		role: "custom",
+		customType: "interrupted-thinking",
+		content: "unfinished reasoning",
+		timestamp: 1,
+	};
+
+	it("adds the message_end usage exactly once while it is pending AgentSession persistence", () => {
+		const persisted = { cacheRead: 9_000, cacheWrite: 5_000, input: 1_000 };
+		const current = usage({ cacheRead: 7_000, cacheWrite: 500, input: 99 });
+
+		expect(addPromptTraffic(persisted, current)).toEqual({
+			cacheRead: 16_000,
+			cacheWrite: 5_500,
+			input: 1_099,
+		});
+	});
+
+	it.each([
+		[
+			"present same",
+			[
+				[{ continuity: thinkingContinuity, assistant: thinkingAssistant }],
+				structuredClone([{ continuity: thinkingContinuity, assistant: thinkingAssistant }]),
+			],
+			[["thinking-demote"], []],
+		],
+		[
+			"present changed",
+			[
+				[{ continuity: thinkingContinuity, assistant: thinkingAssistant }],
+				[
+					{
+						continuity: { ...thinkingContinuity, content: "different interrupted reasoning" },
+						assistant: thinkingAssistant,
+					},
+				],
+			],
+			[["thinking-demote"], ["thinking-demote"]],
+		],
+		[
+			"present to absent",
+			[[{ continuity: thinkingContinuity, assistant: thinkingAssistant }], []],
+			[["thinking-demote"], []],
+		],
+		[
+			"absent to same present",
+			[
+				[{ continuity: thinkingContinuity, assistant: thinkingAssistant }],
+				[],
+				structuredClone([{ continuity: thinkingContinuity, assistant: thinkingAssistant }]),
+			],
+			[["thinking-demote"], [], ["thinking-demote"]],
+		],
+	] as const)("records thinking demotion for %s transition", (_transition, replays, expectedTags) => {
+		const ledger = new CacheMutationLedger();
+
+		const tags = replays.map(replay => {
+			ledger.recordThinkingDemotionsAtWire(replay);
+			return ledger.consume();
+		});
+
+		expect(tags).toEqual([...expectedTags]);
+	});
+
+	it.each([
+		[
+			"present same",
+			[Bun.hash.wyhash("stable wrapped bytes"), Bun.hash.wyhash("stable wrapped bytes")],
+			[["steering-wrap"], []],
+		],
+		[
+			"present changed",
+			[Bun.hash.wyhash("stable wrapped bytes"), Bun.hash.wyhash("changed wrapped bytes")],
+			[["steering-wrap"], ["steering-wrap"]],
+		],
+		["present to absent", [Bun.hash.wyhash("stable wrapped bytes"), undefined], [["steering-wrap"], []]],
+		[
+			"absent to same present",
+			[Bun.hash.wyhash("stable wrapped bytes"), undefined, Bun.hash.wyhash("stable wrapped bytes")],
+			[["steering-wrap"], [], ["steering-wrap"]],
+		],
+	] as const)("records steering wrapping for %s transition", (_transition, digests, expectedTags) => {
+		const ledger = new CacheMutationLedger();
+		const tags = digests.map(digest => {
+			ledger.recordSteeringWrapAtWire(digest);
+			return ledger.consume();
+		});
+
+		expect(tags).toEqual([...expectedTags]);
 	});
 });
 

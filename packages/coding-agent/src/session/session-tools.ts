@@ -606,7 +606,6 @@ export class SessionTools {
 			if (this.#rebuildSystemPrompt) {
 				const signature = this.#computeAppliedToolSignature(validToolNames, tools);
 				if (signature !== this.#lastAppliedToolSignature) {
-					if (this.#lastAppliedToolSignature !== undefined) this.#host.recordCacheMutation?.("tool-signature");
 					const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
 					rebuiltSystemPrompt = built.systemPrompt;
 					rebuiltSignature = signature;
@@ -627,12 +626,14 @@ export class SessionTools {
 		this.#notifyXdevMountDelta(previousMounted);
 		this.#host.agent.setTools(tools);
 		if (rebuiltSystemPrompt && rebuiltSignature) {
-			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
+			const hadAppliedToolSignature = this.#lastAppliedToolSignature !== undefined;
+			if (hadAppliedToolSignature) this.#host.clearInheritedProviderPromptCacheKey();
 			this.#baseSystemPrompt = rebuiltSystemPrompt;
 			this.#host.clearMemoryPromotionSnapshot();
 			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
 			this.#lastAppliedToolSignature = rebuiltSignature;
 			this.#promptModelKey = this.#currentPromptModelKey();
+			if (hadAppliedToolSignature) this.#host.recordCacheMutation?.("tool-signature");
 		}
 	}
 

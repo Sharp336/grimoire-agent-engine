@@ -29,6 +29,11 @@ export type CacheMutationTag =
 	| "retry-recovery"
 	| "tool-signature";
 
+/** The fingerprint state of a mutator on the current provider request. */
+type WireMutationState = { state: "absent" } | { state: "present"; digest: bigint };
+
+const ABSENT_WIRE_MUTATION: WireMutationState = { state: "absent" };
+
 /**
  * Session-scoped ledger of which message-array mutators fired since the last
  * cache-invalidation report. Producers call {@link CacheMutationLedger.record};
@@ -42,6 +47,8 @@ export type CacheMutationTag =
 export class CacheMutationLedger {
 	#tags = new Set<CacheMutationTag>();
 	#order: CacheMutationTag[] = [];
+	#thinkingReplayState: WireMutationState = ABSENT_WIRE_MUTATION;
+	#steeringWrapState: WireMutationState = ABSENT_WIRE_MUTATION;
 
 	/** Record that mutator `tag` rewrote the message array for the wire this turn. */
 	record(tag: CacheMutationTag): void {
@@ -53,6 +60,42 @@ export class CacheMutationLedger {
 	/** Tags recorded so far this turn, without clearing. */
 	get tags(): readonly CacheMutationTag[] {
 		return this.#order;
+	}
+
+	#advancePresentMutation(
+		tag: CacheMutationTag,
+		previous: WireMutationState,
+		next: WireMutationState,
+	): WireMutationState {
+		if (next.state === "absent") return next;
+		if (previous.state === "present" && previous.digest === next.digest) return next;
+		this.record(tag);
+		return next;
+	}
+
+	/**
+	 * Record a thinking demotion only when the ordered interrupted-thinking replay
+	 * set differs from the preceding provider request. The fingerprint includes
+	 * both each persisted continuity message and its paired assistant turn, so a
+	 * structured clone remains stable while either wire-relevant member changes.
+	 */
+	recordThinkingDemotionsAtWire(pairs: readonly { continuity: object; assistant: object }[]): void {
+		const next: WireMutationState =
+			pairs.length === 0
+				? ABSENT_WIRE_MUTATION
+				: {
+						state: "present",
+						digest: Bun.hash.wyhash(
+							JSON.stringify(pairs.map(({ continuity, assistant }) => [continuity, assistant])),
+						),
+					};
+		this.#thinkingReplayState = this.#advancePresentMutation("thinking-demote", this.#thinkingReplayState, next);
+	}
+
+	/** Record a steering wrap only when its emitted digest is newly present or changes. */
+	recordSteeringWrapAtWire(digest: bigint | undefined): void {
+		const next: WireMutationState = digest === undefined ? ABSENT_WIRE_MUTATION : { state: "present", digest };
+		this.#steeringWrapState = this.#advancePresentMutation("steering-wrap", this.#steeringWrapState, next);
 	}
 
 	/** Return the tags recorded since the last report, then clear the ledger. */
@@ -75,6 +118,15 @@ interface PromptTraffic {
 	cacheRead: number;
 	cacheWrite: number;
 	input: number;
+}
+
+/** Add the current message's pending prompt traffic to persisted session usage. */
+export function addPromptTraffic(persisted: PromptTraffic, current: PromptTraffic): PromptTraffic {
+	return {
+		cacheRead: persisted.cacheRead + current.cacheRead,
+		cacheWrite: persisted.cacheWrite + current.cacheWrite,
+		input: persisted.input + current.input,
+	};
 }
 
 /**
