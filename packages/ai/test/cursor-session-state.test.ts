@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
@@ -143,6 +143,15 @@ async function run(baseUrl: string, apiKey: string, conversationId = "shared-cal
 	}).result();
 	expect(result.stopReason).toBe("stop");
 }
+
+// The conversation cache is a module-level singleton, and `bun test --parallel`
+// co-locates files in one worker non-deterministically. Several sibling suites
+// stream Cursor successfully and leave retained entries behind, which would
+// shift the eviction arithmetic the bound assertions below depend on. Establish
+// an empty cache before each test rather than trusting worker assignment.
+beforeEach(async () => {
+	await disposeCursorConversationCache();
+});
 
 afterEach(async () => {
 	await disposeCursorConversationCache();
