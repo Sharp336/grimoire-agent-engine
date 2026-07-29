@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Hardened `isLocalOrMetadataHost` to catch IPv4-mapped IPv6 and expanded address forms that previously bypassed the string-based checks.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
