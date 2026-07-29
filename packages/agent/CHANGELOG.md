@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `readToolSupersedeKey()` now supports native `read` arrays, emitting one key per usable target so a batch result is pruned only after later reads cover every target; failed reads and errored batch targets remain exempt.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed
@@ -508,7 +512,7 @@
 
 - Added `convertMessageToLlm()`: the single-message core transformer behind `defaultConvertToLlm()`. Embedders with app-specific message roles should handle their own roles and delegate every core role (`user`/`developer`/`assistant`/`toolResult`/`custom`/`hookMessage`/`branchSummary`/`compactionSummary`) to it instead of duplicating the conversion — a duplicated `compactionSummary` case is how snapcompact frames once silently dropped off provider requests
 - Added `pruneSupersededToolResults()` and the opt-in `PruneConfig.supersedeKey` hook so harnesses can prune stale tool results superseded by a newer read of the same file; superseded results are pruned ahead of age-based victims during overflow pruning and replaced with a `[Superseded by a newer read of this file]` placeholder. Without the new config, `pruneToolOutputs()` behavior is unchanged.
-- Added `readToolSupersedeKey()` implementing the read-tool path/selector grammar (selector-free reads supersede range reads of the same file; URL-scheme paths exempt). Failed reads and errored targets in partial native batches do not supersede earlier usable content. Pruning honors prompt-cache economics: per-turn prunes only fire when the post-candidate suffix is small or the cache is cold (idle gap).
+- Added `readToolSupersedeKey()` implementing the read-tool path/selector grammar (selector-free reads supersede range reads of the same file; URL-scheme paths exempt). Pruning honors prompt-cache economics: per-turn prunes only fire when the post-candidate suffix is small or the cache is cold (idle gap).
 - Added the `snapcompact` compaction strategy via `@oh-my-pi/snapcompact`: instead of an LLM summary, discarded history is printed onto dense bitmap frames and re-attached to the compaction summary message as image blocks. `CompactionSummaryMessage` gains an optional `images` field, `estimateTokens()` charges per attached frame, and frames persist under `preserveData.snapcompact` with an 8-frame middle-out eviction budget.
 - Snapcompact frames are now rendered in a provider-aware shape (`SNAPCOMPACT_SHAPES` + `resolveSnapcompactShape(api)`), following the snapcompact 200k-token monolithic evals: Anthropic-family and unknown APIs get `8x8r-bw` (unscii-8 square cells, black ink, every line printed twice with the copy on a pale highlight band — read at F1 parity with raw text at ~2x lower cost and the most refusal-robust), Google gets `8x8r-sent` (sentence-hue ink, ~2.9x cheaper), and OpenAI gets `6x6u-sent` (unscii Lanczos-stretched to 6x6 cells — OpenAI bills a flat ~2.9k tokens per image, so frame count is the only cost lever) with `detail: "original"` on the frame images. `snapcompactCompact()` accepts `model`/`shape` options, frames persist their shape metadata, mixed-shape archives (provider switches, legacy 5x8 frames) are flagged in the reading instructions, and `snapcompactGeometry()`/`renderSnapcompactFrame()` now take a shape
 

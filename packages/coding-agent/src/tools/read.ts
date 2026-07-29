@@ -114,7 +114,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
 import { executeReadBatch, MAX_READ_PATHS, type ReadBatchDetails } from "./read-batch";
-import { formatBytes, replaceTabs, shortenPath, wrapBrackets } from "./render-utils";
+import { formatBytes, joinTextContentBlocks, replaceTabs, shortenPath, wrapBrackets } from "./render-utils";
 import { REPORT_ISSUE_DEVICE_NAME, reportIssueDeviceUsage } from "./report-tool-issue";
 import { isResolutionDeviceName, resolutionDeviceUsage } from "./resolve";
 import {
@@ -3601,7 +3601,7 @@ export const readToolRenderer = {
 			});
 		}
 		const details = result.details;
-		const rawText = result.content?.find(c => c.type === "text")?.text ?? "";
+		const rawText = joinTextContentBlocks(result.content) ?? "";
 		// Prefer structured `displayContent` from details when available so the TUI
 		// shows clean file content (no model-only hashline anchors) without parsing the formatted text.
 		// Fall back to the raw text, but strip the LLM-facing notice so it doesn't

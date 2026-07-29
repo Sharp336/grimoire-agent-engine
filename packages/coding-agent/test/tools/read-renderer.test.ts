@@ -110,6 +110,34 @@ describe("readToolRenderer hyperlinks", () => {
 		expect(Bun.stripANSI(result.render(200).join("\n"))).toContain("Read (2)");
 	});
 
+	it("keeps text previews that follow images in native batches", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const result = readToolRenderer.renderResult(
+			{
+				content: [
+					{ type: "text", text: "batch notice" },
+					{ type: "image" },
+					{ type: "text", text: "later file preview" },
+				],
+				details: {
+					readTargetOutcomes: [
+						{ path: "src/preview.png", status: "success" },
+						{ path: "src/later.ts", status: "success" },
+					],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme!,
+			{ path: ["src/preview.png", "src/later.ts"] },
+		);
+
+		const rendered = Bun.stripANSI(result.render(200).join("\n"));
+		expect(rendered).toContain("batch notice");
+		expect(rendered).toContain("later file preview");
+	});
+
 	it("renders a one-URL native array through the batch read renderer", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();

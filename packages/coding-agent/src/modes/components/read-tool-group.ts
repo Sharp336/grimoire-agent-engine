@@ -6,7 +6,7 @@ import { InternalUrlRouter, XD_URL_PREFIX } from "../../internal-urls";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
 import { extractPathArguments, parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tools/path-utils";
 import type { ReadTargetOutcome } from "../../tools/read";
-import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
+import { joinTextContentBlocks, PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
 import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import type { ToolExecutionHandle } from "./tool-execution";
@@ -462,7 +462,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		// Store clean display content for preview/expanded display when the read
 		// tool provides it; fall back to model-facing text for legacy results.
 		const displayContent = details?.displayContent;
-		const textContent = result.content?.find(c => c.type === "text")?.text;
+		const textContent = joinTextContentBlocks(result.content);
 		if (displayContent !== undefined || textContent !== undefined) {
 			entry.contentText = displayContent?.text ?? textContent;
 			entry.codeStartLine = displayContent?.startLine;

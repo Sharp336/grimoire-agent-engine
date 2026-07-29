@@ -120,6 +120,22 @@ export function previewLine(text: string, maxWidth: number, ellipsis?: Ellipsis)
 	return truncateToWidth(text.replace(/\s+/g, " ").trim(), maxWidth, ellipsis);
 }
 
+/**
+ * Join every text block in a mixed tool result for text-only previews.
+ * Blank-line separators preserve the boundary where an intervening image is
+ * omitted from the preview; returns `undefined` when there is no text.
+ */
+export function joinTextContentBlocks(
+	content: readonly { type: string; text?: string }[] | undefined,
+): string | undefined {
+	let text: string | undefined;
+	for (const block of content ?? []) {
+		if (block.type !== "text" || typeof block.text !== "string") continue;
+		text = text === undefined ? block.text : `${text}\n\n${block.text}`;
+	}
+	return text;
+}
+
 // =============================================================================
 // URL Utilities
 // =============================================================================

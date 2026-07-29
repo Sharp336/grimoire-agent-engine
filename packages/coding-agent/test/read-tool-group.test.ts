@@ -285,6 +285,32 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain("combined preview content");
 	});
 
+	it("keeps text previews that follow images in a native batch", () => {
+		const component = new ReadToolGroupComponent({ showContentPreview: true });
+		component.updateArgs({ path: ["/tmp/preview.png", "/tmp/later.ts"] }, "read-mixed-preview");
+		component.updateResult(
+			{
+				content: [
+					{ type: "text", text: "batch notice" },
+					{ type: "image" },
+					{ type: "text", text: "later file preview" },
+				],
+				details: {
+					readTargetOutcomes: [
+						{ path: "/tmp/preview.png", status: "success" },
+						{ path: "/tmp/later.ts", status: "success" },
+					],
+				},
+			},
+			false,
+			"read-mixed-preview",
+		);
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+		expect(plain).toContain("batch notice");
+		expect(plain).toContain("later file preview");
+	});
+
 	it("renders warning previews with warning styling instead of success styling", () => {
 		const component = new ReadToolGroupComponent({ showContentPreview: true });
 		const examplePath = path.resolve("/tmp/example.ts");
