@@ -98,7 +98,6 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 		const toolPartialJson = new Map<string, string>();
 		let sawEndTurn = false;
 		let response: TransportResponse | undefined;
-		let completed = false;
 		try {
 			const credentials = parseKiroCredentials(options?.apiKey, options?.profileArn);
 			if (!credentials) throw new AIError.ConfigurationError("Kiro requires KIRO_API_KEY or an OAuth login");
@@ -273,12 +272,10 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 			calculateCost(model, output.usage);
-			completed = true;
 			const doneReason = output.stopReason;
 			stream.push({ type: "done", reason: doneReason, message: output });
 			stream.end();
 		} catch (error) {
-			if (!completed) await response?.close();
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
@@ -289,7 +286,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
-			await response?.close();
+			await response?.close().catch(() => {});
 		}
 	})();
 	return stream;
