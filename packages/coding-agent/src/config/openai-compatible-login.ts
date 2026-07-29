@@ -6,11 +6,11 @@ import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { withTimeoutSignal } from "../utils/fetch-timeout";
 import { withFileLock } from "./file-lock";
-import { OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD } from "./openai-compatible-api-key";
 import { normalizeOpenAIModelsListBaseUrl } from "./model-discovery";
 import { ModelsConfigFile } from "./models-config";
 import type { ModelsConfig } from "./models-config-schema";
 import { MODELS_CONFIG_API_IDS } from "./models-config-schema-bundle";
+import { OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD } from "./openai-compatible-api-key";
 
 export const OPENAI_COMPATIBLE_LOGIN_ID = "openai-compatible";
 export const OPENAI_COMPATIBLE_API_IDS = ["openai-completions", "openai-responses"] as const;
@@ -224,12 +224,6 @@ export async function writeOpenAICompatibleProvider(
 		if (validated instanceof Error) {
 			throw new Error(`Cannot update ${modelsPath}: the resulting models.yml is invalid: ${validated.message}`);
 		}
-		await writeModelsConfigAtomically(
-			modelsPath,
-			validated as ModelsConfig,
-			providerName,
-			apiKey,
-			signal,
-		);
+		await writeModelsConfigAtomically(modelsPath, validated as ModelsConfig, providerName, apiKey, signal);
 	});
 }
