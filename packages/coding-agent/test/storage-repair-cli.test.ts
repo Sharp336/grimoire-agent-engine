@@ -808,6 +808,33 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePathTrusted).toBe(false);
 	});
 
+	test("session rebuild skips blank and malformed JSONL records", async () => {
+		await createHistorySource();
+		const file = await writeSession("primary", "primary-session", [
+			message("before", "2026-01-01T00:00:01.000Z", "before damage"),
+		]);
+		await fs.promises.appendFile(
+			file,
+			`\n{"type":"message"\n${JSON.stringify(message("after", "2026-01-01T00:00:02.000Z", "after damage"))}\n{"type":"message"`,
+		);
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
+		try {
+			expect(db.prepare("SELECT prompt FROM history ORDER BY id").all()).toEqual([
+				{ prompt: "before damage" },
+				{ prompt: "after damage" },
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
 	test("invalid or changing physical sessions refuse while zero sessions remains valid", async () => {
 		await createHistorySource();
 		let result = await runStorageRepair({

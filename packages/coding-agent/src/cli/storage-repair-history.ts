@@ -2,14 +2,13 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import { HistoryStorage } from "../session/history-storage";
 import { CURRENT_SESSION_VERSION, SESSION_TITLE_SLOT_BYTES } from "../session/session-entries";
 import { parseTitleSlotLine } from "../session/session-title-slot";
 import {
 	assertInvariant,
 	checkpointCandidate,
-	errorMessage,
 	stableJson,
 	verifyCommonCandidate,
 } from "./storage-repair-files";
@@ -113,12 +112,8 @@ async function manifestSessions(root: string) {
 }
 
 function parseJsonRecord(line: string, file: string, ordinal: number) {
-	let value: unknown;
-	try {
-		value = JSON.parse(line);
-	} catch (error) {
-		throw new Error(`Malformed JSONL record ${ordinal} in ${file}: ${errorMessage(error)}`, { cause: error });
-	}
+	const [value] = parseJsonlLenient<unknown>(`${line}\n`);
+	if (value === undefined) return null;
 	assertInvariant(
 		typeof value === "object" && value !== null && !Array.isArray(value),
 		`Invalid JSONL record ${ordinal} in ${file}`,
@@ -189,6 +184,7 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 				if (parseTitleSlotLine(line)) continue;
 			}
 			const record = parseJsonRecord(line, file.path, physicalLine);
+			if (!record) continue;
 			if (!header) {
 				header = validateHeader(record, file.path);
 				continue;
