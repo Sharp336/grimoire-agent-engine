@@ -5,6 +5,9 @@
 ### Fixed
 
 - Fixed live Devin model discovery to declare `MODEL_ROUTER` display support, which the server requires before it will return the `adaptive` router model. Discovery now returns the same catalog `devin models list` shows, and reads per-token pricing from the server's `modelDimensions` instead of reporting zero cost.
+### Added
+
+- Added Cursor Bidi and server-configuration protocol descriptors used by HTTP/1 transport fallback and mode discovery.
 
 ## [17.1.8] - 2026-07-28
 
