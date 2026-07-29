@@ -18,6 +18,18 @@ function makeUserNode(text: string, parentId: string | null = null): SessionTree
 	return { entry, children: [] };
 }
 
+function makeMessageNode(message: AgentMessage, parentId: string | null = null): SessionTreeNode {
+	const id = `entry-${counter++}`;
+	const entry: SessionEntry = {
+		type: "message",
+		id,
+		parentId,
+		timestamp: new Date().toISOString(),
+		message,
+	};
+	return { entry, children: [] };
+}
+
 /** Build a tree where every parent has two children, simulating heavy rewind branching. */
 function buildBranchyTree(branchDepth: number): { root: SessionTreeNode; leaf: SessionTreeNode } {
 	const root = makeUserNode("root");
@@ -73,5 +85,37 @@ describe("TreeSelectorComponent deep branching overflow", () => {
 		const selectedRow = rendered.find(line => line.trimStart().startsWith("›"));
 		expect(selectedRow).toBeDefined();
 		expect(selectedRow!).toContain("user:");
+	});
+
+	it("sanitizes control whitespace in batched-read paths", () => {
+		const toolCallId = "read-control-paths";
+		const assistant = makeMessageNode({
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: toolCallId,
+					name: "read",
+					arguments: { path: ["src/one\tfile.ts", "src/two\nfile.ts"] },
+				},
+			],
+			stopReason: "toolUse",
+		} as unknown as AgentMessage);
+		const toolResult = makeMessageNode(
+			{
+				role: "toolResult",
+				toolCallId,
+				toolName: "read",
+				content: [{ type: "text", text: "done" }],
+				isError: false,
+			} as AgentMessage,
+			assistant.entry.id,
+		);
+		assistant.children.push(toolResult);
+
+		const rendered = renderSelector(assistant, toolResult.entry.id, 120);
+		expect(rendered.join("\n")).not.toContain("\t");
+		expect(rendered.every(line => !line.includes("\n"))).toBe(true);
+		expect(rendered.join("\n")).toContain("src/one file.ts, src/two file.ts");
 	});
 });

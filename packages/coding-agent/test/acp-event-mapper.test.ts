@@ -562,6 +562,41 @@ describe("ACP event mapper", () => {
 		]);
 	});
 
+	it("uses mapper cwd for failed structured-read outcome locations", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-outcome-cwd-"));
+		fs.writeFileSync(path.join(cwd, "outer.zip"), "");
+		fs.writeFileSync(path.join(cwd, "outer.db"), "");
+		try {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_end",
+					toolCallId: "tc-read-structured-failures",
+					toolName: "read",
+					isError: false,
+					result: {
+						content: [{ type: "text", text: "partial" }],
+						details: {
+							readTargetOutcomes: [
+								{ path: "outer.zip:dir/inner.zip", status: "error" },
+								{ path: "outer.db:logs/inner.db:users", status: "error" },
+							],
+						},
+					},
+				} as AgentSessionEvent,
+				"session-1",
+				{ cwd },
+			);
+
+			const update = updates[0]!.update as { locations?: { path: string }[] };
+			expect(update.locations).toEqual([
+				{ path: path.join(cwd, "outer.zip") },
+				{ path: path.join(cwd, "outer.db") },
+			]);
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	it("resolves live image blob refs for ACP content without expanding rawOutput", () => {
 		const blobRef = "blob:sha256:77467fcfe2bbdc034e0eabb4778c9d7de521c0d7c3e0d0a62566468e4d7da3a5";
 		const resolvedImageData = "resolved-webp-base64";

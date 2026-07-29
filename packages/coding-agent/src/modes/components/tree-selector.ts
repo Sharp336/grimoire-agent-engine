@@ -16,7 +16,7 @@ import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { SessionTreeNode } from "../../session/session-entries";
 import { extractPathArguments, toPathList } from "../../tools/path-utils";
-import { shortenPath } from "../../tools/render-utils";
+import { previewLine, replaceTabs, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { DynamicBorder } from "./dynamic-border";
@@ -722,12 +722,13 @@ class TreeList implements Component {
 				const paths = extractPathArguments(args);
 				const offset = typeof args.offset === "number" ? args.offset : undefined;
 				const limit = typeof args.limit === "number" ? args.limit : undefined;
-				let display = paths.map(path => shortenPath(path)).join(", ");
+				let display = paths.map(path => replaceTabs(shortenPath(path))).join(", ");
 				if (paths.length <= 1 && (offset !== undefined || limit !== undefined)) {
 					const start = offset ?? 1;
 					const end = limit !== undefined ? start + limit - 1 : "";
 					display += `:${start}${end ? `-${end}` : ""}`;
 				}
+				display = previewLine(display, TRUNCATE_LENGTHS.LINE);
 				return `[read: ${display}]`;
 			}
 			case "write": {

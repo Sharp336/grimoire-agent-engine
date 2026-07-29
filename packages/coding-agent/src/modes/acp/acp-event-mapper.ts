@@ -706,7 +706,7 @@ function extractToolLocationsFromResult(result: unknown, cwd?: string, toolName?
 		for (const target of readTargets) {
 			const resolvedPath = extractStringProperty<{ resolvedPath?: string }>(target, "resolvedPath");
 			const rawPath = extractStringProperty<PathContainer>(target, "path");
-			pushPath(resolvedPath ?? (toolName === "read" && rawPath ? readFilesystemLocation(rawPath) : rawPath));
+			pushPath(resolvedPath ?? (toolName === "read" && rawPath ? readFilesystemLocation(rawPath, cwd) : rawPath));
 		}
 	}
 
