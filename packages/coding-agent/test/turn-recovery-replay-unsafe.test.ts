@@ -213,4 +213,26 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		);
 		expect(recovery.isRetryableError(message)).toBe(false);
 	});
+
+	it("keeps replay-safe classifier refusals retriable", () => {
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		const thinking = makeMessage([{ type: "thinking", thinking: "reasoning before refusal" }], model);
+		thinking.stopDetails = { type: "refusal" };
+		expect(recovery.isRetryableError(thinking)).toBe(true);
+
+		const whitespace = makeMessage([{ type: "text", text: "   \n\n  " }], model);
+		whitespace.stopDetails = { type: "refusal" };
+		expect(recovery.isRetryableError(whitespace)).toBe(true);
+
+		const empty = makeMessage([], model);
+		empty.stopDetails = { type: "refusal" };
+		expect(recovery.isRetryableError(empty)).toBe(true);
+	});
+
+	it("does not retry a classifier refusal after visible text", () => {
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		const message = makeMessage([{ type: "text", text: "Visible refusal output" }], model);
+		message.stopDetails = { type: "refusal" };
+		expect(recovery.isRetryableError(message)).toBe(false);
+	});
 });

@@ -872,8 +872,13 @@ export class TurnRecovery {
 		const contextWindow = this.#host.model()?.contextWindow ?? 0;
 		if (AIError.isContextOverflow(message, contextWindow)) return false;
 
+		// A classifier refusal/sensitivity stop is the model's decision, not a route
+		// failure, but only after we confirm no user-visible output has already been
+		// streamed. Visible text, images, tool calls, or server tools must not be
+		// discarded and replayed.
+		if (this.#hasReplayUnsafeOutput(message)) return false;
 		if (this.isClassifierRefusal(message)) return true;
-		return AIError.retriable(id, { replayUnsafe: this.#hasReplayUnsafeOutput(message) });
+		return AIError.retriable(id);
 	}
 
 	/**
