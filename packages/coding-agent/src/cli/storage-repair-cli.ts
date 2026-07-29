@@ -145,6 +145,8 @@ export async function runStorageRepair(
 					result.backupCreated = true;
 				},
 				hooks.afterBackupLink,
+				hooks.isWindows,
+				hooks.onDirectorySync,
 			);
 			backupStage = null;
 			candidateStage = await exclusiveStage(artifacts.candidate, "candidate");
@@ -158,7 +160,7 @@ export async function runStorageRepair(
 			if (!diagnosis || !snapshot.immutable) throw new Error("Agent schema diagnosis is missing");
 			result.objects = buildAgentCandidate(snapshot.immutable.db, candidateStage, diagnosis);
 			await hooks.beforeCandidateVerification?.();
-			verifyAgentCandidate(candidateStage);
+			verifyAgentCandidate(candidateStage, snapshot.immutable.db, diagnosis.omitTables);
 		} else {
 			if (!historySource) throw new Error("History source is missing");
 			result.objects = buildHistoryCandidate(candidateStage, historySource, prompts);
@@ -167,7 +169,8 @@ export async function runStorageRepair(
 		}
 
 		const digest = await sealCandidate(candidateStage);
-		result.checksums.push({ path: artifacts.candidate, ...digest });
+		const candidateChecksum = { path: candidateStage, ...digest, ephemeral: true };
+		result.checksums.push(candidateChecksum);
 		await sourceStillMatches(snapshot.manifest);
 		if (historySource === "sessions") await promptManifestStillMatches(prompts);
 		if (flags.apply) {
@@ -184,8 +187,12 @@ export async function runStorageRepair(
 					afterLink: hooks.afterCandidatePublication,
 					beforeStageUnlink: hooks.beforeCandidateStageUnlink,
 					beforeDirectorySync: hooks.beforeCandidateDirectorySync,
+					isWindows: hooks.isWindows,
+					onDirectorySync: hooks.onDirectorySync,
 				},
 			);
+			candidateChecksum.path = artifacts.candidate;
+			candidateChecksum.ephemeral = false;
 			candidateStage = null;
 			await sourceStillMatches(snapshot.manifest);
 			result.candidatePathTrusted = true;

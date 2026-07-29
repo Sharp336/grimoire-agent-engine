@@ -974,7 +974,9 @@ function renderText(result: GcResult): string {
 			);
 		}
 		for (const checksum of repair.checksums)
-			lines.push(`sha256 ${checksum.sha256} ${checksum.size} ${checksum.path}`);
+			lines.push(
+				`sha256 ${checksum.sha256} ${checksum.size} ${checksum.path}${checksum.ephemeral ? " (ephemeral staging)" : ""}`,
+			);
 		if (repair.refusal) lines.push(`refusal: ${repair.refusal}`);
 		if (repair.warning) lines.push(`warning: ${repair.warning}`);
 		lines.push(`manual next step: ${repair.manualNextStep}`);

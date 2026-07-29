@@ -273,7 +273,7 @@ async function copyAndHash(
 	source: string,
 	destination: string,
 	sourceNoAtime: boolean,
-): Promise<StorageRepairChecksum> {
+): Promise<{ path: string; sha256: string; size: number }> {
 	const input = sourceNoAtime ? await openSourceNoAtime(source) : await fs.promises.open(source, "r");
 	const output = await fs.promises.open(
 		destination,
@@ -452,7 +452,9 @@ async function syncFile(file: string): Promise<void> {
 	}
 }
 
-async function syncDirectory(dir: string): Promise<void> {
+async function syncDirectory(dir: string, isWindows: () => boolean, onDirectorySync?: () => void): Promise<void> {
+	if (isWindows()) return;
+	onDirectorySync?.();
 	const handle = await fs.promises.open(dir, "r");
 	try {
 		await handle.sync();
@@ -463,9 +465,10 @@ async function syncDirectory(dir: string): Promise<void> {
 
 interface PublicationHooks {
 	afterLink?: () => void | Promise<void>;
-	onLinkedVerified?: () => void;
 	beforeStageUnlink?: () => void | Promise<void>;
 	beforeDirectorySync?: () => void | Promise<void>;
+	isWindows?: () => boolean;
+	onDirectorySync?: () => void;
 }
 
 interface PublishedFile {
@@ -521,6 +524,29 @@ async function verifyFinalFile(finalPath: string, expected: PublishedFile): Prom
 	);
 }
 
+async function runPublicationHook(
+	hook: (() => void | Promise<void>) | undefined,
+	stage: string,
+	finalPath: string,
+	expected: PublishedFile,
+	onPublished: () => void,
+): Promise<void> {
+	try {
+		await hook?.();
+	} catch (error) {
+		try {
+			await verifyPublishedFile(stage, finalPath, expected);
+		} catch (verificationError) {
+			throw new AggregateError(
+				[error, verificationError],
+				"Publication hook failed and changed the output identity",
+			);
+		}
+		onPublished();
+		throw error;
+	}
+}
+
 async function publishNoReplace(
 	stage: string,
 	finalPath: string,
@@ -530,16 +556,19 @@ async function publishNoReplace(
 	const expected = await sealedFile(stage);
 	await fs.promises.link(stage, finalPath);
 	await verifyPublishedFile(stage, finalPath, expected);
-	hooks.onLinkedVerified?.();
-	await hooks.afterLink?.();
+	await runPublicationHook(hooks.afterLink, stage, finalPath, expected, onPublished);
 	await verifyPublishedFile(stage, finalPath, expected);
-	await hooks.beforeStageUnlink?.();
+	await runPublicationHook(hooks.beforeStageUnlink, stage, finalPath, expected, onPublished);
 	await verifyPublishedFile(stage, finalPath, expected);
 	await fs.promises.unlink(stage);
 	onPublished();
 	await hooks.beforeDirectorySync?.();
 	await verifyFinalFile(finalPath, expected);
-	await syncDirectory(path.dirname(finalPath));
+	await syncDirectory(
+		path.dirname(finalPath),
+		hooks.isWindows ?? (() => process.platform === "win32"),
+		hooks.onDirectorySync,
+	);
 	await verifyFinalFile(finalPath, expected);
 }
 
@@ -595,6 +624,8 @@ export async function publishBackup(
 	snapshot: PristineSnapshot,
 	onPublished: (checksum: StorageRepairChecksum) => void,
 	afterLink?: () => void | Promise<void>,
+	isWindows?: () => boolean,
+	onDirectorySync?: () => void,
 ): Promise<StorageRepairChecksum> {
 	const entries: Array<readonly [string, ArchiveMemberContent]> = [
 		[BACKUP_MANIFEST_NAME, backupManifestJson(snapshot.manifest)],
@@ -609,14 +640,14 @@ export async function publishBackup(
 	await verifyBackup(stage, snapshot.manifest, new Set(entries.map(([name]) => name)), snapshot.tempDir);
 	await syncFile(stage);
 	const digest = await hashFile(stage, false);
-	const checksum = { path: backup, ...digest };
+	const checksum = { path: backup, ...digest, ephemeral: false };
 	let reported = false;
 	const report = () => {
 		if (reported) return;
 		reported = true;
 		onPublished(checksum);
 	};
-	await publishNoReplace(stage, backup, report, { afterLink, onLinkedVerified: report });
+	await publishNoReplace(stage, backup, report, { afterLink, isWindows, onDirectorySync });
 	return checksum;
 }
 

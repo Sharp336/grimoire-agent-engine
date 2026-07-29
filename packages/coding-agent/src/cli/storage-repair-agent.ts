@@ -51,6 +51,11 @@ interface SchemaObjectRow {
 	sql: string | null;
 }
 
+interface SqliteSequence {
+	name: string;
+	seq: bigint;
+}
+
 export interface AgentRepairDiagnosis {
 	expectedSchema: CanonicalSchemaObject[];
 	omitTables: string[];
@@ -287,6 +292,66 @@ function schemaObjects(db: Database) {
 		.all() as SchemaObjectRow[];
 }
 
+function autoincrementTables(db: Database): Set<string> {
+	return new Set(
+		schemaObjects(db)
+			.filter(
+				object =>
+					object.type === "table" && typeof object.sql === "string" && /\bAUTOINCREMENT\b/iu.test(object.sql),
+			)
+			.map(object => object.name),
+	);
+}
+
+function sqliteSequenceRows(db: Database): SqliteSequence[] {
+	if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sqlite_sequence'").get()) return [];
+	return sqliteRows(db, "SELECT name, seq FROM sqlite_sequence ORDER BY name").map(row => {
+		assertInvariant(typeof row.name === "string" && typeof row.seq === "bigint", "Invalid sqlite_sequence row");
+		return { name: row.name, seq: row.seq };
+	});
+}
+
+function preservedAutoincrementTables(destination: Database, omitted: readonly string[]): Set<string> {
+	const result = autoincrementTables(destination);
+	for (const table of omitted) result.delete(table);
+	return result;
+}
+
+function expectedSqliteSequences(source: Database, preserved: ReadonlySet<string>): SqliteSequence[] {
+	const sourceAutoincrement = autoincrementTables(source);
+	return sqliteSequenceRows(source).filter(row => sourceAutoincrement.has(row.name) && preserved.has(row.name));
+}
+
+function copySqliteSequences(source: Database, destination: Database, omitted: readonly string[]): void {
+	const preserved = preservedAutoincrementTables(destination, omitted);
+	const expected = expectedSqliteSequences(source, preserved);
+	if (!destination.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sqlite_sequence'").get()) {
+		assertInvariant(expected.length === 0, "Candidate is missing sqlite_sequence for preserved AUTOINCREMENT tables");
+		return;
+	}
+	destination.exec("DELETE FROM sqlite_sequence");
+	const insert = destination.prepare("INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)");
+	try {
+		for (const row of expected) insert.run(row.name, row.seq);
+	} finally {
+		insert.finalize();
+	}
+}
+
+function verifySqliteSequences(source: Database, candidate: Database, omitted: readonly string[]): void {
+	const preserved = preservedAutoincrementTables(candidate, omitted);
+	const expected = expectedSqliteSequences(source, preserved);
+	const actual = sqliteSequenceRows(candidate);
+	assertInvariant(
+		actual.every(row => preserved.has(row.name)),
+		"Candidate has sqlite_sequence row for an omitted table",
+	);
+	assertInvariant(
+		stableJson(actual) === stableJson(expected),
+		"Candidate sqlite_sequence differs from preserved source high-water marks",
+	);
+}
+
 function viewOwner(object: SchemaObjectRow) {
 	if (object.type !== "view" || typeof object.sql !== "string") return null;
 	const match = SIMPLE_VIEW_RE.exec(object.sql);
@@ -449,6 +514,7 @@ export function buildAgentCandidate(
 			}
 		}
 		preserveExtensions(source, destination, diagnosis.expectedSchema, results);
+		copySqliteSequences(source, destination, diagnosis.omitTables);
 		assertInvariant(
 			destination.prepare("PRAGMA foreign_key_check").all().length === 0,
 			"Candidate foreign key check failed after assembly",
@@ -459,7 +525,7 @@ export function buildAgentCandidate(
 	}
 }
 
-export function verifyAgentCandidate(candidate: string) {
+export function verifyAgentCandidate(candidate: string, source: Database, omitted: readonly string[]) {
 	AgentStorage.validateExactPath(candidate);
 	validateMemoryStorageExactPath(candidate);
 	checkpointCandidate(candidate);
@@ -473,6 +539,7 @@ export function verifyAgentCandidate(candidate: string) {
 				`Candidate is missing ${table}`,
 			);
 		}
+		verifySqliteSequences(source, db, omitted);
 	} finally {
 		db.close();
 	}

@@ -378,6 +378,32 @@ describe("offline SQLite salvage", () => {
 		expect(result.objects).toContainEqual(expect.objectContaining({ name: "ext_notes_touch", action: "preserved" }));
 	});
 
+	test("agent repair preserves AUTOINCREMENT high-water marks after the highest row is deleted", async () => {
+		const dbPath = await createAgentSource();
+		const source = new Database(dbPath, { safeIntegers: true });
+		source.exec("CREATE TABLE ext_autoincrement(id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)");
+		const insert = source.prepare("INSERT INTO ext_autoincrement(value) VALUES (?)");
+		insert.run("first");
+		insert.run("second");
+		insert.run("deleted-high-water");
+		insert.finalize();
+		source.exec("DELETE FROM ext_autoincrement WHERE id = 3");
+		closeWithPhysicalWal(source);
+
+		const result = await runStorageRepair({ target: "agent", apply: true, agentDir: root });
+		expect(result.status).toBe("ready");
+		const candidate = new Database(result.candidate, { safeIntegers: true });
+		try {
+			expect(candidate.prepare("SELECT seq FROM sqlite_sequence WHERE name = ?").get("ext_autoincrement")).toEqual({
+				seq: 3n,
+			});
+			candidate.prepare("INSERT INTO ext_autoincrement(value) VALUES (?)").run("next");
+			expect(candidate.prepare("SELECT id FROM ext_autoincrement WHERE value = ?").get("next")).toEqual({ id: 4n });
+		} finally {
+			candidate.close();
+		}
+	});
+
 	test("only a registered corrupt derived table may be omitted", async () => {
 		const dbPath = await createAgentSource();
 		const db = new Database(dbPath);
@@ -484,7 +510,10 @@ describe("offline SQLite salvage", () => {
 		await writeSession(
 			"legacy",
 			"legacy-session",
-			[message("m", "2026-01-01T00:00:01.000Z", "東京 café résumé")],
+			[
+				message("synthetic", "2026-01-01T00:00:00.000Z", "synthetic legacy prompt", { synthetic: true }),
+				message("m", "2026-01-01T00:00:01.000Z", "東京 café résumé"),
+			],
 			"legacy-slotless",
 		);
 		const result = await runStorageRepair({
@@ -497,7 +526,7 @@ describe("offline SQLite salvage", () => {
 		expect(result.dataLoss).toBe(true);
 		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
 		try {
-			expect(db.prepare("SELECT prompt FROM history").get()).toEqual({ prompt: "東京 café résumé" });
+			expect(db.prepare("SELECT prompt FROM history ORDER BY id").all()).toEqual([{ prompt: "東京 café résumé" }]);
 		} finally {
 			db.close();
 		}
@@ -559,6 +588,23 @@ describe("offline SQLite salvage", () => {
 		expect(result.refusal).toContain("Session directory changed");
 	});
 
+	test("Windows publication skips directory fsync without weakening file verification", async () => {
+		await createAgentSource();
+		let directorySyncs = 0;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root },
+			{
+				isWindows: () => true,
+				onDirectorySync: () => {
+					directorySyncs += 1;
+				},
+			},
+		);
+		expect(result.status).toBe("ready");
+		expect(result.candidatePathTrusted).toBe(true);
+		expect(directorySyncs).toBe(0);
+	});
+
 	test("fresh history is empty and reports explicit data loss", async () => {
 		await createHistorySource();
 		const result = await runStorageRepair({ target: "history", historySource: "fresh", apply: true, agentDir: root });
@@ -616,6 +662,11 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePublished).toBe(false);
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(result.candidate).text()).toBe("racer");
+		const staged = requireValue(
+			result.checksums.find(checksum => checksum.ephemeral),
+			"staged candidate checksum",
+		);
+		expect(staged.path).not.toBe(result.candidate);
 		expect(await fingerprint(racedCandidate)).toEqual(requireValue(racerIdentity, "racer identity"));
 	});
 
@@ -634,9 +685,10 @@ describe("offline SQLite salvage", () => {
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 		expect(await Bun.file(candidate).exists()).toBe(true);
 		const sealed = requireValue(
-			result.checksums.find(checksum => checksum.path === candidate),
-			"sealed candidate checksum",
+			result.checksums.find(checksum => checksum.path === candidate && !checksum.ephemeral),
+			"published candidate checksum",
 		);
+		expect(sealed.ephemeral).toBe(false);
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
 		const entries = await fs.promises.readdir(root);
 		expect(entries.some(name => name.startsWith(`.${path.basename(candidate)}.candidate-`))).toBe(false);
@@ -667,7 +719,7 @@ describe("offline SQLite salvage", () => {
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 	});
 
-	test("candidate stage-unlink failure refuses an output that could not be proven through cleanup", async () => {
+	test("candidate stage-unlink failure warns after proving the linked output", async () => {
 		await createAgentSource();
 		const candidate = path.join(root, "candidate-stage-unlink.db");
 		const result = await runStorageRepair(
@@ -678,9 +730,9 @@ describe("offline SQLite salvage", () => {
 				},
 			},
 		);
-		expect(result.status).toBe("refused");
-		expect(result.refusal).toContain("candidate stage-unlink injection");
-		expect(result.candidatePublished).toBe(false);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.warning).toContain("candidate stage-unlink injection");
+		expect(result.candidatePublished).toBe(true);
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 		expect(await Bun.file(candidate).exists()).toBe(true);
@@ -703,9 +755,10 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 		const sealed = requireValue(
-			result.checksums.find(checksum => checksum.path === candidate),
+			result.checksums.find(checksum => checksum.ephemeral),
 			"sealed candidate checksum",
 		);
+		expect(sealed.path).not.toBe(candidate);
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
 	});
 
@@ -755,6 +808,31 @@ describe("offline SQLite salvage", () => {
 		expect((await new Bun.Archive(await Bun.file(result.backup).bytes()).files()).get("manifest.json")).toBeDefined();
 		const entries = await fs.promises.readdir(root);
 		expect(entries.some(name => name.startsWith(`.${path.basename(result.backup)}.backup-`))).toBe(false);
+	});
+
+	test("backup post-link replacement refuses without claiming the replacement as verified", async () => {
+		await createAgentSource();
+		const replacement = "backup replacement must survive";
+		let replacementIdentity: FileFingerprint | undefined;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root },
+			{
+				afterBackupLink: async () => {
+					const directory = path.dirname(getAgentDbPath(root));
+					const name = (await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar"));
+					if (!name) throw new Error("Linked backup is missing");
+					const backup = path.join(directory, name);
+					await fs.promises.unlink(backup);
+					await Bun.write(backup, replacement);
+					replacementIdentity = await fingerprint(backup);
+				},
+			},
+		);
+		expect(result.status).toBe("refused");
+		expect(result.backupCreated).toBe(false);
+		expect(result.checksums.some(checksum => checksum.path === result.backup)).toBe(false);
+		expect(await Bun.file(result.backup).text()).toBe(replacement);
+		expect(await fingerprint(result.backup)).toEqual(requireValue(replacementIdentity, "replacement identity"));
 	});
 
 	test("primary refusal and cleanup invariant failures retain both causes in deterministic order", async () => {
@@ -843,5 +921,35 @@ describe("offline SQLite salvage", () => {
 		expect(result.repair?.dataLoss).toBe(true);
 		expect(stdout.join("")).toContain("session rebuild retains only session messages");
 		expect(stdout.join("")).toContain("stable row IDs are not preserved");
+	});
+
+	test("dry-run and published candidates report distinct checksum lifecycles", async () => {
+		await createAgentSource();
+		const dryRun = await runStorageRepair({ target: "agent", apply: false, agentDir: root });
+		const staged = requireValue(
+			dryRun.checksums.find(checksum => checksum.ephemeral),
+			"staged candidate checksum",
+		);
+		expect(staged.path).not.toBe(dryRun.candidate);
+		expect(staged.ephemeral).toBe(true);
+
+		const published = await runStorageRepair({ target: "agent", apply: true, agentDir: root });
+		const candidate = requireValue(
+			published.checksums.find(checksum => checksum.path === published.candidate),
+			"published candidate checksum",
+		);
+		expect(candidate.ephemeral).toBe(false);
+	});
+
+	test("text and JSON reports label staged candidate digests as ephemeral", async () => {
+		await createAgentSource();
+		await runGcCommand({ flags: { agentDir: root, repairStorage: "agent" } });
+		expect(stdout.join("")).toContain("(ephemeral staging)");
+		stdout = [];
+		await runGcCommand({ flags: { agentDir: root, repairStorage: "agent", json: true } });
+		const parsed = JSON.parse(stdout.join(""));
+		const staged = parsed.repair.checksums.find((checksum: { ephemeral: boolean }) => checksum.ephemeral);
+		expect(staged.path).not.toBe(parsed.repair.candidate);
+		expect(staged.ephemeral).toBe(true);
 	});
 });

@@ -180,6 +180,7 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 	let recordOrdinal = 0;
 	let header: { id: string; cwd: string } | null = null;
 	let inserted = 0;
+	promptDb.exec("BEGIN");
 	try {
 		for await (const line of lines) {
 			physicalLine += 1;
@@ -200,14 +201,29 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 				`Invalid message in ${file.path}:${physicalLine}`,
 			);
 			const typed = message as Record<string, unknown>;
-			if (typed.role !== "user" || typed.attribution === "agent" || typed.steering === true) continue;
+			if (
+				typed.role !== "user" ||
+				typed.attribution === "agent" ||
+				typed.steering === true ||
+				typed.synthetic === true
+			) {
+				continue;
+			}
 			const prompt = promptContent(typed.content, `${file.path}:${physicalLine}`).trim();
 			if (prompt.length === 0) continue;
 			insert.run(BigInt(timestamp), file.canonicalPath, BigInt(recordOrdinal), prompt, header.cwd, header.id);
 			inserted += 1;
 		}
 		assertInvariant(physicalLine >= 1 && header, `Incomplete session file: ${file.path}`);
+		promptDb.exec("COMMIT");
 		return inserted;
+	} catch (error) {
+		try {
+			promptDb.exec("ROLLBACK");
+		} catch (rollbackError) {
+			throw new AggregateError([error, rollbackError], `Prompt manifest rollback failed for ${file.path}`);
+		}
+		throw error;
 	} finally {
 		insert.finalize();
 		lines.close();

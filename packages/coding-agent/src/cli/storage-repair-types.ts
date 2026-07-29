@@ -24,6 +24,7 @@ export interface StorageRepairChecksum {
 	path: string;
 	sha256: string;
 	size: number;
+	ephemeral: boolean;
 }
 
 export interface StorageRepairResult {
@@ -56,6 +57,8 @@ export interface StorageRepairTestHooks {
 	afterCandidatePublication?: () => void | Promise<void>;
 	beforeCandidateStageUnlink?: () => void | Promise<void>;
 	beforeCandidateDirectorySync?: () => void | Promise<void>;
+	isWindows?: () => boolean;
+	onDirectorySync?: () => void;
 }
 
 export interface SourceMemberManifest {
