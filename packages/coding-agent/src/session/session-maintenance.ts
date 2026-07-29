@@ -178,6 +178,8 @@ export interface SessionMaintenanceHost {
 	modelRegistry: ModelRegistry;
 	/** Record a prompt-cache mutation tag on the owning session's ledger. */
 	recordCacheMutation?(tag: CacheMutationTag): void;
+	/** Queue a prompt-cache mutation for the next real provider request. */
+	queueCacheMutationForNextProviderRequest?(tag: CacheMutationTag): void;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
@@ -424,6 +426,7 @@ export class SessionMaintenance {
 			return { removed: 0 };
 		}
 		await this.#host.sessionManager.rewriteEntries();
+		this.#host.queueCacheMutationForNextProviderRequest?.("shake");
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes();
@@ -481,6 +484,7 @@ export class SessionMaintenance {
 		applyShakeRegions(items);
 
 		await this.#host.sessionManager.rewriteEntries();
+		this.#host.queueCacheMutationForNextProviderRequest?.("shake");
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes();

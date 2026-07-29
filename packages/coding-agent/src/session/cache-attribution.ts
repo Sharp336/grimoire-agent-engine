@@ -27,12 +27,73 @@ export type CacheMutationTag =
 	| "steering-wrap"
 	| "thinking-demote"
 	| "retry-recovery"
-	| "tool-signature";
+	| "tool-signature"
+	| "shake";
 
 /** The fingerprint state of a mutator on the current provider request. */
 type WireMutationState = { state: "absent" } | { state: "present"; digest: bigint };
 
 const ABSENT_WIRE_MUTATION: WireMutationState = { state: "absent" };
+
+/**
+ * Extract only wire bytes that form a provider prompt-cache prefix. This is
+ * intentionally a projection, not a recursive JSON walk: request contents can
+ * hold arbitrary user data and must never participate in this fingerprint.
+ *
+ * Google and Vertex invoke `onPayload` before their SDK config is flattened to
+ * the REST body, while Gemini CLI sends its Cloud Code Assist body with a nested
+ * `request`. All other built-in provider payloads put these fields at the top
+ * level (apart from system/developer entries in `messages`).
+ */
+export function projectSystemAndToolsWireBytes(payload: unknown): string {
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+	const record = payload as Record<string, unknown>;
+	const projection: Record<string, unknown> = {};
+	projectWireFields(projection, record);
+
+	const config = record.config;
+	if (isRecord(config)) {
+		const projectedConfig: Record<string, unknown> = {};
+		projectWireFields(projectedConfig, config);
+		if (Object.keys(projectedConfig).length > 0) projection.config = projectedConfig;
+	}
+
+	const request = record.request;
+	if (isRecord(request)) {
+		const projectedRequest: Record<string, unknown> = {};
+		projectWireFields(projectedRequest, request);
+		if (Object.keys(projectedRequest).length > 0) projection.request = projectedRequest;
+	}
+
+	if (Array.isArray(record.messages)) {
+		const systemMessages = record.messages.filter(
+			(message): message is Record<string, unknown> =>
+				isRecord(message) && (message.role === "system" || message.role === "developer"),
+		);
+		if (systemMessages.length > 0) projection.messages = systemMessages;
+	}
+	return JSON.stringify(projection);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function projectWireFields(target: Record<string, unknown>, source: Record<string, unknown>): void {
+	for (const key of [
+		"system",
+		"instructions",
+		"systemInstruction",
+		"customSystemPrompt",
+		"tools",
+		"functions",
+		"tool_choice",
+		"toolChoice",
+		"toolConfig",
+	]) {
+		if (key in source) target[key] = source[key];
+	}
+}
 
 /**
  * Session-scoped ledger of which message-array mutators fired since the last
@@ -49,6 +110,10 @@ export class CacheMutationLedger {
 	#order: CacheMutationTag[] = [];
 	#thinkingReplayState: WireMutationState = ABSENT_WIRE_MUTATION;
 	#steeringWrapState: WireMutationState = ABSENT_WIRE_MUTATION;
+	#obfuscationState: WireMutationState = ABSENT_WIRE_MUTATION;
+	#imageStripState: WireMutationState = ABSENT_WIRE_MUTATION;
+	#nextProviderRequestTags = new Set<CacheMutationTag>();
+	#lastEmittedToolSignatureByCacheIdentity = new Map<string, string>();
 
 	/** Record that mutator `tag` rewrote the message array for the wire this turn. */
 	record(tag: CacheMutationTag): void {
@@ -71,6 +136,52 @@ export class CacheMutationLedger {
 		if (previous.state === "present" && previous.digest === next.digest) return next;
 		this.record(tag);
 		return next;
+	}
+
+	#recordChangedMessagesAtWire(
+		tag: CacheMutationTag,
+		previous: WireMutationState,
+		before: readonly object[],
+		emitted: readonly object[],
+	): WireMutationState {
+		const changed = emitted.flatMap((message, index) => (message === before[index] ? [] : [[index, message]]));
+		const next: WireMutationState =
+			changed.length === 0
+				? ABSENT_WIRE_MUTATION
+				: { state: "present", digest: Bun.hash.wyhash(JSON.stringify(changed)) };
+		return this.#advancePresentMutation(tag, previous, next);
+	}
+
+	/** Record an obfuscation only when the emitted secret-bearing message subset changes. */
+	recordObfuscationAtWire(before: readonly object[], emitted: readonly object[]): void {
+		this.#obfuscationState = this.#recordChangedMessagesAtWire("obfuscate", this.#obfuscationState, before, emitted);
+	}
+
+	/** Record image stripping only when the emitted placeholder-bearing message subset changes. */
+	recordImageStripAtWire(before: readonly object[], emitted: readonly object[]): void {
+		this.#imageStripState = this.#recordChangedMessagesAtWire("image-strip", this.#imageStripState, before, emitted);
+	}
+
+	/** Queue a mutation that must be attributed to the next real provider request, not an in-flight one. */
+	queueForNextProviderRequest(tag: CacheMutationTag): void {
+		this.#nextProviderRequestTags.add(tag);
+	}
+
+	/**
+	 * Compare system/tool bytes at the main provider boundary. The baseline is
+	 * partitioned by the actual provider and its prompt-cache/session identity,
+	 * rather than by calls that happen to share this SDK instance.
+	 */
+	recordMainProviderToolSignature(cacheIdentity: string, wireBytes: string): void {
+		const previous = this.#lastEmittedToolSignatureByCacheIdentity.get(cacheIdentity);
+		if (previous !== undefined && previous !== wireBytes) this.record("tool-signature");
+		this.#lastEmittedToolSignatureByCacheIdentity.set(cacheIdentity, wireBytes);
+	}
+
+	/** Move queued mutations onto the main request being emitted. Each queued tag is consumed exactly once. */
+	recordQueuedMutationsAtMainProviderBoundary(): void {
+		for (const tag of this.#nextProviderRequestTags) this.record(tag);
+		this.#nextProviderRequestTags.clear();
 	}
 
 	/**
@@ -110,6 +221,7 @@ export class CacheMutationLedger {
 	clear(): void {
 		this.#order = [];
 		this.#tags.clear();
+		this.#nextProviderRequestTags.clear();
 	}
 }
 
