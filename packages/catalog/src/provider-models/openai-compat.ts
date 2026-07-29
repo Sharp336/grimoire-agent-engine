@@ -2069,9 +2069,20 @@ export function friendliModelManagerOptions(
 						};
 
 						const functionality = raw.functionality ?? {};
-						const supportsTools = toBoolean(functionality.tool_call) === false ? false : undefined;
-						const modalities = Array.isArray(raw.input_modalities) ? raw.input_modalities : [];
-						const vision = modalities.includes("image") || (reference?.input.includes("image") ?? false);
+						const toolCallFlag = toBoolean(functionality.tool_call);
+						// Explicit tool_call: false → supportsTools: false.
+						// Explicit tool_call: true → supportsTools: true (overrides a
+						// cross-provider reference's host-specific false).
+						// Absent → defer to reference/baseModel.
+						const supportsTools = toolCallFlag === false ? false : toolCallFlag === true ? true : undefined;
+						const hasModalities = Array.isArray(raw.input_modalities);
+						const modalities = hasModalities ? (raw.input_modalities as unknown[]) : [];
+						// Only fall back to the reference when the API omits
+						// input_modalities entirely. An explicit text-only array must NOT
+						// inherit vision from a cross-provider reference — the Friendli
+						// deployment declared itself text-only.
+						const vision =
+							modalities.includes("image") || (!hasModalities && (reference?.input.includes("image") ?? false));
 
 						const reasoning = toBoolean(raw.reasoning) ?? reference?.reasoning ?? false;
 						const interleaved = raw.interleaved === "reasoning_content";
@@ -2085,7 +2096,7 @@ export function friendliModelManagerOptions(
 							cost,
 							contextWindow,
 							maxTokens,
-							...(supportsTools === false ? { supportsTools } : {}),
+							...(supportsTools !== undefined ? { supportsTools } : {}),
 							...(interleaved
 								? { compat: { ...baseModel.compat, reasoningContentField: "reasoning_content" } }
 								: {}),
@@ -2229,7 +2240,7 @@ function mapWaferModel(
 		cost,
 		contextWindow,
 		maxTokens,
-		...(supportsTools === false ? { supportsTools } : {}),
+		...(supportsTools !== undefined ? { supportsTools } : {}),
 	};
 	if (reasoning) {
 		// Wafer's `wafer.provider` envelope tells us which upstream backend serves
@@ -3351,7 +3362,7 @@ export function basetenModelManagerOptions(
 							contextWindow,
 							maxTokens,
 							...(thinking ? { thinking } : {}),
-							...(supportsTools === false ? { supportsTools } : {}),
+							...(supportsTools !== undefined ? { supportsTools } : {}),
 						};
 					},
 					fetch: config?.fetch,

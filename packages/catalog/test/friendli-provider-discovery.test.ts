@@ -74,6 +74,7 @@ describe("Friendli provider discovery", () => {
 		expect(models).toHaveLength(2);
 
 		// GLM-5.2 — reasoning + vision + interleaved
+		// functionality.tool_call: true → supportsTools: true
 		const glm = models!.find(m => m.id === "zai-org/GLM-5.2");
 		expect(glm).toBeDefined();
 		expect(glm?.provider).toBe("friendli");
@@ -90,6 +91,9 @@ describe("Friendli provider discovery", () => {
 		expect(glm?.cost.cacheWrite).toBeCloseTo(0.3, 10);
 		// interleaved: "reasoning_content" → reasoningContentField compat override
 		expect(glm?.compat?.reasoningContentField).toBe("reasoning_content");
+		// Explicit tool_call: true must set supportsTools: true, overriding any
+		// reference's host-specific false.
+		expect(glm?.supportsTools).toBe(true);
 
 		// Llama 4 9B — no reasoning, no vision, tools disabled
 		const llama = models!.find(m => m.id === "meta-llama/Llama-4-9B");
@@ -98,6 +102,7 @@ describe("Friendli provider discovery", () => {
 		expect(llama?.api).toBe("openai-completions");
 		expect(llama?.name).toBe("Llama 4 9B");
 		expect(llama?.reasoning).toBe(false);
+		// Explicit input_modalities: ["text"] → must NOT inherit vision from reference
 		expect(llama?.input).toEqual(["text"]);
 		expect(llama?.contextWindow).toBe(1_048_576);
 		expect(llama?.maxTokens).toBe(16_384);
