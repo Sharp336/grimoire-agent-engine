@@ -186,6 +186,8 @@ export async function runStorageRepair(
 				seal,
 				() => {
 					result.candidatePublished = true;
+					candidateChecksum.path = artifacts.candidate;
+					candidateChecksum.ephemeral = false;
 				},
 				{
 					afterLink: hooks.afterCandidatePublication,
@@ -195,8 +197,6 @@ export async function runStorageRepair(
 					onDirectorySync: hooks.onDirectorySync,
 				},
 			);
-			candidateChecksum.path = artifacts.candidate;
-			candidateChecksum.ephemeral = false;
 			candidateStage = null;
 			await sourceStillMatches(snapshot.manifest);
 			result.candidatePathTrusted = true;

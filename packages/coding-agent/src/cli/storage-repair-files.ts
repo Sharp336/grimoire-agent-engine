@@ -579,45 +579,44 @@ async function verifyFinalFile(finalPath: string, expected: PublishedFile): Prom
 
 async function runPublicationHook(
 	hook: (() => void | Promise<void>) | undefined,
-	stage: string,
-	finalPath: string,
-	expected: PublishedFile,
-	onPublished: () => void,
+	verify: () => Promise<void>,
+	onPublished?: () => void,
 ): Promise<void> {
+	if (!hook) return;
 	try {
-		await hook?.();
+		await hook();
 	} catch (error) {
 		try {
-			await verifyPublishedFile(stage, finalPath, expected);
+			await verify();
 		} catch (verificationError) {
 			throw new AggregateError(
 				[error, verificationError],
 				"Publication hook failed and changed the output identity",
 			);
 		}
-		onPublished();
+		onPublished?.();
 		throw error;
 	}
+	await verify();
 }
 
 async function publishNoReplace(
 	stage: string,
 	finalPath: string,
 	expected: PublishedFile,
-	onPublished: () => void,
+	onLinked: () => void,
+	onPublished?: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
 	await verifySealedFile(stage, expected);
 	await fs.promises.link(stage, finalPath);
+	onLinked();
 	await verifyPublishedFile(stage, finalPath, expected);
-	await runPublicationHook(hooks.afterLink, stage, finalPath, expected, onPublished);
-	await verifyPublishedFile(stage, finalPath, expected);
-	await runPublicationHook(hooks.beforeStageUnlink, stage, finalPath, expected, onPublished);
-	await verifyPublishedFile(stage, finalPath, expected);
+	await runPublicationHook(hooks.afterLink, () => verifyPublishedFile(stage, finalPath, expected), onPublished);
+	await runPublicationHook(hooks.beforeStageUnlink, () => verifyPublishedFile(stage, finalPath, expected), onPublished);
 	await fs.promises.unlink(stage);
-	onPublished();
-	await hooks.beforeDirectorySync?.();
-	await verifyFinalFile(finalPath, expected);
+	onPublished?.();
+	await runPublicationHook(hooks.beforeDirectorySync, () => verifyFinalFile(finalPath, expected), onPublished);
 	await syncDirectory(
 		path.dirname(finalPath),
 		hooks.isWindows ?? (() => process.platform === "win32"),
@@ -710,7 +709,7 @@ export async function publishBackup(
 		reported = true;
 		onPublished(checksum);
 	};
-	await publishNoReplace(stage, backup, seal, report, { afterLink, isWindows, onDirectorySync });
+	await publishNoReplace(stage, backup, seal, report, report, { afterLink, isWindows, onDirectorySync });
 	return checksum;
 }
 
@@ -749,10 +748,10 @@ export async function publishCandidate(
 	stage: string,
 	finalPath: string,
 	seal: PublishedFile,
-	onPublished: () => void,
+	onLinked: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
-	await publishNoReplace(stage, finalPath, seal, onPublished, hooks);
+	await publishNoReplace(stage, finalPath, seal, onLinked, undefined, hooks);
 }
 
 export function manualNextStep(source: string, candidate: string, backup: string): string {
