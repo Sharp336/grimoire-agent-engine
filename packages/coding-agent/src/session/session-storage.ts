@@ -121,8 +121,13 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		if (!fs.existsSync(dir)) {
 			fs.mkdirSync(dir, { recursive: true });
 		}
-		// Open file once, keep fd for lifetime
-		this.#fd = fs.openSync(fpath, flags === "w" ? "w" : "a");
+		// Open file once, keep fd for lifetime. Refuse a symlink installed over
+		// the canonical path after lock acquisition: following it here would let
+		// an append escape to a session this writer does not own. The manager
+		// latches ELOOP and repairs its canonical path with an atomic rewrite.
+		const commonFlags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0);
+		const openFlags = flags === "w" ? commonFlags | fs.constants.O_TRUNC : commonFlags | fs.constants.O_APPEND;
+		this.#fd = fs.openSync(fpath, openFlags, 0o666);
 		// Register for cleanup if abandoned without close()
 		writerRegistry.register(this, this.#fd, this);
 	}

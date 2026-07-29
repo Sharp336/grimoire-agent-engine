@@ -1470,6 +1470,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,

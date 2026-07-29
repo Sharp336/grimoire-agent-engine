@@ -1443,7 +1443,6 @@ export class SessionManager {
 		// cannot redirect a live manager.
 		const resolvedSessionFile = this.#sessionLock?.handle.record.sessionFile ?? requestedSessionFile;
 		this.#sessionFile = resolvedSessionFile;
-		this.#sessionDir = path.dirname(resolvedSessionFile);
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
 		try {
