@@ -250,6 +250,18 @@ export class StatusLineComponent implements Component {
 	#cachedBranch: string | null | undefined = undefined;
 	#cachedBranchRepoId: string | null | undefined = undefined;
 	#cachedBranchCwd: string | undefined = undefined;
+	// In-flight reftable resolve slot. Ownership is the launch id, not the cwd:
+	// two live resolves can share a cwd string across an invalidation, and a
+	// stale one must never free (or poison) a slot it no longer owns.
+	#branchResolveSeq = 0;
+	#branchResolveActive: number | undefined = undefined;
+	// Bumped on every branch-cache reset (#invalidateGitCaches — a HEAD move or
+	// repo-context change). An in-flight reftable resolve captures this at
+	// launch; a mismatch on resolve means the cache was invalidated underneath
+	// it (a newer resolve superseded it), so its result is stale and must be
+	// dropped rather than overwrite the value the newer resolve committed.
+	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
+	#branchCacheGeneration = 0;
 	#gitWatcher: fs.FSWatcher | null = null;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
@@ -626,6 +638,12 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranch = undefined;
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedBranchCwd = undefined;
+		// Release the in-flight slot and bump the generation so any pending
+		// reftable resolve drops itself on resolve (see #getCurrentBranch): its
+		// result is now stale, and clearing the slot lets the next render start a
+		// fresh resolve immediately instead of waiting for the superseded one.
+		this.#branchResolveActive = undefined;
+		this.#branchCacheGeneration++;
 		this.#cachedPrContext = undefined;
 		// jj label/status share the git segment's lifecycle: a HEAD move (e.g. a
 		// colocated `jj new`/bookmark move) must drop the throttled jj caches too,
@@ -646,6 +664,58 @@ export class StatusLineComponent implements Component {
 			return this.#cachedBranch;
 		}
 
+		// A reftable repo resolves HEAD by spawning `git symbolic-ref` +
+		// `git rev-parse` — the unbounded spawn that froze the render path (F7).
+		// A non-reftable repo resolves HEAD with cheap sync filesystem reads, so
+		// only the reftable branch moves off the render path, mirroring
+		// #getGitStatus and #getJjBranch in this file.
+		const repository = git.repo.resolveSync(gitCwd);
+		if (repository && git.repo.isReftableSync(repository)) {
+			if (this.#branchResolveActive !== undefined) {
+				return this.#cachedBranchCwd === gitCwd ? (this.#cachedBranch ?? null) : null;
+			}
+			const requestId = ++this.#branchResolveSeq;
+			this.#branchResolveActive = requestId;
+			// Capture the cache generation at launch. #invalidateGitCaches bumps it
+			// on a HEAD move and clears the in-flight slot, so a fresher resolve can
+			// start while this one is still pending. Without a generation check the
+			// older resolve would finish later, install its stale HEAD, and clear the
+			// slot — dropping the fresh result and freezing the status line on the
+			// pre-change branch. Mirrors #jjCacheGeneration / #getJjBranch.
+			const generation = this.#branchCacheGeneration;
+			(async () => {
+				let next: string | null = null;
+				let repoId: string | null = null;
+				try {
+					const headState = await git.head.resolve(gitCwd);
+					repoId = headState?.headPath ?? null;
+					next = !headState
+						? null
+						: headState.kind === "ref"
+							? (headState.branchName ?? headState.ref)
+							: "detached";
+				} catch {
+					next = null;
+				} finally {
+					// Release the slot only if this resolve still owns it: after an
+					// invalidation a fresher resolve may hold it, and freeing that
+					// slot here would let a third same-generation resolve launch and
+					// race the fresh one to the cache commit.
+					if (this.#branchResolveActive === requestId) this.#branchResolveActive = undefined;
+				}
+				// Only the latest generation may update the cache; a mismatch means a
+				// newer resolve superseded this one (or the component disposed).
+				if (this.#branchCacheGeneration !== generation || this.#disposed) return;
+				const prev = this.#cachedBranchCwd === gitCwd ? this.#cachedBranch : undefined;
+				this.#cachedBranchCwd = gitCwd;
+				this.#cachedBranchRepoId = repoId;
+				this.#cachedBranch = next;
+				if (prev !== next && this.#onBranchChange) this.#onBranchChange();
+			})();
+			return this.#cachedBranchCwd === gitCwd ? (this.#cachedBranch ?? null) : null;
+		}
+
+		// Non-reftable: cheap sync filesystem read, safe on the render path.
 		const head = git.head.resolveSync(gitCwd);
 		const gitHeadPath = head?.headPath ?? null;
 		this.#cachedBranchCwd = gitCwd;
@@ -654,9 +724,7 @@ export class StatusLineComponent implements Component {
 			this.#cachedBranch = null;
 			return null;
 		}
-
 		this.#cachedBranch = head.kind === "ref" ? (head.branchName ?? head.ref) : "detached";
-
 		return this.#cachedBranch ?? null;
 	}
 

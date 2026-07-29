@@ -16,7 +16,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { GitRefHead } from "@oh-my-pi/pi-coding-agent/utils/git";
+import type { GitHeadState, GitRefHead, GitRepository } from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -161,6 +161,80 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		await Promise.resolve();
 
 		expect(onBranchChange).toHaveBeenCalled();
+		component.dispose();
+	});
+});
+describe("StatusLineComponent reftable branch resolve honors mid-flight invalidation", () => {
+	it("discards a stale resolve invalidated mid-flight, keeps the fresh one", async () => {
+		// Force the reftable async-resolve path: #getCurrentBranch only spawns
+		// git.head.resolve when the repo resolves as reftable.
+		const fakeRepo = {
+			commonDir: "/fake/.git",
+			gitDir: "/fake/.git",
+			gitEntryPath: "/fake/.git",
+			headPath: "/fake/.git/HEAD",
+			repoRoot: "/fake",
+		} as GitRepository;
+		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
+		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
+		// Keep the sibling async fetches quiet so only the branch resolve drives
+		// #onBranchChange: git.status stays in flight forever, jj is no repo here.
+		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
+		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
+
+		const refHead = (branchName: string): GitRefHead => ({
+			...fakeRefHead,
+			branchName,
+			ref: `refs/heads/${branchName}`,
+		});
+
+		// Two controllable resolves: the stale one (R1) then the fresh one (R2).
+		const r1 = Promise.withResolvers<GitHeadState | null>();
+		const r2 = Promise.withResolvers<GitHeadState | null>();
+		const resolveSpy = vi.spyOn(git.head, "resolve");
+		resolveSpy.mockReturnValueOnce(r1.promise);
+		resolveSpy.mockReturnValueOnce(r2.promise);
+
+		const onBranchChange = vi.fn();
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(onBranchChange);
+
+		// Cold paint kicks the stale resolve (R1).
+		component.getTopBorder(80);
+		expect(git.head.resolve).toHaveBeenCalledTimes(1);
+
+		// A HEAD move fires the watcher: invalidate bumps the generation and
+		// releases the in-flight slot.
+		component.invalidate();
+
+		// The repaint starts a fresh resolve (R2) for the same cwd.
+		component.getTopBorder(80);
+		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+
+		// R1 (stale) lands first. Pre-fix it passed the in-flight-cwd guard
+		// (R2 had re-set the slot), installed the stale branch, cleared the
+		// marker, and caused R2 to be discarded — freezing the status line on
+		// the pre-change branch.
+		r1.resolve(refHead("stale-branch"));
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onBranchChange).not.toHaveBeenCalled();
+
+		// R2 (fresh) lands and commits.
+		r2.resolve(refHead("fresh-branch"));
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onBranchChange).toHaveBeenCalledTimes(1);
+
+		// The committed value is the fresh branch, served from cache with no new
+		// resolve, and the stale name never reaches the rendered segment.
+		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+		const border = component.getTopBorder(80);
+		expect(border.content).toContain("fresh-branch");
+		expect(border.content).not.toContain("stale-branch");
+		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+
 		component.dispose();
 	});
 });
