@@ -4,40 +4,20 @@ import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { withEnv } from "./helpers";
 
 const { getAgentDir, setAgentDir, TempDir } = piUtils;
 
 const originalAgentDir = getAgentDir();
-const originalCodexZstd = Bun.env.PI_CODEX_ZSTD;
-const originalProxyEnv: Record<string, string | undefined> = {
-	PI_PROXY: Bun.env.PI_PROXY,
-	HTTPS_PROXY: Bun.env.HTTPS_PROXY,
-	https_proxy: Bun.env.https_proxy,
-	ALL_PROXY: Bun.env.ALL_PROXY,
-	all_proxy: Bun.env.all_proxy,
-	NO_PROXY: Bun.env.NO_PROXY,
-	no_proxy: Bun.env.no_proxy,
-};
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
 
-function restoreEnv(name: string, value: string | undefined): void {
-	if (value === undefined) {
-		delete Bun.env[name];
-		return;
-	}
-	Bun.env[name] = value;
-}
-
 beforeEach(() => {
-	for (const key in originalProxyEnv) delete Bun.env[key];
 	__resetProxyCache();
 	vi.spyOn(piUtils, "getInstallId").mockReturnValue(TEST_INSTALLATION_ID);
 });
 
 afterEach(() => {
 	setAgentDir(originalAgentDir);
-	restoreEnv("PI_CODEX_ZSTD", originalCodexZstd);
-	for (const key in originalProxyEnv) restoreEnv(key, originalProxyEnv[key]);
 	__resetProxyCache();
 	vi.restoreAllMocks();
 });
@@ -127,31 +107,31 @@ async function runAndCaptureRequest(): Promise<CapturedRequest> {
 
 describe("codex SSE request body zstd compression", () => {
 	it("compresses the request body with zstd and sets content-encoding by default", async () => {
-		delete Bun.env.PI_CODEX_ZSTD;
+		await withEnv({ PI_CODEX_ZSTD: undefined }, async () => {
+			const { body, headers } = await runAndCaptureRequest();
 
-		const { body, headers } = await runAndCaptureRequest();
+			expect(headers.get("content-encoding")).toBe("zstd");
+			expect(headers.get("content-type")).toContain("application/json");
+			if (!(body instanceof Uint8Array)) throw new Error("expected a compressed binary body");
+			// A zstd frame begins with the magic number 0xFD2FB528 (little-endian).
+			expect(body[0]).toBe(0x28);
+			expect(body[1]).toBe(0xb5);
+			expect(body[2]).toBe(0x2f);
+			expect(body[3]).toBe(0xfd);
 
-		expect(headers.get("content-encoding")).toBe("zstd");
-		expect(headers.get("content-type")).toContain("application/json");
-		if (!(body instanceof Uint8Array)) throw new Error("expected a compressed binary body");
-		// A zstd frame begins with the magic number 0xFD2FB528 (little-endian).
-		expect(body[0]).toBe(0x28);
-		expect(body[1]).toBe(0xb5);
-		expect(body[2]).toBe(0x2f);
-		expect(body[3]).toBe(0xfd);
-
-		const decompressed = new TextDecoder().decode(Bun.zstdDecompressSync(body));
-		expect(decompressed).toBe(JSON.stringify(PINNED_PAYLOAD));
+			const decompressed = new TextDecoder().decode(Bun.zstdDecompressSync(body));
+			expect(decompressed).toBe(JSON.stringify(PINNED_PAYLOAD));
+		});
 	});
 
 	it("sends the plain JSON string without content-encoding when PI_CODEX_ZSTD=0", async () => {
-		Bun.env.PI_CODEX_ZSTD = "0";
+		await withEnv({ PI_CODEX_ZSTD: "0" }, async () => {
+			const { body, headers } = await runAndCaptureRequest();
 
-		const { body, headers } = await runAndCaptureRequest();
-
-		expect(headers.has("content-encoding")).toBe(false);
-		expect(headers.get("content-type")).toContain("application/json");
-		expect(typeof body).toBe("string");
-		expect(body).toBe(JSON.stringify(PINNED_PAYLOAD));
+			expect(headers.has("content-encoding")).toBe(false);
+			expect(headers.get("content-type")).toContain("application/json");
+			expect(typeof body).toBe("string");
+			expect(body).toBe(JSON.stringify(PINNED_PAYLOAD));
+		});
 	});
 });

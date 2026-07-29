@@ -3953,14 +3953,6 @@ async function openCodexSseEventStream(
 		requestMetadata,
 		await getCodexAttestationHeader(accountId),
 	);
-	CODEX_DEBUG &&
-		logger.debug("[codex] codex request", {
-			url,
-			model: body.model,
-			headers: redactHeaders(headers),
-			sentTurnStateHeader: headers.has(X_CODEX_TURN_STATE_HEADER),
-			sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
-		});
 	// `wrapCodexSseStream` arms the iterator-level idle watchdog only after this
 	// fetch resolves. Each transport attempt needs its own pre-response timer:
 	// the retry loop's base signal remains reserved for caller cancellation, so
@@ -3979,6 +3971,15 @@ async function openCodexSseEventStream(
 	if (compressedBody !== undefined) {
 		headers.set("content-encoding", "zstd");
 	}
+	CODEX_DEBUG &&
+		logger.debug("[codex] codex request", {
+			url,
+			model: body.model,
+			headers: redactHeaders(headers),
+			sentTurnStateHeader: headers.has(X_CODEX_TURN_STATE_HEADER),
+			sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
+		});
+
 	let response: Response;
 	try {
 		response = await fetchWithRetry(url, {
