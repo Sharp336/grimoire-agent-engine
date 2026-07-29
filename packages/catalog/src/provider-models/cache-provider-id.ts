@@ -1,6 +1,10 @@
+import { parseKiroCredentials, resolveKiroRegion } from "../discovery/kiro";
+
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
 	baseUrl?: string;
+	profileArn?: string;
+	region?: string;
 }
 
 export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | undefined {
@@ -26,6 +30,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `litellm:rich-v5:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "kiro": {
+			const credentials = parseKiroCredentials(options.apiKey, options.profileArn);
+			if (!credentials) return providerId;
+			const region = resolveKiroRegion(options.region, credentials.profileArn);
+			const endpoint = (options.baseUrl ?? `https://management.${region}.kiro.dev`).replace(/\/$/, "");
+			const identity = credentials.profileArn ?? credentials.accessToken;
+			return `kiro:models-v1:${Bun.hash(`${identity}\u0000${endpoint}`).toString(36)}`;
 		}
 		case "opencode-go":
 		case "opencode-zen": {

@@ -29,6 +29,7 @@ describe("fetchKiroModels", () => {
 		expect(models).toHaveLength(19);
 		expect(models?.every(model => model.input.length === 1 && model.input[0] === "text")).toBe(true);
 		expect(models?.find(model => model.id === "claude-opus-5")?.reasoning).toBe(true);
+		expect(models?.find(model => model.id === "gpt-5.6-sol")?.reasoning).toBe(true);
 		expect(models?.find(model => model.id === "auto")?.reasoning).toBe(false);
 	});
 

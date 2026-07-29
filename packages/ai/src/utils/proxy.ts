@@ -441,10 +441,10 @@ export function createProxiedAgent(
 		callback: (error: Error | null, socket?: net.Socket) => void,
 	) => {
 		connectProxiedSocket(proxyUrlStr, targetUrlStr, {
+			ca: options?.ca,
 			signal: options?.signal,
 			timeoutMs: options?.timeoutMs,
 			alpnProtocols: options?.alpnProtocols ?? ["http/1.1"],
-			ca: options?.ca,
 		}).then(
 			socket => callback(null, socket),
 			error => callback(error instanceof Error ? error : new Error(String(error))),

@@ -122,7 +122,7 @@ export function normalizeKiroModels(
 function supportsKiroReasoning(candidate: Record<string, unknown>): boolean {
 	const schema = candidate.additionalModelRequestFieldsSchema;
 	if (!isRecord(schema) || !isRecord(schema.properties)) return false;
-	return isRecord(schema.properties.thinking);
+	return isRecord(schema.properties.thinking) || isRecord(schema.properties.reasoning);
 }
 
 function finitePositive(value: unknown): number | undefined {

@@ -220,6 +220,9 @@ export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): Mo
 	const { apiKey, baseUrl, fetch, profileArn, region } = config;
 	return {
 		providerId: "kiro",
+		...(apiKey
+			? { cacheProviderId: resolveModelCacheProviderId("kiro", { apiKey, baseUrl, profileArn, region }) }
+			: undefined),
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {

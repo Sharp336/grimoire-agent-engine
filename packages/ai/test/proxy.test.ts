@@ -7,6 +7,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
 	connectDirectSocket,
 	connectProxiedSocket,
+	createProxiedAgent,
 	getProxyForProvider,
 	getProxyForUrl,
 	isLocalOrMetadataHost,
@@ -314,6 +315,31 @@ describe("connectDirectSocket", () => {
 		const error = await pending.catch((value: unknown) => value);
 		expect((error as { code?: string }).code).toBe("ERR_HTTP2_ALPN");
 		expect((error as Error).message).toContain("expected h2");
+	});
+});
+
+describe("createProxiedAgent", () => {
+	it("forwards a custom CA to the proxied TLS connection", async () => {
+		const emitter = new EventEmitter();
+		const socket = emitter as tls.TLSSocket;
+		Object.defineProperty(socket, "destroy", { value: vi.fn() });
+		let connectionCa: string | undefined;
+		vi.spyOn(tls, "connect").mockImplementation(options => {
+			if (typeof options === "object" && options !== null && "ca" in options && typeof options.ca === "string") {
+				connectionCa = options.ca;
+			}
+			return socket;
+		});
+		const agent = createProxiedAgent("https://proxy.example", "https://target.example", {
+			ca: "private-ca",
+		});
+		const callback = Promise.withResolvers<Error | null>();
+
+		agent.createConnection({}, error => callback.resolve(error));
+		queueMicrotask(() => emitter.emit("error", new Error("stop after option capture")));
+
+		expect(await callback.promise).toBeInstanceOf(Error);
+		expect(connectionCa).toBe("private-ca");
 	});
 });
 

@@ -1,4 +1,4 @@
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { pollOAuthDeviceCodeFlow } from "./device-code";
@@ -41,7 +41,13 @@ export async function loginKiro(ctrl: OAuthController): Promise<OAuthCredentials
 	});
 	ctrl.onProgress?.("Waiting for Kiro authorization...");
 	const token = await pollForToken(endpoint, client, device, fetchImpl, ctrl.signal);
-	const profileArn = await discoverProfileArn(token.accessToken, region, fetchImpl, ctrl.signal);
+	let profileArn: string | undefined;
+	try {
+		profileArn = await discoverProfileArn(token.accessToken, region, fetchImpl, ctrl.signal);
+	} catch (error) {
+		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+		logger.warn("kiro: optional profile discovery failed", { error: String(error) });
+	}
 	return {
 		refresh: JSON.stringify({ ...client, refreshToken: token.refreshToken, region } satisfies RefreshState),
 		access: token.accessToken,

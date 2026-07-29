@@ -48,6 +48,26 @@ describe("Kiro OAuth", () => {
 		expect(credentials.expires).toBeGreaterThan(Date.now());
 	});
 
+	it("preserves device credentials when optional profile discovery has a transport failure", async () => {
+		const deviceFetch = loginFetch(json({ accessToken: "access", refreshToken: "refresh", expiresIn: 3600 }));
+		const credentials = await loginKiro({
+			fetch: (input, init) => {
+				if (String(input).startsWith("https://management.us-east-1.kiro.dev/")) {
+					throw new Error("profile endpoint unavailable");
+				}
+				return deviceFetch(input, init);
+			},
+		});
+
+		expect(credentials).toMatchObject({ access: "access" });
+		expect(JSON.parse(credentials.refresh)).toMatchObject({
+			refreshToken: "refresh",
+			region: "us-east-1",
+		});
+		expect(credentials.profileArn).toBeUndefined();
+		expect(credentials.accountId).toBeUndefined();
+	});
+
 	it("preserves the stored refresh token when refresh omits a replacement", async () => {
 		const credentials = await refreshKiroToken(
 			{
