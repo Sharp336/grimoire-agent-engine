@@ -119,13 +119,35 @@ export interface GuestSnapshotActivityReconcilerCtx extends GuestIdleReconcilerC
 	 * missed an earlier `agent_start` (a reconnect dropped it mid-stream)
 	 * starts its spinner when the host later reports it is streaming.
 	 */
-	ensureLoadingAnimation: () => void;
+	ensureLoadingAnimation: InteractiveModeContext["ensureLoadingAnimation"];
+	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
+	retryLoader: InteractiveModeContext["retryLoader"];
+}
+
+/** Status-area state which cannot outlive removal of its child components. */
+export interface GuestTransientStatusCtx {
+	statusContainer: Pick<InteractiveModeContext["statusContainer"], "clear">;
+	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
+	retryLoader: InteractiveModeContext["retryLoader"];
+}
+
+/** Stop and forget status-area loaders before detaching their components. */
+export function clearGuestTransientStatus(ctx: GuestTransientStatusCtx): void {
+	if (ctx.autoCompactionLoader) {
+		ctx.autoCompactionLoader.stop();
+		ctx.autoCompactionLoader = undefined;
+	}
+	if (ctx.retryLoader) {
+		ctx.retryLoader.stop();
+		ctx.retryLoader = undefined;
+	}
+	ctx.statusContainer.clear();
 }
 
 export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconcilerCtx, isStreaming: boolean): void {
 	if (isStreaming) {
 		ctx.statusLine.markActivityStart();
-		ctx.ensureLoadingAnimation();
+		if (!ctx.autoCompactionLoader && !ctx.retryLoader) ctx.ensureLoadingAnimation();
 		return;
 	}
 	reconcileGuestIdleHostState(ctx, false);
@@ -690,7 +712,7 @@ export class CollabGuestLink {
 
 	#clearTransientUi(): void {
 		this.#clearUiRequests();
-		this.#ctx.statusContainer.clear();
+		clearGuestTransientStatus(this.#ctx);
 		this.#ctx.pendingMessagesContainer.clear();
 		this.#ctx.compactionQueuedMessages = [];
 		this.#ctx.streamingComponent = undefined;
