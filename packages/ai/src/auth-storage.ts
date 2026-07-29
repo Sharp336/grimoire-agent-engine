@@ -25,7 +25,7 @@ import type {
 	OAuthProvider,
 	OAuthProviderId,
 } from "./registry/oauth/types";
-import { getEnvApiKey, getEnvApiKeyName } from "./stream";
+import { getEnvApiKey, getEnvApiKeyName, getEnvApiKeys } from "./stream";
 import type { Provider } from "./types";
 import type {
 	ClientProviderUsage,
@@ -1238,7 +1238,7 @@ export class AuthStorage {
 	/** Provider -> credentials cache, populated from store on reload(). */
 	#data: Map<string, StoredCredential[]> = new Map();
 	#runtimeOverrides: Map<string, string> = new Map();
-	#configOverrides: Map<string, string> = new Map();
+	#configOverrides: Map<string, string[]> = new Map();
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
@@ -1417,23 +1417,27 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Register a per-provider API key sourced from user configuration
-	 * (e.g. `models.yml` `providers.<name>.apiKey`). Higher priority than
-	 * stored credentials and OAuth tokens — when the user pins a key in
-	 * config, that key is what authenticates outbound requests, regardless
-	 * of whatever the broker happens to have loaded for that provider.
-	 *
-	 * Lower priority than {@link setRuntimeApiKey} so a CLI `--api-key`
-	 * still wins for the duration of a single invocation.
+	 * Register per-provider API keys sourced from user configuration (e.g.
+	 * models.yml `providers.<name>.apiKey` / `apiKeys`). Higher priority than
+	 * stored credentials and OAuth, lower than a CLI `--api-key`.
 	 */
-	setConfigApiKey(provider: string, apiKey: string): void {
-		this.#configOverrides.set(provider, apiKey);
+	setConfigApiKeys(provider: string, apiKeys: readonly string[]): void {
+		const keys = [...new Set(apiKeys.map(apiKey => apiKey.trim()).filter(Boolean))];
+		const previous = this.#configOverrides.get(provider);
+		if (previous?.length === keys.length && previous.every((apiKey, index) => apiKey === keys[index])) return;
+		this.#clearVirtualApiKeyBlocks(provider, "config");
+		if (keys.length === 0) {
+			this.#configOverrides.delete(provider);
+			return;
+		}
+		this.#configOverrides.set(provider, keys);
 	}
 
 	/**
 	 * Remove a single config-sourced API key override.
 	 */
 	removeConfigApiKey(provider: string): void {
+		this.#clearVirtualApiKeyBlocks(provider, "config");
 		this.#configOverrides.delete(provider);
 	}
 
@@ -1442,7 +1446,74 @@ export class AuthStorage {
 	 * re-parsing `models.yml` so removed entries actually disappear.
 	 */
 	clearConfigApiKeys(): void {
+		for (const provider of this.#configOverrides.keys()) this.#clearVirtualApiKeyBlocks(provider, "config");
 		this.#configOverrides.clear();
+	}
+
+	#clearVirtualApiKeyBlocks(provider: string, source: "config" | "env"): void {
+		const providerKey = `${provider}:${source}_api_key`;
+		this.#credentialBackoff.delete(providerKey);
+		this.#credentialBackoffProbeAfter.delete(providerKey);
+	}
+
+	#hasPinnedConfigApiKey(provider: string): boolean {
+		return this.#configOverrides.get(provider)?.length === 1;
+	}
+
+	#selectApiKeyOverride(
+		provider: string,
+		providerKey: string,
+		apiKeys: readonly string[],
+		sessionId?: string,
+	): string | undefined {
+		if (apiKeys.length === 0) return undefined;
+		if (apiKeys.length === 1) return apiKeys[0];
+		const order = this.#getCredentialOrder(providerKey, sessionId, apiKeys.length);
+		const fallback = apiKeys[order[0]];
+		for (const index of order) {
+			if (!this.#isCredentialBlocked(provider, providerKey, index)) return apiKeys[index];
+		}
+		return fallback;
+	}
+
+	#selectConfigApiKey(provider: string, sessionId?: string): string | undefined {
+		return this.#selectApiKeyOverride(
+			provider,
+			`${provider}:config_api_key`,
+			this.#configOverrides.get(provider) ?? [],
+			sessionId,
+		);
+	}
+
+	#selectEnvApiKey(provider: string, sessionId?: string): string | undefined {
+		return this.#selectApiKeyOverride(provider, `${provider}:env_api_key`, getEnvApiKeys(provider), sessionId);
+	}
+
+	#markApiKeyOverrideUsageLimit(
+		provider: string,
+		apiKey: string | undefined,
+		retryAfterMs: number | undefined,
+	): UsageLimitMarkResult | undefined {
+		if (apiKey === undefined) return undefined;
+		for (const [providerKey, keys] of [
+			[`${provider}:config_api_key`, this.#configOverrides.get(provider) ?? []],
+			[`${provider}:env_api_key`, getEnvApiKeys(provider)],
+		] as const) {
+			if (keys.length < 2) continue;
+			const index = keys.indexOf(apiKey);
+			if (index < 0) continue;
+			const blockedUntil = Date.now() + (retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+			this.#markCredentialBlocked(provider, providerKey, index, blockedUntil, undefined, false);
+			let retryAtMs: number | undefined;
+			for (let sibling = 0; sibling < keys.length; sibling += 1) {
+				if (sibling === index) continue;
+				const siblingBlockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, sibling);
+				if (siblingBlockedUntil === undefined) return { switched: true };
+				if (retryAtMs === undefined || siblingBlockedUntil < retryAtMs) retryAtMs = siblingBlockedUntil;
+			}
+			return { switched: false, retryAtMs };
+		}
+		return undefined;
 	}
 
 	/**
@@ -1753,6 +1824,7 @@ export class AuthStorage {
 		credentialIndex: number,
 		blockedUntilMs: number,
 		blockScope: string | undefined = undefined,
+		persist = true,
 	): void {
 		const backoffKey = this.#toScopedBackoffKey(providerKey, blockScope);
 		const backoffMap = this.#credentialBackoff.get(backoffKey) ?? new Map<number, number>();
@@ -1765,6 +1837,7 @@ export class AuthStorage {
 		this.#credentialBackoffProbeAfter.set(backoffKey, probeAfterMap);
 		this.#invalidateUsageReportCache(provider);
 
+		if (!persist) return;
 		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
 		if (!upsertCredentialBlock) return;
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
@@ -4173,6 +4246,8 @@ export class AuthStorage {
 			signal?: AbortSignal;
 		},
 	): Promise<UsageLimitMarkResult> {
+		const overrideResult = this.#markApiKeyOverrideUsageLimit(provider, options?.apiKey, options?.retryAfterMs);
+		if (overrideResult) return overrideResult;
 		let sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
@@ -5125,10 +5200,8 @@ export class AuthStorage {
 			return runtimeKey;
 		}
 
-		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
-		}
+		const configKey = this.#selectConfigApiKey(provider);
+		if (configKey) return configKey;
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
@@ -5157,7 +5230,7 @@ export class AuthStorage {
 			return this.#configValueResolver(loginApiKeySelection.credential.key);
 		}
 
-		const envKey = getEnvApiKey(provider);
+		const envKey = this.#selectEnvApiKey(provider);
 		if (envKey) return envKey;
 
 		const apiKeySelection = this.#selectCredentialByType(provider, "api_key");
@@ -5191,10 +5264,8 @@ export class AuthStorage {
 		// (e.g. an auth-gateway) and supplied the bearer for that endpoint —
 		// honor it instead of forwarding an upstream OAuth token that the proxy
 		// won't accept.
-		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
-		}
+		const configKey = this.#selectConfigApiKey(provider, sessionId);
+		if (configKey) return configKey;
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
@@ -5218,7 +5289,7 @@ export class AuthStorage {
 		// suppresses account_uuid for this session.
 		if (sessionId) this.#sessionLastCredential.get(provider)?.delete(sessionId);
 
-		const envKey = getEnvApiKey(provider);
+		const envKey = this.#selectEnvApiKey(provider, sessionId);
 		if (envKey) return envKey;
 		const apiKeySelection = await this.#selectApiKeyCredential(
 			provider,
@@ -5258,7 +5329,7 @@ export class AuthStorage {
 		// Runtime / config overrides intentionally short-circuit OAuth: when the
 		// user has pinned an API key, they expect the OAuth identity to be
 		// suppressed (same contract as `getOAuthAccountId`).
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (this.#runtimeOverrides.has(provider) || this.#hasPinnedConfigApiKey(provider)) {
 			return undefined;
 		}
 		const resolved = await this.#resolveOAuthSelection(provider, sessionId, options);
@@ -5351,7 +5422,7 @@ export class AuthStorage {
 	 * credential.
 	 */
 	listOAuthAccounts(provider: string, sessionId?: string): OAuthAccountSummary[] {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (this.#runtimeOverrides.has(provider) || this.#hasPinnedConfigApiKey(provider)) {
 			return [];
 		}
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
@@ -5380,7 +5451,7 @@ export class AuthStorage {
 	 * handling may still route around an unavailable account.
 	 */
 	pinSessionOAuthAccount(provider: string, sessionId: string, credentialId: number): boolean {
-		if (!sessionId || this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (!sessionId || this.#runtimeOverrides.has(provider) || this.#hasPinnedConfigApiKey(provider)) {
 			return false;
 		}
 		const stored = this.#getStoredCredentials(provider);
@@ -5400,7 +5471,7 @@ export class AuthStorage {
 	 * exercise each stored account exactly once.
 	 */
 	async getOAuthAccesses(provider: string, options?: AuthApiKeyOptions): Promise<OAuthAccessResolution[]> {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (this.#runtimeOverrides.has(provider) || this.#hasPinnedConfigApiKey(provider)) {
 			return [];
 		}
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
@@ -5427,7 +5498,7 @@ export class AuthStorage {
 		position: number,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccessResolution | undefined> {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (this.#runtimeOverrides.has(provider) || this.#hasPinnedConfigApiKey(provider)) {
 			return undefined;
 		}
 		const selection = this.#getStoredOAuthSelections(provider)[position];

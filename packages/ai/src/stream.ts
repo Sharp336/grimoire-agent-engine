@@ -726,12 +726,20 @@ const serviceProviderMap: Record<string, KeyResolver> = {
  * Will not return API keys for providers that require OAuth tokens.
  * Checks Bun.env, then cwd/.env, then ~/.env.
  */
-export function getEnvApiKey(provider: string): string | undefined {
+export function getEnvApiKeys(provider: string): string[] {
 	const resolver = serviceProviderMap[provider];
-	if (typeof resolver === "string") {
-		return $env[resolver];
-	}
-	return resolver?.();
+	const value = typeof resolver === "string" ? $env[resolver] : resolver?.();
+	return (
+		value
+			?.split(",")
+			.map(apiKey => apiKey.trim())
+			.filter(Boolean) ?? []
+	);
+}
+
+/** Returns the first configured environment API key for callers that do not rotate credentials. */
+export function getEnvApiKey(provider: string): string | undefined {
+	return getEnvApiKeys(provider)[0];
 }
 
 /**

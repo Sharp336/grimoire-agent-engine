@@ -103,6 +103,10 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 	return Boolean(apiKey) && apiKey !== kNoAuth;
 }
 
+function mergeProviderApiKeyConfigs(apiKey: string | undefined, apiKeys: readonly string[] | undefined): string[] {
+	return [...new Set([apiKey, ...(apiKeys ?? [])].filter((value): value is string => Boolean(value?.trim())))];
+}
+
 function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
 	return isAuthenticated(apiKey) && !LOCAL_PROVIDER_PLACEHOLDERS.has(apiKey);
 }
@@ -785,7 +789,7 @@ export class ModelRegistry {
 	#cachedAuthoritativeProviders: Set<string> = new Set();
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
-	#customProviderApiKeys: Map<string, string> = new Map();
+	#customProviderApiKeys: Map<string, readonly string[]> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
 	#customModelOverlays: CustomModelOverlay[] = [];
@@ -814,23 +818,23 @@ export class ModelRegistry {
 	#fetch: FetchImpl;
 
 	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
-		const keyConfig = this.#customProviderApiKeys.get(provider);
-		if (!isCommandConfigValue(keyConfig)) return { configured: false };
-		const value = resolveConfigValue(keyConfig);
-		if (value) {
-			this.authStorage.setConfigApiKey(provider, value);
-			return { configured: true, value };
+		const keyConfigs = this.#customProviderApiKeys.get(provider) ?? [];
+		if (!keyConfigs.some(isCommandConfigValue)) return { configured: false };
+		const apiKeys = keyConfigs.map(resolveConfigValue).filter((apiKey): apiKey is string => apiKey !== undefined);
+		if (apiKeys.length > 0) {
+			this.authStorage.setConfigApiKeys(provider, apiKeys);
+			return { configured: false };
 		}
 		this.authStorage.removeConfigApiKey(provider);
 		return { configured: true };
 	}
 
-	#installProviderApiKey(provider: string, keyConfig: string): void {
-		this.#customProviderApiKeys.set(provider, keyConfig);
-		const resolved = resolveConfigValue(keyConfig);
-		if (resolved) {
-			this.authStorage.setConfigApiKey(provider, resolved);
-		} else if (isCommandConfigValue(keyConfig)) {
+	#installProviderApiKeys(provider: string, keyConfigs: readonly string[]): void {
+		this.#customProviderApiKeys.set(provider, keyConfigs);
+		const apiKeys = keyConfigs.map(resolveConfigValue).filter((apiKey): apiKey is string => apiKey !== undefined);
+		if (apiKeys.length > 0) {
+			this.authStorage.setConfigApiKeys(provider, apiKeys);
+		} else if (keyConfigs.some(isCommandConfigValue)) {
 			this.authStorage.removeConfigApiKey(provider);
 		}
 	}
@@ -868,9 +872,8 @@ export class ModelRegistry {
 		this.#cacheDbPath = modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined;
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver(provider => {
-			const keyConfig = this.#customProviderApiKeys.get(provider);
-			if (!keyConfig) return undefined;
-			return resolveConfigValue(keyConfig);
+			const keyConfigs = this.#customProviderApiKeys.get(provider);
+			return keyConfigs?.map(resolveConfigValue).find(Boolean);
 		});
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
@@ -1042,7 +1045,7 @@ export class ModelRegistry {
 		// Restore runtime API keys before #loadModels — survives because
 		// #loadModels only calls .set() on #customProviderApiKeys, never reassigns it.
 		for (const [k, v] of this.#runtimeProviderApiKeys) {
-			this.#installProviderApiKey(k, v);
+			this.#installProviderApiKeys(k, [v]);
 		}
 		this.#providerOverrides.clear();
 		this.#modelOverrides.clear();
@@ -1496,11 +1499,12 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		for (const [providerName, providerConfig] of providerEntries) {
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
+			const providerApiKeyConfigs = mergeProviderApiKeyConfigs(providerConfig.apiKey, providerConfig.apiKeys);
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/transport are present
 			if (
 				providerConfig.baseUrl ||
 				resolvedProviderHeaders ||
-				providerConfig.apiKey ||
+				providerApiKeyConfigs.length > 0 ||
 				providerConfig.authHeader !== undefined ||
 				providerConfig.compat ||
 				providerConfig.disableStrictTools ||
@@ -1514,7 +1518,7 @@ export class ModelRegistry {
 							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
 							: providerConfig.baseUrl,
 					headers: resolvedProviderHeaders,
-					apiKey: providerConfig.apiKey,
+					apiKey: providerApiKeyConfigs[0],
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
@@ -1548,8 +1552,8 @@ export class ModelRegistry {
 			// so it wins over OAuth tokens from the broker — when the user pins a
 			// bearer in models.yml (e.g. for an auth-gateway baseUrl), that bearer
 			// must authenticate the outbound request.
-			if (providerConfig.apiKey) {
-				this.#installProviderApiKey(providerName, providerConfig.apiKey);
+			if (providerApiKeyConfigs.length > 0) {
+				this.#installProviderApiKeys(providerName, providerApiKeyConfigs);
 			}
 
 			// Parse per-model overrides
@@ -2121,8 +2125,9 @@ export class ModelRegistry {
 			const modelDefs = providerConfig.models ?? [];
 			if (modelDefs.length === 0) continue; // Override-only, no custom models
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
-			if (providerConfig.apiKey) {
-				this.#installProviderApiKey(providerName, providerConfig.apiKey);
+			const providerApiKeyConfigs = mergeProviderApiKeyConfigs(providerConfig.apiKey, providerConfig.apiKeys);
+			if (providerApiKeyConfigs.length > 0) {
+				this.#installProviderApiKeys(providerName, providerApiKeyConfigs);
 			}
 			for (const modelDef of modelDefs) {
 				const providerCompat = providerConfig.disableStrictTools
@@ -2133,7 +2138,7 @@ export class ModelRegistry {
 					providerConfig.baseUrl!,
 					providerConfig.api as Api | undefined,
 					resolvedProviderHeaders,
-					providerConfig.apiKey,
+					providerApiKeyConfigs[0],
 					providerConfig.authHeader,
 					providerCompat,
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
@@ -2222,7 +2227,7 @@ export class ModelRegistry {
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
-			isCommandConfigValue(keyConfig) ||
+			keyConfig?.some(isCommandConfigValue) ||
 			this.#keylessProviders.has(model.provider) ||
 			this.authStorage.hasAuth(model.provider)
 		);
@@ -2236,7 +2241,7 @@ export class ModelRegistry {
 	 */
 	hasCommandBackedApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		return isCommandConfigValue(keyConfig);
+		return keyConfig?.some(isCommandConfigValue) ?? false;
 	}
 
 	getDiscoverableProviders(): string[] {
@@ -2499,7 +2504,7 @@ export class ModelRegistry {
 
 		this.#ensureFullSnapshot();
 		if (config.apiKey) {
-			this.#installProviderApiKey(providerName, config.apiKey);
+			this.#installProviderApiKeys(providerName, [config.apiKey]);
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
 			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 		}

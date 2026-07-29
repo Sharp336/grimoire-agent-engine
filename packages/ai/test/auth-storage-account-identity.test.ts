@@ -126,7 +126,7 @@ describe("AuthStorage.getOAuthAccountIdentity", () => {
 		]);
 		expect(authStorage.getOAuthAccountIdentity(PROVIDER)?.accountId).toBe("acc-a");
 
-		authStorage.setConfigApiKey(PROVIDER, "gateway-bearer");
+		authStorage.setConfigApiKeys(PROVIDER, ["gateway-bearer"]);
 		// With an explicit bearer in play the session is not using OAuth, so no
 		// account may be reported as "in use".
 		expect(authStorage.getOAuthAccountIdentity(PROVIDER)).toBeUndefined();

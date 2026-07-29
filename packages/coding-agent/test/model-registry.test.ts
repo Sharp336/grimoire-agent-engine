@@ -401,6 +401,29 @@ describe("ModelRegistry", () => {
 				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
 			}
 		});
+		test("apiKeys combines after apiKey, removes duplicates, and configures auth", async () => {
+			const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+			delete Bun.env.OPENAI_API_KEY;
+			try {
+				writeRawModelsJson({
+					openai: {
+						apiKey: "first-key",
+						apiKeys: ["second-key", "first-key", "third-key"],
+					},
+				});
+
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				expect(await registry.getApiKeyForProvider("openai")).toBe("first-key");
+				expect(await authStorage.markUsageLimitReached("openai", undefined, { apiKey: "first-key" })).toEqual({
+					switched: true,
+				});
+				expect(await registry.getApiKeyForProvider("openai")).toBe("second-key");
+			} finally {
+				if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
+				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+			}
+		});
+
 		test("zhipu-coding-plan glm-5.2 chat resolves the zhipu credential with model-scoped hints", async () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			const model = registry.find("zhipu-coding-plan", "glm-5.2");

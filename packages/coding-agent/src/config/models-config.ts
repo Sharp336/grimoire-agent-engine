@@ -21,6 +21,7 @@ export interface ProviderValidationConfig {
 	baseUrl?: string;
 	headers?: Record<string, string>;
 	apiKey?: string;
+	apiKeys?: string[];
 	api?: Api;
 	auth?: ProviderAuthMode;
 	oauthConfigured?: boolean;
@@ -48,6 +49,7 @@ export function validateProviderConfiguration(
 				!config.headers &&
 				!config.compat &&
 				!config.apiKey &&
+				!config.apiKeys?.length &&
 				config.auth !== "none" &&
 				!config.disableStrictTools &&
 				!config.remoteCompaction &&
@@ -55,7 +57,7 @@ export function validateProviderConfiguration(
 				!config.discovery
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
+					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "apiKeys", "auth: none", "compat", "disableStrictTools", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
 				);
 			}
 		}
@@ -65,8 +67,8 @@ export function validateProviderConfiguration(
 		}
 		const requiresAuth =
 			mode === "runtime-register"
-				? !config.apiKey && !config.oauthConfigured
-				: !config.apiKey && (config.auth ?? "apiKey") !== "none";
+				? !config.apiKey && !config.apiKeys?.length && !config.oauthConfigured
+				: !config.apiKey && !config.apiKeys?.length && (config.auth ?? "apiKey") !== "none";
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"
@@ -115,6 +117,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 				baseUrl: providerConfig.baseUrl,
 				headers: providerConfig.headers,
 				apiKey: providerConfig.apiKey,
+				apiKeys: providerConfig.apiKeys,
 				api: providerConfig.api as Api | undefined,
 				auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
 				discovery: providerConfig.discovery as ProviderDiscovery | undefined,

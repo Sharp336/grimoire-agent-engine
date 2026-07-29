@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `providers.<name>.apiKeys` in `models.yml` for ordered, de-duplicated API-key rotation.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
