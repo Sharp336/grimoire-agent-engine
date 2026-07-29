@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Coalesced the models configuration resource probe into one child process to avoid startup contention while preserving retained-resource coverage.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
