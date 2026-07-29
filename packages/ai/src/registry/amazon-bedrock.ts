@@ -1,5 +1,5 @@
 import { $env } from "@oh-my-pi/pi-utils";
-import type { ProviderDefinition } from "./types";
+import { AUTHENTICATED_SENTINEL, type ProviderDefinition } from "./types";
 
 export const amazonBedrockProvider = {
 	id: "amazon-bedrock",
@@ -16,7 +16,7 @@ export const amazonBedrockProvider = {
 			hasEcsCredentials ||
 			hasWebIdentity
 		) {
-			return "<authenticated>";
+			return AUTHENTICATED_SENTINEL;
 		}
 	},
 } as const satisfies ProviderDefinition;
