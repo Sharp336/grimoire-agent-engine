@@ -10,6 +10,7 @@ import type {
 	SimpleStreamOptions,
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
+import { REQUEST_API_KEY_AUTHORIZATION } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
@@ -101,6 +102,10 @@ export const kNoAuth = "N/A";
 
 export function isAuthenticated(apiKey: string | undefined | null): apiKey is string {
 	return Boolean(apiKey) && apiKey !== kNoAuth;
+}
+
+function mergeProviderApiKeyConfigs(apiKey: string | undefined, apiKeys: readonly string[] | undefined): string[] {
+	return [...new Set([apiKey, ...(apiKeys ?? [])].filter((value): value is string => Boolean(value?.trim())))];
 }
 
 function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
@@ -337,7 +342,7 @@ type HeaderSource = Record<string, string> | undefined;
 
 interface HeaderResolutionOptions {
 	authHeader?: boolean;
-	apiKeyConfig?: string;
+	apiKey?: string;
 }
 
 function materializeConfigHeaderSources(
@@ -352,9 +357,8 @@ function materializeConfigHeaderSources(
 			if (next) resolved[key] = next;
 		}
 	}
-	if (options?.authHeader && options.apiKeyConfig) {
-		const resolvedKey = resolveConfigValue(options.apiKeyConfig);
-		if (resolvedKey) resolved.Authorization = `Bearer ${resolvedKey}`;
+	if (options?.authHeader && options.apiKey !== kNoAuth) {
+		resolved.Authorization = options.apiKey ? `Bearer ${options.apiKey}` : REQUEST_API_KEY_AUTHORIZATION;
 	}
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
@@ -364,7 +368,9 @@ function createLiveConfigHeaders(
 	options?: HeaderResolutionOptions,
 ): Record<string, string> | undefined {
 	const liveSources = sources.filter((source): source is Record<string, string> => source !== undefined);
-	if (liveSources.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
+	if (liveSources.length === 0 && !options?.authHeader) {
+		return undefined;
+	}
 
 	const localHeaders: Record<string, string> = {};
 	const allSources = [...liveSources, localHeaders];
@@ -604,17 +610,15 @@ function mergeCustomModelHeaders(
 	providerHeaders: Record<string, string> | undefined,
 	modelHeaders: Record<string, string> | undefined,
 	authHeader: boolean | undefined,
-	apiKeyConfig: string | undefined,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader });
 }
 
 function mergeAuthHeaderSources(
 	sources: readonly HeaderSource[],
 	authHeader: boolean | undefined,
-	apiKeyConfig: string | undefined,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders(sources, { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders(sources, { authHeader });
 }
 
 /**
@@ -636,7 +640,6 @@ function buildCustomModelOverlay(
 	providerBaseUrl: string,
 	providerApi: Api | undefined,
 	providerHeaders: Record<string, string> | undefined,
-	providerApiKey: string | undefined,
 	authHeader: boolean | undefined,
 	providerCompat: ModelSpec<Api>["compat"] | undefined,
 	providerAuth: ProviderAuthMode | undefined,
@@ -659,7 +662,7 @@ function buildCustomModelOverlay(
 		contextWindow: modelDef.contextWindow,
 		maxTokens: modelDef.maxTokens,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
-		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
+		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader),
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,
@@ -785,7 +788,7 @@ export class ModelRegistry {
 	#cachedAuthoritativeProviders: Set<string> = new Set();
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
-	#customProviderApiKeys: Map<string, string> = new Map();
+	#customProviderApiKeys: Map<string, readonly string[]> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
 	#customModelOverlays: CustomModelOverlay[] = [];
@@ -814,23 +817,23 @@ export class ModelRegistry {
 	#fetch: FetchImpl;
 
 	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
-		const keyConfig = this.#customProviderApiKeys.get(provider);
-		if (!isCommandConfigValue(keyConfig)) return { configured: false };
-		const value = resolveConfigValue(keyConfig);
-		if (value) {
-			this.authStorage.setConfigApiKey(provider, value);
-			return { configured: true, value };
+		const keyConfigs = this.#customProviderApiKeys.get(provider) ?? [];
+		if (!keyConfigs.some(isCommandConfigValue)) return { configured: false };
+		const apiKeys = keyConfigs.map(resolveConfigValue).filter((apiKey): apiKey is string => apiKey !== undefined);
+		if (apiKeys.length > 0) {
+			this.authStorage.setConfigApiKeys(provider, apiKeys);
+			return { configured: false };
 		}
 		this.authStorage.removeConfigApiKey(provider);
 		return { configured: true };
 	}
 
-	#installProviderApiKey(provider: string, keyConfig: string): void {
-		this.#customProviderApiKeys.set(provider, keyConfig);
-		const resolved = resolveConfigValue(keyConfig);
-		if (resolved) {
-			this.authStorage.setConfigApiKey(provider, resolved);
-		} else if (isCommandConfigValue(keyConfig)) {
+	#installProviderApiKeys(provider: string, keyConfigs: readonly string[]): void {
+		this.#customProviderApiKeys.set(provider, keyConfigs);
+		const apiKeys = keyConfigs.map(resolveConfigValue).filter((apiKey): apiKey is string => apiKey !== undefined);
+		if (apiKeys.length > 0) {
+			this.authStorage.setConfigApiKeys(provider, apiKeys);
+		} else if (keyConfigs.some(isCommandConfigValue)) {
 			this.authStorage.removeConfigApiKey(provider);
 		}
 	}
@@ -868,9 +871,8 @@ export class ModelRegistry {
 		this.#cacheDbPath = modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined;
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver(provider => {
-			const keyConfig = this.#customProviderApiKeys.get(provider);
-			if (!keyConfig) return undefined;
-			return resolveConfigValue(keyConfig);
+			const keyConfigs = this.#customProviderApiKeys.get(provider);
+			return keyConfigs?.map(resolveConfigValue).find(Boolean);
 		});
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
@@ -1042,7 +1044,7 @@ export class ModelRegistry {
 		// Restore runtime API keys before #loadModels — survives because
 		// #loadModels only calls .set() on #customProviderApiKeys, never reassigns it.
 		for (const [k, v] of this.#runtimeProviderApiKeys) {
-			this.#installProviderApiKey(k, v);
+			this.#installProviderApiKeys(k, [v]);
 		}
 		this.#providerOverrides.clear();
 		this.#modelOverrides.clear();
@@ -1496,11 +1498,12 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		for (const [providerName, providerConfig] of providerEntries) {
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
+			const providerApiKeyConfigs = mergeProviderApiKeyConfigs(providerConfig.apiKey, providerConfig.apiKeys);
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/transport are present
 			if (
 				providerConfig.baseUrl ||
 				resolvedProviderHeaders ||
-				providerConfig.apiKey ||
+				providerApiKeyConfigs.length > 0 ||
 				providerConfig.authHeader !== undefined ||
 				providerConfig.compat ||
 				providerConfig.disableStrictTools ||
@@ -1514,7 +1517,7 @@ export class ModelRegistry {
 							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
 							: providerConfig.baseUrl,
 					headers: resolvedProviderHeaders,
-					apiKey: providerConfig.apiKey,
+					apiKey: providerApiKeyConfigs[0],
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
@@ -1548,8 +1551,8 @@ export class ModelRegistry {
 			// so it wins over OAuth tokens from the broker — when the user pins a
 			// bearer in models.yml (e.g. for an auth-gateway baseUrl), that bearer
 			// must authenticate the outbound request.
-			if (providerConfig.apiKey) {
-				this.#installProviderApiKey(providerName, providerConfig.apiKey);
+			if (providerApiKeyConfigs.length > 0) {
+				this.#installProviderApiKeys(providerName, providerApiKeyConfigs);
 			}
 
 			// Parse per-model overrides
@@ -2023,7 +2026,12 @@ export class ModelRegistry {
 		};
 	}
 	#applyProviderTransportOverride<
-		T extends { baseUrl?: string; headers?: Record<string, string>; remoteCompaction?: RemoteCompactionConfig<Api> },
+		T extends {
+			provider: string;
+			baseUrl?: string;
+			headers?: Record<string, string>;
+			remoteCompaction?: RemoteCompactionConfig<Api>;
+		},
 	>(
 		entry: T,
 		override: Pick<
@@ -2034,7 +2042,6 @@ export class ModelRegistry {
 		const headers = mergeAuthHeaderSources(
 			override.headers ? [entry.headers, override.headers] : [entry.headers],
 			override.authHeader,
-			override.apiKey,
 		);
 		return {
 			...entry,
@@ -2121,8 +2128,9 @@ export class ModelRegistry {
 			const modelDefs = providerConfig.models ?? [];
 			if (modelDefs.length === 0) continue; // Override-only, no custom models
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
-			if (providerConfig.apiKey) {
-				this.#installProviderApiKey(providerName, providerConfig.apiKey);
+			const providerApiKeyConfigs = mergeProviderApiKeyConfigs(providerConfig.apiKey, providerConfig.apiKeys);
+			if (providerApiKeyConfigs.length > 0) {
+				this.#installProviderApiKeys(providerName, providerApiKeyConfigs);
 			}
 			for (const modelDef of modelDefs) {
 				const providerCompat = providerConfig.disableStrictTools
@@ -2133,7 +2141,6 @@ export class ModelRegistry {
 					providerConfig.baseUrl!,
 					providerConfig.api as Api | undefined,
 					resolvedProviderHeaders,
-					providerConfig.apiKey,
 					providerConfig.authHeader,
 					providerCompat,
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
@@ -2222,7 +2229,7 @@ export class ModelRegistry {
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
-			isCommandConfigValue(keyConfig) ||
+			keyConfig?.some(isCommandConfigValue) ||
 			this.#keylessProviders.has(model.provider) ||
 			this.authStorage.hasAuth(model.provider)
 		);
@@ -2236,7 +2243,7 @@ export class ModelRegistry {
 	 */
 	hasCommandBackedApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		return isCommandConfigValue(keyConfig);
+		return keyConfig?.some(isCommandConfigValue) ?? false;
 	}
 
 	getDiscoverableProviders(): string[] {
@@ -2285,11 +2292,16 @@ export class ModelRegistry {
 	/**
 	 * Get provider-level headers without including per-model overrides.
 	 */
-	getProviderHeaders(provider: string): Record<string, string> | undefined {
-		return createLiveConfigHeaders([
-			this.#providerOverrides.get(provider)?.headers,
-			this.#runtimeProviderOverrides.get(provider)?.headers,
-		]);
+	getProviderHeaders(provider: string, apiKey?: string): Record<string, string> | undefined {
+		return createLiveConfigHeaders(
+			[this.#providerOverrides.get(provider)?.headers, this.#runtimeProviderOverrides.get(provider)?.headers],
+			{
+				authHeader:
+					this.#runtimeProviderOverrides.get(provider)?.authHeader ??
+					this.#providerOverrides.get(provider)?.authHeader,
+				apiKey,
+			},
+		);
 	}
 
 	/**
@@ -2319,7 +2331,7 @@ export class ModelRegistry {
 			if (apiKey === undefined) {
 				return { ok: false, error: `No API key found for "${model.provider}"` };
 			}
-			const headers = this.getProviderHeaders(model.provider);
+			const headers = this.getProviderHeaders(model.provider, apiKey);
 			return { ok: true, apiKey, headers };
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -2499,7 +2511,7 @@ export class ModelRegistry {
 
 		this.#ensureFullSnapshot();
 		if (config.apiKey) {
-			this.#installProviderApiKey(providerName, config.apiKey);
+			this.#installProviderApiKeys(providerName, [config.apiKey]);
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
 			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 		}
@@ -2513,7 +2525,6 @@ export class ModelRegistry {
 					config.baseUrl!,
 					config.api,
 					config.headers,
-					config.apiKey,
 					config.authHeader,
 					config.compat,
 					undefined,
@@ -2559,7 +2570,6 @@ export class ModelRegistry {
 			const providerBaseUrl = config.baseUrl ?? "";
 			const providerApi = config.api;
 			const providerHeaders = config.headers;
-			const providerApiKey = config.apiKey;
 			const providerAuthHeader = config.authHeader;
 			const providerCompat = config.compat;
 			const managerOptions: ModelManagerOptions<Api> = {
@@ -2581,7 +2591,6 @@ export class ModelRegistry {
 							modelDef.baseUrl ?? providerBaseUrl,
 							modelDef.api ?? providerApi,
 							providerHeaders,
-							providerApiKey,
 							providerAuthHeader,
 							providerCompat,
 							undefined,

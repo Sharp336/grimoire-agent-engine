@@ -51,6 +51,9 @@ providers:
   my-provider:
     baseUrl: https://api.example.com/v1
     apiKey: MY_PROVIDER_API_KEY
+    apiKeys:
+      - MY_PROVIDER_FALLBACK_API_KEY
+      - MY_PROVIDER_LAST_RESORT_API_KEY
     api: openai-completions
     headers:
       X-Team: platform
@@ -91,6 +94,26 @@ providers:
             controller: mlx
 ```
 
+### Multiple API keys (`apiKey`, `apiKeys`)
+
+A provider can supply one primary `apiKey` and an ordered `apiKeys` list. The
+effective configured key list is `apiKey` first, followed by `apiKeys`. Each
+entry is trimmed; blank entries are ignored; duplicate values keep their first
+position. This lets a generated config leave optional list entries blank.
+
+Configured keys take precedence over stored OAuth and stored API-key credentials
+(but not the runtime `--api-key` override). Any nonempty configured key list
+suppresses OAuth for that provider. With a session, the first key is chosen
+deterministically for that session; without one, selections rotate round-robin.
+A usage-limit response temporarily blocks the selected key and retries with the
+next unblocked configured key. Comma-separated environment keys use the same
+rotation and are deduplicated; JSON object/array credentials remain one intact
+value.
+
+When `authHeader: true`, `Authorization: Bearer <key>` is materialized from the
+currently selected configured key, so the header changes with rotation rather
+than remaining on the first key.
+
 ### Allowed provider/model `api` values
 
 - `openai-completions`
@@ -104,7 +127,8 @@ providers:
 
 ### Allowed auth/discovery values
 
-- `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
+- `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models,
+  `oauth` is accepted by schema but does not waive the `apiKey` / `apiKeys` requirement
 - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, or `litellm`
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 
@@ -115,7 +139,7 @@ providers:
 Required:
 
 - `baseUrl`
-- `apiKey` unless `auth: none`
+- `apiKey` or a nonempty `apiKeys` list unless `auth: none`
 - `api` at provider level or each model
 
 ### Override-only provider (`models` missing or empty)
@@ -124,6 +148,7 @@ Must define at least one of:
 
 - `baseUrl`
 - `apiKey`
+- `apiKeys`
 - `auth: none`
 - `headers`
 - `compat`
@@ -142,7 +167,9 @@ Must define at least one of:
 
 ### Command-resolved secrets
 
-Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. The command is run with a 10 s timeout, stdout is trimmed, and empty/failing commands are omitted:
+Provider `apiKey` / `apiKeys` values and provider/model `headers` values may start
+with `!` to read a secret from command stdout. The command is run with a 10 s
+timeout, stdout is trimmed, and empty/failing commands are omitted:
 
 ```yaml
 providers:
@@ -379,19 +406,19 @@ Extensions can register providers at runtime (`pi.registerProvider(...)`), inclu
 When requesting a key for a provider, effective order is:
 
 1. Runtime override (CLI `--api-key`)
-2. Stored API key credential in `agent.db`
+2. Configured `models.yml` `apiKey` / `apiKeys`
 3. Stored OAuth credential in `agent.db` (with refresh)
-4. Environment variable mapping (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
-5. ModelRegistry fallback resolver (provider `apiKey` from `models.yml`, env-name-or-literal semantics)
+4. API key persisted by a successful `/login`
+5. Environment variable mapping (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
+6. Other stored API-key credentials
+7. ModelRegistry fallback resolver
 
-`models.yml` `apiKey` behavior:
+`models.yml` key values are first treated as environment variable names. If no
+matching environment variable exists, their literal string is used as the token.
 
-- Value is first treated as an environment variable name.
-- If no env var exists, the literal string is used as the token.
+If `authHeader: true` and a provider key is selected, models get:
 
-If `authHeader: true` and provider `apiKey` is set, models get:
-
-- `Authorization: Bearer <resolved-key>` header injected.
+- `Authorization: Bearer <selected-key>` header injected.
 
 Keyless providers:
 
@@ -402,7 +429,11 @@ Keyless providers:
 
 When `OMP_AUTH_BROKER_URL` (or `auth.broker.url`) is set, the local SQLite credential store is replaced by `RemoteAuthCredentialStore`. Layers 2 and 3 above (stored API key / OAuth in `agent.db`) are served from a broker-supplied snapshot whose `refresh` tokens are redacted; expiry triggers `POST /v1/credential/:id/refresh` on the broker rather than a local refresh.
 
-`AuthStorage.setConfigApiKey` lets a `models.yml` `apiKey` win over a broker-resolved OAuth token without overriding a runtime `--api-key`. See [`auth-broker-gateway.md`](./auth-broker-gateway.md) for the full broker / gateway design and env surface (`OMP_AUTH_BROKER_URL`, `OMP_AUTH_BROKER_TOKEN`, `auth.broker.url`, `auth.broker.token`).
+`AuthStorage.setConfigApiKeys` lets `models.yml` `apiKey` and `apiKeys` win over
+a broker-resolved OAuth token without overriding a runtime `--api-key`. See
+[`auth-broker-gateway.md`](./auth-broker-gateway.md) for the full broker /
+gateway design and env surface (`OMP_AUTH_BROKER_URL`, `OMP_AUTH_BROKER_TOKEN`,
+`auth.broker.url`, `auth.broker.token`).
 
 ## Model availability vs all models
 

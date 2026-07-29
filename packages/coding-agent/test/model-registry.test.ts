@@ -3,7 +3,15 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
+import {
+	type Context,
+	Effort,
+	type FetchImpl,
+	type Model,
+	type OpenAICompat,
+	streamSimple,
+	type ThinkingConfig,
+} from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -373,12 +381,106 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("authHeader override applies bearer auth to built-in models without custom models", () => {
+		test("authHeader override applies bearer auth to built-in models without custom models", async () => {
 			const anthropicModels = getModelsForProvider(anthropicAuthHeader, "anthropic");
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			for (const model of anthropicModels) {
-				expect(model.headers?.Authorization).toBe("Bearer issue-929-key");
+				const auth = await anthropicAuthHeader.getApiKeyAndHeaders(model);
+				expect(auth).toEqual({
+					ok: true,
+					apiKey: "issue-929-key",
+					headers: { Authorization: "Bearer issue-929-key" },
+				});
 			}
+		});
+
+		test("authHeader binds each interleaved session request to its resolved key", async () => {
+			writeRawModelsJson({
+				anthropic: {
+					baseUrl: "https://anthropic-proxy.example.com/v1",
+					apiKeys: ["header-first", "header-second"],
+					authHeader: true,
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic model");
+
+			const selections = await Promise.all(
+				Array.from({ length: 64 }, async (_, index) => {
+					const sessionId = `auth-header-session-${index}`;
+					return { sessionId, apiKey: await registry.getApiKey(model, sessionId) };
+				}),
+			);
+			const first = selections[0];
+			const second = selections.find(selection => selection.apiKey !== first?.apiKey);
+			if (!first?.apiKey || !second?.apiKey) throw new Error("Expected two distinct configured API keys");
+
+			const { promise: firstRelease, resolve: releaseFirst } = Promise.withResolvers<void>();
+			const { promise: firstResolved, resolve: markFirstResolved } = Promise.withResolvers<void>();
+			const { promise: secondResolved, resolve: markSecondResolved } = Promise.withResolvers<void>();
+
+			const firstKeyResolver = registry.resolver(model, first.sessionId);
+			const secondKeyResolver = registry.resolver(model, second.sessionId);
+			const firstResolver = async (context: Parameters<typeof firstKeyResolver>[0]) => {
+				const apiKey = await firstKeyResolver(context);
+				markFirstResolved();
+				await firstRelease;
+				return apiKey;
+			};
+			const secondResolver = async (context: Parameters<typeof secondKeyResolver>[0]) => {
+				const apiKey = await secondKeyResolver(context);
+				markSecondResolved();
+				return apiKey;
+			};
+
+			const observedHeaders: Record<string, string | null> = {};
+			const fetchMock: FetchImpl = async (input, init) => {
+				const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+				const bodyText = input instanceof Request ? await input.clone().text() : String(init?.body);
+				const body = JSON.parse(bodyText);
+				const requestContent = body.messages[0].content;
+				const requestText = typeof requestContent === "string" ? requestContent : requestContent[0].text;
+				observedHeaders[requestText] = headers.get("Authorization");
+				const events = [
+					{ type: "message_start", message: { id: "msg", usage: { input_tokens: 1, output_tokens: 0 } } },
+					{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "end_turn" },
+						usage: { input_tokens: 1, output_tokens: 1 },
+					},
+					{ type: "message_stop" },
+				];
+				return new Response(
+					events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+					{
+						headers: { "content-type": "text/event-stream" },
+					},
+				);
+			};
+			const context = (content: string): Context => ({ messages: [{ role: "user", content, timestamp: 0 }] });
+
+			const firstStream = streamSimple(model, context("first"), {
+				apiKey: firstResolver,
+				fetch: fetchMock,
+			});
+			await firstResolved;
+			const secondStream = streamSimple(model, context("second"), {
+				apiKey: secondResolver,
+				fetch: fetchMock,
+			});
+			await secondResolved;
+			releaseFirst();
+			await Promise.all([firstStream.result(), secondStream.result()]);
+
+			expect(observedHeaders).toEqual({
+				first: `Bearer ${first.apiKey}`,
+				second: `Bearer ${second.apiKey}`,
+			});
 		});
 
 		test("apiKey-only override supplies fallback auth for built-in models", async () => {
@@ -401,6 +503,55 @@ describe("ModelRegistry", () => {
 				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
 			}
 		});
+		test("apiKeys accepts blank entries, combines after apiKey, removes duplicates, and configures auth", async () => {
+			const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+			delete Bun.env.OPENAI_API_KEY;
+			try {
+				writeRawModelsJson({
+					openai: {
+						apiKey: "first-key",
+						apiKeys: ["second-key", "", "first-key", "third-key"],
+					},
+				});
+
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				expect(await registry.getApiKeyForProvider("openai")).toBe("first-key");
+				expect(await authStorage.markUsageLimitReached("openai", undefined, { apiKey: "first-key" })).toEqual({
+					switched: true,
+				});
+				expect(await registry.getApiKeyForProvider("openai")).toBe("second-key");
+			} finally {
+				if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
+				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+			}
+		});
+		test("authHeader follows the configured key selected after rotation", async () => {
+			writeRawModelsJson({
+				anthropic: {
+					apiKeys: ["header-first", "header-second"],
+					authHeader: true,
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic model");
+
+			expect(await registry.getApiKeyAndHeaders(model)).toEqual({
+				ok: true,
+				apiKey: "header-first",
+				headers: { Authorization: "Bearer header-first" },
+			});
+			expect(await authStorage.markUsageLimitReached("anthropic", undefined, { apiKey: "header-first" })).toEqual({
+				switched: true,
+			});
+			expect(await registry.getApiKeyAndHeaders(model)).toEqual({
+				ok: true,
+				apiKey: "header-second",
+				headers: { Authorization: "Bearer header-second" },
+			});
+		});
+
 		test("zhipu-coding-plan glm-5.2 chat resolves the zhipu credential with model-scoped hints", async () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			const model = registry.find("zhipu-coding-plan", "glm-5.2");

@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
-import { complete, getEnvApiKey, stream } from "@oh-my-pi/pi-ai/stream";
+import { complete, getEnvApiKey, getEnvApiKeys, stream } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -404,6 +404,26 @@ describe("Generate E2E Tests", () => {
 			},
 			{ retry: 3 },
 		);
+	});
+
+	describe("environment API key lists", () => {
+		it("preserves structured credentials and deduplicates comma-separated keys", () => {
+			const originalAlibabaCredential = Bun.env.ALIBABA_TOKEN_PLAN_API_KEY;
+			const originalApiKey = Bun.env.ANTHROPIC_API_KEY;
+			try {
+				const credential = '{"token":"structured-token","cookie":"structured-cookie"}';
+				Bun.env.ALIBABA_TOKEN_PLAN_API_KEY = credential;
+				expect(getEnvApiKeys("alibaba-token-plan")).toEqual([credential]);
+
+				Bun.env.ANTHROPIC_API_KEY = "key-a, key-a, key-b, key-a";
+				expect(getEnvApiKeys("anthropic")).toEqual(["key-a", "key-b"]);
+			} finally {
+				if (originalAlibabaCredential === undefined) delete Bun.env.ALIBABA_TOKEN_PLAN_API_KEY;
+				else Bun.env.ALIBABA_TOKEN_PLAN_API_KEY = originalAlibabaCredential;
+				if (originalApiKey === undefined) delete Bun.env.ANTHROPIC_API_KEY;
+				else Bun.env.ANTHROPIC_API_KEY = originalApiKey;
+			}
+		});
 	});
 
 	describe("google-vertex env auth", () => {

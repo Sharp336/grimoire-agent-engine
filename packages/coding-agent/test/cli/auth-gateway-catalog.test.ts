@@ -9,7 +9,7 @@ function stubAuthStorage(configKeys?: string[]): AuthStorage {
 	const stub = {
 		setFallbackResolver: () => {},
 		clearConfigApiKeys: () => {},
-		setConfigApiKey: (provider: string) => configKeys?.push(provider),
+		setConfigApiKeys: (provider: string) => configKeys?.push(provider),
 		removeConfigApiKey: () => {},
 		hasAuth: () => true,
 		getAll: () => ({ anthropic: {} }),

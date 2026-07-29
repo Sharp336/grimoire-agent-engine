@@ -73,6 +73,7 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
+import { REQUEST_API_KEY_AUTHORIZATION } from "./types";
 import { resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
@@ -726,12 +727,30 @@ const serviceProviderMap: Record<string, KeyResolver> = {
  * Will not return API keys for providers that require OAuth tokens.
  * Checks Bun.env, then cwd/.env, then ~/.env.
  */
-export function getEnvApiKey(provider: string): string | undefined {
+export function getEnvApiKeys(provider: string): string[] {
 	const resolver = serviceProviderMap[provider];
-	if (typeof resolver === "string") {
-		return $env[resolver];
+	const value = typeof resolver === "string" ? $env[resolver] : resolver?.();
+	const trimmed = value?.trim();
+	if (!trimmed) return [];
+	try {
+		const parsed: unknown = JSON.parse(trimmed);
+		if (typeof parsed === "object" && parsed !== null) return [trimmed];
+	} catch {
+		// A non-JSON value can be a comma-separated key list.
 	}
-	return resolver?.();
+	return [
+		...new Set(
+			trimmed
+				.split(",")
+				.map(apiKey => apiKey.trim())
+				.filter(Boolean),
+		),
+	];
+}
+
+/** Returns the first configured environment API key for callers that do not rotate credentials. */
+export function getEnvApiKey(provider: string): string | undefined {
+	return getEnvApiKeys(provider)[0];
 }
 
 /**
@@ -1005,6 +1024,16 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 	}
 }
 
+function materializeRequestAuthorization<TApi extends Api>(
+	model: Model<TApi>,
+	options: SimpleStreamOptions,
+	apiKey: string,
+): SimpleStreamOptions {
+	if (model.headers?.Authorization !== REQUEST_API_KEY_AUTHORIZATION) return options;
+	if (Object.keys(options.headers ?? {}).some(header => header.toLowerCase() === "authorization")) return options;
+	return { ...options, headers: { ...options.headers, Authorization: `Bearer ${apiKey}` } };
+}
+
 export function streamSimple<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1012,7 +1041,7 @@ export function streamSimple<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const baseOptions = (options || {}) as SimpleStreamOptions;
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));
-	const requestOptions = {
+	let requestOptions = {
 		...debugOptions,
 		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
 	} as SimpleStreamOptions;
@@ -1121,6 +1150,10 @@ export function streamSimple<TApi extends Api>(
 		return outer;
 	}
 
+	if (typeof requestOptions.apiKey === "string") {
+		requestOptions = materializeRequestAuthorization(model, requestOptions, requestOptions.apiKey);
+	}
+
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
 	// the gateway resolves provider + credential server-side, so we don't
 	// need an `apiKey` from `getEnvApiKey` here — `options.apiKey` carries
@@ -1158,6 +1191,8 @@ export function streamSimple<TApi extends Api>(
 	if (!apiKey) {
 		throw new AIError.MissingApiKeyError(model.provider);
 	}
+
+	requestOptions = materializeRequestAuthorization(model, requestOptions, apiKey);
 
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
 	if (isGitLabDuoModel(model)) {

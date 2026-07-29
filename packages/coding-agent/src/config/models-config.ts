@@ -21,6 +21,7 @@ export interface ProviderValidationConfig {
 	baseUrl?: string;
 	headers?: Record<string, string>;
 	apiKey?: string;
+	apiKeys?: string[];
 	api?: Api;
 	auth?: ProviderAuthMode;
 	oauthConfigured?: boolean;
@@ -38,6 +39,7 @@ export function validateProviderConfiguration(
 	mode: ProviderValidationMode,
 ): void {
 	const hasProviderApi = !!config.api;
+	const hasConfiguredApiKey = Boolean(config.apiKey?.trim()) || Boolean(config.apiKeys?.some(apiKey => apiKey.trim()));
 	const models = config.models;
 
 	if (models.length === 0) {
@@ -47,7 +49,7 @@ export function validateProviderConfiguration(
 				!config.baseUrl &&
 				!config.headers &&
 				!config.compat &&
-				!config.apiKey &&
+				!hasConfiguredApiKey &&
 				config.auth !== "none" &&
 				!config.disableStrictTools &&
 				!config.remoteCompaction &&
@@ -55,7 +57,7 @@ export function validateProviderConfiguration(
 				!config.discovery
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
+					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "apiKeys", "auth: none", "compat", "disableStrictTools", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
 				);
 			}
 		}
@@ -65,13 +67,13 @@ export function validateProviderConfiguration(
 		}
 		const requiresAuth =
 			mode === "runtime-register"
-				? !config.apiKey && !config.oauthConfigured
-				: !config.apiKey && (config.auth ?? "apiKey") !== "none";
+				? !hasConfiguredApiKey && !config.oauthConfigured
+				: !hasConfiguredApiKey && (config.auth ?? "apiKey") !== "none";
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"
 					? `Provider ${providerName}: "apiKey" or "oauth" is required when defining models.`
-					: `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`,
+					: `Provider ${providerName}: "apiKey" or "apiKeys" is required when defining custom models unless auth is "none".`,
 			);
 		}
 	}
@@ -115,6 +117,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 				baseUrl: providerConfig.baseUrl,
 				headers: providerConfig.headers,
 				apiKey: providerConfig.apiKey,
+				apiKeys: providerConfig.apiKeys,
 				api: providerConfig.api as Api | undefined,
 				auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
 				discovery: providerConfig.discovery as ProviderDiscovery | undefined,

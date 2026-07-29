@@ -57,6 +57,9 @@ export type { AssistantMessageEventStream } from "./utils/event-stream";
  */
 export const OPENAI_MAX_OUTPUT_TOKENS = 64000;
 
+/** Header value resolved to the request's API key immediately before dispatch. */
+export const REQUEST_API_KEY_AUTHORIZATION = "Bearer __PI_REQUEST_API_KEY__";
+
 export interface ApiOptionsMap {
 	"anthropic-messages": AnthropicOptions;
 	"bedrock-converse-stream": BedrockOptions;

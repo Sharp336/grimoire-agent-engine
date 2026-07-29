@@ -95,7 +95,7 @@ describe("AuthStorage.getCredentialOrigin", () => {
 			await auth.set("openai", [{ type: "api_key", key: "sk-stored" }]);
 			expect(auth.getCredentialOrigin("openai")).toEqual({ kind: "api_key" });
 
-			auth.setConfigApiKey("openai", "gateway-bearer");
+			auth.setConfigApiKeys("openai", ["gateway-bearer"]);
 			expect(auth.getCredentialOrigin("openai")).toEqual({ kind: "config" });
 
 			auth.setRuntimeApiKey("openai", "cli-flag-bearer");

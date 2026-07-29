@@ -214,7 +214,7 @@ The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*` becaus
 
 The broker only owns OAuth credentials and provider-API-key credentials that were uploaded to it. The standard credential ladder in `models.md` (`Auth and API key resolution order`) is preserved, with one addition committed alongside the gateway:
 
-- `AuthStorage.setConfigApiKey / removeConfigApiKey / clearConfigApiKeys` let a `models.yml` `apiKey` beat a stored OAuth token **without** overriding an explicit `--api-key`. This is what allows a broker-resolved OAuth credential to be reliably shadowed by a per-environment `models.yml` config key when both are present.
+- `AuthStorage.setConfigApiKeys / removeConfigApiKey / clearConfigApiKeys` let a `models.yml` `apiKey` or `apiKeys` beat a stored OAuth token **without** overriding an explicit `--api-key`. This is what allows a broker-resolved OAuth credential to be reliably shadowed by a per-environment `models.yml` config key when both are present.
 
 ## See also
 

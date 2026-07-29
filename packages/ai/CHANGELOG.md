@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added rotation across configured and comma-separated environment API keys after quota exhaustion.
+
+### Fixed
+
+- Classified concurrent-request caps separately from quota exhaustion so they use a short retry backoff without burning a credential, and rotate credentials for account-scoped 403 caps such as Devin's overall message limit.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

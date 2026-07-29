@@ -56,10 +56,13 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		expect(models.length).toBeGreaterThan(1);
 		for (const model of models) {
-			expect(model.headers?.Authorization).toBe("Bearer cmd-api-key");
 			expect(model.headers?.["X-Api-Key"]).toBe("cmd-header");
 		}
-		expect(await registry.getApiKey(models[0])).toBe("cmd-api-key");
+		expect(await registry.getApiKeyAndHeaders(models[0]!)).toEqual({
+			ok: true,
+			apiKey: "cmd-api-key",
+			headers: { Authorization: "Bearer cmd-api-key", "X-Api-Key": "cmd-header" },
+		});
 	});
 
 	test("modelOverrides headers resolve from command stdout", async () => {
@@ -86,7 +89,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		expect(model).toBeDefined();
 		expect(model?.headers?.["X-Model-Key"]).toBe("cmd-model-header");
-		expect(model?.headers?.Authorization).toBe("Bearer cmd-api-key");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKeyAndHeaders(model)).toEqual({
+			ok: true,
+			apiKey: "cmd-api-key",
+			headers: { Authorization: "Bearer cmd-api-key" },
+		});
 	});
 
 	test("resolveCommandConfig caches failed executions so they do not retry", async () => {

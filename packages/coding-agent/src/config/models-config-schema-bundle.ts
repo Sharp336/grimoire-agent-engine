@@ -269,6 +269,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ProviderConfigSchema = type({
 		"baseUrl?": "string",
 		"apiKey?": "string",
+		"apiKeys?": "string[]",
 		"api?": ApiSchema,
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
