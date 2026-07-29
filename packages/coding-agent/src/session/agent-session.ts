@@ -7917,14 +7917,7 @@ export class AgentSession {
 		if (!authStorage.fetchUsageReports) return null;
 		return authStorage.fetchUsageReports({
 			baseUrlResolver: provider => {
-				if (provider === "google-antigravity") {
-					const mode = this.settings.get("providers.antigravityEndpoint");
-					if (mode === "sandbox") {
-						return "https://daily-cloudcode-pa.sandbox.googleapis.com";
-					} else if (mode === "production") {
-						return "https://daily-cloudcode-pa.googleapis.com";
-					}
-				}
+				if (provider === "google-antigravity") return "https://daily-cloudcode-pa.googleapis.com";
 				return this.#modelRegistry.getProviderBaseUrl?.(provider);
 			},
 			signal,

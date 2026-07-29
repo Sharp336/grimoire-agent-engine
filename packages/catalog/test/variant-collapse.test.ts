@@ -126,8 +126,14 @@ describe("collapseEffortVariants", () => {
 		expect(flash?.name).toBe("Gemini 3.6 Flash");
 		expect(flash?.requestModelId).toBe("gemini-3.6-flash-low");
 		expect(flash?.thinking).toEqual({
-			mode: "google-level",
+			mode: "budget",
 			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			effortBudgets: {
+				minimal: 1000,
+				low: 1000,
+				medium: 4000,
+				high: 10000,
+			},
 			requiresEffort: true,
 			effortRouting: {
 				minimal: "gemini-3.6-flash-low",
@@ -141,6 +147,40 @@ describe("collapseEffortVariants", () => {
 		expect(resolveWireModelId(model, Effort.Minimal)).toBe("gemini-3.6-flash-low");
 		expect(resolveWireModelId(model, Effort.Low)).toBe("gemini-3.6-flash-low");
 		expect(resolveWireModelId(model, Effort.Medium)).toBe("gemini-3.6-flash-medium");
+		expect(resolveWireModelId(model, Effort.High)).toBe("gemini-3.6-flash-high");
+	});
+
+	it("collapses Gemini 3.6 Flash tiers on the gemini-cli level transport (no effortBudgets)", () => {
+		const out = collapseEffortVariants(
+			[
+				memberSpec("gemini-3.6-flash-high"),
+				memberSpec("gemini-3.6-flash-low"),
+				memberSpec("gemini-3.6-flash-medium"),
+				memberSpec("gemini-3.6-flash-tiered"),
+			],
+			GEMINI_CLI_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const flash = out[0];
+		expect(flash?.id).toBe("gemini-3.6-flash");
+		expect(flash?.requestModelId).toBe("gemini-3.6-flash-low");
+		// The official Gemini CLI transport speaks thinkingLevel, not
+		// thinkingBudget, so the collapsed spec carries no effortBudgets.
+		expect(flash?.thinking).toEqual({
+			mode: "google-level",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			requiresEffort: true,
+			effortRouting: {
+				minimal: "gemini-3.6-flash-low",
+				low: "gemini-3.6-flash-low",
+				medium: "gemini-3.6-flash-medium",
+				high: "gemini-3.6-flash-high",
+			},
+		});
+		expect(flash?.thinking?.effortBudgets).toBeUndefined();
+
+		const model = buildModel(flash as ModelSpec<"google-gemini-cli">);
 		expect(resolveWireModelId(model, Effort.High)).toBe("gemini-3.6-flash-high");
 	});
 

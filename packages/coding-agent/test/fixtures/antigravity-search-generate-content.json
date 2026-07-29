@@ -1,0 +1,43 @@
+{
+  "request": {
+    "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent",
+    "headers": {
+      "authorization": "Bearer <redacted>",
+      "user-agent": "antigravity/hub/<redacted>",
+      "content-type": "application/json",
+      "accept-encoding": "gzip"
+    },
+    "body": {
+      "model": "gemini-3.6-flash-low",
+      "project": "<redacted>",
+      "requestType": "agent",
+      "userAgent": "antigravity",
+      "request": {
+        "systemInstruction": { "role": "user", "parts": [{ "text": "<redacted>" }] },
+        "contents": [{ "role": "user", "parts": [{ "text": "<redacted>" }] }],
+        "generationConfig": { "candidateCount": 1 },
+        "tools": [{ "googleSearch": { "enhancedContent": { "imageSearch": { "maxResultCount": 5 } } } }]
+      }
+    }
+  },
+  "response": {
+    "candidates": [{
+      "content": {
+        "role": "model",
+        "parts": [
+          { "text": "<thought-redacted>", "thought": true },
+          { "text": "Grounded answer." }
+        ]
+      },
+      "finishReason": "STOP",
+      "groundingMetadata": {
+        "webSearchQueries": ["<redacted>"],
+        "searchEntryPoint": { "renderedContent": "<redacted>" },
+        "groundingChunks": [{ "web": { "uri": "https://example.test/source", "title": "Source title" } }],
+        "groundingSupports": [{ "segment": { "endIndex": 16, "text": "Grounded answer." }, "groundingChunkIndices": [0] }]
+      }
+    }],
+    "usageMetadata": { "promptTokenCount": 3, "candidatesTokenCount": 4, "totalTokenCount": 7 },
+    "modelVersion": "gemini-3.6-flash-low"
+  }
+}
