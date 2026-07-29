@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -177,5 +178,39 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			model,
 		);
 		expect(recovery.isRetryableError(message)).toBe(true);
+	});
+
+	it("does not retry malformed calls after visible text", () => {
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		const message = makeMessage([{ type: "text", text: "Already shown" }], model);
+		message.errorId = AIError.create(AIError.Flag.MalformedFunctionCall);
+		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
+	it("retries malformed calls with replay-safe output", () => {
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		const message = makeMessage([{ type: "thinking", thinking: "Unshown reasoning" }], model);
+		message.errorId = AIError.create(AIError.Flag.MalformedFunctionCall);
+		expect(recovery.isRetryableError(message)).toBe(true);
+	});
+
+	it("treats generated images as replay-unsafe", () => {
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		const message = makeMessage([{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }], model);
+		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
+	it("treats Anthropic server tools as replay-unsafe", () => {
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		const message = makeMessage(
+			[
+				{
+					type: "anthropicServerTool",
+					block: { type: "server_tool_use", id: "srv-1", name: "web_search", input: { query: "status" } },
+				},
+			],
+			model,
+		);
+		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 });
