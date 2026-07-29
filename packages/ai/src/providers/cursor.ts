@@ -170,6 +170,7 @@ export { CURSOR_DEFAULT_CLIENT_VERSION as CURSOR_CLIENT_VERSION } from "./cursor
 interface CursorConversationCacheEntry {
 	blobStore: Map<string, Uint8Array>;
 	conversationState?: ConversationStateStructure;
+	pins: number;
 }
 
 const CURSOR_CONVERSATION_CACHE_LIMIT = 64;
@@ -179,9 +180,50 @@ let conversationCacheDisposerRegistered = false;
 function ensureConversationCacheDisposerRegistered(): void {
 	if (conversationCacheDisposerRegistered) return;
 	conversationCacheDisposerRegistered = true;
-	registerTransportDisposer("cursor-conversation-cache", async () => {
-		cursorConversationCache.clear();
-	});
+	registerTransportDisposer("cursor-conversation-cache", disposeCursorConversationCache);
+}
+
+export function disposeCursorConversationCache(): Promise<void> {
+	cursorConversationCache.clear();
+	return Promise.resolve();
+}
+
+function evictCursorConversationCache(): void {
+	while (cursorConversationCache.size > CURSOR_CONVERSATION_CACHE_LIMIT) {
+		let evicted = false;
+		for (const [key, entry] of cursorConversationCache) {
+			if (entry.pins !== 0) continue;
+			cursorConversationCache.delete(key);
+			evicted = true;
+			break;
+		}
+		if (!evicted) return;
+	}
+}
+
+function acquireCursorConversationCacheEntry(key: string): {
+	entry: CursorConversationCacheEntry;
+	release: () => void;
+} {
+	let entry = cursorConversationCache.get(key);
+	if (entry) {
+		cursorConversationCache.delete(key);
+	} else {
+		entry = { blobStore: new Map(), pins: 0 };
+	}
+	entry.pins++;
+	cursorConversationCache.set(key, entry);
+	evictCursorConversationCache();
+	let released = false;
+	return {
+		entry,
+		release() {
+			if (released) return;
+			released = true;
+			entry.pins--;
+			evictCursorConversationCache();
+		},
+	};
 }
 
 function cursorConversationCacheKey(baseUrl: string, apiKey: string, conversationId: string): string {
@@ -189,23 +231,6 @@ function cursorConversationCacheKey(baseUrl: string, apiKey: string, conversatio
 	const normalizedEndpoint = `${endpoint.origin}${endpoint.pathname.replace(/\/+$/, "")}`;
 	const credentialHash = createHash("sha256").update(apiKey).digest("hex");
 	return `${normalizedEndpoint}\0${credentialHash}\0${conversationId}`;
-}
-
-function getCursorConversationCacheEntry(key: string): CursorConversationCacheEntry {
-	const existing = cursorConversationCache.get(key);
-	if (existing) {
-		cursorConversationCache.delete(key);
-		cursorConversationCache.set(key, existing);
-		return existing;
-	}
-	while (cursorConversationCache.size >= CURSOR_CONVERSATION_CACHE_LIMIT) {
-		const oldest = cursorConversationCache.keys().next().value;
-		if (oldest === undefined) break;
-		cursorConversationCache.delete(oldest);
-	}
-	const created: CursorConversationCacheEntry = { blobStore: new Map() };
-	cursorConversationCache.set(key, created);
-	return created;
 }
 
 export interface CursorOptions extends StreamOptions {
@@ -452,6 +477,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let h1Bridge: CursorHttp1Bridge | null = null;
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let requestAbortListener: (() => void) | undefined;
+		let releaseCacheEntry: (() => void) | undefined;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
@@ -492,7 +518,9 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			ensureConversationCacheDisposerRegistered();
 			const cacheKey = cursorConversationCacheKey(baseUrl, apiKey, conversationId);
-			const cacheEntry = getCursorConversationCacheEntry(cacheKey);
+			const acquiredCacheEntry = acquireCursorConversationCacheEntry(cacheKey);
+			const cacheEntry = acquiredCacheEntry.entry;
+			releaseCacheEntry = acquiredCacheEntry.release;
 			const blobStore = cacheEntry.blobStore;
 			const { requestBytes, conversationState } = buildGrpcRequest(model, context, options, {
 				conversationId,
@@ -579,7 +607,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			};
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				getCursorConversationCacheEntry(cacheKey).conversationState = checkpoint;
+				cacheEntry.conversationState = checkpoint;
 			};
 
 			let channel: CursorChannel;
@@ -882,6 +910,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			}
 			h2Request?.close();
 			h2Lease?.release();
+			releaseCacheEntry?.();
 		}
 	})();
 

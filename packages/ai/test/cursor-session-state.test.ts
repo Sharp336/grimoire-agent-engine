@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { disposeCursorConversationCache, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import { disposeH2Pool, encodeConnectFrame } from "@oh-my-pi/pi-ai/transport";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -74,8 +74,12 @@ function successResponse(checkpoint?: ConversationStateStructure): Buffer {
 	return Buffer.concat(frames);
 }
 
-async function startServer(checkpointFirstRequest: boolean): Promise<{ baseUrl: string; requests: CapturedRequest[] }> {
+async function startServer(
+	checkpointRequests: boolean | ReadonlySet<number>,
+	holdFirstRequest?: Promise<void>,
+): Promise<{ baseUrl: string; requests: CapturedRequest[]; firstRequest: Promise<void> }> {
 	const requests: CapturedRequest[] = [];
+	const firstRequest = Promise.withResolvers<void>();
 	const server = http2.createServer();
 	servers.add(server);
 	server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
@@ -86,7 +90,7 @@ async function startServer(checkpointFirstRequest: boolean): Promise<{ baseUrl: 
 		}
 		let body = Buffer.alloc(0);
 		let responded = false;
-		stream.on("data", (chunk: Buffer) => {
+		stream.on("data", async (chunk: Buffer) => {
 			body = Buffer.concat([body, chunk]);
 			if (responded || body.byteLength < 5) return;
 			const payloadLength = body.readUInt32BE(1);
@@ -99,9 +103,20 @@ async function startServer(checkpointFirstRequest: boolean): Promise<{ baseUrl: 
 				authorization: String(headers.authorization ?? ""),
 				todos: request.conversationState?.todos ?? [],
 			});
+			const requestNumber = requests.length;
+			if (requestNumber === 1) {
+				firstRequest.resolve();
+				await holdFirstRequest;
+			}
 			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			const shouldCheckpoint =
+				checkpointRequests === true
+					? requestNumber === 1
+					: checkpointRequests === false
+						? false
+						: checkpointRequests.has(requestNumber);
 			const checkpoint =
-				checkpointFirstRequest && requests.length === 1 && request.conversationState
+				shouldCheckpoint && request.conversationState
 					? create(ConversationStateStructureSchema, {
 							...request.conversationState,
 							todos: [new Uint8Array([42])],
@@ -116,7 +131,7 @@ async function startServer(checkpointFirstRequest: boolean): Promise<{ baseUrl: 
 	});
 	const address = server.address();
 	if (!address || typeof address === "string") throw new Error("expected Cursor state fixture port");
-	return { baseUrl: `http://127.0.0.1:${address.port}`, requests };
+	return { baseUrl: `http://127.0.0.1:${address.port}`, requests, firstRequest: firstRequest.promise };
 }
 
 async function run(baseUrl: string, apiKey: string, conversationId = "shared-caller-id"): Promise<void> {
@@ -128,6 +143,7 @@ async function run(baseUrl: string, apiKey: string, conversationId = "shared-cal
 }
 
 afterEach(async () => {
+	await disposeCursorConversationCache();
 	await disposeH2Pool();
 	await Promise.all(
 		[...servers].map(
@@ -145,29 +161,63 @@ describe("Cursor conversation state isolation", () => {
 		const firstEndpoint = await startServer(true);
 		await run(firstEndpoint.baseUrl, "credential-a");
 		await run(firstEndpoint.baseUrl, "credential-b");
+
+		const secondEndpoint = await startServer(false);
+		await run(secondEndpoint.baseUrl, "credential-c");
+		await run(secondEndpoint.baseUrl, "credential-a");
 		await run(firstEndpoint.baseUrl, "credential-a");
+		await run(firstEndpoint.baseUrl, "credential-b");
+		await run(secondEndpoint.baseUrl, "credential-c");
 
 		expect(firstEndpoint.requests.map(request => request.authorization)).toEqual([
 			"Bearer credential-a",
 			"Bearer credential-b",
 			"Bearer credential-a",
+			"Bearer credential-b",
 		]);
-		expect(firstEndpoint.requests[0]?.todos).toEqual([]);
-		expect(firstEndpoint.requests[1]?.todos).toEqual([]);
-		expect(firstEndpoint.requests[2]?.todos).toEqual([new Uint8Array([42])]);
-
-		const secondEndpoint = await startServer(false);
-		await run(secondEndpoint.baseUrl, "credential-a");
-		expect(secondEndpoint.requests[0]?.todos).toEqual([]);
+		expect(firstEndpoint.requests.map(request => request.todos)).toEqual([[], [], [new Uint8Array([42])], []]);
+		expect(secondEndpoint.requests.map(request => request.authorization)).toEqual([
+			"Bearer credential-c",
+			"Bearer credential-a",
+			"Bearer credential-c",
+		]);
+		expect(secondEndpoint.requests.map(request => request.todos)).toEqual([[], [], []]);
 	});
-	it("evicts the least-recently-used checkpoint when the bounded cache fills", async () => {
+
+	it("clears checkpoints when Cursor transports are disposed", async () => {
 		const endpoint = await startServer(true);
-		await run(endpoint.baseUrl, "bounded-credential", "oldest");
-		for (let index = 0; index < 64; index++) {
+		await run(endpoint.baseUrl, "disposed-credential", "disposed-conversation");
+		await disposeCursorConversationCache();
+		await run(endpoint.baseUrl, "disposed-credential", "disposed-conversation");
+		expect(endpoint.requests.map(request => request.todos)).toEqual([[], []]);
+	});
+
+	it("evicts the least-recently-used checkpoint when the bounded cache fills", async () => {
+		const endpoint = await startServer(new Set([1, 2]));
+		await run(endpoint.baseUrl, "bounded-credential", "refreshed");
+		await run(endpoint.baseUrl, "bounded-credential", "untouched");
+		await run(endpoint.baseUrl, "bounded-credential", "refreshed");
+		for (let index = 0; index < 63; index++) {
 			await run(endpoint.baseUrl, "bounded-credential", `new-${index}`);
 		}
-		await run(endpoint.baseUrl, "bounded-credential", "oldest");
+		await run(endpoint.baseUrl, "bounded-credential", "refreshed");
+		await run(endpoint.baseUrl, "bounded-credential", "untouched");
+		expect(endpoint.requests.at(-2)?.todos).toEqual([new Uint8Array([42])]);
 		expect(endpoint.requests.at(-1)?.todos).toEqual([]);
+	});
+
+	it("does not evict a checkpoint written by an in-flight request", async () => {
+		const releaseFirst = Promise.withResolvers<void>();
+		const endpoint = await startServer(true, releaseFirst.promise);
+		const inFlight = run(endpoint.baseUrl, "pinned-credential", "pinned");
+		await endpoint.firstRequest;
+		for (let index = 0; index < 64; index++) {
+			await run(endpoint.baseUrl, "pinned-credential", `competing-${index}`);
+		}
+		releaseFirst.resolve();
+		await inFlight;
+		await run(endpoint.baseUrl, "pinned-credential", "pinned");
+		expect(endpoint.requests.at(-1)?.todos).toEqual([new Uint8Array([42])]);
 	});
 
 	it("removes every per-request abort listener after a successful turn", async () => {
