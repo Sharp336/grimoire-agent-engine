@@ -190,6 +190,76 @@ export interface ConnectProxiedSocketOptions {
 }
 
 /**
+ * Establish a direct TLS connection and reject before HTTP/2 dispatch unless
+ * the server negotiates h2.
+ */
+export async function connectDirectSocket(
+	targetUrlStr: string,
+	options?: ConnectProxiedSocketOptions,
+): Promise<tls.TLSSocket> {
+	if (options?.signal?.aborted) {
+		throw new AIError.AbortError("Direct TLS connection aborted");
+	}
+
+	const targetUrl = new URL(targetUrlStr);
+	const port = targetUrl.port ? Number.parseInt(targetUrl.port, 10) : 443;
+	const { promise, resolve, reject } = Promise.withResolvers<tls.TLSSocket>();
+	let socket: tls.TLSSocket | undefined;
+	let timeout: NodeJS.Timeout | undefined;
+	let settled = false;
+
+	const cleanup = (): void => {
+		if (timeout) clearTimeout(timeout);
+		options?.signal?.removeEventListener("abort", onAbort);
+		socket?.off("secureConnect", onSecureConnect);
+		socket?.off("error", onError);
+	};
+	const rejectOnce = (error: Error): void => {
+		if (settled) return;
+		settled = true;
+		cleanup();
+		socket?.destroy();
+		reject(error);
+	};
+	const onAbort = (): void => rejectOnce(new AIError.AbortError("Direct TLS connection aborted"));
+	const onError = (error: Error): void => rejectOnce(error);
+	const onSecureConnect = (): void => {
+		if (!socket) return;
+		if (socket.alpnProtocol !== "h2") {
+			rejectOnce(
+				Object.assign(new Error(`Direct TLS negotiated ALPN ${socket.alpnProtocol || "none"}, expected h2`), {
+					code: "ERR_HTTP2_ALPN",
+				}),
+			);
+			return;
+		}
+		settled = true;
+		cleanup();
+		resolve(socket);
+	};
+
+	options?.signal?.addEventListener("abort", onAbort, { once: true });
+	if (options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+		const timeoutMs = Math.trunc(options.timeoutMs);
+		timeout = setTimeout(
+			() => rejectOnce(new AIError.StreamTimeoutError(`Direct TLS connection timed out after ${timeoutMs}ms`)),
+			timeoutMs,
+		);
+		timeout.unref?.();
+	}
+	socket = tls.connect({
+		host: targetUrl.hostname,
+		port,
+		servername: net.isIP(targetUrl.hostname) === 0 ? targetUrl.hostname : undefined,
+		ALPNProtocols: options?.alpnProtocols ?? ["h2"],
+		ca: options?.ca,
+	});
+	socket.once("secureConnect", onSecureConnect);
+	socket.once("error", onError);
+	return promise;
+}
+
+/**
  * Tunnel a socket connection through an HTTP CONNECT proxy.
  * This is used specifically to wrap Node's `http2.connect(baseUrl, { createConnection })` for Cursor.
  */

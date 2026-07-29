@@ -1,8 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { EventEmitter } from "node:events";
 import * as net from "node:net";
+import * as tls from "node:tls";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
+	connectDirectSocket,
 	connectProxiedSocket,
 	getProxyForProvider,
 	getProxyForUrl,
@@ -108,6 +111,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const key of proxyEnvKeys()) delete Bun.env[key];
 	for (const key in saved) {
 		const value = saved[key];
@@ -295,6 +299,21 @@ describe("wrapFetchForProxy", () => {
 		await wrapFetchForProxy(fetch, "wrap-badurl")("not a url");
 		expect(calls).toHaveLength(1);
 		expect(calls[0].proxy).toBeUndefined();
+	});
+});
+
+describe("connectDirectSocket", () => {
+	it("rejects a direct TLS connection that negotiates HTTP/1.1", async () => {
+		const emitter = new EventEmitter();
+		const socket = emitter as unknown as tls.TLSSocket;
+		Object.defineProperty(socket, "alpnProtocol", { value: "http/1.1" });
+		Object.defineProperty(socket, "destroy", { value: vi.fn() });
+		vi.spyOn(tls, "connect").mockReturnValue(socket);
+		const pending = connectDirectSocket("https://cursor.example");
+		queueMicrotask(() => emitter.emit("secureConnect"));
+		const error = await pending.catch((value: unknown) => value);
+		expect((error as { code?: string }).code).toBe("ERR_HTTP2_ALPN");
+		expect((error as Error).message).toContain("expected h2");
 	});
 });
 

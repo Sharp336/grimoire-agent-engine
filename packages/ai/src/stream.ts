@@ -776,9 +776,10 @@ function streamDispatch<TApi extends Api>(
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));
 	const { fetch: decoratedFetch, ...requestOptionFields } = debugOptions;
 	const usesExplicitFetch = baseOptions.fetch !== undefined;
+	const usesProviderManagedTransport = model.api === "devin-agent" || model.api === "kiro-agent";
 	const requestOptions = {
 		...requestOptionFields,
-		...((model.api !== "devin-agent" || usesExplicitFetch) && {
+		...((!usesProviderManagedTransport || usesExplicitFetch) && {
 			fetch: wrapFetchForProxy(decoratedFetch ?? (globalThis.fetch as FetchImpl), model.provider),
 		}),
 	} as OptionsForApi<TApi>;

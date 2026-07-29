@@ -1,6 +1,6 @@
-import { parseKiroCredentials } from "@oh-my-pi/pi-catalog/discovery/kiro";
+import { parseKiroCredentials, resolveKiroRegion } from "@oh-my-pi/pi-catalog/discovery/kiro";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { isRecord, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import { isRecord, parseStreamingJsonThrottled, prompt } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { postH2Only, type TransportResponse } from "../transport";
 import type {
@@ -19,8 +19,9 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
 import { decodeEventStream } from "./aws-eventstream";
+import toolResultsPrompt from "./kiro-tool-results.md" with { type: "text" };
+import userMessagePrompt from "./kiro-user-message.md" with { type: "text" };
 
-const KIRO_DEFAULT_REGION = "us-east-1";
 const KIRO_GENERATE_TARGET = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse";
 const KIRO_MAX_EVENTSTREAM_FRAME_BYTES = 16 * 1024 * 1024;
 const TEXT_DECODER = new TextDecoder();
@@ -104,7 +105,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 			if (!credentials) throw new AIError.ConfigurationError("Kiro requires KIRO_API_KEY or an OAuth login");
 			const request = buildKiroRequest(model, context, options, credentials.profileArn);
 			options?.onPayload?.(request, model);
-			const region = options?.region ?? KIRO_DEFAULT_REGION;
+			const region = resolveKiroRegion(options?.region, credentials.profileArn);
 			const requestUrl = new URL(model.baseUrl ?? `https://runtime.${region}.kiro.dev`);
 			response = await postH2Only({
 				url: requestUrl.toString(),
@@ -195,7 +196,12 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 					}
 					case "toolUseEvent": {
 						const toolUseId = typeof payload.toolUseId === "string" ? payload.toolUseId : "";
-						if (!toolUseId) break;
+						if (!toolUseId) {
+							throw new AIError.ProviderResponseError("Kiro tool use event is missing toolUseId", {
+								provider: model.provider,
+								kind: "envelope",
+							});
+						}
 						let block = toolBlocks.get(toolUseId);
 						if (!block) {
 							block = {
@@ -310,23 +316,21 @@ function buildKiroRequest(
 		context.messages[latestInputIndex]?.role === "toolResult"
 			? findTrailingToolResultStart(context.messages, latestInputIndex)
 			: latestInputIndex;
-	const history = context.messages
-		.slice(0, currentInputIndex)
-		.flatMap(message => toKiroHistoryMessage(message, wireModelId));
+	const history = toKiroHistory(context.messages.slice(0, currentInputIndex), wireModelId);
 	const latestMessage = context.messages[currentInputIndex];
 	if (latestMessage.role !== "user" && latestMessage.role !== "developer" && latestMessage.role !== "toolResult") {
 		throw new AIError.ConfigurationError("Kiro requires a user message or tool result");
 	}
 	const currentMessage: KiroWireUserMessage = {
 		userInputMessage: {
-			content: latestMessage.role === "toolResult" ? "Tool results provided." : userContent(latestMessage.content),
+			content: "",
 			origin: "KIRO_CLI",
 			modelId: wireModelId,
 		},
 	};
 	const systemPrompt = context.systemPrompt?.filter(Boolean).join("\n\n");
-	if (systemPrompt)
-		currentMessage.userInputMessage.content = `${systemPrompt}\n\n${currentMessage.userInputMessage.content}`;
+	const content = latestMessage.role === "toolResult" ? toolResultsPrompt : userContent(latestMessage.content);
+	currentMessage.userInputMessage.content = prompt.render(userMessagePrompt, { systemPrompt, content });
 	const toolResults = context.messages
 		.slice(currentInputIndex)
 		.filter((message): message is ToolResultMessage => message.role === "toolResult")
@@ -378,6 +382,34 @@ function toKiroToolResult(message: ToolResultMessage): KiroWireToolResult {
 	};
 }
 
+function toKiroHistory(messages: readonly Message[], modelId: string): KiroWireHistoryMessage[] {
+	const history: KiroWireHistoryMessage[] = [];
+	for (let index = 0; index < messages.length; index += 1) {
+		const message = messages[index];
+		if (message.role !== "toolResult") {
+			history.push(...toKiroHistoryMessage(message, modelId));
+			continue;
+		}
+		const toolResults: KiroWireToolResult[] = [];
+		for (;;) {
+			const toolResult = messages[index];
+			if (toolResult?.role !== "toolResult") break;
+			toolResults.push(toKiroToolResult(toolResult));
+			index += 1;
+		}
+		index -= 1;
+		history.push({
+			userInputMessage: {
+				content: toolResultsPrompt,
+				userInputMessageContext: { toolResults },
+				origin: "KIRO_CLI",
+				modelId,
+			},
+		});
+	}
+	return history;
+}
+
 function toKiroHistoryMessage(message: Message, modelId: string): KiroWireHistoryMessage[] {
 	if (message.role === "assistant") {
 		const content = message.content
@@ -398,7 +430,14 @@ function toKiroHistoryMessage(message: Message, modelId: string): KiroWireHistor
 
 function userContent(content: UserMessage["content"]): string {
 	if (typeof content === "string") return content;
-	return content.map(block => (block.type === "text" ? block.text : `[${block.mimeType} ${block.type}]`)).join("\n");
+	const text: string[] = [];
+	for (const block of content) {
+		if (block.type !== "text") {
+			throw new AIError.ValidationError(`Kiro supports text input only; received ${block.mimeType}`);
+		}
+		text.push(block.text);
+	}
+	return text.join("\n");
 }
 
 function parseEventPayload(payload: Uint8Array, eventType: string | undefined): Record<string, unknown> {

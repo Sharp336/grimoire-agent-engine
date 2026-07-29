@@ -2,7 +2,7 @@ import { once } from "@oh-my-pi/pi-utils";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
-import type { KiroModelDiscoveryOptions } from "../discovery/kiro";
+import { fetchKiroModels, type KiroModelDiscoveryOptions } from "../discovery/kiro";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
@@ -223,16 +223,12 @@ export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): Mo
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
-					fetchDynamicModels: async () => {
-						const { fetchKiroModels } = await kiroDiscovery();
-						return fetchKiroModels({ apiKey, baseUrl, fetch, profileArn, region });
-					},
+					fetchDynamicModels: () => fetchKiroModels({ apiKey, baseUrl, fetch, profileArn, region }),
 				}
 			: undefined),
 	};
 }
 
-const kiroDiscovery = once(() => import("../discovery/kiro"));
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

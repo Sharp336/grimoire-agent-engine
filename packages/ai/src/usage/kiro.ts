@@ -1,8 +1,7 @@
-import { parseKiroCredentials } from "@oh-my-pi/pi-catalog/discovery/kiro";
+import { parseKiroCredentials, resolveKiroRegion } from "@oh-my-pi/pi-catalog/discovery/kiro";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { UsageLimit, UsageProvider, UsageReport, UsageStatus } from "../usage";
 
-const DEFAULT_REGION = "us-east-1";
 const GET_USAGE_TARGET = "AmazonCodeWhispererService.GetUsageLimits";
 
 export function parseKiroUsage(payload: unknown, profileArn?: string, fetchedAt = Date.now()): UsageReport | null {
@@ -16,7 +15,8 @@ export function parseKiroUsage(payload: unknown, profileArn?: string, fetchedAt 
 		const limit = finiteNumber(entry.usageLimitWithPrecision) ?? finiteNumber(entry.usageLimit);
 		if (used === undefined || limit === undefined) continue;
 		const usedFraction = limit > 0 ? used / limit : 0;
-		const status: UsageStatus = usedFraction >= 1 ? "exhausted" : usedFraction >= 0.9 ? "warning" : "ok";
+		const status: UsageStatus =
+			limit === 0 || usedFraction >= 1 ? "exhausted" : usedFraction >= 0.9 ? "warning" : "ok";
 		const window = { id: "subscription", label: "Subscription", ...(resetsAt ? { resetsAt } : undefined) };
 		limits.push({
 			id: `kiro:${resourceType.toLowerCase()}`,
@@ -57,8 +57,7 @@ export const kiroUsageProvider: UsageProvider = {
 		const rawToken = params.credential.type === "oauth" ? params.credential.accessToken : params.credential.apiKey;
 		const credentials = parseKiroCredentials(rawToken, params.credential.profileArn);
 		if (!credentials) return null;
-		const profileRegion = credentials.profileArn?.split(":")[3];
-		const region = profileRegion || DEFAULT_REGION;
+		const region = resolveKiroRegion(undefined, credentials.profileArn);
 		const url = new URL(`https://management.${region}.kiro.dev/`);
 		url.searchParams.set("origin", "KIRO_CLI");
 		if (credentials.profileArn) url.searchParams.set("profileArn", credentials.profileArn);

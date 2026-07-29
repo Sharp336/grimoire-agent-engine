@@ -38,7 +38,7 @@ import type { DevinOptions } from "./devin";
 import type { GoogleOptions } from "./google";
 import type { GoogleGeminiCliOptions } from "./google-gemini-cli";
 import type { GoogleVertexOptions } from "./google-vertex";
-import type { KiroOptions } from "./kiro";
+import { streamKiro as streamKiroProvider } from "./kiro";
 import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
@@ -136,10 +136,6 @@ interface DevinProviderModule {
 	streamDevin: (model: Model<"devin-agent">, context: Context, options: DevinOptions) => AssistantMessageEventStream;
 }
 
-interface KiroProviderModule {
-	streamKiro: (model: Model<"kiro-agent">, context: Context, options: KiroOptions) => AssistantMessageEventStream;
-}
-
 interface BedrockProviderModule {
 	streamBedrock: (
 		model: Model<"bedrock-converse-stream">,
@@ -164,7 +160,6 @@ let ollamaProviderModulePromise: Promise<LazyProviderModule<"ollama-chat">> | un
 let cursorProviderModulePromise: Promise<LazyProviderModule<"cursor-agent">> | undefined;
 let cursorProviderModuleOverride: LazyProviderModule<"cursor-agent"> | undefined;
 let devinProviderModulePromise: Promise<LazyProviderModule<"devin-agent">> | undefined;
-let kiroProviderModulePromise: Promise<LazyProviderModule<"kiro-agent">> | undefined;
 let bedrockProviderModuleOverride: LazyProviderModule<"bedrock-converse-stream"> | undefined;
 let bedrockProviderModulePromise: Promise<LazyProviderModule<"bedrock-converse-stream">> | undefined;
 
@@ -448,11 +443,7 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 }
 
 function loadKiroProviderModule(): Promise<LazyProviderModule<"kiro-agent">> {
-	kiroProviderModulePromise ||= import("./kiro").then(module => {
-		const provider = module as KiroProviderModule;
-		return { stream: provider.streamKiro };
-	});
-	return kiroProviderModulePromise;
+	return Promise.resolve({ stream: streamKiroProvider });
 }
 
 function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {

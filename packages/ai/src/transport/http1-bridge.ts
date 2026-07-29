@@ -225,6 +225,13 @@ export async function createHttp1Bridge<TMessage>(
 			for await (const frame of rpc.poll(receiveSignal)) {
 				if (state.kind !== "open") return;
 				if (expectedSeq === undefined) {
+					if (frame.seqno !== 0n) {
+						await closeBridge(
+							"fatal",
+							new Error(`HTTP/1 poll sequence must start at 0, received ${frame.seqno}`),
+						);
+						return;
+					}
 					expectedSeq = frame.seqno;
 					lastData = frame.data;
 				} else if (frame.seqno === expectedSeq) {

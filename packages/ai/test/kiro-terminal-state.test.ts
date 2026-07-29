@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import http2 from "node:http2";
 import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
 import { streamKiro } from "@oh-my-pi/pi-ai/providers/kiro";
+import { stream as streamModel } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, Context, Model, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -16,6 +17,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 type Scenario =
 	| { kind: "complete-tool-use" }
+	| { kind: "missing-tool-id" }
 	| { kind: "throttled-tool-use" }
 	| { kind: "truncated-tool-use" }
 	| { kind: "invalid-tool-json" }
@@ -113,6 +115,15 @@ async function startServer(): Promise<string> {
 	server.on("stream", (stream: http2.ServerHttp2Stream) => {
 		stream.on("data", () => {});
 		stream.respond({ ":status": 200, "content-type": "application/vnd.amazon.eventstream" });
+		if (scenario.kind === "missing-tool-id") {
+			stream.end(
+				Buffer.concat([
+					encodeKiroEvent("toolUseEvent", { name: "read_file", input: "{}" }),
+					endTurnMetadataFrame(),
+				]),
+			);
+			return;
+		}
 		if (scenario.kind === "complete-tool-use") {
 			stream.write(Buffer.concat([toolUseStartFrame(), endTurnMetadataFrame()]));
 			stream.end();
@@ -202,7 +213,21 @@ afterEach(async () => {
 	await stopServer();
 });
 
-describe("Kiro terminal-state invariant", () => {
+describe("Kiro terminal-state validation", () => {
+	it("keeps the public stream path on HTTP/2 when no fetch override was supplied", async () => {
+		scenario = { kind: "complete-tool-use" };
+		const result = await streamModel(makeModel(await startServer()), context, { apiKey: "test-token" }).result();
+		expect(result.stopReason).toBe("toolUse");
+	});
+
+	it("rejects a tool-use event without an identifier", async () => {
+		scenario = { kind: "missing-tool-id" };
+		const { eventTypes, result } = await collectStream(makeModel(await startServer()));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("missing toolUseId");
+		expect(eventTypes).not.toContain("done");
+	});
+
 	it("accepts a complete tool use only after END_TURN metadata", async () => {
 		scenario = { kind: "complete-tool-use" };
 		const baseUrl = await startServer();

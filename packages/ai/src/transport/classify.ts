@@ -40,6 +40,9 @@ export function normalizeConnectAuthError(
 export function isTransientTransportError(error: unknown): boolean {
 	if (error instanceof H2UnavailableBeforeDispatchError) return true;
 	if (error instanceof DOMException && error.name === "AbortError") return false;
+	if (error instanceof ConnectError && (error.code === Code.Unavailable || error.code === Code.DeadlineExceeded)) {
+		return true;
+	}
 	if (error && typeof error === "object" && "status" in error) return false;
 	const code = (error as { code?: unknown } | null)?.code;
 	if (typeof code === "string" && TRANSIENT_SYSTEM_CODES[code]) return true;

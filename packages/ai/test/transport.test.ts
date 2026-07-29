@@ -447,7 +447,7 @@ describe("shared HTTP/2 pool", () => {
 			return connecting.promise;
 		});
 		const controller = new AbortController();
-		const acquiring = acquireH2Session("https://abandoned.example", "transport-test", {
+		const acquiring = acquireH2Session("http://abandoned.example", "transport-test", {
 			signal: controller.signal,
 		});
 		await connectStarted.promise;
@@ -747,22 +747,21 @@ describe("HTTP/2 primary fallback boundary", () => {
 		expect(response.status).toBe(200);
 		expect(fetchAttempts).toBe(1);
 	});
-	it("passes inline extra CAs to native HTTP/2 sessions", async () => {
-		if (await runInIsolatedProcess("passes inline extra CAs to native HTTP/2 sessions")) return;
+	it("passes inline extra CAs to direct TLS before creating an HTTP/2 session", async () => {
+		if (await runInIsolatedProcess("passes inline extra CAs to direct TLS before creating an HTTP/2 session")) {
+			return;
+		}
 		const previousCa = Bun.env.NODE_EXTRA_CA_CERTS;
 		Bun.env.NODE_EXTRA_CA_CERTS = "-----BEGIN CERTIFICATE-----\\nMIIB-test-extra-ca\\n-----END CERTIFICATE-----";
 		__resetExtraCaCache();
-		let sessionOptions: { ca?: string | string[] } | undefined;
-		vi.spyOn(Http2SessionManager.prototype, "connect").mockImplementation(function (this: Http2SessionManager) {
-			const options: unknown = Reflect.get(this, "http2SessionOptions");
-			if (options && typeof options === "object" && "ca" in options) {
-				const ca = options.ca;
-				if (typeof ca === "string" || (Array.isArray(ca) && ca.every(value => typeof value === "string"))) {
-					sessionOptions = { ca };
-				}
-			}
+		let connectOptions: proxyUtils.ConnectProxiedSocketOptions | undefined;
+		vi.spyOn(proxyUtils, "connectDirectSocket").mockImplementation((_target, options) => {
+			connectOptions = options;
 			return Promise.reject(Object.assign(new Error("stop after option capture"), { code: "TEST_CAPTURE" }));
 		});
+		const managerConnect = vi
+			.spyOn(Http2SessionManager.prototype, "connect")
+			.mockRejectedValue(new Error("HTTP/2 manager connected before direct TLS validation"));
 		try {
 			await expect(
 				postH2Only({
@@ -772,7 +771,8 @@ describe("HTTP/2 primary fallback boundary", () => {
 					body: "body",
 				}),
 			).rejects.toThrow("stop after option capture");
-			expect(sessionOptions?.ca).toContain(
+			expect(managerConnect).not.toHaveBeenCalled();
+			expect(connectOptions?.ca).toContain(
 				"-----BEGIN CERTIFICATE-----\nMIIB-test-extra-ca\n-----END CERTIFICATE-----",
 			);
 		} finally {

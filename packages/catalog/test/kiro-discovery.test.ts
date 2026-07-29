@@ -27,5 +27,25 @@ describe("fetchKiroModels", () => {
 		expect(models?.map(model => model.id)).toContain("gpt-5.6-sol");
 		expect(models?.map(model => model.id)).toContain("claude-opus-4.8");
 		expect(models).toHaveLength(19);
+		expect(models?.every(model => model.input.length === 1 && model.input[0] === "text")).toBe(true);
+		expect(models?.find(model => model.id === "claude-opus-5")?.reasoning).toBe(true);
+		expect(models?.find(model => model.id === "auto")?.reasoning).toBe(false);
+	});
+
+	test("uses the profile ARN region for management and runtime endpoints", async () => {
+		let requestUrl: string | undefined;
+		const profileArn = "arn:aws:codewhisperer:eu-west-2:123:profile/test";
+		const models = await fetchKiroModels({
+			apiKey: JSON.stringify({ accessToken: "token", profileArn }),
+			fetch: async input => {
+				requestUrl = String(input);
+				return new Response(fixture);
+			},
+		});
+
+		expect(requestUrl).toBe(
+			"https://management.eu-west-2.kiro.dev/?origin=KIRO_CLI&profileArn=arn%3Aaws%3Acodewhisperer%3Aeu-west-2%3A123%3Aprofile%2Ftest",
+		);
+		expect(models?.every(model => model.baseUrl === "https://runtime.eu-west-2.kiro.dev")).toBe(true);
 	});
 });

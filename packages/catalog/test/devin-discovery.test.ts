@@ -92,4 +92,22 @@ describe("fetchDevinModels", () => {
 		expect(devinOs("win32")).toBe("windows");
 		expect(devinOs("linux")).toBe("linux");
 	});
+
+	it("keeps the default output cap when only the legacy context limit is reported", async () => {
+		const response = create(GetCliModelConfigsResponseSchema, {
+			clientModelConfigs: [
+				create(ClientModelConfigSchema, {
+					modelUid: "legacy-limit-model",
+					label: "Legacy Limit Model",
+					maxTokens: 1_000_000,
+				}),
+			],
+		});
+		const models = await fetchDevinModels({
+			apiKey: "fixture",
+			fetch: async () => new Response(toBinary(GetCliModelConfigsResponseSchema, response)),
+		});
+
+		expect(models?.[0]).toMatchObject({ contextWindow: 1_000_000, maxTokens: 64_000 });
+	});
 });

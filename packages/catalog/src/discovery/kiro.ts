@@ -44,6 +44,11 @@ export function parseKiroCredentials(apiKey: string | undefined, profileArn?: st
 	return { accessToken: token, profileArn };
 }
 
+/** Resolve an explicit Kiro region first, then a profile ARN's region, then the service default. */
+export function resolveKiroRegion(region: string | undefined, profileArn: string | undefined): string {
+	return region || profileArn?.split(":")[3] || KIRO_DEFAULT_REGION;
+}
+
 /**
  * Fetches the account-scoped `ListAvailableModels` catalog. The service returns
  * model ids directly, so this function never derives ids from display names.
@@ -52,7 +57,7 @@ export async function fetchKiroModels(options: KiroModelDiscoveryOptions): Promi
 	const credentials = parseKiroCredentials(options.apiKey, options.profileArn);
 	if (!credentials) return null;
 
-	const region = options.region ?? KIRO_DEFAULT_REGION;
+	const region = resolveKiroRegion(options.region, credentials.profileArn);
 	const baseUrl = options.baseUrl ?? `https://management.${region}.kiro.dev`;
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 5_000);
@@ -94,10 +99,6 @@ export function normalizeKiroModels(
 		if (!isRecord(candidate)) continue;
 		const id = typeof candidate.modelId === "string" ? candidate.modelId.trim() : "";
 		if (!id) continue;
-		const inputs = Array.isArray(candidate.supportedInputTypes)
-			? candidate.supportedInputTypes.filter((input): input is string => typeof input === "string")
-			: [];
-		const input: ("text" | "image")[] = inputs.includes("IMAGE") ? ["text", "image"] : ["text"];
 		const tokenLimits = isRecord(candidate.tokenLimits) ? candidate.tokenLimits : undefined;
 		const maxInputTokens = finitePositive(tokenLimits?.maxInputTokens);
 		const maxOutputTokens = finitePositive(tokenLimits?.maxOutputTokens);
@@ -107,8 +108,8 @@ export function normalizeKiroModels(
 			api: "kiro-agent",
 			provider: "kiro",
 			baseUrl: baseUrl ?? `https://runtime.${region}.kiro.dev`,
-			reasoning: false,
-			input,
+			reasoning: supportsKiroReasoning(candidate),
+			input: ["text"],
 			supportsTools: true,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: maxInputTokens ?? 200_000,
@@ -116,6 +117,12 @@ export function normalizeKiroModels(
 		});
 	}
 	return [...models.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function supportsKiroReasoning(candidate: Record<string, unknown>): boolean {
+	const schema = candidate.additionalModelRequestFieldsSchema;
+	if (!isRecord(schema) || !isRecord(schema.properties)) return false;
+	return isRecord(schema.properties.thinking);
 }
 
 function finitePositive(value: unknown): number | undefined {

@@ -2,13 +2,14 @@ import type { ClientHttp2Stream } from "node:http2";
 import { constants as http2Constants } from "node:http2";
 import { Http2SessionManager } from "@connectrpc/connect-node";
 import * as AIError from "../error";
-import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
+import { connectDirectSocket, connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { isTransportDisposed, registerTransportDisposer } from "./lifecycle";
 
 const POOL_SIZE = 4;
 const PING_INTERVAL_MS = 10_000;
 const PING_TIMEOUT_MS = 20_000;
 const PROXY_TUNNEL_TIMEOUT_MS = 30_000;
+const CONNECTION_TIMEOUT_MS = 30_000;
 
 type HealthySlot = { kind: "healthy"; generation: number; manager: Http2SessionManager; leases: number };
 type InitializingSlot = {
@@ -142,8 +143,15 @@ async function createSessionManager(
 			ca,
 		});
 		manager = new Http2SessionManager(origin, pingOptions, { createConnection: () => socket });
+	} else if (new URL(baseUrl).protocol === "https:") {
+		const socket = await connectDirectSocket(baseUrl, {
+			signal,
+			timeoutMs: CONNECTION_TIMEOUT_MS,
+			ca,
+		});
+		manager = new Http2SessionManager(origin, pingOptions, { createConnection: () => socket });
 	} else {
-		manager = new Http2SessionManager(origin, pingOptions, ca ? { ca } : undefined);
+		manager = new Http2SessionManager(origin, pingOptions);
 	}
 	const state = await manager.connect();
 	if (state === "error") {
