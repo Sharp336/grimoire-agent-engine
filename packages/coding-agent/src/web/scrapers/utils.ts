@@ -99,18 +99,29 @@ export async function fetchBinary(url: string, timeout: number = 20, signal?: Ab
 			}
 			void response.body?.cancel().catch(() => {});
 			const redirectUrl = new URL(location, currentUrl).href;
-			const redirectHost = new URL(redirectUrl).hostname;
+			const redirectParsed = new URL(redirectUrl);
+			// Reject cross-protocol redirects (file://, data:, etc.). On Bun
+			// `fetch("file:///...")` reads local files, and a non-HTTP(S) target
+			// has no host to classify, so the hostname guard alone can't stop it.
+			if (redirectParsed.protocol !== "http:" && redirectParsed.protocol !== "https:") {
+				return { ok: false, error: `Refused to follow redirect to non-HTTP(S) protocol: ${redirectParsed.protocol}` };
+			}
+			const redirectHost = redirectParsed.hostname;
 			if (isLocalOrMetadataHost(redirectHost)) {
 				return { ok: false, error: `Refused to follow redirect to non-public address: ${redirectHost}` };
 			}
 			currentUrl = redirectUrl;
 		}
-		if (!response) {
+		// `response` is always assigned inside the loop, so the old `!response`
+		// guard was dead. When the redirect chain exceeds MAX_REDIRECTS the loop
+		// exits with `response` still holding a 3xx — detect that explicitly rather
+		// than falling through to the HTTP-status check (which would mislabel it).
+		if (response && response.status >= 300 && response.status < 400) {
 			return { ok: false, error: `Redirect loop exceeded ${MAX_REDIRECTS} hops` };
 		}
 
-		if (!response.ok) {
-			return { ok: false, error: `HTTP ${response.status}` };
+		if (!response || !response.ok) {
+			return { ok: false, error: `HTTP ${response?.status ?? 0}` };
 		}
 
 		const contentDisposition = response.headers.get("content-disposition") || undefined;

@@ -295,4 +295,123 @@ describe("fetchBinary SSRF guard", () => {
 			expect(result.buffer).toEqual(pngBytes);
 		}
 	});
+
+	it("blocks a 302 redirect to a file:/// target", async () => {
+		let fetchCalled = false;
+		mockFetch(input => {
+			const urlStr = input.toString();
+			if (urlStr.includes("example.com")) {
+				return makeRedirectResponse("file:///etc/hosts");
+			}
+			fetchCalled = true;
+			return makeOkResponse("should not reach", urlStr);
+		});
+		const result = await fetchBinary("https://example.com/image.png");
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toMatch(/non-HTTP\(S\) protocol: file:/);
+		expect(fetchCalled).toBe(false);
+	});
+
+	it("blocks a 302 redirect to a data: target", async () => {
+		let fetchCalled = false;
+		mockFetch(input => {
+			const urlStr = input.toString();
+			if (urlStr.includes("example.com")) {
+				return makeRedirectResponse("data:text/html,<script>alert(1)</script>");
+			}
+			fetchCalled = true;
+			return makeOkResponse("should not reach", urlStr);
+		});
+		const result = await fetchBinary("https://example.com/image.png");
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toMatch(/non-HTTP\(S\) protocol: data:/);
+		expect(fetchCalled).toBe(false);
+	});
+
+	it("returns 'redirect loop exceeded' when the chain exceeds MAX_REDIRECTS", async () => {
+		mockFetch(input => {
+			const urlStr = input.toString();
+			// Every hop redirects to itself, so the chain never terminates.
+			return makeRedirectResponse(urlStr, 302);
+		});
+		const result = await fetchBinary("https://example.com/image.png");
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toMatch(/Redirect loop exceeded/);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// loadPage — cross-protocol redirect targets are rejected.
+// ---------------------------------------------------------------------------
+
+describe("loadPage — cross-protocol redirect guard", () => {
+	it("blocks a 302 redirect to file:///", async () => {
+		let fetchCalled = false;
+		mockFetch(input => {
+			const urlStr = input.toString();
+			if (urlStr.includes("example.com")) {
+				return makeRedirectResponse("file:///etc/hosts");
+			}
+			fetchCalled = true;
+			return makeOkResponse("should not reach", urlStr);
+		});
+		const result = await scrapers.loadPage("https://example.com/");
+		expect(result.ok).toBe(false);
+		expect(result.error).toMatch(/non-HTTP\(S\) protocol: file:/);
+		expect(fetchCalled).toBe(false);
+	});
+
+	it("blocks a 301 redirect to a data: URI", async () => {
+		let fetchCalled = false;
+		mockFetch(input => {
+			const urlStr = input.toString();
+			if (urlStr.includes("example.com")) {
+				return makeRedirectResponse("data:text/html,<h1>hi</h1>", 301);
+			}
+			fetchCalled = true;
+			return makeOkResponse("should not reach", urlStr);
+		});
+		const result = await scrapers.loadPage("https://example.com/");
+		expect(result.ok).toBe(false);
+		expect(result.error).toMatch(/non-HTTP\(S\) protocol: data:/);
+		expect(fetchCalled).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// loadPage — POST downgrades to GET on 301/302/303 (RFC 9110 §15.4).
+// ---------------------------------------------------------------------------
+
+describe("loadPage — method downgrade on redirect", () => {
+	it("downgrades POST to GET on a 302 redirect", async () => {
+		const methods: string[] = [];
+		mockFetch((input, init) => {
+			const urlStr = input.toString();
+			methods.push(init?.method ?? "GET");
+			if (urlStr.includes("example.com/submit")) {
+				return makeRedirectResponse("https://cdn.example.org/result", 302);
+			}
+			return makeOkResponse("<html><body>OK</body></html>", urlStr);
+		});
+		const result = await scrapers.loadPage("https://example.com/submit", { method: "POST", body: "data" });
+		expect(result.ok).toBe(true);
+		// First hop: POST (original), second hop: GET (downgraded).
+		expect(methods).toEqual(["POST", "GET"]);
+	});
+
+	it("preserves POST on a 307 redirect", async () => {
+		const methods: string[] = [];
+		mockFetch((input, init) => {
+			const urlStr = input.toString();
+			methods.push(init?.method ?? "GET");
+			if (urlStr.includes("example.com/submit")) {
+				return makeRedirectResponse("https://cdn.example.org/result", 307);
+			}
+			return makeOkResponse("<html><body>OK</body></html>", urlStr);
+		});
+		const result = await scrapers.loadPage("https://example.com/submit", { method: "POST", body: "data" });
+		expect(result.ok).toBe(true);
+		// 307 preserves the method and body.
+		expect(methods).toEqual(["POST", "POST"]);
+	});
 });

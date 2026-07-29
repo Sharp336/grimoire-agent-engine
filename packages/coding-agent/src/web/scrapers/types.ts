@@ -184,11 +184,12 @@ async function fetchWithRedirectGuard(
 	signal?: AbortSignal,
 ): Promise<{ response: Response; finalUrl: string }> {
 	let currentUrl = url;
+	let currentInit = requestInit;
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
-		const response = await fetch(currentUrl, requestInit);
+		const response = await fetch(currentUrl, currentInit);
 		// Non-3xx (or 3xx without Location) — terminal response.
 		if (response.status < 300 || response.status >= 400 || response.status === 304) {
 			return { response, finalUrl: currentUrl };
@@ -200,10 +201,21 @@ async function fetchWithRedirectGuard(
 		void response.body?.cancel().catch(() => {});
 		// Resolve the redirect target relative to the current URL.
 		const redirectUrl = new URL(location, currentUrl).href;
-		const redirectHost = new URL(redirectUrl).hostname;
+		const redirectParsed = new URL(redirectUrl);
+		// Reject cross-protocol redirects (file://, data:, etc.). On Bun
+		// `fetch("file:///...")` reads local files, and a non-HTTP(S) target
+		// has no host to classify, so the hostname guard alone can't stop it.
+		if (redirectParsed.protocol !== "http:" && redirectParsed.protocol !== "https:") {
+			throw new Error(`Refused to follow redirect to non-HTTP(S) protocol: ${redirectParsed.protocol}`);
+		}
+		const redirectHost = redirectParsed.hostname;
 		if (isLocalOrMetadataHost(redirectHost)) {
 			throw new SsrfBlockedError(redirectHost);
 		}
+		// 301/302/303 downgrade POST (and other non-safe methods) to GET per
+		// RFC 9110 §15.4; 307/308 preserve the original method and body.
+		const downgradeMethod = response.status === 301 || response.status === 302 || response.status === 303;
+		currentInit = downgradeMethod ? { ...currentInit, method: "GET", body: undefined } : currentInit;
 		currentUrl = redirectUrl;
 	}
 	// Exceeded MAX_REDIRECTS — return a synthetic error response.

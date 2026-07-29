@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed missing SSRF guard in the fetch tool — requests to loopback, RFC1918 private, link-local, and cloud-metadata addresses are now refused before and after every redirect.
+- Fixed missing SSRF guard in the fetch tool — requests to loopback, RFC1918 private, link-local, and cloud-metadata addresses are now refused before and after every redirect. Cross-protocol redirects to `file:` and `data:` targets are rejected; redirect loop exhaustion in `fetchBinary` now returns the correct error; and 301/302/303 redirects downgrade POST to GET per RFC 9110.
 
 ## [17.1.8] - 2026-07-28
 
