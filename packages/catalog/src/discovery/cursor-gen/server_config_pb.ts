@@ -16,6 +16,8 @@ export const file_server_config: GenFile =
 	);
 
 /**
+ * Per-account agent endpoint overrides returned by GetServerConfig.
+ *
  * @generated from message aiserver.v1.AgentUrlConfig
  */
 export type AgentUrlConfig = Message<"aiserver.v1.AgentUrlConfig"> & {
@@ -54,8 +56,6 @@ export const GetServerConfigRequestSchema: GenMessage<GetServerConfigRequest> =
  */
 export type GetServerConfigResponse = Message<"aiserver.v1.GetServerConfigResponse"> & {
 	/**
-	 * Server-forced transport policy (bare enum on the wire, field 7).
-	 *
 	 * @generated from field: aiserver.v1.Http2Config http2_config = 7;
 	 */
 	http2Config: Http2Config;
@@ -75,8 +75,9 @@ export const GetServerConfigResponseSchema: GenMessage<GetServerConfigResponse> 
 	messageDesc(file_server_config, 2);
 
 /**
- * Server-forced bidi/HTTP2 policy. UNSPECIFIED leaves the choice to the local
- * `providers.cursor.useHttp1ForAgent` preference.
+ * Server-forced bidi/HTTP2 policy. Only FORCE_ALL_DISABLED and
+ * FORCE_BIDI_DISABLED select HTTP/1; every other value, including
+ * UNSPECIFIED and a failed config fetch, stays on HTTP/2.
  *
  * @generated from enum aiserver.v1.Http2Config
  */
@@ -113,6 +114,8 @@ export enum Http2Config {
 export const Http2ConfigSchema: GenEnum<Http2Config> = /*@__PURE__*/ enumDesc(file_server_config, 0);
 
 /**
+ * Account-scoped transport and endpoint policy.
+ *
  * @generated from service aiserver.v1.ServerConfigService
  */
 export const ServerConfigService: GenService<{

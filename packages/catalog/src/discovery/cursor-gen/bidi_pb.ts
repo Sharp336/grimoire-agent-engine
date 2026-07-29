@@ -40,8 +40,6 @@ export const BidiRequestIdSchema: GenMessage<BidiRequestId> = /*@__PURE__*/ mess
  */
 export type BidiAppendRequest = Message<"aiserver.v1.BidiAppendRequest"> & {
 	/**
-	 * Legacy JSON-encoded payload slot (unused by omp; kept for wire parity).
-	 *
 	 * @generated from field: string data = 1;
 	 */
 	data: string;
@@ -52,15 +50,11 @@ export type BidiAppendRequest = Message<"aiserver.v1.BidiAppendRequest"> & {
 	requestId?: BidiRequestId | undefined;
 
 	/**
-	 * Monotonic per-request sequence number for FIFO ordering on the server.
-	 *
 	 * @generated from field: uint64 append_seqno = 3;
 	 */
 	appendSeqno: bigint;
 
 	/**
-	 * Binary AgentClientMessage frame.
-	 *
 	 * @generated from field: bytes data_binary = 4;
 	 */
 	dataBinary: Uint8Array;
@@ -97,8 +91,6 @@ export type BidiPollRequest = Message<"aiserver.v1.BidiPollRequest"> & {
 	requestId?: BidiRequestId | undefined;
 
 	/**
-	 * When true, (re)starts the server stream for this request id.
-	 *
 	 * @generated from field: bool start_request = 2;
 	 */
 	startRequest: boolean;
@@ -122,8 +114,6 @@ export type BidiPollResponse = Message<"aiserver.v1.BidiPollResponse"> & {
 	seqno: bigint;
 
 	/**
-	 * Server frame data (string in vendor wire, not bytes).
-	 *
 	 * @generated from field: string data = 2;
 	 */
 	data: string;
@@ -142,8 +132,7 @@ export const BidiPollResponseSchema: GenMessage<BidiPollResponse> = /*@__PURE__*
 
 /**
  * Client->server frame append. Server frames are consumed via the
- * AgentService.RunSSE / RunPoll server-streaming methods (declared in the
- * hand-corrected transport descriptors), not through this service.
+ * AgentService.RunSSE / RunPoll server-streaming methods.
  *
  * @generated from service aiserver.v1.BidiService
  */
