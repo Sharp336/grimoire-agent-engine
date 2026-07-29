@@ -28,6 +28,7 @@ import type {
 } from "./types";
 
 const JJ_REFRESH_TTL_MS = 5000;
+const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Context-usage memo
@@ -180,6 +181,11 @@ interface BranchResolveRequest {
 	controller: AbortController;
 }
 
+interface JjResolveRequest {
+	id: number;
+	controller: AbortController;
+}
+
 interface WorktreeContext {
 	/** Primary-checkout (project) name shown by the path segment. */
 	projectName: string;
@@ -267,8 +273,19 @@ export class StatusLineComponent implements Component {
 	// it (a newer resolve superseded it), so its result is stale and must be
 	// dropped rather than overwrite the value the newer resolve committed.
 	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
+	// Timestamp of the latest branch read; only bounds cache freshness when the
+	// HEAD watcher could not be installed.
+	#branchLastFetch: number | undefined = undefined;
+	// Bumped on every branch-cache reset (invalidateGitCaches — a HEAD move or
+	// repo-context change). An in-flight reftable resolve captures this at
+	// launch; a mismatch on resolve means the cache was invalidated underneath
+	// it (a newer resolve superseded it), so its result is stale and must be
+	// dropped rather than overwrite the value the newer resolve committed.
+	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
 	#branchCacheGeneration = 0;
 	#gitWatcher: fs.FSWatcher | null = null;
+	#gitWatcherErrorListener: (() => void) | undefined = undefined;
+	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
 	#autoCompactEnabled: boolean = true;
@@ -317,10 +334,11 @@ export class StatusLineComponent implements Component {
 	#jjRootCwd: string | undefined = undefined;
 	#cachedJjBranch: string | null = null;
 	#jjBranchLastFetch = 0;
-	#jjBranchInFlight = false;
+	#jjResolveSeq = 0;
+	#jjBranchActive: JjResolveRequest | undefined = undefined;
 	#cachedJjStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#jjStatusLastFetch = 0;
-	#jjStatusInFlight = false;
+	#jjStatusActive: JjResolveRequest | undefined = undefined;
 	// Bumped on every jj-cache reset — a cwd switch (#jjRootFor) or a HEAD /
 	// bookmark move (#invalidateGitCaches). An in-flight jj query captures this
 	// at launch; a mismatch on resolve means the caches were reset underneath it
@@ -580,47 +598,68 @@ export class StatusLineComponent implements Component {
 	}
 
 	#setupGitWatcher(): void {
-		if (this.#gitWatcher) {
-			this.#gitWatcher.close();
-			this.#gitWatcher = null;
-		}
+		this.#retireGitWatcher();
+		this.#gitWatcherUnavailable = false;
 
 		if (!this.#gitEnabled() || !this.#hasGitBackedSegment()) {
-			this.#invalidateGitCaches();
+			this.invalidateGitCaches();
 			return;
 		}
 
 		const { effectiveGitCwd } = this.#resolveActiveRepoCache();
 		const repository = git.repo.resolveSync(effectiveGitCwd);
-		if (!repository) return;
+		if (!repository) {
+			// There is no path to watch yet. Cache the negative result only for the
+			// fallback poll interval so a later `git init` becomes visible without
+			// generic invalidations or a render-path probe on every paint.
+			this.#gitWatcherUnavailable = true;
+			return;
+		}
 
 		const watchPath = git.repo.isReftableSync(repository)
 			? path.join(repository.gitDir, "reftable")
 			: repository.headPath;
 
 		try {
-			this.#gitWatcher = fs.watch(watchPath, () => {
-				if (this.#disposed) return;
-				this.#invalidateGitCaches();
-				if (this.#onBranchChange) {
-					this.#onBranchChange();
-				}
+			const watcher = fs.watch(watchPath, () => {
+				if (this.#disposed || this.#gitWatcher !== watcher) return;
+				this.invalidateGitCaches();
+				this.#onBranchChange?.();
 			});
+			const onError = () => {
+				if (this.#gitWatcher !== watcher) return;
+				this.#retireGitWatcher();
+				this.#gitWatcherUnavailable = true;
+				if (this.#disposed) return;
+				this.invalidateGitCaches();
+				this.#onBranchChange?.();
+			};
+			this.#gitWatcher = watcher;
+			this.#gitWatcherErrorListener = onError;
+			watcher.on("error", onError);
 		} catch {
-			this.#invalidateGitCaches();
+			this.#gitWatcherUnavailable = true;
 		}
+	}
+
+	#retireGitWatcher(): void {
+		const watcher = this.#gitWatcher;
+		const onError = this.#gitWatcherErrorListener;
+		this.#gitWatcher = null;
+		this.#gitWatcherErrorListener = undefined;
+		if (!watcher) return;
+		if (onError) watcher.off("error", onError);
+		watcher.close();
 	}
 
 	dispose(): void {
 		this.#disposed = true;
 		this.#branchResolveActive?.controller.abort();
 		this.#branchResolveActive = undefined;
+		this.#resetJjRequests();
 		this.#onBranchChange = null;
 		this.#clearUsageStartTimer();
-		if (this.#gitWatcher) {
-			this.#gitWatcher.close();
-			this.#gitWatcher = null;
-		}
+		this.#retireGitWatcher();
 	}
 
 	#clearUsageStartTimer(): void {
@@ -630,7 +669,14 @@ export class StatusLineComponent implements Component {
 	}
 
 	invalidate(): void {
-		this.#invalidateGitCaches();
+		// Generic repaint invalidation (theme change, message event, model
+		// switch, …). Must NOT abort or restart a live reftable HEAD/PR resolve:
+		// the render path self-invalidates via cwd/context cache-miss checks, so
+		// a generic paint only needs to re-render — not tear down in-flight VCS
+		// work. Aborting here would fan out a new git subprocess on every agent
+		// event, re-introducing the render-path spawn churn the async resolve
+		// was designed to avoid. Explicit Git/repository invalidation (watcher
+		// HEAD-move, cwd/repo switch) goes through {@link invalidateGitCaches}.
 	}
 	#invalidateSessionCaches(): void {
 		this.#clearUsageStartTimer();
@@ -642,7 +688,15 @@ export class StatusLineComponent implements Component {
 		this.#lastTokensPerSecondTimestamp = null;
 	}
 
-	#invalidateGitCaches(): void {
+	/**
+	 * Explicit Git/repository cache invalidation. Aborts any in-flight
+	 * reftable HEAD/PR resolve, bumps the stale-result generation, and drops
+	 * the branch/PR/jj caches so the next render refetches from disk. Called
+	 * by the git watcher on a HEAD move and by {@link applyCwdChange} on a
+	 * repo/cwd switch. Generic repaints use {@link invalidate} instead and
+	 * must never reach this path.
+	 */
+	invalidateGitCaches(): void {
 		this.#cachedBranch = undefined;
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedBranchCwd = undefined;
@@ -650,11 +704,13 @@ export class StatusLineComponent implements Component {
 		// repeated invalidations to fan out still-running git subprocesses.
 		this.#branchResolveActive?.controller.abort();
 		this.#branchResolveActive = undefined;
+		this.#branchLastFetch = undefined;
 		this.#branchCacheGeneration++;
 		this.#cachedPrContext = undefined;
 		// jj label/status share the git segment's lifecycle: a HEAD move (e.g. a
 		// colocated `jj new`/bookmark move) must drop the throttled jj caches too,
 		// mirroring #jjRootFor's per-cwd reset so the next render refetches.
+		this.#resetJjRequests();
 		this.#jjRoot = undefined;
 		this.#jjRootCwd = undefined;
 		this.#cachedJjBranch = null;
@@ -663,11 +719,38 @@ export class StatusLineComponent implements Component {
 		this.#jjStatusLastFetch = 0;
 		this.#jjCacheGeneration++;
 	}
+
+	/**
+	 * Re-point the status line's VCS watcher and caches at a new cwd/repository.
+	 * Atomically retires the old watcher/listeners, invalidates VCS caches and
+	 * in-flight controllers, then runs watcher setup for the new cwd and requests
+	 * a repaint. Called by {@link InteractiveMode.applyCwdChange} after the
+	 * SessionManager's cwd has moved — the watcher ownership always follows the
+	 * effective cwd/repo, so a stale watcher for the previous repo can never
+	 * invalidate the new one. Generic repaints use {@link invalidate} and must
+	 * never retire the watcher or abort a live resolve.
+	 */
+	applyCwdChange(): void {
+		this.#retireGitWatcher();
+		this.invalidateGitCaches();
+		this.#setupGitWatcher();
+		this.#onBranchChange?.();
+	}
+
+	#resetJjRequests(): void {
+		this.#jjBranchActive?.controller.abort();
+		this.#jjBranchActive = undefined;
+		this.#jjStatusActive?.controller.abort();
+		this.#jjStatusActive = undefined;
+	}
 	#getCurrentBranch(effectiveGitCwd?: string): string | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		if (this.#cachedBranch !== undefined && this.#cachedBranchCwd === gitCwd) {
+		const fallbackCacheExpired =
+			this.#gitWatcherUnavailable &&
+			(this.#branchLastFetch === undefined || Date.now() - this.#branchLastFetch >= WATCHER_FAILURE_POLL_TTL_MS);
+		if (this.#cachedBranch !== undefined && this.#cachedBranchCwd === gitCwd && !fallbackCacheExpired) {
 			return this.#cachedBranch;
 		}
 
@@ -689,7 +772,7 @@ export class StatusLineComponent implements Component {
 				controller: new AbortController(),
 			};
 			this.#branchResolveActive = request;
-			// Capture the cache generation at launch. #invalidateGitCaches bumps it
+			// Capture the cache generation at launch. invalidateGitCaches bumps it
 			// on a HEAD move and clears the in-flight slot, so a fresher resolve can
 			// start while this one is still pending. Without a generation check the
 			// older resolve would finish later, install its stale HEAD, and clear the
@@ -723,6 +806,7 @@ export class StatusLineComponent implements Component {
 				this.#cachedBranchCwd = gitCwd;
 				this.#cachedBranchRepoId = repoId;
 				this.#cachedBranch = next;
+				this.#branchLastFetch = Date.now();
 				if (prev !== next && this.#onBranchChange) this.#onBranchChange();
 			})();
 			return this.#cachedBranchCwd === gitCwd ? (this.#cachedBranch ?? null) : null;
@@ -733,6 +817,7 @@ export class StatusLineComponent implements Component {
 		const gitHeadPath = head?.headPath ?? null;
 		this.#cachedBranchCwd = gitCwd;
 		this.#cachedBranchRepoId = gitHeadPath;
+		this.#branchLastFetch = Date.now();
 		if (!head) {
 			this.#cachedBranch = null;
 			return null;
@@ -822,17 +907,24 @@ export class StatusLineComponent implements Component {
 		const cwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
 		const root = this.#jjRootFor(cwd);
 		if (!root) return null;
-		if (this.#jjBranchInFlight || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
+		if (this.#jjBranchActive || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
 			return this.#cachedJjBranch;
 		}
-		this.#jjBranchInFlight = true;
+		const request: JjResolveRequest = {
+			id: ++this.#jjResolveSeq,
+			controller: new AbortController(),
+		};
+		this.#jjBranchActive = request;
 		const generation = this.#jjCacheGeneration;
 		(async () => {
 			let next: string | null = null;
 			try {
-				next = await jj.workingCopy.label(root);
+				next = await jj.workingCopy.label(root, {
+					signal: request.controller.signal,
+					timeoutMs: jj.JJ_COMMAND_TIMEOUT_MS,
+				});
 			} finally {
-				this.#jjBranchInFlight = false;
+				if (this.#jjBranchActive?.id === request.id) this.#jjBranchActive = undefined;
 				// Advance the throttle only if no reset raced this query; a reset
 				// leaves LastFetch at 0 so the current root refetches instead of
 				// being throttled on a superseded result.
@@ -844,7 +936,7 @@ export class StatusLineComponent implements Component {
 			if (this.#jjCacheGeneration !== generation || this.#disposed) return;
 			const changed = next !== this.#cachedJjBranch;
 			this.#cachedJjBranch = next;
-			if (changed && this.#onBranchChange) this.#onBranchChange();
+			if (changed) this.#onBranchChange?.();
 		})();
 		return this.#cachedJjBranch;
 	}
@@ -856,23 +948,30 @@ export class StatusLineComponent implements Component {
 		const cwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
 		const root = this.#jjRootFor(cwd);
 		if (!root) return null;
-		if (this.#jjStatusInFlight || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
+		if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
 			return this.#cachedJjStatus;
 		}
-		this.#jjStatusInFlight = true;
+		const request: JjResolveRequest = {
+			id: ++this.#jjResolveSeq,
+			controller: new AbortController(),
+		};
+		this.#jjStatusActive = request;
 		const generation = this.#jjCacheGeneration;
 		(async () => {
 			let next: { staged: number; unstaged: number; untracked: number } | null = null;
 			try {
-				next = await jj.status.summary(root);
+				next = await jj.status.summary(root, {
+					signal: request.controller.signal,
+					timeoutMs: jj.JJ_COMMAND_TIMEOUT_MS,
+				});
 			} finally {
-				this.#jjStatusInFlight = false;
+				if (this.#jjStatusActive?.id === request.id) this.#jjStatusActive = undefined;
 				if (this.#jjCacheGeneration === generation) this.#jjStatusLastFetch = Date.now();
 			}
 			if (this.#jjCacheGeneration !== generation || this.#disposed) return;
 			const prev = this.#cachedJjStatus;
 			this.#cachedJjStatus = next;
-			if (this.#onBranchChange && JSON.stringify(prev) !== JSON.stringify(next)) this.#onBranchChange();
+			if (JSON.stringify(prev) !== JSON.stringify(next)) this.#onBranchChange?.();
 		})();
 		return this.#cachedJjStatus;
 	}

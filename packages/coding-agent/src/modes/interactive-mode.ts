@@ -1273,8 +1273,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.refreshSkillState();
 		await this.refreshSlashCommandState(newCwd);
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		this.statusLine.invalidate();
-		this.ui.requestRender();
+		this.statusLine.applyCwdChange();
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {

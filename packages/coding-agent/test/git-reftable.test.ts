@@ -130,12 +130,12 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 			exitCode: 0,
 			exitedDueToTimeout: true,
 			stdout: Buffer.from("refs/heads/feature-branch\n"),
-		} satisfies ReturnType<typeof Bun.spawnSync>;
+		} satisfies Bun.ReadableSyncSubprocess;
 		const successfulRevParse = {
 			...baseResult,
 			exitCode: 0,
 			stdout: Buffer.from(`${headSha}\n`),
-		} satisfies ReturnType<typeof Bun.spawnSync>;
+		} satisfies Bun.ReadableSyncSubprocess;
 		vi.spyOn(Bun, "spawnSync").mockReturnValueOnce(timedOutSymbolicRef).mockReturnValueOnce(successfulRevParse);
 
 		const headState = git.head.resolveSync(sharedRepoDir);
