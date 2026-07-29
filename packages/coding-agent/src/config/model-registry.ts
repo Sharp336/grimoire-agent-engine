@@ -2338,12 +2338,21 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined> {
+		return (await this.getApiKeyResolutionForProvider(provider, sessionId, options))?.apiKey;
+	}
+
+	/** Resolve a bearer with the stored credential row that supplied it, when applicable. */
+	async getApiKeyResolutionForProvider(
+		provider: string,
+		sessionId?: string,
+		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+	): Promise<{ apiKey: string; credentialId?: number } | undefined> {
 		const commandKey = this.#resolveCommandBackedApiKey(provider);
-		if (commandKey.configured) return commandKey.value;
+		if (commandKey.configured) return commandKey.value ? { apiKey: commandKey.value } : undefined;
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
-			return kNoAuth;
+			return { apiKey: kNoAuth };
 		}
-		return this.authStorage.getApiKey(provider, sessionId, {
+		return this.authStorage.getApiKeyResolution(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
 			forceRefresh: options?.forceRefresh,

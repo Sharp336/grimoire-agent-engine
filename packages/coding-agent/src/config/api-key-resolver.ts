@@ -24,6 +24,11 @@ export interface ApiKeyResolverRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined>;
+	getApiKeyResolutionForProvider?(
+		provider: string,
+		sessionId?: string,
+		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+	): Promise<{ apiKey: string; credentialId?: number } | undefined>;
 	authStorage: Pick<AuthStorage, "rotateSessionCredential">;
 	/**
 	 * Build an {@link ApiKeyResolver} implementing the central a/b/c auth-retry
@@ -45,15 +50,25 @@ export interface ApiKeyResolverRegistry {
  * Also usable standalone for structural registries that don't carry the method.
  */
 export function createApiKeyResolver(
-	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "authStorage">,
+	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "getApiKeyResolutionForProvider" | "authStorage">,
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId } = options;
-	return async ({ lastChance, error, signal, previousKey }) => {
-		if (error === undefined) {
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
-		}
+	const resolve = async (requestOptions: {
+		forceRefresh?: boolean;
+		signal?: AbortSignal;
+	}): Promise<string | undefined> => {
+		const resolved = registry.getApiKeyResolutionForProvider
+			? await registry.getApiKeyResolutionForProvider(provider, sessionId, { baseUrl, modelId, ...requestOptions })
+			: undefined;
+		resolver.credentialId = resolved?.credentialId;
+		return (
+			resolved?.apiKey ?? registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, ...requestOptions })
+		);
+	};
+	const resolver: ApiKeyResolver = async ({ lastChance, error, signal, previousKey }) => {
+		if (error === undefined) return resolve({ signal });
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
 			// sibling credential. We do NOT honor any retry-after here — if a
@@ -65,6 +80,7 @@ export function createApiKeyResolver(
 				modelId,
 				signal,
 				apiKey: previousKey,
+				credentialId: resolver.credentialId,
 			});
 			if (!switched) {
 				const status = AIError.status(error);
@@ -74,8 +90,9 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return resolve({ signal });
 		}
-		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
+		return resolve({ forceRefresh: true, signal });
 	};
+	return resolver;
 }

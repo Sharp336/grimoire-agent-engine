@@ -21,7 +21,7 @@ import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } fr
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isInvalidatedOAuthTokenError } from "./error/auth-classify";
-import { isUsageLimitOutcome } from "./error/rate-limit";
+import { calculateRateLimitBackoffMs, isUsageLimitOutcome, parseRateLimitReason } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { CursorOptions } from "./providers/cursor";
@@ -166,6 +166,7 @@ const PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS = 250;
 
 let configuredProviderMaxInFlightRequests: Record<string, number> = {};
 let providerInFlightRootOverride: string | undefined;
+const reducedProviderInFlightLimits = new Map<string, number>();
 
 export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
 	configuredProviderMaxInFlightRequests = limits ?? {};
@@ -173,12 +174,27 @@ export function configureProviderMaxInFlightRequests(limits: Record<string, numb
 
 function resolveProviderInFlightLimit(
 	provider: string,
-	options?: Pick<StreamOptions, "maxInFlightRequests">,
+	options?: Pick<StreamOptions, "maxInFlightRequests" | "credentialId">,
 ): number | undefined {
 	const limits = options?.maxInFlightRequests ?? configuredProviderMaxInFlightRequests;
 	const value = limits[provider];
 	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
-	return Math.max(1, Math.floor(value));
+	const configuredLimit = Math.max(1, Math.floor(value));
+	return reducedProviderInFlightLimits.get(providerInFlightKey(provider, options?.credentialId)) ?? configuredLimit;
+}
+
+function providerInFlightKey(provider: string, credentialId: number | undefined): string {
+	return `${provider}#${credentialId ?? "default"}`;
+}
+
+function reduceProviderInFlightLimit(
+	provider: string,
+	options: Pick<StreamOptions, "maxInFlightRequests" | "credentialId"> | undefined,
+): void {
+	const currentLimit = resolveProviderInFlightLimit(provider, options);
+	if (currentLimit === undefined) return;
+	const key = providerInFlightKey(provider, options?.credentialId);
+	reducedProviderInFlightLimits.set(key, Math.max(1, currentLimit - 1));
 }
 
 function providerInFlightRoot(): string {
@@ -533,20 +549,20 @@ export const __providerInFlightForTesting = {
 	setRoot(root: string | undefined): void {
 		providerInFlightRootOverride = root;
 	},
-	providerDir(provider: string): string {
-		return providerInFlightDir(provider);
+	providerDir(provider: string, credentialId?: number): string {
+		return providerInFlightDir(providerInFlightKey(provider, credentialId));
 	},
-	lockDir(provider: string): string {
-		return providerInFlightLockDir(provider);
+	lockDir(provider: string, credentialId?: number): string {
+		return providerInFlightLockDir(providerInFlightKey(provider, credentialId));
 	},
-	async captureStaleLockRelease(provider: string): Promise<(() => Promise<void>) | null> {
-		const lockDir = providerInFlightLockDir(provider);
+	async captureStaleLockRelease(provider: string, credentialId?: number): Promise<(() => Promise<void>) | null> {
+		const lockDir = providerInFlightLockDir(providerInFlightKey(provider, credentialId));
 		const stale = await readProviderInFlightStaleLock(lockDir);
 		if (!stale) return null;
 		return () => releaseProviderInFlightStaleLock(lockDir, stale);
 	},
-	async captureLockDirRelease(provider: string): Promise<(() => Promise<void>) | null> {
-		const lockDir = providerInFlightLockDir(provider);
+	async captureLockDirRelease(provider: string, credentialId?: number): Promise<(() => Promise<void>) | null> {
+		const lockDir = providerInFlightLockDir(providerInFlightKey(provider, credentialId));
 		try {
 			const identity = await readProviderInFlightLockIdentity(lockDir);
 			return () => releaseProviderInFlightLockDirIfSame(lockDir, identity);
@@ -554,9 +570,14 @@ export const __providerInFlightForTesting = {
 			return null;
 		}
 	},
+	resetReducedLimits(): void {
+		reducedProviderInFlightLimits.clear();
+	},
 };
 
-function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests">>(
+function withProviderInFlightLimit<
+	TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests" | "credentialId">,
+>(
 	model: Model<Api>,
 	options: TOptions | undefined,
 	dispatch: () => AssistantMessageEventStream,
@@ -567,6 +588,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
 	if (limit === undefined) return healLeakedThinking(model, dispatch());
+	const inFlightKey = providerInFlightKey(model.provider, options?.credentialId);
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
@@ -579,7 +601,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 		};
 		try {
 			const startedWaitingAt = Date.now();
-			release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
+			release = await acquireProviderInFlightSlot(inFlightKey, limit, options?.signal);
 			if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
 				logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
 			}
@@ -961,6 +983,7 @@ type AuthRetryFailure = {
 	error: unknown;
 	bufferedEvents: AssistantMessageEvent[];
 	terminalEvent?: Extract<AssistantMessageEvent, { type: "error" }>;
+	concurrentLimit?: boolean;
 };
 
 function extractStatusFromAssistantError(message: AssistantMessage): number | undefined {
@@ -987,6 +1010,10 @@ function isRetryableUpstreamError(error: unknown, status: number | undefined, me
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	if (status === 401 || status === 403) return true;
 	return isUsageLimitOutcome(status, message);
+}
+
+function isConcurrentLimitError(message: string | undefined): boolean {
+	return message !== undefined && parseRateLimitReason(message) === "CONCURRENT_LIMIT";
 }
 
 function createAssistantAuthError(message: AssistantMessage): Error {
@@ -1026,7 +1053,10 @@ export function streamSimple<TApi extends Api>(
 		// (so the caller can retry with a fresh key) instead of surfaced. Once any
 		// non-start event escapes, retry is no longer safe and the failure is
 		// emitted directly.
-		const runAttempt = async (apiKey: string): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (
+			apiKey: string,
+			credentialId: number | undefined,
+		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1035,7 +1065,7 @@ export function streamSimple<TApi extends Api>(
 			};
 
 			try {
-				const inner = streamSimple(model, context, { ...requestOptions, apiKey });
+				const inner = streamSimple(model, context, { ...requestOptions, apiKey, credentialId });
 				for await (const event of inner) {
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -1044,13 +1074,19 @@ export function streamSimple<TApi extends Api>(
 					if (
 						!emittedReplayUnsafeEvent &&
 						event.type === "error" &&
-						isRetryableUpstreamError(
-							event.error,
-							extractStatusFromAssistantError(event.error),
-							event.error.errorMessage,
-						)
+						(isConcurrentLimitError(event.error.errorMessage) ||
+							isRetryableUpstreamError(
+								event.error,
+								extractStatusFromAssistantError(event.error),
+								event.error.errorMessage,
+							))
 					) {
-						return { error: createAssistantAuthError(event.error), bufferedEvents, terminalEvent: event };
+						return {
+							error: createAssistantAuthError(event.error),
+							bufferedEvents,
+							terminalEvent: event,
+							concurrentLimit: isConcurrentLimitError(event.error.errorMessage),
+						};
 					}
 					flushBuffered();
 					emittedReplayUnsafeEvent = true;
@@ -1060,15 +1096,12 @@ export function streamSimple<TApi extends Api>(
 				flushBuffered();
 				if (!outer.done) outer.end(await inner.result());
 			} catch (error) {
+				const message = error instanceof Error ? error.message : undefined;
 				if (
 					!emittedReplayUnsafeEvent &&
-					isRetryableUpstreamError(
-						error,
-						AIError.status(error),
-						error instanceof Error ? error.message : undefined,
-					)
+					(isConcurrentLimitError(message) || isRetryableUpstreamError(error, AIError.status(error), message))
 				) {
-					return { error, bufferedEvents };
+					return { error, bufferedEvents, concurrentLimit: isConcurrentLimitError(message) };
 				}
 				flushBuffered();
 				outer.fail(error);
@@ -1086,8 +1119,10 @@ export function streamSimple<TApi extends Api>(
 
 		void (async () => {
 			let lastKey: string | undefined;
+			let credentialId: number | undefined;
 			try {
 				lastKey = (await apiKeyResolver({ lastChance: false, error: undefined, signal })) || undefined;
+				credentialId = apiKeyResolver.credentialId;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1104,15 +1139,30 @@ export function streamSimple<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey);
+			let failure = await runAttempt(lastKey, credentialId);
 			if (!failure) return;
+			if (failure.concurrentLimit) {
+				reduceProviderInFlightLimit(model.provider, { ...requestOptions, credentialId });
+				await Bun.sleep(calculateRateLimitBackoffMs("CONCURRENT_LIMIT"));
+				if (signal?.aborted) {
+					emitFailure(failure);
+					return;
+				}
+				failure = await runAttempt(lastKey, credentialId);
+				if (!failure) return;
+				if (failure.concurrentLimit) {
+					emitFailure(failure);
+					return;
+				}
+			}
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
 				const nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey);
+				credentialId = apiKeyResolver.credentialId;
+				const next = await runAttempt(nextKey, credentialId);
 				if (!next) return;
 				failure = next;
 			}
@@ -1470,6 +1520,7 @@ function mapOptionsForApi<TApi extends Api>(
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
 		maxInFlightRequests: options?.maxInFlightRequests,
+		credentialId: options?.credentialId,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,

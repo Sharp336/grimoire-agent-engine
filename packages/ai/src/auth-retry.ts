@@ -38,7 +38,11 @@ export interface ApiKeyResolveContext {
  * Resolves the API key to send for a request, retried through the a/b/c policy
  * described on {@link ApiKeyResolveContext}.
  */
-export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<string | undefined> | string | undefined;
+export interface ApiKeyResolver {
+	(ctx: ApiKeyResolveContext): Promise<string | undefined> | string | undefined;
+	/** SQLite credential row selected for the most recent resolution, if stored. */
+	credentialId?: number;
+}
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
@@ -68,13 +72,17 @@ export async function resolveApiKeyOnce(key: ApiKey | undefined, signal?: AbortS
  */
 export function seedApiKeyResolver(seed: string | undefined, resolver: ApiKeyResolver): ApiKeyResolver {
 	let seedPending = seed !== undefined;
-	return ctx => {
+	const seeded: ApiKeyResolver = async ctx => {
 		if (seedPending && ctx.error === undefined) {
 			seedPending = false;
+			seeded.credentialId = resolver.credentialId;
 			return seed;
 		}
-		return resolver(ctx);
+		const resolved = await resolver(ctx);
+		seeded.credentialId = resolver.credentialId;
+		return resolved;
 	};
+	return seeded;
 }
 
 // Re-exported from the error module (its new home); see error/auth-classify.ts.

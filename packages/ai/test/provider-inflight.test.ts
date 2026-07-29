@@ -24,6 +24,7 @@ afterEach(async () => {
 	clearCustomApis();
 	configureProviderMaxInFlightRequests(undefined);
 	__providerInFlightForTesting.setRoot(undefined);
+	__providerInFlightForTesting.resetReducedLimits();
 	if (limiterRoot !== undefined) {
 		await fs.rm(limiterRoot, { recursive: true, force: true });
 		limiterRoot = undefined;
@@ -83,6 +84,38 @@ describe("provider in-flight request limits", () => {
 		expect(secondMessage.content).toEqual([{ type: "text", text: "reply 2" }]);
 		expect(maxActive).toBe(1);
 		expect(mock.calls).toHaveLength(2);
+	});
+
+	test("allows one in-flight request per credential for the same provider", async () => {
+		registerMockApi();
+		const bothStarted = Promise.withResolvers<void>();
+		const releaseBoth = Promise.withResolvers<void>();
+		let active = 0;
+		let maxActive = 0;
+		const mock = createMockModel({
+			provider: "tests",
+			handler: async () => {
+				active++;
+				maxActive = Math.max(maxActive, active);
+				if (active === 2) bothStarted.resolve();
+				try {
+					await releaseBoth.promise;
+					return { content: ["reply"] };
+				} finally {
+					active--;
+				}
+			},
+		});
+
+		const options = { maxInFlightRequests: { tests: 1 } };
+		const first = streamSimple(mock.model, context(), { ...options, credentialId: 1 });
+		const second = streamSimple(mock.model, context(), { ...options, credentialId: 2 });
+		await bothStarted.promise;
+
+		expect(mock.calls).toHaveLength(2);
+		expect(maxActive).toBe(2);
+		releaseBoth.resolve();
+		await Promise.all([first.result(), second.result()]);
 	});
 
 	test("removes an aborted queued request without dispatching it", async () => {

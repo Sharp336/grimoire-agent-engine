@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Applied provider in-flight request caps per stored credential so independently authenticated accounts can use their configured concurrency in parallel; concurrent-limit responses now shed one local slot for the affected credential and retry without rotating it.
+
 ### Fixed
 
 - Classified concurrent-request caps separately from quota exhaustion so they use a short retry backoff without burning a credential, and rotate credentials for account-scoped 403 caps such as Devin's overall message limit.
