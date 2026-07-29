@@ -209,12 +209,6 @@ function devinGpt56Families(variant: "luna" | "sol" | "terra", name: string): re
 const GEMINI_3_FLASH_FAMILY_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High];
 const GEMINI_3_PRO_FAMILY_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High];
 
-/**
- * Antigravity Cloud Code Assist sends an explicit `thinkingBudget` per tier
- * (verified against captured `daily-cloudcode-pa` requests). Flash uses round
- * budgets; Pro offsets every budget by +1. Minimal mirrors Low (the Antigravity
- * UI exposes Low/Medium/High only) so the effort stays selectable.
- */
 const GEMINI_3_FLASH_FAMILY_BUDGETS: Readonly<Partial<Record<Effort, number>>> = {
 	[Effort.Minimal]: 1000,
 	[Effort.Low]: 1000,
@@ -228,11 +222,11 @@ const GEMINI_3_PRO_FAMILY_BUDGETS: Readonly<Partial<Record<Effort, number>>> = {
 
 /**
  * Cloud Code Assist's legacy Gemini 3.5 Flash and 3.1 Pro families use
- * different thinking transports: `google-antigravity` (daily-cloudcode-pa)
- * sends captured `thinkingBudget` values, while `google-gemini-cli`
- * (cloudcode-pa) follows the official Gemini CLI and uses `thinkingLevel`.
- * Gemini 3.6 follows the same endpoint-specific transport: Antigravity uses
- * captured thinking budgets, while the official Gemini CLI uses thinking levels.
+ * different thinking transports. The current Antigravity route is
+ * `daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse`,
+ * which serializes per-tier `thinkingBudget`; the official Gemini CLI's
+ * cloudcode-pa route uses `thinkingLevel`. Gemini 3.6 follows that same
+ * endpoint-specific split.
  */
 function geminiFlashFamily(mode: "budget" | "google-level"): EffortVariantFamily {
 	const budget = mode === "budget";
@@ -265,23 +259,28 @@ function geminiFlashFamily(mode: "budget" | "google-level"): EffortVariantFamily
 	};
 }
 
-const GEMINI_36_FLASH_FAMILY: EffortVariantFamily = {
-	id: "gemini-3.6-flash",
-	name: "Gemini 3.6 Flash",
-	members: ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high", "gemini-3.6-flash-tiered"],
-	routing: {
-		[Effort.Minimal]: "gemini-3.6-flash-low",
-		[Effort.Low]: "gemini-3.6-flash-low",
-		[Effort.Medium]: "gemini-3.6-flash-medium",
-		[Effort.High]: "gemini-3.6-flash-high",
-	},
-	thinking: {
-		mode: "budget",
-		efforts: GEMINI_3_FLASH_FAMILY_EFFORTS,
-		effortBudgets: GEMINI_3_FLASH_FAMILY_BUDGETS,
-		requiresEffort: true,
-	},
-};
+function gemini36FlashFamily(mode: "budget" | "google-level"): EffortVariantFamily {
+	const budget = mode === "budget";
+	return {
+		id: "gemini-3.6-flash",
+		name: "Gemini 3.6 Flash",
+		members: ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high", "gemini-3.6-flash-tiered"],
+		routing: {
+			[Effort.Minimal]: "gemini-3.6-flash-low",
+			[Effort.Low]: "gemini-3.6-flash-low",
+			[Effort.Medium]: "gemini-3.6-flash-medium",
+			[Effort.High]: "gemini-3.6-flash-high",
+		},
+		thinking: budget
+			? {
+					mode: "budget",
+					efforts: GEMINI_3_FLASH_FAMILY_EFFORTS,
+					effortBudgets: GEMINI_3_FLASH_FAMILY_BUDGETS,
+					requiresEffort: true,
+				}
+			: { mode: "google-level", efforts: GEMINI_3_FLASH_FAMILY_EFFORTS, requiresEffort: true },
+	};
+}
 
 function geminiProFamily(mode: "budget" | "google-level"): EffortVariantFamily {
 	const budget = mode === "budget";
@@ -365,13 +364,18 @@ const SHARED_CCA_FAMILIES: readonly EffortVariantFamily[] = [
 
 /** `google-antigravity` Gemini families, using each generation's native transport. */
 export const ANTIGRAVITY_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
-	families: [GEMINI_36_FLASH_FAMILY, geminiFlashFamily("budget"), geminiProFamily("budget"), ...SHARED_CCA_FAMILIES],
+	families: [
+		gemini36FlashFamily("budget"),
+		geminiFlashFamily("budget"),
+		geminiProFamily("budget"),
+		...SHARED_CCA_FAMILIES,
+	],
 };
 
 /** `google-gemini-cli` Gemini families on the official CLI's level transport. */
 export const GEMINI_CLI_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 	families: [
-		GEMINI_36_FLASH_FAMILY,
+		gemini36FlashFamily("google-level"),
 		geminiFlashFamily("google-level"),
 		geminiProFamily("google-level"),
 		...SHARED_CCA_FAMILIES,
