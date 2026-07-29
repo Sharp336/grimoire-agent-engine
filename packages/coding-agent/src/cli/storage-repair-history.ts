@@ -52,23 +52,24 @@ function codeOf(error: unknown) {
 }
 
 async function sessionFiles(root: string) {
+	let projects: fs.Dirent[];
+	try {
+		projects = await fs.promises.readdir(root, { withFileTypes: true });
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
 	const result: string[] = [];
-	async function visit(dir: string): Promise<void> {
-		let entries: fs.Dirent[];
-		try {
-			entries = await fs.promises.readdir(dir, { withFileTypes: true });
-		} catch (error) {
-			if (codeOf(error) === "ENOENT" && dir === root) return;
-			throw error;
-		}
-		for (const entry of entries) {
-			const file = path.join(dir, entry.name);
-			assertInvariant(!entry.isSymbolicLink(), `Session manifest refuses symbolic link: ${file}`);
-			if (entry.isDirectory()) await visit(file);
-			else if (entry.isFile() && entry.name.endsWith(".jsonl")) result.push(file);
+	for (const project of projects) {
+		const projectPath = path.join(root, project.name);
+		assertInvariant(!project.isSymbolicLink(), `Session manifest refuses symbolic link: ${projectPath}`);
+		if (!project.isDirectory()) continue;
+		for (const file of await fs.promises.readdir(projectPath, { withFileTypes: true })) {
+			const filePath = path.join(projectPath, file.name);
+			assertInvariant(!file.isSymbolicLink(), `Session manifest refuses symbolic link: ${filePath}`);
+			if (file.isFile() && file.name.endsWith(".jsonl")) result.push(filePath);
 		}
 	}
-	await visit(root);
 	return result.sort();
 }
 

@@ -661,6 +661,40 @@ describe("offline SQLite salvage", () => {
 		}
 	});
 
+	test("history rebuild ignores nested subagent and advisor transcripts", async () => {
+		await createHistorySource();
+		await writeSession("primary", "primary", [message("primary", "2026-01-01T00:00:01.000Z", "primary prompt")]);
+		const subagent = await writeSession(
+			path.join("primary", "__subagent"),
+			"nested",
+			[message("nested", "2026-01-01T00:00:02.000Z", "nested prompt")],
+		);
+		const advisor = await writeSession(
+			path.join("primary", "__advisor"),
+			"advisor",
+			[message("advisor", "2026-01-01T00:00:03.000Z", "advisor prompt")],
+		);
+		await fs.promises.appendFile(advisor, "{\"type\":\"message\"");
+
+		const result = await runStorageRepair(
+			{ target: "history", historySource: "sessions", apply: true, agentDir: root },
+			{
+				afterSessionManifestParse: () =>
+					fs.promises.appendFile(
+						subagent,
+						`${JSON.stringify(message("late", "2026-01-01T00:00:04.000Z", "late nested prompt"))}\n`,
+					),
+			},
+		);
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
+		try {
+			expect(db.prepare("SELECT prompt FROM history ORDER BY id").all()).toEqual([{ prompt: "primary prompt" }]);
+		} finally {
+			db.close();
+		}
+	});
+
 	test("session manifest changes before publication refuse the candidate", async () => {
 		await createHistorySource();
 		await writeSession("first", "first-session", [message("m", "2026-01-01T00:00:01.000Z", "first")]);
