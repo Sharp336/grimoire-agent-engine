@@ -220,24 +220,25 @@ async function stageArtifacts(finalPath: string, label: "backup" | "candidate") 
 }
 
 describe("offline SQLite salvage", () => {
-	test("rejects normalized and case-insensitive source-triplet artifact aliases", async () => {
+	test("rejects normalized and mixed-case source-triplet artifact aliases on caseless platforms", async () => {
 		const source = path.join(root, "agent.db");
 		await fs.promises.writeFile(source, "source");
-		const options = { comparisonMode: "case-insensitive" } as const;
 
-		await expect(resolveArtifactPaths(source, path.join(root, "nested", "..", "agent.db"), options)).rejects.toThrow(
-			"Repair output already exists",
-		);
-
-		for (const output of [
-			path.join(root, "nested", "..", "agent.db-wal"),
-			path.join(root, "nested", "..", "agent.db-shm"),
-			path.join(root, "AGENT.DB-WAL"),
-			path.join(root, "AGENT.DB-SHM"),
-		]) {
-			await expect(resolveArtifactPaths(source, output, options)).rejects.toThrow(
-				"Repair artifact collides with source triplet",
-			);
+		for (const platform of ["darwin", "win32"] as const) {
+			const options = { platform: () => platform };
+			await expect(
+				resolveArtifactPaths(source, path.join(root, "nested", "..", "agent.db"), options),
+			).rejects.toThrow("Repair output already exists");
+			for (const output of [
+				path.join(root, "nested", "..", "agent.db-wal"),
+				path.join(root, "nested", "..", "agent.db-shm"),
+				path.join(root, "AGENT.DB-WAL"),
+				path.join(root, "AGENT.DB-SHM"),
+			]) {
+				await expect(resolveArtifactPaths(source, output, options)).rejects.toThrow(
+					"Repair artifact collides with source triplet",
+				);
+			}
 		}
 	});
 
@@ -246,12 +247,14 @@ describe("offline SQLite salvage", () => {
 		const slug = "fixed";
 		await fs.promises.writeFile(source, "source");
 
-		await expect(
-			resolveArtifactPaths(source, path.join(root, "nested", "..", `agent.db.salvage-${slug}.tar`), {
-				comparisonMode: "case-insensitive",
-				artifactSlug: () => slug,
-			}),
-		).rejects.toThrow("Candidate and backup paths collide");
+		for (const platform of ["darwin", "win32"] as const) {
+			await expect(
+				resolveArtifactPaths(source, path.join(root, "nested", "..", `agent.db.salvage-${slug}.tar`), {
+					platform: () => platform,
+					artifactSlug: () => slug,
+				}),
+			).rejects.toThrow("Candidate and backup paths collide");
+		}
 	});
 
 	test("rejects Unicode-normalized source-sidecar and candidate-backup aliases", async () => {
@@ -262,37 +265,31 @@ describe("offline SQLite salvage", () => {
 		const slug = "fixed";
 		await fs.promises.writeFile(source, "source");
 
-		await expect(
-			resolveArtifactPaths(source, `${alias}-wal`, { comparisonMode: "case-insensitive" }),
-		).rejects.toThrow("Repair artifact collides with source triplet");
-		await expect(
-			resolveArtifactPaths(source, `${alias}.salvage-${slug}.tar`, {
-				comparisonMode: "case-insensitive",
-				artifactSlug: () => slug,
-			}),
-		).rejects.toThrow("Candidate and backup paths collide");
-	});
-
-	test("rejects full Unicode casefold source-sidecar and candidate-backup aliases", async () => {
-		const slug = "fixed";
-		for (const { sourceName, aliasName } of [
-			{ sourceName: "agent-ος.db", aliasName: "agent-οσ.db" },
-			{ sourceName: "agent-straße.db", aliasName: "agent-STRASSE.db" },
-		]) {
-			const source = path.join(root, sourceName);
-			const alias = path.join(root, aliasName);
-			await fs.promises.writeFile(source, "source");
-
-			await expect(
-				resolveArtifactPaths(source, `${alias}-shm`, { comparisonMode: "case-insensitive" }),
-			).rejects.toThrow("Repair artifact collides with source triplet");
+		for (const platform of ["darwin", "win32"] as const) {
+			await expect(resolveArtifactPaths(source, `${alias}-wal`, { platform: () => platform })).rejects.toThrow(
+				"Repair artifact collides with source triplet",
+			);
 			await expect(
 				resolveArtifactPaths(source, `${alias}.salvage-${slug}.tar`, {
-					comparisonMode: "case-insensitive",
+					platform: () => platform,
 					artifactSlug: () => slug,
 				}),
 			).rejects.toThrow("Candidate and backup paths collide");
 		}
+	});
+
+	test("rejects full Unicode folds on caseless platforms but not Linux", async () => {
+		const source = path.join(root, "agent-straße.db");
+		const alias = path.join(root, "AGENT-STRASSE.DB");
+		await fs.promises.writeFile(source, "source");
+
+		for (const platform of ["darwin", "win32"] as const) {
+			await expect(resolveArtifactPaths(source, `${alias}-shm`, { platform: () => platform })).rejects.toThrow(
+				"Repair artifact collides with source triplet",
+			);
+		}
+		const artifacts = await resolveArtifactPaths(source, `${alias}-shm`, { platform: () => "linux" });
+		expect(artifacts.candidate).toBe(`${alias}-shm`);
 	});
 
 	test("accepts distinct repair artifact paths", async () => {
@@ -300,7 +297,7 @@ describe("offline SQLite salvage", () => {
 		const candidate = path.join(root, "repaired.db");
 		await fs.promises.writeFile(source, "source");
 
-		const artifacts = await resolveArtifactPaths(source, candidate, { comparisonMode: "case-insensitive" });
+		const artifacts = await resolveArtifactPaths(source, candidate, { platform: () => "linux" });
 		expect(artifacts.candidate).toBe(candidate);
 		expect(artifacts.backup).not.toBe(candidate);
 	});
