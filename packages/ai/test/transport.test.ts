@@ -388,9 +388,9 @@ process.stdout.write(JSON.stringify({ drained, disposed: isTransportDisposed() }
 });
 
 describe("shared transport classification", () => {
-	it("classifies replay-safe network and HTTP failures but excludes auth and cancellation", () => {
+	it("classifies exact network failures but excludes provider status and cancellation", () => {
 		expect(isTransientTransportError(Object.assign(new Error("reset"), { code: "ECONNRESET" }))).toBeTrue();
-		expect(isTransientTransportError(Object.assign(new Error("unavailable"), { status: 503 }))).toBeTrue();
+		expect(isTransientTransportError(Object.assign(new Error("unavailable"), { status: 503 }))).toBeFalse();
 		expect(isTransientTransportError(Object.assign(new Error("forbidden"), { status: 403 }))).toBeFalse();
 		expect(isTransientTransportError(new DOMException("aborted", "AbortError"))).toBeFalse();
 	});

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, toBinary } from "@bufbuild/protobuf";
+import { disposeH2Pool } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
-import { disposeH2Pool } from "@oh-my-pi/pi-ai";
 import { __evictServerConfigEntry } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -229,7 +229,7 @@ describe("Cursor Connect terminal behavior without the CLI retry feature signal"
 		const detail = "context_length_exceeded: input exceeds the model context window";
 		handleAttempt = (_attemptIndex, stream) => {
 			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-			stream.end(Buffer.concat([connectEndErrorFrame("resource_exhausted", detail), turnEndedFrame()]));
+			stream.end(Buffer.concat([turnEndedFrame(), connectEndErrorFrame("resource_exhausted", detail)]));
 		};
 
 		const { eventTypes, message, retryDelays } = await collect(makeModel(baseUrl));

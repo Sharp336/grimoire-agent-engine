@@ -88,9 +88,7 @@ async function callAntigravitySearch(
 		"Content-Type": "application/json",
 		"Accept-Encoding": "gzip",
 	};
-	const body = new TextEncoder().encode(
-		JSON.stringify({ model, project: projectId, request, requestType: "agent", userAgent: "antigravity" }),
-	);
+	const body = JSON.stringify({ model, project: projectId, request, requestType: "agent", userAgent: "antigravity" });
 	const transport = await postH2Primary({
 		url,
 		provider: "google-antigravity",

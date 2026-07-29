@@ -213,7 +213,24 @@ function cursorConnectError(code: string, message: string): Error {
 	const detail = `Connect error ${code || "unknown"}: ${message || "Unknown error"}`;
 	if (normalized === "unauthenticated") return new AIError.CursorCredentialError(detail, 401);
 	if (normalized === "permission_denied") return new AIError.CursorCredentialError(detail, 403);
-	return new AIError.ProviderResponseError(detail, { kind: "envelope" });
+	const error = new AIError.ProviderResponseError(detail, { kind: "envelope" });
+	if (normalized === "resource_exhausted" && /context(?:_length)?|context window|input exceeds/i.test(message)) {
+		AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
+	}
+	return error;
+}
+
+function cursorHttpError(status: number, body: Uint8Array): Error {
+	const detail = new TextDecoder().decode(body);
+	const message = detail ? `Cursor HTTP ${status}: ${detail}` : `Cursor HTTP ${status} (no body)`;
+	const error =
+		status === 401 || status === 403
+			? new AIError.CursorCredentialError(message, status)
+			: new AIError.ProviderHttpError(message, status);
+	if (status === 413 && /request_too_large/i.test(detail) && /context window|input exceeds/i.test(detail)) {
+		AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
+	}
+	return error;
 }
 
 function debugBytes(bytes: Uint8Array, asHex: boolean): string {
@@ -395,6 +412,9 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let h2Settled = false;
 		let sawTurnEnded = false;
 		let endStreamError: Error | null = null;
+		let httpErrorStatus: number | null = null;
+		const httpErrorBody: Buffer[] = [];
+		let httpErrorBodyBytes = 0;
 		const settleH2 = (error?: unknown): void => {
 			if (h2Settled) return;
 			h2Settled = true;
@@ -588,13 +608,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					);
 					const status = Number(headers[":status"] ?? 0);
 					if (status >= 200 && status < 300) return;
-					const error =
-						status === 401 || status === 403
-							? new AIError.CursorCredentialError(`Cursor HTTP/2 request failed with status ${status}`, status)
-							: new AIError.ProviderHttpError(`Cursor HTTP/2 request failed with status ${status}`, status);
-					endStreamError = error;
-					settleH2(error);
-					h2Request?.close();
+					httpErrorStatus = status;
 				});
 
 				h2Request.on("data", (chunk: Buffer) => {
@@ -602,6 +616,14 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						void debugResponseLogPromise.then(log => {
 							log?.write(chunk);
 						});
+					}
+					if (httpErrorStatus !== null) {
+						if (httpErrorBodyBytes < 64 * 1024) {
+							const bounded = chunk.subarray(0, 64 * 1024 - httpErrorBodyBytes);
+							httpErrorBody.push(bounded);
+							httpErrorBodyBytes += bounded.byteLength;
+						}
+						return;
 					}
 					let frames: ConnectFrame[];
 					try {
@@ -688,13 +710,17 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				});
 
 				h2Request.on("end", () => {
-					try {
-						frameReader.finish();
-					} catch (error) {
-						endStreamError = new AIError.ProviderResponseError(
-							`Cursor protocol error: ${error instanceof Error ? error.message : String(error)}`,
-							{ provider: model.provider, kind: "envelope", cause: error },
-						);
+					if (httpErrorStatus !== null) {
+						endStreamError = cursorHttpError(httpErrorStatus, Buffer.concat(httpErrorBody));
+					} else if (!endStreamError) {
+						try {
+							frameReader.finish();
+						} catch (error) {
+							endStreamError = new AIError.ProviderResponseError(
+								`Cursor protocol error: ${error instanceof Error ? error.message : String(error)}`,
+								{ provider: model.provider, kind: "envelope", cause: error },
+							);
+						}
 					}
 					void closeDebugLog()
 						.then(() => settleH2(endStreamError ?? undefined))

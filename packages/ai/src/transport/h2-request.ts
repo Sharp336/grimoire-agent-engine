@@ -116,7 +116,7 @@ export async function establishH2Request(options: EstablishH2RequestOptions): Pr
 }
 
 export interface H2PostOptions extends EstablishH2RequestOptions {
-	body: Uint8Array;
+	body: Uint8Array | string;
 	fetchOverride?: FetchImpl;
 }
 
@@ -183,7 +183,9 @@ export async function postH2Only(options: H2PostOptions): Promise<TransportRespo
 	if (options.fetchOverride) return postFetch(options, options.fetchOverride);
 	const exchange = await establishH2Request(options);
 	try {
-		exchange.dispatch(() => options.body);
+		exchange.dispatch(() =>
+			typeof options.body === "string" ? new TextEncoder().encode(options.body) : options.body,
+		);
 		const response = await exchange.response;
 		return {
 			status: response.status,

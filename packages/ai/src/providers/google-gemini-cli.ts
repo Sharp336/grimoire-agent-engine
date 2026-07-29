@@ -886,7 +886,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						url,
 						provider: model.provider,
 						headers: requestHeaders,
-						body: new TextEncoder().encode(requestBodyJson),
+						body: requestBodyJson,
 						signal: watchdog.signal,
 						fetchOverride: options?.fetch,
 					});
@@ -942,7 +942,6 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				);
 			}
 			if (providerState) providerState.lastExecutionId = lastResponseId;
-
 
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;

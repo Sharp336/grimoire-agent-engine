@@ -76,6 +76,10 @@ function connectEndErrorFrame(code: string, message: string): Buffer {
 	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
 }
 
+function connectEndSuccessFrame(): Buffer {
+	return frameConnectMessage(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+}
+
 /**
  * A `read` exec request. The provider parses every frame in a chunk
  * synchronously and dispatches each `handleServerMessage` fire-and-forget, so
@@ -105,7 +109,7 @@ function execRequestFrame(): Buffer {
  * the call is never paired.
  */
 function execAndTurnEndedFrame(): Buffer {
-	return Buffer.concat([execRequestFrame(), turnEndedFrame()]);
+	return Buffer.concat([execRequestFrame(), turnEndedFrame(), connectEndSuccessFrame()]);
 }
 
 function malformedProtobufFrame(): Buffer {
@@ -168,7 +172,7 @@ async function startServer(): Promise<string> {
 		});
 
 		if (scenario.kind === "end-before-turn") {
-			stream.write(textDeltaFrame("partial"));
+			stream.write(Buffer.concat([textDeltaFrame("partial"), connectEndSuccessFrame()]));
 			stream.end();
 			return;
 		}
@@ -222,7 +226,7 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
-		stream.end();
+		stream.end(connectEndSuccessFrame());
 	});
 
 	const listening = Promise.withResolvers<void>();
