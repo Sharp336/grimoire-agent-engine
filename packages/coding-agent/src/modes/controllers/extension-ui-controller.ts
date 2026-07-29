@@ -28,6 +28,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/comp
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { formatAskValidationTitle, getAskCustomInputValidationError } from "../../tools/ask-validation";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
 const MAX_WIDGET_LINES = 10;
@@ -801,10 +802,7 @@ export class ExtensionUiController {
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
 				if (choice.value === ASK_NEXT_OPTION) break;
 				if (choice.value === ASK_OTHER_OPTION) {
-					const input = await this.#requestGuestUiString(
-						{ kind: "editor", title: boundPromptTitle("Custom answer: ", question.question) },
-						signal,
-					);
+					const input = await this.#requestGuestAskCustomInput(question, signal);
 					if (input.kind === "unavailable") return "unavailable";
 					// Guest cancelled the Other editor: keep the ask open and
 					// return to the option list instead of cancelling the whole ask.
@@ -838,10 +836,7 @@ export class ExtensionUiController {
 				if (choice.kind === "cancelled") return undefined;
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
 				if (choice.value === ASK_OTHER_OPTION) {
-					const input = await this.#requestGuestUiString(
-						{ kind: "editor", title: boundPromptTitle("Custom answer: ", question.question) },
-						signal,
-					);
+					const input = await this.#requestGuestAskCustomInput(question, signal);
 					if (input.kind === "unavailable") return "unavailable";
 					// Guest cancelled the Other editor: re-show the select list
 					// instead of cancelling the whole ask.
@@ -861,6 +856,29 @@ export class ExtensionUiController {
 			selectedOptions: question.options.map(option => option.label).filter(label => selected.has(label)),
 			customInput,
 		};
+	}
+
+	async #requestGuestAskCustomInput(
+		question: ExtensionAskDialogQuestion,
+		signal: AbortSignal,
+	): Promise<GuestUiResult> {
+		let prefill: string | undefined;
+		let validationError: string | undefined;
+		while (true) {
+			const title = boundPromptTitle("Custom answer: ", question.question);
+			const input = await this.#requestGuestUiString(
+				{
+					kind: "editor",
+					title: formatAskValidationTitle(validationError, title),
+					prefill,
+				},
+				signal,
+			);
+			if (input.kind !== "answered") return input;
+			validationError = getAskCustomInputValidationError(input.value, question.validation);
+			if (validationError === undefined) return input;
+			prefill = input.value;
+		}
 	}
 
 	async #requestGuestUiString(request: CollabUiRequestDraft, signal: AbortSignal): Promise<GuestUiResult> {

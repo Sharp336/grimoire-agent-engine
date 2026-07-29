@@ -10,6 +10,7 @@ import type {
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import { getAskCustomInputValidationError } from "@oh-my-pi/pi-coding-agent/tools/ask-validation";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { type } from "arktype";
 
@@ -1598,6 +1599,68 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("accepts schema upgrades and forwards them to the rich dialog", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Q1?",
+					options: ["Option A"],
+					multi: false,
+					selectedOptions: ["Option A"],
+					note: "My Custom Note",
+					timedOut: undefined,
+				},
+			],
+		});
+		const context = createContext({ askDialog });
+
+		const result = await tool.execute(
+			"call-rich-dialog",
+			{
+				questions: [
+					{
+						id: "q1",
+						question: "Q1?",
+						header: "Chip Header",
+						searchable: true,
+						validation: { pattern: "^[a-z]+$", minLength: 2, maxLength: 8, message: "Use lowercase letters" },
+						options: [{ label: "Option A", preview: "My Preview", previewType: "diff" }],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(askDialog).toHaveBeenCalledTimes(1);
+		// Check that rich-only schema fields were forwarded.
+		expect(askDialog.mock.calls[0][0]).toEqual([
+			{
+				id: "q1",
+				question: "Q1?",
+				header: "Chip Header",
+				searchable: true,
+				validation: { pattern: "^[a-z]+$", minLength: 2, maxLength: 8, message: "Use lowercase letters" },
+				options: [{ label: "Option A", preview: "My Preview", previewType: "diff" }],
+			},
+		]);
+
+		// Verify result contains details with note mapping
+		expect(result.details).toEqual({
+			question: "Q1?",
+			options: ["Option A"],
+			multi: false,
+			selectedOptions: ["Option A"],
+			customInput: undefined,
+			note: "My Custom Note",
+			timedOut: undefined,
+		});
+	});
+
 	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {
 		const tool = new AskTool(createSession());
 		const abort = vi.fn();
@@ -1690,5 +1753,106 @@ describe("AskTool rich ask dialog", () => {
 			questions: [{ id: "q1", question: "Q?", options: [{ label: "Next →" }] }],
 		});
 		expect(reservedNext instanceof type.errors).toBe(true);
+	});
+
+	it("validates schema upgrades and preserves reserved-label protection", async () => {
+		const tool = new AskTool(createSession());
+
+		const valid = tool.parameters({
+			questions: [
+				{
+					id: "q1",
+					question: "Q?",
+					searchable: true,
+					validation: { pattern: "^[a-z]+$", minLength: 1, maxLength: 12, message: "Use letters" },
+					options: [{ label: "ok", preview: "+ added", previewType: "diff" }],
+				},
+			],
+		});
+		expect(valid instanceof type.errors).toBe(false);
+
+		const invalidValidation = tool.parameters({
+			questions: [
+				{
+					id: "q1",
+					question: "Q?",
+					validation: { minLength: 5, maxLength: 2 },
+					options: [{ label: "ok" }],
+				},
+			],
+		});
+		expect(invalidValidation instanceof type.errors).toBe(true);
+
+		const invalidPattern = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", validation: { pattern: "[" }, options: [{ label: "ok" }] }],
+		});
+		expect(invalidPattern instanceof type.errors).toBe(true);
+
+		const unsafePattern = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", validation: { pattern: "^(a+)+$" }, options: [{ label: "ok" }] }],
+		});
+		expect(unsafePattern instanceof type.errors).toBe(true);
+		expect(getAskCustomInputValidationError("a".repeat(2_000), { pattern: "^a+$" })).toBeDefined();
+		expect(getAskCustomInputValidationError(`${"a".repeat(1_024)}!`, { pattern: "^a+$" })).toBeDefined();
+		expect(getAskCustomInputValidationError(`${"a".repeat(24)}!`, { pattern: "^(a+)+$" })).toBeDefined();
+
+		const invalidPreviewType = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "ok", previewType: "code" }] }],
+		});
+		expect(invalidPreviewType instanceof type.errors).toBe(true);
+
+		const reservedOther = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "Other (type your own)" }] }],
+		});
+		expect(reservedOther instanceof type.errors).toBe(true);
+	});
+
+	it("retries invalid degraded Other input with sanitized title and prefill", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn().mockResolvedValueOnce("letters").mockResolvedValueOnce("42");
+		const context = createContext({
+			select: async () => "Other (type your own)",
+			editor,
+		});
+
+		const result = await tool.execute(
+			"call-degraded-validation",
+			{
+				questions: [
+					{
+						id: "code",
+						question: "Enter a numeric code",
+						options: [{ label: "Skip" }],
+						validation: { pattern: "^\\d+$", message: "Digits\tonly\n\x1b[31m" },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.customInput).toBe("42");
+		expect(editor).toHaveBeenCalledTimes(2);
+		expect(editor.mock.calls[1]?.[1]).toBe("letters");
+		expect(editor.mock.calls[1]?.[0]).toContain("Digits only");
+		expect(editor.mock.calls[1]?.[0]).not.toContain("\x1b");
+	});
+
+	it("returns to degraded selection when Other input is cancelled", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn().mockResolvedValueOnce("Other (type your own)").mockResolvedValueOnce("Skip");
+		const context = createContext({ select, editor: async () => undefined });
+
+		const result = await tool.execute(
+			"call-degraded-cancel",
+			{ questions: [{ id: "code", question: "Enter a code", options: [{ label: "Skip" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.selectedOptions).toEqual(["Skip"]);
+		expect(select).toHaveBeenCalledTimes(2);
 	});
 });

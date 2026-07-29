@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added searchable rich ask options, validated custom answers, and diff previews.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

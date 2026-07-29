@@ -1362,4 +1362,104 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBeUndefined();
 	});
+
+	it("filters a searchable long option list after typed input", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				searchable: true,
+				options: [
+					{ label: "Alpha" },
+					{ label: "Beta target" },
+					{ label: "Gamma" },
+					{ label: "Delta" },
+					{ label: "Epsilon" },
+					{ label: "Zeta" },
+					{ label: "Eta" },
+				],
+			},
+		];
+		const component = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() });
+
+		expect(render(component)).toContain("Alpha");
+		component.handleInput("/");
+		for (const character of "beta") component.handleInput(character);
+
+		const filtered = render(component);
+		expect(filtered).toContain("Beta target");
+		expect(filtered).not.toContain("Alpha");
+		expect(filtered).toContain("filter: beta");
+	});
+
+	it("accepts Kitty Backspace while filtering a searchable option list", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose one?",
+					searchable: true,
+					options: [
+						{ label: "Alpha" },
+						{ label: "Beta target" },
+						{ label: "Gamma" },
+						{ label: "Delta" },
+						{ label: "Epsilon" },
+						{ label: "Zeta" },
+						{ label: "Eta" },
+					],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		component.handleInput("/");
+		for (const character of "betx") component.handleInput(character);
+		component.handleInput("\x1b[127u");
+
+		expect(render(component)).toContain("filter: bet");
+	});
+
+	it("renders diff previews with added and removed lines", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Review the patch?",
+				options: [{ label: "Apply", preview: "- old value\n+ new value", previewType: "diff" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() });
+
+		const previewLine = component.render(80).find(line => line.includes("new value"));
+		expect(previewLine).toContain("new value");
+		expect(previewLine).toContain("\x1b[");
+	});
+
+	it("re-prompts Other answers that fail validation with the configured message", async () => {
+		const onPrompt = vi.fn().mockResolvedValueOnce("letters").mockResolvedValueOnce("42");
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Enter a numeric code",
+				validation: { pattern: "^\\d+$", message: `Enter digits\tonly\n\x1b[31m ${"long ".repeat(100)}` },
+				options: [{ label: "Option A" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(2);
+		const retryTitle = onPrompt.mock.calls[1]?.[0] ?? "";
+		expect(retryTitle).toContain("Enter digits only");
+		expect(retryTitle).not.toContain("\x1b");
+		expect(retryTitle.split("\n")).toHaveLength(3);
+		expect(onPrompt.mock.calls[1]?.[1]).toBe("letters");
+		expect(onSubmit.mock.calls[0]?.[0].results[0].customInput).toBe("42");
+	});
 });
