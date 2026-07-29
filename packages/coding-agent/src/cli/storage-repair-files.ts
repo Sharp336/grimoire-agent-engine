@@ -588,7 +588,6 @@ async function verifyFinalFile(finalPath: string, expected: PublishedFile): Prom
 async function runPublicationHook(
 	hook: (() => void | Promise<void>) | undefined,
 	verify: () => Promise<void>,
-	onPublished?: () => void,
 ): Promise<void> {
 	if (!hook) return;
 	try {
@@ -602,7 +601,6 @@ async function runPublicationHook(
 				"Publication hook failed and changed the output identity",
 			);
 		}
-		onPublished?.();
 		throw error;
 	}
 	await verify();
@@ -613,22 +611,16 @@ async function publishNoReplace(
 	finalPath: string,
 	expected: PublishedFile,
 	onLinked: () => void,
-	onPublished?: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
 	await verifySealedFile(stage, expected);
 	await fs.promises.link(stage, finalPath);
 	onLinked();
 	await verifyPublishedFile(stage, finalPath, expected);
-	await runPublicationHook(hooks.afterLink, () => verifyPublishedFile(stage, finalPath, expected), onPublished);
-	await runPublicationHook(
-		hooks.beforeStageUnlink,
-		() => verifyPublishedFile(stage, finalPath, expected),
-		onPublished,
-	);
+	await runPublicationHook(hooks.afterLink, () => verifyPublishedFile(stage, finalPath, expected));
+	await runPublicationHook(hooks.beforeStageUnlink, () => verifyPublishedFile(stage, finalPath, expected));
 	await fs.promises.unlink(stage);
-	onPublished?.();
-	await runPublicationHook(hooks.beforeDirectorySync, () => verifyFinalFile(finalPath, expected), onPublished);
+	await runPublicationHook(hooks.beforeDirectorySync, () => verifyFinalFile(finalPath, expected));
 	await syncDirectory(
 		path.dirname(finalPath),
 		hooks.isWindows ?? (() => process.platform === "win32"),
@@ -696,7 +688,8 @@ export async function publishBackup(
 	stage: string,
 	backup: string,
 	snapshot: PristineSnapshot,
-	onPublished: (checksum: StorageRepairChecksum) => void,
+	onLinked: () => void,
+	onVerified: (checksum: StorageRepairChecksum) => void,
 	afterLink?: () => void | Promise<void>,
 	isWindows?: () => boolean,
 	onDirectorySync?: () => void,
@@ -715,13 +708,8 @@ export async function publishBackup(
 	await syncFile(stage);
 	const seal = await sealedFile(stage);
 	const checksum = { path: backup, sha256: seal.sha256, size: Number(seal.size), ephemeral: false };
-	let reported = false;
-	const report = () => {
-		if (reported) return;
-		reported = true;
-		onPublished(checksum);
-	};
-	await publishNoReplace(stage, backup, seal, report, report, { afterLink, isWindows, onDirectorySync });
+	await publishNoReplace(stage, backup, seal, onLinked, { afterLink, isWindows, onDirectorySync });
+	onVerified(checksum);
 	return checksum;
 }
 
@@ -763,7 +751,7 @@ export async function publishCandidate(
 	onLinked: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
-	await publishNoReplace(stage, finalPath, seal, onLinked, undefined, hooks);
+	await publishNoReplace(stage, finalPath, seal, onLinked, hooks);
 }
 
 export function manualNextStep(source: string, candidate: string, backup: string): string {

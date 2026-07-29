@@ -36,6 +36,15 @@ function requireValue<T>(value: T | undefined, label: string): T {
 	return value;
 }
 
+function checksumPathCounts(result: StorageRepairResult): Record<string, number> {
+	return Object.fromEntries(
+		result.checksums.reduce((counts, checksum) => {
+			counts.set(checksum.path, (counts.get(checksum.path) ?? 0) + 1);
+			return counts;
+		}, new Map<string, number>()),
+	);
+}
+
 beforeEach(async () => {
 	root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-storage-repair-test-"));
 	stdout = [];
@@ -440,6 +449,7 @@ describe("offline SQLite salvage", () => {
 		expect(result.backupCreated).toBe(true);
 		expect(result.candidatePublished).toBe(true);
 		expect(result.candidatePathTrusted).toBe(true);
+		expect(checksumPathCounts(result)).toEqual({ [result.backup]: 1, [result.candidate]: 1 });
 		expect(await artifactModes(result)).toEqual({ backup: 0o600, candidate: 0o600 });
 		const archive = new Bun.Archive(await Bun.file(result.backup).bytes());
 		const files = await archive.files();
@@ -1004,6 +1014,7 @@ describe("offline SQLite salvage", () => {
 		expect(result.warning).toContain("Published output no longer matches staging file");
 		expect(result.candidatePublished).toBe(true);
 		expect(result.candidatePathTrusted).toBe(false);
+		expect(checksumPathCounts(result)).toEqual({ [result.backup]: 1, [candidate]: 1 });
 		expect(await Bun.file(candidate).text()).toBe(replacement);
 		expect(await fingerprint(candidate)).toEqual(requireValue(replacementIdentity, "replacement identity"));
 		const sealed = requireValue(
@@ -1136,7 +1147,7 @@ describe("offline SQLite salvage", () => {
 		expect(await fingerprint(candidate)).toEqual(requireValue(replacementIdentity, "replacement identity"));
 	});
 
-	test("backup ownership survives a post-link staging-cleanup failure", async () => {
+	test("backup post-link hook failure records the link without a verified checksum", async () => {
 		await createAgentSource();
 		const result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root },
@@ -1149,14 +1160,9 @@ describe("offline SQLite salvage", () => {
 		expect(result.status).toBe("refused");
 		expect(result.backupCreated).toBe(true);
 		expect(result.candidatePublished).toBe(false);
+		expect(checksumPathCounts(result)).toEqual({});
 		expect(await Bun.file(result.candidate).exists()).toBe(false);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
-		const backup = requireValue(
-			result.checksums.find(checksum => checksum.path === result.backup),
-			"backup checksum",
-		);
-		expect(new Bun.SHA256().update(await Bun.file(result.backup).bytes()).digest("hex")).toBe(backup.sha256);
-		expect((await new Bun.Archive(await Bun.file(result.backup).bytes()).files()).get("manifest.json")).toBeDefined();
 		const entries = await fs.promises.readdir(root);
 		expect(entries.some(name => name.startsWith(`.${path.basename(result.backup)}.backup-`))).toBe(false);
 	});
@@ -1181,7 +1187,7 @@ describe("offline SQLite salvage", () => {
 		);
 		expect(result.status).toBe("refused");
 		expect(result.backupCreated).toBe(true);
-		expect(result.checksums.some(checksum => checksum.path === result.backup)).toBe(true);
+		expect(checksumPathCounts(result)).toEqual({});
 		expect(await Bun.file(result.backup).text()).toBe(replacement);
 		expect(await fingerprint(result.backup)).toEqual(requireValue(replacementIdentity, "replacement identity"));
 	});
@@ -1219,6 +1225,7 @@ describe("offline SQLite salvage", () => {
 		expect(result.status).toBe("refused");
 		expect(result.backupCreated).toBe(true);
 		expect(result.candidatePublished).toBe(false);
+		expect(checksumPathCounts(result)).toEqual({});
 		expect(result.refusal).toContain("Published output content changed");
 	});
 
@@ -1249,6 +1256,7 @@ describe("offline SQLite salvage", () => {
 		expect(result.status).toBe("refused");
 		expect(result.backupCreated).toBe(true);
 		expect(result.candidatePublished).toBe(false);
+		expect(checksumPathCounts(result)).toEqual({});
 		expect(result.refusal).toContain("Published output no longer matches staging file");
 	});
 

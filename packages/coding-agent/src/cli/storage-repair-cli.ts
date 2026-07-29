@@ -143,9 +143,11 @@ export async function runStorageRepair(
 				backupStage,
 				artifacts.backup,
 				snapshot,
+				() => {
+					result.backupCreated = true;
+				},
 				checksum => {
 					result.checksums.push(checksum);
-					result.backupCreated = true;
 				},
 				hooks.afterBackupLink,
 				hooks.isWindows,
