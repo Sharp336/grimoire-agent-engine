@@ -961,7 +961,13 @@ function renderText(result: GcResult): string {
 		lines.push(`backup: ${repair.backup}${repair.backupCreated ? " (created)" : ""}`);
 		lines.push(`candidate: ${repair.candidate}${repair.candidatePublished ? " (published)" : ""}`);
 		lines.push(`candidate path trusted: ${repair.candidatePathTrusted}`);
-		if (repair.dataLoss) lines.push("data loss: true (fresh empty history)");
+		if (repair.dataLoss) {
+			lines.push(
+				repair.historySource === "sessions"
+					? "data loss: true (session rebuild retains only session messages; existing history rows and stable row IDs are not preserved)"
+					: "data loss: true (fresh empty history)",
+			);
+		}
 		for (const object of repair.objects) {
 			lines.push(
 				`${object.action}: ${object.kind} ${object.name} [${object.owner}]${object.detail ? ` — ${object.detail}` : ""}`,

@@ -1,4 +1,4 @@
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDbPath, getHistoryDbPath } from "@oh-my-pi/pi-utils";
 import {
@@ -26,6 +26,7 @@ import {
 	closePromptManifest,
 	freezePromptManifest,
 	type PromptManifest,
+	promptManifestStillMatches,
 	verifyHistoryCandidate,
 } from "./storage-repair-history";
 import type {
@@ -95,7 +96,7 @@ export async function runStorageRepair(
 		target: flags.target,
 		...(historySource ? { historySource } : {}),
 		apply: flags.apply,
-		dataLoss: historySource === "fresh",
+		dataLoss: historySource !== undefined,
 		status: "ready",
 		source,
 		backup: planned.backup,
@@ -125,7 +126,7 @@ export async function runStorageRepair(
 		if (flags.target === "agent") {
 			if (!snapshot.immutable) throw new Error("Agent immutable SQLite snapshot is missing");
 			const expectedPath = path.join(snapshot.tempDir, "expected-agent.db");
-			const expected = await fs.open(expectedPath, "wx", 0o600);
+			const expected = await fs.promises.open(expectedPath, "wx", 0o600);
 			await expected.close();
 			diagnosis = diagnoseAgentSnapshot(snapshot.immutable, expectedPath);
 		} else if (historySource === "sessions") {
@@ -149,7 +150,7 @@ export async function runStorageRepair(
 			candidateStage = await exclusiveStage(artifacts.candidate, "candidate");
 		} else {
 			candidateStage = path.join(snapshot.tempDir, "candidate.db");
-			const candidate = await fs.open(candidateStage, "wx", 0o600);
+			const candidate = await fs.promises.open(candidateStage, "wx", 0o600);
 			await candidate.close();
 		}
 
@@ -168,9 +169,11 @@ export async function runStorageRepair(
 		const digest = await sealCandidate(candidateStage);
 		result.checksums.push({ path: artifacts.candidate, ...digest });
 		await sourceStillMatches(snapshot.manifest);
+		if (historySource === "sessions") await promptManifestStillMatches(prompts);
 		if (flags.apply) {
 			await hooks.beforeCandidatePublication?.();
 			await sourceStillMatches(snapshot.manifest);
+			if (historySource === "sessions") await promptManifestStillMatches(prompts);
 			await publishCandidate(
 				candidateStage,
 				artifacts.candidate,
@@ -210,6 +213,11 @@ export async function runStorageRepair(
 		}
 		try {
 			if (snapshot) await sourceStillMatches(snapshot.manifest);
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
+		try {
+			if (historySource === "sessions") await promptManifestStillMatches(prompts);
 		} catch (error) {
 			cleanupErrors.push(error);
 		}

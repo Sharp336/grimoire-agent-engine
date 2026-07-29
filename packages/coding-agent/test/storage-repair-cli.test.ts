@@ -1,6 +1,6 @@
 import { Database, constants as sqliteConstants } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { collectGcErrors, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
@@ -16,13 +16,27 @@ let root: string;
 let stdout: string[];
 let stdoutSpy: { mockRestore(): void } | undefined;
 
+interface FileFingerprint {
+	dev: bigint;
+	ino: bigint;
+	size: bigint;
+	mtimeNs: bigint;
+	ctimeNs: bigint;
+	mode: bigint;
+	uid: bigint;
+	gid: bigint;
+	sha256: string;
+}
+
+type SessionFormat = "legacy-slotless" | "title-slot";
+
 function requireValue<T>(value: T | undefined, label: string): T {
 	if (value === undefined) throw new Error(`Missing ${label}`);
 	return value;
 }
 
 beforeEach(async () => {
-	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-storage-repair-test-"));
+	root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-storage-repair-test-"));
 	stdout = [];
 	stdoutSpy = spyOn(process.stdout, "write").mockImplementation(chunk => {
 		stdout.push(String(chunk));
@@ -33,7 +47,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	stdoutSpy?.mockRestore();
 	stdoutSpy = undefined;
-	await fs.rm(root, { recursive: true, force: true });
+	await fs.promises.rm(root, { recursive: true, force: true });
 });
 
 function closeWal(db: Database) {
@@ -110,9 +124,14 @@ async function createHistorySource() {
 	return dbPath;
 }
 
-async function writeSession(project: string, name: string, records: Record<string, unknown>[]) {
+async function writeSession(
+	project: string,
+	name: string,
+	records: Record<string, unknown>[],
+	format: SessionFormat = "title-slot",
+) {
 	const dir = path.join(getSessionsDir(root), project);
-	await fs.mkdir(dir, { recursive: true });
+	await fs.promises.mkdir(dir, { recursive: true });
 	const file = path.join(dir, `${name}.jsonl`);
 	const header = {
 		type: "session",
@@ -122,7 +141,7 @@ async function writeSession(project: string, name: string, records: Record<strin
 		cwd: `/work/${project}`,
 	};
 	const body = [
-		serializeTitleSlot({ title: name, updatedAt: header.timestamp }),
+		...(format === "title-slot" ? [serializeTitleSlot({ title: name, updatedAt: header.timestamp })] : []),
 		`${JSON.stringify(header)}\n`,
 		...records.map(record => `${JSON.stringify(record)}\n`),
 	].join("");
@@ -140,8 +159,8 @@ function message(id: string, timestamp: string, content: unknown, extra: Record<
 	};
 }
 
-async function fingerprint(file: string) {
-	const stat = await fs.lstat(file, { bigint: true });
+async function fingerprint(file: string): Promise<FileFingerprint> {
+	const stat = await fs.promises.lstat(file, { bigint: true });
 	return {
 		dev: stat.dev,
 		ino: stat.ino,
@@ -171,7 +190,7 @@ async function corruptTablePage(dbPath: string, table: string) {
 	} | null;
 	db.close();
 	if (typeof pageSize !== "bigint" || typeof row?.rootpage !== "bigint") throw new Error(`Cannot locate ${table}`);
-	const handle = await fs.open(dbPath, "r+");
+	const handle = await fs.promises.open(dbPath, "r+");
 	try {
 		await handle.write(
 			Buffer.alloc(Number(pageSize), 0xa5),
@@ -186,17 +205,19 @@ async function corruptTablePage(dbPath: string, table: string) {
 }
 
 function artifactModes(result: { backup: string; candidate: string }) {
-	return Promise.all([fs.stat(result.backup), fs.stat(result.candidate)]).then(([backup, candidate]) => ({
-		backup: backup.mode & 0o777,
-		candidate: candidate.mode & 0o777,
-	}));
+	return Promise.all([fs.promises.stat(result.backup), fs.promises.stat(result.candidate)]).then(
+		([backup, candidate]) => ({
+			backup: backup.mode & 0o777,
+			candidate: candidate.mode & 0o777,
+		}),
+	);
 }
 
 describe("offline SQLite salvage", () => {
 	test("physical corruption fixture reproduces normal owner-open failure", async () => {
 		const dbPath = await createAgentSource();
 		closeWal(new Database(dbPath));
-		const handle = await fs.open(dbPath, "r+");
+		const handle = await fs.promises.open(dbPath, "r+");
 		try {
 			await handle.write(Buffer.from("not sqlite"), 0, 10, 0);
 		} finally {
@@ -208,7 +229,7 @@ describe("offline SQLite salvage", () => {
 	test("history rebuild salvages a source that SQLite cannot open", async () => {
 		const dbPath = await createHistorySource();
 		closeWal(new Database(dbPath));
-		const handle = await fs.open(dbPath, "r+");
+		const handle = await fs.promises.open(dbPath, "r+");
 		try {
 			await handle.write(Buffer.from("not sqlite"), 0, 10, 0);
 		} finally {
@@ -228,14 +249,14 @@ describe("offline SQLite salvage", () => {
 	test("dry-run preserves bytes and identity metadata for every physical source triplet member", async () => {
 		const dbPath = await createAgentSource();
 		const before = await fingerprintTriplet(dbPath);
-		const siblings = await fs.readdir(path.dirname(dbPath));
+		const siblings = await fs.promises.readdir(path.dirname(dbPath));
 		const result = await runStorageRepair({ target: "agent", apply: false, agentDir: root });
 		expect(result.status).toBe("ready");
 		expect(result.backupCreated).toBe(false);
 		expect(result.candidatePublished).toBe(false);
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await fingerprintTriplet(dbPath)).toEqual(before);
-		expect(await fs.readdir(path.dirname(dbPath))).toEqual(siblings);
+		expect(await fs.promises.readdir(path.dirname(dbPath))).toEqual(siblings);
 	});
 
 	test("a changed physical WAL refuses and leaves every source member at its post-change fingerprint", async () => {
@@ -246,7 +267,7 @@ describe("offline SQLite salvage", () => {
 			{ target: "agent", apply: false, agentDir: root },
 			{
 				afterPristineCopy: async () => {
-					await fs.appendFile(`${dbPath}-wal`, "source-sidecar-change");
+					await fs.promises.appendFile(`${dbPath}-wal`, "source-sidecar-change");
 					afterMutation = await fingerprintTriplet(dbPath);
 				},
 			},
@@ -273,7 +294,7 @@ describe("offline SQLite salvage", () => {
 		const dbPath = await createAgentSource();
 		const result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root },
-			{ afterPristineCopy: () => fs.appendFile(dbPath, "race") },
+			{ afterPristineCopy: () => fs.promises.appendFile(dbPath, "race") },
 		);
 		expect(result.status).toBe("refused");
 		expect(result.refusal).toContain("changed");
@@ -406,9 +427,9 @@ describe("offline SQLite salvage", () => {
 		expect(result.status).toBe("refused");
 		expect(result.refusal).toContain("Structural drift");
 
-		await fs.rm(dbPath, { force: true });
-		await fs.rm(`${dbPath}-wal`, { force: true });
-		await fs.rm(`${dbPath}-shm`, { force: true });
+		await fs.promises.rm(dbPath, { force: true });
+		await fs.promises.rm(`${dbPath}-wal`, { force: true });
+		await fs.promises.rm(`${dbPath}-shm`, { force: true });
 		await createAgentSource();
 		db = new Database(dbPath);
 		db.exec("CREATE TABLE unsafe_extension(value TEXT CHECK(length(value) > 0))");
@@ -440,6 +461,7 @@ describe("offline SQLite salvage", () => {
 			agentDir: root,
 		});
 		expect(result.status).toBe("ready");
+		expect(result.dataLoss).toBe(true);
 		expect(result.objects.find(object => object.name === "history")).toMatchObject({ action: "rebuilt" });
 		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
 		try {
@@ -457,6 +479,63 @@ describe("offline SQLite salvage", () => {
 		}
 	});
 
+	test("slotless sessions with CJK and accented prompts rebuild through SQLite FTS verification", async () => {
+		await createHistorySource();
+		await writeSession(
+			"legacy",
+			"legacy-session",
+			[message("m", "2026-01-01T00:00:01.000Z", "東京 café résumé")],
+			"legacy-slotless",
+		);
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
+		expect(result.status).toBe("ready");
+		expect(result.dataLoss).toBe(true);
+		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
+		try {
+			expect(db.prepare("SELECT prompt FROM history").get()).toEqual({ prompt: "東京 café résumé" });
+		} finally {
+			db.close();
+		}
+	});
+
+	test("session manifest changes before publication refuse the candidate", async () => {
+		await createHistorySource();
+		await writeSession("first", "first-session", [message("m", "2026-01-01T00:00:01.000Z", "first")]);
+		const result = await runStorageRepair(
+			{ target: "history", historySource: "sessions", apply: true, agentDir: root },
+			{
+				beforeCandidatePublication: async () => {
+					await writeSession("second", "second-session", [message("m", "2026-01-01T00:00:02.000Z", "second")]);
+				},
+			},
+		);
+		expect(result.status).toBe("refused");
+		expect(result.refusal).toContain("Session directory changed during storage repair");
+		expect(result.candidatePublished).toBe(false);
+	});
+
+	test("session manifest changes during final cleanup make a published candidate untrusted", async () => {
+		await createHistorySource();
+		await writeSession("first", "first-session", [message("m", "2026-01-01T00:00:01.000Z", "first")]);
+		const result = await runStorageRepair(
+			{ target: "history", historySource: "sessions", apply: true, agentDir: root },
+			{
+				afterCandidatePublication: async () => {
+					await writeSession("late", "late-session", [message("m", "2026-01-01T00:00:02.000Z", "late")]);
+				},
+			},
+		);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.warning).toContain("Session directory changed during storage repair");
+		expect(result.candidatePublished).toBe(true);
+		expect(result.candidatePathTrusted).toBe(false);
+	});
+
 	test("invalid or changing physical sessions refuse while zero sessions remains valid", async () => {
 		await createHistorySource();
 		let result = await runStorageRepair({
@@ -470,11 +549,11 @@ describe("offline SQLite salvage", () => {
 		result = await runStorageRepair({ target: "history", historySource: "sessions", apply: false, agentDir: root });
 		expect(result.status).toBe("refused");
 		expect(result.refusal).toContain("Invalid timestamp");
-		await fs.rm(file);
+		await fs.promises.rm(file);
 		const changing = await writeSession("p", "changing", [message("m", "2026-01-01T00:00:01.000Z", "prompt")]);
 		result = await runStorageRepair(
 			{ target: "history", historySource: "sessions", apply: false, agentDir: root },
-			{ afterSessionManifestParse: () => fs.appendFile(changing, "{}\n") },
+			{ afterSessionManifestParse: () => fs.promises.appendFile(changing, "{}\n") },
 		);
 		expect(result.status).toBe("refused");
 		expect(result.refusal).toContain("Session directory changed");
@@ -522,7 +601,7 @@ describe("offline SQLite salvage", () => {
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 
 		const racedCandidate = path.join(root, "raced-candidate.db");
-		let racerIdentity: Awaited<ReturnType<typeof fingerprint>> | undefined;
+		let racerIdentity: FileFingerprint | undefined;
 		result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root, output: racedCandidate },
 			{
@@ -545,7 +624,7 @@ describe("offline SQLite salvage", () => {
 		const candidate = path.join(root, "publication-race.db");
 		const result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root, output: candidate },
-			{ afterCandidatePublication: () => fs.appendFile(dbPath, "publication race") },
+			{ afterCandidatePublication: () => fs.promises.appendFile(dbPath, "publication race") },
 		);
 		expect(result.status).toBe("published-with-warning");
 		expect(result.warning).toContain("Live source triplet changed during storage repair");
@@ -559,40 +638,36 @@ describe("offline SQLite salvage", () => {
 			"sealed candidate checksum",
 		);
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
-		const entries = await fs.readdir(root);
+		const entries = await fs.promises.readdir(root);
 		expect(entries.some(name => name.startsWith(`.${path.basename(candidate)}.candidate-`))).toBe(false);
 	});
 
-	test("late source mismatch never disturbs a replacement after candidate link", async () => {
+	test("post-link candidate replacement refuses publication without deleting the replacement", async () => {
 		const dbPath = await createAgentSource();
 		const candidate = path.join(root, "candidate-replacement.db");
 		const replacement = "replacement bytes must survive";
-		let replacementIdentity: Awaited<ReturnType<typeof fingerprint>> | undefined;
+		let replacementIdentity: FileFingerprint | undefined;
 		const result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root, output: candidate },
 			{
 				afterCandidatePublication: async () => {
-					await fs.unlink(candidate);
+					await fs.promises.unlink(candidate);
 					await Bun.write(candidate, replacement);
 					replacementIdentity = await fingerprint(candidate);
-					await fs.appendFile(dbPath, "late invariant refusal");
+					await fs.promises.appendFile(dbPath, "late invariant refusal");
 				},
 			},
 		);
-		expect(result.status).toBe("published-with-warning");
-		expect(result.candidatePublished).toBe(true);
+		expect(result.status).toBe("refused");
+		expect(result.refusal).toContain("Published output no longer matches staging file");
+		expect(result.candidatePublished).toBe(false);
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(candidate).text()).toBe(replacement);
 		expect(await fingerprint(candidate)).toEqual(requireValue(replacementIdentity, "replacement identity"));
 		expect(await Bun.file(result.backup).exists()).toBe(true);
-		const sealed = requireValue(
-			result.checksums.find(checksum => checksum.path === candidate),
-			"sealed candidate checksum",
-		);
-		expect(sealed.sha256).not.toBe(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex"));
 	});
 
-	test("candidate stage-unlink failure warns and leaves the published candidate untouched", async () => {
+	test("candidate stage-unlink failure refuses an output that could not be proven through cleanup", async () => {
 		await createAgentSource();
 		const candidate = path.join(root, "candidate-stage-unlink.db");
 		const result = await runStorageRepair(
@@ -603,18 +678,12 @@ describe("offline SQLite salvage", () => {
 				},
 			},
 		);
-		expect(result.status).toBe("published-with-warning");
-		expect(result.warning).toContain("candidate stage-unlink injection");
-		expect(result.candidatePublished).toBe(true);
+		expect(result.status).toBe("refused");
+		expect(result.refusal).toContain("candidate stage-unlink injection");
+		expect(result.candidatePublished).toBe(false);
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
-		const sealed = requireValue(
-			result.checksums.find(checksum => checksum.path === candidate),
-			"sealed candidate checksum",
-		);
-		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
-		const entries = await fs.readdir(root);
-		expect(entries.some(name => name.startsWith(`.${path.basename(candidate)}.candidate-`))).toBe(false);
+		expect(await Bun.file(candidate).exists()).toBe(true);
 	});
 
 	test("candidate directory-sync failure warns and leaves the published candidate untouched", async () => {
@@ -640,6 +709,29 @@ describe("offline SQLite salvage", () => {
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
 	});
 
+	test("candidate directory-sync replacement is reported as untrusted without deleting the replacement", async () => {
+		await createAgentSource();
+		const candidate = path.join(root, "candidate-directory-sync-replacement.db");
+		const replacement = "directory sync replacement must survive";
+		let replacementIdentity: FileFingerprint | undefined;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root, output: candidate },
+			{
+				beforeCandidateDirectorySync: async () => {
+					await fs.promises.unlink(candidate);
+					await Bun.write(candidate, replacement);
+					replacementIdentity = await fingerprint(candidate);
+				},
+			},
+		);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.warning).toContain("Published output no longer matches staging file");
+		expect(result.candidatePublished).toBe(true);
+		expect(result.candidatePathTrusted).toBe(false);
+		expect(await Bun.file(candidate).text()).toBe(replacement);
+		expect(await fingerprint(candidate)).toEqual(requireValue(replacementIdentity, "replacement identity"));
+	});
+
 	test("backup ownership survives a post-link staging-cleanup failure", async () => {
 		await createAgentSource();
 		const result = await runStorageRepair(
@@ -661,7 +753,7 @@ describe("offline SQLite salvage", () => {
 		);
 		expect(new Bun.SHA256().update(await Bun.file(result.backup).bytes()).digest("hex")).toBe(backup.sha256);
 		expect((await new Bun.Archive(await Bun.file(result.backup).bytes()).files()).get("manifest.json")).toBeDefined();
-		const entries = await fs.readdir(root);
+		const entries = await fs.promises.readdir(root);
 		expect(entries.some(name => name.startsWith(`.${path.basename(result.backup)}.backup-`))).toBe(false);
 	});
 
@@ -671,7 +763,7 @@ describe("offline SQLite salvage", () => {
 			{ target: "agent", apply: false, agentDir: root },
 			{
 				beforeCandidateVerification: async () => {
-					await fs.appendFile(dbPath, "cleanup race");
+					await fs.promises.appendFile(dbPath, "cleanup race");
 					throw new Error("primary verification refusal");
 				},
 			},
@@ -740,5 +832,16 @@ describe("offline SQLite salvage", () => {
 				repair: { ...result.repair!, status: "published-with-warning", warning: "late source mismatch" },
 			}),
 		).toEqual(["repair: late source mismatch"]);
+	});
+
+	test("session-source text reports warn about irreversible history loss", async () => {
+		await createHistorySource();
+		await writeSession("project", "session", [message("m", "2026-01-01T00:00:01.000Z", "prompt")]);
+		const result = await runGcCommand({
+			flags: { agentDir: root, repairStorage: "history", historySource: "sessions" },
+		});
+		expect(result.repair?.dataLoss).toBe(true);
+		expect(stdout.join("")).toContain("session rebuild retains only session messages");
+		expect(stdout.join("")).toContain("stable row IDs are not preserved");
 	});
 });

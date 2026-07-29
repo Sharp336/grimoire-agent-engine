@@ -1,6 +1,5 @@
 import { Database, constants as sqliteConstants } from "bun:sqlite";
-import { type BigIntStats, constants as fsConstants, type Stats } from "node:fs";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type ArchiveMemberContent, archiveFileMember, extractFileBackedTar, writeArchive } from "../utils/zip";
@@ -188,26 +187,26 @@ function openImmutableSnapshot(workingMain: string): FrozenSqliteSnapshot {
 	throw new Error("Serialized SQLite snapshot changed its schema/version/corruption manifest");
 }
 
-async function lstatIfPresent(target: string): Promise<Stats | null> {
+async function lstatIfPresent(target: string): Promise<fs.Stats | null> {
 	try {
-		return await fs.lstat(target);
+		return await fs.promises.lstat(target);
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return null;
 		throw error;
 	}
 }
 
-async function openSourceNoAtime(file: string): Promise<fs.FileHandle> {
-	const noAtime = fsConstants.O_NOATIME ?? 0;
+async function openSourceNoAtime(file: string): Promise<fs.promises.FileHandle> {
+	const noAtime = fs.constants.O_NOATIME ?? 0;
 	try {
-		return await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | noAtime);
+		return await fs.promises.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | noAtime);
 	} catch (error) {
 		if (noAtime === 0 || (codeOf(error) !== "EPERM" && codeOf(error) !== "EINVAL")) throw error;
-		return fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+		return fs.promises.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
 	}
 }
 
-async function hashHandle(handle: fs.FileHandle): Promise<{ sha256: string; size: number }> {
+async function hashHandle(handle: fs.promises.FileHandle): Promise<{ sha256: string; size: number }> {
 	const hash = new Bun.SHA256();
 	const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
 	let position = 0;
@@ -220,7 +219,7 @@ async function hashHandle(handle: fs.FileHandle): Promise<{ sha256: string; size
 }
 
 async function hashFile(file: string, source: boolean): Promise<{ sha256: string; size: number }> {
-	const handle = source ? await openSourceNoAtime(file) : await fs.open(file, "r");
+	const handle = source ? await openSourceNoAtime(file) : await fs.promises.open(file, "r");
 	try {
 		return await hashHandle(handle);
 	} finally {
@@ -233,9 +232,9 @@ async function manifestMember(
 	file: string,
 	archiveName: string,
 ): Promise<SourceMemberManifest | null> {
-	let stat: BigIntStats;
+	let stat: fs.BigIntStats;
 	try {
-		stat = await fs.lstat(file, { bigint: true });
+		stat = await fs.promises.lstat(file, { bigint: true });
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return null;
 		throw error;
@@ -275,8 +274,12 @@ async function copyAndHash(
 	destination: string,
 	sourceNoAtime: boolean,
 ): Promise<StorageRepairChecksum> {
-	const input = sourceNoAtime ? await openSourceNoAtime(source) : await fs.open(source, "r");
-	const output = await fs.open(destination, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+	const input = sourceNoAtime ? await openSourceNoAtime(source) : await fs.promises.open(source, "r");
+	const output = await fs.promises.open(
+		destination,
+		fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+		0o600,
+	);
 	const hash = new Bun.SHA256();
 	const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
 	let position = 0;
@@ -346,13 +349,13 @@ export async function preparePristineSnapshot(
 	afterPristineCopy?: () => void | Promise<void>,
 ): Promise<PristineSnapshot> {
 	const manifest = await manifestTriplet(source);
-	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-storage-repair-"));
+	const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-storage-repair-"));
 	try {
-		await fs.chmod(tempDir, 0o700);
+		await fs.promises.chmod(tempDir, 0o700);
 		const pristineDir = path.join(tempDir, "pristine");
 		const workingDir = path.join(tempDir, "working");
-		await fs.mkdir(pristineDir, { mode: 0o700 });
-		await fs.mkdir(workingDir, { mode: 0o700 });
+		await fs.promises.mkdir(pristineDir, { mode: 0o700 });
+		await fs.promises.mkdir(workingDir, { mode: 0o700 });
 		const pristine = await copyTriplet(manifest, pristineDir, true);
 		await sealTriplet(manifest, pristine);
 		await afterPristineCopy?.();
@@ -375,7 +378,7 @@ export async function preparePristineSnapshot(
 			immutable: inspectSqlite ? openImmutableSnapshot(working.main) : null,
 		};
 	} catch (error) {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await fs.promises.rm(tempDir, { recursive: true, force: true });
 		throw error;
 	}
 }
@@ -385,14 +388,14 @@ export async function cleanupSnapshot(snapshot: PristineSnapshot | null): Promis
 	try {
 		snapshot.immutable?.db.close();
 	} finally {
-		await fs.rm(snapshot.tempDir, { recursive: true, force: true });
+		await fs.promises.rm(snapshot.tempDir, { recursive: true, force: true });
 	}
 }
 
 async function canonicalNewPath(target: string): Promise<string> {
 	const absolute = path.resolve(target);
 	assertInvariant((await lstatIfPresent(absolute)) === null, `Repair output already exists: ${absolute}`);
-	const parent = await fs.realpath(path.dirname(absolute));
+	const parent = await fs.promises.realpath(path.dirname(absolute));
 	const canonical = path.join(parent, path.basename(absolute));
 	assertInvariant((await lstatIfPresent(canonical)) === null, `Repair output already exists: ${canonical}`);
 	return canonical;
@@ -405,7 +408,7 @@ export async function resolveArtifactPaths(
 	const slug = `${new Date().toISOString().replace(/[-:.TZ]/gu, "")}-${crypto.randomUUID().slice(0, 8)}`;
 	const candidate = await canonicalNewPath(output ?? `${source}.salvage-${slug}.db`);
 	const backup = await canonicalNewPath(`${source}.salvage-${slug}.tar`);
-	const canonicalSource = path.join(await fs.realpath(path.dirname(source)), path.basename(source));
+	const canonicalSource = path.join(await fs.promises.realpath(path.dirname(source)), path.basename(source));
 	const forbidden = [canonicalSource, `${canonicalSource}-wal`, `${canonicalSource}-shm`];
 	assertInvariant(
 		!forbidden.includes(candidate) && !forbidden.includes(backup),
@@ -417,7 +420,11 @@ export async function resolveArtifactPaths(
 
 export async function exclusiveStage(finalPath: string, label: string): Promise<string> {
 	const stage = path.join(path.dirname(finalPath), `.${path.basename(finalPath)}.${label}-${crypto.randomUUID()}.tmp`);
-	const handle = await fs.open(stage, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+	const handle = await fs.promises.open(
+		stage,
+		fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+		0o600,
+	);
 	await handle.close();
 	return stage;
 }
@@ -425,7 +432,7 @@ export async function exclusiveStage(finalPath: string, label: string): Promise<
 export async function removeOwnedFile(target: string | null): Promise<void> {
 	if (!target) return;
 	try {
-		await fs.unlink(target);
+		await fs.promises.unlink(target);
 	} catch (error) {
 		if (codeOf(error) !== "ENOENT") throw error;
 	}
@@ -437,7 +444,7 @@ export async function removeCandidateSidecars(candidate: string): Promise<void> 
 }
 
 async function syncFile(file: string): Promise<void> {
-	const handle = await fs.open(file, "r");
+	const handle = await fs.promises.open(file, "r");
 	try {
 		await handle.sync();
 	} finally {
@@ -446,7 +453,7 @@ async function syncFile(file: string): Promise<void> {
 }
 
 async function syncDirectory(dir: string): Promise<void> {
-	const handle = await fs.open(dir, "r");
+	const handle = await fs.promises.open(dir, "r");
 	try {
 		await handle.sync();
 	} finally {
@@ -456,8 +463,62 @@ async function syncDirectory(dir: string): Promise<void> {
 
 interface PublicationHooks {
 	afterLink?: () => void | Promise<void>;
+	onLinkedVerified?: () => void;
 	beforeStageUnlink?: () => void | Promise<void>;
 	beforeDirectorySync?: () => void | Promise<void>;
+}
+
+interface PublishedFile {
+	dev: bigint;
+	ino: bigint;
+	size: bigint;
+	sha256: string;
+}
+
+async function sealedFile(file: string): Promise<PublishedFile> {
+	const stat = await fs.promises.lstat(file, { bigint: true });
+	assertInvariant(stat.isFile() && !stat.isSymbolicLink(), `Publication stage is not a regular file: ${file}`);
+	return { dev: stat.dev, ino: stat.ino, size: stat.size, sha256: (await hashFile(file, false)).sha256 };
+}
+
+async function verifyPublishedFile(stage: string, finalPath: string, expected: PublishedFile): Promise<void> {
+	const [stageStat, finalStat] = await Promise.all([
+		fs.promises.lstat(stage, { bigint: true }),
+		fs.promises.lstat(finalPath, { bigint: true }),
+	]);
+	assertInvariant(
+		stageStat.isFile() &&
+			!stageStat.isSymbolicLink() &&
+			finalStat.isFile() &&
+			!finalStat.isSymbolicLink() &&
+			stageStat.dev === expected.dev &&
+			stageStat.ino === expected.ino &&
+			stageStat.size === expected.size &&
+			finalStat.dev === expected.dev &&
+			finalStat.ino === expected.ino &&
+			finalStat.size === expected.size,
+		`Published output no longer matches staging file: ${finalPath}`,
+	);
+	assertInvariant(
+		(await hashFile(finalPath, false)).sha256 === expected.sha256,
+		`Published output content changed: ${finalPath}`,
+	);
+}
+
+async function verifyFinalFile(finalPath: string, expected: PublishedFile): Promise<void> {
+	const finalStat = await fs.promises.lstat(finalPath, { bigint: true });
+	assertInvariant(
+		finalStat.isFile() &&
+			!finalStat.isSymbolicLink() &&
+			finalStat.dev === expected.dev &&
+			finalStat.ino === expected.ino &&
+			finalStat.size === expected.size,
+		`Published output no longer matches staging file: ${finalPath}`,
+	);
+	assertInvariant(
+		(await hashFile(finalPath, false)).sha256 === expected.sha256,
+		`Published output content changed: ${finalPath}`,
+	);
 }
 
 async function publishNoReplace(
@@ -466,13 +527,20 @@ async function publishNoReplace(
 	onPublished: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
-	await fs.link(stage, finalPath);
-	onPublished();
+	const expected = await sealedFile(stage);
+	await fs.promises.link(stage, finalPath);
+	await verifyPublishedFile(stage, finalPath, expected);
+	hooks.onLinkedVerified?.();
 	await hooks.afterLink?.();
+	await verifyPublishedFile(stage, finalPath, expected);
 	await hooks.beforeStageUnlink?.();
-	await fs.unlink(stage);
+	await verifyPublishedFile(stage, finalPath, expected);
+	await fs.promises.unlink(stage);
+	onPublished();
 	await hooks.beforeDirectorySync?.();
+	await verifyFinalFile(finalPath, expected);
 	await syncDirectory(path.dirname(finalPath));
+	await verifyFinalFile(finalPath, expected);
 }
 
 function backupManifestJson(manifest: SourceTripletManifest): string {
@@ -497,14 +565,14 @@ async function verifyBackup(
 	names: Set<string>,
 	tempDir: string,
 ): Promise<void> {
-	const verificationDir = await fs.mkdtemp(path.join(tempDir, "backup-verify-"));
+	const verificationDir = await fs.promises.mkdtemp(path.join(tempDir, "backup-verify-"));
 	try {
-		const archiveStat = await fs.stat(stage);
+		const archiveStat = await fs.promises.stat(stage);
 		const extracted = await extractFileBackedTar(stage, archiveStat.size, verificationDir);
 		assertInvariant(extracted === names.size, "Backup archive contains unexpected members");
 		const manifestPath = path.join(verificationDir, BACKUP_MANIFEST_NAME);
 		assertInvariant(
-			(await fs.readFile(manifestPath, "utf8")) === backupManifestJson(manifest),
+			(await fs.promises.readFile(manifestPath, "utf8")) === backupManifestJson(manifest),
 			"Backup manifest verification failed",
 		);
 		for (const role of ["main", "wal", "shm"] as const) {
@@ -517,7 +585,7 @@ async function verifyBackup(
 			);
 		}
 	} finally {
-		await fs.rm(verificationDir, { recursive: true, force: true });
+		await fs.promises.rm(verificationDir, { recursive: true, force: true });
 	}
 }
 
@@ -537,12 +605,18 @@ export async function publishBackup(
 		if (member && file) entries.push([member.archiveName, archiveFileMember(file, member.size)]);
 	}
 	await writeArchive(stage, "tar", entries);
-	await fs.chmod(stage, 0o600);
+	await fs.promises.chmod(stage, 0o600);
 	await verifyBackup(stage, snapshot.manifest, new Set(entries.map(([name]) => name)), snapshot.tempDir);
 	await syncFile(stage);
 	const digest = await hashFile(stage, false);
 	const checksum = { path: backup, ...digest };
-	await publishNoReplace(stage, backup, () => onPublished(checksum), { afterLink });
+	let reported = false;
+	const report = () => {
+		if (reported) return;
+		reported = true;
+		onPublished(checksum);
+	};
+	await publishNoReplace(stage, backup, report, { afterLink, onLinkedVerified: report });
 	return checksum;
 }
 
@@ -572,7 +646,7 @@ export function verifyCommonCandidate(candidate: string): void {
 
 export async function sealCandidate(candidate: string): Promise<{ sha256: string; size: number }> {
 	await removeCandidateSidecars(candidate);
-	await fs.chmod(candidate, 0o600);
+	await fs.promises.chmod(candidate, 0o600);
 	await syncFile(candidate);
 	return hashFile(candidate, false);
 }

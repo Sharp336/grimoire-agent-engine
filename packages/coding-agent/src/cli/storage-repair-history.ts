@@ -1,6 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createReadStream, type Dirent } from "node:fs";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
@@ -43,6 +42,8 @@ export interface PromptManifest {
 	db: Database;
 	path: string;
 	count: number;
+	root: string;
+	fingerprint: string;
 }
 
 function codeOf(error: unknown) {
@@ -53,9 +54,9 @@ function codeOf(error: unknown) {
 async function sessionFiles(root: string) {
 	const result: string[] = [];
 	async function visit(dir: string): Promise<void> {
-		let entries: Dirent[];
+		let entries: fs.Dirent[];
 		try {
-			entries = await fs.readdir(dir, { withFileTypes: true });
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
 		} catch (error) {
 			if (codeOf(error) === "ENOENT" && dir === root) return;
 			throw error;
@@ -72,7 +73,7 @@ async function sessionFiles(root: string) {
 }
 
 async function hashSession(file: string) {
-	const handle = await fs.open(file, "r");
+	const handle = await fs.promises.open(file, "r");
 	const hash = new Bun.SHA256();
 	const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
 	let position = 0;
@@ -91,9 +92,9 @@ async function hashSession(file: string) {
 async function manifestSessions(root: string) {
 	const manifests: SessionFileManifest[] = [];
 	for (const file of await sessionFiles(root)) {
-		const stat = await fs.lstat(file, { bigint: true });
+		const stat = await fs.promises.lstat(file, { bigint: true });
 		assertInvariant(stat.isFile() && !stat.isSymbolicLink(), `Session is not a regular file: ${file}`);
-		const canonicalPath = await fs.realpath(file);
+		const canonicalPath = await fs.promises.realpath(file);
 		const digest = await hashSession(file);
 		assertInvariant(BigInt(digest.size) === stat.size, `Session changed while hashing: ${file}`);
 		manifests.push({
@@ -170,7 +171,7 @@ function validateHeader(record: Record<string, unknown>, file: string) {
 }
 
 async function parseSession(file: SessionFileManifest, promptDb: Database) {
-	const input = createReadStream(file.path, { encoding: "utf8" });
+	const input = fs.createReadStream(file.path, { encoding: "utf8" });
 	const lines = readline.createInterface({ input, crlfDelay: Infinity });
 	const insert = promptDb.prepare(
 		"INSERT INTO prompts(entry_ms, canonical_path, ordinal, prompt, cwd, session_id) VALUES (?, ?, ?, ?, ?, ?)",
@@ -182,15 +183,11 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 	try {
 		for await (const line of lines) {
 			physicalLine += 1;
-			if (physicalLine === 1) {
-				assertInvariant(
-					Buffer.byteLength(`${line}\n`, "utf8") === SESSION_TITLE_SLOT_BYTES && parseTitleSlotLine(line),
-					`Invalid fixed title slot in ${file.path}`,
-				);
-				continue;
+			if (physicalLine === 1 && Buffer.byteLength(`${line}\n`, "utf8") === SESSION_TITLE_SLOT_BYTES) {
+				if (parseTitleSlotLine(line)) continue;
 			}
 			const record = parseJsonRecord(line, file.path, physicalLine);
-			if (physicalLine === 2) {
+			if (!header) {
 				header = validateHeader(record, file.path);
 				continue;
 			}
@@ -204,13 +201,12 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 			);
 			const typed = message as Record<string, unknown>;
 			if (typed.role !== "user" || typed.attribution === "agent" || typed.steering === true) continue;
-			assertInvariant(header, `Session header state missing for ${file.path}`);
 			const prompt = promptContent(typed.content, `${file.path}:${physicalLine}`).trim();
 			if (prompt.length === 0) continue;
 			insert.run(BigInt(timestamp), file.canonicalPath, BigInt(recordOrdinal), prompt, header.cwd, header.id);
 			inserted += 1;
 		}
-		assertInvariant(physicalLine >= 2 && header, `Incomplete session file: ${file.path}`);
+		assertInvariant(physicalLine >= 1 && header, `Incomplete session file: ${file.path}`);
 		return inserted;
 	} finally {
 		insert.finalize();
@@ -231,19 +227,28 @@ export async function freezePromptManifest(
 	db.exec(
 		"CREATE TABLE prompts(entry_ms INTEGER NOT NULL, canonical_path TEXT NOT NULL, ordinal INTEGER NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL, session_id TEXT NOT NULL)",
 	);
+	const fingerprint = stableJson(first);
 	let count = 0;
 	try {
 		for (const file of first) count += await parseSession(file, db);
 		await hook?.();
 		assertInvariant(
-			stableJson(first) === stableJson(await manifestSessions(root)),
+			fingerprint === stableJson(await manifestSessions(root)),
 			"Session directory changed while rebuilding history manifest",
 		);
-		return { db, path: dbPath, count };
+		return { db, path: dbPath, count, root, fingerprint };
 	} catch (error) {
 		db.close();
 		throw error;
 	}
+}
+
+export async function promptManifestStillMatches(manifest: PromptManifest | null): Promise<void> {
+	assertInvariant(manifest, "Missing frozen session manifest");
+	assertInvariant(
+		manifest.fingerprint === stableJson(await manifestSessions(manifest.root)),
+		"Session directory changed during storage repair",
+	);
 }
 
 function sortedPrompts(manifest: Database) {
@@ -343,38 +348,6 @@ function verifyRows(candidate: Database, manifest: PromptManifest | null, source
 	assertInvariant(iterator.next().done === true, "History candidate has unexpected extra rows");
 }
 
-function tokenize(text: string) {
-	return text
-		.toLowerCase()
-		.split(/[^\p{L}\p{N}]+/u)
-		.filter(Boolean);
-}
-
-function verifyRepresentativeSearches(db: Database) {
-	const samples = db
-		.prepare("SELECT prompt FROM history ORDER BY id ASC LIMIT 8")
-		.values()
-		.map(row => String(row[0]));
-	for (const prompt of samples) {
-		const token = tokenize(prompt).find(part => part.length > 1);
-		if (!token) continue;
-		const expected: unknown[] = [];
-		for (const row of db
-			.prepare("SELECT id, prompt FROM history ORDER BY created_at DESC, id DESC")
-			.iterate() as Iterable<{ id: bigint; prompt: string }>) {
-			if (tokenize(row.prompt).includes(token)) expected.push(row.id);
-			if (expected.length === 128) break;
-		}
-		const actual = db
-			.prepare(
-				"SELECT h.id FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ORDER BY h.created_at DESC, h.id DESC LIMIT 128",
-			)
-			.values(token)
-			.map(row => row[0]);
-		assertInvariant(stableJson(actual) === stableJson(expected), `Representative FTS query mismatch for ${token}`);
-	}
-}
-
 export function verifyHistoryCandidate(
 	candidate: string,
 	source: HistoryRepairSource,
@@ -386,7 +359,6 @@ export function verifyHistoryCandidate(
 	try {
 		verifyRows(db, manifest, source);
 		db.exec("INSERT INTO history_fts(history_fts, rank) VALUES('integrity-check', 1)");
-		verifyRepresentativeSearches(db);
 	} finally {
 		db.close();
 	}

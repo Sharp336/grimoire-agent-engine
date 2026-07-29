@@ -970,7 +970,7 @@ export async function extractArchive(source: ArchiveSource, destDir: string): Pr
 		if (!outputPath.startsWith(extractRoot + path.sep)) {
 			throw new ToolError(`Archive entry escapes extraction dir: ${name}`);
 		}
-		await Bun.write(outputPath, await memberToBytes(content));
+		await Bun.write(outputPath, isArchiveFileMember(content) ? Bun.file(content.path) : content);
 		count++;
 	}
 	return count;
