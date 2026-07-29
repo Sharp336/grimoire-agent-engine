@@ -148,12 +148,23 @@ process.stdout.write(JSON.stringify({ stopReason: result.stopReason, closeCalls 
 			],
 			{ cwd: new URL("..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe" },
 		);
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(child.stdout).text(),
-			new Response(child.stderr).text(),
-			child.exited,
-		]);
-		expect(exitCode, stderr).toBe(0);
-		expect(JSON.parse(stdout)).toEqual({ stopReason: "stop", closeCalls: 2 });
+		const stdout = new Response(child.stdout).text();
+		const stderr = new Response(child.stderr).text();
+		try {
+			const deadline = Promise.withResolvers<never>();
+			const timeout = setTimeout(() => deadline.reject(new Error("Devin disposal child did not exit")), 5_000);
+			let exitCode: number;
+			try {
+				exitCode = await Promise.race([child.exited, deadline.promise]);
+			} finally {
+				clearTimeout(timeout);
+			}
+			const [output, errors] = await Promise.all([stdout, stderr]);
+			expect(exitCode, errors).toBe(0);
+			expect(JSON.parse(output)).toEqual({ stopReason: "stop", closeCalls: 2 });
+		} finally {
+			if (child.exitCode === null) child.kill();
+			await child.exited;
+		}
 	});
 });
