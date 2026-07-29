@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added prompt-cache invalidation attribution: the session records which prefix mutator (compaction, image-strip, obfuscation, …) rewrote the wire messages, and a cache-miss warn log now names the cause alongside the reprocessed-token count and the session-cumulative hit ratio.
+- Added prompt-cache invalidation attribution: the session records which prefix mutator (compaction, image-strip, obfuscation, …) rewrote the wire messages, and a cache-miss warn log now names the cause alongside the reprocessed-token count and the session-cumulative hit ratio ([#6998](https://github.com/can1357/oh-my-pi/pull/6998) by [@metaphorics](https://github.com/metaphorics)).
 
 ## [17.1.8] - 2026-07-28
 

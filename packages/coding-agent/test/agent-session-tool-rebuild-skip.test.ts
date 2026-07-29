@@ -992,6 +992,9 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		failRebuild = true;
 
 		await expect(session.refreshMCPTools([newTool])).rejects.toThrow("rebuild failed");
+		// The failed rebuild never reaches setTools/setSystemPrompt, so it must not
+		// attribute a cache miss to a signature that never reached the provider.
+		expect(session.cacheMutationLedger.tags).not.toContain("tool-signature");
 		expect(session.getToolByName(oldTool.name)).toBeDefined();
 		expect(session.getToolByName(newTool.name)).toBeUndefined();
 		expect(session.getMountedXdevToolNames()).toContain(oldTool.name);

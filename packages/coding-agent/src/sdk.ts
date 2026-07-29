@@ -135,6 +135,8 @@ import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
 	type CustomMessage,
 	convertToLlm,
+	demoteInterruptedThinking,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	replaceLlmImagesWithText,
 	USER_INTERRUPT_LABEL,
@@ -226,6 +228,69 @@ type McpNotificationEntry = {
 type LateDiagnosticsDetails = {
 	files: Array<{ path: string; summary: string; errored: boolean; messages: string[] }>;
 };
+
+function demoteInterruptedThinkingBeforeProviderReplay(messages: AgentMessage[]): {
+	messages: AgentMessage[];
+	pairs?: Array<{ continuity: CustomMessage; assistant: AgentMessage }>;
+} {
+	let transformed: AgentMessage[] | undefined;
+	let pairs: Array<{ continuity: CustomMessage; assistant: AgentMessage }> | undefined;
+
+	for (let index = 0; index < messages.length - 1; index++) {
+		const assistant = messages[index];
+		const continuity = messages[index + 1];
+		if (
+			assistant?.role !== "assistant" ||
+			continuity?.role !== "custom" ||
+			continuity.customType !== INTERRUPTED_THINKING_MESSAGE_TYPE
+		) {
+			continue;
+		}
+
+		const demoted = demoteInterruptedThinking(assistant);
+		if (!demoted) continue;
+		if (!transformed) transformed = messages.slice();
+		transformed[index] = { ...assistant, content: demoted.strippedContent };
+		if (!pairs) pairs = [];
+		pairs.push({ continuity, assistant });
+	}
+
+	return { messages: transformed ?? messages, pairs };
+}
+
+function digestSteeringWrappedMessages(source: readonly AgentMessage[], emitted: readonly AgentMessage[]): bigint {
+	let canonical = "";
+	for (let index = 0; index < source.length; index++) {
+		const original = source[index];
+		const wrapped = emitted[index];
+		if (original?.role !== "user" || original.steering !== true || wrapped === original || wrapped?.role !== "user") {
+			continue;
+		}
+
+		const append = (value: string) => {
+			canonical += `${value.length}:${value}`;
+		};
+		append("user");
+		if (typeof wrapped.content === "string") {
+			append("text");
+			append(wrapped.content);
+			continue;
+		}
+
+		append("parts");
+		for (const part of wrapped.content) {
+			append(part.type);
+			if (part.type === "text") {
+				append(part.text);
+				continue;
+			}
+			append(part.mimeType);
+			append(part.detail ?? "");
+			append(part.data);
+		}
+	}
+	return Bun.hash.wyhash(canonical);
+}
 
 function buildLateDiagnosticsBatchMessage(
 	entries: DeferredDiagnosticsEntry[],
@@ -2912,17 +2977,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Final convertToLlm: live provider replay drops API-level refusal errors,
 		// then applies secret obfuscation to the remaining outbound context.
 		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
-			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
-			if (!obfuscator?.hasSecrets()) return converted;
-			const obfuscated = obfuscateMessages(obfuscator, converted);
-			if (obfuscated !== converted) cacheMutationLedger.record("obfuscate");
-			return obfuscated;
+			const thinkingDemotion = demoteInterruptedThinkingBeforeProviderReplay(messages);
+			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(thinkingDemotion.messages));
+			cacheMutationLedger.recordThinkingDemotionsAtWire(thinkingDemotion.pairs ?? []);
+			if (obfuscator?.hasSecrets()) {
+				const obfuscated = obfuscateMessages(obfuscator, converted);
+				if (obfuscated !== converted) cacheMutationLedger.record("obfuscate");
+				return obfuscated;
+			}
+			return converted;
 		};
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
 			const wrapped = wrapSteeringForModel(withContext);
-			if (wrapped !== withContext) cacheMutationLedger.record("steering-wrap");
+			cacheMutationLedger.recordSteeringWrapAtWire(
+				wrapped === withContext ? undefined : digestSteeringWrappedMessages(withContext, wrapped),
+			);
 			return wrapped;
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are

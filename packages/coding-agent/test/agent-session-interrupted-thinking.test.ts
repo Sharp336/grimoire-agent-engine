@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, Model, ThinkingContent } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Message, Model, ThinkingContent } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -54,6 +56,40 @@ function thinkingAssistant(model: Model<Api>, errorMessage: string): AssistantMe
 
 function textAssistant(model: Model<Api>): AssistantMessage {
 	return { ...baseAssistant(model, [{ type: "text", text: VISIBLE_TEXT }]), errorMessage: USER_INTERRUPT_LABEL };
+}
+
+function interruptedAssistantWithText(model: Model<Api>, text: string, reasoning: string): AssistantMessage {
+	return {
+		...baseAssistant(model, [
+			{ type: "text", text },
+			{ type: "thinking", thinking: reasoning },
+		]),
+		errorMessage: USER_INTERRUPT_LABEL,
+	};
+}
+
+function providerRefusal(model: Model<Api>): AssistantMessage {
+	return {
+		...baseAssistant(model, [{ type: "text", text: "provider refusal" }]),
+		stopReason: "error",
+		stopDetails: { type: "refusal", category: "cyber", explanation: "provider refusal" },
+		errorMessage: "Refusal (cyber): provider refusal",
+	};
+}
+
+function userMessage(text: string) {
+	return { role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now() };
+}
+
+function interruptedContinuity(reasoning: string): CustomMessage {
+	return {
+		role: "custom",
+		customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
+		content: reasoning,
+		display: false,
+		attribution: "agent",
+		timestamp: Date.now(),
+	};
 }
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
@@ -143,6 +179,129 @@ describe("AgentSession interrupted thinking persistence", () => {
 		return { model, sessionManager, session };
 	}
 
+	it("demotes continuity before filtering a preceding provider refusal on the SDK wire path", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const settings = Settings.isolated({
+			"advisor.enabled": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const { session: sdkSession } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "sdk-models.yml")),
+			model,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = sdkSession;
+		const outbound: Message[][] = [];
+		sdkSession.agent.state.messages.push(
+			userMessage("original user"),
+			providerRefusal(model),
+			interruptedAssistantWithText(model, "preserved answer", "demoted reasoning"),
+			interruptedContinuity("demoted reasoning"),
+		);
+		sdkSession.agent.streamFn = (_model, context) => {
+			outbound.push(context.messages);
+			const response = { ...baseAssistant(model, [{ type: "text", text: "done" }]), stopReason: "stop" as const };
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: response });
+				stream.push({ type: "done", reason: "stop", message: response });
+			});
+			return stream;
+		};
+
+		expect(sdkSession.cacheMutationLedger.tags).toEqual([]);
+		await sdkSession.prompt("continue");
+
+		expect(sdkSession.cacheMutationLedger.tags).toEqual(["thinking-demote"]);
+		expect(outbound).toHaveLength(1);
+		const messages = outbound[0] ?? [];
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "developer", "user"]);
+		expect(messages[1]?.content).toEqual([{ type: "text", text: "preserved answer" }]);
+		expect(messages[2]?.content).toEqual([{ type: "text", text: "demoted reasoning" }]);
+		expect(messages.some(message => message.role === "assistant" && message.stopReason === "error")).toBe(false);
+	});
+
+	it("demotes every interrupted-thinking pair without shifted replay indices", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const settings = Settings.isolated({
+			"advisor.enabled": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+		});
+		const { session: sdkSession } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "sdk-multi-models.yml")),
+			model,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = sdkSession;
+		const outbound: Message[][] = [];
+		sdkSession.agent.state.messages.push(
+			userMessage("original user"),
+			interruptedAssistantWithText(model, "first answer", "first reasoning"),
+			interruptedContinuity("first reasoning"),
+			interruptedAssistantWithText(model, "second answer", "second reasoning"),
+			interruptedContinuity("second reasoning"),
+		);
+		sdkSession.agent.streamFn = (_model, context) => {
+			outbound.push(context.messages);
+			const response = { ...baseAssistant(model, [{ type: "text", text: "done" }]), stopReason: "stop" as const };
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: response });
+				stream.push({ type: "done", reason: "stop", message: response });
+			});
+			return stream;
+		};
+
+		expect(sdkSession.cacheMutationLedger.tags).toEqual([]);
+		await sdkSession.prompt("continue");
+
+		expect(sdkSession.cacheMutationLedger.tags).toEqual(["thinking-demote"]);
+		const messages = outbound[0] ?? [];
+		expect(messages.map(message => message.role)).toEqual([
+			"user",
+			"assistant",
+			"developer",
+			"assistant",
+			"developer",
+			"user",
+		]);
+		expect(messages[1]?.content).toEqual([{ type: "text", text: "first answer" }]);
+		expect(messages[2]?.content).toEqual([{ type: "text", text: "first reasoning" }]);
+		expect(messages[3]?.content).toEqual([{ type: "text", text: "second answer" }]);
+		expect(messages[4]?.content).toEqual([{ type: "text", text: "second reasoning" }]);
+	});
+
 	it("retains native thinking on a user-interrupted assistant for replay and demotes a copy into hidden context", async () => {
 		const harness = createSession();
 		await emitAssistantEnd(
@@ -153,6 +312,9 @@ describe("AgentSession interrupted thinking persistence", () => {
 		);
 
 		const messages = harness.session.agent.state.messages;
+		// The marker is created at message_end but must not attribute that already
+		// completed response; SDK conversion records it on the next outbound request.
+		expect(harness.session.cacheMutationLedger.tags).not.toContain("thinking-demote");
 		const assistant = messages.find(isAssistantMessage);
 		expect(assistant).toBeDefined();
 		expect(assistant?.content.some(block => block.type === "thinking")).toBe(true);

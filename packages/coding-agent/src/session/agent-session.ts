@@ -1358,8 +1358,8 @@ export class AgentSession {
 			shake: (mode, options) => this.shake(mode, options),
 			dropImages: () => this.dropImages(),
 			runHandoff: (customInstructions, options) => this.handoff(customInstructions, options),
-			removeAssistantMessageFromActiveContext: message =>
-				this.#recovery.removeAssistantMessageFromActiveContext(message),
+			removeAssistantMessageFromActiveContext: (message, options) =>
+				this.#recovery.removeAssistantMessageFromActiveContext(message, options),
 			dropPersistedAssistantTurn: message => this.#recovery.dropPersistedAssistantTurn(message),
 			runRecoveryCompactionWithRollback: (reason, message, allowDefer, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, allowDefer, options),
@@ -2126,7 +2126,6 @@ export class AgentSession {
 		if (message.stopReason !== "aborted" || !isUserInterruptAbort(message)) return undefined;
 		const demoted = demoteInterruptedThinking(message);
 		if (!demoted) return undefined;
-		this.cacheMutationLedger.record("thinking-demote");
 		const interruptedAt = Date.now();
 		return {
 			role: "custom",

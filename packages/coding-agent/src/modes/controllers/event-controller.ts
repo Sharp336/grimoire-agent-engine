@@ -22,6 +22,7 @@ import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
+import { addPromptTraffic } from "../../session/cache-attribution";
 import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
 import { type ApprovalMode, resolveApproval } from "../../tools/approval";
 import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
@@ -945,12 +946,16 @@ export class EventController {
 			// undefined for zero traffic, so no warn fires on an empty turn. The
 			// visual marker is setting-gated.
 			const usage = event.message.usage;
+			// AgentSession delivers message_end to this controller before it persists
+			// the assistant into SessionManager, so the aggregate still excludes this
+			// turn at this point. Add it exactly once for the cumulative hit ratio.
+			const persistedUsage = this.ctx.sessionManager.getUsageStatistics();
 			const invalidation = reportCacheInvalidation({
 				prev: this.ctx.lastAssistantUsage,
 				current: usage,
 				ledger: this.ctx.session.cacheMutationLedger,
 				logger,
-				cumulativeUsage: this.ctx.sessionManager.getUsageStatistics(),
+				cumulativeUsage: addPromptTraffic(persistedUsage, usage),
 			});
 			if (invalidation && settings.get("display.cacheMissMarker")) {
 				this.ctx.streamingComponent.setCacheInvalidation(invalidation);
