@@ -14,7 +14,7 @@ import {
 	isTransientTransportError,
 	normalizeConnectAuthError,
 	readConnectTrailerError,
-} from "@oh-my-pi/pi-ai";
+} from "@oh-my-pi/pi-ai/transport";
 import { CursorCredentialError } from "../src/error";
 
 const servers = new Set<http2.Http2Server>();

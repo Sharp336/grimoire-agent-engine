@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { create, toBinary } from "@bufbuild/protobuf";
-import { CONNECT_END_STREAM_FLAG, type FetchImpl } from "@oh-my-pi/pi-ai";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
+import { CONNECT_END_STREAM_FLAG } from "@oh-my-pi/pi-ai/transport";
 import type { Context, Model, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { isTransientTransportError } from "@oh-my-pi/pi-ai";
+import { isTransientTransportError } from "@oh-my-pi/pi-ai/transport";
 
 describe("Cursor shared HTTP/2 transport classification", () => {
 	it("recognizes an ALPN negotiation failure as transient", () => {
