@@ -129,6 +129,7 @@ export async function runStorageRepair(
 			const expected = await fs.promises.open(expectedPath, "wx", 0o600);
 			await expected.close();
 			diagnosis = diagnoseAgentSnapshot(snapshot.immutable, expectedPath);
+			result.dataLoss = diagnosis.omitTables.length > 0;
 		} else if (historySource === "sessions") {
 			prompts = await freezePromptManifest(snapshot.tempDir, flags.agentDir, hooks.afterSessionManifestParse);
 		}

@@ -338,6 +338,7 @@ describe("offline SQLite salvage", () => {
 		const siblings = await fs.promises.readdir(path.dirname(dbPath));
 		const result = await runStorageRepair({ target: "agent", apply: false, agentDir: root });
 		expect(result.status).toBe("ready");
+		expect(result.dataLoss).toBe(false);
 		expect(result.backupCreated).toBe(false);
 		expect(result.candidatePublished).toBe(false);
 		expect(result.candidatePathTrusted).toBe(false);
@@ -498,7 +499,12 @@ describe("offline SQLite salvage", () => {
 		await corruptTablePage(dbPath, "cache");
 		const result = await runStorageRepair({ target: "agent", apply: false, agentDir: root });
 		expect(result.status).toBe("ready");
+		expect(result.dataLoss).toBe(true);
 		expect(result.objects).toContainEqual(expect.objectContaining({ name: "cache", action: "omitted" }));
+
+		const gcResult = await runGcCommand({ flags: { agentDir: root, repairStorage: "agent" } });
+		expect(gcResult.repair?.dataLoss).toBe(true);
+		expect(stdout.join("")).toContain("registered rebuildable tables omitted: cache");
 	});
 
 	test("authoritative page corruption refuses with the SQLite cause", async () => {
