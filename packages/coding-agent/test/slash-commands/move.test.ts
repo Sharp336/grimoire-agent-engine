@@ -43,4 +43,13 @@ describe("/move slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 		expect(harness.handleMoveCommand).toHaveBeenCalledWith(undefined);
 	});
+
+	it("routes /cd to the same move handler", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/cd /tmp/project", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.handleMoveCommand).toHaveBeenCalledWith("/tmp/project");
+	});
 });

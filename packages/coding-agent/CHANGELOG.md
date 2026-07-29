@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `/worktree` slash command managing agent-managed git worktrees under `~/.omp/wt`: `list` shows live worktrees of the current repo (`--all` widens to every repo and orphaned leftovers), `create <branch> [base]` checks a branch out into a new `<branch-slug>-<repo-hash>` worktree in the managed dir (creating the branch from `base` when needed), and `remove <path|branch> [--force]` deletes a managed worktree with dirty-tree and current-session guards.
+- Added `/cd` as an alias of `/move`.
+
+### Changed
+
+- Extracted the managed-worktree scanner and free-path resolution out of the `omp worktree` CLI into a shared `utils/managed-worktrees.ts` module, now consumed by the CLI, the `github` tool's PR checkout, and the new `/worktree` command.
+
 ## [17.1.6] - 2026-07-27
 
 ### Added

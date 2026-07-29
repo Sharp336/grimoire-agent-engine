@@ -10,11 +10,12 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 
-import { getWorktreeDir, hashPath, isEnoent, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { Settings } from "../config/settings";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
 import * as git from "../utils/git";
+import { resolveManagedWorktreePath } from "../utils/managed-worktrees";
 import type { ToolSession } from ".";
 import { formatShortSha } from "./gh-format";
 import { type CacheStatus, getOrFetchView, invalidateAllForNumber, resolveGithubCacheAuthKey } from "./github-cache";
@@ -915,9 +916,6 @@ function sanitizeRemoteName(value: string): string {
 	return sanitized.length > 0 ? `fork-${sanitized}` : "fork";
 }
 
-/** Maximum disambiguation suffixes we try before giving up on a worktree path. */
-const WORKTREE_PATH_MAX_SUFFIX = 100;
-
 function toLocalBranchRef(value: string): string {
 	return `refs/heads/${value}`;
 }
@@ -959,37 +957,22 @@ async function requireCurrentGitHead(cwd: string, signal?: AbortSignal): Promise
 }
 
 /**
- * Resolve a worktree path that is free of conflicts.
- *
- * Given a `basePath`, return either `basePath` itself or `${basePath}-2`,
- * `${basePath}-3`, … up to {@link WORKTREE_PATH_MAX_SUFFIX} — whichever is the
- * first variant that is **not** registered with git as another worktree and
- * **not** present on disk. The numeric tail salvages two rare cases that
- * would otherwise abort a checkout: stale leftover dirs from an interrupted
- * `git worktree add`, and the (vanishingly unlikely) `hashPath` collision
- * between two repos that happen to produce the same 7-hex digest.
+ * Return the first free worktree path for a PR checkout. Thin wrapper over
+ * the shared resolver: git-registered paths plus on-disk leftovers are both
+ * skipped via `-2`, `-3`, … suffixes.
  */
 async function resolveAvailableWorktreePath(
 	basePath: string,
 	existingWorktrees: git.GitWorktreeEntry[],
 ): Promise<string> {
-	const registered = new Set(existingWorktrees.map(entry => path.resolve(entry.path)));
-	for (let attempt = 0; attempt < WORKTREE_PATH_MAX_SUFFIX; attempt += 1) {
-		const candidate = attempt === 0 ? basePath : `${basePath}-${attempt + 1}`;
-		const normalized = path.resolve(candidate);
-		if (registered.has(normalized)) continue;
-		try {
-			await fs.stat(normalized);
-		} catch (error) {
-			if (isEnoent(error)) {
-				return candidate;
-			}
-			throw error;
-		}
+	try {
+		return await resolveManagedWorktreePath(
+			basePath,
+			existingWorktrees.map(entry => entry.path),
+		);
+	} catch (error) {
+		throw new ToolError(error instanceof Error ? error.message : String(error));
 	}
-	throw new ToolError(
-		`could not find an unused worktree path under ${basePath} (tried ${WORKTREE_PATH_MAX_SUFFIX} suffixes)`,
-	);
 }
 
 function selectPrCloneUrl(originUrl: string | undefined, repo: Pick<GhRepoViewData, "url" | "sshUrl">): string {

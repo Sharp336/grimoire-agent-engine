@@ -65,6 +65,7 @@ import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
+import { handleWorktreeAcp } from "./helpers/worktree";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type {
 	BuiltinSlashCommand,
@@ -1893,6 +1894,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "move",
+		aliases: ["cd"],
 		description: "Move the current session to a different directory",
 		acpDescription: "Move the current session to a different directory",
 		inlineHint: "[<path>]",
@@ -1935,6 +1937,23 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
 		},
+	},
+	{
+		name: "worktree",
+		description: "List, create, and remove agent-managed git worktrees",
+		acpDescription: "Manage agent-managed git worktrees",
+		inlineHint: "[<subcommand>]",
+		subcommands: [
+			{ name: "list", description: "List live managed worktrees of the current repo", usage: "[--all]" },
+			{ name: "create", description: "Check a branch out into a new managed worktree", usage: "<branch> [base]" },
+			{
+				name: "remove",
+				description: "Remove a managed worktree by path or branch",
+				usage: "<path|branch> [--force]",
+			},
+		],
+		allowArgs: true,
+		handle: handleWorktreeAcp,
 	},
 	{
 		name: "add-dir",
