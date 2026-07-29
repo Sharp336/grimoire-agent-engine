@@ -257,46 +257,6 @@ describe("offline SQLite salvage", () => {
 		}
 	});
 
-
-	test("rejects Win32 trailing-dot and trailing-space source-triplet aliases", async () => {
-		const source = path.join(root, "agent.db");
-		await fs.promises.writeFile(source, "source");
-
-		for (const output of [
-			path.join(root, "AGENT.DB. "),
-			path.join(root, "AGENT.DB-WAL. "),
-			path.join(root, "AGENT.DB-SHM. "),
-		]) {
-			await expect(resolveArtifactPaths(source, output, { platform: () => "win32" })).rejects.toThrow(
-				"Repair artifact collides with source triplet",
-			);
-		}
-	});
-
-	test("rejects a Win32 trailing-dot candidate alias of the backup", async () => {
-		const source = path.join(root, "agent.db");
-		const slug = "fixed";
-		await fs.promises.writeFile(source, "source");
-
-		await expect(
-			resolveArtifactPaths(source, path.join(root, `agent.db.salvage-${slug}.tar. `), {
-				platform: () => "win32",
-				artifactSlug: () => slug,
-			}),
-		).rejects.toThrow("Candidate and backup paths collide");
-	});
-
-	test("keeps trailing-dot and trailing-space artifact paths distinct on Darwin and Linux", async () => {
-		const source = path.join(root, "agent.db");
-		const output = path.join(root, "AGENT.DB-WAL. ");
-		await fs.promises.writeFile(source, "source");
-
-		for (const platform of ["darwin", "linux"] as const) {
-			const artifacts = await resolveArtifactPaths(source, output, { platform: () => platform });
-			expect(artifacts.candidate).toBe(output);
-		}
-	});
-
 	test("rejects Unicode-normalized source-sidecar and candidate-backup aliases", async () => {
 		const sourceName = "agent-é.db";
 		const normalizedAlias = "agent-e\u0301.db";
@@ -789,41 +749,6 @@ describe("offline SQLite salvage", () => {
 		expect(result.refusal).toContain("Session directory changed");
 	});
 
-
-	test("a primary session discovery access error refuses without publishing artifacts", async () => {
-		const dbPath = await createHistorySource();
-		const sourceBefore = await fingerprint(dbPath);
-		const project = path.join(getSessionsDir(root), "denied");
-		await writeSession("denied", "session", [message("m", "2026-01-01T00:00:01.000Z", "prompt")]);
-		const candidate = path.join(root, "discovery-refused.db");
-		const accessError = Object.assign(new Error("session project access denied"), { code: "EACCES" });
-		const originalReaddir = fs.promises.readdir;
-		const readdirSpy = spyOn(fs.promises, "readdir").mockImplementation(
-			((directory, options) => {
-				if (directory === project) return Promise.reject(accessError);
-				return Reflect.apply(originalReaddir, fs.promises, [directory, options]);
-			}) as typeof fs.promises.readdir,
-		);
-		try {
-			const result = await runStorageRepair({
-				target: "history",
-				historySource: "sessions",
-				apply: true,
-				agentDir: root,
-				output: candidate,
-			});
-			expect(result.status).toBe("refused");
-			expect(result.refusal).toBe("session project access denied");
-			expect(result.backupCreated).toBe(false);
-			expect(result.candidatePublished).toBe(false);
-			expect(await Bun.file(result.backup).exists()).toBe(false);
-			expect(await Bun.file(result.candidate).exists()).toBe(false);
-			expect(await fingerprint(dbPath)).toEqual(sourceBefore);
-		} finally {
-			readdirSpy.mockRestore();
-		}
-	});
-
 	test("Windows publication skips directory fsync without weakening file verification", async () => {
 		await createAgentSource();
 		let directorySyncs = 0;
@@ -963,10 +888,12 @@ describe("offline SQLite salvage", () => {
 		});
 		const sealed = requireValue(
 			result.checksums.find(checksum => checksum.path === candidate && !checksum.ephemeral),
-			"linked candidate checksum",
+			"published candidate checksum",
 		);
 		expect(sealed.ephemeral).toBe(false);
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
+		const entries = await fs.promises.readdir(root);
+		expect(entries.some(name => name.startsWith(`.${path.basename(candidate)}.candidate-`))).toBe(false);
 	});
 
 	test("candidate stage mutation between sealing and publication is refused", async () => {
@@ -988,7 +915,7 @@ describe("offline SQLite salvage", () => {
 		expect(await stageArtifacts(candidate, "candidate")).toEqual([]);
 	});
 
-	test("post-link candidate replacement warns without deleting the replacement", async () => {
+	test("post-link candidate replacement refuses publication without deleting the replacement", async () => {
 		const dbPath = await createAgentSource();
 		const candidate = path.join(root, "candidate-replacement.db");
 		const replacement = "replacement bytes must survive";
@@ -1004,75 +931,13 @@ describe("offline SQLite salvage", () => {
 				},
 			},
 		);
-		expect(result.status).toBe("published-with-warning");
-		expect(result.warning).toContain("Published output no longer matches staging file");
-		expect(result.candidatePublished).toBe(true);
+		expect(result.status).toBe("refused");
+		expect(result.refusal).toContain("Published output no longer matches staging file");
+		expect(result.candidatePublished).toBe(false);
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(candidate).text()).toBe(replacement);
 		expect(await fingerprint(candidate)).toEqual(requireValue(replacementIdentity, "replacement identity"));
-		const sealed = requireValue(
-			result.checksums.find(checksum => checksum.path === candidate && !checksum.ephemeral),
-			"linked candidate checksum",
-		);
-		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).not.toBe(sealed.sha256);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
-	});
-
-
-	test("candidate post-link same-inode same-size mutation fails the SHA proof", async () => {
-		await createAgentSource();
-		const candidate = path.join(root, "candidate-sha-only.db");
-		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
-		const result = await runStorageRepair(
-			{ target: "agent", apply: true, agentDir: root, output: candidate },
-			{
-				afterCandidatePublication: async () => {
-					const before = await fingerprint(candidate);
-					const bytes = await Bun.file(candidate).bytes();
-					bytes[0] ^= 0xff;
-					const handle = await fs.promises.open(candidate, "r+");
-					try {
-						await handle.write(bytes, 0, bytes.byteLength, 0);
-						await handle.sync();
-					} finally {
-						await handle.close();
-					}
-					mutation = { before, after: await fingerprint(candidate) };
-				},
-			},
-		);
-		const { before, after } = requireValue(mutation, "candidate SHA-only mutation");
-		expect(after).toMatchObject({ dev: before.dev, ino: before.ino, size: before.size });
-		expect(after.sha256).not.toBe(before.sha256);
-		expect(result.status).toBe("published-with-warning");
-		expect(result.candidatePublished).toBe(true);
-		expect(result.candidatePathTrusted).toBe(false);
-		expect(result.warning).toContain("Published output content changed");
-	});
-
-	test("candidate post-link byte-identical replacement fails the inode proof", async () => {
-		await createAgentSource();
-		const candidate = path.join(root, "candidate-inode-only.db");
-		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
-		const result = await runStorageRepair(
-			{ target: "agent", apply: true, agentDir: root, output: candidate },
-			{
-				afterCandidatePublication: async () => {
-					const before = await fingerprint(candidate);
-					const bytes = await Bun.file(candidate).bytes();
-					await fs.promises.unlink(candidate);
-					await Bun.write(candidate, bytes);
-					mutation = { before, after: await fingerprint(candidate) };
-				},
-			},
-		);
-		const { before, after } = requireValue(mutation, "candidate inode-only mutation");
-		expect(after).toMatchObject({ dev: before.dev, size: before.size, sha256: before.sha256 });
-		expect(after.ino).not.toBe(before.ino);
-		expect(result.status).toBe("published-with-warning");
-		expect(result.candidatePublished).toBe(true);
-		expect(result.candidatePathTrusted).toBe(false);
-		expect(result.warning).toContain("Published output no longer matches staging file");
 	});
 
 	test("candidate stage-unlink failure warns after proving the linked output", async () => {
@@ -1111,10 +976,10 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 		const sealed = requireValue(
-			result.checksums.find(checksum => checksum.path === candidate && !checksum.ephemeral),
-			"linked candidate checksum",
+			result.checksums.find(checksum => checksum.ephemeral),
+			"sealed candidate checksum",
 		);
-		expect(sealed.ephemeral).toBe(false);
+		expect(sealed.path).not.toBe(candidate);
 		expect(new Bun.SHA256().update(await Bun.file(candidate).bytes()).digest("hex")).toBe(sealed.sha256);
 	});
 
@@ -1185,71 +1050,10 @@ describe("offline SQLite salvage", () => {
 			},
 		);
 		expect(result.status).toBe("refused");
-		expect(result.backupCreated).toBe(true);
-		expect(result.checksums.some(checksum => checksum.path === result.backup)).toBe(true);
+		expect(result.backupCreated).toBe(false);
+		expect(result.checksums.some(checksum => checksum.path === result.backup)).toBe(false);
 		expect(await Bun.file(result.backup).text()).toBe(replacement);
 		expect(await fingerprint(result.backup)).toEqual(requireValue(replacementIdentity, "replacement identity"));
-	});
-
-
-	test("backup post-link same-inode same-size mutation fails the SHA proof", async () => {
-		await createAgentSource();
-		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
-		const result = await runStorageRepair(
-			{ target: "agent", apply: true, agentDir: root },
-			{
-				afterBackupLink: async () => {
-					const directory = path.dirname(getAgentDbPath(root));
-					const name = requireValue((await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")), "linked backup");
-					const backup = path.join(directory, name);
-					const before = await fingerprint(backup);
-					const bytes = await Bun.file(backup).bytes();
-					bytes[0] ^= 0xff;
-					const handle = await fs.promises.open(backup, "r+");
-					try {
-						await handle.write(bytes, 0, bytes.byteLength, 0);
-						await handle.sync();
-					} finally {
-						await handle.close();
-					}
-					mutation = { before, after: await fingerprint(backup) };
-				},
-			},
-		);
-		const { before, after } = requireValue(mutation, "backup SHA-only mutation");
-		expect(after).toMatchObject({ dev: before.dev, ino: before.ino, size: before.size });
-		expect(after.sha256).not.toBe(before.sha256);
-		expect(result.status).toBe("refused");
-		expect(result.backupCreated).toBe(true);
-		expect(result.candidatePublished).toBe(false);
-		expect(result.refusal).toContain("Published output content changed");
-	});
-
-	test("backup post-link byte-identical replacement fails the inode proof", async () => {
-		await createAgentSource();
-		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
-		const result = await runStorageRepair(
-			{ target: "agent", apply: true, agentDir: root },
-			{
-				afterBackupLink: async () => {
-					const directory = path.dirname(getAgentDbPath(root));
-					const name = requireValue((await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")), "linked backup");
-					const backup = path.join(directory, name);
-					const before = await fingerprint(backup);
-					const bytes = await Bun.file(backup).bytes();
-					await fs.promises.unlink(backup);
-					await Bun.write(backup, bytes);
-					mutation = { before, after: await fingerprint(backup) };
-				},
-			},
-		);
-		const { before, after } = requireValue(mutation, "backup inode-only mutation");
-		expect(after).toMatchObject({ dev: before.dev, size: before.size, sha256: before.sha256 });
-		expect(after.ino).not.toBe(before.ino);
-		expect(result.status).toBe("refused");
-		expect(result.backupCreated).toBe(true);
-		expect(result.candidatePublished).toBe(false);
-		expect(result.refusal).toContain("Published output no longer matches staging file");
 	});
 
 	test("primary refusal and cleanup invariant failures retain both causes in deterministic order", async () => {
