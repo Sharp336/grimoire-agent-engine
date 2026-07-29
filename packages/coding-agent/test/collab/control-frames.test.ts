@@ -41,10 +41,20 @@ interface HostState {
 	cwd: string;
 	resumeTargets: Map<string, { id: string; cwd: string }>;
 	controlOrder: string[];
+	prompts: string[];
+	finishCompactionCalls: number;
 	compactBlock?: Promise<void>;
 	compactStarted?: () => void;
 	emitSessionEvent?: () => void;
 	resumeAfterSwitchFailure?: { id: string; cwd: string; error: Error };
+	resumeCancelled?: boolean;
+	resumeDisablesControl?: boolean;
+	resumeGate?: Promise<void>;
+	resumeSwitched?: () => void;
+	modelRefreshGate?: Promise<void>;
+	modelRefreshStarted?: () => void;
+	setModelGate?: Promise<void>;
+	setModelStarted?: () => void;
 }
 
 interface HostHarness {
@@ -89,6 +99,8 @@ function makeHostContext(): HostHarness {
 		cwd: "/tmp",
 		resumeTargets: new Map(),
 		controlOrder: [],
+		prompts: [],
+		finishCompactionCalls: 0,
 	};
 	const ctx = {
 		settings: {
@@ -117,12 +129,24 @@ function makeHostContext(): HostHarness {
 				};
 			},
 			emitNotice: () => {},
+			promptCustomMessage: (message: { content: string | { text: string }[] }) => {
+				state.prompts.push(
+					typeof message.content === "string" ? message.content : (message.content[0]?.text ?? ""),
+				);
+				return Promise.resolve();
+			},
 			getAvailableModels: () => state.models,
 			getSessionStats: () => state.sessionStats,
-			modelRegistry: { awaitBackgroundRefresh: () => Promise.resolve() },
+			modelRegistry: {
+				awaitBackgroundRefresh: () => {
+					state.modelRefreshStarted?.();
+					return state.modelRefreshGate ?? Promise.resolve();
+				},
+			},
 			setModel: (model: unknown) => {
 				state.setModelCalls.push(model);
-				return Promise.resolve({ switched: true });
+				state.setModelStarted?.();
+				return (state.setModelGate ?? Promise.resolve()).then(() => ({ switched: true }));
 			},
 			setThinkingLevel: (level: unknown) => {
 				state.setThinkingCalls.push(level);
@@ -148,23 +172,32 @@ function makeHostContext(): HostHarness {
 		},
 		ui: { requestRender: () => {} },
 		showStatus: () => {},
+		finishCompaction: () => {
+			state.finishCompactionCalls++;
+		},
+		flushCompactionQueue: () => Promise.resolve(),
 		handleResumeSession: (sessionPath: string) => {
 			state.switchCalls.push(sessionPath);
 			state.controlOrder.push("switch");
 			const target = state.resumeTargets.get(sessionPath);
-			if (target) {
+			if (target && !state.resumeCancelled) {
 				state.sessionId = target.id;
 				state.cwd = target.cwd;
 			}
-			const failure = state.resumeAfterSwitchFailure;
-			if (failure) {
-				state.sessionId = failure.id;
-				state.cwd = failure.cwd;
+			state.resumeSwitched?.();
+			if (state.resumeDisablesControl) state.allowControl = false;
+			const finishResume = () => {
+				const failure = state.resumeAfterSwitchFailure;
+				if (failure) {
+					state.sessionId = failure.id;
+					state.cwd = failure.cwd;
+					state.emitSessionEvent?.();
+					throw failure.error;
+				}
 				state.emitSessionEvent?.();
-				return Promise.reject(failure.error);
-			}
-			state.emitSessionEvent?.();
-			return Promise.resolve(true);
+				return !state.resumeCancelled;
+			};
+			return state.resumeGate?.then(finishResume) ?? Promise.resolve().then(finishResume);
 		},
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
@@ -184,6 +217,7 @@ const FILTERED_FRAME_TYPES: Record<string, true> = {
 interface TestGuest {
 	socket: CollabSocket;
 	nextFrame(): Promise<CollabFrame>;
+	frames(): readonly CollabFrame[];
 }
 
 /** Full-link guest speaking the wire protocol directly, sending proto-4 hello. */
@@ -211,7 +245,7 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 		waiters.push(resolve);
 		return promise;
 	};
-	return { socket, nextFrame };
+	return { socket, nextFrame, frames: () => [...queue] };
 }
 
 /** Connect a guest that sends an arbitrary proto version at hello (for the mismatch case). */
@@ -237,7 +271,7 @@ async function joinWithProto(link: string, proto: number): Promise<TestGuest> {
 		waiters.push(resolve);
 		return promise;
 	};
-	return { socket, nextFrame };
+	return { socket, nextFrame, frames: () => [...queue] };
 }
 
 type CtlResult = Extract<CollabFrame, { t: "ctl-result" }>;
@@ -285,6 +319,17 @@ function sessionInfo(id: string, cwd = "/resumed-project"): SessionInfo {
 	};
 }
 
+function rehello(guest: TestGuest, link: string, write: boolean): void {
+	const parsed = parseCollabLink(link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	guest.socket.send({
+		t: "hello",
+		proto: COLLAB_PROTO,
+		name: write ? "writer-restored" : "writer-revoked",
+		...(write && parsed.writeToken ? { writeToken: Buffer.from(parsed.writeToken).toString("base64url") } : {}),
+	});
+}
+
 /** Narrow a wire `unknown` payload into an object map; throws a clear error if it isn't one. */
 function obj(data: unknown): Record<string, unknown> {
 	if (!data || typeof data !== "object") throw new Error(`expected object payload, got ${typeof data}`);
@@ -311,6 +356,14 @@ beforeAll(async () => {
 afterEach(() => {
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
 	harness.state.allowControl = false;
+	harness.state.resumeCancelled = undefined;
+	harness.state.resumeDisablesControl = undefined;
+	harness.state.resumeGate = undefined;
+	harness.state.resumeSwitched = undefined;
+	harness.state.modelRefreshGate = undefined;
+	harness.state.modelRefreshStarted = undefined;
+	harness.state.setModelGate = undefined;
+	harness.state.setModelStarted = undefined;
 });
 
 afterAll(async () => {
@@ -402,31 +455,94 @@ describe("collab control frames", () => {
 		}
 	});
 
-	it("rebinds and resyncs the room when resume changes the ID twice then rejects", async () => {
+	it("rebinds survivors when a switching requester disconnects and returns read-only", async () => {
+		harness.state.allowControl = true;
+		const target = sessionInfo("disconnect-resume");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const resumeGate = Promise.withResolvers<void>();
+		const switched = Promise.withResolvers<void>();
+		harness.state.resumeGate = resumeGate.promise;
+		harness.state.resumeSwitched = switched.resolve;
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const requester = await joinAsGuest(host.link, "switch-requester");
+			guestCleanups.push(() => requester.socket.close());
+			await requester.nextFrame();
+			const survivor = await joinAsGuest(host.link, "survivor");
+			guestCleanups.push(() => survivor.socket.close());
+			await survivor.nextFrame();
+
+			requester.socket.send({ t: "ctl", reqId: 62, cmd: { k: "switch-session", sessionId: target.id } });
+			await switched.promise;
+			requester.socket.close();
+			await Bun.sleep(0);
+
+			const returnedReadOnly = await joinAsGuest(host.viewLink, "requester-returned");
+			guestCleanups.push(() => returnedReadOnly.socket.close());
+			await Bun.sleep(0);
+			expect(returnedReadOnly.frames()).toEqual([]);
+
+			resumeGate.resolve();
+			const survivorWelcome = await survivor.nextFrame();
+			expect(survivorWelcome.t).toBe("welcome");
+			if (survivorWelcome.t === "welcome") expect(survivorWelcome.header.id).toBe(target.id);
+			const returnedWelcome = await returnedReadOnly.nextFrame();
+			expect(returnedWelcome).toMatchObject({ t: "welcome", readOnly: true });
+			if (returnedWelcome.t === "welcome") expect(returnedWelcome.header.id).toBe(target.id);
+			await Bun.sleep(0);
+			expect(survivor.frames().filter(frame => frame.t === "welcome")).toEqual([]);
+			expect(returnedReadOnly.frames().filter(frame => frame.t === "welcome")).toEqual([]);
+
+			harness.state.emitSessionEvent?.();
+			const manager = harness.ctx.sessionManager as unknown as { onEntryAppended?: (entry: unknown) => void };
+			manager.onEntryAppended?.({
+				id: "entry-after-disconnected-requester",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				type: "model_change",
+				model: "test/alpha",
+			});
+			await Bun.sleep(150);
+			expect(host.participants).toHaveLength(3);
+
+			survivor.socket.send({ t: "ctl", reqId: 63, cmd: { k: "session-stats" } });
+			expect(okResult(await survivor.nextFrame()).reqId).toBe(63);
+		} finally {
+			listSpy.mockRestore();
+		}
+	});
+
+	it("rebinds and releases deferred peers when resume changes state then fails", async () => {
 		harness.state.allowControl = true;
 		const target = sessionInfo("intermediate-session");
 		const finalSession = { id: "resumed-before-failure", cwd: "/tmp/resumed-before-failure" };
 		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
-		harness.state.resumeAfterSwitchFailure = {
-			...finalSession,
-			error: new Error("resume render failed"),
-		};
+		harness.state.resumeAfterSwitchFailure = { ...finalSession, error: new Error("resume render failed") };
+		const resumeGate = Promise.withResolvers<void>();
+		const switched = Promise.withResolvers<void>();
+		harness.state.resumeGate = resumeGate.promise;
+		harness.state.resumeSwitched = switched.resolve;
 		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
 		try {
-			const guest = await joinAsGuest(host.link, "writer");
-			guestCleanups.push(() => guest.socket.close());
-			await guest.nextFrame(); // initial welcome
+			const requester = await joinAsGuest(host.link, "failure-requester");
+			guestCleanups.push(() => requester.socket.close());
+			await requester.nextFrame();
 
-			guest.socket.send({ t: "ctl", reqId: 39, cmd: { k: "switch-session", sessionId: target.id } });
-			const resync = await guest.nextFrame();
-			expect(resync.t).toBe("welcome");
-			if (resync.t === "welcome") {
-				expect(resync.header.id).toBe(finalSession.id);
-				expect(resync.state.cwd).toBe(finalSession.cwd);
-			}
-			const failed = failResult(await guest.nextFrame());
-			expect(failed.reqId).toBe(39);
-			expect(failed.error).toBe("resume render failed");
+			requester.socket.send({ t: "ctl", reqId: 65, cmd: { k: "switch-session", sessionId: target.id } });
+			await switched.promise;
+			const deferred = await joinAsGuest(host.link, "failure-deferred");
+			guestCleanups.push(() => deferred.socket.close());
+			await Bun.sleep(0);
+			expect(deferred.frames()).toEqual([]);
+
+			resumeGate.resolve();
+			const requesterWelcome = await requester.nextFrame();
+			expect(requesterWelcome.t).toBe("welcome");
+			if (requesterWelcome.t === "welcome") expect(requesterWelcome.header.id).toBe(finalSession.id);
+			expect(failResult(await requester.nextFrame())).toMatchObject({ reqId: 65, error: "resume render failed" });
+			const deferredWelcome = await deferred.nextFrame();
+			expect(deferredWelcome.t).toBe("welcome");
+			if (deferredWelcome.t === "welcome") expect(deferredWelcome.header.id).toBe(finalSession.id);
 
 			harness.state.emitSessionEvent?.();
 			const manager = harness.ctx.sessionManager as unknown as { onEntryAppended?: (entry: unknown) => void };
@@ -438,12 +554,81 @@ describe("collab control frames", () => {
 				model: "test/alpha",
 			});
 			await Bun.sleep(150);
-			expect(host.participants).toHaveLength(2);
-
-			guest.socket.send({ t: "ctl", reqId: 40, cmd: { k: "session-stats" } });
-			expect(okResult(await guest.nextFrame()).reqId).toBe(40);
+			expect(host.participants).toHaveLength(3);
 		} finally {
 			harness.state.resumeAfterSwitchFailure = undefined;
+			listSpy.mockRestore();
+		}
+	});
+
+	it("releases deferred valid hellos when session resume is cancelled", async () => {
+		harness.state.allowControl = true;
+		harness.state.resumeCancelled = true;
+		const activeSessionId = harness.state.sessionId;
+		const target = sessionInfo("cancelled-resume");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const resumeGate = Promise.withResolvers<void>();
+		const switched = Promise.withResolvers<void>();
+		harness.state.resumeGate = resumeGate.promise;
+		harness.state.resumeSwitched = switched.resolve;
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const requester = await joinAsGuest(host.link, "cancel-requester");
+			guestCleanups.push(() => requester.socket.close());
+			await requester.nextFrame();
+
+			requester.socket.send({ t: "ctl", reqId: 64, cmd: { k: "switch-session", sessionId: target.id } });
+			await switched.promise;
+			const deferred = await joinAsGuest(host.link, "cancel-deferred");
+			guestCleanups.push(() => deferred.socket.close());
+			await Bun.sleep(0);
+			expect(deferred.frames()).toEqual([]);
+
+			resumeGate.resolve();
+			expect(obj(okResult(await requester.nextFrame()).data).cancelled).toBe(true);
+			const deferredWelcome = await deferred.nextFrame();
+			expect(deferredWelcome.t).toBe("welcome");
+			if (deferredWelcome.t === "welcome") expect(deferredWelcome.header.id).toBe(activeSessionId);
+			await Bun.sleep(0);
+			expect(deferred.frames().filter(frame => frame.t === "welcome")).toEqual([]);
+		} finally {
+			listSpy.mockRestore();
+		}
+	});
+
+	it("defers hellos until a resumed project's permission is known, then sends one fresh snapshot per peer", async () => {
+		harness.state.allowControl = true;
+		const target = sessionInfo("permission-approved");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const resumeGate = Promise.withResolvers<void>();
+		const switched = Promise.withResolvers<void>();
+		harness.state.resumeGate = resumeGate.promise;
+		harness.state.resumeSwitched = switched.resolve;
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const before = await joinAsGuest(host.link, "before-switch");
+			guestCleanups.push(() => before.socket.close());
+			await before.nextFrame();
+
+			before.socket.send({ t: "ctl", reqId: 61, cmd: { k: "switch-session", sessionId: target.id } });
+			await switched.promise;
+			const during = await joinAsGuest(host.link, "during-switch");
+			guestCleanups.push(() => during.socket.close());
+			await Bun.sleep(0);
+			expect(during.frames()).toEqual([]);
+
+			resumeGate.resolve();
+			const beforeResync = await before.nextFrame();
+			expect(beforeResync.t).toBe("welcome");
+			if (beforeResync.t === "welcome") expect(beforeResync.header.id).toBe(target.id);
+			expect(okResult(await before.nextFrame()).reqId).toBe(61);
+			const duringWelcome = await during.nextFrame();
+			expect(duringWelcome.t).toBe("welcome");
+			if (duringWelcome.t === "welcome") expect(duringWelcome.header.id).toBe(target.id);
+			await Bun.sleep(0);
+			expect(before.frames().filter(frame => frame.t === "welcome")).toEqual([]);
+			expect(during.frames().filter(frame => frame.t === "welcome")).toEqual([]);
+		} finally {
 			listSpy.mockRestore();
 		}
 	});
@@ -616,6 +801,222 @@ describe("collab control frames", () => {
 		expect(harness.state.setThinkingCalls).toHaveLength(0);
 	});
 
+	it("rejects malformed decrypted control commands without a successful undefined result", async () => {
+		harness.state.allowControl = true;
+		const guest = await joinAsGuest(host.link, "writer");
+		guestCleanups.push(() => guest.socket.close());
+		await guest.nextFrame(); // welcome
+
+		guest.socket.send({ t: "ctl", reqId: 41, cmd: { k: "not-a-command" } } as unknown as CollabFrame);
+		guest.socket.send({ t: "ctl", reqId: 42, cmd: null } as unknown as CollabFrame);
+		const results = await ctlResults(guest, 2);
+		expect(results.map(result => [result.reqId, result.ok])).toEqual([
+			[41, false],
+			[42, false],
+		]);
+		for (const result of results) {
+			if (result.ok) throw new Error("malformed command unexpectedly succeeded");
+			expect(result.code).toBe("invalid-command");
+		}
+	});
+
+	it("resyncs a replacement snapshot after a same-ID reload", async () => {
+		harness.state.allowControl = true;
+		const target = sessionInfo("sess-1", "/same-project");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // initial welcome
+
+			guest.socket.send({ t: "ctl", reqId: 43, cmd: { k: "switch-session", sessionId: target.id } });
+			const resync = await guest.nextFrame();
+			expect(resync.t).toBe("welcome");
+			if (resync.t === "welcome") expect(resync.state.cwd).toBe(target.cwd);
+			expect(okResult(await guest.nextFrame()).reqId).toBe(43);
+		} finally {
+			listSpy.mockRestore();
+		}
+	});
+
+	it("uses the shared interactive cleanup after remote compact and rejects prompts during the transition", async () => {
+		harness.state.allowControl = true;
+		harness.state.finishCompactionCalls = 0;
+		harness.state.prompts.length = 0;
+		const compactGate = Promise.withResolvers<void>();
+		const compactStarted = Promise.withResolvers<void>();
+		harness.state.compactBlock = compactGate.promise;
+		harness.state.compactStarted = compactStarted.resolve;
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // welcome
+
+			guest.socket.send({ t: "ctl", reqId: 44, cmd: { k: "compact" } });
+			await compactStarted.promise;
+			guest.socket.send({ t: "prompt", text: "must not cross the transition" });
+			const rejected = await guest.nextFrame();
+			expect(rejected.t).toBe("error");
+			if (rejected.t === "error") expect(rejected.message).toContain("transition");
+			compactGate.resolve();
+			expect(okResult(await guest.nextFrame()).reqId).toBe(44);
+			expect(harness.state.finishCompactionCalls).toBe(1);
+			expect(harness.state.prompts).toEqual([]);
+		} finally {
+			harness.state.compactBlock = undefined;
+			harness.state.compactStarted = undefined;
+		}
+	});
+
+	it("rechecks the setting and disconnected peer when queued control reaches the mutation gate", async () => {
+		harness.state.allowControl = true;
+		const compactGate = Promise.withResolvers<void>();
+		const compactStarted = Promise.withResolvers<void>();
+		harness.state.compactBlock = compactGate.promise;
+		harness.state.compactStarted = compactStarted.resolve;
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // welcome
+
+			guest.socket.send({ t: "ctl", reqId: 45, cmd: { k: "compact" } });
+			await compactStarted.promise;
+			guest.socket.send({ t: "ctl", reqId: 46, cmd: { k: "set-model", provider: "test", modelId: "alpha" } });
+			harness.state.allowControl = false;
+			compactGate.resolve();
+			const results = await ctlResults(guest, 2);
+			expect(results[0]?.reqId).toBe(45);
+			expect(results[1]?.reqId).toBe(46);
+			expect(results[1]?.ok).toBe(false);
+			expect(harness.state.setModelCalls).toHaveLength(0);
+
+			harness.state.allowControl = true;
+			const disconnectGate = Promise.withResolvers<void>();
+			const disconnectStarted = Promise.withResolvers<void>();
+			harness.state.compactBlock = disconnectGate.promise;
+			harness.state.compactStarted = disconnectStarted.resolve;
+			guest.socket.send({ t: "ctl", reqId: 47, cmd: { k: "compact" } });
+			await disconnectStarted.promise;
+			guest.socket.send({ t: "ctl", reqId: 48, cmd: { k: "set-model", provider: "test", modelId: "alpha" } });
+			guest.socket.close();
+			await Promise.resolve();
+			disconnectGate.resolve();
+			await Bun.sleep(0);
+			expect(harness.state.setModelCalls).toHaveLength(0);
+		} finally {
+			harness.state.compactBlock = undefined;
+			harness.state.compactStarted = undefined;
+		}
+	});
+
+	it("fails closed when live control is revoked during command preparation", async () => {
+		harness.state.allowControl = true;
+		const originalModels = harness.state.models;
+		const refreshGate = Promise.withResolvers<void>();
+		const refreshStarted = Promise.withResolvers<void>();
+		harness.state.models = [];
+		harness.state.modelRefreshGate = refreshGate.promise;
+		harness.state.modelRefreshStarted = refreshStarted.resolve;
+		const target = sessionInfo("permission-gated-session");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const listGate = Promise.withResolvers<SessionInfo[]>();
+		const listStarted = Promise.withResolvers<void>();
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(() => {
+			listStarted.resolve();
+			return listGate.promise;
+		});
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // welcome
+
+			guest.socket.send({ t: "ctl", reqId: 70, cmd: { k: "set-model", provider: "test", modelId: "alpha" } });
+			await refreshStarted.promise;
+			rehello(guest, host.link, false);
+			const revokedWelcome = await guest.nextFrame();
+			expect(revokedWelcome).toMatchObject({ t: "welcome", readOnly: true });
+			harness.state.models = originalModels;
+			refreshGate.resolve();
+			const [modelFailure] = await ctlResults(guest, 1);
+			expect(modelFailure).toMatchObject({ reqId: 70, ok: false, code: "control-disabled" });
+			expect(harness.state.setModelCalls).toHaveLength(0);
+
+			rehello(guest, host.link, true);
+			guest.socket.send({ t: "ctl", reqId: 71, cmd: { k: "switch-session", sessionId: target.id } });
+			await listStarted.promise;
+			harness.state.allowControl = false;
+			listGate.resolve([target]);
+			const [resumeFailure] = await ctlResults(guest, 1);
+			expect(resumeFailure).toMatchObject({ reqId: 71, ok: false, code: "control-disabled" });
+			expect(harness.state.switchCalls).not.toContain(target.path);
+
+			harness.state.allowControl = true;
+			guest.socket.send({ t: "ctl", reqId: 72, cmd: { k: "session-stats" } });
+			const [allowedAfterPreparationFailure] = await ctlResults(guest, 1);
+			expect(okResult(allowedAfterPreparationFailure).reqId).toBe(72);
+		} finally {
+			harness.state.models = originalModels;
+			listSpy.mockRestore();
+		}
+	});
+
+	it("does not disclose inventory or a completed mutation after permission revokes", async () => {
+		harness.state.allowControl = true;
+		const refreshGate = Promise.withResolvers<void>();
+		const refreshStarted = Promise.withResolvers<void>();
+		harness.state.modelRefreshGate = refreshGate.promise;
+		harness.state.modelRefreshStarted = refreshStarted.resolve;
+		const listGate = Promise.withResolvers<SessionInfo[]>();
+		const listStarted = Promise.withResolvers<void>();
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(() => {
+			listStarted.resolve();
+			return listGate.promise;
+		});
+		try {
+			const guest = await joinAsGuest(host.link, "writer");
+			guestCleanups.push(() => guest.socket.close());
+			await guest.nextFrame(); // welcome
+
+			guest.socket.send({ t: "ctl", reqId: 73, cmd: { k: "models-list" } });
+			await refreshStarted.promise;
+			harness.state.allowControl = false;
+			refreshGate.resolve();
+			const [modelsFailure] = await ctlResults(guest, 1);
+			expect(modelsFailure).toMatchObject({ reqId: 73, ok: false, code: "control-disabled" });
+			expect(modelsFailure.ok).toBe(false);
+
+			harness.state.allowControl = true;
+			guest.socket.send({ t: "ctl", reqId: 74, cmd: { k: "sessions-list" } });
+			await listStarted.promise;
+			harness.state.allowControl = false;
+			listGate.resolve([sessionInfo("private-session")]);
+			const [sessionsFailure] = await ctlResults(guest, 1);
+			expect(sessionsFailure).toMatchObject({ reqId: 74, ok: false, code: "control-disabled" });
+
+			harness.state.allowControl = true;
+			const setModelGate = Promise.withResolvers<void>();
+			const setModelStarted = Promise.withResolvers<void>();
+			const setModelCallCount = harness.state.setModelCalls.length;
+			harness.state.setModelGate = setModelGate.promise;
+			harness.state.setModelStarted = setModelStarted.resolve;
+			guest.socket.send({ t: "ctl", reqId: 75, cmd: { k: "set-model", provider: "test", modelId: "alpha" } });
+			await setModelStarted.promise;
+			harness.state.allowControl = false;
+			setModelGate.resolve();
+			const [mutationFailure] = await ctlResults(guest, 1);
+			expect(mutationFailure).toMatchObject({ reqId: 75, ok: false, code: "control-disabled" });
+			expect(harness.state.setModelCalls).toHaveLength(setModelCallCount + 1);
+
+			harness.state.allowControl = true;
+			guest.socket.send({ t: "ctl", reqId: 76, cmd: { k: "session-stats" } });
+			const [allowedAfterReplyFailure] = await ctlResults(guest, 1);
+			expect(okResult(allowedAfterReplyFailure).reqId).toBe(76);
+		} finally {
+			listSpy.mockRestore();
+		}
+	});
+
 	it("fails closed when a proto-3 guest joins a proto-4 host", async () => {
 		const guest = await joinWithProto(host.viewLink, 3);
 		guestCleanups.push(() => guest.socket.close());
@@ -623,6 +1024,47 @@ describe("collab control frames", () => {
 		const frame = await guest.nextFrame();
 		expect(frame.t).toBe("error");
 		if (frame.t === "error") expect(frame.message).toContain("protocol mismatch");
+	});
+
+	it("ends collab without snapshot disclosure when the resumed project opts out", async () => {
+		harness.state.allowControl = true;
+		harness.state.resumeDisablesControl = true;
+		const target = sessionInfo("opted-out-project", "/private-project");
+		harness.state.resumeTargets.set(target.path, { id: target.id, cwd: target.cwd });
+		const resumeGate = Promise.withResolvers<void>();
+		const switched = Promise.withResolvers<void>();
+		harness.state.resumeGate = resumeGate.promise;
+		harness.state.resumeSwitched = switched.resolve;
+		const listSpy = spyOn(SessionManager, "listAll").mockImplementation(async () => [target]);
+		try {
+			const before = await joinAsGuest(host.link, "before-denial");
+			guestCleanups.push(() => before.socket.close());
+			await before.nextFrame(); // initial welcome
+
+			before.socket.send({ t: "ctl", reqId: 49, cmd: { k: "switch-session", sessionId: target.id } });
+			await switched.promise;
+			const during = await joinAsGuest(host.link, "during-denial");
+			guestCleanups.push(() => during.socket.close());
+			await Bun.sleep(0);
+			expect(during.frames()).toEqual([]);
+
+			resumeGate.resolve();
+			const result = failResult(await before.nextFrame());
+			expect(result).toMatchObject({ reqId: 49, code: "control-disabled" });
+			expect(result.error).toContain("without sharing");
+			await Bun.sleep(0);
+			expect(before.frames().filter(frame => frame.t === "ctl-result")).toEqual([]);
+			expect(before.frames().filter(frame => frame.t === "welcome")).toEqual([]);
+			expect(during.frames()).toEqual([]);
+			expect(harness.ctx.collabHost).toBeUndefined();
+
+			const after = await joinAsGuest(host.link, "after-denied");
+			guestCleanups.push(() => after.socket.close());
+			await Bun.sleep(0);
+			expect(after.frames()).toEqual([]);
+		} finally {
+			listSpy.mockRestore();
+		}
 	});
 });
 

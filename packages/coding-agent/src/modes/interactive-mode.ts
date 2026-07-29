@@ -4338,6 +4338,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.flushCompactionQueue(options);
 	}
 
+	finishCompaction(): void {
+		this.#commandController.finishCompaction();
+	}
+
 	flushPendingBashComponents(): void {
 		this.#uiHelpers.flushPendingBashComponents();
 	}

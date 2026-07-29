@@ -69,7 +69,7 @@ export class CollabSocket {
 		this.#openSocket();
 	}
 
-	send(frame: CollabFrame, targetPeer = 0): void {
+	send(frame: CollabFrame, targetPeer = 0): Promise<void> {
 		this.#sendChain = this.#sendChain
 			.then(async () => {
 				if (this.#closed) {
@@ -104,6 +104,7 @@ export class CollabSocket {
 			.catch((err: unknown) => {
 				logger.debug("collab: send failed", { error: String(err) });
 			});
+		return this.#sendChain;
 	}
 
 	#enqueuePendingSend(envelope: Uint8Array, frameType: CollabFrame["t"]): void {

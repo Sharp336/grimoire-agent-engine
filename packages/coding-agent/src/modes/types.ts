@@ -273,6 +273,8 @@ export interface InteractiveModeContext {
 	updatePendingMessagesDisplay(): void;
 	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
+	/** Rebuild and refresh the interactive UI after a successful compaction. */
+	finishCompaction(): void;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	setWorkingMessage(message?: string): void;
