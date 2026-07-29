@@ -1251,12 +1251,24 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "workflow",
-		description: "Control the active durable workflow",
-		acpDescription: "Control the active durable workflow",
-		acpInputHint: "cancel",
+		description: "Cancel the active durable workflow",
 		subcommands: [{ name: "cancel", description: "Cancel the active workflow" }],
 		allowArgs: true,
-		handle: handleWorkflowCommand,
+		handleTui: async (command, runtime) => {
+			const ctx = runtime.ctx;
+			await handleWorkflowCommand(command, {
+				session: ctx.session,
+				sessionManager: ctx.sessionManager,
+				settings: ctx.settings,
+				cwd: ctx.sessionManager.getCwd(),
+				output: text => {
+					ctx.showStatus(text);
+				},
+				refreshCommands: () => ctx.refreshSlashCommandState(),
+				reloadPlugins: async () => {},
+			});
+			ctx.editor.setText("");
+		},
 	},
 	{
 		name: "session",
