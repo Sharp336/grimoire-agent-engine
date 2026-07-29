@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed the active persistent-session JSONL path to Bash subprocesses through `OMP_SESSION_FILE`.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

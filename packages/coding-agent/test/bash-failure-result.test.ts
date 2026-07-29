@@ -80,6 +80,61 @@ describe("BashTool execution results", () => {
 		expect(text).not.toContain("Command exited with code");
 	});
 
+	it("exposes the active OMP session file to Bash", async () => {
+		const session = makeSession();
+		session.getSessionFile = () => "/tmp/active-session.jsonl";
+		const tool = new BashTool(session);
+
+		const result = await tool.execute("call-session-file", { command: 'printf "%s" "$OMP_SESSION_FILE"' });
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+		expect(text).toContain("/tmp/active-session.jsonl");
+	});
+
+	it("uses the current session file on each Bash invocation", async () => {
+		let sessionFile = "/tmp/original-session.jsonl";
+		const session = makeSession();
+		session.getSessionFile = () => sessionFile;
+		const tool = new BashTool(session);
+
+		const initialResult = await tool.execute("call-original-session-file", {
+			command: 'printf "%s" "$OMP_SESSION_FILE"',
+		});
+		sessionFile = "/tmp/resumed-session.jsonl";
+		const resumedResult = await tool.execute("call-resumed-session-file", {
+			command: 'printf "%s" "$OMP_SESSION_FILE"',
+		});
+
+		expect(initialResult.content.find(c => c.type === "text")?.text).toContain("/tmp/original-session.jsonl");
+		expect(resumedResult.content.find(c => c.type === "text")?.text).toContain("/tmp/resumed-session.jsonl");
+	});
+
+	it("does not let callers override the active OMP session file", async () => {
+		const session = makeSession();
+		session.getSessionFile = () => "/tmp/authoritative-session.jsonl";
+		const tool = new BashTool(session);
+
+		const result = await tool.execute("call-overridden-session-file", {
+			command: 'printf "%s" "$OMP_SESSION_FILE"',
+			env: { OMP_SESSION_FILE: "/tmp/caller-session.jsonl" },
+		});
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+		expect(text).toContain("/tmp/authoritative-session.jsonl");
+		expect(text).not.toContain("/tmp/caller-session.jsonl");
+	});
+
+	it("does not inject a session file for in-memory sessions", async () => {
+		const tool = new BashTool(makeSession());
+		const result = await tool.execute("call-no-session-file", {
+			command: 'printf "%s" "$OMP_SESSION_FILE"',
+			env: { OMP_SESSION_FILE: "/tmp/inherited-session.jsonl" },
+		});
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+		expect(text).toContain("/tmp/inherited-session.jsonl");
+	});
+
 	it("preserves final-stage output when a pipeline ends in head or tail", async () => {
 		const tool = new BashTool(makeSession());
 
