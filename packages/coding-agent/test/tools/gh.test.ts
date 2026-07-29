@@ -6,6 +6,7 @@ import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	buildSearchDateQualifier,
@@ -15,6 +16,7 @@ import {
 	parseSearchDateBound,
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { githubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/gh-renderer";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import { getAgentDir, hashPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -41,7 +43,7 @@ process.env.GIT_ASKPASS = "true";
 delete process.env.XDG_CONFIG_HOME;
 
 function createSession(
-	cwd: string = "/tmp/test",
+	cwd: string = os.tmpdir(),
 	settings: Settings = Settings.isolated({ "github.enabled": true }),
 	artifactsDir?: string,
 ): ToolSession {
@@ -86,6 +88,73 @@ function runGit(cwd: string, args: string[]): string {
 	}
 
 	return new TextDecoder().decode(result.stdout).trim();
+}
+
+async function createWorktreeContextFixture(): Promise<{
+	baseDir: string;
+	primaryRoot: string;
+	worktreeRoot: string;
+	primaryHead: string;
+	worktreeHead: string;
+}> {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-cwd-worktree-"));
+	const primaryRoot = path.join(baseDir, "primary");
+	const worktreeRoot = path.join(baseDir, "feature");
+	await fs.mkdir(primaryRoot);
+
+	runGit(primaryRoot, ["init", "-b", "main"]);
+	await Bun.write(path.join(primaryRoot, "primary.txt"), "primary\n");
+	runGit(primaryRoot, ["add", "primary.txt"]);
+	runGit(primaryRoot, ["commit", "-m", "primary"]);
+	const primaryHead = runGit(primaryRoot, ["rev-parse", "HEAD"]);
+
+	runGit(primaryRoot, ["worktree", "add", "-b", "feature/worktree", worktreeRoot]);
+	await Bun.write(path.join(worktreeRoot, "worktree.txt"), "worktree\n");
+	runGit(worktreeRoot, ["add", "worktree.txt"]);
+	runGit(worktreeRoot, ["commit", "-m", "worktree"]);
+
+	return {
+		baseDir,
+		primaryRoot,
+		worktreeRoot,
+		primaryHead,
+		worktreeHead: runGit(worktreeRoot, ["rev-parse", "HEAD"]),
+	};
+}
+
+async function createSubmoduleContextFixture(): Promise<{
+	baseDir: string;
+	parentRoot: string;
+	submoduleRoot: string;
+	submoduleHead: string;
+}> {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-cwd-submodule-"));
+	const submoduleSource = path.join(baseDir, "submodule-source");
+	const parentRoot = path.join(baseDir, "parent");
+	await fs.mkdir(submoduleSource);
+	await fs.mkdir(parentRoot);
+
+	runGit(submoduleSource, ["init", "-b", "submodule-main"]);
+	await Bun.write(path.join(submoduleSource, "submodule.txt"), "submodule\n");
+	runGit(submoduleSource, ["add", "submodule.txt"]);
+	runGit(submoduleSource, ["commit", "-m", "submodule"]);
+
+	runGit(parentRoot, ["init", "-b", "main"]);
+	await Bun.write(path.join(parentRoot, "parent.txt"), "parent\n");
+	runGit(parentRoot, ["add", "parent.txt"]);
+	runGit(parentRoot, ["commit", "-m", "parent"]);
+	runGit(parentRoot, ["-c", "protocol.file.allow=always", "submodule", "add", submoduleSource, "submodule"]);
+	runGit(parentRoot, ["commit", "-am", "add submodule"]);
+
+	const submoduleRoot = path.join(parentRoot, "submodule");
+	const submoduleHead = runGit(submoduleRoot, ["rev-parse", "HEAD"]);
+	runGit(submoduleRoot, ["checkout", "--detach", submoduleHead]);
+	return {
+		baseDir,
+		parentRoot,
+		submoduleRoot,
+		submoduleHead,
+	};
 }
 
 interface PrFixture {
@@ -394,6 +463,7 @@ describe("getOrFetchPrDiff diff-too-large fallback", () => {
 
 describe("github tool", () => {
 	beforeAll(async () => {
+		await initTheme();
 		prFixtureTemplate = await buildPrFixtureTemplate();
 	});
 
@@ -438,6 +508,171 @@ describe("github tool", () => {
 		expect(text).toContain("Topics: cli, github");
 	});
 
+	it("targets a sibling worktree through cwd and preserves the session checkout", async () => {
+		const fixture = await createWorktreeContextFixture();
+		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({
+			nameWithOwner: "owner/repo",
+			url: "https://github.com/owner/repo",
+		});
+		try {
+			const tool = new GithubTool(createSession(fixture.primaryRoot));
+			const worktreeCwd = path.relative(fixture.primaryRoot, fixture.worktreeRoot);
+			await tool.execute("repo-view-worktree", { op: "repo_view", cwd: worktreeCwd });
+			await tool.execute("repo-view-primary", { op: "repo_view" });
+
+			expect(jsonSpy.mock.calls[0]?.[0]).toBe(fixture.worktreeRoot);
+			expect(jsonSpy.mock.calls[1]?.[0]).toBe(fixture.primaryRoot);
+			expect(jsonSpy.mock.calls[0]?.[1]?.slice(0, 2)).toEqual(["repo", "view"]);
+		} finally {
+			await removeWithRetries(fixture.baseDir);
+		}
+	});
+
+	it("rejects missing and non-directory cwd overrides", async () => {
+		const fixture = await createWorktreeContextFixture();
+		const filePath = path.join(fixture.primaryRoot, "primary.txt");
+		try {
+			const tool = new GithubTool(createSession(fixture.primaryRoot));
+			await expect(tool.execute("missing-cwd", { op: "repo_view", cwd: "missing" })).rejects.toThrow(
+				`Working directory does not exist: ${path.join(fixture.primaryRoot, "missing")}`,
+			);
+			await expect(tool.execute("file-cwd", { op: "repo_view", cwd: filePath })).rejects.toThrow(
+				`Working directory is not a directory: ${filePath}`,
+			);
+		} finally {
+			await removeWithRetries(fixture.baseDir);
+		}
+	});
+
+	it("uses the selected worktree branch and HEAD for run_watch", async () => {
+		const fixture = await createWorktreeContextFixture();
+		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("owner/repo");
+		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ workflow_runs: [] });
+		try {
+			const tool = new GithubTool(createSession(fixture.primaryRoot));
+			const worktreeAbort = new AbortController();
+			let worktreeDetails: { repo?: string; branch?: string; headSha?: string } | undefined;
+			await tool
+				.execute(
+					"watch-worktree",
+					{ op: "run_watch", cwd: path.relative(fixture.primaryRoot, fixture.worktreeRoot) },
+					worktreeAbort.signal,
+					update => {
+						worktreeDetails = update.details;
+						worktreeAbort.abort();
+					},
+				)
+				.catch(() => {});
+
+			const primaryAbort = new AbortController();
+			let primaryDetails: { repo?: string; branch?: string; headSha?: string } | undefined;
+			await tool
+				.execute("watch-primary", { op: "run_watch" }, primaryAbort.signal, update => {
+					primaryDetails = update.details;
+					primaryAbort.abort();
+				})
+				.catch(() => {});
+
+			expect(worktreeDetails).toMatchObject({
+				repo: "owner/repo",
+				branch: "feature/worktree",
+				headSha: fixture.worktreeHead,
+			});
+			expect(primaryDetails).toMatchObject({
+				repo: "owner/repo",
+				branch: "main",
+				headSha: fixture.primaryHead,
+			});
+			expect(textSpy.mock.calls.filter(call => call[0] === fixture.worktreeRoot)).toHaveLength(2);
+			expect(textSpy.mock.calls.filter(call => call[0] === fixture.primaryRoot)).toHaveLength(2);
+			expect(jsonSpy.mock.calls.some(call => call[0] === fixture.worktreeRoot)).toBe(true);
+			expect(jsonSpy.mock.calls.some(call => call[0] === fixture.primaryRoot)).toBe(true);
+		} finally {
+			await removeWithRetries(fixture.baseDir);
+		}
+	});
+
+	it("uses the selected detached submodule HEAD for run_watch", async () => {
+		const fixture = await createSubmoduleContextFixture();
+		const textSpy = vi
+			.spyOn(git.github, "text")
+			.mockImplementation(async cwd => (cwd === fixture.submoduleRoot ? "owner/submodule" : "owner/parent"));
+		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ workflow_runs: [] });
+		try {
+			const tool = new GithubTool(createSession(fixture.parentRoot));
+			const abort = new AbortController();
+			let details: { repo?: string; branch?: string; headSha?: string } | undefined;
+			let text: string | undefined;
+			await tool
+				.execute("watch-submodule", { op: "run_watch", cwd: "submodule" }, abort.signal, update => {
+					details = update.details;
+					const content = update.content[0];
+					if (content?.type === "text") text = content.text;
+					abort.abort();
+				})
+				.catch(() => {});
+
+			expect(details).toMatchObject({
+				repo: "owner/submodule",
+				headSha: fixture.submoduleHead,
+			});
+			expect(details?.branch).toBeUndefined();
+			expect(text).toContain("Branch: detached HEAD");
+			expect(textSpy.mock.calls.filter(call => call[0] === fixture.submoduleRoot)).toHaveLength(2);
+			expect(jsonSpy.mock.calls.some(call => call[0] === fixture.submoduleRoot)).toBe(true);
+		} finally {
+			await removeWithRetries(fixture.baseDir);
+		}
+	});
+
+	it("shows the selected worktree in run_watch call and result renderers", () => {
+		const args = { op: "run_watch", cwd: path.join(process.cwd(), "linked-feature") };
+		const options = { expanded: true } as Parameters<typeof githubToolRenderer.renderResult>[1];
+		const callText = Bun.stripANSI(githubToolRenderer.renderCall(args, options, theme).render(120).join("\n"));
+		const resultText = Bun.stripANSI(
+			githubToolRenderer
+				.renderResult(
+					{
+						content: [{ type: "text", text: "watching" }],
+						details: {
+							watch: {
+								mode: "commit",
+								state: "watching",
+								repo: "owner/repo",
+								branch: "feature/worktree",
+								headSha: "0123456789abcdef",
+								pollCount: 1,
+								runs: [],
+							},
+						},
+					},
+					options,
+					theme,
+					args,
+				)
+				.render(120)
+				.join("\n"),
+		);
+
+		expect(callText).toContain("linked-feature");
+		expect(resultText).toContain("linked-feature");
+	});
+
+	it("flattens newline-bearing cwd metadata in the run_watch pending header", () => {
+		const args = {
+			op: "run_watch",
+			cwd: path.join(process.cwd(), "linked\nspoofed-header"),
+		};
+		const options = { expanded: false } as Parameters<typeof githubToolRenderer.renderCall>[1];
+		const lines = Bun.stripANSI(githubToolRenderer.renderCall(args, options, theme).render(120).join("\n")).split(
+			"\n",
+		);
+
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toContain("linked spoofed-header");
+		expect(lines[1]).toContain("waiting for workflow data");
+	});
+
 	it("reads repository files through the GitHub contents API", async () => {
 		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue('{"version":"16.3.11"}\n');
 		const tool = new GithubTool(createSession());
@@ -451,7 +686,7 @@ describe("github tool", () => {
 
 		expect(text).toBe('{"version":"16.3.11"}\n');
 		expect(textSpy).toHaveBeenCalledWith(
-			"/tmp/test",
+			os.tmpdir(),
 			[
 				"api",
 				"/repos/can1357/oh-my-pi/contents/packages/coding-agent/package.json",
@@ -1209,6 +1444,7 @@ exec ${JSON.stringify(realGit)} "$@"
 		const wire = toolWireSchema(tool);
 		const properties = wire.properties as Record<string, unknown>;
 		expect(properties.op).toBeDefined();
+		expect(properties.cwd).toBeDefined();
 		expect(properties.interval).toBeUndefined();
 		expect(properties.grace).toBeUndefined();
 	});
@@ -1258,7 +1494,7 @@ exec ${JSON.stringify(realGit)} "$@"
 
 		try {
 			const tool = new GithubTool(
-				createSession("/tmp/test", Settings.isolated({ "github.enabled": true }), artifactsDir),
+				createSession(os.tmpdir(), Settings.isolated({ "github.enabled": true }), artifactsDir),
 			);
 			const result = await tool.execute("run-watch", {
 				op: "run_watch",

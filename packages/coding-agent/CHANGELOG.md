@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-call `cwd` selection to the GitHub tool so every operation can target a linked worktree or Git submodule checkout without moving the session ([#6944](https://github.com/can1357/oh-my-pi/pull/6944) by [@joshrzemien](https://github.com/joshrzemien)).
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

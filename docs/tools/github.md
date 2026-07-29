@@ -17,7 +17,8 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `op` | `"repo_view" \| "pr_create" \| "pr_checkout" \| "pr_push" \| "search_issues" \| "search_prs" \| "search_code" \| "search_commits" \| "search_repos" \| "run_watch"` | Yes | Dispatch selector. `GithubTool.execute()` switches only on this field. |
+| `op` | `"repo_view" \| "file_read" \| "pr_create" \| "pr_checkout" \| "pr_push" \| "search_issues" \| "search_prs" \| "search_code" \| "search_commits" \| "search_repos" \| "run_watch"` | Yes | Dispatch selector. `GithubTool.execute()` switches only on this field. |
+| `cwd` | `string` | No | Local checkout used to infer repository, branch, HEAD, remotes, and PR push metadata. Relative paths resolve from the session directory; linked worktrees and Git submodule checkouts are supported. Defaults to the session directory. Accepted by every op and omitted from the op-specific optional-field lists below. |
 | `repo` | `string` | No | `owner/repo` override. Ignored when the identifier argument is already a full GitHub URL. For `search_issues`/`search_prs`/`search_code`/`search_commits`, defaults to the current checkout's `owner/repo` when omitted (skipped when the query already contains a `repo:`/`org:`/`user:`/`owner:` qualifier or when current-repo resolution fails). Required in practice when `gh` cannot infer repo context from the current checkout. |
 | `branch` | `string` | No | Used by `repo_view`, `pr_push`, and `run_watch`. `run_watch` falls back to current git branch when `run` is omitted; `pr_push` falls back to current branch. |
 | `pr` | `string \| string[]` | No | Used by `pr_checkout`. Each item may be a PR number, branch name, or GitHub PR URL. Array form enables batching. Omitted means current branch PR. |
@@ -56,7 +57,7 @@ The tool returns a single text result built by `buildTextResult()` in `packages/
 
 ## Flow
 1. `GithubTool.createIf()` exposes the tool only when `git.github.available()` finds `gh` on `PATH`.
-2. `GithubTool.execute()` wraps dispatch in `untilAborted()` and switches on `params.op`.
+2. `GithubTool.execute()` resolves an optional `cwd` relative to the session directory, verifies that the selected worktree or submodule checkout is a directory, wraps dispatch in `untilAborted()`, and switches on `params.op`.
 3. Each op normalizes optional strings, arrays, booleans, and numeric caps locally in `packages/coding-agent/src/tools/gh.ts`.
 4. CLI execution goes through `git.github.run/json/text()` in `packages/coding-agent/src/utils/git.ts`:
    - spawns `gh ...` with `Bun.spawn()`;
