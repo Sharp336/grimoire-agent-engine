@@ -1,7 +1,8 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatNumber, type logger } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
+import { type CacheMutationLedger, computeCacheHitRatio } from "../../session/cache-attribution";
 
 /**
  * Minimum prefix the previous turn must have READ back from cache before a
@@ -63,6 +64,42 @@ export function detectCacheInvalidation(prev: Usage | undefined, current: Usage)
 	const reprocessedTokens = current.cacheWrite + current.input;
 	if (reprocessedTokens < MIN_CACHE_FOOTPRINT) return undefined;
 	return { reprocessedTokens };
+}
+/**
+ * Attributes a detected prompt-cache invalidation to its cause.
+ *
+ * Runs {@link detectCacheInvalidation}; when the prefix was lost, logs the
+ * reprocessed-token count together with the message-array mutators recorded
+ * for this turn (via {@link CacheMutationLedger}) and the session-cumulative
+ * hit ratio (computed with the same denominator as the status-line `cache_hit`
+ * segment, so the per-turn miss and the session-wide rate are directly
+ * comparable). The ledger is consumed — read and cleared — on every call,
+ * whether or not an invalidation was detected, so tags never leak across turns.
+ *
+ * Returns the {@link CacheInvalidation} (for the transcript marker) when one
+ * was detected, else `undefined`. Does not change detection thresholds.
+ */
+export function reportCacheInvalidation(args: {
+	prev: Usage | undefined;
+	current: Usage;
+	ledger: CacheMutationLedger | undefined;
+	logger: Pick<typeof logger, "warn">;
+	cumulativeUsage?: { cacheRead: number; cacheWrite: number; input: number };
+}): CacheInvalidation | undefined {
+	const { prev, current, ledger, logger, cumulativeUsage } = args;
+	const invalidation = detectCacheInvalidation(prev, current);
+	// Consume every turn so a mutator tag recorded on a turn that did not lose
+	// the prefix (e.g. compaction, which resets the cache baseline) cannot be
+	// mis-attributed to a later invalidation.
+	const tags = ledger ? ledger.consume() : [];
+	if (!invalidation) return undefined;
+	const ratio = cumulativeUsage ? computeCacheHitRatio(cumulativeUsage) : null;
+	logger.warn("prompt-cache invalidation: prefix lost on the wire", {
+		reprocessedTokens: invalidation.reprocessedTokens,
+		tags: [...tags],
+		...(ratio === null ? {} : { cumulativeHitRatio: Math.round((ratio + Number.EPSILON) * 100) / 100 }),
+	});
+	return invalidation;
 }
 
 const CACHE_INVALIDATION_RULE_WIDTH = 10;

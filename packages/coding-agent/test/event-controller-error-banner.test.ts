@@ -131,6 +131,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 			return viewSession;
 		},
 		clearTransientSessionUi: () => {},
+		sessionManager: { getUsageStatistics: () => ({ cacheRead: 0, cacheWrite: 0, input: 0 }) },
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);

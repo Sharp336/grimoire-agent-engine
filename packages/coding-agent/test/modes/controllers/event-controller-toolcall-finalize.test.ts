@@ -67,7 +67,10 @@ function createFixture(streamingMessage: AssistantMessage) {
 		session: { getToolByName: () => undefined },
 		viewSession: { getToolByName: () => undefined },
 		clearTransientSessionUi: () => {},
-		sessionManager: { getCwd: () => process.cwd() },
+		sessionManager: {
+			getCwd: () => process.cwd(),
+			getUsageStatistics: () => ({ cacheRead: 0, cacheWrite: 0, input: 0 }),
+		},
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);

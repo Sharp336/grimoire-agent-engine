@@ -78,6 +78,7 @@ function createFixture(opts: {
 		session: sessionMock,
 		viewSession: sessionMock,
 		clearTransientSessionUi: () => {},
+		sessionManager: { getUsageStatistics: () => ({ cacheRead: 0, cacheWrite: 0, input: 0 }) },
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);

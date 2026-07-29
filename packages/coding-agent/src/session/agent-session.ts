@@ -235,6 +235,7 @@ import {
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
+import { CacheMutationLedger } from "./cache-attribution";
 import {
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
@@ -569,6 +570,13 @@ export class AgentSession {
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
+	/**
+	 * Session-scoped ledger attributing prompt-cache invalidations to the
+	 * message-array mutators that fired on the losing turn. Public so the wire
+	 * transform pipeline (which mutates outbound bytes) and the detection point
+	 * (which reports) share one instance.
+	 */
+	readonly cacheMutationLedger: CacheMutationLedger;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -940,6 +948,7 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			configWarnings: this.configWarnings,
+			recordCacheMutation: tag => this.cacheMutationLedger.record(tag),
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
@@ -1091,6 +1100,7 @@ export class AgentSession {
 			model: () => this.model,
 			memoryBackendSession: () => this,
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
+			recordCacheMutation: tag => this.cacheMutationLedger.record(tag),
 			clearMemoryPromotionSnapshot: () => this.#memory.clearPromotionSnapshot(),
 			captureMemoryPromotionSnapshot: prompt => this.#memory.capturePromotionSnapshot(prompt),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
@@ -1133,6 +1143,7 @@ export class AgentSession {
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
 		this.#obfuscator = config.obfuscator;
+		this.cacheMutationLedger = config.cacheMutationLedger ?? new CacheMutationLedger();
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1303,6 +1314,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			recordCacheMutation: tag => this.cacheMutationLedger.record(tag),
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
@@ -2114,6 +2126,7 @@ export class AgentSession {
 		if (message.stopReason !== "aborted" || !isUserInterruptAbort(message)) return undefined;
 		const demoted = demoteInterruptedThinking(message);
 		if (!demoted) return undefined;
+		this.cacheMutationLedger.record("thinking-demote");
 		const interruptedAt = Date.now();
 		return {
 			role: "custom",

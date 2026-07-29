@@ -8,7 +8,7 @@ import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
-import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
+import { reportCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
 import {
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
@@ -935,14 +935,27 @@ export class EventController {
 				// waiting poll cannot be displaced anymore — freeze it in place.
 				this.#resolveDisplaceablePoll();
 			}
-			// Surface a prompt-cache invalidation: if the previous turn cached a
-			// meaningful prefix and this request read none of it back, flag the turn.
+			// Surface + attribute a prompt-cache invalidation: detect the prefix
+			// loss, log the reprocessed tokens with the mutators active this turn
+			// and the session-cumulative hit ratio, and (when the marker is on)
+			// render the divider. Attribution runs on every turn so the mutation
+			// ledger is consumed even on aborted/all-zero responses — otherwise a
+			// tag recorded this turn (compaction, image-strip) would be mis-attributed
+			// to the next nonzero turn's miss. detectCacheInvalidation returns
+			// undefined for zero traffic, so no warn fires on an empty turn. The
+			// visual marker is setting-gated.
 			const usage = event.message.usage;
+			const invalidation = reportCacheInvalidation({
+				prev: this.ctx.lastAssistantUsage,
+				current: usage,
+				ledger: this.ctx.session.cacheMutationLedger,
+				logger,
+				cumulativeUsage: this.ctx.sessionManager.getUsageStatistics(),
+			});
+			if (invalidation && settings.get("display.cacheMissMarker")) {
+				this.ctx.streamingComponent.setCacheInvalidation(invalidation);
+			}
 			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
-				if (settings.get("display.cacheMissMarker")) {
-					const invalidation = detectCacheInvalidation(this.ctx.lastAssistantUsage, usage);
-					if (invalidation) this.ctx.streamingComponent.setCacheInvalidation(invalidation);
-				}
 				this.ctx.lastAssistantUsage = usage;
 			}
 			this.ctx.streamingComponent.markTranscriptBlockFinalized();
