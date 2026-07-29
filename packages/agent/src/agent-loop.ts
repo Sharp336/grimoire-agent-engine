@@ -1511,6 +1511,7 @@ async function prepareProviderCall(
 	} else {
 		llmContext = {
 			systemPrompt: context.systemPrompt,
+			stableSystemPromptBlockCount: context.stableSystemPromptBlockCount,
 			messages: normalizedMessages,
 			tools: normalizeTools(context.tools, !!config.intentTracing, exampleDialect, pruneToolDescriptions),
 		};

@@ -15,7 +15,9 @@ import { deduplicateMCPToolsByName } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import turnContextPrompt from "../prompts/system/turn-context.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
+import type { SystemPromptPlan } from "../system-prompt";
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
@@ -52,8 +54,6 @@ export interface SessionToolsHost {
 	model(): Model | undefined;
 	memoryBackendSession(): MemoryBackendStartOptions["session"];
 	clearInheritedProviderPromptCacheKey(): void;
-	clearMemoryPromotionSnapshot(): void;
-	captureMemoryPromotionSnapshot(prompt: string[]): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
@@ -72,12 +72,12 @@ interface SessionToolsOptions {
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
-	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<SystemPromptPlan>;
 	getLocalCalendarDate?: () => string;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
-	baseSystemPrompt: string[];
+	baseSystemPromptPlan?: SystemPromptPlan;
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
 	skillsSettings?: SkillsSettings;
@@ -174,7 +174,7 @@ export class SessionTools {
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
-	#baseSystemPrompt: string[];
+	#systemPromptPlan: SystemPromptPlan;
 	#lastAppliedToolSignature: string | undefined;
 	#mcpRefreshTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
@@ -208,7 +208,12 @@ export class SessionTools {
 		}
 		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
-		this.#baseSystemPrompt = options.baseSystemPrompt;
+		const agentStateBoundary = this.#host.agent.state.stableSystemPromptBlockCount;
+		this.#systemPromptPlan = options.baseSystemPromptPlan ?? {
+			systemPrompt: this.#host.agent.state.systemPrompt,
+			stableSystemPromptBlockCount: agentStateBoundary ?? this.#host.agent.state.systemPrompt.length,
+			compositionPolicy: "append-turn-context",
+		};
 		this.#skills = options.skills ?? [];
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
@@ -223,12 +228,17 @@ export class SessionTools {
 
 	/** Current stable base system prompt. */
 	get baseSystemPrompt(): string[] {
-		return this.#baseSystemPrompt;
+		return this.#systemPromptPlan.systemPrompt;
+	}
+
+	/** Current base system prompt plan. */
+	get baseSystemPromptPlan(): SystemPromptPlan {
+		return this.#systemPromptPlan;
 	}
 
 	/** Replaces the controller-owned base prompt without applying it to the agent. */
-	setBaseSystemPrompt(prompt: string[]): void {
-		this.#baseSystemPrompt = prompt;
+	setBaseSystemPrompt(plan: SystemPromptPlan): void {
+		this.#systemPromptPlan = plan;
 	}
 
 	/** Skills currently rendered into the system prompt. */
@@ -597,14 +607,14 @@ export class SessionTools {
 		this.#setMountedNames(mountNames);
 		this.#setActiveToolNames?.(validToolNames);
 
-		let rebuiltSystemPrompt: string[] | undefined;
+		let rebuiltSystemPromptPlan: SystemPromptPlan | undefined;
 		let rebuiltSignature: string | undefined;
 		try {
 			if (this.#rebuildSystemPrompt) {
 				const signature = this.#computeAppliedToolSignature(validToolNames, tools);
 				if (signature !== this.#lastAppliedToolSignature) {
 					const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
-					rebuiltSystemPrompt = built.systemPrompt;
+					rebuiltSystemPromptPlan = built;
 					rebuiltSignature = signature;
 				}
 			}
@@ -622,11 +632,13 @@ export class SessionTools {
 
 		this.#notifyXdevMountDelta(previousMounted);
 		this.#host.agent.setTools(tools);
-		if (rebuiltSystemPrompt && rebuiltSignature) {
+		if (rebuiltSystemPromptPlan && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
-			this.#baseSystemPrompt = rebuiltSystemPrompt;
-			this.#host.clearMemoryPromotionSnapshot();
-			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
+			this.#systemPromptPlan = rebuiltSystemPromptPlan;
+			this.#host.agent.setSystemPrompt(
+				this.#systemPromptPlan.systemPrompt,
+				this.#systemPromptPlan.stableSystemPromptBlockCount,
+			);
 			this.#lastAppliedToolSignature = rebuiltSignature;
 			this.#promptModelKey = this.#currentPromptModelKey();
 		}
@@ -960,18 +972,22 @@ export class SessionTools {
 		if (this.#host.isDisposed() || !this.#rebuildSystemPrompt) return;
 		const activeToolNames = this.getActiveToolNames();
 		this.#setActiveToolNames?.(activeToolNames);
-		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const previousSystemPromptPlan = this.#systemPromptPlan;
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
-		this.#baseSystemPrompt = built.systemPrompt;
-		this.#host.clearMemoryPromotionSnapshot();
+		this.#systemPromptPlan = built;
 		if (
-			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
-			previousBaseSystemPrompt.some((part, index) => part !== this.#baseSystemPrompt[index])
+			previousSystemPromptPlan.systemPrompt.length !== this.#systemPromptPlan.systemPrompt.length ||
+			previousSystemPromptPlan.systemPrompt.some(
+				(part, index) => part !== this.#systemPromptPlan.systemPrompt[index],
+			)
 		) {
 			this.#host.clearInheritedProviderPromptCacheKey();
 		}
-		this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
+		this.#host.agent.setSystemPrompt(
+			this.#systemPromptPlan.systemPrompt,
+			this.#systemPromptPlan.stableSystemPromptBlockCount,
+		);
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we
@@ -982,43 +998,62 @@ export class SessionTools {
 		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(activeToolNames, activeTools);
 	}
 
-	/** Applies one-turn memory prompt injection before an agent run. */
-	async buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+	/** Builds the stable prompt plus volatile turn context before an agent run. */
+	async buildSystemPromptForAgentStart(promptText: string): Promise<SystemPromptPlan> {
+		if (this.#systemPromptPlan.compositionPolicy === "verbatim") return this.#systemPromptPlan;
+
+		const turnContext = prompt.render(turnContextPrompt, { date: this.#getLocalCalendarDate() }).trim();
 		const backend = await resolveMemoryBackend(this.#host.settings);
-		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
+		if (!backend.beforeAgentStartPrompt) {
+			return {
+				...this.#systemPromptPlan,
+				systemPrompt: [...this.#systemPromptPlan.systemPrompt, turnContext],
+			};
+		}
 
 		try {
 			const injected = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
-			if (!injected) return this.#baseSystemPrompt;
-
-			const previousBaseSystemPrompt = this.#baseSystemPrompt;
-			try {
-				await this.refreshBaseSystemPrompt();
-			} catch (refreshErr) {
-				logger.debug("Memory backend prompt refresh after beforeAgentStartPrompt failed", {
-					backend: backend.id,
-					error: String(refreshErr),
-				});
-			}
-
-			if (
-				this.#baseSystemPrompt.length !== previousBaseSystemPrompt.length ||
-				this.#baseSystemPrompt.some((part, index) => part !== previousBaseSystemPrompt[index])
-			) {
-				return this.#baseSystemPrompt;
-			}
-
-			this.#host.captureMemoryPromotionSnapshot(previousBaseSystemPrompt);
-			const stablePrompt = [...previousBaseSystemPrompt, injected];
-			this.#baseSystemPrompt = stablePrompt;
-			this.#host.agent.setSystemPrompt(stablePrompt);
-			return stablePrompt;
+			return {
+				...this.#systemPromptPlan,
+				systemPrompt: injected
+					? [...this.#systemPromptPlan.systemPrompt, turnContext, injected]
+					: [...this.#systemPromptPlan.systemPrompt, turnContext],
+			};
 		} catch (err) {
 			logger.debug("Memory backend beforeAgentStartPrompt failed", {
 				backend: backend.id,
 				error: String(err),
 			});
-			return this.#baseSystemPrompt;
+			return {
+				...this.#systemPromptPlan,
+				systemPrompt: [...this.#systemPromptPlan.systemPrompt, turnContext],
+			};
+		}
+	}
+
+	/** Builds the stable prompt plus side-request recall context for an ephemeral turn. */
+	async buildSystemPromptForSideRequest(promptText: string): Promise<SystemPromptPlan> {
+		if (this.#systemPromptPlan.compositionPolicy === "verbatim") return this.#systemPromptPlan;
+
+		const turnContext = prompt.render(turnContextPrompt, { date: this.#getLocalCalendarDate() }).trim();
+		const backend = await resolveMemoryBackend(this.#host.settings);
+		try {
+			const injected = await backend.beforeSideRequestPrompt(this.#host.memoryBackendSession(), promptText);
+			return {
+				...this.#systemPromptPlan,
+				systemPrompt: injected
+					? [...this.#systemPromptPlan.systemPrompt, turnContext, injected]
+					: [...this.#systemPromptPlan.systemPrompt, turnContext],
+			};
+		} catch (err) {
+			logger.debug("Memory backend beforeSideRequestPrompt failed", {
+				backend: backend.id,
+				error: String(err),
+			});
+			return {
+				...this.#systemPromptPlan,
+				systemPrompt: [...this.#systemPromptPlan.systemPrompt, turnContext],
+			};
 		}
 	}
 
@@ -1056,11 +1091,6 @@ export class SessionTools {
 	 * closure-captured ones cannot change at runtime regardless of skip behavior.
 	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
 	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.
-	 *
-	 * The current calendar date IS covered (appended as a segment) because
-	 * `buildSystemPrompt` injects it into the prompt body (`Today is '{{date}}'`).
-	 * Without this, a session spanning midnight with only tool-stable MCP
-	 * reconnects would keep yesterday's date indefinitely.
 	 */
 	#computeAppliedToolSignature(toolNames: string[], tools: AgentTool[]): string {
 		// Order-preserving join: any reorder must produce a different signature so
@@ -1094,8 +1124,7 @@ export class SessionTools {
 		// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
 		// exception above, bounded to the exact projection rendered in the global
 		// route guidance so churn wholly behind its fallback does not rebuild.
-		const date = this.#getLocalCalendarDate();
-		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}|${date}`;
+		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}`;
 	}
 
 	/**

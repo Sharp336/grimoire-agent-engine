@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Agent provider contexts now carry the stable system-prompt prefix boundary, preserving explicit cache placement through normal, side-channel, and append-only calls.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed

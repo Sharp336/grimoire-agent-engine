@@ -163,7 +163,7 @@ describe("AgentSession plan-mode convergence", () => {
 			rebuildSystemPrompt: options?.rebuildGate
 				? async () => {
 						if (options.rebuildGate?.fail) throw new Error("rebuild failed");
-						return { systemPrompt: ["Test"] };
+						return { systemPrompt: ["Test"], compositionPolicy: "append-turn-context" };
 					}
 				: undefined,
 		});

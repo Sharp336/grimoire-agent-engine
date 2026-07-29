@@ -89,15 +89,13 @@ export const hindsightBackend: MemoryBackend = {
 
 		const state = session?.getHindsightSessionState();
 		const primary = state?.aliasOf ?? state;
-		const recallSnippet = primary?.lastRecallSnippet;
 		const mentalModelsSnippet = primary?.mentalModelsSnippet;
 
-		// Order: static instructions → mental models (stable, curated) → recall
-		// (volatile per turn). Stable context first so the LLM's prior is
-		// anchored on curated knowledge.
+		// Stable developer instructions only: static instructions → mental
+		// models (stable, curated). Volatile recall context is injected per
+		// turn via `beforeAgentStartPrompt` and never enters the stable prefix.
 		const parts = [STATIC_INSTRUCTIONS];
 		if (mentalModelsSnippet) parts.push(mentalModelsSnippet);
-		if (recallSnippet) parts.push(recallSnippet);
 		return parts.join("\n\n");
 	},
 
@@ -106,6 +104,11 @@ export const hindsightBackend: MemoryBackend = {
 		if (!state) return undefined;
 
 		return await state.beforeAgentStartPrompt(promptText);
+	},
+
+	async beforeSideRequestPrompt(session: AgentSession, promptText: string): Promise<string | undefined> {
+		const state = session.getHindsightSessionState();
+		return await state?.beforeSideRequestPrompt(promptText);
 	},
 
 	async clear(_agentDir, _cwd, session): Promise<void> {

@@ -9,8 +9,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { buildSystemPrompt, type SystemPromptPlan } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { usesCodexTaskPrompt } from "@oh-my-pi/pi-coding-agent/task/prompt-policy";
+import { formatLocalCalendarDate } from "@oh-my-pi/pi-coding-agent/utils/local-date";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
@@ -22,68 +23,22 @@ const EMPTY_TREE = {
 	agentsMdFiles: [],
 };
 
-async function expectPromptDateFromStartupTimezone(options: {
-	tempDir: string;
-	tempHomeDir: string;
-	timeZone: string;
-	now: string;
-	expectedDate: string;
-	rejectedDate: string;
-}): Promise<void> {
-	const scenarioPath = path.join(options.tempDir, "prompt-date-timezone.test.ts");
-	await Bun.write(
-		scenarioPath,
-		`import { expect, it, setSystemTime } from "bun:test";
-import { buildSystemPrompt } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/system-prompt.ts"))};
-
-it("renders the prompt date in the startup timezone", async () => {
-	setSystemTime(new Date(process.env.OMP_TEST_NOW!));
-	try {
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: process.cwd(),
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			toolNames: [],
-			workspaceTree: {
-				rootPath: process.cwd(),
-				rendered: "",
-				truncated: false,
-				totalLines: 0,
-				agentsMdFiles: [],
-			},
-			activeRepoContext: null,
-		});
-		const rendered = systemPrompt.join("\\n\\n");
-		expect(rendered).toContain(\`Today is \${process.env.OMP_EXPECTED_DATE}\`);
-		expect(rendered).not.toContain(\`Today is \${process.env.OMP_REJECTED_DATE}\`);
-	} finally {
-		setSystemTime();
-	}
-});
-`,
-	);
-	const child = Bun.spawn([process.execPath, "test", scenarioPath], {
-		cwd: options.tempDir,
-		env: {
-			...process.env,
-			HOME: options.tempHomeDir,
-			TZ: options.timeZone,
-			OMP_TEST_NOW: options.now,
-			OMP_EXPECTED_DATE: options.expectedDate,
-			OMP_REJECTED_DATE: options.rejectedDate,
-		},
-		stdout: "pipe",
-		stderr: "pipe",
+describe("formatLocalCalendarDate timezone", () => {
+	it("formats the local calendar date in the host timezone, not UTC", () => {
+		// 2026-07-01T03:15:00Z is 2026-06-30 in America/Los_Angeles (UTC-7).
+		// formatLocalCalendarDate uses getFullYear/getMonth/getDate which respect TZ.
+		const previousTz = process.env.TZ;
+		try {
+			process.env.TZ = "America/Los_Angeles";
+			const date = new Date("2026-07-01T03:15:00Z");
+			expect(formatLocalCalendarDate(date)).toBe("2026-06-30");
+			expect(formatLocalCalendarDate(date)).not.toBe("2026-07-01");
+		} finally {
+			if (previousTz === undefined) delete process.env.TZ;
+			else process.env.TZ = previousTz;
+		}
 	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
-		child.exited,
-	]);
-	expect(`${stdout}\n${stderr}`).toContain("1 pass");
-	expect(exitCode).toBe(0);
-}
+});
 
 describe("system prompt model identifier", () => {
 	let tempDir = "";
@@ -113,15 +68,19 @@ describe("system prompt model identifier", () => {
 		expect(systemPrompt.join("\n\n")).toContain("Model: anthropic/claude-opus-4");
 	});
 
-	it("renders the prompt date from the startup local timezone rather than UTC", async () => {
-		await expectPromptDateFromStartupTimezone({
-			tempDir,
-			tempHomeDir,
-			timeZone: "America/Los_Angeles",
-			now: "2026-07-01T03:15:00Z",
-			expectedDate: "2026-06-30",
-			rejectedDate: "2026-07-01",
+	it("does not render the date into the stable base prompt", async () => {
+		// The date is a volatile suffix injected per-turn via turn-context.md;
+		// buildSystemPrompt must keep it out of the stable prefix so the cache
+		// breakpoint is byte-stable across midnight.
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
+		expect(systemPrompt.join("\n\n")).not.toContain("Today is ");
 	});
 
 	it("omits the model line when no model is provided", async () => {
@@ -135,6 +94,43 @@ describe("system prompt model identifier", () => {
 		});
 
 		expect(systemPrompt.join("\n\n")).not.toContain("Model:");
+	});
+});
+
+describe("SystemPromptPlan NULL_PROMPT and verbatim override", () => {
+	let tempDir = "";
+	let tempHomeDir = "";
+	let originalHome: string | undefined;
+	let originalNullPrompt: string | undefined;
+
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-null-"));
+		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-null-home-"));
+		originalHome = process.env.HOME;
+		originalNullPrompt = Bun.env.NULL_PROMPT;
+		process.env.HOME = tempHomeDir;
+	});
+
+	afterEach(() => {
+		if (originalNullPrompt === undefined) delete Bun.env.NULL_PROMPT;
+		else Bun.env.NULL_PROMPT = originalNullPrompt;
+		cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
+	});
+
+	it("returns empty verbatim plan with no date or backend side effects under NULL_PROMPT", async () => {
+		Bun.env.NULL_PROMPT = "true";
+		const plan = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+		});
+		expect(plan.systemPrompt).toEqual([]);
+		expect(plan.stableSystemPromptBlockCount).toBe(0);
+		expect(plan.compositionPolicy).toBe("verbatim");
+		// No date rendered — the volatile suffix is never built under NULL_PROMPT.
+		expect(plan.systemPrompt.join("\n\n")).not.toContain("Today is ");
 	});
 });
 
@@ -187,11 +183,7 @@ describe("AgentSession model-change prompt refresh", () => {
 		return [defaultPolicy, codexPolicy];
 	}
 
-	function newSession(
-		model: Model,
-		settings: Settings,
-		rebuild: () => Promise<{ systemPrompt: string[] }>,
-	): AgentSession {
+	function newSession(model: Model, settings: Settings, rebuild: () => Promise<SystemPromptPlan>): AgentSession {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
@@ -216,7 +208,10 @@ describe("AgentSession model-change prompt refresh", () => {
 		session = newSession(modelA, Settings.isolated({ "compaction.enabled": false }), async () => {
 			rebuildCount++;
 			const active = session?.model;
-			return { systemPrompt: [`model:${active ? `${active.provider}/${active.id}` : ""}`] };
+			return {
+				systemPrompt: [`model:${active ? `${active.provider}/${active.id}` : ""}`],
+				compositionPolicy: "append-turn-context",
+			};
 		});
 
 		await session.setModel(modelB);
@@ -239,7 +234,7 @@ describe("AgentSession model-change prompt refresh", () => {
 			Settings.isolated({ "compaction.enabled": false, includeModelInPrompt: false }),
 			async () => {
 				rebuildCount++;
-				return { systemPrompt: ["unchanged"] };
+				return { systemPrompt: ["unchanged"], compositionPolicy: "append-turn-context" };
 			},
 		);
 
@@ -259,7 +254,7 @@ describe("AgentSession model-change prompt refresh", () => {
 			Settings.isolated({ "compaction.enabled": false, includeModelInPrompt: false }),
 			async () => {
 				rebuildCount++;
-				return { systemPrompt: ["policy changed"] };
+				return { systemPrompt: ["policy changed"], compositionPolicy: "append-turn-context" };
 			},
 		);
 

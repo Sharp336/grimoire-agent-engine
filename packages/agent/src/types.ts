@@ -651,6 +651,8 @@ export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessag
  */
 export interface AgentState {
 	systemPrompt: string[];
+	/** Leading system-prompt blocks that can retain an explicit provider cache breakpoint. */
+	stableSystemPromptBlockCount?: number;
 	model: Model;
 	thinkingLevel?: Effort;
 	disableReasoning?: boolean;
@@ -830,6 +832,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 // AgentContext is like Context but uses AgentTool
 export interface AgentContext {
 	systemPrompt: string[];
+	stableSystemPromptBlockCount?: number;
 	messages: AgentMessage[];
 	tools?: AgentTool<any>[];
 }

@@ -11,6 +11,9 @@ export const offBackend: MemoryBackend = {
 	async buildDeveloperInstructions() {
 		return undefined;
 	},
+	async beforeSideRequestPrompt() {
+		return undefined;
+	},
 	async clear() {},
 	async enqueue() {},
 	async status() {

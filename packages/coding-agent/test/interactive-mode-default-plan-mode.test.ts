@@ -109,7 +109,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 				? async () => {
 						if (options.rebuildGate) options.rebuildGate.calls = (options.rebuildGate.calls ?? 0) + 1;
 						if (options.rebuildGate?.fail) throw new Error("rebuild failed");
-						return { systemPrompt: ["Test"] };
+						return { systemPrompt: ["Test"], compositionPolicy: "append-turn-context" };
 					}
 				: undefined,
 			xdev,

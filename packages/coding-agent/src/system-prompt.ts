@@ -24,10 +24,10 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import toolInventoryTemplate from "./prompts/system/tool-inventory.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import { usesCodexTaskPrompt } from "./task/prompt-policy";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
-import { formatLocalCalendarDate } from "./utils/local-date";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
@@ -549,15 +549,22 @@ export interface BuildSystemPromptOptions {
 }
 
 /** Result of building provider-facing system prompt messages. */
-export interface BuildSystemPromptResult {
+export interface SystemPromptPlan {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
+	/** Number of leading blocks that remain stable across project-context and tool changes. */
+	stableSystemPromptBlockCount?: number;
+	/** Whether turn-specific context may be appended to the bundled prompt. */
+	compositionPolicy: SystemPromptCompositionPolicy;
 }
 
+/** Controls whether the session may append turn-specific context to a prompt plan. */
+export type SystemPromptCompositionPolicy = "append-turn-context" | "verbatim";
+
 /** Build the system prompt with tools, guidelines, and context */
-export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
+export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<SystemPromptPlan> {
 	if ($env.NULL_PROMPT === "true") {
-		return { systemPrompt: [] };
+		return { systemPrompt: [], stableSystemPromptBlockCount: 0, compositionPolicy: "verbatim" };
 	}
 
 	const {
@@ -763,8 +770,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		}
 	}
 
-	const date = formatLocalCalendarDate();
-	const dateTime = date;
 	const promptCwd = normalizePromptPath(resolvedCwd);
 	const activeRepoContextPrompt = renderActiveRepoContextPrompt(activeRepoContext);
 
@@ -850,8 +855,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
-		date,
-		dateTime,
 		cwd: promptCwd,
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
@@ -878,6 +881,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	if (toolNames.includes("computer")) {
 		systemPrompt.push(computerSafetyPrompt.trim());
 	}
+	const stableSystemPromptBlockCount = systemPrompt.length;
 	// Custom prompt templates already render context files and append text; the
 	// project footer still carries environment, cwd, workspace, and dir-context.
 	const projectPrompt = prompt
@@ -889,6 +893,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	if (activeRepoContextPrompt) {
 		systemPrompt.push(activeRepoContextPrompt);
 	}
+	const renderedToolInventory = prompt.render(toolInventoryTemplate, data).trim();
+	if (renderedToolInventory) {
+		systemPrompt.push(renderedToolInventory);
+	}
 
-	return { systemPrompt };
+	return {
+		systemPrompt,
+		stableSystemPromptBlockCount,
+		compositionPolicy: "append-turn-context",
+	};
 }

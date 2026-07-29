@@ -426,7 +426,6 @@ export class HindsightSessionState {
 		if (!context) return;
 
 		this.lastRecallSnippet = context;
-		await this.#refreshBaseSystemPromptAfter("recall");
 	}
 
 	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
@@ -434,7 +433,11 @@ export class HindsightSessionState {
 			await Promise.race([this.mentalModelsLoadPromise, Bun.sleep(MENTAL_MODEL_FIRST_TURN_DEADLINE_MS)]);
 		}
 
-		if (!this.config.autoRecall || this.hasRecalledForFirstTurn) return undefined;
+		// Aliases never start recall; they replay the primary's cached snippet.
+		if (this.aliasOf) return this.aliasOf.lastRecallSnippet;
+
+		if (!this.config.autoRecall) return undefined;
+		if (this.hasRecalledForFirstTurn) return this.lastRecallSnippet;
 
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
@@ -451,6 +454,19 @@ export class HindsightSessionState {
 
 		this.lastRecallSnippet = context;
 		return context;
+	}
+
+	async beforeSideRequestPrompt(promptText: string): Promise<string | undefined> {
+		if (!this.config.autoRecall) return undefined;
+		const latestPrompt = promptText.trim();
+		if (!latestPrompt) return undefined;
+
+		const history = extractMessages(this.session.sessionManager);
+		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
+		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
+		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
+		const { context, ok } = await this.recallForContext(truncated);
+		return ok ? (context ?? undefined) : undefined;
 	}
 
 	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {
@@ -540,7 +556,7 @@ export class HindsightSessionState {
 		this.retainQueue.dispose();
 	}
 
-	async #refreshBaseSystemPromptAfter(reason: "recall" | "MM load" | "MM reload" | "MM TTL reload"): Promise<void> {
+	async #refreshBaseSystemPromptAfter(reason: "MM load" | "MM reload" | "MM TTL reload"): Promise<void> {
 		try {
 			await this.session.refreshBaseSystemPrompt();
 		} catch (err) {

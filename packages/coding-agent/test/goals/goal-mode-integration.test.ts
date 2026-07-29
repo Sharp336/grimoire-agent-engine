@@ -88,7 +88,7 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		settings,
 		modelRegistry,
 		toolRegistry,
-		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
+		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"], compositionPolicy: "append-turn-context" }),
 	});
 	const mode = new InteractiveMode(session, "test");
 	const toolSession = createToolSession(tempDir.path(), settings, {

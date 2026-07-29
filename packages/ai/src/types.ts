@@ -1086,6 +1086,13 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 
 export interface Context {
 	systemPrompt?: string[];
+	/** Number of leading system-prompt blocks safe to cache independently of volatile suffix blocks. */
+	stableSystemPromptBlockCount?: number;
+	/**
+	 * Session-stable seed for Anthropic OAuth's Claude Code billing header.
+	 * It is provider request metadata, never a model-visible message.
+	 */
+	anthropicBillingSeed?: string;
 	messages: Message[];
 	tools?: Tool[];
 }

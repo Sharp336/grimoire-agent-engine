@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Anthropic explicit prompt caching can target a declared stable system-prompt prefix instead of invalidating it when later system blocks change.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

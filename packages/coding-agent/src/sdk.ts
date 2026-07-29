@@ -155,10 +155,10 @@ import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
-	type BuildSystemPromptResult,
 	buildSystemPrompt as buildSystemPromptInternal,
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
+	type SystemPromptPlan,
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
@@ -819,7 +819,7 @@ export interface BuildSystemPromptOptions {
  * The returned `systemPrompt` preserves the stable harness prompt and dynamic project context
  * as separate entries so providers can cache prompt prefixes without concatenating blocks.
  */
-export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
+export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<SystemPromptPlan> {
 	const toolNames = options.tools?.map(tool => tool.name);
 	const toolMap = options.tools ? new Map(options.tools.map(tool => [tool.name, tool])) : undefined;
 	const promptTools = toolMap
@@ -2647,7 +2647,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
-		): Promise<BuildSystemPromptResult> => {
+		): Promise<SystemPromptPlan> => {
 			toolContextStore.setToolNames(toolNames);
 			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
@@ -2762,6 +2762,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: options.systemPrompt;
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				stableSystemPromptBlockCount: undefined,
+				compositionPolicy: "verbatim",
 			};
 		};
 
@@ -2870,12 +2872,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		setActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const systemPromptPlan = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
 			toolRegistry,
 		);
+		const { systemPrompt, stableSystemPromptBlockCount } = systemPromptPlan;
 
 		const promptTemplates = await promptTemplatesPromise;
 		toolSession.promptTemplates = promptTemplates;
@@ -2994,6 +2997,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
+				stableSystemPromptBlockCount,
 				model,
 				thinkingLevel: toReasoningEffort(effectiveThinkingLevel),
 				disableReasoning: shouldDisableReasoning(effectiveThinkingLevel),
@@ -3190,6 +3194,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			systemPromptPlan,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,

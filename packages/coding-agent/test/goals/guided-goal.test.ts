@@ -63,7 +63,7 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 		settings,
 		modelRegistry,
 		toolRegistry,
-		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
+		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"], compositionPolicy: "append-turn-context" }),
 	});
 	// Mirror sdk.ts assembly: the goal tool is pre-registered (hidden) whenever
 	// goal.enabled, so /guided-goal can activate it by name for the interview.

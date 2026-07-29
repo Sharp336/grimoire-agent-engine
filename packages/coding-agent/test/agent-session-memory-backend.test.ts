@@ -83,6 +83,7 @@ describe("AgentSession memory backend lifecycle", () => {
 			builtInToolNames: [read.name],
 			rebuildSystemPrompt: async toolNames => ({
 				systemPrompt: [`backend:${settings.get("memory.backend")};tools:${toolNames.sort().join(",")}`],
+				compositionPolicy: "append-turn-context",
 			}),
 		});
 		return session;

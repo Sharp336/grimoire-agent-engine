@@ -172,6 +172,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
+import type { SystemPromptPlan } from "../system-prompt";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -502,6 +503,7 @@ export class AgentSession {
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
+	#sideRequestAnthropicBillingSeed: { sessionId: string; seed: string } | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
@@ -984,10 +986,6 @@ export class AgentSession {
 			setHindsightSessionState: state => this.setHindsightSessionState(state),
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
-			setBaseSystemPrompt: prompt => {
-				this.#tools.setBaseSystemPrompt(prompt);
-				this.agent.setSystemPrompt(prompt);
-			},
 			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
 			replaceMemoryTools: tools => this.#tools.replaceMemoryTools(tools),
 		};
@@ -1091,8 +1089,6 @@ export class AgentSession {
 			model: () => this.model,
 			memoryBackendSession: () => this,
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
-			clearMemoryPromotionSnapshot: () => this.#memory.clearPromotionSnapshot(),
-			captureMemoryPromotionSnapshot: prompt => this.#memory.capturePromotionSnapshot(prompt),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
@@ -1115,7 +1111,7 @@ export class AgentSession {
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
 			setActiveToolNames: config.setActiveToolNames,
-			baseSystemPrompt: this.agent.state.systemPrompt,
+			baseSystemPromptPlan: config.systemPromptPlan,
 			skills: config.skills,
 			skillWarnings: config.skillWarnings,
 			skillsSettings: config.skillsSettings,
@@ -1370,7 +1366,7 @@ export class AgentSession {
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
 			sessionFile: () => this.sessionFile,
-			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
+			baseSystemPromptPlan: () => this.#tools.baseSystemPromptPlan,
 			assertVibeSessionTransitionAllowed: action => this.#assertVibeSessionTransitionAllowed(action),
 			setSkipPostTurnMaintenance: timestamp => {
 				this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = timestamp;
@@ -4085,8 +4081,12 @@ export class AgentSession {
 		return this.#tools.refreshBaseSystemPrompt();
 	}
 
-	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+	#buildSystemPromptForAgentStart(promptText: string): Promise<SystemPromptPlan> {
 		return this.#tools.buildSystemPromptForAgentStart(promptText);
+	}
+
+	#buildSystemPromptForSideRequest(promptText: string): Promise<SystemPromptPlan> {
+		return this.#tools.buildSystemPromptForSideRequest(promptText);
 	}
 
 	/** Replaces connected MCP tools and enables them immediately. */
@@ -5017,7 +5017,7 @@ export class AgentSession {
 				const result = await this.#extensionRunner.emitBeforeAgentStart(
 					expandedText,
 					options?.images,
-					beforeAgentStartSystemPrompt,
+					beforeAgentStartSystemPrompt.systemPrompt,
 				);
 				if (result?.messages) {
 					const promptAttribution: "user" | "agent" | undefined =
@@ -5048,10 +5048,16 @@ export class AgentSession {
 				if (result?.systemPrompt !== undefined) {
 					this.agent.setSystemPrompt(result.systemPrompt);
 				} else {
-					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+					this.agent.setSystemPrompt(
+						beforeAgentStartSystemPrompt.systemPrompt,
+						beforeAgentStartSystemPrompt.stableSystemPromptBlockCount,
+					);
 				}
 			} else {
-				this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+				this.agent.setSystemPrompt(
+					beforeAgentStartSystemPrompt.systemPrompt,
+					beforeAgentStartSystemPrompt.stableSystemPromptBlockCount,
+				);
 			}
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
@@ -6824,7 +6830,10 @@ export class AgentSession {
 		const cacheSessionId = this.sessionId;
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
-		const context = await this.agent.buildSideRequestContext(llmMessages);
+		const systemPromptPlan = await this.#buildSystemPromptForSideRequest(args.promptText);
+		const context = await this.agent.buildSideRequestContext(llmMessages, systemPromptPlan, {
+			anthropicBillingSeed: this.#getSideRequestAnthropicBillingSeed(cacheSessionId),
+		});
 		const options = this.prepareSimpleStreamOptions(
 			{
 				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
@@ -6952,6 +6961,31 @@ export class AgentSession {
 		return messages;
 	}
 
+	#getSideRequestAnthropicBillingSeed(sessionId: string): string {
+		if (this.#sideRequestAnthropicBillingSeed?.sessionId === sessionId) {
+			return this.#sideRequestAnthropicBillingSeed.seed;
+		}
+
+		const firstUserMessage = this.messages.find((message): message is UserMessage => message.role === "user");
+		// No persisted user message yet (e.g. a side request before the first main
+		// turn): return a transient empty seed WITHOUT freezing it. Freezing "" here
+		// would make every later side request derive an empty Anthropic billing
+		// header while main OAuth requests derive a nonempty one from the first user
+		// text, breaking prefix identity through cache_control. Only a first user
+		// message *object* — including an explicit empty-text one — is a settled
+		// seed worth caching for the rest of the provider session.
+		if (firstUserMessage === undefined) {
+			return "";
+		}
+		const content = firstUserMessage.content;
+		const seed =
+			typeof content === "string"
+				? content
+				: (content.find((block): block is TextContent => block.type === "text")?.text ?? "");
+		this.#sideRequestAnthropicBillingSeed = { sessionId, seed };
+		return seed;
+	}
+
 	// =========================================================================
 	// Session Management
 	// =========================================================================
@@ -7024,9 +7058,9 @@ export class AgentSession {
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousTools = [...this.agent.state.tools];
-		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
+		const previousBaseSystemPromptPlan = this.#tools.baseSystemPromptPlan;
 		const previousSystemPrompt = this.agent.state.systemPrompt;
-		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
+		const previousStableSystemPromptBlockCount = this.agent.state.stableSystemPromptBlockCount;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
 
@@ -7190,9 +7224,8 @@ export class AgentSession {
 			this.#syncAgentSessionId(previousSessionState.sessionId);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
-			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
-			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
-			this.agent.setSystemPrompt(previousSystemPrompt);
+			this.#tools.setBaseSystemPrompt(previousBaseSystemPromptPlan);
+			this.agent.setSystemPrompt(previousSystemPrompt, previousStableSystemPromptBlockCount);
 			this.agent.replaceMessages(previousAgentMessages);
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;

@@ -143,11 +143,21 @@ export interface MemoryBackend {
 	 * system prompt before the agent starts generating.
 	 *
 	 * This is the only place a backend can affect the very first answer of a
-	 * fresh session. The returned text is appended to the already-built base
-	 * system prompt for this turn only; callers may separately cache it and
-	 * surface it through `buildDeveloperInstructions()` on later rebuilds.
+	 * fresh session. The returned text is volatile: it is appended to the
+	 * already-built base system prompt for this turn only and is never folded
+	 * into the stable developer instructions. Backends cache the snippet and
+	 * replay it on every subsequent call until the session's transcript resets,
+	 * so the recalled context persists across turns without entering the
+	 * stable prefix.
 	 */
 	beforeAgentStartPrompt?(session: AgentSession, promptText: string): Promise<string | undefined>;
+
+	/**
+	 * Inject volatile recall context for an ephemeral side request. This operation
+	 * MUST recall for `promptText` each time and MUST NOT replace the snippet
+	 * cached by `beforeAgentStartPrompt` for normal agent turns.
+	 */
+	beforeSideRequestPrompt(session: AgentSession, promptText: string): Promise<string | undefined>;
 
 	/**
 	 * Optional hook to splice extra context into a compaction summarization.
