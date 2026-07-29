@@ -49,6 +49,7 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
+import { resolveToolTier } from "../tools/approval";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
@@ -2848,9 +2849,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				context: options.context?.trim() ?? "",
 				outputSchema: normalizedOutputSchema ? JSON.stringify(normalizedOutputSchema, null, 2) : "",
 			});
-			const installForkContext = (target: AgentSession, appendNotice: boolean): void => {
+			const installForkRestrictions = (target: AgentSession, appendNotice: boolean): void => {
 				if (!useFork) return;
 				target.setTodoPhases([]);
+				const beforeToolCall = target.agent.beforeToolCall;
+				target.agent.beforeToolCall = async (ctx, toolSignal) => {
+					const inherited = await beforeToolCall?.(ctx, toolSignal);
+					if (inherited?.block) return inherited;
+					const effectiveArgs = inherited?.args ?? ctx.args;
+					if (resolveToolTier(ctx.tool, effectiveArgs) !== "read") {
+						return { block: true, reason: "Forked task agents are read-only; return findings to the parent." };
+					}
+					return inherited;
+				};
 				const injectNotice = () => {
 					const message = {
 						role: "developer",
@@ -2962,7 +2973,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
-			installForkContext(session, true);
+			installForkRestrictions(session, true);
 			installRegistryStatusSync(session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
@@ -2979,7 +2990,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const { session: revived } = await createAgentSession(
 						buildSubagentSessionOptions(reopened, expectedAgentRef),
 					);
-					installForkContext(revived, false);
+					installForkRestrictions(revived, false);
 					installRegistryStatusSync(revived);
 					return revived;
 				};

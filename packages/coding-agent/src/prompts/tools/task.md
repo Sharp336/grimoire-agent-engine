@@ -25,7 +25,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
   - `agent`: The agent type running this item (e.g. `scout`, `reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
-  - `source`: `fresh` starts blank. `fork` inherits the completed parent conversation. `auto` forks when the parent context is available and otherwise starts fresh. Source selection does not change the selected agent's tools. A fork can miss the provider prompt cache when the child tool catalog differs. Use `fork` when prior conversation context is important and `fresh` for independent work.
+  - `source`: `fresh` starts blank and can use the selected agent's normal tools. `fork` inherits the completed parent conversation but is always read-only. `auto` forks when the parent context is available and otherwise starts fresh. A fork can miss the provider prompt cache when the child tool catalog differs. Use `fork` only for context-heavy investigation or review; use `fresh` for implementation, independent review, or isolated worktree tasks.
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
@@ -41,7 +41,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
 - `agent`: The agent type to spawn (e.g. `scout`, `reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
-- `source`: `fresh` starts blank. `fork` inherits the completed parent conversation. `auto` forks when the parent context is available and otherwise starts fresh. Source selection does not change the selected agent's tools. A fork can miss the provider prompt cache when the child tool catalog differs. Use `fork` when prior conversation context is important and `fresh` for independent work.
+- `source`: `fresh` starts blank and can use the selected agent's normal tools. `fork` inherits the completed parent conversation but is always read-only. `auto` forks when the parent context is available and otherwise starts fresh. A fork can miss the provider prompt cache when the child tool catalog differs. Use `fork` only for context-heavy investigation or review; use `fresh` for implementation, independent review, or isolated worktree tasks.
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
