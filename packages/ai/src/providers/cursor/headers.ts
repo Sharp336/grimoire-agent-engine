@@ -28,8 +28,8 @@ export interface CursorHeaderParams {
 	apiKey: string;
 	/** Explicit per-request client-version override (highest precedence). */
 	clientVersion?: string;
-	/** Stable id shared by every attempt in one logical turn. */
-	originalRequestId: string;
+	/** Stable id shared by every agent-stream attempt in one logical turn. */
+	originalRequestId?: string;
 	/** Fresh id minted for this single transport attempt. */
 	requestId: string;
 	/** Cursor ghost mode; defaults to enabled. */
@@ -39,10 +39,11 @@ export interface CursorHeaderParams {
 }
 
 /**
- * Build the protected Cursor request-identity headers shared by every transport
- * (HTTP/2 Run, HTTP/1 BidiAppend/RunSSE/RunPoll, and unary GetServerConfig).
- * Transport-specific pseudo-headers (`:method`, `:path`, `content-type`,
- * `connect-protocol-version`, `te`) are added by the caller.
+ * Build the protected Cursor request-identity headers shared by every transport.
+ * Agent-stream callers additionally provide `originalRequestId`; unary discovery
+ * intentionally uses only its fresh request id. Transport-specific pseudo-headers
+ * (`:method`, `:path`, `content-type`, `connect-protocol-version`, `te`) are
+ * added by the caller.
  */
 export function buildCursorHeaders(params: CursorHeaderParams): Record<string, string> {
 	const headers: Record<string, string> = {
@@ -50,9 +51,11 @@ export function buildCursorHeaders(params: CursorHeaderParams): Record<string, s
 		"x-ghost-mode": params.ghostMode === false ? "false" : "true",
 		"x-cursor-client-type": "cli",
 		"x-cursor-client-version": resolveCursorClientVersion(params.clientVersion),
-		"x-original-request-id": params.originalRequestId,
 		"x-request-id": params.requestId,
 	};
+	if (params.originalRequestId) {
+		headers["x-original-request-id"] = params.originalRequestId;
+	}
 	if (params.http1) {
 		headers["x-cursor-streaming"] = "true";
 	}

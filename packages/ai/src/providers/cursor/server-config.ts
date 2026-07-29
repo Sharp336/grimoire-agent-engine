@@ -62,7 +62,6 @@ export interface ResolveTransportModeOptions {
 	/** Local preference from providers.cursor.useHttp1ForAgent. */
 	useHttp1ForAgent: boolean;
 	clientVersion?: string;
-	originalRequestId: string;
 	signal?: AbortSignal;
 }
 
@@ -151,7 +150,6 @@ async function fetchServerConfig(
 			buildCursorHeaders({
 				apiKey: opts.apiKey,
 				clientVersion: opts.clientVersion,
-				originalRequestId: opts.originalRequestId,
 				requestId: crypto.randomUUID(),
 			}),
 		)) {

@@ -458,6 +458,27 @@ describe("Cursor request action encoding", () => {
 		expect(payload.requestedModel?.maxMode).toBe(true);
 	});
 
+	it("advertises non-native MCP tools in the initial run request", async () => {
+		const payload = await captureCursorPayload({
+			messages: [{ role: "user", content: "Check the weather.", timestamp: 0 }],
+			tools: [
+				{
+					name: "mcp__weather",
+					description: "Read the weather",
+					parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+				},
+				{ name: "read", description: "Cursor-native read", parameters: { type: "object", properties: {} } },
+			],
+		});
+
+		expect(payload.mcpTools.mcpTools).toHaveLength(1);
+		expect(payload.mcpTools.mcpTools[0]).toMatchObject({
+			name: "mcp__weather",
+			providerIdentifier: "pi-agent",
+			toolName: "mcp__weather",
+		});
+	});
+
 	it("uses a resume action when a tool result is the final context message", async () => {
 		const payload = await captureCursorPayload(toolResultContext());
 
