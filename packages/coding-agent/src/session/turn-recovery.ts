@@ -15,17 +15,19 @@ import type {
 	Model,
 	TextContent,
 	ToolChoice,
+	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
+import { calculateRateLimitBackoffMs, completeSimple, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
+import { formatModelStringWithRouting, resolveModelOverride, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { RecoveredRetryError } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
+import refusalParaphraseTemplate from "../prompts/system/refusal-paraphrase.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
@@ -63,7 +65,26 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+const REFUSAL_PARAPHRASE_MAX_TOKENS = 1024;
 const NON_WHITESPACE_RE = /\S/;
+
+function replaceUserText(content: UserMessage["content"], text: string): UserMessage["content"] {
+	if (typeof content === "string") return text;
+	if (content.every(block => block.type === "text" && block.textSignature === undefined)) return text;
+	const rewritten: typeof content = [];
+	let replaced = false;
+	for (const block of content) {
+		if (block.type !== "text") {
+			rewritten.push(block);
+			continue;
+		}
+		if (!replaced) {
+			rewritten.push({ ...block, text });
+			replaced = true;
+		}
+	}
+	return rewritten;
+}
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
@@ -116,7 +137,7 @@ export interface TurnRecoveryHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
-	appendSessionMessage(message: AssistantMessage): void;
+	appendSessionMessage(message: AssistantMessage | UserMessage): void;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
@@ -156,6 +177,7 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#refusalParaphraseUsed = false;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -198,6 +220,7 @@ export class TurnRecovery {
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
+		this.#refusalParaphraseUsed = false;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 	}
 
@@ -1305,6 +1328,16 @@ export class TurnRecovery {
 			: retrySettings.maxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
 
+		if (
+			classifierRefusal &&
+			!retryBudgetExhausted &&
+			!this.#refusalParaphraseUsed &&
+			retrySettings.refusalParaphrase
+		) {
+			this.#refusalParaphraseUsed = true;
+			if (await this.#retryRefusalWithParaphrase(message, generation, maxRetries)) return true;
+		}
+
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
@@ -1641,7 +1674,9 @@ export class TurnRecovery {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
-		this.#retryAbortController?.abort();
+		const controller = this.#retryAbortController;
+		if (!controller) return;
+		controller.abort();
 		// Note: _retryAttempt is reset in the catch block of _autoRetry
 		this.resolveRetry();
 	}
@@ -1653,9 +1688,7 @@ export class TurnRecovery {
 				await this.#host.agent.prompt(messages, options);
 				return;
 			} catch (err) {
-				if (!(err instanceof AgentBusyError)) {
-					throw err;
-				}
+				if (!(err instanceof AgentBusyError)) throw err;
 				if (Date.now() >= deadline) {
 					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
 				}
@@ -1674,12 +1707,145 @@ export class TurnRecovery {
 		return this.#host.settings.get("retry.enabled") ?? true;
 	}
 
-	/**
-	 * Toggle auto-retry setting.
-	 */
+	/** Toggle auto-retry setting. */
 	setAutoRetryEnabled(enabled: boolean): void {
 		this.#host.settings.set("retry.enabled", enabled);
 	}
+
+	async #retryRefusalWithParaphrase(
+		assistantMessage: AssistantMessage,
+		generation: number,
+		maxRetries: number,
+	): Promise<boolean> {
+		const messages = this.#host.agent.state.messages;
+		const assistantIndex = messages.findLastIndex(
+			message => message.role === "assistant" && this.#isSameAssistantMessage(message, assistantMessage),
+		);
+		const userIndex = assistantIndex - 1;
+		const userMessage = messages[userIndex];
+		if (userMessage?.role !== "user") return false;
+		const originalText =
+			typeof userMessage.content === "string"
+				? userMessage.content
+				: userMessage.content
+						.filter((content): content is TextContent => content.type === "text")
+						.map(content => content.text)
+						.join("\n")
+						.trim();
+		if (!hasNonWhitespace(originalText)) return false;
+
+		const resolved = resolveRoleSelection(
+			[this.#host.settings.getGroup("retry").refusalParaphraseRole, "smol"],
+			this.#host.settings,
+			this.#host.modelRegistry.getAvailable(),
+		);
+		if (!resolved) return false;
+
+		const abortController = new AbortController();
+		this.#retryAbortController?.abort();
+		this.#retryAbortController = abortController;
+		const registryApiKey = this.#host.modelRegistry.resolver(resolved.model, this.#host.sessionId());
+		let response: AssistantMessage;
+		try {
+			try {
+				response = await completeSimple(
+					resolved.model,
+					{
+						systemPrompt: [prompt.render(refusalParaphraseTemplate)],
+						messages: [{ role: "user", content: originalText, timestamp: Date.now() }],
+					},
+					{
+						apiKey: async context => {
+							const apiKey = await registryApiKey(context);
+							if (apiKey !== undefined) return apiKey;
+							const agentApiKey = await this.#host.agent.getApiKey?.(resolved.model);
+							return typeof agentApiKey === "function" ? agentApiKey(context) : agentApiKey;
+						},
+						maxTokens: REFUSAL_PARAPHRASE_MAX_TOKENS,
+						disableReasoning: true,
+						metadata: this.#host.agent.metadataForProvider(resolved.model.provider),
+						sessionId: this.#host.sessionId(),
+						signal: abortController.signal,
+					},
+				);
+			} catch (error) {
+				logger.debug("refusal paraphrase retry failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			}
+
+			if (abortController.signal.aborted || response.stopReason !== "stop") return false;
+			const paraphrasedText = response.content
+				.filter((content): content is TextContent => content.type === "text")
+				.map(content => content.text)
+				.join("\n")
+				.trim();
+			if (!hasNonWhitespace(paraphrasedText)) return false;
+
+			const rewrittenUserMessage = {
+				...userMessage,
+				content: replaceUserText(userMessage.content, paraphrasedText),
+			};
+			await this.#host.waitForSessionMessagePersistence(assistantMessage);
+			if (abortController.signal.aborted) return false;
+			const branch = this.#host.sessionManager.getBranch();
+			const userEntry = branch
+				.slice()
+				.reverse()
+				.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						(entry.message === userMessage || entry.message.timestamp === userMessage.timestamp),
+				);
+			if (userEntry?.type !== "message" || userEntry.message.role !== "user") return false;
+
+			// Commit the rewrite: Escape may still cancel the provider call and persistence
+			// wait above, but cannot split the synchronous state mutation, lifecycle
+			// events, and continuation scheduling below.
+			if (this.#retryAbortController === abortController) this.#retryAbortController = undefined;
+			this.#host.withBashBranchTransition(() => {
+				if (userEntry.parentId === null) {
+					this.#host.sessionManager.resetLeaf();
+				} else {
+					this.#host.sessionManager.branch(userEntry.parentId);
+				}
+				this.#host.appendSessionMessage(rewrittenUserMessage);
+			});
+			const rewrittenMessages = messages.slice();
+			rewrittenMessages[userIndex] = rewrittenUserMessage;
+			this.#host.agent.replaceMessages(rewrittenMessages);
+			this.removeAssistantMessageFromActiveContext(assistantMessage, "refusal-paraphrase");
+			logger.warn("Retrying classifier refusal with paraphrased user prompt", {
+				model: `${resolved.model.provider}/${resolved.model.id}`,
+				originalLength: originalText.length,
+				paraphrasedLength: paraphrasedText.length,
+			});
+			await this.#host.emitSessionEvent({
+				type: "refusal_paraphrase_applied",
+				originalText,
+				paraphrasedText,
+			});
+			await this.#host.emitSessionEvent({
+				type: "auto_retry_start",
+				attempt: this.#retryAttempt,
+				maxAttempts: maxRetries,
+				delayMs: 0,
+				errorMessage: assistantMessage.errorMessage || "Unknown error",
+				errorId: assistantMessage.errorId,
+			});
+			this.#host.scheduleAgentContinue({
+				delayMs: 1,
+				generation,
+				onError: error => void this.#failRetryAfterLocalContinueError(assistantMessage, error),
+			});
+			return true;
+		} finally {
+			if (this.#retryAbortController === abortController) this.#retryAbortController = undefined;
+		}
+	}
+
 	/**
 	 * Manually retry the last failed assistant turn.
 	 * Removes the error message from active agent state when present and
@@ -1719,6 +1885,7 @@ export class TurnRecovery {
 
 		// Reset retry budget for a fresh attempt
 		this.#retryAttempt = 0;
+		this.#refusalParaphraseUsed = false;
 
 		// Re-attempt the turn
 		this.#host.scheduleAgentContinue({ delayMs: 1 });

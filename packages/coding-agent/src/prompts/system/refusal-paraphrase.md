@@ -1,0 +1,1 @@
+Rewrite the user's request in clear, neutral wording that preserves its original intent. Do not add, remove, or change capabilities, instructions, or claims. Return only the rewritten request.

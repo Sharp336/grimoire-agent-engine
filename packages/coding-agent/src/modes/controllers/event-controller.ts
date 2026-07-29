@@ -188,6 +188,7 @@ export class EventController {
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
+			refusal_paraphrase_applied: e => this.#handleRefusalParaphraseApplied(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
@@ -1559,6 +1560,16 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>,
 	): Promise<void> {
 		this.ctx.showStatus(`Fallback succeeded on ${event.model}`);
+	}
+
+	async #handleRefusalParaphraseApplied(
+		event: Extract<AgentSessionEvent, { type: "refusal_paraphrase_applied" }>,
+	): Promise<void> {
+		const original = previewLine(sanitizeText(event.originalText), TRUNCATE_LENGTHS.LINE);
+		const paraphrased = previewLine(sanitizeText(event.paraphrasedText), TRUNCATE_LENGTHS.LINE);
+		this.ctx.showWarning(
+			`Prompt rewritten after a classifier refusal; retrying once. Original: ${original} Retry: ${paraphrased}`,
+		);
 	}
 
 	async #handleTtsrTriggered(event: Extract<AgentSessionEvent, { type: "ttsr_triggered" }>): Promise<void> {

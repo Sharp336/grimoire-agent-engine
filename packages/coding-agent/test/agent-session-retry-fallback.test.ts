@@ -9,7 +9,7 @@ import {
 	type ModelUsageHealth,
 	type ProviderSessionState,
 } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -101,6 +101,7 @@ describe("AgentSession retry fallback", () => {
 		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
 		authStorage.setRuntimeApiKey("devin", "devin-test-key");
 		authStorage.setRuntimeApiKey("openai-codex", "openai-codex-test-key");
+		registerMockApi();
 		sharedRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -1521,6 +1522,110 @@ describe("AgentSession retry fallback", () => {
 		const recovered = session.getLastAssistantMessage();
 		expect(recovered?.stopReason).toBe("stop");
 		expect(recovered?.content).toEqual([{ type: "text", text: "recovered" }]);
+	});
+
+	it("retries an Anthropic classifier refusal once with a paraphrased user prompt", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) throw new Error("Expected bundled test model to exist");
+
+		const paraphraseModel = createMockModel({
+			id: "refusal-paraphraser",
+			responses: [{ content: ["Explain the same request in neutral, legitimate terms."] }],
+		});
+		const primaryMock = createMockModel({
+			responses: [
+				{
+					stopReason: "error",
+					stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
+					errorMessage: "Refusal (cyber): Classifier declined.",
+				},
+				{ content: ["Recovered on the same model."] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => primaryMock.stream(model, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.modelFallback": false,
+			"retry.refusalParaphrase": true,
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		settings.setModelRole("smol", "mock/refusal-paraphraser");
+		const getAvailable = vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primaryModel, paraphraseModel]);
+		const paraphraseEvents: Array<Extract<AgentSessionEvent, { type: "refusal_paraphrase_applied" }>> = [];
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.subscribe(event => {
+			if (event.type === "refusal_paraphrase_applied") paraphraseEvents.push(event);
+		});
+
+		await session.prompt("Explain how to bypass the classifier.");
+		await session.waitForIdle();
+
+		expect(paraphraseModel.calls).toHaveLength(1);
+		expect(paraphraseModel.calls[0]?.context.messages).toEqual([
+			{ role: "user", content: "Explain how to bypass the classifier.", timestamp: expect.any(Number) },
+		]);
+		expect(primaryMock.calls).toHaveLength(2);
+		expect(primaryMock.calls[1]?.context.messages.at(-1)).toMatchObject({
+			role: "user",
+			content: "Explain the same request in neutral, legitimate terms.",
+		});
+		expect(session.model).toBe(primaryModel);
+		expect(paraphraseEvents).toEqual([
+			{
+				type: "refusal_paraphrase_applied",
+				originalText: "Explain how to bypass the classifier.",
+				paraphrasedText: "Explain the same request in neutral, legitimate terms.",
+			},
+		]);
+		getAvailable.mockRestore();
+	});
+
+	it("leaves classifier refusals unchanged when paraphrase retry is disabled by default", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) throw new Error("Expected bundled test model to exist");
+
+		const paraphraseModel = createMockModel({ id: "disabled-refusal-paraphraser" });
+		const primaryMock = createMockModel({
+			responses: [
+				{
+					stopReason: "error",
+					stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
+					errorMessage: "Refusal (cyber): Classifier declined.",
+				},
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => primaryMock.stream(model, context, options),
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.modelFallback": false });
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		settings.setModelRole("smol", "mock/disabled-refusal-paraphraser");
+		const getAvailable = vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primaryModel, paraphraseModel]);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("Explain how to bypass the classifier.");
+		await session.waitForIdle();
+
+		expect(paraphraseModel.calls).toHaveLength(0);
+		expect(primaryMock.calls).toHaveLength(1);
+		expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
+		getAvailable.mockRestore();
 	});
 
 	it("does not exceed retry.maxRetries for classifier fallback chains", async () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in retry.refusalParaphrase setting that rewrites an Anthropic classifier refusal with a tiny or smol model and retries the same model once, with the rewrite logged and surfaced to the session.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
