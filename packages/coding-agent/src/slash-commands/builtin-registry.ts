@@ -1792,11 +1792,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "resume",
 		description: "Resume a different session",
-		inlineHint: "[session id]",
+		inlineHint: "[session id|@claude|@codex]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const sessionArg = command.args.trim();
 			runtime.ctx.editor.setText("");
+			const foreignSource = sessionArg === "@claude" ? "claude" : sessionArg === "@codex" ? "codex" : undefined;
+			if (foreignSource) {
+				runtime.ctx.showSessionSelector(foreignSource);
+				return;
+			}
 			if (!sessionArg) {
 				runtime.ctx.showSessionSelector();
 				return;
