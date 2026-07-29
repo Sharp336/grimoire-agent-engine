@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Container, setKeybindings } from "@oh-my-pi/pi-tui";
+import type { CollabUiRequestDraft } from "@oh-my-pi/pi-wire";
+import type { CollabGuestUiResult, CollabHost } from "../../../src/collab/host";
 import { KeybindingsManager } from "../../../src/config/keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
 import { AskDialogComponent } from "../../../src/modes/components/ask-dialog";
@@ -18,7 +20,7 @@ beforeAll(async () => {
 	setThemeInstance(dark);
 });
 
-function makeHarness() {
+function makeHarness(options: { collabHost?: Pick<CollabHost, "requestGuestUi"> } = {}) {
 	const editor = new CustomEditor(getEditorTheme());
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
@@ -43,6 +45,7 @@ function makeHarness() {
 			uiContext = context;
 		},
 		addAutocompleteProvider,
+		...(options.collabHost === undefined ? {} : { collabHost: options.collabHost }),
 	} as unknown as InteractiveModeContext;
 
 	const controller = new ExtensionUiController(ctx);
@@ -246,5 +249,69 @@ describe("ExtensionUiController editor UI", () => {
 
 		expect(harness.addAutocompleteProvider).toHaveBeenCalledTimes(1);
 		expect(harness.addAutocompleteProvider).toHaveBeenCalledWith(factory);
+	});
+
+	it("retries invalid guest Other input with sanitized title and prefill", async () => {
+		const responses: CollabGuestUiResult[] = [
+			{ kind: "answered", value: "Other (type your own)" },
+			{ kind: "answered", value: "INVALID" },
+			{ kind: "answered", value: "42" },
+		];
+		const requestGuestUi = vi.fn<
+			(request: CollabUiRequestDraft, signal?: AbortSignal) => Promise<CollabGuestUiResult>
+		>(async () => responses.shift() ?? { kind: "unavailable" });
+		const harness = makeHarness({ collabHost: { requestGuestUi } });
+
+		const result = await harness.controller.showAskDialog([
+			{
+				id: "code",
+				question: "Enter the code",
+				options: [{ label: "Skip" }],
+				validation: { pattern: "^\\d+$", message: "Digits\tonly\n\x1b[31m" },
+			},
+		]);
+
+		expect(result).toEqual({
+			kind: "submit",
+			results: [
+				{
+					id: "code",
+					question: "Enter the code",
+					options: ["Skip"],
+					multi: false,
+					selectedOptions: [],
+					customInput: "42",
+				},
+			],
+		});
+		const editorRequests = requestGuestUi.mock.calls
+			.map(([request]) => request)
+			.filter((request): request is Extract<CollabUiRequestDraft, { kind: "editor" }> => request.kind === "editor");
+		expect(editorRequests).toHaveLength(2);
+		expect(editorRequests[1]?.prefill).toBe("INVALID");
+		expect(editorRequests[1]?.title).toContain("Digits only");
+		expect(editorRequests[1]?.title).not.toContain("\x1b");
+	});
+
+	it("returns to the guest select list when its Other editor is cancelled", async () => {
+		const responses: CollabGuestUiResult[] = [
+			{ kind: "answered", value: "Other (type your own)" },
+			{ kind: "answered", value: undefined },
+			{ kind: "answered", value: "Skip" },
+		];
+		const requestGuestUi = vi.fn<
+			(request: CollabUiRequestDraft, signal?: AbortSignal) => Promise<CollabGuestUiResult>
+		>(async () => responses.shift() ?? { kind: "unavailable" });
+		const harness = makeHarness({ collabHost: { requestGuestUi } });
+
+		const result = await harness.controller.showAskDialog([
+			{ id: "code", question: "Enter the code", options: [{ label: "Skip" }] },
+		]);
+
+		expect(result).toMatchObject({
+			kind: "submit",
+			results: [{ selectedOptions: ["Skip"], customInput: undefined }],
+		});
+		expect(requestGuestUi.mock.calls).toHaveLength(3);
 	});
 });

@@ -1392,6 +1392,34 @@ describe("AskDialogComponent", () => {
 		expect(filtered).toContain("filter: beta");
 	});
 
+	it("accepts Kitty Backspace while filtering a searchable option list", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose one?",
+					searchable: true,
+					options: [
+						{ label: "Alpha" },
+						{ label: "Beta target" },
+						{ label: "Gamma" },
+						{ label: "Delta" },
+						{ label: "Epsilon" },
+						{ label: "Zeta" },
+						{ label: "Eta" },
+					],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		component.handleInput("/");
+		for (const character of "betx") component.handleInput(character);
+		component.handleInput("\x1b[127u");
+
+		expect(render(component)).toContain("filter: bet");
+	});
+
 	it("renders diff previews with added and removed lines", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
@@ -1414,7 +1442,7 @@ describe("AskDialogComponent", () => {
 			{
 				id: "q1",
 				question: "Enter a numeric code",
-				validation: { pattern: "^\\d+$", message: "Enter digits only" },
+				validation: { pattern: "^\\d+$", message: `Enter digits\tonly\n\x1b[31m ${"long ".repeat(100)}` },
 				options: [{ label: "Option A" }],
 			},
 		];
@@ -1427,7 +1455,10 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 
 		expect(onPrompt).toHaveBeenCalledTimes(2);
-		expect(onPrompt.mock.calls[1]?.[0]).toContain("Enter digits only");
+		const retryTitle = onPrompt.mock.calls[1]?.[0] ?? "";
+		expect(retryTitle).toContain("Enter digits only");
+		expect(retryTitle).not.toContain("\x1b");
+		expect(retryTitle.split("\n")).toHaveLength(3);
 		expect(onPrompt.mock.calls[1]?.[1]).toBe("letters");
 		expect(onSubmit.mock.calls[0]?.[0].results[0].customInput).toBe("42");
 	});

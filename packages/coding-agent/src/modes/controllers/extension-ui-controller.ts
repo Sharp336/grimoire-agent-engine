@@ -28,7 +28,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/comp
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
-import { getAskCustomInputValidationError } from "../../tools/ask-validation";
+import { formatAskValidationTitle, getAskCustomInputValidationError } from "../../tools/ask-validation";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
 const MAX_WIDGET_LINES = 10;
@@ -869,7 +869,7 @@ export class ExtensionUiController {
 			const input = await this.#requestGuestUiString(
 				{
 					kind: "editor",
-					title: validationError ? `${validationError}\n\n${title}` : title,
+					title: formatAskValidationTitle(validationError, title),
 					prefill,
 				},
 				signal,

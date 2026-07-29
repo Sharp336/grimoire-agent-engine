@@ -118,10 +118,18 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
+/** Validation applied only when the user chooses `Other (type your own)`. */
 export interface ExtensionAskDialogValidation {
+	/** A safe JavaScript regular expression matched against the complete Other answer.
+	 * Groups and multiple quantified atoms are rejected to keep synchronous UI
+	 * validation bounded; patterns are limited to 256 UTF-16 code units. */
 	pattern?: string;
+	/** Minimum Other-answer length in UTF-16 code units. */
 	minLength?: number;
+	/** Maximum Other-answer length in UTF-16 code units. */
 	maxLength?: number;
+	/** Error shown after validation fails. When omitted, a built-in format error is shown.
+	 * With this validation configured, Other answers over 1,024 UTF-16 code units always fail. */
 	message?: string;
 }
 
@@ -129,6 +137,7 @@ export interface ExtensionAskDialogOption {
 	label: string;
 	description?: string;
 	preview?: string;
+	/** Rendering mode for `preview`; markdown is the default and `diff` renders a patch preview. */
 	previewType?: "markdown" | "diff";
 }
 
@@ -138,9 +147,11 @@ export interface ExtensionAskDialogQuestion {
 	header?: string;
 	options: ExtensionAskDialogOption[];
 	multi?: boolean;
-	/** Recommended option index. A timed-out multi-select chooses exactly this option. */
+	/** Recommended option index. Timeout selects it only while the question is unanswered. */
 	recommended?: number;
+	/** Enables filtering only when there are at least seven options; ignored for shorter lists. */
 	searchable?: boolean;
+	/** Validation for Other answers. */
 	validation?: ExtensionAskDialogValidation;
 }
 

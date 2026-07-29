@@ -10,6 +10,7 @@ import type {
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import { getAskCustomInputValidationError } from "@oh-my-pi/pi-coding-agent/tools/ask-validation";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { type } from "arktype";
 
@@ -1787,6 +1788,14 @@ describe("AskTool rich ask dialog", () => {
 		});
 		expect(invalidPattern instanceof type.errors).toBe(true);
 
+		const unsafePattern = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", validation: { pattern: "^(a+)+$" }, options: [{ label: "ok" }] }],
+		});
+		expect(unsafePattern instanceof type.errors).toBe(true);
+		expect(getAskCustomInputValidationError("a".repeat(2_000), { pattern: "^a+$" })).toBeDefined();
+		expect(getAskCustomInputValidationError(`${"a".repeat(1_024)}!`, { pattern: "^a+$" })).toBeDefined();
+		expect(getAskCustomInputValidationError(`${"a".repeat(24)}!`, { pattern: "^(a+)+$" })).toBeDefined();
+
 		const invalidPreviewType = tool.parameters({
 			questions: [{ id: "q1", question: "Q?", options: [{ label: "ok", previewType: "code" }] }],
 		});
@@ -1796,5 +1805,54 @@ describe("AskTool rich ask dialog", () => {
 			questions: [{ id: "q1", question: "Q?", options: [{ label: "Other (type your own)" }] }],
 		});
 		expect(reservedOther instanceof type.errors).toBe(true);
+	});
+
+	it("retries invalid degraded Other input with sanitized title and prefill", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn().mockResolvedValueOnce("letters").mockResolvedValueOnce("42");
+		const context = createContext({
+			select: async () => "Other (type your own)",
+			editor,
+		});
+
+		const result = await tool.execute(
+			"call-degraded-validation",
+			{
+				questions: [
+					{
+						id: "code",
+						question: "Enter a numeric code",
+						options: [{ label: "Skip" }],
+						validation: { pattern: "^\\d+$", message: "Digits\tonly\n\x1b[31m" },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.customInput).toBe("42");
+		expect(editor).toHaveBeenCalledTimes(2);
+		expect(editor.mock.calls[1]?.[1]).toBe("letters");
+		expect(editor.mock.calls[1]?.[0]).toContain("Digits only");
+		expect(editor.mock.calls[1]?.[0]).not.toContain("\x1b");
+	});
+
+	it("returns to degraded selection when Other input is cancelled", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn().mockResolvedValueOnce("Other (type your own)").mockResolvedValueOnce("Skip");
+		const context = createContext({ select, editor: async () => undefined });
+
+		const result = await tool.execute(
+			"call-degraded-cancel",
+			{ questions: [{ id: "code", question: "Enter a code", options: [{ label: "Skip" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.selectedOptions).toEqual(["Skip"]);
+		expect(select).toHaveBeenCalledTimes(2);
 	});
 });

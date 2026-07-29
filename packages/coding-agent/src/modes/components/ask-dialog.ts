@@ -1,6 +1,7 @@
 import {
 	type Component,
 	Ellipsis,
+	extractPrintableText,
 	Markdown,
 	type MarkdownTheme,
 	matchesKey,
@@ -19,7 +20,7 @@ import type {
 	ExtensionAskDialogResultItem,
 	ExtensionAskDialogSubmitResult,
 } from "../../extensibility/extensions";
-import { getAskCustomInputValidationError } from "../../tools/ask-validation";
+import { formatAskValidationTitle, getAskCustomInputValidationError } from "../../tools/ask-validation";
 import { getTabBarTheme } from "../shared";
 import { getMarkdownTheme, highlightCode, theme } from "../theme/theme";
 import {
@@ -614,15 +615,16 @@ export class AskDialogComponent implements Component {
 			return true;
 		}
 		if (!state.searchActive) return false;
-		if (keyData === "\b" || keyData === "\x7f") {
+		if (matchesKey(keyData, "backspace")) {
 			state.searchQuery = state.searchQuery.slice(0, -1);
 			state.cursorIndex = 0;
 			state.manualScroll = false;
 			this.#requestRender();
 			return true;
 		}
-		if (keyData.length === 0 || keyData.startsWith("\x1b") || /[\n\r\t]/u.test(keyData)) return false;
-		state.searchQuery += keyData;
+		const printableText = extractPrintableText(keyData);
+		if (!printableText) return false;
+		state.searchQuery += printableText;
 		state.cursorIndex = 0;
 		state.manualScroll = false;
 		this.#requestRender();
@@ -767,7 +769,10 @@ export class AskDialogComponent implements Component {
 			while (true) {
 				const title = boundPromptTitle("Custom answer: ", question.question);
 				const input = await this.callbacks.onPrompt(
-					validationError ? `${validationError}\n\n${title}` : title,
+					formatAskValidationTitle(validationError, title, {
+						width: promptTitleContentWidth(),
+						maxRows: MAX_PROMPT_TITLE_ROWS,
+					}),
 					prefill,
 				);
 				if (input === undefined || this.#closed) return;

@@ -12,7 +12,7 @@
  *   - Users will always be able to select "Other" to provide custom text input
  *   - Use multi: true to allow multiple answers to be selected for a question
  *   - Use recommended: <index> to mark the default option; "(Recommended)" suffix is added automatically
- *   - Questions may time out and auto-select the recommended option (configurable, disabled in plan mode)
+ *   - Questions may time out and auto-select the recommended option only when unanswered (configurable, disabled in plan mode)
  */
 
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -38,7 +38,11 @@ import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import { vocalizer } from "../tts/vocalizer";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
 import type { ToolSession } from ".";
-import { getAskCustomInputValidationError } from "./ask-validation";
+import {
+	formatAskValidationTitle,
+	getAskCustomInputValidationError,
+	isSafeAskCustomInputPattern,
+} from "./ask-validation";
 import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
 import { ToolAbortError } from "./tool-errors";
 
@@ -56,10 +60,14 @@ const RESERVED_OPTION_LABELS: Record<string, true> = {
 };
 
 const CustomInputValidation = arkType({
-	"pattern?": arkType("string").describe("optional JavaScript regular expression for Other answers"),
-	"minLength?": arkType("number").describe("optional minimum length for Other answers"),
-	"maxLength?": arkType("number").describe("optional maximum length for Other answers"),
-	"message?": arkType("string").describe("message shown when an Other answer fails validation"),
+	"pattern?": arkType("string").describe(
+		"optional safe JavaScript regular expression for Other answers (256 UTF-16 code units maximum)",
+	),
+	"minLength?": arkType("number").describe("optional minimum Other-answer length in UTF-16 code units"),
+	"maxLength?": arkType("number").describe("optional maximum Other-answer length in UTF-16 code units"),
+	"message?": arkType("string").describe(
+		"message shown when an Other answer fails validation; defaults to a format error",
+	),
 }).narrow((validation, ctx) => {
 	if (
 		(validation.minLength !== undefined && (!Number.isInteger(validation.minLength) || validation.minLength < 0)) ||
@@ -75,6 +83,9 @@ const CustomInputValidation = arkType({
 		return ctx.mustBe("defined with minLength no greater than maxLength");
 	}
 	if (validation.pattern !== undefined) {
+		if (!isSafeAskCustomInputPattern(validation.pattern)) {
+			return ctx.mustBe("defined with a safe JavaScript regular expression pattern");
+		}
 		try {
 			new RegExp(validation.pattern);
 		} catch {
@@ -88,7 +99,7 @@ const OptionItem = arkType({
 	label: arkType("string").describe("display label"),
 	"description?": arkType("string").describe("optional explanatory text displayed below the label"),
 	"preview?": arkType("string").describe("optional rich preview content for interactive ask dialogs"),
-	"previewType?": arkType('"markdown" | "diff"').describe("how the rich preview is rendered"),
+	"previewType?": arkType('"markdown" | "diff"').describe("how the rich preview is rendered; defaults to markdown"),
 });
 
 const QuestionItem = arkType({
@@ -98,9 +109,9 @@ const QuestionItem = arkType({
 	options: OptionItem.array().describe("available options"),
 	"multi?": arkType("boolean").describe("allow multiple selections"),
 	"recommended?": arkType("number").describe(
-		"recommended option index; timeout chooses exactly this option, including for multi-select",
+		"recommended option index; timeout chooses this option only when the question has no selections",
 	),
-	"searchable?": arkType("boolean").describe("allow filtering long option lists in the rich ask dialog"),
+	"searchable?": arkType("boolean").describe("allow filtering in rich ask dialogs with at least seven options"),
 	"validation?": CustomInputValidation.describe("optional validation applied only to Other custom answers"),
 }).narrow((question, ctx) => {
 	const reserved = question.options.find(option => RESERVED_OPTION_LABELS[option.label] === true);
@@ -590,7 +601,10 @@ async function askSingleQuestion(
 		let prefill: string | undefined;
 		let validationError: string | undefined;
 		while (true) {
-			const editorTitle = validationError ? `${validationError}\n\n${baseTitle}` : baseTitle;
+			const editorTitle = formatAskValidationTitle(validationError, baseTitle, {
+				width: customInputContentWidth(),
+				maxRows: MAX_CUSTOM_INPUT_TITLE_ROWS,
+			});
 			const showCustomInput = () => ui.editor(editorTitle, prefill, dialogOptions, { promptStyle: true });
 			const input = signal ? await untilAborted(signal, showCustomInput) : await showCustomInput();
 			if (input === undefined) return { input };
