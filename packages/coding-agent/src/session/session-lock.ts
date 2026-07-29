@@ -827,6 +827,14 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 			} catch (error) {
 				throw ioError(normalized, lockPath, error);
 			}
+			// Clear our mutation claim before removing the visible owner record.
+			// If claim cleanup fails, retaining the owner keeps every observer
+			// fail-closed and lets this handle retry release safely.
+			try {
+				removeClaim(claimPathFor(lockPath), normalized, rt.ownerId);
+			} catch (error) {
+				throw ioError(normalized, lockPath, error);
+			}
 			if (current.kind === "record" && sameOwner(current.record, record)) {
 				try {
 					fs.unlinkSync(lockPath);
@@ -834,7 +842,6 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 					if (errorCode(error) !== "ENOENT") throw ioError(normalized, lockPath, error);
 				}
 			}
-			removeClaim(claimPathFor(lockPath), normalized, rt.ownerId);
 			released = true;
 			clearInterval(timer);
 		},

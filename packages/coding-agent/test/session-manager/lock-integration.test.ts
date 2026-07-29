@@ -180,6 +180,31 @@ describe("SessionManager persistent lock integration", () => {
 		await manager.close();
 	});
 
+	it("does not follow a symlink installed over the pinned session path", async () => {
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("missing session file");
+
+		const foreignSession = path.join(sessions, "foreign.jsonl");
+		fs.writeFileSync(foreignSession, "foreign sentinel");
+		fs.unlinkSync(sessionFile);
+		fs.symlinkSync(foreignSession, sessionFile);
+
+		manager.appendMessage({ role: "user", content: "pinned rewrite", timestamp: Date.now() });
+		await manager.recoverPersistenceFromCurrentState();
+
+		expect(fs.readFileSync(foreignSession, "utf8")).toBe("foreign sentinel");
+		expect(fs.lstatSync(sessionFile).isSymbolicLink()).toBe(false);
+		expect(
+			(await SessionManager.openSnapshot(sessionFile))
+				.getEntries()
+				.some(entry => entry.type === "message" && entry.message.role === "user"),
+		).toBe(true);
+		await manager.close();
+	});
+
 	it("keeps a shared lock while a detached session clone can still persist", async () => {
 		const { cwd, sessions } = fixture();
 		const manager = SessionManager.create(cwd, sessions);

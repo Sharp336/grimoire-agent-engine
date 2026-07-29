@@ -157,6 +157,51 @@ describe("session lock", () => {
 		expect(fs.existsSync(lockPath)).toBe(false);
 	});
 
+	it("retains ownership when release cannot remove its mutation claim", () => {
+		const { session } = fixture();
+		const lock = acquireSessionLock(session, {
+			ownerId: OWNER_A,
+			pid: 42,
+			processStartMarker: "marker",
+			processProbe: probe(true),
+		});
+		const lockPath = lockPathForSession(session);
+		const claimPath = `${lockPath}.steal`;
+		fs.writeFileSync(
+			claimPath,
+			JSON.stringify({
+				protocolVersion: 1,
+				ownerId: OWNER_A,
+				pid: 42,
+				processStartMarker: "marker",
+				hostname: os.hostname(),
+				createdAt: 0,
+				sessionFile: lock.record.sessionFile,
+			}),
+		);
+		const unlinkSync = fs.unlinkSync;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (String(target) === claimPath) {
+				const error = new Error("claim cleanup denied") as NodeJS.ErrnoException;
+				error.code = "EACCES";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		try {
+			expect(() => lock.release()).toThrow(SessionLockError);
+			expect(lock.released).toBe(false);
+			expect(fs.existsSync(lockPath)).toBe(true);
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+
+		lock.release();
+		expect(lock.released).toBe(true);
+		expect(fs.existsSync(lockPath)).toBe(false);
+		expect(fs.existsSync(claimPath)).toBe(false);
+	});
+
 	it("prevents competing writers and classifies suspect locks", () => {
 		const { session } = fixture();
 		const now = 20_000;

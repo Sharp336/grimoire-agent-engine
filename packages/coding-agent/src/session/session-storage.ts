@@ -101,12 +101,10 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 });
 
 function atomicWriteTarget(fpath: string): string {
-	const resolved = path.resolve(fpath);
-	try {
-		return fs.realpathSync(resolved);
-	} catch {
-		return resolved;
-	}
+	// Writable session managers canonicalize once while acquiring ownership.
+	// Re-resolving here would follow a symlink installed after acquisition and
+	// redirect a rewrite to a session this writer does not own.
+	return path.resolve(fpath);
 }
 
 class FileSessionStorageWriter implements SessionStorageWriter {
