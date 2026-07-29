@@ -2,6 +2,7 @@
  * Shared types and utilities for web-fetch handlers
  */
 import { scheduler } from "node:timers/promises";
+import { isLocalOrMetadataHost } from "@oh-my-pi/pi-ai";
 import { ptree } from "@oh-my-pi/pi-utils";
 import type TurndownService from "turndown";
 
@@ -30,6 +31,8 @@ export type SpecialHandler = (
 
 export const MAX_OUTPUT_CHARS = 500_000;
 export const MAX_BYTES = 50 * 1024 * 1024;
+/** Maximum HTTP redirects to follow manually (matches Node's default). */
+export const MAX_REDIRECTS = 10;
 
 const USER_AGENTS = [
 	"curl/8.0",
@@ -133,10 +136,96 @@ function decodeBody(bytes: Buffer, contentTypeHeader: string): string {
 }
 
 /**
+ * Error thrown when the SSRF guard blocks a URL or redirect target.
+ * Carries the refused hostname so callers can surface a clear message.
+ */
+class SsrfBlockedError extends Error {
+	readonly host: string;
+	constructor(host: string) {
+		super(`Refused to fetch non-public address: ${host}`);
+		this.name = "SsrfBlockedError";
+		this.host = host;
+	}
+}
+
+/**
+ * Check a URL's hostname against the SSRF blocklist. Returns a `LoadPageResult`
+ * error when the host is private/loopback/link-local/metadata, otherwise `null`.
+ */
+function checkSsrfGuard(url: string): LoadPageResult | null {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		// Unparseable URL — let fetch surface the error; not an SSRF concern.
+		return null;
+	}
+	if (isLocalOrMetadataHost(parsed.hostname)) {
+		return {
+			content: "",
+			contentType: "",
+			finalUrl: url,
+			ok: false,
+			error: `Refused to fetch non-public address: ${parsed.hostname}`,
+		};
+	}
+	return null;
+}
+
+/**
+ * Fetch a URL following redirects manually, SSRF-checking every hop.
+ * Throws {@link SsrfBlockedError} if any redirect target resolves to a
+ * non-public address. Returns the final (non-redirect) response and the
+ * final URL after all redirects.
+ */
+async function fetchWithRedirectGuard(
+	url: string,
+	requestInit: RequestInit,
+	signal?: AbortSignal,
+): Promise<{ response: Response; finalUrl: string }> {
+	let currentUrl = url;
+	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+		if (signal?.aborted) {
+			throw new ToolAbortError();
+		}
+		const response = await fetch(currentUrl, requestInit);
+		// Non-3xx (or 3xx without Location) — terminal response.
+		if (response.status < 300 || response.status >= 400 || response.status === 304) {
+			return { response, finalUrl: currentUrl };
+		}
+		const location = response.headers.get("location");
+		if (!location) {
+			return { response, finalUrl: currentUrl };
+		}
+		void response.body?.cancel().catch(() => {});
+		// Resolve the redirect target relative to the current URL.
+		const redirectUrl = new URL(location, currentUrl).href;
+		const redirectHost = new URL(redirectUrl).hostname;
+		if (isLocalOrMetadataHost(redirectHost)) {
+			throw new SsrfBlockedError(redirectHost);
+		}
+		currentUrl = redirectUrl;
+	}
+	// Exceeded MAX_REDIRECTS — return a synthetic error response.
+	throw new Error(`Redirect loop exceeded ${MAX_REDIRECTS} hops`);
+}
+
+/**
  * Fetch a page with timeout and size limit
+ *
+ * SSRF guard: the initial URL hostname and every redirect target are validated
+ * with {@link isLocalOrMetadataHost} before connecting. Redirects are followed
+ * manually (not via `redirect: "follow"`) so a public URL that 302-redirects to
+ * an internal address cannot bypass the guard. Limitation: this checks the
+ * hostname string only — DNS rebinding (a public name resolving to a private IP)
+ * is not caught; full mitigation requires resolving before connecting.
  */
 export async function loadPage(url: string, options: LoadPageOptions = {}): Promise<LoadPageResult> {
 	const { timeout = 20, headers = {}, maxBytes = MAX_BYTES, signal, method = "GET", body } = options;
+
+	// SSRF guard: refuse non-public addresses before any network activity.
+	const ssrfError = checkSsrfGuard(url);
+	if (ssrfError) return ssrfError;
 
 	let lastError: string | undefined;
 	let retried429 = false;
@@ -159,18 +248,18 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 					"Accept-Encoding": "identity", // Cloudflare Markdown-for-Agents returns corrupted bytes when compression is negotiated
 					...headers,
 				},
-				redirect: "follow",
+				redirect: "manual",
 			};
 
 			if (body !== undefined) {
 				requestInit.body = body;
 			}
 
-			const response = await fetch(url, requestInit);
+			// Follow redirects manually so every hop's hostname is SSRF-checked.
+			const { response, finalUrl } = await fetchWithRedirectGuard(url, requestInit, signal);
 
 			const rawContentType = response.headers.get("content-type") ?? "";
 			const contentType = rawContentType.split(";")[0]?.trim().toLowerCase() ?? "";
-			const finalUrl = response.url;
 
 			if (response.status === 429 && !retried429) {
 				// Rate limited: retry once, honoring a bounded Retry-After. The
@@ -229,6 +318,10 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 		} catch (error) {
 			if (signal?.aborted) {
 				throw new ToolAbortError();
+			}
+			const message = error instanceof SsrfBlockedError ? error.message : undefined;
+			if (message) {
+				return { content: "", contentType: "", finalUrl: url, ok: false, error: message };
 			}
 			lastError = error instanceof Error ? error.message : String(error);
 			if (attempt === USER_AGENTS.length - 1) {

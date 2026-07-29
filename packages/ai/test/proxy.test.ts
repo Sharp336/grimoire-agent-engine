@@ -191,7 +191,21 @@ describe("isLocalOrMetadataHost / shouldBypassProxy hard-coded ranges", () => {
 	}
 
 	// IPv6 hosts need bracket form inside a URL.
-	const bypassedV6 = ["::1", "fd00:ec2::254", "fe80::1"];
+	const bypassedV6 = [
+		"::1",
+		"fd00:ec2::254",
+		"fe80::1",
+		"::", // unspecified
+		// IPv4-mapped IPv6 — these previously bypassed string-based checks.
+		"::ffff:127.0.0.1",
+		"::ffff:10.0.0.1",
+		"::ffff:192.168.1.1",
+		"::ffff:172.16.0.1",
+		"::ffff:169.254.169.254",
+		// Fully-expanded forms that are equivalent to compressed addresses.
+		"0:0:0:0:0:0:0:1", // == ::1
+		"0000:0000:0000:0000:0000:0000:0000:0001", // == ::1
+	];
 	for (const host of bypassedV6) {
 		it(`bypasses [${host}]`, () => {
 			expect(isLocalOrMetadataHost(host)).toBe(true);
@@ -205,11 +219,17 @@ describe("isLocalOrMetadataHost / shouldBypassProxy hard-coded ranges", () => {
 		"172.15.0.1", // just below the 172.16/12 block
 		"172.32.0.1", // just above the 172.16/12 block
 		"11.0.0.1", // not RFC1918
+		"8.8.8.8", // public DNS
+		"1.1.1.1", // public DNS
+		"::ffff:8.8.8.8", // IPv4-mapped public — must NOT be flagged
+		"2606:4700:4700::1111", // public IPv6 (Cloudflare)
 	];
 	for (const host of proxied) {
 		it(`does not bypass ${host}`, () => {
 			expect(isLocalOrMetadataHost(host)).toBe(false);
-			expect(shouldBypassProxy(new URL(`https://${host}/x`))).toBe(false);
+			// IPv6 hosts need bracket form inside a URL.
+			const urlHost = host.includes(":") ? `[${host}]` : host;
+			expect(shouldBypassProxy(new URL(`https://${urlHost}/x`))).toBe(false);
 		});
 	}
 });

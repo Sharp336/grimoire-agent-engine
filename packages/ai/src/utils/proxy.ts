@@ -6,7 +6,34 @@ import type { FetchImpl } from "../types";
 /**
  * Checks if a host is local or cloud metadata, which should always bypass the proxy
  * (e.g. localhost, 127/8, ::1, 169.254.169.254, metadata.google.internal).
+ *
+ * Uses `node:net.BlockList` so that all address normalization is handled by the
+ * runtime — IPv4-mapped IPv6 (`::ffff:127.0.0.1`), fully-expanded forms
+ * (`0:0:0:0:0:0:0:1`), and other representations that string matching missed are
+ * now caught. This is the single classifier shared by provider proxy bypass
+ * decisions and the fetch-tool SSRF guard.
+ *
+ * Limitation: this validates the hostname string only. A public DNS name that
+ * resolves to a private IP (DNS rebinding) is NOT caught here; full mitigation
+ * requires resolving the host before connecting and is out of scope for the
+ * fetch() API surface.
  */
+// Module-level BlockList — built once; address checks are O(1) and side-effect free.
+const privateAddressBlockList = new net.BlockList();
+privateAddressBlockList.addRange("127.0.0.0", "127.255.255.255", "ipv4"); // loopback 127/8
+privateAddressBlockList.addRange("0.0.0.0", "0.255.255.255", "ipv4"); // unspecified 0/8
+privateAddressBlockList.addRange("10.0.0.0", "10.255.255.255", "ipv4"); // RFC1918 10/8
+privateAddressBlockList.addRange("172.16.0.0", "172.31.255.255", "ipv4"); // RFC1918 172.16/12
+privateAddressBlockList.addRange("192.168.0.0", "192.168.255.255", "ipv4"); // RFC1918 192.168/16
+// link-local 169.254/16 — covers IMDS 169.254.169.254 and ECS credentials 169.254.170.2
+privateAddressBlockList.addRange("169.254.0.0", "169.254.255.255", "ipv4");
+// IPv6 loopback ::1, unspecified ::, link-local fe80::/10, unique-local fc00::/7
+// (covers EC2 IPv6 IMDS fd00:ec2::254).
+privateAddressBlockList.addAddress("::1", "ipv6");
+privateAddressBlockList.addAddress("::", "ipv6");
+privateAddressBlockList.addRange("fe80::", "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "ipv6");
+privateAddressBlockList.addRange("fc00::", "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "ipv6");
+
 export function isLocalOrMetadataHost(host: string): boolean {
 	const lowerHost = host.toLowerCase();
 
@@ -18,26 +45,14 @@ export function isLocalOrMetadataHost(host: string): boolean {
 	// Strip IPv6 brackets before numeric checks.
 	const ip = lowerHost.replace(/^\[|\]$/g, "");
 
-	// IPv4 loopback (127/8), unspecified (0/8), RFC1918 private (10/8, 172.16/12,
-	// 192.168/16) and link-local (169.254/16 — covers IMDS 169.254.169.254 and
-	// ECS credentials 169.254.170.2). None are reachable through a remote egress
-	// proxy, and credential/metadata probes must never leak to one.
-	const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
-	if (v4) {
-		const a = Number(v4[1]);
-		const b = Number(v4[2]);
-		if (a === 127 || a === 10 || a === 0) return true;
-		if (a === 169 && b === 254) return true;
-		if (a === 192 && b === 168) return true;
-		if (a === 172 && b >= 16 && b <= 31) return true;
-		return false;
+	// Use the runtime's address normalization: BlockList.check handles
+	// canonicalization of every IP form (IPv4, IPv6, mapped, compressed,
+	// expanded) so string-matching bypass vectors like `::ffff:127.0.0.1` or
+	// `0:0:0:0:0:0:0:1` are caught.
+	const family = net.isIP(ip);
+	if (family === 4 || family === 6) {
+		return privateAddressBlockList.check(ip, family === 4 ? "ipv4" : "ipv6");
 	}
-
-	// IPv6 loopback (::1), unspecified (::), link-local (fe80::/10) and
-	// unique-local (fc00::/7 — covers EC2 IPv6 IMDS fd00:ec2::254).
-	if (ip === "::1" || ip === "::") return true;
-	if (/^fe[89ab][0-9a-f]:/.test(ip)) return true;
-	if (/^f[cd][0-9a-f]{2}:/.test(ip)) return true;
 
 	return false;
 }

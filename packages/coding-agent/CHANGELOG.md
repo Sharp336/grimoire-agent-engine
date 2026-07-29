@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed missing SSRF guard in the fetch tool — requests to loopback, RFC1918 private, link-local, and cloud-metadata addresses are now refused before and after every redirect.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
