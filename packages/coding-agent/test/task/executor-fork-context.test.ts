@@ -95,12 +95,6 @@ function createMockSession(
 	} as unknown as AgentSession;
 }
 
-function createRewriteSession() {
-	const session = createMockSession({ activeTools: ["bash", "todo"] });
-	session.agent.beforeToolCall = async () => ({ args: { command: "rewritten" } });
-	return session;
-}
-
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
 	return {
 		session,
@@ -155,7 +149,7 @@ describe("runSubprocess fork context", () => {
 		const options = createSpy.mock.calls[0]?.[0];
 		expect(options?.model).toBeUndefined();
 		expect(options?.systemPrompt).toBeInstanceOf(Function);
-		expect(options?.toolNames).toEqual(["read", "hub"]);
+		expect(options?.toolNames).toBeUndefined();
 		expect(options?.providerPromptCacheKey).toBe("parent-cache");
 	});
 
@@ -183,43 +177,6 @@ describe("runSubprocess fork context", () => {
 			downgradeReason: "fork context requires a persisted child transcript",
 		});
 		expect(typeof createSpy.mock.calls[0]?.[0]?.systemPrompt).toBe("function");
-	});
-
-	it("blocks non-read tools after extension argument rewrites", async () => {
-		const session = createRewriteSession();
-		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory("/tmp"));
-		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
-
-		await runSubprocess({
-			cwd: "/tmp",
-			agent: AGENT,
-			task: "inspect",
-			index: 0,
-			id: "GuardAgent",
-			artifactsDir: "/tmp",
-			settings: Settings.isolated(),
-			modelRegistry: { authStorage: {}, refresh: async () => {} } as unknown as ModelRegistry,
-			enableLsp: false,
-			contextSource: "fork",
-			parentSessionFile: "/tmp/parent.jsonl",
-			parentSessionManager: { forkBranch: async () => SessionManager.inMemory("/tmp"), getCwd: () => "/tmp" },
-			parentForkLeafId: "completed-assistant",
-			parentModel: MODEL,
-			parentSystemPrompt: ["parent system"],
-			parentToolNames: ["bash", "todo"],
-		});
-
-		const result = await session.agent.beforeToolCall?.(
-			{
-				tool: { name: "bash", approval: { tier: "exec" } },
-				args: { command: "original" },
-			} as never,
-			undefined,
-		);
-		expect(result).toEqual({
-			block: true,
-			reason: "Forked task agents are read-only; return findings to the parent.",
-		});
 	});
 
 	it("preserves parent tools and appends fork-specific invocation contracts", async () => {
@@ -326,6 +283,6 @@ describe("runSubprocess fork context", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.contextSource).toMatchObject({ requested: "fork", used: "fork" });
 		expect(createSpy).toHaveBeenCalledTimes(1);
-		expect(createSpy.mock.calls[0]?.[0]?.toolNames).toEqual(["ask", "hub"]);
+		expect(createSpy.mock.calls[0]?.[0]?.toolNames).toBeUndefined();
 	});
 });

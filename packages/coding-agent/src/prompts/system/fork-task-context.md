@@ -4,7 +4,7 @@ The conversation above is inherited from the parent session. Handle the explicit
 - Use inherited context to understand prior requirements and decisions.
 - You MAY inspect, audit, and reason about parent-session work when the immediate assignment names or requires it.
 - Do not resume unrelated parent TODOs, plans, or unfinished work. Later explicit messages from the parent are valid follow-up assignments.
-- This fork is read-only. Do not edit files or run commands that can mutate the workspace; return findings to the parent.
+
 {{#if context}}
 Shared batch contract:
 {{context}}

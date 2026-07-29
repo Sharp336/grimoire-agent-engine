@@ -49,7 +49,6 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
-import { resolveToolTier } from "../tools/approval";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
@@ -2509,17 +2508,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 	const ircEnabled = options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
 
-	// Named agents with an explicit catalog use it. The default agent inherits
-	// the parent's active catalog so spawning does not silently widen access.
+	// Add tools if specified
 	let toolNames: string[] | undefined;
 	if (agent.tools && agent.tools.length > 0) {
-		toolNames = [...agent.tools];
+		toolNames = agent.tools;
 		// Auto-include task tool if spawns defined but task not in tools
 		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
 			toolNames = [...toolNames, "task"];
 		}
-	} else if (options.parentToolNames) {
-		toolNames = [...options.parentToolNames];
 	}
 
 	if (atMaxDepth && toolNames?.includes("task")) {
@@ -2852,19 +2848,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				context: options.context?.trim() ?? "",
 				outputSchema: normalizedOutputSchema ? JSON.stringify(normalizedOutputSchema, null, 2) : "",
 			});
-			const installForkRestrictions = (target: AgentSession, appendNotice: boolean): void => {
+			const installForkContext = (target: AgentSession, appendNotice: boolean): void => {
 				if (!useFork) return;
 				target.setTodoPhases([]);
-				const beforeToolCall = target.agent.beforeToolCall;
-				target.agent.beforeToolCall = async (ctx, toolSignal) => {
-					const inherited = await beforeToolCall?.(ctx, toolSignal);
-					if (inherited?.block) return inherited;
-					const effectiveArgs = inherited?.args ?? ctx.args;
-					if (resolveToolTier(ctx.tool, effectiveArgs) !== "read") {
-						return { block: true, reason: "Forked task agents are read-only; return findings to the parent." };
-					}
-					return inherited;
-				};
 				const injectNotice = () => {
 					const message = {
 						role: "developer",
@@ -2976,7 +2962,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
-			installForkRestrictions(session, true);
+			installForkContext(session, true);
 			installRegistryStatusSync(session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
@@ -2993,7 +2979,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const { session: revived } = await createAgentSession(
 						buildSubagentSessionOptions(reopened, expectedAgentRef),
 					);
-					installForkRestrictions(revived, false);
+					installForkContext(revived, false);
 					installRegistryStatusSync(revived);
 					return revived;
 				};

@@ -120,12 +120,12 @@
 
 ### Added
 
-- Added `fresh`, `fork`, and `auto` context sources to the task tool, including completed-parent conversation cloning, prompt-cache lineage inheritance, read-only fork execution, fresh fallback when parent context is unavailable, and cache-read result metadata. Forked tasks continue with inherited context when child tools differ, accepting a provider cache miss.
+- Added `fresh`, `fork`, and `auto` context sources to the task tool, including completed-parent conversation cloning, prompt-cache lineage inheritance, fresh fallback when parent context is unavailable, and cache-read result metadata. Source selection preserves the selected agent's normal tools, and forked tasks continue with inherited context when child tools differ, accepting a provider cache miss.
 - Added omp cleanse, a new command that automatically detects language-ecosystem checkers, parses diagnostics (such as Cargo Clippy JSON), distributes repair workloads across concurrent subagents, and runs verification checks with a live progress bar.
 
 ### Changed
 
-- Changed default task subagents without an explicit tool catalog to inherit the parent's active tools.
+
 - Reworked the /guided-goal command from a modal-based popup flow into a natural, conversational chat interface where the agent asks follow-up questions directly in the session.
 - Reduced startup memory usage by lazy-loading HTML session export assets only on their first use.
 
