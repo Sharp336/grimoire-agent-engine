@@ -97,6 +97,7 @@ export async function runStorageRepair(
 		...(historySource ? { historySource } : {}),
 		apply: flags.apply,
 		dataLoss: historySource !== undefined,
+		diagnosedOmittedTables: [],
 		status: "ready",
 		source,
 		backup: planned.backup,
@@ -129,6 +130,7 @@ export async function runStorageRepair(
 			const expected = await fs.promises.open(expectedPath, "wx", 0o600);
 			await expected.close();
 			diagnosis = diagnoseAgentSnapshot(snapshot.immutable, expectedPath);
+			result.diagnosedOmittedTables = diagnosis.omitTables;
 			result.dataLoss = diagnosis.omitTables.length > 0;
 		} else if (historySource === "sessions") {
 			prompts = await freezePromptManifest(snapshot.tempDir, flags.agentDir, hooks.afterSessionManifestParse);

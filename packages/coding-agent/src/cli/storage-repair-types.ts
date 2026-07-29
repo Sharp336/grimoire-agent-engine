@@ -32,6 +32,7 @@ export interface StorageRepairResult {
 	historySource?: HistoryRepairSource;
 	apply: boolean;
 	dataLoss: boolean;
+	diagnosedOmittedTables: string[];
 	status: "ready" | "refused" | "published-with-warning";
 	source: string;
 	backup: string;

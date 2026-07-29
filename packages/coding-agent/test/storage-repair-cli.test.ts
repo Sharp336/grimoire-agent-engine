@@ -516,6 +516,41 @@ describe("offline SQLite salvage", () => {
 		expect(result.refusal).toContain("database disk image is malformed");
 	});
 
+	test("refusal before candidate retains diagnosed omitted tables in result, JSON, and text", async () => {
+		const dbPath = await createAgentSource();
+		const db = new Database(dbPath);
+		db.prepare("INSERT INTO cache(key, value, expires_at) VALUES (?, ?, ?)").run("broken", "value", 1);
+		closeWal(db);
+		await corruptTablePage(dbPath, "cache");
+
+		const originalOpen = fs.promises.open;
+		const openSpy = spyOn(fs.promises, "open").mockImplementation(async (file, flags, mode) => {
+			if (typeof file === "string" && file.includes(".backup-") && file.endsWith(".tmp")) {
+				throw new Error("backup injection");
+			}
+			return originalOpen(file, flags, mode);
+		});
+		try {
+			const jsonResult = await runGcCommand({
+				flags: { agentDir: root, repairStorage: "agent", apply: true, json: true },
+			});
+			expect(jsonResult.repair).toMatchObject({
+				status: "refused",
+				dataLoss: true,
+				diagnosedOmittedTables: ["cache"],
+			});
+			expect(JSON.parse(stdout.join("")).repair.diagnosedOmittedTables).toEqual(["cache"]);
+
+			stdout = [];
+			const textResult = await runGcCommand({ flags: { agentDir: root, repairStorage: "agent", apply: true } });
+			expect(textResult.repair?.diagnosedOmittedTables).toEqual(["cache"]);
+			expect(stdout.join("")).toContain("registered rebuildable tables omitted: cache");
+			expect(stdout.join("")).not.toContain("fresh empty history");
+		} finally {
+			openSpy.mockRestore();
+		}
+	});
+
 	test("an impossible snapshot transition reports both rollback failures", async () => {
 		await createAgentSource();
 		const originalExec = Database.prototype.exec;

@@ -962,14 +962,11 @@ function renderText(result: GcResult): string {
 		lines.push(`candidate: ${repair.candidate}${repair.candidatePublished ? " (published)" : ""}`);
 		lines.push(`candidate path trusted: ${repair.candidatePathTrusted}`);
 		if (repair.dataLoss) {
-			const omittedTables = repair.objects
-				.filter(object => object.action === "omitted" && object.kind === "table")
-				.map(object => object.name);
 			lines.push(
-				repair.historySource === "sessions"
-					? "data loss: true (session rebuild retains only session messages; existing history rows and stable row IDs are not preserved)"
-					: omittedTables.length > 0
-						? `data loss: true (registered rebuildable tables omitted: ${omittedTables.join(", ")})`
+				repair.target === "agent"
+					? `data loss: true (registered rebuildable tables omitted: ${repair.diagnosedOmittedTables.join(", ")})`
+					: repair.historySource === "sessions"
+						? "data loss: true (session rebuild retains only session messages; existing history rows and stable row IDs are not preserved)"
 						: "data loss: true (fresh empty history)",
 			);
 		}
