@@ -186,6 +186,15 @@ describe("WorkflowTool", () => {
 			settings: Settings.isolated(),
 		};
 		expect(await WorkflowTool.createIf(session)).toBeNull();
+		const inMemorySession = createPersistentSession([]);
+		inMemorySession.getSessionFile = () => null;
+		expect(await WorkflowTool.createIf(inMemorySession)).toBeNull();
 		expect(await WorkflowTool.createIf({ ...session, taskDepth: 1 })).toBeNull();
+	});
+
+	it("serializes model-facing workflow operations", async () => {
+		const tool = await WorkflowTool.createIf(createPersistentSession([]));
+		if (!tool) throw new Error("Expected workflow tool for a persistent top-level session");
+		expect(tool.concurrency).toBe("exclusive");
 	});
 });

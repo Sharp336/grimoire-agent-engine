@@ -66,6 +66,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 	readonly description = prompt.render(workflowDescription);
 	readonly parameters = workflowSchema;
 	readonly approval = "exec" as const;
+	readonly concurrency = "exclusive" as const;
 	readonly strict = true;
 	readonly intent = "omit" as const;
 	readonly loadMode = "discoverable" as const;
@@ -78,7 +79,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 	}
 
 	static async createIf(session: ToolSession): Promise<WorkflowTool | null> {
-		if (!session.sessionManager || (session.taskDepth ?? 0) !== 0) return null;
+		if (!session.sessionManager || !session.getSessionFile() || (session.taskDepth ?? 0) !== 0) return null;
 		const runtime = await WorkflowRuntime.create({ store: new SessionWorkflowStore(session.sessionManager) });
 		return new WorkflowTool(session, runtime);
 	}
