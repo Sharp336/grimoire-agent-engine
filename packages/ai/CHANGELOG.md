@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Kiro device login, shared HTTP/2-only streaming, strict AWS EventStream completion and tool validation, and subscription usage reporting.
+
+### Changed
+
+- Centralized provider HTTP/2 pooling, Connect framing, proxy tunneling, and lifecycle cleanup in a shared transport.
+- Updated Cursor to its live HTTP/2 Connect contract with strict terminal framing and HTTP/1.1 fallback only when HTTP/2 is unavailable before dispatch or server discovery reports `BIDI_DISABLED`.
+- Centralized OAuth JWT expiry decoding while preserving each provider's existing fallback policy.
+- Updated Devin to the current CLI request, OAuth PKCE, and HTTP/2 Connect contracts with strict terminal framing and explicit fetch-override support.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

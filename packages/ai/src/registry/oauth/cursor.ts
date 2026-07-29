@@ -1,4 +1,5 @@
 import * as AIError from "../../error";
+import { decodeJwtPayload, jwtExpiryMs, jwtExpirySeconds } from "./jwt";
 import { generatePKCE } from "./pkce";
 import type { OAuthCredentials } from "./types";
 
@@ -138,34 +139,20 @@ export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<
 	};
 }
 
+// Cursor's own tokens are JWTs, but a pasted API key need not be: an
+// unreadable expiry means "assume an hour" rather than "refresh now", so a
+// long-lived opaque key is not re-minted on every request.
 function getTokenExpiry(token: string): number {
-	try {
-		const parts = token.split(".");
-		if (parts.length !== 3) {
-			return Date.now() + 3600 * 1000;
-		}
-		const payload = parts[1];
-		if (!payload) {
-			return Date.now() + 3600 * 1000;
-		}
-		const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-		if (decoded && typeof decoded === "object" && typeof decoded.exp === "number") {
-			return decoded.exp * 1000 - 5 * 60 * 1000;
-		}
-	} catch {
-		// Ignore parsing errors
-	}
-	return Date.now() + 3600 * 1000;
+	return jwtExpiryMs(token) ?? Date.now() + 3600 * 1000;
 }
 
+// A token whose payload decodes but states no usable `exp` is NOT treated as
+// expiring: Cursor accepts long-lived pasted keys, and refreshing those on
+// every request would churn a credential that never expires. Only a payload
+// that cannot be read at all forces a refresh.
 export function isCursorTokenExpiringSoon(token: string, thresholdSeconds = 300): boolean {
-	try {
-		const [, payload] = token.split(".");
-		if (!payload) return true;
-		const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-		const currentTime = Math.floor(Date.now() / 1000);
-		return decoded.exp - currentTime < thresholdSeconds;
-	} catch {
-		return true;
-	}
+	if (decodeJwtPayload(token) === null) return true;
+	const exp = jwtExpirySeconds(token);
+	if (exp === undefined) return false;
+	return exp - Math.floor(Date.now() / 1000) < thresholdSeconds;
 }

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { create, toBinary } from "@bufbuild/protobuf";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 
 /**
  * Regression for #4228: a Devin Connect frame header advertising an outsized
@@ -37,17 +37,21 @@ function corruptFrameHeader(advertisedLen: number): Uint8Array {
 	return out;
 }
 
+function connectFrame(payload: Uint8Array): Uint8Array {
+	const frame = new Uint8Array(5 + payload.byteLength);
+	new DataView(frame.buffer).setUint32(1, payload.byteLength, false);
+	frame.set(payload, 5);
+	return frame;
+}
+
 describe("streamDevin frame length cap", () => {
 	it("rejects a frame advertising a payload above the 16 MiB cap without buffering it", async () => {
-		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 		// 32 MiB advertised — twice the cap, well below UINT32_MAX so the
 		// concat-forever bug would silently swallow it on the vulnerable branch.
 		const header = corruptFrameHeader(32 * 1024 * 1024);
 		let concatBytes = 0;
 
-		const fetchImpl = (async (input: string | URL | Request) => {
-			const url = String(input);
-			if (url.includes("GetUserJwt")) return new Response(authPayload);
+		const fetchImpl: FetchImpl = async () => {
 			return new Response(
 				new ReadableStream<Uint8Array>({
 					async pull(controller) {
@@ -62,13 +66,13 @@ describe("streamDevin frame length cap", () => {
 				}),
 				{ status: 200 },
 			);
-		}) as typeof fetch;
+		};
 
 		const stream = streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl });
 		const result = await stream.result();
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Devin Connect frame length");
+		expect(result.errorMessage).toContain("Devin Connect frame payload");
 		expect(result.errorMessage).toContain("16777216");
 		// Fewer than 2 MiB should ever flow through: the reader must reject the
 		// frame the moment it decodes the length prefix, not after a payload
@@ -77,12 +81,9 @@ describe("streamDevin frame length cap", () => {
 	});
 
 	it("carries the envelope diagnostic on the error event and finalized message", async () => {
-		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 		const header = corruptFrameHeader(64 * 1024 * 1024);
 
-		const fetchImpl = (async (input: string | URL | Request) => {
-			const url = String(input);
-			if (url.includes("GetUserJwt")) return new Response(authPayload);
+		const fetchImpl: FetchImpl = async () => {
 			return new Response(
 				new ReadableStream<Uint8Array>({
 					async pull(controller) {
@@ -92,7 +93,7 @@ describe("streamDevin frame length cap", () => {
 				}),
 				{ status: 200 },
 			);
-		}) as typeof fetch;
+		};
 
 		const stream = streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl });
 		let errorEvent:
@@ -111,5 +112,24 @@ describe("streamDevin frame length cap", () => {
 		expect(errorEvent?.error.stopReason).toBe("error");
 		expect(errorEvent?.error.errorMessage).toContain("67108864");
 		expect(errorEvent?.error.errorMessage).toContain("16777216");
+	});
+
+	it("fails a clean explicit-fetch close with a truncated Connect payload", async () => {
+		const frame = connectFrame(new Uint8Array([1, 2, 3]));
+		const fetchImpl: FetchImpl = async () =>
+			new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(frame.subarray(0, -1));
+						controller.close();
+					},
+				}),
+				{ status: 200 },
+			);
+
+		const result = await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("incomplete frame payload (2 of 3 bytes)");
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
 	});
 });

@@ -7,6 +7,7 @@ import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { isRecord } from "../../utils";
 import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-server";
+import { decodeJwtPayload } from "./jwt";
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
 
@@ -39,16 +40,14 @@ type JwtPayload = {
 	[key: string]: unknown;
 };
 
+/**
+ * Kept as a named export for API stability; the decode itself lives in
+ * `./jwt`. Behavior is unchanged — Bun's `base64` and `base64url` decoders
+ * both accept the URL-safe alphabet — except that a non-object payload now
+ * returns `null` instead of being cast to `T`.
+ */
 export function decodeJwt<T = Record<string, unknown>>(token: string): T | null {
-	try {
-		const parts = token.split(".");
-		if (parts.length !== 3) return null;
-		const payload = parts[1] ?? "";
-		const decoded = Buffer.from(payload, "base64").toString("utf-8");
-		return JSON.parse(decoded) as T;
-	} catch {
-		return null;
-	}
+	return decodeJwtPayload(token) as T | null;
 }
 
 /**

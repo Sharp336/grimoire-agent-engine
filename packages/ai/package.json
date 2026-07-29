@@ -38,6 +38,8 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "catalog:",
+    "@connectrpc/connect": "catalog:",
+    "@connectrpc/connect-node": "catalog:",
     "@oh-my-pi/pi-catalog": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
@@ -64,6 +66,10 @@
     "./error": {
       "types": "./src/error/index.ts",
       "import": "./src/error/index.ts"
+    },
+    "./transport": {
+      "types": "./src/transport/index.ts",
+      "import": "./src/transport/index.ts"
     },
     "./*": {
       "types": "./src/*.ts",

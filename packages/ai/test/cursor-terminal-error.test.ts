@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, toBinary } from "@bufbuild/protobuf";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -19,11 +20,14 @@ type Scenario =
 	| { kind: "success" }
 	| { kind: "connect-error-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
+	| { kind: "grpc-trailer-malformed-message" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
+	| { kind: "http-status"; status: number }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-transport-error"; responseFinished: PromiseWithResolvers<void> }
-	| { kind: "exec-then-hang" };
+	| { kind: "exec-then-hang" }
+	| { kind: "malformed-frame-before-turn-ended" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -72,6 +76,10 @@ function connectEndErrorFrame(code: string, message: string): Buffer {
 	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
 }
 
+function connectEndSuccessFrame(): Buffer {
+	return frameConnectMessage(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+}
+
 /**
  * A `read` exec request. The provider parses every frame in a chunk
  * synchronously and dispatches each `handleServerMessage` fire-and-forget, so
@@ -101,9 +109,12 @@ function execRequestFrame(): Buffer {
  * the call is never paired.
  */
 function execAndTurnEndedFrame(): Buffer {
-	return Buffer.concat([execRequestFrame(), turnEndedFrame()]);
+	return Buffer.concat([execRequestFrame(), turnEndedFrame(), connectEndSuccessFrame()]);
 }
 
+function malformedProtobufFrame(): Buffer {
+	return frameConnectMessage(Buffer.from([0x0a]));
+}
 async function startServer(): Promise<string> {
 	server = http2.createServer();
 	server.on("session", session => {
@@ -115,6 +126,12 @@ async function startServer(): Promise<string> {
 
 		if (headers[":path"] !== "/agent.v1.AgentService/Run") {
 			stream.respond({ ":status": 404 });
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "http-status") {
+			stream.respond({ ":status": scenario.status });
 			stream.end();
 			return;
 		}
@@ -138,6 +155,16 @@ async function startServer(): Promise<string> {
 			stream.end();
 			return;
 		}
+		if (scenario.kind === "grpc-trailer-malformed-message") {
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" }, { waitForTrailers: true });
+			stream.on("wantTrailers", () => {
+				stream.sendTrailers({ "grpc-status": "13", "grpc-message": "rate-limit %ZZ blocked" });
+			});
+			stream.write(textDeltaFrame("hello"));
+			stream.write(turnEndedFrame());
+			stream.end();
+			return;
+		}
 
 		stream.respond({
 			":status": 200,
@@ -145,7 +172,13 @@ async function startServer(): Promise<string> {
 		});
 
 		if (scenario.kind === "end-before-turn") {
-			stream.write(textDeltaFrame("partial"));
+			stream.write(Buffer.concat([textDeltaFrame("partial"), connectEndSuccessFrame()]));
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "malformed-frame-before-turn-ended") {
+			stream.write(Buffer.concat([textDeltaFrame("partial"), malformedProtobufFrame(), turnEndedFrame()]));
 			stream.end();
 			return;
 		}
@@ -193,7 +226,7 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
-		stream.end();
+		stream.end(connectEndSuccessFrame());
 	});
 
 	const listening = Promise.withResolvers<void>();
@@ -292,6 +325,51 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(result.errorMessage).toContain("gRPC error 13: post-turn trailer failure");
 	});
 
+	it("preserves pre-message HTTP status and marks a 503 transient", async () => {
+		scenario = { kind: "http-status", status: 503 };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(result.errorStatus).toBe(503);
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBeTrue();
+	});
+
+	it("normalizes a pre-message 403 as a credential error", async () => {
+		scenario = { kind: "http-status", status: 403 };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(result.errorStatus).toBe(403);
+		expect(AIError.is(result.errorId, AIError.Flag.AuthFailed)).toBeTrue();
+	});
+
+	it("preserves raw trailer text when grpc-message has a malformed percent escape", async () => {
+		// A remote grpc-message trailer may carry a percent escape that is not a
+		// valid hex pair (e.g. "%ZZ"). decodeURIComponent would throw a URIError
+		// out of the trailers event callback, which — uncaught — crashes the
+		// process. The provider must instead keep the raw trailer text and
+		// terminate through its normal error lifecycle: a terminal error event,
+		// never `done`, and no uncaught exception.
+		scenario = { kind: "grpc-trailer-malformed-message" };
+		const uncaught: unknown[] = [];
+		const onUncaught = (error: unknown) => uncaught.push(error);
+		process.on("uncaughtException", onUncaught);
+		try {
+			const baseUrl = await startServer();
+			const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+			expect(eventTypes[0]).toBe("start");
+			expect(eventTypes.at(-1)).toBe("error");
+			expect(eventTypes).not.toContain("done");
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("gRPC error 13: rate-limit %ZZ blocked");
+			// The stream has fully settled; any synchronous throw from the
+			// callback would have surfaced by now.
+			expect(uncaught).toEqual([]);
+		} finally {
+			process.removeListener("uncaughtException", onUncaught);
+		}
+	});
+
 	it("rejects when the stream ends before turnEnded", async () => {
 		scenario = { kind: "end-before-turn" };
 		const baseUrl = await startServer();
@@ -301,6 +379,17 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
+	});
+
+	it("rejects malformed protobuf frames before a queued turnEnded without emitting done", async () => {
+		scenario = { kind: "malformed-frame-before-turn-ended" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Cursor protocol error: malformed response frame");
 	});
 
 	it("aborts without emitting done when the signal fires", async () => {

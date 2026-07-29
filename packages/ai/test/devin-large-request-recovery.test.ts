@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { create, toBinary } from "@bufbuild/protobuf";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 
 const CONNECT_END_STREAM_FLAG = 0x02;
 const LARGE_TOOL_RESULT_BYTES = 160 * 1024;
@@ -59,10 +59,8 @@ function connectErrorFrame(code: string, message: string): Uint8Array {
 }
 
 async function runTrailerError(context: Context, code: string, message: string, leadingFrames: Uint8Array[] = []) {
-	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 	const trailer = connectErrorFrame(code, message);
-	const fetchImpl = (async (input: string | URL | Request) => {
-		if (String(input).includes("GetUserJwt")) return new Response(authPayload);
+	const fetchImpl: FetchImpl = async () => {
 		return new Response(
 			new ReadableStream<Uint8Array>({
 				start(controller) {
@@ -73,13 +71,18 @@ async function runTrailerError(context: Context, code: string, message: string, 
 			}),
 			{ status: 200 },
 		);
-	}) as typeof fetch;
+	};
 
 	return streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
 }
 
+async function runHttpError(context: Context, status: number, statusText: string, body: string) {
+	const fetchImpl: FetchImpl = async () => new Response(body, { status, statusText });
+	return streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
+}
+
 describe("streamDevin large request recovery", () => {
-	it("classifies an opaque invalid_argument on cumulative large read output as context overflow", async () => {
+	it("does not reinterpret an opaque invalid_argument from request size", async () => {
 		const result = await runTrailerError(
 			largeReadContext,
 			"invalid_argument",
@@ -88,7 +91,45 @@ describe("streamDevin large request recovery", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("trace ID: large-request");
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
+	});
+
+	it("classifies an explicit current-protocol Connect oversized-request trailer without relying on history size", async () => {
+		const result = await runTrailerError(
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			"resource_exhausted",
+			"request_too_large: serialized prompt exceeds the backend request budget",
+		);
+
+		expect(result.stopReason).toBe("error");
 		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.isContextOverflow(result)).toBe(true);
+	});
+
+	it("classifies a current-protocol HTTP 413 oversized request", async () => {
+		const result = await runHttpError(
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			413,
+			"Payload Too Large",
+			"request_too_large",
+		);
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(413);
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.isContextOverflow(result)).toBe(true);
+	});
+
+	it("keeps a non-overflow current-protocol trailer out of auto-compaction", async () => {
+		const result = await runTrailerError(
+			largeReadContext,
+			"permission_denied",
+			"the selected model is unavailable to this account",
+		);
+
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
+		expect(AIError.isContextOverflow(result)).toBe(false);
 	});
 
 	it("keeps the same opaque trailer transient for a small request", async () => {
@@ -157,7 +198,7 @@ describe("streamDevin large request recovery", () => {
 		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
 	});
 
-	it("classifies as context overflow if there is huge eligible prior history before the active turn user message", async () => {
+	it("does not infer overflow from eligible prior history", async () => {
 		const result = await runTrailerError(
 			{
 				messages: [
@@ -182,10 +223,10 @@ describe("streamDevin large request recovery", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("trace ID: prior-history-overflow");
-		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
 	});
 
-	it("classifies as context overflow if the request follows a large tool execution", async () => {
+	it("does not infer overflow from a large tool execution", async () => {
 		const result = await runTrailerError(
 			{
 				messages: [
@@ -235,9 +276,9 @@ describe("streamDevin large request recovery", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("trace ID: tool-execution-overflow");
-		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
 	});
-	it("keeps prior user-role execution history eligible before the active prompt", async () => {
+	it("does not infer overflow from prior user-role execution history", async () => {
 		const result = await runTrailerError(
 			{
 				messages: [
@@ -258,7 +299,7 @@ describe("streamDevin large request recovery", () => {
 		);
 
 		expect(result.stopReason).toBe("error");
-		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
 	});
 
 	it("keeps the trailer transient for a large current prompt split across multiple trailing user/developer messages", async () => {

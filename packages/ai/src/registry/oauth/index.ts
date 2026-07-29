@@ -4,6 +4,7 @@
 
 import * as AIError from "../../error";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
+import { jwtExpiryMs } from "./jwt";
 import type {
 	OAuthCredentials,
 	OAuthProvider,
@@ -77,19 +78,6 @@ export async function refreshOAuthToken(
 	// don't expire) return the credentials unchanged.
 	return def.refreshToken ? def.refreshToken(credentials) : credentials;
 }
-function getPerplexityJwtExpiryMs(token: string): number | undefined {
-	const parts = token.split(".");
-	if (parts.length !== 3) return undefined;
-	const payload = parts[1];
-	if (!payload) return undefined;
-	try {
-		const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: unknown };
-		if (typeof decoded.exp !== "number" || !Number.isFinite(decoded.exp)) return undefined;
-		return decoded.exp * 1000 - 5 * 60_000;
-	} catch {
-		return undefined;
-	}
-}
 
 /**
  * Build API-key bytes for a provider from an already-fresh OAuth credential.
@@ -119,7 +107,7 @@ export async function getOAuthApiKey(
 		const NEVER_EXPIRES = 8.64e15;
 		const normalizedExpires =
 			creds.expires > 0 && creds.expires < 10_000_000_000 ? creds.expires * 1000 : creds.expires;
-		const jwtExpiry = getPerplexityJwtExpiryMs(creds.access);
+		const jwtExpiry = jwtExpiryMs(creds.access);
 		const expires = jwtExpiry ?? Math.max(normalizedExpires, NEVER_EXPIRES);
 		if (expires !== creds.expires) {
 			creds = { ...creds, expires };
@@ -134,7 +122,7 @@ export async function getOAuthApiKey(
 	// as `invalid_grant` and disables the row. Refuse loudly instead.
 	if (Date.now() >= creds.expires) {
 		if (provider === "perplexity") {
-			const jwtExpiry = getPerplexityJwtExpiryMs(creds.access);
+			const jwtExpiry = jwtExpiryMs(creds.access);
 			if (jwtExpiry && Date.now() < jwtExpiry) {
 				const fallbackCredentials = { ...creds, expires: jwtExpiry };
 				return { newCredentials: fallbackCredentials, apiKey: fallbackCredentials.access };

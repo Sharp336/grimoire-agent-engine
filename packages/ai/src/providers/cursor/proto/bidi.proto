@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package aiserver.v1;
+
+// Identifies one logical bidi request across the append/poll/SSE channels.
+message BidiRequestId {
+  string request_id = 1;
+}
+
+// Appends a client frame (AgentClientMessage bytes) to an open bidi request.
+message BidiAppendRequest {
+  string data = 1;
+  aiserver.v1.BidiRequestId request_id = 2;
+  uint64 append_seqno = 3;
+  bytes data_binary = 4;
+}
+
+// Response to a BidiAppend call. No fields are consumed by omp.
+message BidiAppendResponse {}
+
+// Polls buffered server frames for a bidi request (HTTP/1 receive fallback).
+message BidiPollRequest {
+  aiserver.v1.BidiRequestId request_id = 1;
+  bool start_request = 2;
+}
+
+// One polled server frame.
+message BidiPollResponse {
+  uint64 seqno = 1;
+  string data = 2;
+  bool eof = 3;
+}
+
+// Client->server frame append. Server frames are consumed via the
+// AgentService.RunSSE / RunPoll server-streaming methods.
+service BidiService {
+  rpc BidiAppend(aiserver.v1.BidiAppendRequest) returns (aiserver.v1.BidiAppendResponse);
+}

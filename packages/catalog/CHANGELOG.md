@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added account-scoped dynamic model discovery for Kiro.
+
+### Changed
+
+- Updated Cursor discovery to decode the current server configuration used for transport selection.
+- Updated Devin discovery to the live model catalog and current model metadata.
+
 ## [17.1.8] - 2026-07-28
 
 ### Added

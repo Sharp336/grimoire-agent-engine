@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package aiserver.v1;
+
+// Server-forced bidi/HTTP2 policy. Only FORCE_ALL_DISABLED and
+// FORCE_BIDI_DISABLED select HTTP/1; every other value, including
+// UNSPECIFIED and a failed config fetch, stays on HTTP/2.
+enum Http2Config {
+  HTTP2_CONFIG_UNSPECIFIED = 0;
+  HTTP2_CONFIG_FORCE_ALL_DISABLED = 1;
+  HTTP2_CONFIG_FORCE_ALL_ENABLED = 2;
+  HTTP2_CONFIG_FORCE_BIDI_DISABLED = 3;
+  HTTP2_CONFIG_FORCE_BIDI_ENABLED = 4;
+}
+
+// Per-account agent endpoint overrides returned by GetServerConfig.
+message AgentUrlConfig {
+  string agent_url = 1;
+  string agentn_url = 2;
+}
+
+message GetServerConfigRequest {}
+
+message GetServerConfigResponse {
+  aiserver.v1.Http2Config http2_config = 7;
+  aiserver.v1.AgentUrlConfig agent_url_config = 27;
+}
+
+// Account-scoped transport and endpoint policy.
+service ServerConfigService {
+  rpc GetServerConfig(aiserver.v1.GetServerConfigRequest) returns (aiserver.v1.GetServerConfigResponse);
+}
