@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced bash, grep, and glob tool guidance while making shell/eval boundaries, broad-search timeout avoidance, and local-only glob routing explicit.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
