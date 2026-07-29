@@ -83,6 +83,13 @@ function toolUseStartFrame(input = JSON.stringify({ path: "/etc/passwd" })): Uin
 	});
 }
 
+function exceptionFrame(exceptionType: string, message: string): Uint8Array {
+	return encodeFrame(
+		{ ":message-type": "exception", ":exception-type": exceptionType },
+		new TextEncoder().encode(JSON.stringify({ message })),
+	);
+}
+
 function endTurnMetadataFrame(): Uint8Array {
 	return encodeKiroEvent("metadataEvent", { stopReason: "END_TURN" });
 }
@@ -275,5 +282,39 @@ describe("Kiro terminal-state invariant", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("frame length 16777217 exceeds maximum 16777216");
 		expect(eventTypes).toEqual(["start", "error"]);
+	});
+
+	it("emits the original terminal error when response cleanup rejects", async () => {
+		const response = new Response(exceptionFrame("validationException", "original provider failure"), {
+			status: 200,
+			headers: { "content-type": "application/vnd.amazon.eventstream" },
+		});
+		let closeCalls = 0;
+		const closeStarted = Promise.withResolvers<void>();
+		if (!response.body) throw new Error("expected response body");
+		Object.defineProperty(response.body, "cancel", {
+			value: async () => {
+				closeCalls += 1;
+				closeStarted.resolve();
+				throw new Error("cleanup failed");
+			},
+		});
+		const stream = streamKiro(makeModel("https://kiro.invalid"), context, {
+			apiKey: "test-token",
+			fetch: async () => response,
+		});
+		const eventTypes: string[] = [];
+		const collected = (async () => {
+			for await (const event of stream) eventTypes.push(event.type);
+			return stream.result();
+		})();
+		await closeStarted.promise;
+
+		expect(stream.resultSettled).toBe(true);
+		const result = await collected;
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(result.errorMessage).toContain("original provider failure");
+		await Promise.resolve();
+		expect(closeCalls).toBe(1);
 	});
 });
