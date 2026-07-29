@@ -985,6 +985,34 @@ describe("tool path arrays", () => {
 		}
 	});
 
+	it("labels every payload in a multi-target read", async () => {
+		const parts = ["first-target.txt", "second-target.txt"];
+		const result = await executeReadBatch<ReadBatchPartDetails>({
+			parts,
+			notice: "custom batch",
+			enforceAggregateBudget: true,
+			async readPart(part) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: part === parts[0] ? "first payload\n\nwith an internal blank line" : "second payload",
+						},
+					],
+				};
+			},
+		});
+		const text = getText(result);
+		const firstHeader = '[Read target 1/2: "first-target.txt"]';
+		const secondHeader = '[Read target 2/2: "second-target.txt"]';
+
+		expect(text).toContain(firstHeader);
+		expect(text).toContain(secondHeader);
+		expect(text.indexOf(firstHeader)).toBeLessThan(text.indexOf("first payload"));
+		expect(text.indexOf(secondHeader)).toBeGreaterThan(text.indexOf("with an internal blank line"));
+		expect(text.indexOf(secondHeader)).toBeLessThan(text.indexOf("second payload"));
+	});
+
 	it("preserves each target's truncation notice in native batches", async () => {
 		const largeA = `${"aaaaaaaaaaaaaaaa\n".repeat(3_100)}large-a-end`;
 		const largeB = `${"bbbbbbbbbbbbbbbb\n".repeat(3_100)}large-b-end`;

@@ -245,6 +245,10 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 		pendingTextOwner = owner;
 		pendingTextProtected = protectedText;
 	};
+	const appendTargetHeader = (part: string, index: number, owner: number) => {
+		if (parts.length < 2) return;
+		appendText(`[Read target ${index + 1}/${parts.length}: ${JSON.stringify(part)}]`, owner, true);
+	};
 	const consumeSettledResult = (index: number, settled: PromiseSettledResult<LimitedBatchPartResult<TDetails>>) => {
 		const part = parts[index];
 		if (part === undefined) throw new ToolError(`Read batch did not execute slot ${index}`);
@@ -257,6 +261,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 			notes.push(errorNote);
 			const owner = readTargetOutcomes.length;
 			readTargetOutcomes.push({ path: part, status: "error", message });
+			appendTargetHeader(part, index, owner);
 			appendText(`[${errorNote}]`, owner, true);
 			return;
 		}
@@ -307,6 +312,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 				message: targetWarnings.length > 0 ? targetWarnings.join(" ") : undefined,
 			});
 		}
+		appendTargetHeader(part, index, owner);
 		for (const block of result.content) {
 			if (block.type === "text") {
 				appendText(block.text, owner);
