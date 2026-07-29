@@ -838,6 +838,12 @@ export class CustomEditor extends Editor {
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
 
+		// Vim owns Ctrl-R in normal mode; history search remains available in insert mode.
+		if (canonical === "ctrl+r" && this.getVimMode() === "normal") {
+			super.handleInput(data);
+			return;
+		}
+
 		// Left-arrow on an empty editor: surface for the agent-hub double-tap
 		// gesture. Plain "left" only — modified arrows and any in-text cursor
 		// movement fall through to normal handling.

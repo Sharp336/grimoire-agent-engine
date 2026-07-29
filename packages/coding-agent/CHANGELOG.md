@@ -262,6 +262,14 @@
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
 
+### Added
+
+- Added a configurable `inputMode: vim` setting for modal prompt editing, including visible mode labels and safe interaction with app shortcuts and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
+
+### Fixed
+
+- Kept Ctrl-R available for redo in Vim normal mode instead of opening prompt history search.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

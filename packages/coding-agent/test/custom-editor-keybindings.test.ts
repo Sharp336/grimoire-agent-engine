@@ -96,6 +96,25 @@ describe("CustomEditor keybindings", () => {
 		expect(onEscape).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps Ctrl-R for Vim redo instead of opening history search", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onHistorySearch = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.history.search", ["ctrl+r"]);
+		editor.onHistorySearch = onHistorySearch;
+
+		editor.handleInput("i");
+		for (const char of "hello") editor.handleInput(char);
+		editor.handleInput("\x1b");
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
+
+		editor.handleInput("\x12");
+
+		expect(editor.getText()).toBe("hello");
+		expect(onHistorySearch).not.toHaveBeenCalled();
+	});
+
 	it("does not start push-to-talk from Vim normal-mode spaces", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onSpaceHoldStart = vi.fn();
