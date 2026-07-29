@@ -6,7 +6,14 @@ import { InternalUrlRouter, XD_URL_PREFIX } from "../../internal-urls";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
 import { extractPathArguments, parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tools/path-utils";
 import type { ReadTargetOutcome } from "../../tools/read";
-import { joinTextContentBlocks, PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
+import {
+	joinTextContentBlocks,
+	PREVIEW_LIMITS,
+	previewLine,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+} from "../../tools/render-utils";
 import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import type { ToolExecutionHandle } from "./tool-execution";
@@ -783,7 +790,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(options.correctedFrom)})`);
 		}
 		pathDisplay += this.#formatConflictBadge(options.conflictCount);
-		return pathDisplay;
+		return previewLine(replaceTabs(pathDisplay), TRUNCATE_LENGTHS.LINE);
 	}
 
 	#formatConflictBadge(conflictCount: number | undefined): string {

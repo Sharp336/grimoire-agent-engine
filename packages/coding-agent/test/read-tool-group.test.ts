@@ -8,6 +8,7 @@ import {
 	readArgsCollapseIntoGroup,
 } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 
 function extractLinkUris(text: string): string[] {
 	return [...text.matchAll(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/g)].map(match => match[1]!);
@@ -176,6 +177,27 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain("Read (2)");
 		expect(plain).toContain(onePath);
 		expect(plain).toContain(twoPath);
+	});
+
+	it("sanitizes and bounds every pending native-array path", () => {
+		const component = new ReadToolGroupComponent();
+		const paths = Array.from({ length: 32 }, (_, index) => `src/${index}\t${"long-".repeat(30)}.ts`);
+		component.updateArgs({ path: paths }, "read-long-array");
+
+		const rawLines = component.render(400);
+		const rendered = rawLines.join("\n");
+		const pathRows = rawLines.map(line => Bun.stripANSI(line).trimEnd()).filter(line => line.includes("src/"));
+		const prefixWidth = Math.max(
+			Bun.stringWidth(`   ${themeModule.theme.tree.branch} `),
+			Bun.stringWidth(`   ${themeModule.theme.tree.last} `),
+		);
+		const statusWidth = Bun.stringWidth(`${themeModule.theme.status.pending} `);
+
+		expect(rendered).not.toContain("\t");
+		expect(pathRows).toHaveLength(paths.length);
+		for (const row of pathRows) {
+			expect(Bun.stringWidth(row)).toBeLessThanOrEqual(prefixWidth + statusWidth + TRUNCATE_LENGTHS.LINE);
+		}
 	});
 
 	it("merges multi-range selectors into one file row", () => {

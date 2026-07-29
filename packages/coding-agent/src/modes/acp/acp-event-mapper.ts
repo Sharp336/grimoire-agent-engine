@@ -649,9 +649,20 @@ const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 function readFilesystemLocation(raw: string, cwd?: string): string {
 	const literalPath = toAcpLocationPath(raw, cwd);
 	if (fs.existsSync(literalPath)) return raw;
-	const archivePath = parseArchivePathCandidates(raw)[0]?.archivePath;
+
+	const archiveCandidates = parseArchivePathCandidates(raw);
+	for (const candidate of archiveCandidates) {
+		if (fs.existsSync(toAcpLocationPath(candidate.archivePath, cwd))) return candidate.archivePath;
+	}
+
+	const sqliteCandidates = parseSqlitePathCandidates(raw);
+	for (const candidate of sqliteCandidates) {
+		if (fs.existsSync(toAcpLocationPath(candidate.sqlitePath, cwd))) return candidate.sqlitePath;
+	}
+
+	const archivePath = archiveCandidates[0]?.archivePath;
 	if (archivePath) return archivePath;
-	const sqlitePath = parseSqlitePathCandidates(raw)[0]?.sqlitePath;
+	const sqlitePath = sqliteCandidates[0]?.sqlitePath;
 	if (sqlitePath) return sqlitePath;
 	return splitPathAndSel(raw).path;
 }

@@ -1100,6 +1100,28 @@ describe("ACP event mapper", () => {
 		}
 	});
 
+	it("uses existing outer containers for nested archive and SQLite read targets", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-container-"));
+		fs.writeFileSync(path.join(cwd, "outer.zip"), "");
+		fs.writeFileSync(path.join(cwd, "outer.db"), "");
+		try {
+			const update = buildToolCallStartUpdate({
+				toolCallId: "toolu_read_nested_containers",
+				toolName: "read",
+				args: { path: ["outer.zip:dir/inner.zip", "outer.db:logs/inner.db:users"] },
+				cwd,
+				status: "pending",
+			});
+
+			expect((update as { locations?: { path: string }[] }).locations).toEqual([
+				{ path: path.join(cwd, "outer.zip") },
+				{ path: path.join(cwd, "outer.db") },
+			]);
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps malformed replay arguments as raw input without command content", () => {
 		const replayArgs = normalizeReplayToolArguments("{not json");
 		const update = buildToolCallStartUpdate({
