@@ -55,7 +55,6 @@ async function main(): Promise<Result> {
 			apiKey: "test-key",
 			provider: "cursor",
 			useHttp1ForAgent: false,
-			originalRequestId: "req-1",
 		});
 	} catch (err) {
 		if (String(err).includes("disposed")) threwMode = true;

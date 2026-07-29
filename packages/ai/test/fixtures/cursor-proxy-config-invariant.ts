@@ -143,7 +143,6 @@ async function main(): Promise<Result> {
 				apiKey: "test-key",
 				provider: "cursor",
 				useHttp1ForAgent: false,
-				originalRequestId: "orig-123",
 			});
 			steps.push(check("GetServerConfig HTTP/1 mode", "http1", res.mode));
 		} finally {

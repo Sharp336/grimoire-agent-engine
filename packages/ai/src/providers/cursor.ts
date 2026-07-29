@@ -67,6 +67,7 @@ import {
 	McpToolDefinitionSchema,
 	McpToolNotFoundSchema,
 	McpToolResultContentItemSchema,
+	McpToolsSchema,
 	ModelDetailsSchema,
 	ReadErrorSchema,
 	ReadMcpResourceExecResultSchema,
@@ -1030,7 +1031,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				provider: model.provider,
 				useHttp1ForAgent: options?.useHttp1ForAgent ?? options?.cursorUseHttp1ForAgent ?? false,
 				clientVersion: options?.clientVersion,
-				originalRequestId,
 				signal: options?.signal,
 			}).catch((error: unknown) => {
 				// Caller abort and auth failures from config discovery must
@@ -3328,12 +3328,14 @@ function buildGrpcRequest(
 		action,
 		modelDetails,
 		requestedModel,
+		mcpTools: create(McpToolsSchema, { mcpTools: buildMcpToolDefinitions(context.tools) }),
 		conversationId: state.conversationId,
 	});
 
 	options?.onPayload?.(runRequest, model);
 
-	// Tools are sent later via requestContext (exec handshake)
+	// MCP tools are advertised in the run request and supplied again only when
+	// the server explicitly asks for request context through the exec channel.
 
 	if (options?.customSystemPrompt) {
 		runRequest.customSystemPrompt = options.customSystemPrompt;

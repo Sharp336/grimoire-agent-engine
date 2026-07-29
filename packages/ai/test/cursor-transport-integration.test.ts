@@ -213,11 +213,13 @@ describe("Cursor transport production integration", () => {
 		let sawRunSSE = false;
 		let sawBidiAppend = false;
 		let sawGetServerConfig = false;
+		let serverConfigOriginalRequestId: string | undefined;
 
 		handleH1Request = (req, res) => {
 			const url = req.url ?? "";
 			if (url.includes("GetServerConfig")) {
 				sawGetServerConfig = true;
+				serverConfigOriginalRequestId = req.headers["x-original-request-id"] as string | undefined;
 				res.writeHead(404, { "content-type": "application/json" });
 				res.end();
 				return;
@@ -254,6 +256,7 @@ describe("Cursor transport production integration", () => {
 
 		// The config RPC was made over H1.
 		expect(sawGetServerConfig).toBe(true);
+		expect(serverConfigOriginalRequestId).toBeUndefined();
 		// Either RunSSE or BidiAppend was attempted over H1.
 		expect(sawRunSSE || sawBidiAppend).toBe(true);
 		// H2 pool should NOT have been used for the agent traffic.

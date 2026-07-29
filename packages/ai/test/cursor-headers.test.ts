@@ -6,7 +6,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/cursor/headers";
 import { CURSOR_DEFAULT_CLIENT_VERSION as CATALOG_DEFAULT } from "@oh-my-pi/pi-catalog/discovery/cursor";
 
-const PINNED = "cli-2026.07.20-8cc9c0b";
+const PINNED = "cli-2026.07.23-e383d2b";
 const originalClientVersionEnv = Bun.env.CURSOR_CLIENT_VERSION;
 
 afterEach(() => {
@@ -50,6 +50,12 @@ describe("Cursor request identity headers", () => {
 		expect(headers["x-original-request-id"]).toBe("orig-1");
 		expect(headers["x-request-id"]).toBe("req-1");
 		expect(headers["x-cursor-streaming"]).toBeUndefined();
+	});
+
+	it("omits the stream-only original request ID when discovery does not provide one", () => {
+		const headers = buildCursorHeaders({ apiKey: "secret-token", requestId: "req-1" });
+		expect(headers["x-original-request-id"]).toBeUndefined();
+		expect(headers["x-request-id"]).toBe("req-1");
 	});
 
 	it("honors ghost mode and the HTTP/1 streaming marker", () => {
