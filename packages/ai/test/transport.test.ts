@@ -612,10 +612,11 @@ describe("shared transport classification", () => {
 describe("HTTP/2 primary fallback boundary", () => {
 	it("attempts HTTP/1 only for typed pre-dispatch unavailability", async () => {
 		let fetchAttempts = 0;
-		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+		const fetchMock = async (): Promise<Response> => {
 			fetchAttempts++;
 			return new Response("fallback", { status: 200 });
-		});
+		};
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock as typeof fetch);
 		const unavailable = net.createServer();
 		await new Promise<void>((resolve, reject) => {
 			unavailable.once("error", reject);
@@ -636,10 +637,11 @@ describe("HTTP/2 primary fallback boundary", () => {
 
 	it("never attempts HTTP/1 after request creation or body dispatch", async () => {
 		let fetchAttempts = 0;
-		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+		const fetchMock = async (): Promise<Response> => {
 			fetchAttempts++;
 			return new Response();
-		});
+		};
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock as typeof fetch);
 		for (const phase of ["request", "body"] as const) {
 			const { baseUrl } = await listen(stream => {
 				if (phase === "request") {
@@ -657,10 +659,11 @@ describe("HTTP/2 primary fallback boundary", () => {
 
 	it("never attempts HTTP/1 after status, frame, or trailer observation", async () => {
 		let fetchAttempts = 0;
-		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+		const fetchMock = async (): Promise<Response> => {
 			fetchAttempts++;
 			return new Response();
-		});
+		};
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock as typeof fetch);
 		for (const phase of ["status", "frame", "trailer"] as const) {
 			const { baseUrl } = await listen(stream => {
 				stream.on("error", () => {});
