@@ -230,7 +230,7 @@ def _event_row_from_db_row(row: sqlite3.Row) -> EventRow:
         state=row["state"],
         attempts=int(row["attempts"]),
         last_error=row["last_error"],
-        platform=row.get("platform", "github") or "github",
+        platform=row["platform"] if "platform" in row.keys() else "github",
     )
 
 
@@ -400,7 +400,7 @@ class Database:
                 state="running",
                 attempts=int(row["attempts"]) + 1,
                 last_error=row["last_error"],
-                platform=row.get("platform", "github") or "github",
+                platform=row["platform"] if "platform" in row.keys() else "github",
             )
 
     def mark_event(self, delivery_id: str, state: EventState, *, error: str | None = None) -> None:
@@ -453,7 +453,7 @@ class Database:
                 state=row["state"],
                 attempts=int(row["attempts"]),
                 last_error=row["last_error"],
-                platform=row.get("platform", "github") or "github",
+                platform=row["platform"] if "platform" in row.keys() else "github",
             )
             for row in rows
         ]
@@ -662,7 +662,7 @@ class Database:
             state=row["state"],
             attempts=int(row["attempts"]),
             last_error=row["last_error"],
-            platform=row.get("platform", "github") or "github",
+            platform=row["platform"] if "platform" in row.keys() else "github",
         )
 
     def has_authorized_impl_event(self, issue_key: str) -> bool:
