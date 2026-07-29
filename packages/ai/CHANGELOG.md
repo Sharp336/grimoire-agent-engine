@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Credential selection now uses a rendezvous-hash (HRW) tie-breaker among equally-ranked accounts, keeping a session sticky to the same credential (and its warm provider prompt cache) across pool changes. Ranking criteria still dominate; without a session id ordering is unchanged.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
