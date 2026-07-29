@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Outgoing provider requests now enforce a 24 MiB aggregate decoded-image-byte budget on top of the provider image count cap: the newest image is always retained, older images collapse into a transport placeholder. Applies only to the transient provider view; session history is never rewritten.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
