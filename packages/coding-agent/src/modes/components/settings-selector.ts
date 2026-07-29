@@ -372,7 +372,7 @@ class ProviderLimitsSubmenu extends Container {
 			new Text(
 				theme.fg(
 					"muted",
-					"Select a provider, enter a positive number to cap concurrent LLM requests, or clear it for unlimited.",
+					"Select a provider, enter a positive number to cap concurrent LLM requests per credential, or clear it for unlimited.",
 				),
 				0,
 				0,

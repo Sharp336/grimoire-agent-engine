@@ -35,6 +35,15 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("Requests per minute limit reached")).toBe("RATE_LIMIT_EXCEEDED");
 	});
 
+	it("classifies concurrent request caps separately from rate limits and quota exhaustion", () => {
+		expect(parseRateLimitReason("Number of concurrent requests exceeded")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("Maximum concurrent invocation limit reached")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("concurrent_limit_reached")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("concurrent_request_limit_reached")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("Rate limit reached for gpt-4o")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("Your quota will reset at 07-28")).toBe("QUOTA_EXHAUSTED");
+	});
+
 	it("classifies overloaded 529 as MODEL_CAPACITY_EXHAUSTED", () => {
 		expect(parseRateLimitReason("Service overloaded 529")).toBe("MODEL_CAPACITY_EXHAUSTED");
 	});
@@ -234,6 +243,16 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(429, message)).toBe(true);
 	});
 
+	it("rotates only account-scoped cap 403s", () => {
+		expect(
+			isUsageLimitOutcome(
+				403,
+				"Devin stream error permission_denied: Reached overall message rate limit. Please try again later. Your limit will reset in 13 minutes.",
+			),
+		).toBe(true);
+		expect(isUsageLimitOutcome(403, "Forbidden")).toBe(false);
+	});
+
 	it("rotates on xAI Grok Build 402 usage-balance exhaustion regardless of status", () => {
 		const message = "402 Grok Build usage balance exhausted";
 		expect(isUsageLimitOutcome(402, message)).toBe(true);
@@ -262,5 +281,9 @@ describe("calculateRateLimitBackoffMs", () => {
 			expect(ms).toBeGreaterThanOrEqual(45_000);
 			expect(ms).toBeLessThanOrEqual(75_000);
 		}
+	});
+
+	it("returns a short backoff for CONCURRENT_LIMIT", () => {
+		expect(calculateRateLimitBackoffMs("CONCURRENT_LIMIT")).toBe(5_000);
 	});
 });

@@ -72,13 +72,21 @@ function retryRecovery(recovery: AssistantRetryRecovery["recovery"], note: strin
 }
 
 function resolveInitialApiKey(
-	apiKey: string | ((ctx: ApiKeyResolveContext) => string | Promise<string | undefined> | undefined) | undefined,
+	apiKey:
+		| string
+		| ((
+				ctx: ApiKeyResolveContext,
+		  ) =>
+				| string
+				| { apiKey: string; credentialId?: number }
+				| Promise<string | { apiKey: string; credentialId?: number } | undefined>
+				| undefined)
+		| undefined,
 ): string {
 	const resolved = typeof apiKey === "function" ? apiKey({ lastChance: false, error: undefined }) : apiKey;
-	if (typeof resolved !== "string") {
-		throw new Error("Expected API key to be resolved before streaming");
-	}
-	return resolved;
+	if (typeof resolved === "string") return resolved;
+	if (resolved !== undefined && typeof resolved === "object" && "apiKey" in resolved) return resolved.apiKey;
+	throw new Error("Expected API key to be resolved before streaming");
 }
 
 interface AssistantEntry {

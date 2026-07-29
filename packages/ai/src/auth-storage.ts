@@ -812,6 +812,12 @@ type AuthApiKeyOptions = {
 };
 type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
 
+/** A resolved bearer plus its stored credential row when one supplied it. */
+export interface ApiKeyResolution {
+	apiKey: string;
+	credentialId?: number;
+}
+
 /**
  * Refreshed OAuth access plus identity metadata returned by
  * {@link AuthStorage.getOAuthAccess}. Callers that authenticate via a bearer
@@ -5180,11 +5186,21 @@ export class AuthStorage {
 	 * 7. Fallback resolver (models.yml custom providers, last-resort)
 	 */
 	async getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+		return (await this.getApiKeyResolution(provider, sessionId, options))?.apiKey;
+	}
+
+	/**
+	 * Resolve a bearer and, for stored OAuth/API-key credentials, its stable SQLite
+	 * row id. Explicit runtime/config/env keys intentionally have no row id.
+	 */
+	async getApiKeyResolution(
+		provider: string,
+		sessionId?: string,
+		options?: AuthApiKeyOptions,
+	): Promise<ApiKeyResolution | undefined> {
 		// Runtime override takes highest priority
 		const runtimeKey = this.#runtimeOverrides.get(provider);
-		if (runtimeKey) {
-			return runtimeKey;
-		}
+		if (runtimeKey) return { apiKey: runtimeKey };
 
 		// Config override: explicit apiKey pinned in models.yml beats the broker's
 		// OAuth credentials. The user redirected a provider at a custom baseUrl
@@ -5192,16 +5208,12 @@ export class AuthStorage {
 		// honor it instead of forwarding an upstream OAuth token that the proxy
 		// won't accept.
 		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
-		}
+		if (configKey) return { apiKey: configKey };
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
 		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options);
-		if (oauthResolved) {
-			return oauthResolved.apiKey;
-		}
+		if (oauthResolved) return { apiKey: oauthResolved.apiKey, credentialId: oauthResolved.credentialId };
 		const loginApiKeySelection = await this.#selectApiKeyCredential(
 			provider,
 			sessionId,
@@ -5210,7 +5222,13 @@ export class AuthStorage {
 		);
 		if (loginApiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
-			return this.#configValueResolver(loginApiKeySelection.credential.key);
+			const apiKey = await this.#configValueResolver(loginApiKeySelection.credential.key);
+			if (apiKey) {
+				return {
+					apiKey,
+					credentialId: this.#getStoredCredentials(provider)[loginApiKeySelection.index]?.id,
+				};
+			}
 		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
@@ -5219,7 +5237,7 @@ export class AuthStorage {
 		if (sessionId) this.#sessionLastCredential.get(provider)?.delete(sessionId);
 
 		const envKey = getEnvApiKey(provider);
-		if (envKey) return envKey;
+		if (envKey) return { apiKey: envKey };
 		const apiKeySelection = await this.#selectApiKeyCredential(
 			provider,
 			sessionId,
@@ -5228,11 +5246,18 @@ export class AuthStorage {
 		);
 		if (apiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
-			return this.#configValueResolver(apiKeySelection.credential.key);
+			const apiKey = await this.#configValueResolver(apiKeySelection.credential.key);
+			if (apiKey) {
+				return {
+					apiKey,
+					credentialId: this.#getStoredCredentials(provider)[apiKeySelection.index]?.id,
+				};
+			}
 		}
 
 		// Fall back to custom resolver (e.g., models.json custom providers)
-		return this.#fallbackResolver?.(provider) ?? undefined;
+		const fallbackKey = this.#fallbackResolver?.(provider);
+		return fallbackKey ? { apiKey: fallbackKey } : undefined;
 	}
 
 	/**
@@ -6012,16 +6037,25 @@ export class AuthStorage {
 	 */
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {
 		const { sessionId, baseUrl, modelId } = options ?? {};
-		return async ({ lastChance, error, signal, previousKey }) => {
-			if (error === undefined) {
-				return this.getApiKey(provider, sessionId, { baseUrl, modelId, signal });
+		const resolve = async (requestOptions: {
+			forceRefresh?: boolean;
+			signal?: AbortSignal;
+		}): Promise<{ apiKey: string; credentialId?: number } | undefined> => {
+			if (this.getApiKey !== AuthStorage.prototype.getApiKey) {
+				const apiKey = await this.getApiKey(provider, sessionId, { baseUrl, modelId, ...requestOptions });
+				return apiKey === undefined ? undefined : { apiKey };
 			}
+			return this.getApiKeyResolution(provider, sessionId, { baseUrl, modelId, ...requestOptions });
+		};
+		const resolver: ApiKeyResolver = async ({ lastChance, error, signal, previousKey, previousCredentialId }) => {
+			if (error === undefined) return resolve({ signal });
 			if (lastChance) {
 				const switched = await this.rotateSessionCredential(provider, sessionId, {
 					error,
 					modelId,
 					signal,
 					apiKey: previousKey,
+					credentialId: previousCredentialId,
 				});
 				if (!switched) {
 					const status = AIError.status(error);
@@ -6031,10 +6065,11 @@ export class AuthStorage {
 					// because a peer may have refreshed the failed bearer.
 					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 				}
-				return this.getApiKey(provider, sessionId, { baseUrl, modelId, signal });
+				return resolve({ signal });
 			}
-			return this.getApiKey(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
+			return resolve({ forceRefresh: true, signal });
 		};
+		return resolver;
 	}
 
 	// ─── Auth Broker integration ────────────────────────────────────────────

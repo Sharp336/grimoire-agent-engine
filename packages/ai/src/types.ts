@@ -474,6 +474,11 @@ export interface StreamOptions {
 	 */
 	maxInFlightRequests?: Record<string, number>;
 	/**
+	 * SQLite credential row selected by the API-key resolver for this request.
+	 * Internal dispatch metadata: providers must not serialize it upstream.
+	 */
+	credentialId?: number;
+	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
 	 */

@@ -217,12 +217,35 @@ describe("AuthStorage account rotation", () => {
 		const refreshed = await resolver({
 			lastChance: true,
 			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-			previousKey: initial,
+			previousKey: typeof initial === "string" ? initial : initial?.apiKey,
+			previousCredentialId: typeof initial === "string" ? undefined : initial?.credentialId,
 		});
 
-		expect(initial).toBe("stale-access");
-		expect(refreshed).toBe("refreshed-access");
+		expect(initial).toEqual({ apiKey: "stale-access" });
+		expect(refreshed).toEqual({ apiKey: "refreshed-access" });
 		expect(rotationTargets).toEqual(["stale-access"]);
+	});
+
+	test("API key resolver exposes the selected stored credential id alongside the resolved bearer", async () => {
+		const registry: Parameters<typeof createApiKeyResolver>[0] = {
+			async getApiKeyForProvider() {
+				return "fallback-key";
+			},
+			async getApiKeyResolutionForProvider() {
+				return { apiKey: "stored-key", credentialId: 17 };
+			},
+			authStorage: {
+				async rotateSessionCredential() {
+					return false;
+				},
+			},
+		};
+		const resolver = createApiKeyResolver(registry, "openai-codex");
+
+		expect(await resolver({ lastChance: false, error: undefined })).toEqual({
+			apiKey: "stored-key",
+			credentialId: 17,
+		});
 	});
 
 	test("API key resolver stops when a usage-limit rotation has no unblocked sibling", async () => {

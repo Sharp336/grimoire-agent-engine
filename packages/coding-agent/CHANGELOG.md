@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified that `providers.maxInFlightRequests` applies independently to each selected credential.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

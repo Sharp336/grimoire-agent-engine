@@ -5,6 +5,7 @@ import {
 	isApiKeyResolver,
 	isAuthRetryableError,
 	resolveApiKeyOnce,
+	seedApiKeyResolver,
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
@@ -41,6 +42,14 @@ describe("isApiKeyResolver / resolveApiKeyOnce", () => {
 		expect(resolved).toBe("minted");
 		// Initial resolve must look like an initial resolve, not a retry.
 		expect(seen).toEqual({ lastChance: false, error: undefined, signal: undefined });
+	});
+
+	it("keeps a preflight resolver credential id when reusing its seed", async () => {
+		const resolver = () => ({ apiKey: "stored", credentialId: 17 });
+		const seed = await resolveApiKeyOnce(resolver);
+		const seeded = seedApiKeyResolver({ apiKey: seed!, credentialId: 17 }, resolver);
+
+		expect(await seeded({ lastChance: false, error: undefined })).toEqual({ apiKey: "stored", credentialId: 17 });
 	});
 });
 
