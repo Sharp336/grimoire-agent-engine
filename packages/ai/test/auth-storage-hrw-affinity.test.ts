@@ -3,103 +3,63 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
-	rendezvousScore,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const HOUR_MS = 60 * 60 * 1000;
+const SESSIONS = Array.from({ length: 128 }, (_value, index) => `hrw-session-${index}`);
 
-/**
- * HRW winner among string-keyed candidates — same descending-score order the
- * comparator uses.
- */
-function hrwWinner(sessionKey: string, candidates: readonly string[]): string {
-	return [...candidates]
-		.map(c => ({ c, score: rendezvousScore(sessionKey, c) }))
-		.sort((a, b) => (b.score > a.score ? 1 : b.score < a.score ? -1 : 0))[0].c;
+async function selectBySession(storage: AuthStorage, provider: string): Promise<Map<string, string>> {
+	const selected = new Map<string, string>();
+	for (const sessionId of SESSIONS) {
+		const apiKey = await storage.getApiKey(provider, sessionId);
+		if (!apiKey) throw new Error(`expected an API key for ${sessionId}`);
+		selected.set(sessionId, apiKey);
+	}
+	return selected;
 }
 
-// ─── Pure function tests on rendezvousScore ───────────────────────────────
+async function assertLiveMutationAffinity(storage: AuthStorage, provider: string): Promise<void> {
+	const existing: AuthCredential[] = [
+		{ type: "api_key", key: "key-a", source: "login" },
+		{ type: "api_key", key: "key-b", source: "login" },
+		{ type: "api_key", key: "key-c", source: "login" },
+	];
+	const added: AuthCredential = { type: "api_key", key: "key-added", source: "login" };
 
-describe("rendezvousScore", () => {
-	test("is deterministic for a given session/candidate pair", () => {
-		const first = rendezvousScore("session-1", "candidate-a");
-		const second = rendezvousScore("session-1", "candidate-a");
+	await storage.set(provider, existing);
+	const before = await selectBySession(storage, provider);
 
-		expect(first).toBe(second);
-		expect(typeof first).toBe("bigint");
-	});
+	await storage.set(provider, [...existing, added]);
+	const afterAddition = await selectBySession(storage, provider);
+	const movedSessions = SESSIONS.filter(sessionId => before.get(sessionId) !== afterAddition.get(sessionId));
+	const stableSessions = SESSIONS.filter(sessionId => before.get(sessionId) === afterAddition.get(sessionId));
 
-	test("produces a stable total order per session across distinct candidates", () => {
-		const session = "session-stable-order";
-		const candidates = ["alpha", "bravo", "charlie", "delta", "echo"];
+	expect(movedSessions.length).toBeGreaterThan(0);
+	expect(stableSessions.length).toBeGreaterThan(0);
+	for (const sessionId of movedSessions) {
+		expect(afterAddition.get(sessionId)).toBe(added.key);
+	}
 
-		const order = [...candidates]
-			.map(c => ({ c, score: rendezvousScore(session, c) }))
-			.sort((a, b) => (b.score > a.score ? 1 : b.score < a.score ? -1 : 0))
-			.map(entry => entry.c);
+	const addedRow = storage
+		.listStoredCredentials(provider)
+		.find(row => row.credential.type === "api_key" && row.credential.key === added.key);
+	if (!addedRow) throw new Error("expected the added credential to have a stored row");
+	expect(await storage.removeCredential(provider, addedRow.id)).toBe(true);
 
-		const replay = [...candidates]
-			.map(c => ({ c, score: rendezvousScore(session, c) }))
-			.sort((a, b) => (b.score > a.score ? 1 : b.score < a.score ? -1 : 0))
-			.map(entry => entry.c);
-
-		expect(order).toEqual(replay);
-		expect([...order].sort()).toEqual([...candidates].sort());
-	});
-
-	test("distributes distinct sessions across distinct winners", () => {
-		const candidates = ["alpha", "bravo", "charlie", "delta"];
-		const sessions = Array.from({ length: 20 }, (_, index) => `session-${index}`);
-
-		const winners = new Set(sessions.map(session => hrwWinner(session, candidates)));
-		expect(winners.size).toBeGreaterThan(1);
-	});
-});
-
-// ─── Minimal-disruption golden test ───────────────────────────────────────
-
-describe("rendezvousScore minimal disruption", () => {
-	const sessions = ["sess-1", "sess-2", "sess-3", "sess-4", "sess-5", "sess-6"];
-
-	test("adding a candidate moves only sessions that rendezvous-map to it", () => {
-		const before = ["alpha", "bravo", "charlie"];
-		const after = ["alpha", "bravo", "charlie", "delta"];
-
-		const movers: string[] = [];
-		for (const session of sessions) {
-			const oldWinner = hrwWinner(session, before);
-			const newWinner = hrwWinner(session, after);
-			if (oldWinner !== newWinner) {
-				movers.push(session);
-				expect(newWinner).toBe("delta");
-			}
-		}
-		// At least one session should adopt the new candidate — otherwise delta
-		// would be a dead letter, defeating the purpose of HRW.
-		expect(movers.length).toBeGreaterThan(0);
-	});
-
-	test("removing a candidate moves only sessions that were mapped to it", () => {
-		const before = ["alpha", "bravo", "charlie", "delta"];
-		const after = ["alpha", "bravo", "charlie"];
-
-		for (const session of sessions) {
-			const oldWinner = hrwWinner(session, before);
-			const newWinner = hrwWinner(session, after);
-			if (oldWinner !== newWinner) {
-				// Only sessions whose old winner was the removed candidate move.
-				expect(oldWinner).toBe("delta");
-			}
-		}
-	});
-});
-
-// ─── Ranker integration tests ─────────────────────────────────────────────
+	const afterRemoval = await selectBySession(storage, provider);
+	for (const sessionId of stableSessions) {
+		expect(afterRemoval.get(sessionId)).toBe(before.get(sessionId));
+	}
+	for (const sessionId of movedSessions) {
+		expect(afterRemoval.get(sessionId)).toBe(before.get(sessionId));
+	}
+}
 
 describe("AuthStorage HRW credential affinity", () => {
 	let tempDir = "";
@@ -137,7 +97,51 @@ describe("AuthStorage HRW credential affinity", () => {
 		tempDir = "";
 	});
 
-	test("selects the same credential for a given session across repeated calls", async () => {
+	test("preserves unranked sessions across live pool mutations", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await assertLiveMutationAffinity(authStorage, "unit-hrw-unranked");
+	});
+
+	test("preserves unaffected sessions when a filtered pool shifts stored positions", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "unit-hrw-index-shift";
+		await authStorage.set(provider, [
+			{ type: "api_key", key: "key-a", source: "login" },
+			{ type: "api_key", key: "non-login-interleave" },
+			{ type: "api_key", key: "key-b", source: "login" },
+			{ type: "api_key", key: "key-c", source: "login" },
+		]);
+
+		const before = await selectBySession(authStorage, provider);
+		const removedSessions = SESSIONS.filter(sessionId => before.get(sessionId) === "key-b");
+		const stableSessions = SESSIONS.filter(sessionId => before.get(sessionId) !== "key-b");
+		expect(removedSessions.length).toBeGreaterThan(0);
+		expect(stableSessions.length).toBeGreaterThan(0);
+		expect([...before.values()]).not.toContain("non-login-interleave");
+
+		const removedRow = authStorage
+			.listStoredCredentials(provider)
+			.find(row => row.credential.type === "api_key" && row.credential.key === "key-b");
+		if (!removedRow) throw new Error("expected the middle login credential to have a stored row");
+		expect(await authStorage.removeCredential(provider, removedRow.id)).toBe(true);
+
+		const after = await selectBySession(authStorage, provider);
+		for (const sessionId of stableSessions) {
+			expect(after.get(sessionId)).toBe(before.get(sessionId));
+		}
+		for (const sessionId of removedSessions) {
+			const selected = after.get(sessionId);
+			if (!selected) throw new Error(`expected an API key for ${sessionId}`);
+			expect(["key-a", "key-c"]).toContain(selected);
+		}
+	});
+
+	test("preserves equal-ranked zai sessions across live pool mutations", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await assertLiveMutationAffinity(authStorage, "zai");
+	});
+
+	test("round-robins without sessionId in its existing order", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
 		await authStorage.set("zai", [
@@ -147,51 +151,12 @@ describe("AuthStorage HRW credential affinity", () => {
 		]);
 
 		const keys: string[] = [];
-		for (let i = 0; i < 5; i++) {
-			const key = await authStorage.getApiKey("zai", "stable-session");
-			if (key) keys.push(key);
-		}
-
-		// HRW must be deterministic: same session → same credential every call.
-		expect(new Set(keys).size).toBe(1);
-	});
-
-	test("distributes distinct sessions across multiple credentials", async () => {
-		if (!authStorage) throw new Error("test setup failed");
-
-		await authStorage.set("zai", [
-			{ type: "api_key", key: "key-a", source: "login" },
-			{ type: "api_key", key: "key-b", source: "login" },
-			{ type: "api_key", key: "key-c", source: "login" },
-		]);
-
-		const selected = new Set<string>();
-		for (let i = 0; i < 30; i++) {
-			const key = await authStorage.getApiKey("zai", `session-${i}`);
-			if (key) selected.add(key);
-		}
-
-		expect(selected.size).toBeGreaterThan(1);
-	});
-
-	test("round-robins without sessionId — HRW is an exact no-op", async () => {
-		if (!authStorage) throw new Error("test setup failed");
-
-		await authStorage.set("zai", [
-			{ type: "api_key", key: "key-a", source: "login" },
-			{ type: "api_key", key: "key-b", source: "login" },
-			{ type: "api_key", key: "key-c", source: "login" },
-		]);
-
-		const keys: string[] = [];
-		for (let i = 0; i < 6; i++) {
+		for (let index = 0; index < 6; index += 1) {
 			const key = await authStorage.getApiKey("zai");
 			if (key) keys.push(key);
 		}
 
-		// Without sessionId the comparator falls back to orderPos (round-robin),
-		// so successive calls must rotate through distinct credentials.
-		expect(new Set(keys).size).toBeGreaterThan(1);
+		expect(keys).toEqual(["key-a", "key-b", "key-c", "key-a", "key-b", "key-c"]);
 	});
 
 	test("never reorders across differing rank tiers", async () => {
@@ -202,7 +167,6 @@ describe("AuthStorage HRW credential affinity", () => {
 			{ type: "api_key", key: "key-exhausted", source: "login" },
 			{ type: "api_key", key: "key-fresh", source: "login" },
 		]);
-
 		usageByKey.set("key-exhausted", {
 			provider: "zai",
 			fetchedAt: Date.now(),
@@ -256,11 +220,8 @@ describe("AuthStorage HRW credential affinity", () => {
 			],
 		});
 
-		// Across many sessions, the fresh key must always win — HRW never
-		// overrides the usage-priority ordering.
-		for (let i = 0; i < 20; i++) {
-			const key = await storage.getApiKey("zai", `tier-test-${i}`);
-			expect(key).toBe("key-fresh");
+		for (let index = 0; index < 20; index += 1) {
+			expect(await storage.getApiKey("zai", `tier-test-${index}`)).toBe("key-fresh");
 		}
 	});
 });

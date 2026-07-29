@@ -1069,7 +1069,7 @@ function compareUsageRankingMetric(left: number, right: number): number {
  * SHA-256 over `${sessionKey}\0${candidateKey}`, first 8 digest bytes
  * big-endian as an unsigned 64-bit integer.
  */
-export function rendezvousScore(sessionKey: string, candidateKey: string): bigint {
+function rendezvousScore(sessionKey: string, candidateKey: string): bigint {
 	return new Bun.CryptoHasher("sha256").update(`${sessionKey}\0${candidateKey}`).digest().readBigUInt64BE(0);
 }
 
@@ -1636,25 +1636,32 @@ export class AuthStorage {
 	}
 
 	/**
-	 * FNV-1a hash for deterministic session-to-credential mapping.
-	 * Ensures the same session always starts with the same credential.
+	 * Returns credential indices in priority order for selection. Session-bound
+	 * calls use HRW over durable stored rows; without a session, round-robin
+	 * order remains unchanged.
 	 */
-	#getHashedIndex(sessionId: string, total: number): number {
-		if (total <= 1) return 0;
-		return Bun.hash.xxHash32(sessionId) % total;
-	}
-
-	/**
-	 * Returns credential indices in priority order for selection.
-	 * With sessionId: starts from hashed index (consistent per session).
-	 * Without sessionId: starts from round-robin index (load balancing).
-	 * Order wraps around so all credentials are tried if earlier ones are blocked.
-	 */
-	#getCredentialOrder(providerKey: string, sessionId: string | undefined, total: number): number[] {
+	#getCredentialOrder(
+		providerKey: string,
+		sessionId: string | undefined,
+		provider: string,
+		selections: readonly { index: number }[],
+	): number[] {
+		const total = selections.length;
 		if (total <= 1) return [0];
-		const start = sessionId
-			? this.#getHashedIndex(sessionId, total)
-			: this.#getNextRoundRobinIndex(providerKey, total);
+		if (sessionId) {
+			return selections
+				.map((selection, orderPos) => ({
+					orderPos,
+					hrwScore: this.#candidateHrwScore(sessionId, provider, selection.index),
+				}))
+				.sort((left, right) => {
+					if (left.hrwScore !== right.hrwScore) return left.hrwScore > right.hrwScore ? -1 : 1;
+					return left.orderPos - right.orderPos;
+				})
+				.map(candidate => candidate.orderPos);
+		}
+
+		const start = this.#getNextRoundRobinIndex(providerKey, total);
 		const order: number[] = [];
 		for (let i = 0; i < total; i++) {
 			order.push((start + i) % total);
@@ -1664,12 +1671,10 @@ export class AuthStorage {
 
 	/**
 	 * Rendezvous-hash tie-break score for a candidate under a given session.
-	 * Returns undefined when no sessionId is available so the comparator falls
-	 * back to orderPos unchanged. The candidateKey is the durable stored-row id
-	 * when present, else `${provider}:${credentialIndex}`.
+	 * The candidate key is the durable stored-row id when present, else
+	 * `${provider}:${credentialIndex}`.
 	 */
-	#candidateHrwScore(sessionId: string | undefined, provider: string, credentialIndex: number): bigint | undefined {
-		if (!sessionId) return undefined;
+	#candidateHrwScore(sessionId: string, provider: string, credentialIndex: number): bigint {
 		const stored = this.#getStoredCredentials(provider)[credentialIndex];
 		const candidateKey = stored?.id !== undefined ? String(stored.id) : `${provider}:${credentialIndex}`;
 		return rendezvousScore(sessionId, candidateKey);
@@ -1913,7 +1918,7 @@ export class AuthStorage {
 	/**
 	 * Selects a credential of the specified type for a provider.
 	 * Returns both the credential and its index in the original array (for updates/removal).
-	 * Uses deterministic hashing for session stickiness and skips blocked credentials when possible.
+	 * Uses deterministic HRW session affinity and skips blocked credentials when possible.
 	 */
 	#selectCredentialByType<T extends AuthCredential["type"]>(
 		provider: string,
@@ -1932,7 +1937,7 @@ export class AuthStorage {
 		if (credentials.length === 1) return credentials[0];
 
 		const providerKey = this.#getProviderTypeKey(provider, type);
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const order = this.#getCredentialOrder(providerKey, sessionId, provider, credentials);
 		const fallback = credentials[order[0]];
 
 		for (const idx of order) {
@@ -2041,7 +2046,10 @@ export class AuthStorage {
 				primaryUsed: this.#normalizeUsageFraction(primary),
 				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
-				hrwScore: this.#candidateHrwScore(args.sessionId, args.provider, selection.index),
+				hrwScore:
+					args.sessionId === undefined
+						? undefined
+						: this.#candidateHrwScore(args.sessionId, args.provider, selection.index),
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, "none");
@@ -2064,7 +2072,7 @@ export class AuthStorage {
 		if (credentials.length === 1) return credentials[0];
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const order = this.#getCredentialOrder(providerKey, sessionId, provider, credentials);
 		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (!strategy) {
@@ -2080,10 +2088,11 @@ export class AuthStorage {
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy.blockScope?.(rankingContext);
 		const blockScopes = strategy.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
+		const rankingOrder = sessionId ? credentials.map((_credential, index) => index) : order;
 		const candidates = await this.#rankApiKeySelections({
 			providerKey,
 			provider,
-			order,
+			order: rankingOrder,
 			credentials,
 			options,
 			strategy,
@@ -4511,7 +4520,10 @@ export class AuthStorage {
 				primaryUsed: this.#normalizeUsageFraction(primary),
 				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
-				hrwScore: this.#candidateHrwScore(args.sessionId, args.provider, selection.index),
+				hrwScore:
+					args.sessionId === undefined
+						? undefined
+						: this.#candidateHrwScore(args.sessionId, args.provider, selection.index),
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, args.planRequirement);
@@ -4547,7 +4559,7 @@ export class AuthStorage {
 		if (credentials.length === 0) return undefined;
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const order = this.#getCredentialOrder(providerKey, sessionId, provider, credentials);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy?.blockScope?.(rankingContext);
