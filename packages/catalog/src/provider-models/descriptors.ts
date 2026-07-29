@@ -99,6 +99,16 @@ export const CATALOG_PROVIDERS = [
 		id: "amazon-bedrock",
 		defaultModel: "us.anthropic.claude-opus-4-8",
 	},
+	// AWS's separate `bedrock-mantle` endpoint, which serves OpenAI's GPT-5.6
+	// models over the OpenAI Responses API. Models come from the static seed, not
+	// discovery. Terra is the default: it is AWS's positioning for general
+	// production work and is available in one more region than Sol. `envVars` is
+	// deliberately omitted — auth is a computed probe over the AWS credential
+	// chain in the pi-ai registry, and a plain name here would be shadowed by it.
+	{
+		id: "bedrock-mantle",
+		defaultModel: "openai.gpt-5.6-terra",
+	},
 	{
 		id: "anthropic",
 		defaultModel: "claude-opus-4-8",

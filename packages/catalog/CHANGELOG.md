@@ -5,6 +5,13 @@
 ### Fixed
 
 - Fixed an issue where LM Studio first turns failed with a 400 Invalid tool_choice error when a named tool was forced, by using the supported tool_choice: "required" string selector.
+### Added
+
+- Added the `bedrock-mantle` provider for OpenAI's GPT-5.6 Sol/Terra/Luna on AWS. These models are served from AWS's dedicated `bedrock-mantle` endpoint over the OpenAI Responses API (`https://bedrock-mantle.{region}.api.aws/openai/v1`), with AWS-native authentication and per-model AWS pricing. Defaults to Terra.
+
+### Fixed
+
+- Removed the unusable `amazon-bedrock` entries for `openai.gpt-5.6-sol` / `-terra` / `-luna`. AWS's API-compatibility table marks these models as supporting neither Invoke nor Converse, so the generated `bedrock-converse-stream` rows failed on first use; they are now served by the new `bedrock-mantle` provider instead.
 
 ## [17.1.8] - 2026-07-28
 

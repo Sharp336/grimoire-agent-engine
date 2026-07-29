@@ -627,6 +627,110 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
 }
 
+/**
+ * Sentinel `apiKey` for providers whose credentials are resolved out-of-band
+ * (AWS credential chain) rather than passed as a bearer key. It only has to be
+ * non-empty so the `MissingApiKeyError` gate below does not fire; the actual
+ * `Authorization` header is set by the wrapping fetch. Distinct from
+ * `NO_AUTH_SENTINEL` (`"N/A"`), which means "send no Authorization at all".
+ */
+const AWS_AUTHENTICATED_SENTINEL = "<authenticated>";
+
+/**
+ * Region for `bedrock-mantle` requests. Mirrors the resolution intent of
+ * `resolveBedrockRegion`, minus the Geo/Global inference-profile machinery —
+ * the Mantle model ids carry no geo prefix.
+ */
+function resolveBedrockMantleRegion(options: StreamOptions | undefined): string {
+	const explicit = (options as BedrockOptions | undefined)?.region;
+	return explicit || $env.AWS_REGION || $env.AWS_DEFAULT_REGION || "us-east-1";
+}
+
+function rewriteBedrockMantleUrl(url: string, region: string): string {
+	return url.replaceAll("{region}", encodeURIComponent(region)).replaceAll("%7Bregion%7D", encodeURIComponent(region));
+}
+
+function resolveBedrockMantleRequest(input: string | URL | Request, region: string): string | URL | Request {
+	if (input instanceof Request) {
+		const rewritten = rewriteBedrockMantleUrl(input.url, region);
+		return rewritten === input.url ? input : new Request(rewritten, input);
+	}
+	if (input instanceof URL) {
+		const rewritten = rewriteBedrockMantleUrl(input.toString(), region);
+		return rewritten === input.toString() ? input : new URL(rewritten);
+	}
+	return rewriteBedrockMantleUrl(input, region);
+}
+
+async function readBedrockMantleRequestBody(
+	input: string | URL | Request,
+	init: RequestInit | undefined,
+): Promise<Uint8Array> {
+	if (input instanceof Request) return new Uint8Array(await input.clone().arrayBuffer());
+	const body = init?.body;
+	if (typeof body === "string") return new TextEncoder().encode(body);
+	if (body instanceof Uint8Array) return body;
+	if (body instanceof ArrayBuffer) return new Uint8Array(body);
+	return new Uint8Array();
+}
+
+/**
+ * `bedrock-mantle` speaks the OpenAI Responses API but authenticates the AWS
+ * way: a Bedrock API key as a bearer token, or SigV4 over the standard
+ * credential chain. This wraps the transport's fetch to substitute `{region}`
+ * in the base URL and inject the credentials, so no new transport is needed.
+ */
+function createBedrockMantleAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
+	const baseFetch = options?.fetch ?? (globalThis.fetch as FetchImpl);
+	const region = resolveBedrockMantleRegion(options);
+	const mantleFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+		const rewritten = resolveBedrockMantleRequest(input, region);
+		const headers = new Headers(init?.headers);
+		const bearerToken = (options as BedrockOptions | undefined)?.bearerToken || $env.AWS_BEARER_TOKEN_BEDROCK;
+		if (bearerToken) {
+			headers.set("Authorization", `Bearer ${bearerToken}`);
+			return baseFetch(rewritten, { ...init, headers });
+		}
+
+		// SigV4 signs the exact bytes and the exact host/path, so read them off
+		// the already-rewritten request rather than the placeholder original.
+		const url = new URL(rewritten instanceof Request ? rewritten.url : rewritten.toString());
+		const body = await readBedrockMantleRequestBody(rewritten, init);
+		const method = init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST");
+		// Loaded lazily to keep the AWS credential/signing modules out of the CLI
+		// startup parse graph, matching how the provider streams are imported.
+		const [{ resolveAwsCredentials }, { signRequest }] = await Promise.all([
+			import("./providers/aws-credentials"),
+			import("./providers/aws-sigv4"),
+		]);
+		const credentials = await resolveAwsCredentials({
+			profile: (options as BedrockOptions | undefined)?.profile,
+			region,
+			signal: options?.signal,
+			fetch: baseFetch,
+		});
+		const contentType = headers.get("content-type") ?? "application/json";
+		const signed = await signRequest({
+			method,
+			host: url.host,
+			path: url.pathname,
+			query: url.search.replace(/^\?/, ""),
+			body,
+			region,
+			service: "bedrock",
+			credentials,
+			headers: { "content-type": contentType },
+		});
+		for (const [name, value] of Object.entries(signed)) {
+			// `host` is a forbidden request header — fetch derives it from the URL,
+			// which is the same value that was just signed.
+			if (value !== undefined && name !== "host") headers.set(name, value);
+		}
+		return baseFetch(url.toString(), { ...init, method, headers, body });
+	};
+	return Object.assign(mantleFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+}
+
 async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {
 	if (input instanceof Request) return input.clone().text();
 	const body = init?.body;
@@ -814,8 +918,14 @@ function streamDispatch<TApi extends Api>(
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
 
+	// `bedrock-mantle` speaks the OpenAI Responses API but has no API key: the
+	// wrapping fetch resolves credentials from the AWS chain, exactly as the
+	// Converse path above does. The chain reaches sources the registry's env probe
+	// cannot see (`~/.aws/credentials` profiles, SSO, IMDS), so gating on a key
+	// here would reject valid setups — exempt it like `google-vertex`/Bedrock.
+	const isBedrockMantle = model.provider === "bedrock-mantle";
 	const apiKey = requestOptions.apiKey || getEnvApiKey(model.provider);
-	if (!apiKey) {
+	if (!apiKey && !isBedrockMantle) {
 		throw new AIError.MissingApiKeyError(model.provider);
 	}
 	const providerOptions = isGoogleVertexAuthenticatedModel(model)
@@ -824,7 +934,13 @@ function streamDispatch<TApi extends Api>(
 				apiKey: "vertex-adc",
 				fetch: createVertexAuthenticatedFetch(requestOptions),
 			}
-		: { ...requestOptions, apiKey };
+		: isBedrockMantle
+			? {
+					...requestOptions,
+					apiKey: AWS_AUTHENTICATED_SENTINEL,
+					fetch: createBedrockMantleAuthenticatedFetch(requestOptions),
+				}
+			: { ...requestOptions, apiKey };
 
 	const api: Api = model.api;
 	switch (api) {
