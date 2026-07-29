@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added account-scoped dynamic model discovery for Kiro.
+
 ### Changed
 
 - Updated Cursor discovery to decode the current server configuration used for transport selection.
