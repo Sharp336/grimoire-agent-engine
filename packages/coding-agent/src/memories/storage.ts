@@ -36,6 +36,13 @@ const STAGE1_KIND = "memory_stage1";
 const GLOBAL_KIND = "memory_consolidate_global";
 const DEFAULT_RETRY_REMAINING = 3;
 
+/** Tables owned by the memory subsystem in agent.db. */
+export const MEMORY_STORAGE_TABLES = {
+	threads: "authoritative",
+	stage1_outputs: "authoritative",
+	jobs: "rebuildable",
+} as const satisfies Record<string, "authoritative" | "rebuildable">;
+
 /**
  * Per-project job key so Phase 2 consolidation is isolated to a single cwd.
  * Previously a single "global" key caused cross-project memory contamination.
@@ -91,6 +98,25 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 export function closeMemoryDb(db: Database): void {
 	db.close();
+}
+
+/** Initializes memory schema in one caller-owned candidate. */
+export function initializeMemoryStorageExactPath(dbPath: string): void {
+	closeMemoryDb(openMemoryDb(dbPath));
+}
+
+/** Validates memory-owned tables through a read-only exact-path handle. */
+export function validateMemoryStorageExactPath(dbPath: string): void {
+	const db = new Database(dbPath, { readonly: true, safeIntegers: true });
+	try {
+		db.prepare("SELECT id, updated_at, rollout_path, cwd, source_kind FROM threads LIMIT 1").get();
+		db.prepare(
+			"SELECT thread_id, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at FROM stage1_outputs LIMIT 1",
+		).get();
+		db.prepare("SELECT * FROM jobs LIMIT 1").get();
+	} finally {
+		db.close();
+	}
 }
 
 export function clearMemoryData(db: Database): void {

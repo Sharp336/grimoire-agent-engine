@@ -119,6 +119,15 @@ function normalizeModelPerfSample(modelKey: string, sample: ModelPerfSample): Mo
 export const SCHEMA_VERSION = 6;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
+/** Tables owned directly by AgentStorage in agent.db. */
+export const AGENT_STORAGE_TABLES = {
+	model_usage: "authoritative",
+	model_perf: "rebuildable",
+	meta: "rebuildable",
+	schema_version: "authoritative",
+	settings: "authoritative",
+} as const satisfies Record<string, "authoritative" | "rebuildable">;
+
 /** Singleton instances per database path */
 const instances = new Map<string, AgentStorage>();
 
@@ -387,6 +396,35 @@ FROM model_usage_legacy
 			{ cause: lastError },
 		);
 	}
+	/**
+	 * Initializes a candidate at one exact path without registering a singleton.
+	 * The path must be owned by the caller; normal startup continues to use open().
+	 */
+	static initializeExactPath(dbPath: string): void {
+		const storage = new AgentStorage(dbPath);
+		storage.#close();
+	}
+
+	/** Validates owner tables through a read-only, non-singleton exact-path handle. */
+	static validateExactPath(dbPath: string): void {
+		const db = new Database(dbPath, { readonly: true, safeIntegers: true });
+		try {
+			const version = db.prepare("SELECT version FROM schema_version ORDER BY version").values();
+			if (version.length !== 1 || version[0]?.[0] !== BigInt(SCHEMA_VERSION)) {
+				throw new Error(`AgentStorage candidate schema version is not ${SCHEMA_VERSION}`);
+			}
+			db.prepare("SELECT model_key, last_used_at FROM model_usage LIMIT 1").get();
+			db.prepare(
+				"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at FROM model_perf LIMIT 1",
+			).get();
+			db.prepare("SELECT key, value FROM meta LIMIT 1").get();
+			db.prepare("SELECT key, value, updated_at FROM settings LIMIT 1").get();
+		} finally {
+			db.close();
+		}
+		SqliteAuthCredentialStore.validateExactPath(dbPath);
+	}
+
 	/** @internal Reset all singletons and close their databases — test-only. */
 	static resetInstance(): void {
 		for (const storage of instances.values()) storage.#close();

@@ -8,6 +8,12 @@ import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
+import {
+	type HistoryRepairSource,
+	runStorageRepair,
+	type StorageRepairResult,
+	type StorageRepairTarget,
+} from "./storage-repair-cli";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
@@ -31,6 +37,9 @@ export interface GcCommandFlags {
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
+	repairStorage?: StorageRepairTarget;
+	historySource?: HistoryRepairSource;
+	output?: string;
 }
 
 export interface GcCommandArgs {
@@ -81,6 +90,7 @@ export interface GcResult {
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
 	wal?: WalGcResult;
+	repair?: StorageRepairResult;
 	lockPath: string;
 }
 
@@ -107,6 +117,9 @@ interface ResolvedGcOptions {
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
+	repairStorage?: StorageRepairTarget;
+	historySource?: HistoryRepairSource;
+	output?: string;
 }
 
 interface SqliteRunResult {
@@ -140,6 +153,31 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
+	if (flags.repairStorage) {
+		if (flags.blobs || flags.archive || flags.wal) {
+			throw new Error("--repair-storage cannot run with --blobs, --archive, or --wal");
+		}
+		if (flags.repairStorage === "agent" && flags.historySource !== undefined) {
+			throw new Error("--history-source is only valid with --repair-storage history");
+		}
+		return {
+			apply: flags.apply === true,
+			json: flags.json === true,
+			agentDir,
+			runBlobs: false,
+			runArchive: false,
+			runWal: false,
+			coldArchiveAfterDays: 0,
+			retainNewestGlobal: 0,
+			retainNewestPerCwd: 0,
+			repairStorage: flags.repairStorage,
+			historySource: flags.historySource,
+			output: flags.output,
+		};
+	}
+	if (flags.historySource !== undefined || flags.output !== undefined) {
+		throw new Error("--history-source and --output require --repair-storage");
+	}
 	const selected = flags.blobs === true || flags.archive === true || flags.wal === true;
 	const settings =
 		flags.apply === true ? await Settings.loadIsolated({ agentDir }) : await Settings.loadReadOnly({ agentDir });
@@ -175,6 +213,10 @@ export function collectGcErrors(result: GcResult): string[] {
 	return [
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
+		...(result.repair?.status === "refused" ? [`repair: ${result.repair.refusal ?? "refused"}`] : []),
+		...(result.repair?.status === "published-with-warning"
+			? [`repair: ${result.repair.warning ?? "published with warning"}`]
+			: []),
 	];
 }
 
@@ -909,6 +951,29 @@ function formatBytes(bytes: number): string {
 
 function renderText(result: GcResult): string {
 	const lines = [`GC ${result.apply ? "applied" : "dry-run"} (${result.agentDir})`];
+	if (result.repair) {
+		const repair = result.repair;
+		lines.push(
+			`storage repair ${repair.status}: ${repair.target}${repair.historySource ? ` (${repair.historySource})` : ""}`,
+		);
+		lines.push("offline: stop every OMP process before using any repair artifact");
+		lines.push(`source: ${repair.source}`);
+		lines.push(`backup: ${repair.backup}${repair.backupCreated ? " (created)" : ""}`);
+		lines.push(`candidate: ${repair.candidate}${repair.candidatePublished ? " (published)" : ""}`);
+		lines.push(`candidate path trusted: ${repair.candidatePathTrusted}`);
+		if (repair.dataLoss) lines.push("data loss: true (fresh empty history)");
+		for (const object of repair.objects) {
+			lines.push(
+				`${object.action}: ${object.kind} ${object.name} [${object.owner}]${object.detail ? ` — ${object.detail}` : ""}`,
+			);
+		}
+		for (const checksum of repair.checksums)
+			lines.push(`sha256 ${checksum.sha256} ${checksum.size} ${checksum.path}`);
+		if (repair.refusal) lines.push(`refusal: ${repair.refusal}`);
+		if (repair.warning) lines.push(`warning: ${repair.warning}`);
+		lines.push(`manual next step: ${repair.manualNextStep}`);
+		return `${lines.join("\n")}\n`;
+	}
 	if (result.blobs) {
 		lines.push(
 			`blobs: ${result.blobs.deleted}/${result.blobs.wouldDelete} files, ${formatBytes(result.blobs.bytes)}, ${result.blobs.referenced} refs`,
@@ -934,6 +999,16 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		if (options.repairStorage) {
+			next.repair = await runStorageRepair({
+				target: options.repairStorage,
+				historySource: options.historySource,
+				output: options.output,
+				apply: options.apply,
+				agentDir: options.agentDir,
+			});
+			return next;
+		}
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
