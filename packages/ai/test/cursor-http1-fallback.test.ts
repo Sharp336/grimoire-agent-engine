@@ -32,15 +32,13 @@ async function unavailableDiscoveryServer(): Promise<string> {
 }
 
 describe("Cursor HTTP/1 fallback selection", () => {
-	it("honors the per-request HTTP/1 preference when config discovery fails", async () => {
+	it("keeps HTTP/2 primary when config discovery is unavailable", async () => {
 		const baseUrl = await unavailableDiscoveryServer();
 		const result = await resolveCursorTransportMode({
 			baseUrl,
 			apiKey: "test-key",
 			provider: "cursor",
-			useHttp1ForAgent: true,
-			originalRequestId: crypto.randomUUID(),
 		});
-		expect(result.mode).toBe("http1");
+		expect(result.mode).toBe("http2");
 	});
 });

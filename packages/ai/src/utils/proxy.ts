@@ -212,7 +212,7 @@ export async function connectProxiedSocket(
 	let rawSocket: net.Socket | undefined;
 	let tunnelSocket: tls.TLSSocket | undefined;
 	let timeout: NodeJS.Timeout | undefined;
-	let responseData = Buffer.alloc(0);
+	let responseData: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 	let settled = false;
 
 	const cleanup = (): void => {

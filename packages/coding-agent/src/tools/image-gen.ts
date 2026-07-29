@@ -1223,7 +1223,8 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								// access token. Tolerate both, falling back to the seed projectId.
 								const rotated = parseAntigravityCredentials(key);
 								const bearer = rotated?.accessToken ?? key;
-								const projectId = rotated?.projectId ?? apiKey.projectId!;
+								const projectId = rotated?.projectId ?? apiKey.projectId;
+								if (!projectId) throw new Error("Antigravity credentials missing projectId");
 								const requestBody = buildAntigravityRequest(
 									prompt,
 									model,
@@ -1233,74 +1234,35 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 									resolvedImages,
 								);
 
-								let endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD, DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
-								try {
-									const mode = settings.get("providers.antigravityEndpoint");
-									if (mode === "production") {
-										endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD];
-									} else if (mode === "sandbox") {
-										endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
-									}
-								} catch {
-									// Ignored
-								}
-
-								let resp: Response | undefined;
-								let lastError: Error | undefined;
-
-								for (let i = 0; i < endpoints.length; i++) {
-									const endpoint = endpoints[i];
-									const isLastEndpoint = i === endpoints.length - 1;
+								const resp = await fetchImpl(
+									`${DEFAULT_ANTIGRAVITY_ENDPOINT_PROD}/v1internal:streamGenerateContent?alt=sse`,
+									{
+										method: "POST",
+										headers: {
+											Authorization: `Bearer ${bearer}`,
+											"Content-Type": "application/json",
+											Accept: "text/event-stream",
+											"User-Agent": getAntigravityUserAgent(),
+										},
+										body: JSON.stringify(requestBody),
+										signal: requestSignal,
+									},
+								);
+								if (!resp.ok) {
+									const errorText = await resp.text();
+									let message = errorText;
 									try {
-										resp = await fetchImpl(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-											method: "POST",
-											headers: {
-												Authorization: `Bearer ${bearer}`,
-												"Content-Type": "application/json",
-												Accept: "text/event-stream",
-												"User-Agent": getAntigravityUserAgent(),
-											},
-											body: JSON.stringify(requestBody),
-											signal: requestSignal,
-										});
-
-										if (resp.ok) {
-											break;
-										}
-
-										const errorText = await resp.text();
-										let message = errorText;
-										try {
-											const parsedErr = JSON.parse(errorText) as { error?: { message?: string } };
-											message = parsedErr.error?.message ?? message;
-										} catch {
-											// Keep raw text.
-										}
-
-										lastError = new ProviderHttpError(
-											`Antigravity image request failed (${resp.status}): ${message}`,
-											resp.status,
-											{ headers: resp.headers },
-										);
-
-										if (resp.status === 429 || (resp.status >= 500 && resp.status < 600)) {
-											if (!isLastEndpoint) {
-												continue;
-											}
-										}
-										break;
-									} catch (error) {
-										lastError = error as Error;
-										if (isLastEndpoint) {
-											break;
-										}
+										const parsedErr = JSON.parse(errorText) as { error?: { message?: string } };
+										message = parsedErr.error?.message ?? message;
+									} catch {
+										// Keep raw text.
 									}
+									throw new ProviderHttpError(
+										`Antigravity image request failed (${resp.status}): ${message}`,
+										resp.status,
+										{ headers: resp.headers },
+									);
 								}
-
-								if (!resp?.ok) {
-									throw lastError ?? new Error("Antigravity image generation failed");
-								}
-
 								return resp;
 							},
 							{ signal: requestSignal },

@@ -185,7 +185,12 @@ export async function postH2Only(options: H2PostOptions): Promise<TransportRespo
 	try {
 		exchange.dispatch(() => options.body);
 		const response = await exchange.response;
-		return { status: response.status, headers: webHeaders(response.headers), body: nodeBody(exchange), close: exchange.close };
+		return {
+			status: response.status,
+			headers: webHeaders(response.headers),
+			body: nodeBody(exchange),
+			close: exchange.close,
+		};
 	} catch (error) {
 		await exchange.close();
 		throw error;

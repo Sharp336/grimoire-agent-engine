@@ -109,9 +109,7 @@ describe("shared Connect framing", () => {
 
 	it("rejects malformed and unknown Connect terminal payloads", () => {
 		expect(() => readConnectTrailerError(new TextEncoder().encode("{"))).toThrow("malformed JSON");
-		expect(() => readConnectTrailerError(new TextEncoder().encode('{\"unexpected\":true}'))).toThrow(
-			"unknown field",
-		);
+		expect(() => readConnectTrailerError(new TextEncoder().encode('{"unexpected":true}'))).toThrow("unknown field");
 	});
 
 	it("rejects duplicate EOS, data after EOS, unknown flags, and EOF without EOS", () => {

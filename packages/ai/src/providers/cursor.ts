@@ -175,7 +175,6 @@ export interface CursorOptions extends StreamOptions {
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
 	clientVersion?: string;
-	useHttp1ForAgent?: boolean;
 }
 
 interface CursorChannel {
@@ -322,7 +321,6 @@ function omitTypeName(record: Record<string, unknown>): Record<string, unknown> 
 	return rest;
 }
 
-
 export const streamCursor: StreamFunction<"cursor-agent"> = (
 	model: Model<"cursor-agent">,
 	context: Context,
@@ -440,19 +438,16 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const originalRequestId = crypto.randomUUID();
 			const requestId = crypto.randomUUID();
-			const preferHttp1 = options?.useHttp1ForAgent ?? false;
 			const { mode } = await resolveCursorTransportMode({
 				baseUrl,
 				apiKey,
 				provider: model.provider,
-				useHttp1ForAgent: preferHttp1,
 				clientVersion: options?.clientVersion,
-				originalRequestId,
 				signal: options?.signal,
 			}).catch((error: unknown): { mode: CursorTransportMode } => {
 				if (options?.signal?.aborted) throw new AIError.AbortError();
 				if (error instanceof AIError.CursorCredentialError || error instanceof AIError.AbortError) throw error;
-				return { mode: preferHttp1 ? "http1" : "http2" };
+				return { mode: "http2" };
 			});
 			const requestPath = "/agent.v1.AgentService/Run";
 			const requestHeaders = {
@@ -651,8 +646,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							h2Request?.close();
 							return;
 						}
-
-
 					}
 				});
 

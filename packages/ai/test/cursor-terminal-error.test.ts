@@ -108,7 +108,6 @@ function execAndTurnEndedFrame(): Buffer {
 	return Buffer.concat([execRequestFrame(), turnEndedFrame()]);
 }
 
-
 function malformedProtobufFrame(): Buffer {
 	return frameConnectMessage(Buffer.from([0x0a]));
 }
@@ -368,15 +367,15 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 	});
 
 	it("rejects when the stream ends before turnEnded", async () => {
-	scenario = { kind: "end-before-turn" };
-	const baseUrl = await startServer();
-	const { eventTypes, result } = await collectStream(makeModel(baseUrl));
-	expect(eventTypes[0]).toBe("start");
-	expect(eventTypes.at(-1)).toBe("error");
-	expect(eventTypes).not.toContain("done");
-	expect(result.stopReason).toBe("error");
-	expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
-});
+		scenario = { kind: "end-before-turn" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
+	});
 
 	it("rejects malformed protobuf frames before a queued turnEnded without emitting done", async () => {
 		scenario = { kind: "malformed-frame-before-turn-ended" };

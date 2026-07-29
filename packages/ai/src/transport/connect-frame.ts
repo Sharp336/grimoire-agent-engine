@@ -19,9 +19,7 @@ export interface ConnectFrame {
 	endOfStream: boolean;
 }
 
-export type ConnectTerminal =
-	| { kind: "success" }
-	| { kind: "provider-error"; code: string; message: string };
+export type ConnectTerminal = { kind: "success" } | { kind: "provider-error"; code: string; message: string };
 
 export function createConnectFrameReader(options?: { maxPayloadBytes?: number }): {
 	push(chunk: Uint8Array): ConnectFrame[];

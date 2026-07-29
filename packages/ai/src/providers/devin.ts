@@ -455,7 +455,6 @@ function devinOs(): string {
 	return process.platform;
 }
 
-
 /**
  * Build a {@link GetChatMessageRequest} for one Cascade turn. Auth rides inside
  * `Metadata.apiKey`; the system prompt is the flattened `prompt` string and the

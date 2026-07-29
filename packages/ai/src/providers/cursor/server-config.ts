@@ -59,8 +59,6 @@ export interface ResolveTransportModeOptions {
 	baseUrl: string;
 	apiKey: string;
 	provider: string;
-	/** Local preference from providers.cursor.useHttp1ForAgent. */
-	useHttp1ForAgent: boolean;
 	clientVersion?: string;
 	signal?: AbortSignal;
 }
@@ -117,21 +115,18 @@ export async function resolveCursorTransportMode(
 	}
 
 	return {
-		mode: selectMode(result.http2Config, opts.useHttp1ForAgent),
+		mode: selectMode(result.http2Config),
 		agentUrlConfig: result.agentUrlConfig,
 	};
 }
 
-export function selectMode(http2Config: Http2Config, useHttp1ForAgent: boolean): CursorTransportMode {
+export function selectMode(http2Config: Http2Config): CursorTransportMode {
 	switch (http2Config) {
 		case Http2Config.FORCE_ALL_DISABLED:
 		case Http2Config.FORCE_BIDI_DISABLED:
 			return "http1";
-		case Http2Config.FORCE_ALL_ENABLED:
-		case Http2Config.FORCE_BIDI_ENABLED:
-			return "http2";
 		default:
-			return useHttp1ForAgent ? "http1" : "http2";
+			return "http2";
 	}
 }
 

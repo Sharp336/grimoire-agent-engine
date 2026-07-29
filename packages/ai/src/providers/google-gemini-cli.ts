@@ -553,6 +553,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			}
 			const baseUrl = model.baseUrl?.trim();
 			const endpoint = baseUrl || (isAntigravity ? ANTIGRAVITY_DAILY_ENDPOINT : DEFAULT_ENDPOINT);
+			const providerState = isAntigravity
+				? getAntigravityProviderSessionState(options?.providerSessionState)
+				: undefined;
 
 			let requestBody = buildRequest(model, context, projectId, options, isAntigravity);
 			const replacementPayload = await options?.onPayload?.(requestBody, model);
@@ -940,12 +943,6 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			}
 			if (providerState) providerState.lastExecutionId = lastResponseId;
 
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
-					provider: model.provider,
-					kind: "output",
-				});
-			}
 
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
