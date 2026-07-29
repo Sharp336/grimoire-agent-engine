@@ -1225,7 +1225,7 @@ export async function completeSimple<TApi extends Api>(
 	);
 }
 
-const MIN_OUTPUT_TOKENS = 1024;
+export const MIN_OUTPUT_TOKENS = 1024;
 // Fallback total output cap for models whose catalog entry has no maxTokens.
 const OUTPUT_CAP_WHEN_UNKNOWN = 64_000;
 function maxTokensWithThinkingBudget(

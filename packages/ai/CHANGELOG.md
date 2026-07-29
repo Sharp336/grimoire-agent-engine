@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Anthropic and Bedrock requests now clamp the declared max output tokens to the remaining context window (with a 4096-token reserve), reconciling the thinking budget under the clamped value, so prompts that fit the window are no longer rejected because of an oversized output allowance.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
