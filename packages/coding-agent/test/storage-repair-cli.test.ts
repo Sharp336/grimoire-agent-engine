@@ -570,7 +570,7 @@ describe("offline SQLite salvage", () => {
 				{
 					beforeCandidateVerification: async () => {
 						const stage = requireValue(
-							(await stageArtifacts(candidate, "candidate")).find(name => name.endsWith(".stage")),
+							(await stageArtifacts(candidate, "candidate")).find(name => name.endsWith(".tmp")),
 							"candidate database stage",
 						);
 						const stagedDb = new Database(path.join(root, stage), { safeIntegers: true });
@@ -600,7 +600,7 @@ describe("offline SQLite salvage", () => {
 			{
 				beforeCandidateVerification: async () => {
 					const stage = requireValue(
-						(await stageArtifacts(candidate, "candidate")).find(name => name.endsWith(".stage")),
+						(await stageArtifacts(candidate, "candidate")).find(name => name.endsWith(".tmp")),
 						"candidate database stage",
 					);
 					const stagedDb = new Database(path.join(root, stage), { safeIntegers: true });
