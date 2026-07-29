@@ -727,7 +727,14 @@ function createBedrockMantleAuthenticatedFetch(options: StreamOptions | undefine
 			query: url.search.replace(/^\?/, ""),
 			body,
 			region,
-			service: "bedrock",
+			// Mantle is its own IAM service, not part of `bedrock`: the Service
+			// Authorization Reference lists it as `service prefix: bedrock-mantle`
+			// with its own `CreateInference` action and `arn:*:bedrock-mantle:*`
+			// resources. A credential scope of `.../bedrock/aws4_request` is rejected
+			// even for a principal holding the Mantle inference policy. The Converse
+			// path stays on `bedrock`.
+			// https://docs.aws.amazon.com/service-authorization/latest/reference/list_bedrock-mantle.html
+			service: "bedrock-mantle",
 			credentials,
 			headers: { "content-type": contentType },
 		});
@@ -1278,6 +1285,14 @@ export function streamSimple<TApi extends Api>(
 		return stream(model, context, providerOptions);
 	} else if (model.api === "bedrock-converse-stream") {
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
+		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
+		return stream(model, context, providerOptions);
+	} else if (model.provider === "bedrock-mantle") {
+		// Same reason as the Converse branch: credentials come from the AWS chain,
+		// whose `~/.aws/credentials` profiles / SSO / IMDS sources the registry env
+		// probe cannot see. Gating on a key here would fail `completeSimple()` and
+		// the auth-gateway utility calls before `stream()` gets to resolve them.
+		// `mapOptionsForApi` keeps a caller-supplied key when one is present.
 		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
 		return stream(model, context, providerOptions);
 	}
