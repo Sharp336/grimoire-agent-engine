@@ -9,7 +9,7 @@ import {
 } from "../src/compaction/utils";
 import { createAssistantMessage } from "./helpers";
 
-function readCall(id: string, path: string) {
+function readCall(id: string, path: string | string[]) {
 	return { type: "toolCall" as const, id, name: "read", arguments: { path } };
 }
 
@@ -56,6 +56,15 @@ describe("extractFileOpsFromMessage", () => {
 		]);
 		extractFileOpsFromMessage(message, fileOps);
 		expect([...fileOps.read]).toEqual(["docs/compaction.md"]);
+	});
+
+	it("tracks every filesystem target in read arrays", () => {
+		const fileOps = createFileOps();
+		const message = createAssistantMessage([
+			readCall("r1", ["src/alpha.ts:10-20", "src/beta.ts", "artifact://7", "https://example.com/reference"]),
+		]);
+		extractFileOpsFromMessage(message, fileOps);
+		expect([...fileOps.read]).toEqual(["src/alpha.ts", "src/beta.ts"]);
 	});
 
 	it("matches selector-suffixed reads against modified paths", () => {

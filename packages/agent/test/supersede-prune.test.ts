@@ -54,7 +54,11 @@ function toolResultMessage(toolName: string, toolCallId: string, text: string, t
 }
 
 /** Assistant toolCall entry + paired toolResult entry for one read. */
-function readPair(path: string, text: string, timestamp: number): [SessionMessageEntry, SessionMessageEntry] {
+function readPair(
+	path: string | string[],
+	text: string,
+	timestamp: number,
+): [SessionMessageEntry, SessionMessageEntry] {
 	const callId = `call-${idCounter++}`;
 	return [
 		messageEntry(
@@ -115,6 +119,15 @@ describe("readToolSupersedeKey", () => {
 	test("URL/internal schemes are exempt", () => {
 		expect(readToolSupersedeKey("read", { path: "skill://react" })).toBeUndefined();
 		expect(readToolSupersedeKey("read", { path: "https://example.com/page" })).toBeUndefined();
+	});
+
+	test("returns every local path key for native read arrays", () => {
+		expect(readToolSupersedeKey("read", { path: ["src/foo.ts:50-200", "src/bar.ts"] })).toEqual([
+			"src/foo.ts\u000050-200",
+			"src/bar.ts",
+		]);
+		expect(readToolSupersedeKey("read", { path: [] })).toBeUndefined();
+		expect(readToolSupersedeKey("read", { path: ["src/foo.ts", "skill://react"] })).toBeUndefined();
 	});
 
 	test("strips trailing selectors into a \\u0000-separated key", () => {
@@ -200,6 +213,37 @@ describe("pruneSupersededToolResults — tail case", () => {
 		expect(result.prunedCount).toBe(0);
 		expect(resultText(result1)).toBe(FILE_CONTENT);
 		expect(resultText(result2)).toBe(FILE_CONTENT);
+	});
+
+	test("an array result is pruned only after later reads cover every target", () => {
+		const [batchCall, batchResult] = readPair(["src/foo.ts", "src/bar.ts"], FILE_CONTENT, T0);
+		const [fooCall, fooResult] = readPair("src/foo.ts", FILE_CONTENT, T0 + 1_000);
+		let entries: SessionEntry[] = [batchCall, batchResult, fooCall, fooResult];
+
+		let result = pruneSupersededToolResults(entries, cfg({ now: T0 + 1_000 }));
+		expect(result.prunedCount).toBe(0);
+		expect(resultText(batchResult)).toBe(FILE_CONTENT);
+
+		const [barCall, barResult] = readPair("src/bar.ts", FILE_CONTENT, T0 + 2_000);
+		entries = [...entries, barCall, barResult];
+		result = pruneSupersededToolResults(entries, cfg({ now: T0 + 2_000 }));
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(batchResult)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(fooResult)).toBe(FILE_CONTENT);
+		expect(resultText(barResult)).toBe(FILE_CONTENT);
+	});
+
+	test("a newer array read supersedes older scalar reads for its targets", () => {
+		const [fooCall, fooResult] = readPair("src/foo.ts", FILE_CONTENT, T0);
+		const [batchCall, batchResult] = readPair(["src/foo.ts", "src/bar.ts"], FILE_CONTENT, T0 + 1_000);
+		const entries: SessionEntry[] = [fooCall, fooResult, batchCall, batchResult];
+
+		const result = pruneSupersededToolResults(entries, cfg({ now: T0 + 1_000 }));
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(fooResult)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(batchResult)).toBe(FILE_CONTENT);
 	});
 });
 

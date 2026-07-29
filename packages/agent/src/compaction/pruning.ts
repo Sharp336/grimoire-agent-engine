@@ -70,16 +70,19 @@ export const SUPERSEDED_NOTICE = "[Superseded by a newer read of this file]";
 export const USELESS_NOTICE = "[Uneventful result elided]";
 
 /**
- * Maps a tool call to a supersede key. Results sharing a key form a group in
- * which every result except the newest is a supersede candidate. A key `K`
+ * Maps a tool call to one or more supersede keys. A result with multiple keys
+ * becomes a candidate only after later results cover every key. A key `K`
  * additionally supersedes keys with prefix `K + "\u0000"` (selector-free read
- * supersedes selector-carrying reads of the same base path). Return
- * `undefined` to exempt a call from supersede grouping.
+ * supersedes selector-carrying reads of the same base path). Return `undefined`
+ * to exempt a call from supersede grouping.
  */
-export type SupersedeKeyFn = (toolName: string, args: Record<string, unknown>) => string | undefined;
+export type SupersedeKeyFn = (
+	toolName: string,
+	args: Record<string, unknown>,
+) => string | readonly string[] | undefined;
 
 export interface SupersedePruneConfig {
-	/** Supersede key function; results sharing a key supersede older ones. */
+	/** Supersede key function; later results must cover every key from an older result. */
 	supersedeKey?: SupersedeKeyFn;
 	/** Also prune results flagged useless by their tool. Default false. */
 	pruneUseless?: boolean;
@@ -194,11 +197,15 @@ function collectSupersededResults(
 		const toolCall = toolCallsById.get(message.toolCallId);
 		if (!toolCall) continue;
 		if (isProtectedToolResult(message, toolCall, protectedTools)) continue;
-		const key = supersedeKey(toolCall.name, toolCall.arguments as Record<string, unknown>);
-		if (key === undefined) continue;
-		const separator = key.indexOf("\u0000");
-		const superseded = seenKeys.has(key) || (separator >= 0 && seenKeys.has(key.slice(0, separator)));
-		seenKeys.add(key);
+		const resolvedKeys = supersedeKey(toolCall.name, toolCall.arguments as Record<string, unknown>);
+		if (resolvedKeys === undefined) continue;
+		const keys = typeof resolvedKeys === "string" ? [resolvedKeys] : resolvedKeys;
+		if (keys.length === 0) continue;
+		const superseded = keys.every(key => {
+			const separator = key.indexOf("\u0000");
+			return seenKeys.has(key) || (separator >= 0 && seenKeys.has(key.slice(0, separator)));
+		});
+		for (const key of keys) seenKeys.add(key);
 		if (!superseded) continue;
 		candidates.push({
 			entry: entry as SessionMessageEntry,
@@ -407,21 +414,35 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	return { prunedCount, tokensSaved };
 }
 
-/**
- * Supersede key for the `read` tool: the file path with the trailing line/raw
- * selector stripped (the read tool's own splitter grammar via
- * {@link splitReadSelector}, e.g. `src/foo.ts:50-200`, `:2-4:raw`).
- * Internal/URL-scheme paths (`skill://…`, `https://…`) are exempt.
- * Selector-free reads key on the bare path; selector-carrying reads key on
- * `path + "\u0000" + selector`, so two reads collide only when the newer is
- * selector-free or the selectors are identical (the pass's prefix rule lets a
- * bare-path read supersede selector-carrying reads of the same file).
- */
-export function readToolSupersedeKey(toolName: string, args: Record<string, unknown>): string | undefined {
-	if (toolName !== "read") return undefined;
-	const path = args.path;
-	if (typeof path !== "string" || path.length === 0) return undefined;
-	if (path.includes("://")) return undefined;
+function readPathSupersedeKey(path: unknown): string | undefined {
+	if (typeof path !== "string" || path.length === 0 || path.includes("://")) return undefined;
 	const { path: base, sel } = splitReadSelector(path);
 	return sel === undefined ? base : `${base}\u0000${sel}`;
+}
+
+/**
+ * Supersede keys for the `read` tool: each file path with its trailing line/raw
+ * selector split out using the read tool's own grammar via
+ * {@link splitReadSelector} (e.g. `src/foo.ts:50-200`, `:2-4:raw`).
+ * Native path arrays produce one key per target, so their combined result is
+ * pruned only after later reads cover every target. Internal/URL-scheme paths
+ * (`skill://…`, `https://…`) exempt the whole call because one batch result
+ * cannot be pruned safely one target at a time.
+ */
+export function readToolSupersedeKey(
+	toolName: string,
+	args: Record<string, unknown>,
+): string | readonly string[] | undefined {
+	if (toolName !== "read") return undefined;
+	const rawPath = args.path;
+	if (typeof rawPath === "string") return readPathSupersedeKey(rawPath);
+	if (!Array.isArray(rawPath) || rawPath.length === 0) return undefined;
+
+	const keys: string[] = [];
+	for (const path of rawPath) {
+		const key = readPathSupersedeKey(path);
+		if (key === undefined) return undefined;
+		keys.push(key);
+	}
+	return keys;
 }
