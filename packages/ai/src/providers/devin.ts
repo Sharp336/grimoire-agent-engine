@@ -153,7 +153,10 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		let activeToolCallId: string | undefined;
 		let latestStopReason = StopReason.UNSPECIFIED;
 		let response: TransportResponse | undefined;
-		let debugResponseLogPromise: Promise<RequestDebugResponseLog> | undefined;
+		// Never rejects: request debugging is diagnostics, so a failed log open must not
+		// surface as an unhandled rejection from the fire-and-forget writers below, nor
+		// block transport settlement in the teardown.
+		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 
 		const markFirstToken = () => {
 			if (firstTokenTime === undefined) firstTokenTime = performance.now();
@@ -229,12 +232,17 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				signal,
 				fetchOverride: options?.fetch,
 			});
-			debugResponseLogPromise = debugSession?.openResponseLog(`HTTP ${response.status}`.trim(), response.headers);
+			debugResponseLogPromise = debugSession
+				?.openResponseLog(`HTTP ${response.status}`.trim(), response.headers)
+				.catch(error => {
+					logger.warn("devin: response debug log unavailable", { error: String(error) });
+					return undefined;
+				});
 			if (response.status < 200 || response.status >= 300) {
 				const chunks: Uint8Array[] = [];
 				let totalBytes = 0;
 				for await (const chunk of response.body) {
-					if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log.write(chunk));
+					if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log?.write(chunk));
 					if (totalBytes >= 64 * 1024) break;
 					const bounded = chunk.subarray(0, 64 * 1024 - totalBytes);
 					chunks.push(bounded);
@@ -255,7 +263,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stream.push({ type: "start", partial: output });
 			const frameReader = createConnectFrameReader();
 			for await (const chunk of body) {
-				if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log.write(chunk));
+				if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log?.write(chunk));
 				let frames: ConnectFrame[];
 				try {
 					frames = frameReader.push(chunk);
@@ -423,9 +431,18 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				logger.warn("devin: transport close failed", { error: String(error) });
 			} finally {
 				activeDevinTransports.delete(activeTransport);
-				const debugLog = await debugResponseLogPromise;
-				await debugLog?.close();
-				resolveTransportSettled();
+				// Settlement must survive debug-log failures. If opening or closing the
+				// response log throws — an unwritable cwd, a full disk — an unguarded
+				// await here would skip resolution, and `disposeDevinTransports()` would
+				// then wait forever on a promise nothing can settle.
+				try {
+					const debugLog = await debugResponseLogPromise;
+					await debugLog?.close();
+				} catch (error) {
+					logger.warn("devin: response debug log cleanup failed", { error: String(error) });
+				} finally {
+					resolveTransportSettled();
+				}
 			}
 		}
 	})();

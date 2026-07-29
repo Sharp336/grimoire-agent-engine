@@ -233,4 +233,66 @@ process.stdout.write(JSON.stringify({ stopReason: result.stopReason, closeCalls 
 			await child.exited;
 		}
 	});
+	it("settles transport disposal even when response debug-log cleanup rejects", async () => {
+		// With PI_REQ_DEBUG=1 the provider opens a response log at `rr-session-N.res.log`
+		// relative to cwd via fs.open(path, "wx"). Pre-creating that exact path as a
+		// DIRECTORY makes the open reject deterministically, which is the real-world
+		// unwritable-cwd / full-disk case. If that rejection escapes the teardown,
+		// disposeTransports() awaits a settlement promise nothing can resolve and the
+		// child never exits.
+		const debugDir = await fs.mkdtemp(path.join(os.tmpdir(), "devin-debuglog-"));
+		await fs.mkdir(path.join(debugDir, "rr-session-1.res.log"));
+		const pkgRoot = new URL("..", import.meta.url).pathname;
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { streamDevin } from "${pkgRoot}src/providers/devin.ts";
+import { disposeTransports } from "${pkgRoot}src/transport/lifecycle.ts";
+const terminal = new Uint8Array([2, 0, 0, 0, 0]);
+const model = {
+	id: "devin-debuglog-test",
+	name: "Devin debug-log test",
+	api: "devin-agent",
+	provider: "devin",
+	baseUrl: "http://127.0.0.1:1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 1,
+	maxTokens: 1,
+};
+const result = await streamDevin(model, { messages: [] }, {
+	apiKey: "token",
+	fetch: async () => new Response(terminal, { status: 200 }),
+}).result();
+await disposeTransports();
+process.stdout.write(JSON.stringify({ stopReason: result.stopReason }));`,
+			],
+			{ cwd: debugDir, stdout: "pipe", stderr: "pipe", env: { ...process.env, PI_REQ_DEBUG: "1" } },
+		);
+		const stdout = new Response(child.stdout).text();
+		const stderr = new Response(child.stderr).text();
+		try {
+			// A hard deadline is the assertion here, not a tuned sleep: the defect under
+			// test is "disposal waits forever", so without it the suite would hang
+			// instead of failing. There is no fake-timer path when racing a real
+			// subprocess exit.
+			const deadline = Promise.withResolvers<never>();
+			const timeout = setTimeout(() => deadline.reject(new Error("Devin debug-log child did not exit")), 5_000);
+			let exitCode: number;
+			try {
+				exitCode = await Promise.race([child.exited, deadline.promise]);
+			} finally {
+				clearTimeout(timeout);
+			}
+			const [output, errors] = await Promise.all([stdout, stderr]);
+			expect(exitCode, errors).toBe(0);
+			expect(JSON.parse(output)).toEqual({ stopReason: "stop" });
+		} finally {
+			if (child.exitCode === null) child.kill();
+			await child.exited;
+			await fs.rm(debugDir, { recursive: true, force: true });
+		}
+	});
 });
