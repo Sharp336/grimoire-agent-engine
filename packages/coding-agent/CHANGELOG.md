@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Context file deduplication now checks paragraph containment instead of byte-exact matching: a less-authoritative file whose normalized paragraphs appear contiguously within a more authoritative file is omitted, reducing redundant prompt context.
+
 ### Fixed
 
 - Fixed missing SSRF guard in the fetch tool — requests to loopback, RFC1918 private, link-local, and cloud-metadata addresses are now refused before and after every redirect.

@@ -58,16 +58,23 @@ function splitComparablePromptBlocks(content: string | null | undefined): string
 		.filter(block => block.length > 0);
 }
 
-function promptSourceContainsRule(source: string | null | undefined, ruleContent: string): boolean {
-	const sourceBlocks = splitComparablePromptBlocks(source);
-	const ruleBlocks = splitComparablePromptBlocks(ruleContent);
-	if (sourceBlocks.length === 0 || ruleBlocks.length === 0 || ruleBlocks.length > sourceBlocks.length) return false;
-
+/**
+ * Check whether `ruleBlocks` appears as a contiguous subsequence of
+ * `sourceBlocks`. Both inputs must already be normalized and split via
+ * {@link splitComparablePromptBlocks}.
+ */
+function promptBlocksContain(sourceBlocks: string[], ruleBlocks: string[]): boolean {
+	if (sourceBlocks.length === 0 || ruleBlocks.length === 0 || ruleBlocks.length > sourceBlocks.length) {
+		return false;
+	}
 	for (let start = 0; start <= sourceBlocks.length - ruleBlocks.length; start += 1) {
 		if (ruleBlocks.every((block, offset) => sourceBlocks[start + offset] === block)) return true;
 	}
-
 	return false;
+}
+
+function promptSourceContainsRule(source: string | null | undefined, ruleContent: string): boolean {
+	return promptBlocksContain(splitComparablePromptBlocks(source), splitComparablePromptBlocks(ruleContent));
 }
 
 function dedupeAlwaysApplyRules(
@@ -334,16 +341,31 @@ export interface LoadContextFilesOptions {
 	cwd?: string;
 }
 
-function dedupeExactContextFiles(
+/**
+ * Deduplicate context files by paragraph containment.
+ *
+ * A less-authoritative (earlier-indexed) file is omitted when a later
+ * (more-authoritative) file contains its entire normalized paragraph
+ * sequence as a contiguous run. Files whose paragraphs are merely
+ * paraphrased or interleaved are kept — containment is exact after
+ * normalization, not fuzzy.
+ *
+ * Callers must sort files least-authoritative-first (the existing
+ * {@link loadProjectContextFiles} depth-descending sort does this).
+ *
+ * @internal Exported for testing.
+ */
+export function dedupeContainedContextFiles(
 	contextFiles: Array<{ path: string; content: string; depth?: number }>,
 ): Array<{ path: string; content: string; depth?: number }> {
-	const lastIndexByContent = new Map<string, number>();
-	for (const [index, file] of contextFiles.entries()) {
-		// Keep the closest matching context entry when content is byte-for-byte identical.
-		lastIndexByContent.set(file.content, index);
-	}
-
-	return contextFiles.filter((file, index) => lastIndexByContent.get(file.content) === index);
+	const blocks = contextFiles.map(file => splitComparablePromptBlocks(file.content));
+	return contextFiles.filter(
+		(_file, index) =>
+			!blocks.some(
+				(candidateBlocks, candidateIndex) =>
+					candidateIndex > index && promptBlocksContain(candidateBlocks, blocks[index]),
+			),
+	);
 }
 
 /**
@@ -381,7 +403,7 @@ export async function loadProjectContextFiles(
 		return depthB - depthA;
 	});
 
-	return dedupeExactContextFiles(files);
+	return dedupeContainedContextFiles(files);
 }
 
 /**
@@ -602,7 +624,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedCustomPrompt: undefined as string | undefined,
 		resolvedAppendPrompt: undefined as string | undefined,
 		systemPromptCustomization: null as string | null,
-		contextFiles: dedupeExactContextFiles(providedContextFiles ?? []),
+		contextFiles: dedupeContainedContextFiles(providedContextFiles ?? []),
 		skills: providedSkills ?? ([] as Skill[]),
 		workspaceTree: {
 			rootPath: resolvedCwd,
@@ -666,7 +688,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		const extra = await Promise.all(
 			additionalRoots.map(root => loadProjectContextFiles({ cwd: root }).catch(() => [])),
 		);
-		return dedupeExactContextFiles([...primary, ...extra.flat()]);
+		return dedupeContainedContextFiles([...primary, ...extra.flat()]);
 	})();
 	const additionalRootsForTree = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
 	const workspaceTreePromise = (async () => {
@@ -732,7 +754,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		),
 		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization),
 		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
-			dedupeExactContextFiles,
+			dedupeContainedContextFiles,
 		),
 		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
 		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
