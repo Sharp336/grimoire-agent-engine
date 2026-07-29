@@ -5,6 +5,7 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { theme as activeTheme, getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { readToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 function extractLinkUris(text: string): string[] {
@@ -81,6 +82,21 @@ describe("readToolRenderer hyperlinks", () => {
 		expect(extractLinkUris(rendered)).toContain(exampleUri.href);
 		expect(extractLinkTexts(rendered)).toContain(examplePath);
 		expect(extractLinkTexts(rendered)).not.toContain(`${examplePath}:10-12`);
+	});
+
+	it("sanitizes and bounds native-array paths in the pending status", async () => {
+		settings.override("tui.hyperlinks", "always");
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const paths = Array.from({ length: 32 }, (_, index) => `src/${index}\t${"long-".repeat(30)}.ts`);
+
+		const call = readToolRenderer.renderCall({ path: paths }, { expanded: false, isPartial: false }, theme!);
+		const rawRendered = call.render(400).join("\n");
+		const rendered = Bun.stripANSI(rawRendered).trimEnd();
+		const description = rendered.slice(rendered.indexOf(": ") + 2);
+
+		expect(rawRendered).not.toContain("\t");
+		expect(Bun.stringWidth(description)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
 	});
 
 	it("renders every native-array target in calls and a batch title in results", async () => {

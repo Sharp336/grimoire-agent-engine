@@ -114,7 +114,15 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
 import { executeReadBatch, MAX_READ_PATHS, type ReadBatchDetails } from "./read-batch";
-import { formatBytes, joinTextContentBlocks, replaceTabs, shortenPath, wrapBrackets } from "./render-utils";
+import {
+	formatBytes,
+	joinTextContentBlocks,
+	previewLine,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	wrapBrackets,
+} from "./render-utils";
 import { REPORT_ISSUE_DEVICE_NAME, reportIssueDeviceUsage } from "./report-tool-issue";
 import { isResolutionDeviceName, resolutionDeviceUsage } from "./resolve";
 import {
@@ -3545,12 +3553,14 @@ export const readToolRenderer = {
 
 		const offset = args.offset;
 		const limit = args.limit;
-		let pathDisplay = rawPaths.map(path => formatReadPathLink(path, { fallbackLabel: "…" })).join(", ") || "…";
+		let pathDisplay =
+			rawPaths.map(path => replaceTabs(formatReadPathLink(path, { fallbackLabel: "…" }))).join(", ") || "…";
 		if (rawPaths.length === 1 && (offset !== undefined || limit !== undefined)) {
 			const startLine = offset ?? 1;
 			const endLine = limit !== undefined ? startLine + limit - 1 : "";
 			pathDisplay += `:${startLine}${endLine ? `-${endLine}` : ""}`;
 		}
+		pathDisplay = previewLine(pathDisplay, TRUNCATE_LENGTHS.LINE);
 
 		const text = renderStatusLine({ icon: "pending", title: "Read", description: pathDisplay }, uiTheme);
 		return new Text(text, 0, 0);
