@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added response-level OSC 11 appearance subscriptions so terminal consumers can distinguish confirmed unchanged background classifications from missing replies ([#6923](https://github.com/can1357/oh-my-pi/pull/6923) by [@Sairen777](https://github.com/Sairen777)).
+
+### Fixed
+
+- Fixed native Windows terminal panes freezing their host during forced closure by skipping the impossible stdout-drain wait after ConPTY disconnects ([#6917](https://github.com/can1357/oh-my-pi/issues/6917)).
+- Fixed the `Loader` spinner pegging a CPU core during idle waits: advancing the braille glyph baked it into the underlying `Text` via `setText`, invalidating the wrap cache every 80 ms tick so `wrapTextWithAnsi` and per-line width measurement re-ran over the whole message. The wrapped text now carries a stable representative for each frame display width and only the visible glyph is swapped at render time, so same-width frames reuse the wrap/width pipeline while custom themes with mixed-width frames remain correctly wrapped ([#6940](https://github.com/can1357/oh-my-pi/issues/6940)).
+- Fixed hash-prefixed UUIDs in prose being misclassified as 8-digit CSS colors and receiving spurious swatches ([#7002](https://github.com/can1357/oh-my-pi/issues/7002)).
+- Fixed unbounded memory growth when a PTY consumer stalls without dying: `ProcessTerminal.#safeWrite` handed every frame to `process.stdout.write()` and ignored its backpressure return, so a stalled-but-alive reader (never throws, unlike the terminal-death path in [#5837](https://github.com/can1357/oh-my-pi/pull/5837)) let the writable buffer grow without bound as cosmetic `hub wait` spinner/progress frames piled up — one incident reached ~48 GiB RSS and wedged the host. The write path now caps the pending stdout backlog and treats a consumer that will not drain past the cap as a disconnect, taking the same clean, supervisor-resumable exit as a dead terminal ([#6854](https://github.com/can1357/oh-my-pi/issues/6854)).
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Rejected line anchors above `Number.MAX_SAFE_INTEGER` and ranges spanning more than 100,000 lines before expansion, preventing streaming previews from exhausting CPU and memory.
+- Fixed the recorded snapshot tag desyncing from disk when the `Filesystem` transforms content on write (e.g. an ACP-connected editor reformatting on save via `format_on_save`). `Patcher.commit` now keys the returned `fileHash`/header/snapshot on `WriteResult.text` (what the adapter reports actually landed on disk) instead of the pre-write content whenever they diverge, and surfaces a warning naming the drift. Previously a single-line hunk against a drifting write path could look like the tool silently reformatted the entire file on a later, unrelated edit, since every subsequent hunk was resolved against a snapshot the file no longer matched.
+
 ## [17.1.5] - 2026-07-27
 
 ### Changed
