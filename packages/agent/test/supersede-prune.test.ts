@@ -116,6 +116,13 @@ describe("readToolSupersedeKey", () => {
 		expect(readToolSupersedeKey("read", {})).toBeUndefined();
 	});
 
+	test("failed read results are exempt", () => {
+		const failedResult = toolResultMessage("read", "call-failed", "missing", T0);
+		failedResult.isError = true;
+
+		expect(readToolSupersedeKey("read", { path: "src/foo.ts" }, failedResult)).toBeUndefined();
+	});
+
 	test("URL/internal schemes are exempt", () => {
 		expect(readToolSupersedeKey("read", { path: "skill://react" })).toBeUndefined();
 		expect(readToolSupersedeKey("read", { path: "https://example.com/page" })).toBeUndefined();
@@ -243,6 +250,25 @@ describe("pruneSupersededToolResults — tail case", () => {
 
 		expect(result.prunedCount).toBe(1);
 		expect(resultText(fooResult)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(batchResult)).toBe(FILE_CONTENT);
+	});
+	test("a partial batch supersedes only targets with usable results", () => {
+		const [fooCall, fooResult] = readPair("src/foo.ts", FILE_CONTENT, T0);
+		const [barCall, barResult] = readPair("src/bar.ts", FILE_CONTENT, T0 + 1_000);
+		const [batchCall, batchResult] = readPair(["src/foo.ts", "src/bar.ts"], FILE_CONTENT, T0 + 2_000);
+		resultMessage(batchResult).details = {
+			readTargetOutcomes: [
+				{ path: "src/foo.ts", status: "success" },
+				{ path: "src/bar.ts", status: "error" },
+			],
+		};
+		const entries: SessionEntry[] = [fooCall, fooResult, barCall, barResult, batchCall, batchResult];
+
+		const result = pruneSupersededToolResults(entries, cfg({ now: T0 + 2_000 }));
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(fooResult)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(barResult)).toBe(FILE_CONTENT);
 		expect(resultText(batchResult)).toBe(FILE_CONTENT);
 	});
 });
