@@ -1,3 +1,4 @@
+import http2 from "node:http2";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
@@ -5,10 +6,6 @@ import {
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
 } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import {
-	GetUserJwtRequestSchema,
-	GetUserJwtResponseSchema,
-} from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 import {
 	CacheControlType,
 	type ChatMessagePrompt,
@@ -46,10 +43,11 @@ import type {
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
 import { toolWireSchema } from "../utils/schema/wire";
 import { transformMessages } from "./transform-messages";
 
-/** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
+/** Base host for Devin's Connect chat API over HTTP/2. */
 export const DEVIN_API_URL = "https://server.codeium.com";
 
 export interface DevinOptions extends StreamOptions {
@@ -62,10 +60,11 @@ export interface DevinOptions extends StreamOptions {
 }
 
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
+const DEVIN_IDE_NAME = "windsurf";
 const DEVIN_IDE_VERSION = "3.2.23";
+const DEVIN_EXTENSION_NAME = "windsurf";
 const DEVIN_EXTENSION_VERSION = "1.48.2";
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
-const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
 const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
 
 /** Connect streaming framing: flag byte bit 0x01 = gzip payload, 0x02 = end-of-stream JSON trailers. */
@@ -130,6 +129,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		const toolLastParseLen = new Map<string, number>();
 		let activeToolCallId: string | undefined;
 		let latestStopReason = StopReason.UNSPECIFIED;
+		let response: DevinChatResponse | undefined;
 
 		const markFirstToken = () => {
 			if (firstTokenTime === undefined) firstTokenTime = performance.now();
@@ -160,12 +160,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		};
 
 		try {
-			const fetchImpl = options?.fetch ?? fetch;
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
 			const apiKey = normalizeDevinSessionToken(options?.apiKey);
-			const auth = await fetchDevinAuthMetadata(apiKey, baseUrl, fetchImpl, options?.signal);
-			const chatBaseUrl = auth.baseUrl ?? baseUrl;
-			const request = buildDevinChatRequest(model, context, options, apiKey, auth.userJwt);
+			const request = buildDevinChatRequest(model, context, options, apiKey);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
@@ -179,51 +176,18 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			frame.writeUInt32BE(gz.length, 1);
 			frame.set(gz, 5);
 
-			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
-				method: "POST",
-				headers: {
-					"content-type": "application/connect+proto",
-					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
-					"accept-encoding": "identity",
-					"user-agent": "connect-go/1.18.1 (go1.26.3)",
-					"connect-accept-encoding": "gzip",
-					...(options?.headers ?? {}),
-				},
-				body: frame,
-				signal: options?.signal,
-			});
-
-			if (!response.ok) {
-				const text = await response.text();
-				throw new AIError.DevinApiError(
-					`Devin API error ${response.status} ${response.statusText}: ${text}`,
-					response.status,
-				);
-			}
-			if (!response.body) {
-				throw new AIError.ProviderResponseError("Devin API error: response body is empty", {
-					provider: model.provider,
-					kind: "empty-body",
-				});
-			}
-			const body = response.body;
-
+			response = await openDevinChatResponse(baseUrl, frame, model.provider, options);
 			stream.push({ type: "start", partial: output });
 
-			const reader = body.getReader();
-			let pending = Buffer.alloc(0);
+			let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 
-			for (;;) {
-				const { done, value } = await reader.read();
-				if (value && value.length > 0) {
-					// Steady state drains fully per chunk; view the fresh reader chunk
-					// instead of copying it through Buffer.concat (see aws-eventstream.ts).
-					pending =
-						pending.length === 0
-							? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-							: Buffer.concat([pending, value]);
-				}
+			for await (const value of response.body) {
+				// Steady state drains fully per chunk; view the fresh reader chunk
+				// instead of copying it through Buffer.concat (see aws-eventstream.ts).
+				pending =
+					pending.length === 0
+						? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+						: Buffer.concat([pending, value]);
 
 				while (pending.length >= 5) {
 					const flag = pending[0];
@@ -390,8 +354,6 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 							output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					}
 				}
-
-				if (done) break;
 			}
 
 			endTextBlock();
@@ -427,6 +389,8 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
+		} finally {
+			response?.close();
 		}
 	})();
 
@@ -436,58 +400,6 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 function normalizeDevinSessionToken(apiKey: string | undefined): string {
 	if (!apiKey) return "";
 	return apiKey.startsWith(DEVIN_SESSION_TOKEN_PREFIX) ? apiKey : `${DEVIN_SESSION_TOKEN_PREFIX}${apiKey}`;
-}
-
-async function fetchDevinAuthMetadata(
-	apiKey: string,
-	baseUrl: string,
-	fetchImpl: NonNullable<StreamOptions["fetch"]>,
-	signal: AbortSignal | undefined,
-): Promise<{ userJwt: string; baseUrl?: string }> {
-	const request = create(GetUserJwtRequestSchema, {
-		metadata: create(MetadataSchema, {
-			apiKey,
-			ideName: "windsurf",
-			ideVersion: DEVIN_IDE_VERSION,
-			extensionName: "windsurf",
-			extensionVersion: DEVIN_EXTENSION_VERSION,
-			locale: "en",
-		}),
-	});
-	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
-		method: "POST",
-		headers: {
-			"content-type": "application/proto",
-			"connect-protocol-version": "1",
-			accept: "*/*",
-		},
-		body: toBinary(GetUserJwtRequestSchema, request),
-		signal,
-	});
-	const payload = new Uint8Array(await response.arrayBuffer());
-	if (!response.ok) {
-		throw new AIError.DevinApiError(
-			`Devin auth error ${response.status} ${response.statusText}: ${new TextDecoder().decode(payload)}`,
-			response.status,
-		);
-	}
-	const decoded = decodeDevinUserJwtResponse(payload);
-	if (!decoded.userJwt) {
-		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
-			provider: "devin",
-			kind: "runtime",
-		});
-	}
-	const customBaseUrl = decoded.customApiServerUrl.trim();
-	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
-}
-
-function decodeDevinUserJwtResponse(payload: Uint8Array) {
-	try {
-		return fromBinary(GetUserJwtResponseSchema, payload);
-	} catch {
-		return fromBinary(GetUserJwtResponseSchema, gunzipSync(payload));
-	}
 }
 
 /**
@@ -500,7 +412,6 @@ function buildDevinChatRequest(
 	context: Context,
 	options: DevinOptions | undefined,
 	apiKey: string,
-	userJwt: string,
 ) {
 	const cascadeId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 	const stopPatterns =
@@ -511,12 +422,12 @@ function buildDevinChatRequest(
 	return create(GetChatMessageRequestSchema, {
 		metadata: create(MetadataSchema, {
 			apiKey,
-			userJwt,
-			ideName: "windsurf",
+			ideName: DEVIN_IDE_NAME,
 			ideVersion: DEVIN_IDE_VERSION,
-			extensionName: "windsurf",
+			extensionName: DEVIN_EXTENSION_NAME,
 			extensionVersion: DEVIN_EXTENSION_VERSION,
 			locale: "en",
+			os: devinOs(),
 		}),
 		prompt: (context.systemPrompt ?? []).join("\n\n"),
 		chatMessagePrompts: buildChatMessagePrompts(messages, cascadeId, model),
@@ -675,4 +586,132 @@ function readConnectTrailerError(text: string): ConnectTrailerError | null {
 		message,
 		formatted: `Devin stream error${code ? ` ${code}` : ""}: ${message}`,
 	};
+}
+
+function devinOs(): string {
+	if (process.platform === "win32") return "windows";
+	return process.platform;
+}
+
+interface DevinChatResponse {
+	body: AsyncIterable<Uint8Array>;
+	close(): void;
+}
+
+async function openDevinChatResponse(
+	baseUrl: string,
+	frame: Uint8Array,
+	provider: string,
+	options: DevinOptions | undefined,
+): Promise<DevinChatResponse> {
+	const headers = {
+		"content-type": "application/connect+proto",
+		"connect-protocol-version": "1",
+		"connect-content-encoding": "gzip",
+		"accept-encoding": "identity",
+		"connect-accept-encoding": "gzip",
+		...(options?.headers ?? {}),
+	};
+
+	// Custom fetch implementations are explicit caller-owned transports (including
+	// deterministic test fixtures). Normal provider traffic always uses HTTP/2.
+	if (options?.fetch) {
+		const response = await options.fetch(`${baseUrl}${CHAT_MESSAGE_PATH}`, {
+			method: "POST",
+			headers,
+			body: frame,
+			signal: options.signal,
+		});
+		if (!response.ok) {
+			throw new AIError.DevinApiError(
+				`Devin API error ${response.status} ${response.statusText}: ${await response.text()}`,
+				response.status,
+			);
+		}
+		if (!response.body) {
+			throw new AIError.ProviderResponseError("Devin API error: response body is empty", {
+				provider,
+				kind: "empty-body",
+			});
+		}
+		return { body: response.body, close() {} };
+	}
+
+	if (options?.signal?.aborted) throw new AIError.AbortError();
+	const proxyUrl = shouldBypassProxy(new URL(baseUrl)) ? undefined : getProxyForProvider(provider);
+	let client: http2.ClientHttp2Session;
+	if (proxyUrl) {
+		const socket = await connectProxiedSocket(proxyUrl, baseUrl, { signal: options?.signal });
+		client = http2.connect(baseUrl, { createConnection: () => socket });
+	} else {
+		client = http2.connect(baseUrl);
+	}
+	const request = client.request({
+		":method": "POST",
+		":path": CHAT_MESSAGE_PATH,
+		te: "trailers",
+		...headers,
+	});
+	const { promise, resolve, reject } = Promise.withResolvers<http2.IncomingHttpHeaders>();
+	const onError = (error: Error) => reject(mapDevinH2TransportError(error, baseUrl));
+	client.on("error", onError);
+	request.once("error", onError);
+	request.once("response", resolve);
+	const onAbort = () => request.destroy(new AIError.AbortError());
+	options?.signal?.addEventListener("abort", onAbort, { once: true });
+	request.end(frame);
+
+	let responseHeaders: http2.IncomingHttpHeaders;
+	try {
+		responseHeaders = await promise;
+	} catch (error) {
+		request.close();
+		client.close();
+		throw error;
+	}
+	const status = Number(responseHeaders[":status"] ?? 0);
+	if (status < 200 || status >= 300) {
+		const body = await readDevinH2Body(request);
+		request.close();
+		client.close();
+		throw new AIError.DevinApiError(`Devin API error ${status}: ${body}`, status);
+	}
+
+	return {
+		body: h2ResponseChunks(request, baseUrl),
+		close: () => {
+			options?.signal?.removeEventListener("abort", onAbort);
+			request.close();
+			client.close();
+		},
+	};
+}
+
+async function readDevinH2Body(request: http2.ClientHttp2Stream): Promise<string> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of request) chunks.push(chunk);
+	return Buffer.concat(chunks).toString("utf8");
+}
+
+async function* h2ResponseChunks(
+	request: http2.ClientHttp2Stream,
+	baseUrl: string,
+): AsyncGenerator<Uint8Array, void, undefined> {
+	try {
+		for await (const chunk of request) yield chunk;
+	} catch (error) {
+		throw mapDevinH2TransportError(error, baseUrl);
+	}
+}
+
+function mapDevinH2TransportError(error: unknown, baseUrl: string): unknown {
+	const code = (error as { code?: unknown } | null)?.code;
+	const message = error instanceof Error ? error.message : String(error);
+	if (code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) {
+		return new AIError.ProviderResponseError(
+			`Devin chat transport could not negotiate HTTP/2 with ${baseUrl}: "h2 is not supported".`,
+			{ provider: "devin", kind: "runtime" },
+		);
+	}
+	return error;
 }

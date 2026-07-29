@@ -3,7 +3,7 @@ import { exchangeDevinCliToken } from "@oh-my-pi/pi-ai/registry/oauth/devin";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 describe("Devin CLI login", () => {
-	test("exchanges callback code with CLI token JSON endpoint", async () => {
+	test("exchanges callback code with the current CLI RPC path", async () => {
 		let requestUrl = "";
 		let requestInit: RequestInit | undefined;
 		const fetchImpl: FetchImpl = async (url, init) => {
@@ -18,7 +18,9 @@ describe("Devin CLI login", () => {
 		const token = await exchangeDevinCliToken("callback-code", "pkce-verifier", fetchImpl);
 
 		expect(token).toBe("devin-jwt");
-		expect(requestUrl).toBe("https://api.devin.ai/auth/cli/token");
+		expect(requestUrl).toBe(
+			"https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode",
+		);
 		expect(requestInit?.method).toBe("POST");
 		expect(requestInit?.headers).toEqual({
 			Accept: "application/json",

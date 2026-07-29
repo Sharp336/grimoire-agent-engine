@@ -6,11 +6,17 @@ import {
 	GetCliModelConfigsRequestSchema,
 	GetCliModelConfigsResponseSchema,
 } from "./devin-gen/exa/api_server_pb/api_server_pb";
-import { type ClientModelConfig, MetadataSchema } from "./devin-gen/exa/codeium_common_pb/codeium_common_pb";
+import {
+	type ClientModelConfig,
+	DisplayOption,
+	MetadataSchema,
+} from "./devin-gen/exa/codeium_common_pb/codeium_common_pb";
 
 const DEVIN_DEFAULT_BASE_URL = "https://server.codeium.com";
 const DEVIN_GET_CLI_MODEL_CONFIGS_PATH = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
+const DEVIN_IDE_NAME = "windsurf";
 const DEVIN_IDE_VERSION = "3.2.23";
+const DEVIN_EXTENSION_NAME = "windsurf";
 const DEVIN_EXTENSION_VERSION = "1.48.2";
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
 
@@ -63,10 +69,19 @@ export async function fetchDevinModels(
 		const request = create(GetCliModelConfigsRequestSchema, {
 			metadata: create(MetadataSchema, {
 				apiKey: normalizeDevinSessionToken(options.apiKey),
-				ideName: "windsurf",
+				ideName: DEVIN_IDE_NAME,
 				ideVersion: DEVIN_IDE_VERSION,
-				extensionName: "windsurf",
+				extensionName: DEVIN_EXTENSION_NAME,
 				extensionVersion: DEVIN_EXTENSION_VERSION,
+				locale: "en",
+				os: process.platform === "win32" ? "windows" : process.platform,
+				// The server hides non-default display options unless the client
+				// declares support for them. MODEL_ROUTER (3) is what unlocks
+				// `adaptive`; verified live, requesting it yields exactly the 165
+				// models `devin models list` shows. Deliberately NOT requesting
+				// QUICK_REVIEW (4) or the internal-router option (6): those return
+				// devin's own review/plumbing models, which are not user-selectable.
+				supportedModelDisplays: [DisplayOption.MODEL_ROUTER],
 			}),
 		});
 		const body = toBinary(GetCliModelConfigsRequestSchema, request);
@@ -127,6 +142,14 @@ function normalizeDevinModels(
 		if (config.disabled) {
 			continue;
 		}
+		// Only surface the display options actually requested above. The server may
+		// still volunteer others (devin's internal `subagent-default` and
+		// `memory-migration-default` routers ride DISPLAY_OPTION 6), and those are
+		// plumbing, not user-selectable models.
+		const display = config.modelInfo?.displayOption ?? DisplayOption.UNSPECIFIED;
+		if (display !== DisplayOption.UNSPECIFIED && display !== DisplayOption.MODEL_ROUTER) {
+			continue;
+		}
 		const id = config.modelUid.trim();
 		if (!id) {
 			continue;
@@ -142,10 +165,30 @@ function normalizeDevinModels(
 			reasoning: supportsDevinThinking(config),
 			input,
 			supportsTools: true,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: devinModelCost(config),
 			contextWindow,
 			maxTokens: Math.min(config.maxTokens > 0 ? config.maxTokens : DEFAULT_MAX_TOKENS, DEFAULT_MAX_TOKENS),
 		});
 	}
 	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function devinModelCost(config: ClientModelConfig): ModelSpec<"devin-agent">["cost"] {
+	let input = 0;
+	let cacheRead = 0;
+	let output = 0;
+	for (const dimension of config.modelDimensions) {
+		switch (dimension.label) {
+			case "Input":
+				input = dimension.value;
+				break;
+			case "Cached input":
+				cacheRead = dimension.value;
+				break;
+			case "Output":
+				output = dimension.value;
+				break;
+		}
+	}
+	return { input, output, cacheRead, cacheWrite: 0 };
 }

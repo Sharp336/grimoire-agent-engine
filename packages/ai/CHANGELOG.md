@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the obsolete Devin JWT preflight (`GetUserJwt`), which no longer exists in the current Devin CLI, and moved Devin chat streaming to HTTP/2 with proxy support.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
