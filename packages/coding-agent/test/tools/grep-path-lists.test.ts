@@ -985,6 +985,34 @@ describe("tool path arrays", () => {
 		}
 	});
 
+	it("preserves each target's truncation notice in native batches", async () => {
+		const largeA = `${"aaaaaaaaaaaaaaaa\n".repeat(3_100)}large-a-end`;
+		const largeB = `${"bbbbbbbbbbbbbbbb\n".repeat(3_100)}large-b-end`;
+		await Promise.all([
+			Bun.write(path.join(tempDir, "notice-large-a.txt"), largeA),
+			Bun.write(path.join(tempDir, "notice-large-b.txt"), largeB),
+		]);
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-truncated-array", {
+			path: ["notice-large-a.txt", "notice-large-b.txt"],
+		});
+		const text = getText(result);
+		const notices = text.match(/\[Showing lines [^\]]+Use :\d+ to continue\]/g) ?? [];
+
+		expect(notices).toHaveLength(2);
+		expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(50 * 1024);
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.status)).toEqual([
+			"warning",
+			"warning",
+		]);
+		expect(text).not.toContain("large-a-end");
+		expect(text).not.toContain("large-b-end");
+	});
+
 	it("bounds aggregate batched-read text and reports per-target truncation", async () => {
 		const largeText = `${"x".repeat(100)}\n`.repeat(400);
 		await Promise.all([
@@ -1012,7 +1040,7 @@ describe("tool path arrays", () => {
 		expect(
 			details?.readTargetOutcomes?.map(({ path: targetPath, status }) => ({ path: targetPath, status })),
 		).toEqual([
-			{ path: "large-a.txt:raw", status: "success" },
+			{ path: "large-a.txt:raw", status: "warning" },
 			{ path: "large-b.txt:raw", status: "warning" },
 		]);
 	});

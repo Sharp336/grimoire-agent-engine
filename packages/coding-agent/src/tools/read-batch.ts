@@ -2,7 +2,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { DEFAULT_MAX_BYTES, truncateHeadBytes } from "../session/streaming-output";
 import { MAX_IMAGE_INPUT_BYTES } from "../utils/image-loading";
-import type { OutputMeta } from "./output-meta";
+import { formatOutputNotice, type OutputMeta } from "./output-meta";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -136,6 +136,7 @@ function batchResultBufferBytes(result: AgentToolResult<ReadBatchPartDetails>): 
 function capBatchTextContent(
 	content: Array<TextContent | ImageContent>,
 	contentOwners: Array<number | undefined>,
+	contentProtected: boolean[],
 	outcomes: ReadTargetOutcome[],
 	notes: string[],
 ): Array<TextContent | ImageContent> {
@@ -148,9 +149,14 @@ function capBatchTextContent(
 	const finalCapWarning =
 		"The aggregate batch text cap omitted trailing output; read affected targets separately for complete content.";
 	const marker = `\n\n[Batch text output capped at ${READ_BATCH_MAX_TEXT_BYTES} bytes; see per-target outcomes.]`;
-	const markerBytes = Buffer.byteLength(marker, "utf8");
-	let remainingBytes = Math.max(0, READ_BATCH_MAX_TEXT_BYTES - markerBytes - 1);
-	let retainedTextBlocks = 0;
+	const availableBytes = Math.max(0, READ_BATCH_MAX_TEXT_BYTES - Buffer.byteLength(marker, "utf8"));
+	const protectedBytes = content.reduce(
+		(total, block, index) =>
+			total + (block.type === "text" && contentProtected[index] ? Buffer.byteLength(block.text, "utf8") : 0),
+		0,
+	);
+	let protectedRemaining = Math.min(protectedBytes, availableBytes);
+	let regularRemaining = Math.max(0, availableBytes - protectedBytes);
 	const limited: Array<TextContent | ImageContent> = [];
 	const affectedOutcomes = new Set<number>();
 
@@ -160,24 +166,16 @@ function capBatchTextContent(
 			continue;
 		}
 		const owner = contentOwners[index];
-		if (remainingBytes === 0) {
-			if (block.text.length > 0 && owner !== undefined) affectedOutcomes.add(owner);
-			continue;
-		}
-		if (retainedTextBlocks > 0) {
-			if (remainingBytes === 1) {
-				if (owner !== undefined) affectedOutcomes.add(owner);
-				continue;
-			}
-			remainingBytes--;
-		}
+		const protectedBlock = contentProtected[index] === true;
+		const remainingBytes = protectedBlock ? protectedRemaining : regularRemaining;
 		const blockBytes = Buffer.byteLength(block.text, "utf8");
 		const truncated = truncateHeadBytes(block.text, remainingBytes);
-		if (truncated.text.length > 0) {
-			limited.push({ type: "text", text: truncated.text });
-			retainedTextBlocks++;
+		if (truncated.text.length > 0) limited.push({ type: "text", text: truncated.text });
+		if (protectedBlock) {
+			protectedRemaining -= truncated.bytes;
+		} else {
+			regularRemaining -= truncated.bytes;
 		}
-		remainingBytes -= truncated.bytes;
 		if (truncated.bytes < blockBytes && owner !== undefined) affectedOutcomes.add(owner);
 	}
 
@@ -218,6 +216,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 	const { parts, notice, enforceAggregateBudget, signal, readPart } = options;
 	const notes = [notice];
 	const content: Array<TextContent | ImageContent> = [];
+	const contentProtected: boolean[] = [];
 	const contentOwners: Array<number | undefined> = [];
 	const readTargetOutcomes: ReadTargetOutcome[] = [];
 	let remainingTextBytes = enforceAggregateBudget
@@ -226,20 +225,25 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 	let remainingImageBytes = enforceAggregateBudget ? READ_BATCH_MAX_IMAGE_BYTES : Number.MAX_SAFE_INTEGER;
 	let pendingText = notice;
 	let pendingTextOwner: number | undefined;
+	let pendingTextProtected = true;
 	let deferredFatal: { reason: unknown } | undefined;
 
 	const flushText = () => {
 		if (pendingText.length === 0) return;
 		content.push({ type: "text", text: pendingText });
 		contentOwners.push(pendingTextOwner);
+		contentProtected.push(pendingTextProtected);
 		pendingText = "";
 		pendingTextOwner = undefined;
+		pendingTextProtected = false;
 	};
-	const appendText = (text: string, owner?: number) => {
-		const ownerChanged = pendingText.length > 0 && pendingTextOwner !== owner;
-		if (ownerChanged) flushText();
-		pendingText = pendingText.length > 0 ? `${pendingText}\n\n${text}` : ownerChanged ? `\n\n${text}` : text;
+	const appendText = (text: string, owner?: number, protectedText = false) => {
+		const groupChanged =
+			pendingText.length > 0 && (pendingTextOwner !== owner || pendingTextProtected !== protectedText);
+		if (groupChanged) flushText();
+		pendingText = pendingText.length > 0 ? `${pendingText}\n\n${text}` : groupChanged ? `\n\n${text}` : text;
 		pendingTextOwner = owner;
+		pendingTextProtected = protectedText;
 	};
 	const consumeSettledResult = (index: number, settled: PromiseSettledResult<LimitedBatchPartResult<TDetails>>) => {
 		const part = parts[index];
@@ -253,7 +257,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 			notes.push(errorNote);
 			const owner = readTargetOutcomes.length;
 			readTargetOutcomes.push({ path: part, status: "error", message });
-			appendText(`[${errorNote}]`, owner);
+			appendText(`[${errorNote}]`, owner, true);
 			return;
 		}
 
@@ -265,6 +269,8 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 		}
 		const budgetNotes = [...new Set([...prepared.budgetNotes, ...limited.budgetNotes])];
 		const { result } = limited;
+		const outputNotice = formatOutputNotice(result.details?.meta);
+		const targetWarnings = outputNotice ? [...budgetNotes, outputNotice.trim()] : budgetNotes;
 		for (const nestedNote of result.details?.notes ?? []) {
 			if (!notes.includes(nestedNote)) notes.push(nestedNote);
 		}
@@ -273,8 +279,8 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 		if (nestedOutcomes?.length) {
 			for (const outcome of nestedOutcomes) {
 				readTargetOutcomes.push(
-					budgetNotes.length > 0 && outcome.status === "success"
-						? { ...outcome, status: "warning", message: budgetNotes.join(" ") }
+					targetWarnings.length > 0 && outcome.status === "success"
+						? { ...outcome, status: "warning", message: targetWarnings.join(" ") }
 						: outcome,
 				);
 			}
@@ -283,7 +289,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 			const suffixResolution = result.details?.suffixResolution;
 			const status: ReadTargetStatus = result.isError
 				? "error"
-				: budgetNotes.length > 0 || suffixResolution !== undefined || (result.details?.conflictCount ?? 0) > 0
+				: targetWarnings.length > 0 || suffixResolution !== undefined || (result.details?.conflictCount ?? 0) > 0
 					? "warning"
 					: "success";
 			const source = result.details?.meta?.source;
@@ -298,7 +304,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 				requestedPath: suffixResolution?.from,
 				resolvedPath: result.details?.resolvedPath ?? (source?.type === "path" ? source.value : undefined),
 				conflictCount: result.details?.conflictCount,
-				message: budgetNotes.length > 0 ? budgetNotes.join(" ") : undefined,
+				message: targetWarnings.length > 0 ? targetWarnings.join(" ") : undefined,
 			});
 		}
 		for (const block of result.content) {
@@ -309,10 +315,12 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 			flushText();
 			content.push(block);
 			contentOwners.push(owner);
+			contentProtected.push(false);
 		}
+		if (outputNotice) appendText(outputNotice.trim(), owner, true);
 		for (const budgetNote of budgetNotes) {
 			notes.push(budgetNote);
-			appendText(`[${budgetNote}]`, owner);
+			appendText(`[${budgetNote}]`, owner, true);
 		}
 	};
 
@@ -430,7 +438,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 	flushText();
 
 	const cappedContent = enforceAggregateBudget
-		? capBatchTextContent(content, contentOwners, readTargetOutcomes, notes)
+		? capBatchTextContent(content, contentOwners, contentProtected, readTargetOutcomes, notes)
 		: content;
 	const resultBuilder = toolResult<ReadBatchDetails>({
 		notes,
