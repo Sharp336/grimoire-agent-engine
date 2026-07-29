@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Novita login rejecting valid API keys belonging to Developer and Basic team members. Key validation targeted the account billing balance endpoint, which requires a Balance permission those roles do not hold; it now validates against the OpenAI-compatible chat completions endpoint the key is actually used with.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
