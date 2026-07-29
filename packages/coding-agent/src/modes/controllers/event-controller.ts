@@ -967,6 +967,7 @@ export class EventController {
 					) ??
 						false);
 				if (!usageAttached) {
+					this.#resetReadGroup();
 					this.ctx.chatContainer.addChild(
 						createUsageRowBlock(
 							event.message.usage,

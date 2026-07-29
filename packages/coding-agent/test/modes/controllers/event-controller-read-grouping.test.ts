@@ -46,6 +46,10 @@ function read(path: string): Block {
 	return { type: "toolCall", id: `read-${path}`, name: "read", arguments: { path } } as Block;
 }
 
+function toolCall(name: string, id: string, args: Record<string, unknown>): Block {
+	return { type: "toolCall", id, name, arguments: args } as Block;
+}
+
 function thinking(text: string): Block {
 	return { type: "thinking", thinking: text } as Block;
 }
@@ -89,6 +93,7 @@ function createFixture() {
 		setWorkingMessage: vi.fn(),
 		clearTransientSessionUi: () => {},
 		session: sessionMock,
+		sessionManager: { getCwd: () => process.cwd() },
 		viewSession: sessionMock,
 	} as unknown as InteractiveModeContext;
 	return { controller: new EventController(ctx), chatContainer };
@@ -183,6 +188,36 @@ describe("EventController read-group accretion", () => {
 		);
 		expect(usageBlocks).toHaveLength(1);
 		expect(usageBlocks[0]).not.toBe(group!);
+	});
+
+	it("starts a fresh group after standalone usage for a mixed-tool turn ending in read", async () => {
+		settings.set("display.showTokenUsage", true);
+		const { controller, chatContainer } = createFixture();
+		const message = assistantMessage([toolCall("bash", "bash-mixed", { command: "true" }), read("first.ts:1-50")]);
+		message.usage = {
+			input: 1234,
+			output: 7,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1241,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
+
+		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
+		await streamCompletion(controller, [read("second.ts:1-50")]);
+
+		const groups = readGroups(chatContainer);
+		expect(groups).toHaveLength(2);
+		const firstGroupIndex = chatContainer.children.indexOf(groups[0]!);
+		const usageIndex = chatContainer.children.findIndex(component =>
+			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
+		);
+		const secondGroupIndex = chatContainer.children.indexOf(groups[1]!);
+		expect(firstGroupIndex).toBeLessThan(usageIndex);
+		expect(usageIndex).toBeLessThan(secondGroupIndex);
 	});
 
 	it("starts a new group after a completion that renders visible reasoning", async () => {
