@@ -20,6 +20,7 @@ type Scenario =
 	| { kind: "success" }
 	| { kind: "connect-error-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
+	| { kind: "grpc-trailer-malformed-message" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
 	| { kind: "http-status"; status: number }
@@ -145,6 +146,16 @@ async function startServer(): Promise<string> {
 					"grpc-status": "13",
 					"grpc-message": encodeURIComponent("post-turn trailer failure"),
 				});
+			});
+			stream.write(textDeltaFrame("hello"));
+			stream.write(turnEndedFrame());
+			stream.end();
+			return;
+		}
+		if (scenario.kind === "grpc-trailer-malformed-message") {
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" }, { waitForTrailers: true });
+			stream.on("wantTrailers", () => {
+				stream.sendTrailers({ "grpc-status": "13", "grpc-message": "rate-limit %ZZ blocked" });
 			});
 			stream.write(textDeltaFrame("hello"));
 			stream.write(turnEndedFrame());
@@ -329,16 +340,43 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(AIError.is(result.errorId, AIError.Flag.AuthFailed)).toBeTrue();
 	});
 
-	it("rejects when the stream ends before turnEnded", async () => {
-		scenario = { kind: "end-before-turn" };
-		const baseUrl = await startServer();
-		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
-		expect(eventTypes[0]).toBe("start");
-		expect(eventTypes.at(-1)).toBe("error");
-		expect(eventTypes).not.toContain("done");
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
+	it("preserves raw trailer text when grpc-message has a malformed percent escape", async () => {
+		// A remote grpc-message trailer may carry a percent escape that is not a
+		// valid hex pair (e.g. "%ZZ"). decodeURIComponent would throw a URIError
+		// out of the trailers event callback, which — uncaught — crashes the
+		// process. The provider must instead keep the raw trailer text and
+		// terminate through its normal error lifecycle: a terminal error event,
+		// never `done`, and no uncaught exception.
+		scenario = { kind: "grpc-trailer-malformed-message" };
+		const uncaught: unknown[] = [];
+		const onUncaught = (error: unknown) => uncaught.push(error);
+		process.on("uncaughtException", onUncaught);
+		try {
+			const baseUrl = await startServer();
+			const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+			expect(eventTypes[0]).toBe("start");
+			expect(eventTypes.at(-1)).toBe("error");
+			expect(eventTypes).not.toContain("done");
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("gRPC error 13: rate-limit %ZZ blocked");
+			// The stream has fully settled; any synchronous throw from the
+			// callback would have surfaced by now.
+			expect(uncaught).toEqual([]);
+		} finally {
+			process.removeListener("uncaughtException", onUncaught);
+		}
 	});
+
+	it("rejects when the stream ends before turnEnded", async () => {
+	scenario = { kind: "end-before-turn" };
+	const baseUrl = await startServer();
+	const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+	expect(eventTypes[0]).toBe("start");
+	expect(eventTypes.at(-1)).toBe("error");
+	expect(eventTypes).not.toContain("done");
+	expect(result.stopReason).toBe("error");
+	expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
+});
 
 	it("rejects malformed protobuf frames before a queued turnEnded without emitting done", async () => {
 		scenario = { kind: "malformed-frame-before-turn-ended" };

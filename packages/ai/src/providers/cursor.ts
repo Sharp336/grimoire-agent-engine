@@ -634,11 +634,15 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							dispatchServerMessage(serverMessage);
 						} catch (error) {
 							log("error", "parseServerMessage", { error: String(error) });
-							endStreamError = error instanceof Error ? error : new Error(String(error));
+							endStreamError = new AIError.ProviderResponseError(
+								"Cursor protocol error: malformed response frame",
+								{ provider: model.provider, kind: "envelope", cause: error },
+							);
 							settleH2(endStreamError);
 							h2Request?.close();
 							return;
 						}
+
 
 					}
 				});
@@ -662,7 +666,17 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				h2Request.on("trailers", trailers => {
 					const status = Number(trailers["grpc-status"] ?? 0);
 					if (status === 0 || endStreamError) return;
-					const message = decodeURIComponent(String(trailers["grpc-message"] || ""));
+					const rawMessage = String(trailers["grpc-message"] || "");
+					let message: string;
+					try {
+						message = decodeURIComponent(rawMessage);
+					} catch (error) {
+						if (!(error instanceof URIError)) {
+							settleH2(error);
+							return;
+						}
+						message = rawMessage;
+					}
 					endStreamError =
 						status === 16
 							? cursorConnectError("unauthenticated", message)
