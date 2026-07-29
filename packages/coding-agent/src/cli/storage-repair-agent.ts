@@ -286,6 +286,57 @@ function copyTableRows(source: Database, destination: Database, table: string) {
 	}
 }
 
+function equalSqliteValues(source: SqliteValue, candidate: SqliteValue) {
+	if (source instanceof Uint8Array || candidate instanceof Uint8Array) {
+		if (!(source instanceof Uint8Array && candidate instanceof Uint8Array) || source.byteLength !== candidate.byteLength) {
+			return false;
+		}
+		for (let index = 0; index < source.byteLength; index += 1) {
+			if (source[index] !== candidate[index]) return false;
+		}
+		return true;
+	}
+	return source === candidate;
+}
+
+function verifyTableRows(source: Database, candidate: Database, table: string) {
+	const columns = tableColumns(source, table);
+	assertInvariant(
+		columns.every(column => column.hidden === 0n),
+		`Generated or hidden columns are not losslessly supported in ${table}`,
+	);
+	const writable = columns.map(column => column.name);
+	const rowidAlias = selectedRowidAlias(source, table, columns);
+	const sql = transferSql(table, writable, rowidAlias);
+	const sourceSelect = source.prepare(sql.select);
+	const candidateSelect = candidate.prepare(sql.select);
+	try {
+		const sourceRows = sourceSelect.iterate() as Iterator<Record<string, unknown>>;
+		const candidateRows = candidateSelect.iterate() as Iterator<Record<string, unknown>>;
+		for (;;) {
+			const sourceRow = sourceRows.next();
+			const candidateRow = candidateRows.next();
+			if (sourceRow.done || candidateRow.done) {
+				assertInvariant(sourceRow.done && candidateRow.done, `Candidate row count mismatch in ${table}`);
+				return;
+			}
+			if (rowidAlias && sql.rowidProjectionAlias) {
+				const expected = sqliteValue(sourceRow.value[sql.rowidProjectionAlias], table, rowidAlias);
+				const actual = sqliteValue(candidateRow.value[sql.rowidProjectionAlias], table, rowidAlias);
+				assertInvariant(equalSqliteValues(expected, actual), `Candidate row identity mismatch in ${table}`);
+			}
+			for (const column of writable) {
+				const expected = sqliteValue(sourceRow.value[column], table, column);
+				const actual = sqliteValue(candidateRow.value[column], table, column);
+				assertInvariant(equalSqliteValues(expected, actual), `Candidate row value mismatch in ${table}.${column}`);
+			}
+		}
+	} finally {
+		sourceSelect.finalize();
+		candidateSelect.finalize();
+	}
+}
+
 function schemaObjects(db: Database) {
 	return db
 		.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
@@ -539,8 +590,18 @@ export function verifyAgentCandidate(candidate: string, source: Database, omitte
 				`Candidate is missing ${table}`,
 			);
 		}
+		for (const table of preservedTableNames(source, omitted)) verifyTableRows(source, db, table);
 		verifySqliteSequences(source, db, omitted);
 	} finally {
 		db.close();
 	}
+}
+
+function preservedTableNames(source: Database, omitted: readonly string[]) {
+	const excluded = new Set(omitted);
+	const tables = new Set(Object.keys(AGENT_TABLES).filter(table => !excluded.has(table)));
+	for (const object of schemaObjects(source)) {
+		if (object.type === "table" && !AGENT_TABLES[object.name]) tables.add(object.name);
+	}
+	return [...tables].sort((left, right) => left.localeCompare(right));
 }

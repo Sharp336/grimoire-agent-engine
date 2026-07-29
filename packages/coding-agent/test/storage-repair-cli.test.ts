@@ -549,6 +549,71 @@ describe("offline SQLite salvage", () => {
 		expect(result.objects).toContainEqual(expect.objectContaining({ name: "ext_notes_touch", action: "preserved" }));
 	});
 
+	test("pre-verification built-in row rewrites and deletions refuse the candidate", async () => {
+		const dbPath = await createAgentSource();
+		const sourceBefore = await fingerprintTriplet(dbPath);
+		for (const [kind, mutate, expectedRefusal] of [
+			[
+				"rewrite",
+				(db: Database) => db.prepare("UPDATE settings SET value = ? WHERE key = ?").run('"light"', "theme"),
+				"Candidate row value mismatch in settings.value",
+			],
+			[
+				"deletion",
+				(db: Database) => db.prepare("DELETE FROM settings WHERE key = ?").run("theme"),
+				"Candidate row count mismatch in settings",
+			],
+		] as const) {
+			const candidate = path.join(root, `candidate-built-in-${kind}.db`);
+			const result = await runStorageRepair(
+				{ target: "agent", apply: true, agentDir: root, output: candidate },
+				{
+					beforeCandidateVerification: async () => {
+						const stage = requireValue((await stageArtifacts(candidate, "candidate")).at(0), "candidate stage");
+						const stagedDb = new Database(path.join(root, stage), { safeIntegers: true });
+						try {
+							mutate(stagedDb);
+						} finally {
+							closeWal(stagedDb);
+						}
+					},
+				},
+			);
+			expect(result.status).toBe("refused");
+			expect(result.refusal).toContain(expectedRefusal);
+			expect(result.candidatePublished).toBe(false);
+			expect(await Bun.file(candidate).exists()).toBe(false);
+			expect(await stageArtifacts(candidate, "candidate")).toEqual([]);
+			expect(await fingerprintTriplet(dbPath)).toEqual(sourceBefore);
+		}
+	});
+
+	test("pre-verification extension BLOB mutation refuses the candidate", async () => {
+		const dbPath = await createAgentSource();
+		const sourceBefore = await fingerprintTriplet(dbPath);
+		const candidate = path.join(root, "candidate-extension-row.db");
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root, output: candidate },
+			{
+				beforeCandidateVerification: async () => {
+					const stage = requireValue((await stageArtifacts(candidate, "candidate")).at(0), "candidate stage");
+					const stagedDb = new Database(path.join(root, stage), { safeIntegers: true });
+					try {
+						stagedDb.prepare("UPDATE ext_notes SET payload = ? WHERE key = ?").run(new Uint8Array([255, 1, 0]), "note");
+					} finally {
+						closeWal(stagedDb);
+					}
+				},
+			},
+		);
+		expect(result.status).toBe("refused");
+		expect(result.refusal).toContain("Candidate row value mismatch in ext_notes.payload");
+		expect(result.candidatePublished).toBe(false);
+		expect(await Bun.file(candidate).exists()).toBe(false);
+		expect(await stageArtifacts(candidate, "candidate")).toEqual([]);
+		expect(await fingerprintTriplet(dbPath)).toEqual(sourceBefore);
+	});
+
 	test("agent repair preserves AUTOINCREMENT high-water marks after the highest row is deleted", async () => {
 		const dbPath = await createAgentSource();
 		const source = new Database(dbPath, { safeIntegers: true });
