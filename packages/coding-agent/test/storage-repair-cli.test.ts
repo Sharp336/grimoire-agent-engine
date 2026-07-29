@@ -214,6 +214,11 @@ function artifactModes(result: { backup: string; candidate: string }) {
 	);
 }
 
+async function stageArtifacts(finalPath: string, label: "backup" | "candidate") {
+	const prefix = `.${path.basename(finalPath)}.${label}-`;
+	return (await fs.promises.readdir(path.dirname(finalPath))).filter(name => name.startsWith(prefix));
+}
+
 describe("offline SQLite salvage", () => {
 	test("rejects normalized and case-insensitive source-triplet artifact aliases", async () => {
 		const source = path.join(root, "agent.db");
@@ -768,6 +773,7 @@ describe("offline SQLite salvage", () => {
 		).rejects.toMatchObject({
 			code: "ENOENT",
 		});
+		expect(await stageArtifacts(result.backup, "backup")).toEqual([]);
 
 		snapshotTempDir = undefined;
 		result = await runStorageRepair(
@@ -790,6 +796,7 @@ describe("offline SQLite salvage", () => {
 		).rejects.toMatchObject({
 			code: "ENOENT",
 		});
+		expect(await stageArtifacts(result.candidate, "candidate")).toEqual([]);
 
 		const racedCandidate = path.join(root, "raced-candidate.db");
 		let racerIdentity: FileFingerprint | undefined;
@@ -813,6 +820,7 @@ describe("offline SQLite salvage", () => {
 		);
 		expect(staged.path).not.toBe(result.candidate);
 		expect(await fingerprint(racedCandidate)).toEqual(requireValue(racerIdentity, "racer identity"));
+		expect(await stageArtifacts(result.candidate, "candidate")).toEqual([]);
 	});
 
 	test("late source mismatch after candidate link publishes an untrusted sealed candidate", async () => {
