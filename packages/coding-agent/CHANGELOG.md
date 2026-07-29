@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `collab.allowRemoteControl` (default off): lets full-link collab peers change model and thinking level, compact, list and switch sessions on the host via the new wire control frames.
+- Added `collab.allowRemoteControl` (default off): lets full-link collab peers change model and thinking level, compact, list and switch sessions on the host via the new wire control frames. ([#6999](https://github.com/can1357/oh-my-pi/pull/6999) by [@metaphorics](https://github.com/metaphorics))
 
 ## [17.1.8] - 2026-07-28
 

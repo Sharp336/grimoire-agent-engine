@@ -4685,7 +4685,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSessionSelector();
 	}
 
-	async handleResumeSession(sessionPath: string): Promise<void> {
+	async handleResumeSession(sessionPath: string): Promise<boolean> {
 		// Flush pending settings writes *before* disposing controllers or resetting
 		// observers: a save failure must leave the session, process project dir,
 		// and Settings in the source scope with all UI intact.
@@ -4693,12 +4693,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.settings.flush();
 		} catch (err) {
 			this.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
-			return;
+			return false;
 		}
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
 		this.resetObserverRegistry();
-		await this.#selectorController.handleResumeSession(sessionPath, { settingsFlushed: true });
+		return await this.#selectorController.handleResumeSession(sessionPath, { settingsFlushed: true });
 	}
 
 	handleSessionDeleteCommand(): Promise<void> {

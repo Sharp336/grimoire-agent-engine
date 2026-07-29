@@ -335,7 +335,7 @@ export type CollabControlCommand =
 	| { k: "set-model"; provider: string; modelId: string }
 	| { k: "set-thinking-level"; level: string }
 	| { k: "compact"; customInstructions?: string }
-	| { k: "switch-session"; sessionPath: string };
+	| { k: "switch-session"; sessionId: string };
 
 export type GuestFrame =
 	| {
@@ -355,6 +355,18 @@ export type GuestFrame =
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
 	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
 	| { t: "ctl"; reqId: number; cmd: CollabControlCommand };
+
+/** Safe model metadata exposed to collab peers. Transport, credential, and compatibility fields stay host-local. */
+export interface CollabPublicModel {
+	provider: string;
+	id: string;
+	name: string;
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	supportsTools?: boolean;
+	contextWindow: number | null;
+	maxTokens: number | null;
+}
 
 /** EventBus channels mirrored to guests (task subagent traffic only). */
 export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
