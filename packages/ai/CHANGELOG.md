@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Kiro device login, shared HTTP/2-only streaming, strict AWS EventStream completion and tool validation, and subscription usage reporting.
+
 ### Changed
 
 - Centralized provider HTTP/2 pooling, Connect framing, proxy tunneling, and lifecycle cleanup in a shared transport.
