@@ -1598,6 +1598,68 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("accepts schema upgrades and forwards them to the rich dialog", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Q1?",
+					options: ["Option A"],
+					multi: false,
+					selectedOptions: ["Option A"],
+					note: "My Custom Note",
+					timedOut: undefined,
+				},
+			],
+		});
+		const context = createContext({ askDialog });
+
+		const result = await tool.execute(
+			"call-rich-dialog",
+			{
+				questions: [
+					{
+						id: "q1",
+						question: "Q1?",
+						header: "Chip Header",
+						searchable: true,
+						validation: { pattern: "^[a-z]+$", minLength: 2, maxLength: 8, message: "Use lowercase letters" },
+						options: [{ label: "Option A", preview: "My Preview", previewType: "diff" }],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(askDialog).toHaveBeenCalledTimes(1);
+		// Check that rich-only schema fields were forwarded.
+		expect(askDialog.mock.calls[0][0]).toEqual([
+			{
+				id: "q1",
+				question: "Q1?",
+				header: "Chip Header",
+				searchable: true,
+				validation: { pattern: "^[a-z]+$", minLength: 2, maxLength: 8, message: "Use lowercase letters" },
+				options: [{ label: "Option A", preview: "My Preview", previewType: "diff" }],
+			},
+		]);
+
+		// Verify result contains details with note mapping
+		expect(result.details).toEqual({
+			question: "Q1?",
+			options: ["Option A"],
+			multi: false,
+			selectedOptions: ["Option A"],
+			customInput: undefined,
+			note: "My Custom Note",
+			timedOut: undefined,
+		});
+	});
+
 	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {
 		const tool = new AskTool(createSession());
 		const abort = vi.fn();
@@ -1690,5 +1752,49 @@ describe("AskTool rich ask dialog", () => {
 			questions: [{ id: "q1", question: "Q?", options: [{ label: "Next →" }] }],
 		});
 		expect(reservedNext instanceof type.errors).toBe(true);
+	});
+
+	it("validates schema upgrades and preserves reserved-label protection", async () => {
+		const tool = new AskTool(createSession());
+
+		const valid = tool.parameters({
+			questions: [
+				{
+					id: "q1",
+					question: "Q?",
+					searchable: true,
+					validation: { pattern: "^[a-z]+$", minLength: 1, maxLength: 12, message: "Use letters" },
+					options: [{ label: "ok", preview: "+ added", previewType: "diff" }],
+				},
+			],
+		});
+		expect(valid instanceof type.errors).toBe(false);
+
+		const invalidValidation = tool.parameters({
+			questions: [
+				{
+					id: "q1",
+					question: "Q?",
+					validation: { minLength: 5, maxLength: 2 },
+					options: [{ label: "ok" }],
+				},
+			],
+		});
+		expect(invalidValidation instanceof type.errors).toBe(true);
+
+		const invalidPattern = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", validation: { pattern: "[" }, options: [{ label: "ok" }] }],
+		});
+		expect(invalidPattern instanceof type.errors).toBe(true);
+
+		const invalidPreviewType = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "ok", previewType: "code" }] }],
+		});
+		expect(invalidPreviewType instanceof type.errors).toBe(true);
+
+		const reservedOther = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "Other (type your own)" }] }],
+		});
+		expect(reservedOther instanceof type.errors).toBe(true);
 	});
 });

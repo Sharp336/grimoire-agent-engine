@@ -9,6 +9,9 @@ Asks user when you need clarification or input during task execution.
 - Use `questions` for multiple related questions instead of asking one at a time
 - Set `multi: true` on question to allow multiple selections
 - Use short option labels; put explanatory tradeoffs in `description` instead of merging them into the label
+- Long lists (7+ options)? Set `searchable: true`
+- Validate free-text `Other` answers with `validation` when format matters
+- Use `previewType: "diff"` for option previews that change code
 </instruction>
 
 <caution>

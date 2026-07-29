@@ -118,10 +118,18 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
+export interface ExtensionAskDialogValidation {
+	pattern?: string;
+	minLength?: number;
+	maxLength?: number;
+	message?: string;
+}
+
 export interface ExtensionAskDialogOption {
 	label: string;
 	description?: string;
 	preview?: string;
+	previewType?: "markdown" | "diff";
 }
 
 export interface ExtensionAskDialogQuestion {
@@ -130,7 +138,10 @@ export interface ExtensionAskDialogQuestion {
 	header?: string;
 	options: ExtensionAskDialogOption[];
 	multi?: boolean;
+	/** Recommended option index. A timed-out multi-select chooses exactly this option. */
 	recommended?: number;
+	searchable?: boolean;
+	validation?: ExtensionAskDialogValidation;
 }
 
 export interface ExtensionAskDialogResultItem {

@@ -19,6 +19,7 @@ import type {
 	ExtensionAskDialogResultItem,
 	ExtensionAskDialogSubmitResult,
 } from "../../extensibility/extensions";
+import { getAskCustomInputValidationError } from "../../tools/ask-validation";
 import { getTabBarTheme } from "../shared";
 import { getMarkdownTheme, highlightCode, theme } from "../theme/theme";
 import {
@@ -29,6 +30,7 @@ import {
 	matchesSelectUp,
 } from "../utils/keybinding-matchers";
 import { CountdownTimer } from "./countdown-timer";
+import { renderDiff } from "./diff";
 import { editorKey } from "./keybinding-hints";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleTabSwitchKey } from "./selector-helpers";
@@ -55,6 +57,8 @@ const PROMPT_TITLE_CHROME_COLUMNS = 4;
  *  or multi-line question cannot push the option list off-screen. Mirrors the
  *  row-cap pattern used by boundPromptTitle for the prompt editor overlay. */
 const MAX_HEADER_ROWS = 4;
+/** Filtering only appears once a list is long enough to need it. */
+const SEARCHABLE_OPTION_THRESHOLD = 6;
 
 function promptTitleContentWidth(): number {
 	const cols = process.stdout.columns ?? 80;
@@ -105,6 +109,8 @@ interface QuestionState {
 	scrollOffset: number;
 	manualScroll: boolean;
 	timedOut: boolean;
+	searchActive: boolean;
+	searchQuery: string;
 }
 
 type QuestionRowKind = "option" | "other";
@@ -210,7 +216,10 @@ function splitPreviewSegments(preview: string): PreviewSegment[] {
 	return segments;
 }
 
-function renderPreviewContent(preview: string, width: number): string[] {
+function renderPreviewContent(preview: string, previewType: "markdown" | "diff" | undefined, width: number): string[] {
+	if (previewType === "diff") {
+		return [...new Text(renderDiff(preview), 0, 0).render(Math.max(1, width))];
+	}
 	const out: string[] = [];
 	const mdTheme = getMarkdownTheme();
 	const accentStyle = { color: (text: string) => theme.fg("muted", text) };
@@ -227,15 +236,23 @@ function renderPreviewContent(preview: string, width: number): string[] {
 	return out;
 }
 
-function renderCachedPreview(cache: PreviewRenderCache, preview: string, width: number): readonly string[] {
-	let byWidth = cache.get(preview);
+function renderCachedPreview(
+	cache: PreviewRenderCache,
+	preview: string,
+	previewType: "markdown" | "diff" | undefined,
+	width: number,
+): readonly string[] {
+	const cacheKey = `${previewType ?? "markdown"}\u0000${preview}`;
+	let byWidth = cache.get(cacheKey);
 	if (!byWidth) {
 		byWidth = new Map();
-		cache.set(preview, byWidth);
+		cache.set(cacheKey, byWidth);
 	}
 	let rendered = byWidth.get(width);
 	if (!rendered) {
-		rendered = renderPreviewContent(preview, width).map(line => `      ${theme.fg("border", "│")} ${line}`);
+		rendered = renderPreviewContent(preview, previewType, width).map(
+			line => `      ${theme.fg("border", "│")} ${line}`,
+		);
 		byWidth.set(width, rendered);
 	}
 	return rendered;
@@ -327,7 +344,7 @@ function renderRowLabel(
 		}
 		if (option?.preview?.trim()) {
 			const previewWidth = Math.max(1, width - 8);
-			lines.push(...renderCachedPreview(previewCache, option.preview, previewWidth));
+			lines.push(...renderCachedPreview(previewCache, option.preview, option.previewType, previewWidth));
 		}
 	}
 	if (isOther && state.customInput !== undefined) {
@@ -370,6 +387,8 @@ export class AskDialogComponent implements Component {
 				scrollOffset: 0,
 				manualScroll: false,
 				timedOut: false,
+				searchActive: false,
+				searchQuery: "",
 			};
 		});
 		if (options.timeout && options.timeout > 0) {
@@ -402,6 +421,14 @@ export class AskDialogComponent implements Component {
 		// closed/prompt guards, matching HookSelector/HookInput semantics.
 		this.#countdown?.reset();
 		if (matchesSelectCancel(keyData)) {
+			const active = this.#activeQuestionState();
+			if (active?.state.searchActive) {
+				active.state.searchActive = false;
+				active.state.searchQuery = "";
+				active.state.cursorIndex = 0;
+				this.#requestRender();
+				return;
+			}
 			this.#finishCancel();
 			return;
 		}
@@ -479,7 +506,7 @@ export class AskDialogComponent implements Component {
 			const state = this.#states[index];
 			if (!question || !state) continue;
 			const headerRows = tabBarRows + renderQuestionTitle(question, width).length;
-			const rowItems = this.#questionRows(question);
+			const rowItems = this.#questionRows(question, state);
 			const listRows = (listWidth: number): number => {
 				let total = 0;
 				for (const rowItem of rowItems) {
@@ -562,20 +589,59 @@ export class AskDialogComponent implements Component {
 		const question = this.questions[this.#currentQuestionIndex()];
 		const action = question?.multi ? "Space/Enter toggle · n note" : "Enter select · n note";
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
+		const search =
+			question && this.#states[this.#currentQuestionIndex()] && this.#isSearchEnabled(question)
+				? this.#states[this.#currentQuestionIndex()].searchActive
+					? ` · filter: ${this.#states[this.#currentQuestionIndex()].searchQuery || "type to filter"}`
+					: " · / filter"
+				: "";
 		if (this.#questionCanPage && indicator) {
-			return `${action} · ↑/↓${tabs} · ${cancel} · ${pageKeysLabel()} ${indicator}`;
+			return `${action} · ↑/↓${tabs}${search} · ${cancel} · ${pageKeysLabel()} ${indicator}`;
 		}
 		const scroll = indicator ? ` ${indicator} scroll ·` : "";
-		return `${action} · ↑/↓ move${tabs} ·${scroll} ${cancel}`;
+		return `${action} · ↑/↓ move${tabs}${search} ·${scroll} ${cancel}`;
 	}
 
-	#questionRows(question: ExtensionAskDialogQuestion): QuestionRow[] {
-		const rows: QuestionRow[] = question.options.map((option, index) => ({
-			kind: "option",
-			key: `option:${index}`,
-			label: this.#optionLabel(question, option.label, index),
-			optionIndex: index,
-		}));
+	#isSearchEnabled(question: ExtensionAskDialogQuestion): boolean {
+		return question.searchable === true && question.options.length > SEARCHABLE_OPTION_THRESHOLD;
+	}
+
+	#handleSearchInput(question: ExtensionAskDialogQuestion, state: QuestionState, keyData: string): boolean {
+		if (!this.#isSearchEnabled(question)) return false;
+		if (keyData === "/") {
+			state.searchActive = true;
+			this.#requestRender();
+			return true;
+		}
+		if (!state.searchActive) return false;
+		if (keyData === "\b" || keyData === "\x7f") {
+			state.searchQuery = state.searchQuery.slice(0, -1);
+			state.cursorIndex = 0;
+			state.manualScroll = false;
+			this.#requestRender();
+			return true;
+		}
+		if (keyData.length === 0 || keyData.startsWith("\x1b") || /[\n\r\t]/u.test(keyData)) return false;
+		state.searchQuery += keyData;
+		state.cursorIndex = 0;
+		state.manualScroll = false;
+		this.#requestRender();
+		return true;
+	}
+
+	#questionRows(question: ExtensionAskDialogQuestion, state?: QuestionState): QuestionRow[] {
+		const query = state?.searchQuery.trim().toLocaleLowerCase();
+		const rows: QuestionRow[] = question.options.flatMap((option, index) => {
+			if (query && !option.label.toLocaleLowerCase().includes(query)) return [];
+			return [
+				{
+					kind: "option",
+					key: `option:${index}`,
+					label: this.#optionLabel(question, option.label, index),
+					optionIndex: index,
+				},
+			];
+		});
 		rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
 		return rows;
 	}
@@ -595,7 +661,8 @@ export class AskDialogComponent implements Component {
 		const active = this.#activeQuestionState();
 		if (!active) return;
 		const { question, state } = active;
-		const rows = this.#questionRows(question);
+		if (this.#handleSearchInput(question, state, keyData)) return;
+		const rows = this.#questionRows(question, state);
 		if (matchesSelectPageUp(keyData)) {
 			state.scrollOffset = Math.max(0, state.scrollOffset - Math.max(1, this.#bodyRows - 1));
 			state.manualScroll = true;
@@ -695,22 +762,33 @@ export class AskDialogComponent implements Component {
 	): Promise<void> {
 		this.#promptActive = true;
 		try {
-			const input = await this.callbacks.onPrompt(
-				boundPromptTitle("Custom answer: ", question.question),
-				state.customInput,
-			);
-			if (input === undefined || this.#closed) return;
-			if (input.trim() === "") {
-				// Submitting an empty value unselects the custom answer.
-				state.customInput = undefined;
-				clearNoteIfRow(state, rowItem.key);
+			let prefill = state.customInput;
+			let validationError: string | undefined;
+			while (true) {
+				const title = boundPromptTitle("Custom answer: ", question.question);
+				const input = await this.callbacks.onPrompt(
+					validationError ? `${validationError}\n\n${title}` : title,
+					prefill,
+				);
+				if (input === undefined || this.#closed) return;
+				if (input.trim() === "") {
+					// Submitting an empty value unselects the custom answer.
+					state.customInput = undefined;
+					clearNoteIfRow(state, rowItem.key);
+					return;
+				}
+				validationError = getAskCustomInputValidationError(input, question.validation);
+				if (validationError !== undefined) {
+					prefill = input;
+					continue;
+				}
+				state.customInput = input;
+				if (!question.multi) {
+					state.selectedOptions.clear();
+					clearNoteUnlessRow(state, rowItem.key);
+					this.#advanceAfterQuestion();
+				}
 				return;
-			}
-			state.customInput = input;
-			if (!question.multi) {
-				state.selectedOptions.clear();
-				clearNoteUnlessRow(state, rowItem.key);
-				this.#advanceAfterQuestion();
 			}
 		} finally {
 			this.#promptActive = false;
@@ -744,7 +822,7 @@ export class AskDialogComponent implements Component {
 		const active = this.#activeQuestionState();
 		if (!active) return { lines: [], scrollOffset: 0, indicator: "" };
 		const { question, state } = active;
-		const rowItems = this.#questionRows(question);
+		const rowItems = this.#questionRows(question, state);
 		state.cursorIndex = clamp(state.cursorIndex, 0, Math.max(0, rowItems.length - 1));
 		return this.#renderQuestionList(question, state, rowItems, width, maxRows);
 	}
