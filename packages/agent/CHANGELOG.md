@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `onProviderContext` hook on `Agent` and `AgentLoopConfig` that observes a credential-free, deep-cloned snapshot of the final semantic provider context immediately before dispatch, after `transformProviderContext` and owned-dialect rewriting. Observer failures are isolated and never block the request.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed
