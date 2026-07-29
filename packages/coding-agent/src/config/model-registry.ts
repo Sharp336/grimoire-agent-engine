@@ -10,6 +10,7 @@ import type {
 	SimpleStreamOptions,
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
+import { REQUEST_API_KEY_AUTHORIZATION } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
@@ -341,7 +342,7 @@ type HeaderSource = Record<string, string> | undefined;
 
 interface HeaderResolutionOptions {
 	authHeader?: boolean;
-	apiKeyConfig?: string;
+	apiKey?: string;
 }
 
 function materializeConfigHeaderSources(
@@ -356,9 +357,8 @@ function materializeConfigHeaderSources(
 			if (next) resolved[key] = next;
 		}
 	}
-	if (options?.authHeader && options.apiKeyConfig) {
-		const resolvedKey = resolveConfigValue(options.apiKeyConfig);
-		if (resolvedKey) resolved.Authorization = `Bearer ${resolvedKey}`;
+	if (options?.authHeader && options.apiKey !== kNoAuth) {
+		resolved.Authorization = options.apiKey ? `Bearer ${options.apiKey}` : REQUEST_API_KEY_AUTHORIZATION;
 	}
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
@@ -368,7 +368,9 @@ function createLiveConfigHeaders(
 	options?: HeaderResolutionOptions,
 ): Record<string, string> | undefined {
 	const liveSources = sources.filter((source): source is Record<string, string> => source !== undefined);
-	if (liveSources.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
+	if (liveSources.length === 0 && !options?.authHeader) {
+		return undefined;
+	}
 
 	const localHeaders: Record<string, string> = {};
 	const allSources = [...liveSources, localHeaders];
@@ -608,17 +610,15 @@ function mergeCustomModelHeaders(
 	providerHeaders: Record<string, string> | undefined,
 	modelHeaders: Record<string, string> | undefined,
 	authHeader: boolean | undefined,
-	apiKeyConfig: string | undefined,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader });
 }
 
 function mergeAuthHeaderSources(
 	sources: readonly HeaderSource[],
 	authHeader: boolean | undefined,
-	apiKeyConfig: string | undefined,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders(sources, { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders(sources, { authHeader });
 }
 
 /**
@@ -640,7 +640,6 @@ function buildCustomModelOverlay(
 	providerBaseUrl: string,
 	providerApi: Api | undefined,
 	providerHeaders: Record<string, string> | undefined,
-	providerApiKey: string | undefined,
 	authHeader: boolean | undefined,
 	providerCompat: ModelSpec<Api>["compat"] | undefined,
 	providerAuth: ProviderAuthMode | undefined,
@@ -663,7 +662,7 @@ function buildCustomModelOverlay(
 		contextWindow: modelDef.contextWindow,
 		maxTokens: modelDef.maxTokens,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
-		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
+		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader),
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,
@@ -2027,7 +2026,12 @@ export class ModelRegistry {
 		};
 	}
 	#applyProviderTransportOverride<
-		T extends { baseUrl?: string; headers?: Record<string, string>; remoteCompaction?: RemoteCompactionConfig<Api> },
+		T extends {
+			provider: string;
+			baseUrl?: string;
+			headers?: Record<string, string>;
+			remoteCompaction?: RemoteCompactionConfig<Api>;
+		},
 	>(
 		entry: T,
 		override: Pick<
@@ -2038,7 +2042,6 @@ export class ModelRegistry {
 		const headers = mergeAuthHeaderSources(
 			override.headers ? [entry.headers, override.headers] : [entry.headers],
 			override.authHeader,
-			override.apiKey,
 		);
 		return {
 			...entry,
@@ -2138,7 +2141,6 @@ export class ModelRegistry {
 					providerConfig.baseUrl!,
 					providerConfig.api as Api | undefined,
 					resolvedProviderHeaders,
-					providerApiKeyConfigs[0],
 					providerConfig.authHeader,
 					providerCompat,
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
@@ -2290,11 +2292,16 @@ export class ModelRegistry {
 	/**
 	 * Get provider-level headers without including per-model overrides.
 	 */
-	getProviderHeaders(provider: string): Record<string, string> | undefined {
-		return createLiveConfigHeaders([
-			this.#providerOverrides.get(provider)?.headers,
-			this.#runtimeProviderOverrides.get(provider)?.headers,
-		]);
+	getProviderHeaders(provider: string, apiKey?: string): Record<string, string> | undefined {
+		return createLiveConfigHeaders(
+			[this.#providerOverrides.get(provider)?.headers, this.#runtimeProviderOverrides.get(provider)?.headers],
+			{
+				authHeader:
+					this.#runtimeProviderOverrides.get(provider)?.authHeader ??
+					this.#providerOverrides.get(provider)?.authHeader,
+				apiKey,
+			},
+		);
 	}
 
 	/**
@@ -2324,7 +2331,7 @@ export class ModelRegistry {
 			if (apiKey === undefined) {
 				return { ok: false, error: `No API key found for "${model.provider}"` };
 			}
-			const headers = this.getProviderHeaders(model.provider);
+			const headers = this.getProviderHeaders(model.provider, apiKey);
 			return { ok: true, apiKey, headers };
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -2518,7 +2525,6 @@ export class ModelRegistry {
 					config.baseUrl!,
 					config.api,
 					config.headers,
-					config.apiKey,
 					config.authHeader,
 					config.compat,
 					undefined,
@@ -2564,7 +2570,6 @@ export class ModelRegistry {
 			const providerBaseUrl = config.baseUrl ?? "";
 			const providerApi = config.api;
 			const providerHeaders = config.headers;
-			const providerApiKey = config.apiKey;
 			const providerAuthHeader = config.authHeader;
 			const providerCompat = config.compat;
 			const managerOptions: ModelManagerOptions<Api> = {
@@ -2586,7 +2591,6 @@ export class ModelRegistry {
 							modelDef.baseUrl ?? providerBaseUrl,
 							modelDef.api ?? providerApi,
 							providerHeaders,
-							providerApiKey,
 							providerAuthHeader,
 							providerCompat,
 							undefined,

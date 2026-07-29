@@ -39,6 +39,7 @@ export function validateProviderConfiguration(
 	mode: ProviderValidationMode,
 ): void {
 	const hasProviderApi = !!config.api;
+	const hasConfiguredApiKey = Boolean(config.apiKey?.trim()) || Boolean(config.apiKeys?.some(apiKey => apiKey.trim()));
 	const models = config.models;
 
 	if (models.length === 0) {
@@ -48,8 +49,7 @@ export function validateProviderConfiguration(
 				!config.baseUrl &&
 				!config.headers &&
 				!config.compat &&
-				!config.apiKey &&
-				!config.apiKeys?.length &&
+				!hasConfiguredApiKey &&
 				config.auth !== "none" &&
 				!config.disableStrictTools &&
 				!config.remoteCompaction &&
@@ -67,13 +67,13 @@ export function validateProviderConfiguration(
 		}
 		const requiresAuth =
 			mode === "runtime-register"
-				? !config.apiKey && !config.apiKeys?.length && !config.oauthConfigured
-				: !config.apiKey && !config.apiKeys?.length && (config.auth ?? "apiKey") !== "none";
+				? !hasConfiguredApiKey && !config.oauthConfigured
+				: !hasConfiguredApiKey && (config.auth ?? "apiKey") !== "none";
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"
 					? `Provider ${providerName}: "apiKey" or "oauth" is required when defining models.`
-					: `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`,
+					: `Provider ${providerName}: "apiKey" or "apiKeys" is required when defining custom models unless auth is "none".`,
 			);
 		}
 	}

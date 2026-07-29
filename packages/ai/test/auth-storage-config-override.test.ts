@@ -85,7 +85,7 @@ describe("AuthStorage config-override apiKey", () => {
 
 			const first = await authStorage.getApiKey("anthropic", "rotation-session");
 			expect(first).toBeDefined();
-			expect(await authStorage.markUsageLimitReached("anthropic", "rotation-session", { apiKey: first })).toEqual({
+			expect(await authStorage.markUsageLimitReached("anthropic", "rotation-session")).toEqual({
 				switched: true,
 			});
 			expect(await authStorage.getApiKey("anthropic", "rotation-session")).not.toBe(first);
@@ -110,9 +110,7 @@ describe("AuthStorage config-override apiKey", () => {
 			if (!authStorage) throw new Error("test setup failed");
 			const first = await authStorage.getApiKey("anthropic", "env-rotation-session");
 			expect(first).toBeDefined();
-			expect(
-				await authStorage.markUsageLimitReached("anthropic", "env-rotation-session", { apiKey: first }),
-			).toEqual({
+			expect(await authStorage.markUsageLimitReached("anthropic", "env-rotation-session")).toEqual({
 				switched: true,
 			});
 			expect(await authStorage.getApiKey("anthropic", "env-rotation-session")).not.toBe(first);
@@ -149,9 +147,10 @@ describe("AuthStorage config-override apiKey", () => {
 			// Sanity: without override, accountId is exposed.
 			expect(authStorage.getOAuthAccountId("anthropic")).toBe("acc-123");
 
-			authStorage.setConfigApiKeys("anthropic", ["gateway-bearer"]);
-			// With an explicit config bearer in play, OAuth account attribution
-			// must NOT leak — outbound auth is the gateway bearer, not OAuth.
+			authStorage.setConfigApiKeys("anthropic", ["gateway-bearer-a", "gateway-bearer-b"]);
+			// With explicit config bearers in play, OAuth access and account
+			// attribution must NOT leak — outbound auth is the gateway bearer, not OAuth.
+			expect(await authStorage.getOAuthAccess("anthropic")).toBeUndefined();
 			expect(authStorage.getOAuthAccountId("anthropic")).toBeUndefined();
 		});
 	});
