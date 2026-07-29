@@ -6,12 +6,14 @@
 export type RateLimitReason =
 	| "QUOTA_EXHAUSTED"
 	| "RATE_LIMIT_EXCEEDED"
+	| "CONCURRENT_LIMIT"
 	| "MODEL_CAPACITY_EXHAUSTED"
 	| "SERVER_ERROR"
 	| "UNKNOWN";
 
 const QUOTA_EXHAUSTED_BACKOFF_MS = 30 * 60 * 1000; // 30 min
 const RATE_LIMIT_EXCEEDED_BACKOFF_MS = 30 * 1000; // 30s
+const CONCURRENT_LIMIT_BACKOFF_MS = 5 * 1000; // 5s
 const MODEL_CAPACITY_BASE_MS = 45 * 1000; // 45s base
 const MODEL_CAPACITY_JITTER_MS = 30 * 1000; // ±15s
 const SERVER_ERROR_BACKOFF_MS = 20 * 1000; // 20s
@@ -21,11 +23,15 @@ const ACCOUNT_RATE_LIMIT_PATTERN =
 const INSUFFICIENT_BALANCE_PATTERN = /insufficient.?balance/i;
 const SPEND_LIMIT_PATTERN = /spend.?limit/i;
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
+const CONCURRENT_LIMIT_PATTERN =
+	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|request|invocation|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b/i;
+const ACCOUNT_SCOPED_403_PATTERN =
+	/\b(?:overall|account|organization|team|workspace)\b[^\n]{0,40}\b(?:message |request )?rate.?limit\b|\blimit will reset\b|\bwill reset in\b/i;
 
 /**
  * Classify a rate-limit error message into a reason category.
- * Priority order: QUOTA (Antigravity "quota will reset") > MODEL_CAPACITY > QUOTA (account) >
- * RATE_LIMIT > QUOTA (generic) > SERVER_ERROR > UNKNOWN.
+ * Priority order: QUOTA (Antigravity "quota will reset") > CONCURRENT_LIMIT > MODEL_CAPACITY >
+ * QUOTA (account) > RATE_LIMIT > QUOTA (generic) > SERVER_ERROR > UNKNOWN.
  *
  * "resource exhausted" maps to MODEL_CAPACITY (transient, short wait)
  * "quota exceeded" / "quota will reset" maps to QUOTA_EXHAUSTED (long wait, switch account)
@@ -40,6 +46,10 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 	// MODEL_CAPACITY fallthrough so credential rotation (not 60s backoff) kicks in.
 	if (lower.includes("quota will reset") || lower.includes("exhausted your capacity")) {
 		return "QUOTA_EXHAUSTED";
+	}
+
+	if (CONCURRENT_LIMIT_PATTERN.test(errorMessage)) {
+		return "CONCURRENT_LIMIT";
 	}
 
 	if (
@@ -105,6 +115,8 @@ export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 			return QUOTA_EXHAUSTED_BACKOFF_MS;
 		case "RATE_LIMIT_EXCEEDED":
 			return RATE_LIMIT_EXCEEDED_BACKOFF_MS;
+		case "CONCURRENT_LIMIT":
+			return CONCURRENT_LIMIT_BACKOFF_MS;
 		case "MODEL_CAPACITY_EXHAUSTED":
 			return MODEL_CAPACITY_BASE_MS + Math.random() * MODEL_CAPACITY_JITTER_MS;
 		case "SERVER_ERROR":
@@ -151,9 +163,15 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
  */
 export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
 	if (message && matchesUsageLimitText(message)) return true;
+	// A 403 is normally an auth failure, but several providers deliver an
+	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,
+	// GitHub Copilot). Rotate only when the body names a cap that resets —
+	// never on a bare 403, which stays an auth failure.
+	if (status === 403 && message && ACCOUNT_SCOPED_403_PATTERN.test(message)) return true;
 	if (!isUsageLimitStatus(status)) return false;
 	if (!message || isOpaqueStatusBody(message)) return true;
-	return parseRateLimitReason(message) === "QUOTA_EXHAUSTED";
+	const reason = parseRateLimitReason(message);
+	return reason === "QUOTA_EXHAUSTED";
 }
 
 /**
