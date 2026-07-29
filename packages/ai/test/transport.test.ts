@@ -65,6 +65,10 @@ async function readAll(stream: http2.ClientHttp2Stream): Promise<string> {
 	return Buffer.concat(chunks).toString("utf8");
 }
 
+function fetchSpy(implementation: (...args: Parameters<typeof fetch>) => Promise<Response>): typeof fetch {
+	return Object.assign(implementation, { preconnect: fetch.preconnect });
+}
+
 describe("shared Connect framing", () => {
 	it("decodes fragmented and compressed frames without losing boundaries", () => {
 		const first = encodeConnectFrame(new TextEncoder().encode("alpha"));
@@ -612,11 +616,11 @@ describe("shared transport classification", () => {
 describe("HTTP/2 primary fallback boundary", () => {
 	it("attempts HTTP/1 only for typed pre-dispatch unavailability", async () => {
 		let fetchAttempts = 0;
-		const fetchMock = async (): Promise<Response> => {
+		const fetchMock = fetchSpy(async () => {
 			fetchAttempts++;
 			return new Response("fallback", { status: 200 });
-		};
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock as typeof fetch);
+		});
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 		const unavailable = net.createServer();
 		await new Promise<void>((resolve, reject) => {
 			unavailable.once("error", reject);
@@ -637,11 +641,11 @@ describe("HTTP/2 primary fallback boundary", () => {
 
 	it("never attempts HTTP/1 after request creation or body dispatch", async () => {
 		let fetchAttempts = 0;
-		const fetchMock = async (): Promise<Response> => {
+		const fetchMock = fetchSpy(async () => {
 			fetchAttempts++;
 			return new Response();
-		};
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock as typeof fetch);
+		});
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 		for (const phase of ["request", "body"] as const) {
 			const { baseUrl } = await listen(stream => {
 				if (phase === "request") {
@@ -659,11 +663,11 @@ describe("HTTP/2 primary fallback boundary", () => {
 
 	it("never attempts HTTP/1 after status, frame, or trailer observation", async () => {
 		let fetchAttempts = 0;
-		const fetchMock = async (): Promise<Response> => {
+		const fetchMock = fetchSpy(async () => {
 			fetchAttempts++;
 			return new Response();
-		};
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock as typeof fetch);
+		});
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 		for (const phase of ["status", "frame", "trailer"] as const) {
 			const { baseUrl } = await listen(stream => {
 				stream.on("error", () => {});
