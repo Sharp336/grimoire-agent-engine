@@ -94,6 +94,23 @@ function retireManager(entry: PoolEntry, slotIndex: number, slot: HealthySlot): 
 	retiringManagers.add(retiring);
 }
 
+function releaseReservation(entry: PoolEntry, slotIndex: number, slot: HealthySlot): void {
+	const current = entry.slots[slotIndex];
+	if (current.kind === "healthy" && current.generation === slot.generation) {
+		current.leases--;
+		return;
+	}
+	for (const retiring of retiringManagers) {
+		if (retiring.manager !== slot.manager) continue;
+		retiring.leases--;
+		if (retiring.leases === 0) {
+			retiringManagers.delete(retiring);
+			closeManager(retiring.manager);
+		}
+		return;
+	}
+}
+
 async function createSessionManager(
 	baseUrl: string,
 	origin: string,
@@ -199,6 +216,7 @@ async function acquireFromSlot(
 	allowFreshEstablishment: boolean,
 ): Promise<H2Lease> {
 	let slot = entry.slots[slotIndex];
+	let reservedSlot: HealthySlot | undefined;
 	if (slot.kind === "healthy" && (slot.manager.state() === "error" || slot.manager.state() === "closed")) {
 		const error = slot.manager.error() ?? new Error(`HTTP/2 connection to ${origin} is unavailable`);
 		retireManager(entry, slotIndex, slot);
@@ -206,10 +224,23 @@ async function acquireFromSlot(
 		slot = entry.slots[slotIndex];
 	}
 	if (slot.kind === "healthy") {
-		const state = await waitWithSignal(slot.manager.connect(), signal);
-		if (state === "error") {
+		reservedSlot = slot;
+		slot.leases++;
+		let state: Awaited<ReturnType<Http2SessionManager["connect"]>>;
+		try {
+			state = await waitWithSignal(slot.manager.connect(), signal);
+		} catch (error) {
+			releaseReservation(entry, slotIndex, slot);
+			throw error;
+		}
+		const current = entry.slots[slotIndex];
+		if (state === "error" || current.kind !== "healthy" || current.generation !== slot.generation) {
 			const error = slot.manager.error() ?? new Error(`HTTP/2 connection to ${origin} failed`);
-			retireManager(entry, slotIndex, slot);
+			if (current.kind === "healthy" && current.generation === slot.generation) {
+				retireManager(entry, slotIndex, slot);
+			}
+			releaseReservation(entry, slotIndex, slot);
+			reservedSlot = undefined;
 			if (!allowFreshEstablishment) throw error;
 			slot = entry.slots[slotIndex];
 		}
@@ -250,8 +281,11 @@ async function acquireFromSlot(
 		slot = entry.slots[slotIndex];
 	}
 	if (slot.kind !== "healthy") throw new Error("HTTP/2 pool slot did not become healthy");
-	if (signal?.aborted) throw new AIError.AbortError();
-	slot.leases++;
+	if (signal?.aborted) {
+		if (reservedSlot) releaseReservation(entry, slotIndex, reservedSlot);
+		throw new AIError.AbortError();
+	}
+	if (!reservedSlot) slot.leases++;
 	return makeLease(entry, slotIndex, slot);
 }
 

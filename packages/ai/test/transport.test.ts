@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as http2 from "node:http2";
 import * as net from "node:net";
 import { gzipSync } from "node:zlib";
 import { Code, ConnectError, type Transport } from "@connectrpc/connect";
+import { Http2SessionManager } from "@connectrpc/connect-node";
 import * as publicTransport from "@oh-my-pi/pi-ai/transport";
 import {
 	acquireH2Session,
@@ -22,6 +23,7 @@ import { CursorCredentialError } from "../src/error";
 const servers = new Set<http2.Http2Server>();
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await disposeHttp1Bridges();
 	await disposeH2Pool();
 	await Promise.all(
@@ -363,6 +365,32 @@ describe("shared HTTP/2 pool", () => {
 			lease.release();
 		}
 		expect(sessions).toHaveLength(1);
+	});
+
+	it("keeps a healthy slot alive while another acquisition is connecting", async () => {
+		const { baseUrl } = await listen(stream => {
+			stream.respond({ ":status": 200 });
+			stream.end("ok");
+		});
+		const first = await acquireH2Session(baseUrl, "transport-test");
+		const abort = vi.spyOn(Http2SessionManager.prototype, "abort");
+		const connecting = Promise.withResolvers<"open">();
+		const connectStarted = Promise.withResolvers<void>();
+		vi.spyOn(Http2SessionManager.prototype, "connect").mockImplementation(() => {
+			connectStarted.resolve();
+			return connecting.promise;
+		});
+
+		const acquiring = acquireH2Session(baseUrl, "transport-test");
+		await connectStarted.promise;
+		first.release();
+		expect(abort).not.toHaveBeenCalled();
+		connecting.resolve("open");
+		const second = await acquiring;
+		const request = await second.request({ ":method": "POST", ":path": "/reserved" });
+		request.end();
+		expect(await readAll(request)).toBe("ok");
+		second.release();
 	});
 
 	it("closes an acquired stream when abort wins after request creation", async () => {
