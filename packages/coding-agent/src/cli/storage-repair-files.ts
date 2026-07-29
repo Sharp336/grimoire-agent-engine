@@ -402,8 +402,6 @@ async function canonicalNewPath(target: string): Promise<string> {
 	return canonical;
 }
 
-
-
 export interface ResolveArtifactPathOptions {
 	artifactSlug?: () => string;
 	platform?: () => NodeJS.Platform;
@@ -505,7 +503,7 @@ interface PublicationHooks {
 	onDirectorySync?: () => void;
 }
 
-interface PublishedFile {
+export interface PublishedFile {
 	dev: bigint;
 	ino: bigint;
 	size: bigint;
@@ -515,7 +513,28 @@ interface PublishedFile {
 async function sealedFile(file: string): Promise<PublishedFile> {
 	const stat = await fs.promises.lstat(file, { bigint: true });
 	assertInvariant(stat.isFile() && !stat.isSymbolicLink(), `Publication stage is not a regular file: ${file}`);
-	return { dev: stat.dev, ino: stat.ino, size: stat.size, sha256: (await hashFile(file, false)).sha256 };
+	const digest = await hashFile(file, false);
+	const confirmed = await fs.promises.lstat(file, { bigint: true });
+	assertInvariant(
+		confirmed.isFile() &&
+			!confirmed.isSymbolicLink() &&
+			confirmed.dev === stat.dev &&
+			confirmed.ino === stat.ino &&
+			confirmed.size === stat.size,
+		`Publication stage changed while sealing: ${file}`,
+	);
+	return { dev: stat.dev, ino: stat.ino, size: stat.size, sha256: digest.sha256 };
+}
+
+async function verifySealedFile(file: string, expected: PublishedFile): Promise<void> {
+	const actual = await sealedFile(file);
+	assertInvariant(
+		actual.dev === expected.dev &&
+			actual.ino === expected.ino &&
+			actual.size === expected.size &&
+			actual.sha256 === expected.sha256,
+		`Publication stage changed after verification: ${file}`,
+	);
 }
 
 async function verifyPublishedFile(stage: string, finalPath: string, expected: PublishedFile): Promise<void> {
@@ -584,10 +603,11 @@ async function runPublicationHook(
 async function publishNoReplace(
 	stage: string,
 	finalPath: string,
+	expected: PublishedFile,
 	onPublished: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
-	const expected = await sealedFile(stage);
+	await verifySealedFile(stage, expected);
 	await fs.promises.link(stage, finalPath);
 	await verifyPublishedFile(stage, finalPath, expected);
 	await runPublicationHook(hooks.afterLink, stage, finalPath, expected, onPublished);
@@ -682,15 +702,15 @@ export async function publishBackup(
 	await fs.promises.chmod(stage, 0o600);
 	await verifyBackup(stage, snapshot.manifest, new Set(entries.map(([name]) => name)), snapshot.tempDir);
 	await syncFile(stage);
-	const digest = await hashFile(stage, false);
-	const checksum = { path: backup, ...digest, ephemeral: false };
+	const seal = await sealedFile(stage);
+	const checksum = { path: backup, sha256: seal.sha256, size: Number(seal.size), ephemeral: false };
 	let reported = false;
 	const report = () => {
 		if (reported) return;
 		reported = true;
 		onPublished(checksum);
 	};
-	await publishNoReplace(stage, backup, report, { afterLink, isWindows, onDirectorySync });
+	await publishNoReplace(stage, backup, seal, report, { afterLink, isWindows, onDirectorySync });
 	return checksum;
 }
 
@@ -718,20 +738,21 @@ export function verifyCommonCandidate(candidate: string): void {
 	}
 }
 
-export async function sealCandidate(candidate: string): Promise<{ sha256: string; size: number }> {
+export async function sealCandidate(candidate: string): Promise<PublishedFile> {
 	await removeCandidateSidecars(candidate);
 	await fs.promises.chmod(candidate, 0o600);
 	await syncFile(candidate);
-	return hashFile(candidate, false);
+	return sealedFile(candidate);
 }
 
 export async function publishCandidate(
 	stage: string,
 	finalPath: string,
+	seal: PublishedFile,
 	onPublished: () => void,
 	hooks: PublicationHooks = {},
 ): Promise<void> {
-	await publishNoReplace(stage, finalPath, onPublished, hooks);
+	await publishNoReplace(stage, finalPath, seal, onPublished, hooks);
 }
 
 export function manualNextStep(source: string, candidate: string, backup: string): string {
