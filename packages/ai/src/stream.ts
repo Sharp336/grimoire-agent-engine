@@ -67,6 +67,7 @@ import {
 } from "./providers/register-builtins";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
 import { PROVIDER_REGISTRY } from "./registry";
+import { AUTHENTICATED_SENTINEL } from "./registry/types";
 import type {
 	Api,
 	AssistantMessage,
@@ -635,15 +636,6 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 }
 
 /**
- * Sentinel `apiKey` for providers whose credentials are resolved out-of-band
- * (AWS credential chain) rather than passed as a bearer key. It only has to be
- * non-empty so the `MissingApiKeyError` gate below does not fire; the actual
- * `Authorization` header is set by the wrapping fetch. Distinct from
- * `NO_AUTH_SENTINEL` (`"N/A"`), which means "send no Authorization at all".
- */
-const AWS_AUTHENTICATED_SENTINEL = "<authenticated>";
-
-/**
  * Region for `bedrock-mantle` requests. Mirrors the resolution intent of
  * `resolveBedrockRegion`, minus the Geo/Global inference-profile machinery —
  * the Mantle model ids carry no geo prefix.
@@ -669,16 +661,27 @@ function resolveBedrockMantleRequest(input: string | URL | Request, region: stri
 	return rewriteBedrockMantleUrl(input, region);
 }
 
+/**
+ * SigV4 signs the exact payload bytes, and those same bytes are what gets
+ * re-sent. Anything this cannot read must therefore throw rather than fall back
+ * to an empty buffer: a `ReadableStream`/`Blob`/`FormData` body would otherwise
+ * go out empty under a valid-looking signature — a silent, hard-to-debug
+ * failure. Unreachable today (the `openai-responses` transport always hands over
+ * a JSON string), so the throw exists to fail loudly if that ever changes.
+ */
 async function readBedrockMantleRequestBody(
 	input: string | URL | Request,
 	init: RequestInit | undefined,
 ): Promise<Uint8Array> {
 	if (input instanceof Request) return new Uint8Array(await input.clone().arrayBuffer());
 	const body = init?.body;
+	if (body === undefined || body === null) return new Uint8Array();
 	if (typeof body === "string") return new TextEncoder().encode(body);
 	if (body instanceof Uint8Array) return body;
 	if (body instanceof ArrayBuffer) return new Uint8Array(body);
-	return new Uint8Array();
+	throw new AIError.ConfigurationError(
+		`bedrock-mantle cannot SigV4-sign a ${body.constructor?.name ?? typeof body} request body; expected a string, Uint8Array, or ArrayBuffer`,
+	);
 }
 
 /**
@@ -946,10 +949,10 @@ function streamDispatch<TApi extends Api>(
 					...requestOptions,
 					// A resolver is left for the auth-retry path to unwrap; only a
 					// plain string is a usable Bedrock API key here.
-					apiKey: AWS_AUTHENTICATED_SENTINEL,
+					apiKey: AUTHENTICATED_SENTINEL,
 					fetch: createBedrockMantleAuthenticatedFetch(
 						requestOptions,
-						typeof apiKey === "string" && apiKey !== AWS_AUTHENTICATED_SENTINEL ? apiKey : undefined,
+						typeof apiKey === "string" && apiKey !== AUTHENTICATED_SENTINEL ? apiKey : undefined,
 					),
 				}
 			: { ...requestOptions, apiKey };
