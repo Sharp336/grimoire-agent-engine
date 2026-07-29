@@ -147,21 +147,18 @@ async function executeSearch(
 
 	const parsedQuery = parseSearchQuery(params.query);
 
-	// Invariant across providers; read once and tolerate an uninitialized
-	// Settings singleton (e.g. `omp q ...` CLI path, unit tests) so the
-	// provider-fallback loop never aborts before any provider runs.
-	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
-	try {
-		antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
-	} catch {
-		antigravityEndpointMode = undefined;
-	}
-
 	let geminiModel: string | undefined;
 	try {
 		geminiModel = settings.get("providers.webSearchGeminiModel");
 	} catch {
 		geminiModel = undefined;
+	}
+
+	let antigravityModel: string | undefined;
+	try {
+		antigravityModel = settings.get("providers.webSearchAntigravityModel");
+	} catch {
+		antigravityModel = undefined;
 	}
 
 	const failures: Array<{ provider: Pick<SearchProvider, "id" | "label">; error: unknown }> = [];
@@ -199,8 +196,8 @@ async function executeSearch(
 				authStorage,
 				modelRegistry,
 				sessionId,
-				antigravityEndpointMode,
 				geminiModel,
+				antigravityModel,
 			});
 
 			// Lenient constraint pass over whatever the provider returned: enforce

@@ -5,7 +5,6 @@ import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-const SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 const OVERSIZED_REQUEST = "Request payload size exceeds the limit of 30 MiB.";
 
 const model: Model<"google-gemini-cli"> = buildModel({
@@ -25,7 +24,7 @@ const context: Context = { messages: [{ role: "user", content: "too much history
 
 function endpointFromInput(input: Parameters<FetchImpl>[0]): string {
 	const url = input instanceof Request ? input.url : input.toString();
-	return url.startsWith(SANDBOX_ENDPOINT) ? SANDBOX_ENDPOINT : DAILY_ENDPOINT;
+	return url.startsWith(DAILY_ENDPOINT) ? DAILY_ENDPOINT : url;
 }
 
 function sseError(code: number, message: string): Response {
@@ -38,7 +37,6 @@ function sseError(code: number, message: string): Response {
 function streamOptions(fetch: FetchImpl) {
 	return {
 		apiKey: JSON.stringify({ token: "token", projectId: "project" }),
-		antigravityEndpointMode: "auto" as const,
 		fetch,
 	};
 }
@@ -62,7 +60,7 @@ describe("Antigravity Cloud Code Assist oversized-request compaction signals", (
 		expect(result.errorMessage).toContain(OVERSIZED_REQUEST);
 		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
 		expect(result.errorId).toBe(AIError.create(AIError.Flag.ContextOverflow));
-		expect(AIError.isContextOverflow(result, model.contextWindow)).toBe(true);
+		expect(AIError.isContextOverflow(result, model.contextWindow ?? undefined)).toBe(true);
 	});
 
 	it("maps the daily endpoint's SSE oversized-request error without empty-stream retry or sandbox fallback", async () => {
@@ -80,10 +78,10 @@ describe("Antigravity Cloud Code Assist oversized-request compaction signals", (
 		expect(result.errorMessage).toContain(OVERSIZED_REQUEST);
 		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
 		expect(result.errorId).toBe(AIError.create(AIError.Flag.ContextOverflow));
-		expect(AIError.isContextOverflow(result, model.contextWindow)).toBe(true);
+		expect(AIError.isContextOverflow(result, model.contextWindow ?? undefined)).toBe(true);
 	});
 
-	it("fails over for a transient SSE error without misclassifying it as an overflow", async () => {
+	it("reports a transient SSE error from the daily endpoint without misclassifying it as an overflow", async () => {
 		const endpoints: string[] = [];
 		const fetch: FetchImpl = async input => {
 			const endpoint = endpointFromInput(input);
@@ -94,11 +92,11 @@ describe("Antigravity Cloud Code Assist oversized-request compaction signals", (
 		const stream = streamGoogleGeminiCli(model, context, streamOptions(fetch));
 		const result = await stream.result();
 
-		expect(endpoints).toEqual([DAILY_ENDPOINT, SANDBOX_ENDPOINT]);
+		expect(endpoints).toEqual([DAILY_ENDPOINT]);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("temporarily unavailable");
 		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
 		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
-		expect(AIError.isContextOverflow(result, model.contextWindow)).toBe(false);
+		expect(AIError.isContextOverflow(result, model.contextWindow ?? undefined)).toBe(false);
 	});
 });

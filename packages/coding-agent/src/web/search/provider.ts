@@ -34,6 +34,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.gemini,
 		load: async () => new (await import("./providers/gemini")).GeminiProvider(),
 	},
+	antigravity: {
+		id: "antigravity",
+		label: SEARCH_PROVIDER_LABELS.antigravity,
+		load: async () => new (await import("./providers/antigravity")).AntigravityProvider(),
+	},
 	anthropic: {
 		id: "anthropic",
 		label: SEARCH_PROVIDER_LABELS.anthropic,
