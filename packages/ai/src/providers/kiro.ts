@@ -1,6 +1,6 @@
 import { parseKiroCredentials } from "@oh-my-pi/pi-catalog/discovery/kiro";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { isRecord, parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { isRecord, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { postH2Only, type TransportResponse } from "../transport";
 import type {
@@ -95,6 +95,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 		let textBlock: TextContent | undefined;
 		let thinkingBlock: ThinkingContent | undefined;
 		const toolBlocks = new Map<string, ToolCall>();
+		const toolLastParseLength = new Map<string, number>();
 		const toolPartialJson = new Map<string, string>();
 		let sawEndTurn = false;
 		let response: TransportResponse | undefined;
@@ -217,7 +218,11 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 						if (delta) {
 							const accumulated = `${toolPartialJson.get(toolUseId) ?? ""}${delta}`;
 							toolPartialJson.set(toolUseId, accumulated);
-							block.arguments = parseStreamingJson(accumulated);
+							const parsed = parseStreamingJsonThrottled(accumulated, toolLastParseLength.get(toolUseId) ?? 0);
+							if (parsed) {
+								block.arguments = parsed.value;
+								toolLastParseLength.set(toolUseId, parsed.parsedLen);
+							}
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: output.content.indexOf(block),
