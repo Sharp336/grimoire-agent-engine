@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added HTTP Basic authentication for Hindsight memory servers: a hindsight.apiToken set to a user:password value is now sent as Basic auth, while any other value keeps using a bearer token.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

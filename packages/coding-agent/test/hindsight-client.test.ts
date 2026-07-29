@@ -14,6 +14,19 @@ function captureRequestBodies(): string[] {
 	return bodies;
 }
 
+function captureAuthorizationHeaders(): (string | undefined)[] {
+	const headers: (string | undefined)[] = [];
+	const fetchMock: typeof globalThis.fetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+			headers.push(new Headers(init?.headers).get("Authorization") ?? undefined);
+			return new Response("{}", { status: 200 });
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	);
+	vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+	return headers;
+}
+
 function firstTimestamp(bodyText: string): string | undefined {
 	const body: unknown = JSON.parse(bodyText);
 	if (typeof body !== "object" || body === null) return undefined;
@@ -56,5 +69,38 @@ describe("HindsightApi timestamp serialization", () => {
 		});
 
 		expect(firstTimestamp(bodies[0] ?? "{}")).toBe("2026-06-12T19:17:00+08:00");
+	});
+});
+
+describe("HindsightApi authorization", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("sends a plain token as a bearer credential", async () => {
+		const headers = captureAuthorizationHeaders();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local", apiKey: "hs-token" });
+
+		await client.recall("omp", "query");
+
+		expect(headers[0]).toBe("Bearer hs-token");
+	});
+
+	it("sends a user:password credential as HTTP Basic auth", async () => {
+		const headers = captureAuthorizationHeaders();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local", apiKey: "memory:s3cr3t" });
+
+		await client.recall("omp", "query");
+
+		expect(headers[0]).toBe("Basic bWVtb3J5OnMzY3IzdA==");
+	});
+
+	it("omits the authorization header when no credential is configured", async () => {
+		const headers = captureAuthorizationHeaders();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+
+		await client.recall("omp", "query");
+
+		expect(headers[0]).toBeUndefined();
 	});
 });

@@ -35,6 +35,7 @@ export interface HindsightTimeouts {
 
 export interface HindsightApiOptions {
 	baseUrl: string;
+	/** Bearer token, or `user:password` for a deployment behind HTTP Basic auth. */
 	apiKey?: string;
 	userAgent?: string;
 	/** Per-op deadlines; unset entries fall back to built-in defaults. */
@@ -235,6 +236,17 @@ interface RequestOptions {
 	timeoutMs?: number;
 }
 
+/**
+ * Resolve the `Authorization` header for a configured credential. Self-hosted
+ * Hindsight deployments often sit behind HTTP Basic auth, so a `user:password`
+ * value authenticates with Basic; anything else is sent as a bearer token.
+ */
+function authorizationHeader(apiKey: string | undefined): string | undefined {
+	if (!apiKey) return undefined;
+	if (!apiKey.includes(":")) return `Bearer ${apiKey}`;
+	return `Basic ${new TextEncoder().encode(apiKey).toBase64()}`;
+}
+
 export class HindsightApi {
 	#baseUrl: string;
 	#headers: Record<string, string>;
@@ -249,8 +261,9 @@ export class HindsightApi {
 			"User-Agent": options.userAgent ?? DEFAULT_USER_AGENT,
 			"Content-Type": "application/json",
 		};
-		if (options.apiKey) {
-			this.#headers.Authorization = `Bearer ${options.apiKey}`;
+		const authorization = authorizationHeader(options.apiKey);
+		if (authorization) {
+			this.#headers.Authorization = authorization;
 		}
 		const timeouts = options.timeouts;
 		this.#requestTimeoutMs = timeouts?.request ?? DEFAULT_REQUEST_TIMEOUT_MS;
