@@ -330,6 +330,17 @@ const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 const GOOGLE_GEMINI_REFRESH_SKEW_MS = 60_000;
 const ANTIGRAVITY_REFRESH_SKEW_MS = 60_000;
 
+const CLOUD_CODE_OVERSIZED_REQUEST_PATTERN =
+	/\b(?:request|payload)(?:\s+payload)?\s+(?:size\s+)?(?:is\s+)?(?:too\s+large|exceeds?(?:\s+the)?\s+(?:maximum\s+)?(?:size|limit))\b/i;
+
+function createCloudCodeApiError(message: string, status: number, headers?: Headers): AIError.GeminiCliApiError {
+	const error = new AIError.GeminiCliApiError(message, status, headers ? { headers } : undefined);
+	if ((status === 400 || status === 413) && CLOUD_CODE_OVERSIZED_REQUEST_PATTERN.test(message)) {
+		AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
+	}
+	return error;
+}
+
 function isClaudeModel(modelId: string): boolean {
 	return modelId.toLowerCase().includes("claude");
 }
@@ -764,7 +775,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						const detail = chunk.error.message || chunk.error.status || "unknown error";
 						const message = `Cloud Code Assist stream error: ${detail}`;
 						throw typeof chunk.error.code === "number" && chunk.error.code >= 400
-							? new AIError.GeminiCliApiError(message, chunk.error.code)
+							? createCloudCodeApiError(message, chunk.error.code)
 							: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "runtime" });
 					}
 					const responseData = chunk.response;
@@ -953,10 +964,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									parsedCredentials.email,
 								)
 							: errorText;
-						throw new AIError.GeminiCliApiError(
+						throw createCloudCodeApiError(
 							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
 							response.status,
-							{ headers: response.headers },
+							response.headers,
 						);
 					}
 
@@ -989,10 +1000,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 							if (!currentResponse.ok) {
 								const retryErrorText = await currentResponse.text();
-								throw new AIError.GeminiCliApiError(
+								throw createCloudCodeApiError(
 									`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`,
 									currentResponse.status,
-									{ headers: currentResponse.headers },
+									currentResponse.headers,
 								);
 							}
 						}
