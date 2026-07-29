@@ -57,7 +57,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
 import { transformMessages } from "./transform-messages";
 
-/** Base host for Codeium/Windsurf's Cascade chat API. */
+/** Base host for the current Devin CLI's Codeium Connect RPCs. */
 export const DEVIN_API_URL = "https://server.codeium.com";
 
 export interface DevinOptions extends StreamOptions {
@@ -71,11 +71,17 @@ export interface DevinOptions extends StreamOptions {
 
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const DEVIN_IDE_NAME = "windsurf";
-const DEVIN_IDE_VERSION = "3.2.23";
+const DEVIN_IDE_VERSION = "0.0.0-dev";
 const DEVIN_EXTENSION_NAME = "windsurf";
-const DEVIN_EXTENSION_VERSION = "1.48.2";
+const DEVIN_EXTENSION_VERSION = "0.0.0-dev";
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
-const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
+const DEVIN_DEFAULT_STOP_PATTERNS = [
+	"<|user|>",
+	"<|bot|>",
+	"<|context_request|>",
+	"<\u007cendoftext\u007c>",
+	"<|end_of_turn|>",
+];
 
 /**
  * Recovery heuristic for opaque Devin `invalid_argument` trailers. This is not
@@ -198,6 +204,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				"connect-protocol-version": "1",
 				"connect-content-encoding": "gzip",
 				"accept-encoding": "identity",
+				authorization: `Basic ${apiKey}`,
 				"connect-accept-encoding": "gzip",
 				...(options?.headers ?? {}),
 			};
@@ -205,7 +212,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			let body: AsyncIterable<Uint8Array>;
 			if (options?.fetch) {
 				body = await fetchDevinChatBody({
-					url: chatBaseUrl + CHAT_MESSAGE_PATH,
+					url: baseUrl + CHAT_MESSAGE_PATH,
 					headers: commonHeaders,
 					frame,
 					fetchImpl,
@@ -214,7 +221,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				});
 			} else {
 				try {
-					h2Lease = await acquireH2Session(chatBaseUrl, model.provider, signal);
+					h2Lease = await acquireH2Session(baseUrl, model.provider, signal);
 					h2Request = await h2Lease.request(
 						{
 							":method": "POST",
@@ -253,7 +260,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					if (error instanceof AIError.DevinApiError || !isTransientTransportError(error)) throw error;
 					logger.warn("devin: HTTP/2 unavailable, falling back to HTTP/1", { error: String(error) });
 					body = await fetchDevinChatBody({
-						url: chatBaseUrl + CHAT_MESSAGE_PATH,
+						url: baseUrl + CHAT_MESSAGE_PATH,
 						headers: commonHeaders,
 						frame,
 						fetchImpl,
@@ -548,8 +555,8 @@ function buildDevinChatRequest(
 		metadata: create(MetadataSchema, {
 			apiKey,
 			ideName: DEVIN_IDE_NAME,
-			ideVersion: DEVIN_IDE_VERSION,
 			extensionName: DEVIN_EXTENSION_NAME,
+			ideVersion: DEVIN_IDE_VERSION,
 			extensionVersion: DEVIN_EXTENSION_VERSION,
 			locale: "en",
 			os: devinOs(),

@@ -15,9 +15,9 @@ import {
 const DEVIN_DEFAULT_BASE_URL = "https://server.codeium.com";
 const DEVIN_GET_CLI_MODEL_CONFIGS_PATH = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
 const DEVIN_IDE_NAME = "windsurf";
-const DEVIN_IDE_VERSION = "3.2.23";
+const DEVIN_IDE_VERSION = "0.0.0-dev";
 const DEVIN_EXTENSION_NAME = "windsurf";
-const DEVIN_EXTENSION_VERSION = "1.48.2";
+const DEVIN_EXTENSION_VERSION = "0.0.0-dev";
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -66,22 +66,16 @@ export async function fetchDevinModels(
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
 
 	try {
+		const apiKey = normalizeDevinSessionToken(options.apiKey);
 		const request = create(GetCliModelConfigsRequestSchema, {
 			metadata: create(MetadataSchema, {
-				apiKey: normalizeDevinSessionToken(options.apiKey),
-				ideName: DEVIN_IDE_NAME,
+				apiKey,
+				ideName: "chisel",
 				ideVersion: DEVIN_IDE_VERSION,
-				extensionName: DEVIN_EXTENSION_NAME,
+				extensionName: "chisel",
 				extensionVersion: DEVIN_EXTENSION_VERSION,
 				locale: "en",
-				os: process.platform === "win32" ? "windows" : process.platform,
-				// The server hides non-default display options unless the client
-				// declares support for them. MODEL_ROUTER (3) is what unlocks
-				// `adaptive`; verified live, requesting it yields exactly the 165
-				// models `devin models list` shows. Deliberately NOT requesting
-				// QUICK_REVIEW (4) or the internal-router option (6): those return
-				// devin's own review/plumbing models, which are not user-selectable.
-				supportedModelDisplays: [DisplayOption.MODEL_ROUTER],
+				os: process.platform,
 			}),
 		});
 		const body = toBinary(GetCliModelConfigsRequestSchema, request);
@@ -90,6 +84,7 @@ export async function fetchDevinModels(
 			"content-type": "application/proto",
 			"connect-protocol-version": "1",
 			accept: "*/*",
+			authorization: `Basic ${apiKey}`,
 		};
 
 		const fetchImpl = discoveryFetch(options.fetch);
@@ -133,6 +128,14 @@ function decodeCliModelConfigsResponse(payload: Uint8Array) {
 	}
 }
 
+/** First candidate that is a finite positive number, else `undefined`. */
+function firstFinitePositive(...candidates: (number | undefined)[]): number | undefined {
+	for (const candidate of candidates) {
+		if (candidate !== undefined && Number.isFinite(candidate) && candidate > 0) return candidate;
+	}
+	return undefined;
+}
+
 function normalizeDevinModels(
 	configs: readonly ClientModelConfig[],
 	baseUrlOverride: string | undefined,
@@ -155,7 +158,9 @@ function normalizeDevinModels(
 			continue;
 		}
 		const input: ("text" | "image")[] = config.supportsImages ? ["text", "image"] : ["text"];
-		const contextWindow = config.maxTokens > 0 ? config.maxTokens : DEFAULT_CONTEXT_WINDOW;
+		const modelInfo = config.modelInfo;
+		const contextWindow = firstFinitePositive(modelInfo?.maxTokens, config.maxTokens) ?? DEFAULT_CONTEXT_WINDOW;
+		const maxTokens = firstFinitePositive(modelInfo?.maxOutputTokens, config.maxTokens) ?? DEFAULT_MAX_TOKENS;
 		byId.set(id, {
 			id,
 			name: config.label.trim() || id,
@@ -167,7 +172,7 @@ function normalizeDevinModels(
 			supportsTools: true,
 			cost: devinModelCost(config),
 			contextWindow,
-			maxTokens: Math.min(config.maxTokens > 0 ? config.maxTokens : DEFAULT_MAX_TOKENS, DEFAULT_MAX_TOKENS),
+			maxTokens,
 		});
 	}
 	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));

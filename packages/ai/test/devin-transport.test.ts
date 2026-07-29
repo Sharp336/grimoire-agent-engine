@@ -76,6 +76,7 @@ describe("streamDevin shared HTTP/2 transport", () => {
 		respond = async (stream, headers) => {
 			expect(headers[":path"]).toBe("/exa.api_server_pb.ApiServerService/GetChatMessage");
 			expect(headers.te).toBe("trailers");
+			expect(headers.authorization).toBe("Basic devin-session-token$token");
 			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 			const frame = responseFrame("split frame");
 			await writeChunk(stream, frame.subarray(0, 2));
