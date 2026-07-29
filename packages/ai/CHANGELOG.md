@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Codex SSE request bodies are now zstd-compressed (level 3, `content-encoding: zstd`), matching the official Codex client; disable with `PI_CODEX_ZSTD=0`. Compression failure falls back to plain JSON.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
