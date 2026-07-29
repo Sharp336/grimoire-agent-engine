@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { Api, Model, Provider, Usage } from "@oh-my-pi/pi-catalog/types";
+import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -21,13 +21,13 @@ const USAGE: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function makeMessage(content: AssistantMessage["content"]): AssistantMessage {
+function makeMessage(content: AssistantMessage["content"], model: Model): AssistantMessage {
 	return {
 		role: "assistant",
 		content,
-		api: "anthropic-messages" as Api,
-		provider: "anthropic" as Provider,
-		model: "claude-sonnet-4-5",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
 		usage: { ...USAGE },
 		stopReason: "error",
 		errorMessage: "timeout",
@@ -94,7 +94,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 	it("treats a failed turn with partial non-whitespace text as NOT retriable", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const message = makeMessage([{ type: "text", text: "Here is the first part of my answer" }]);
+		const message = makeMessage([{ type: "text", text: "Here is the first part of my answer" }], model);
 		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
@@ -105,56 +105,77 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			}),
 		);
 		// Thinking-only output is replay-safe: nothing visible reached the user.
-		const message = makeMessage([{ type: "thinking", thinking: "safe reasoning before failing" }]);
+		const message = makeMessage([{ type: "thinking", thinking: "safe reasoning before failing" }], model);
 		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
 	});
 
-	it("excludes a failed turn with partial non-whitespace text from fallback candidates", () => {
-		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const message = makeMessage([{ type: "text", text: "partial visible output" }]);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+	it("excludes a Fireworks Fast failed turn with partial visible text from Fast→base fallback", () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
+		if (!fastModel) throw new Error("Expected bundled model kimi-k2.6-fast");
+		const recovery = new TurnRecovery(createHost(fastModel, modelRegistry));
+		const message = makeMessage([{ type: "text", text: "partial visible output" }], fastModel);
+		expect(recovery.isFireworksFastFallbackEligible(message)).toBe(false);
+	});
+
+	it("keeps a Fireworks Fast empty/whitespace failed turn eligible for Fast→base fallback", () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
+		if (!fastModel) throw new Error("Expected bundled model kimi-k2.6-fast");
+		const recovery = new TurnRecovery(createHost(fastModel, modelRegistry));
+		expect(recovery.isFireworksFastFallbackEligible(makeMessage([], fastModel))).toBe(true);
+		expect(recovery.isFireworksFastFallbackEligible(makeMessage([{ type: "text", text: "   \n" }], fastModel))).toBe(
+			true,
+		);
 	});
 
 	it("treats a thinking-only partial turn as still retriable", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const message = makeMessage([{ type: "thinking", thinking: "Let me reason about this step by step." }]);
+		const message = makeMessage([{ type: "thinking", thinking: "Let me reason about this step by step." }], model);
 		expect(recovery.isRetryableError(message)).toBe(true);
 	});
 
 	it("treats a whitespace-only text partial as still retriable", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const message = makeMessage([{ type: "text", text: "   \n\n  " }]);
+		const message = makeMessage([{ type: "text", text: "   \n\n  " }], model);
 		expect(recovery.isRetryableError(message)).toBe(true);
 	});
 
 	it("keeps the tool-call case replay-unsafe (no regression)", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const message = makeMessage([{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "ls" } }]);
+		const message = makeMessage(
+			[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "ls" } }],
+			model,
+		);
 		expect(recovery.isRetryableError(message)).toBe(false);
 		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
 	});
 
 	it("keeps an empty-content error retriable (baseline)", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const message = makeMessage([]);
+		const message = makeMessage([], model);
 		expect(recovery.isRetryableError(message)).toBe(true);
 	});
 
 	it("treats a mix of thinking and text as replay-unsafe (text wins)", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const message = makeMessage([
-			{ type: "thinking", thinking: "Reasoning before the visible answer." },
-			{ type: "text", text: "The answer is 42." },
-		]);
+		const message = makeMessage(
+			[
+				{ type: "thinking", thinking: "Reasoning before the visible answer." },
+				{ type: "text", text: "The answer is 42." },
+			],
+			model,
+		);
 		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
 	it("treats thinking plus whitespace-only text as replay-safe", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const message = makeMessage([
-			{ type: "thinking", thinking: "Long reasoning." },
-			{ type: "text", text: "  " },
-		]);
+		const message = makeMessage(
+			[
+				{ type: "thinking", thinking: "Long reasoning." },
+				{ type: "text", text: "  " },
+			],
+			model,
+		);
 		expect(recovery.isRetryableError(message)).toBe(true);
 	});
 });
