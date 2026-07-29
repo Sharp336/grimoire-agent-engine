@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- API-key validation now preserves provider HTTP status and retry headers, allowing authentication, rate-limit, and server failures to retain their existing error classification instead of reporting every non-success response as a missing key.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
