@@ -91,6 +91,8 @@ Guests with a view-only link can read everything live — back-transcript, strea
 
 Everything that mutates the host session or machine is host-only: `/model`, `/compact`, `/resume`, `/branch`, bash (`!`), python (`$`), skills, etc. Guests keep a small local allowlist (`/dump`, `/export`, `/copy`, `/help`, `/hotkeys`, `/theme`, `/settings`, `/leave`, `/collab`, `/exit`, `/quit`).
 
+**Remote control (opt-in).** A full link plus the host setting `collab.allowRemoteControl` (default off) grants a third capability: driving session controls over `ctl`/`ctl-result` frames — list and switch sessions, list and set the model, set the thinking level, read session stats, and compact. The setting is off by default, so no link already in circulation silently gains control; the host must opt in. View-only links are denied control regardless of the setting, and every command is re-checked against the write token. The command set is deliberately smaller than the host's own RPC surface: no `bash`, host tools, or host URI schemes, since those grant arbitrary execution on the host machine. A host with the setting off replies `ctl-result{ ok: false, code: "control-disabled" }`.
+
 Known v1 limit for guests: a turn already streaming when you join becomes visible from its next message boundary.
 
 ## Web client
@@ -106,6 +108,7 @@ Set `collab.webUrl` when the browser UI is hosted separately from the websocket 
 | `collab.relayUrl` | `wss://my.omp.sh` | Relay used by `/collab` when no relay is passed inline |
 | `collab.webUrl` | empty | Browser UI URL for `/collab` links; empty derives from relay; explicit `http://` is allowed only for localhost |
 | `collab.displayName` | OS username | Name shown to other participants |
+| `collab.allowRemoteControl` | `false` | Let full-link peers change model, thinking level, compact, and switch sessions on the host |
 | `share.serverUrl` | `https://my.omp.sh/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`) |
 | `share.redactSecrets` | `true` | Run the secret obfuscator over `/share` snapshots before upload |
 
