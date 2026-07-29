@@ -6,7 +6,14 @@ import { getSessionsDir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import { HistoryStorage } from "../session/history-storage";
 import { CURRENT_SESSION_VERSION, SESSION_TITLE_SLOT_BYTES } from "../session/session-entries";
 import { parseTitleSlotLine } from "../session/session-title-slot";
-import { assertInvariant, checkpointCandidate, stableJson, verifyCommonCandidate } from "./storage-repair-files";
+import type { RawSchemaDefinition } from "./storage-repair-files";
+import {
+	assertInvariant,
+	checkpointCandidate,
+	stableJson,
+	verifyCommonCandidate,
+	verifyRawSchemaDefinitions,
+} from "./storage-repair-files";
 import type { HistoryRepairSource, StorageRepairObjectResult, StorageRepairTestHooks } from "./storage-repair-types";
 
 const COPY_BUFFER_BYTES = 1024 * 1024;
@@ -30,6 +37,19 @@ interface PromptRow {
 	prompt: string;
 	cwd: string;
 	session_id: string;
+}
+
+interface SessionHeader {
+	id: string;
+	cwd: string;
+	timestamp: number;
+	parentSession: string | null;
+}
+
+interface SessionMember {
+	file: SessionFileManifest;
+	header: SessionHeader;
+	family: number;
 }
 
 export interface PromptManifest {
@@ -148,28 +168,143 @@ function promptContent(content: unknown, label: string) {
 	return text;
 }
 
-function validateHeader(record: Record<string, unknown>, file: string) {
+function validateHeader(record: Record<string, unknown>, file: string): SessionHeader {
 	assertInvariant(record.type === "session", `Missing session header in ${file}`);
 	assertInvariant(typeof record.id === "string" && record.id.length > 0, `Invalid session id in ${file}`);
 	assertInvariant(typeof record.cwd === "string" && record.cwd.length > 0, `Invalid session cwd in ${file}`);
-	parsedTimestamp(record.timestamp, `session header ${file}`);
+	const timestamp = parsedTimestamp(record.timestamp, `session header ${file}`);
 	const version = record.version ?? 1;
 	assertInvariant(
 		typeof version === "number" && Number.isInteger(version) && version >= 1 && version <= CURRENT_SESSION_VERSION,
 		`Unsupported session version in ${file}`,
 	);
-	return { id: record.id, cwd: record.cwd };
+	return {
+		id: record.id,
+		cwd: record.cwd,
+		timestamp,
+		parentSession:
+			typeof record.parentSession === "string" && record.parentSession.length > 0 ? record.parentSession : null,
+	};
 }
 
-async function parseSession(file: SessionFileManifest, promptDb: Database) {
+async function readSessionHeader(file: SessionFileManifest): Promise<SessionHeader> {
+	const input = fs.createReadStream(file.path, { encoding: "utf8" });
+	const lines = readline.createInterface({ input, crlfDelay: Infinity });
+	let physicalLine = 0;
+	try {
+		for await (const line of lines) {
+			physicalLine += 1;
+			if (physicalLine === 1 && Buffer.byteLength(`${line}\n`, "utf8") === SESSION_TITLE_SLOT_BYTES) {
+				if (parseTitleSlotLine(line)) continue;
+			}
+			const record = parseJsonRecord(line, file.path, physicalLine);
+			if (!record) continue;
+			return validateHeader(record, file.path);
+		}
+		throw new Error(`Incomplete session file: ${file.path}`);
+	} finally {
+		lines.close();
+		input.destroy();
+	}
+}
+
+class SessionUnionFind {
+	readonly #parents: number[];
+	readonly #ranks: number[];
+
+	constructor(size: number) {
+		this.#parents = Array.from({ length: size }, (_, index) => index);
+		this.#ranks = Array<number>(size).fill(0);
+	}
+
+	find(index: number): number {
+		let root = index;
+		while (this.#parents[root] !== root) root = this.#parents[root]!;
+		while (this.#parents[index] !== index) {
+			const parent = this.#parents[index]!;
+			this.#parents[index] = root;
+			index = parent;
+		}
+		return root;
+	}
+
+	union(left: number, right: number): void {
+		let leftRoot = this.find(left);
+		let rightRoot = this.find(right);
+		if (leftRoot === rightRoot) return;
+		if (this.#ranks[leftRoot]! < this.#ranks[rightRoot]!) [leftRoot, rightRoot] = [rightRoot, leftRoot];
+		this.#parents[rightRoot] = leftRoot;
+		if (this.#ranks[leftRoot] === this.#ranks[rightRoot]) this.#ranks[leftRoot] = this.#ranks[leftRoot]! + 1;
+	}
+}
+
+function addReference(map: Map<string, number[]>, reference: string, index: number): void {
+	const matches = map.get(reference);
+	if (matches) matches.push(index);
+	else map.set(reference, [index]);
+}
+
+function isPathReference(reference: string): boolean {
+	return (
+		path.isAbsolute(reference) || reference.includes("/") || reference.includes("\\") || reference.endsWith(".jsonl")
+	);
+}
+
+function resolvedParentIndex(
+	member: SessionMember,
+	byId: Map<string, number[]>,
+	byPath: Map<string, number[]>,
+): number | null {
+	const reference = member.header.parentSession;
+	if (!reference) return null;
+	if (!isPathReference(reference)) {
+		const matches = byId.get(reference) ?? [];
+		return matches.length === 1 ? matches[0]! : null;
+	}
+	const matches = new Set<number>();
+	for (const candidate of [path.resolve(reference), path.resolve(path.dirname(member.file.path), reference)]) {
+		for (const index of byPath.get(candidate) ?? []) matches.add(index);
+	}
+	return matches.size === 1 ? [...matches][0]! : null;
+}
+
+async function sessionFamilies(files: SessionFileManifest[]): Promise<SessionMember[]> {
+	const members: SessionMember[] = [];
+	for (const file of files) members.push({ file, header: await readSessionHeader(file), family: -1 });
+	const byId = new Map<string, number[]>();
+	const byPath = new Map<string, number[]>();
+	for (const [index, member] of members.entries()) {
+		addReference(byId, member.header.id, index);
+		addReference(byPath, path.resolve(member.file.path), index);
+		addReference(byPath, path.resolve(member.file.canonicalPath), index);
+	}
+	const families = new SessionUnionFind(members.length);
+	for (const [index, member] of members.entries()) {
+		const parent = resolvedParentIndex(member, byId, byPath);
+		if (parent !== null) families.union(index, parent);
+	}
+	for (const [index, member] of members.entries()) member.family = families.find(index);
+	return members;
+}
+
+function validInnerTimestamp(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function recordSha256(line: string): string {
+	return new Bun.SHA256().update(Buffer.from(line, "utf8")).digest("hex");
+}
+
+async function parseSession(member: SessionMember, promptDb: Database) {
+	const { file, header, family } = member;
 	const input = fs.createReadStream(file.path, { encoding: "utf8" });
 	const lines = readline.createInterface({ input, crlfDelay: Infinity });
 	const insert = promptDb.prepare(
-		"INSERT INTO prompts(entry_ms, canonical_path, ordinal, prompt, cwd, session_id) VALUES (?, ?, ?, ?, ?, ?)",
+		"INSERT INTO prompts(entry_ms, header_ms, canonical_path, ordinal, record_sha256, family, prompt, cwd, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 	);
 	let physicalLine = 0;
 	let recordOrdinal = 0;
-	let header: { id: string; cwd: string } | null = null;
+	let foundHeader = false;
 	let inserted = 0;
 	promptDb.exec("BEGIN");
 	try {
@@ -180,12 +315,17 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 			}
 			const record = parseJsonRecord(line, file.path, physicalLine);
 			if (!record) continue;
-			if (!header) {
-				header = validateHeader(record, file.path);
+			if (!foundHeader) {
+				const parsed = validateHeader(record, file.path);
+				assertInvariant(
+					parsed.id === header.id && parsed.timestamp === header.timestamp && parsed.cwd === header.cwd,
+					`Session header changed while parsing: ${file.path}`,
+				);
+				foundHeader = true;
 				continue;
 			}
 			recordOrdinal += 1;
-			const timestamp = parsedTimestamp(record.timestamp, `record ${physicalLine} in ${file.path}`);
+			const outerTimestamp = parsedTimestamp(record.timestamp, `record ${physicalLine} in ${file.path}`);
 			if (record.type !== "message") continue;
 			const message = record.message;
 			assertInvariant(
@@ -193,15 +333,24 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 				`Invalid message in ${file.path}:${physicalLine}`,
 			);
 			const typed = message as Record<string, unknown>;
-			if (typed.role !== "user" || typed.attribution === "agent" || typed.synthetic === true) {
-				continue;
-			}
+			if (typed.role !== "user" || typed.attribution === "agent" || typed.synthetic === true) continue;
 			const prompt = promptContent(typed.content, `${file.path}:${physicalLine}`).trim();
 			if (prompt.length === 0) continue;
-			insert.run(BigInt(timestamp), file.canonicalPath, BigInt(recordOrdinal), prompt, header.cwd, header.id);
+			const entryTimestamp = validInnerTimestamp(typed.timestamp) ? typed.timestamp : outerTimestamp;
+			insert.run(
+				BigInt(entryTimestamp),
+				BigInt(header.timestamp),
+				file.canonicalPath,
+				BigInt(recordOrdinal),
+				recordSha256(line),
+				BigInt(family),
+				prompt,
+				header.cwd,
+				header.id,
+			);
 			inserted += 1;
 		}
-		assertInvariant(physicalLine >= 1 && header, `Incomplete session file: ${file.path}`);
+		assertInvariant(physicalLine >= 1 && foundHeader, `Incomplete session file: ${file.path}`);
 		promptDb.exec("COMMIT");
 		return inserted;
 	} catch (error) {
@@ -228,12 +377,12 @@ export async function freezePromptManifest(
 	const dbPath = path.join(tempDir, "prompts.sqlite");
 	const db = new Database(dbPath, { safeIntegers: true });
 	db.exec(
-		"CREATE TABLE prompts(entry_ms INTEGER NOT NULL, canonical_path TEXT NOT NULL, ordinal INTEGER NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL, session_id TEXT NOT NULL)",
+		"CREATE TABLE prompts(entry_ms INTEGER NOT NULL, header_ms INTEGER NOT NULL, canonical_path TEXT NOT NULL, ordinal INTEGER NOT NULL, record_sha256 TEXT NOT NULL, family INTEGER NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL, session_id TEXT NOT NULL)",
 	);
 	const fingerprint = stableJson(first);
 	let count = 0;
 	try {
-		for (const file of first) count += await parseSession(file, db);
+		for (const member of await sessionFamilies(first)) count += await parseSession(member, db);
 		await hook?.();
 		assertInvariant(
 			fingerprint === stableJson(await manifestSessions(root)),
@@ -256,9 +405,26 @@ export async function promptManifestStillMatches(manifest: PromptManifest | null
 
 function sortedPrompts(manifest: Database) {
 	return manifest
-		.prepare(
-			"SELECT entry_ms, canonical_path, ordinal, prompt, cwd, session_id FROM prompts ORDER BY entry_ms ASC, canonical_path ASC, ordinal ASC",
-		)
+		.prepare(`
+			WITH family_representatives AS (
+				SELECT
+					entry_ms,
+					canonical_path,
+					ordinal,
+					prompt,
+					cwd,
+					session_id,
+					ROW_NUMBER() OVER (
+						PARTITION BY family, record_sha256
+						ORDER BY header_ms ASC, canonical_path COLLATE BINARY ASC, ordinal ASC
+					) AS representative
+				FROM prompts
+			)
+			SELECT entry_ms, canonical_path, ordinal, prompt, cwd, session_id
+			FROM family_representatives
+			WHERE representative = 1
+			ORDER BY entry_ms ASC, canonical_path COLLATE BINARY ASC, ordinal ASC
+		`)
 		.iterate() as Iterable<PromptRow>;
 }
 
@@ -298,12 +464,9 @@ function insertPrompts(db: Database, manifest: PromptManifest | null) {
 		for (const row of rows) insert.run(row.prompt, row.entry_ms / 1000n, row.cwd, row.session_id);
 	});
 	let batch: PromptRow[] = [];
-	let previous: string | null = null;
 	let inserted = 0;
 	try {
 		for (const row of sortedPrompts(manifest.db)) {
-			if (row.prompt === previous) continue;
-			previous = row.prompt;
 			batch.push(row);
 			if (batch.length < ROW_BATCH_SIZE) continue;
 			flush(batch);
@@ -331,10 +494,7 @@ function verifyRows(candidate: Database, manifest: PromptManifest | null, source
 	}
 	assertInvariant(manifest, "Missing prompt manifest during history verification");
 	let expectedId = 0n;
-	let previous: string | null = null;
 	for (const row of sortedPrompts(manifest.db)) {
-		if (row.prompt === previous) continue;
-		previous = row.prompt;
 		expectedId += 1n;
 		const next = iterator.next();
 		assertInvariant(!next.done, `History candidate is missing expected row ${expectedId}`);
@@ -355,6 +515,7 @@ export function verifyHistoryCandidate(
 	candidate: string,
 	source: HistoryRepairSource,
 	manifest: PromptManifest | null,
+	expectedSchema: readonly RawSchemaDefinition[],
 ) {
 	HistoryStorage.validateExactPath(candidate);
 	checkpointCandidate(candidate);
@@ -367,6 +528,13 @@ export function verifyHistoryCandidate(
 	}
 	checkpointCandidate(candidate);
 	verifyCommonCandidate(candidate);
+	verifyRawSchemaDefinitions(candidate, expectedSchema);
+}
+
+export function verifyPublishedHistoryCandidate(candidate: string, expectedSchema: readonly RawSchemaDefinition[]) {
+	HistoryStorage.validateExactPath(candidate);
+	verifyCommonCandidate(candidate);
+	verifyRawSchemaDefinitions(candidate, expectedSchema);
 }
 
 export function closePromptManifest(manifest: PromptManifest | null) {

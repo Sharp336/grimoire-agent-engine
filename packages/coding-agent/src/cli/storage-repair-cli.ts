@@ -6,7 +6,9 @@ import {
 	buildAgentCandidate,
 	diagnoseAgentSnapshot,
 	verifyAgentCandidate,
+	verifyPublishedAgentCandidate,
 } from "./storage-repair-agent";
+import type { PublishedFile, RawSchemaDefinition } from "./storage-repair-files";
 import {
 	cleanupSnapshot,
 	errorMessage,
@@ -15,11 +17,13 @@ import {
 	preparePristineSnapshot,
 	publishBackup,
 	publishCandidate,
+	rawSchemaDefinitions,
 	removeCandidateSidecars,
 	removeOwnedFile,
 	resolveArtifactPaths,
 	sealCandidate,
 	sourceStillMatches,
+	verifyCandidateSeal,
 } from "./storage-repair-files";
 import {
 	buildHistoryCandidate,
@@ -28,6 +32,7 @@ import {
 	type PromptManifest,
 	promptManifestStillMatches,
 	verifyHistoryCandidate,
+	verifyPublishedHistoryCandidate,
 } from "./storage-repair-history";
 import type {
 	HistoryRepairSource,
@@ -107,12 +112,14 @@ export async function runStorageRepair(
 		candidatePathTrusted: false,
 		checksums: [],
 		objects: [],
-		manualNextStep: manualNextStep(source, planned.candidate, planned.backup),
+		manualNextStep: "",
 	};
 	let snapshot: PristineSnapshot | null = null;
 	let prompts: PromptManifest | null = null;
 	let backupStage: string | null = null;
 	let candidateStage: string | null = null;
+	let expectedSchema: RawSchemaDefinition[] | null = null;
+	let candidateSeal: PublishedFile | null = null;
 	try {
 		if (flags.target === "agent" && flags.historySource !== undefined) {
 			throw new Error("--history-source is only valid with --repair-storage history");
@@ -120,7 +127,6 @@ export async function runStorageRepair(
 		const artifacts = await resolveArtifactPaths(source, flags.output);
 		result.backup = artifacts.backup;
 		result.candidate = artifacts.candidate;
-		result.manualNextStep = manualNextStep(source, artifacts.candidate, artifacts.backup);
 		snapshot = await preparePristineSnapshot(source, flags.target === "agent", hooks.afterPristineCopy);
 
 		let diagnosis: AgentRepairDiagnosis | null = null;
@@ -164,22 +170,41 @@ export async function runStorageRepair(
 		if (flags.target === "agent") {
 			if (!diagnosis || !snapshot.immutable) throw new Error("Agent schema diagnosis is missing");
 			result.objects = buildAgentCandidate(snapshot.immutable.db, candidateStage, diagnosis);
+			expectedSchema = rawSchemaDefinitions(candidateStage);
 			await hooks.beforeCandidateVerification?.();
-			verifyAgentCandidate(candidateStage, snapshot.immutable.db, diagnosis.omitTables);
+			verifyAgentCandidate(candidateStage, snapshot.immutable.db, diagnosis.omitTables, expectedSchema);
 		} else {
 			if (!historySource) throw new Error("History source is missing");
 			result.objects = buildHistoryCandidate(candidateStage, historySource, prompts);
+			expectedSchema = rawSchemaDefinitions(candidateStage);
 			await hooks.beforeCandidateVerification?.();
-			verifyHistoryCandidate(candidateStage, historySource, prompts);
+			verifyHistoryCandidate(candidateStage, historySource, prompts, expectedSchema);
 		}
 
 		const seal = await sealCandidate(candidateStage);
-		const candidateChecksum = { path: candidateStage, sha256: seal.sha256, size: Number(seal.size), ephemeral: true };
+		candidateSeal = seal;
+		if (!expectedSchema) throw new Error("Candidate schema seal is missing");
+		if (flags.target === "agent") {
+			if (!diagnosis || !snapshot.immutable) throw new Error("Agent schema diagnosis is missing");
+			verifyAgentCandidate(candidateStage, snapshot.immutable.db, diagnosis.omitTables, expectedSchema);
+		} else {
+			if (!historySource) throw new Error("History source is missing");
+			verifyHistoryCandidate(candidateStage, historySource, prompts, expectedSchema);
+		}
+		await verifyCandidateSeal(candidateStage, seal);
+		const candidateChecksum = {
+			path: candidateStage,
+			sha256: seal.sha256,
+			size: Number(seal.size),
+			ephemeral: true,
+		};
 		result.checksums.push(candidateChecksum);
 		await sourceStillMatches(snapshot.manifest);
 		if (historySource === "sessions") await promptManifestStillMatches(prompts);
 		if (flags.apply) {
 			await hooks.beforeCandidatePublication?.();
+			if (!candidateStage) throw new Error("Candidate publication stage is missing");
+			await verifyCandidateSeal(candidateStage, seal);
 			await sourceStillMatches(snapshot.manifest);
 			if (historySource === "sessions") await promptManifestStillMatches(prompts);
 			await publishCandidate(
@@ -201,7 +226,6 @@ export async function runStorageRepair(
 			);
 			candidateStage = null;
 			await sourceStillMatches(snapshot.manifest);
-			result.candidatePathTrusted = true;
 		}
 	} catch (error) {
 		if (result.candidatePublished) {
@@ -239,6 +263,20 @@ export async function runStorageRepair(
 		} catch (error) {
 			cleanupErrors.push(error);
 		}
+		if (result.candidatePublished && result.status === "ready" && cleanupErrors.length === 0) {
+			if (!candidateSeal || !expectedSchema) {
+				cleanupErrors.push(new Error("Published candidate verification data is missing"));
+			} else {
+				try {
+					if (flags.target === "agent") verifyPublishedAgentCandidate(result.candidate, expectedSchema);
+					else verifyPublishedHistoryCandidate(result.candidate, expectedSchema);
+					await hooks.beforeFinalCandidateSeal?.();
+					await verifyCandidateSeal(result.candidate, candidateSeal);
+				} catch (error) {
+					cleanupErrors.push(error);
+				}
+			}
+		}
 		if (cleanupErrors.length > 0) {
 			if (result.candidatePublished) {
 				result.status = "published-with-warning";
@@ -251,8 +289,11 @@ export async function runStorageRepair(
 					cleanupInvariant: cleanupErrors.map(errorMessage),
 				})}`;
 			}
+		} else if (result.candidatePublished && result.status === "ready") {
+			result.candidatePathTrusted = true;
 		}
 	}
 	if (result.status === "refused") result.objects.push(refusedObject(result));
+	result.manualNextStep = manualNextStep(result.source, result.candidate, result.backup, result);
 	return result;
 }

@@ -139,6 +139,7 @@ async function writeSession(
 	name: string,
 	records: Record<string, unknown>[],
 	format: SessionFormat = "title-slot",
+	headerExtra: Record<string, unknown> = {},
 ) {
 	const dir = path.join(getSessionsDir(root), project);
 	await fs.promises.mkdir(dir, { recursive: true });
@@ -149,6 +150,7 @@ async function writeSession(
 		id: name,
 		timestamp: "2026-01-01T00:00:00.000Z",
 		cwd: `/work/${project}`,
+		...headerExtra,
 	};
 	const body = [
 		...(format === "title-slot" ? [serializeTitleSlot({ title: name, updatedAt: header.timestamp })] : []),
@@ -226,6 +228,14 @@ function artifactModes(result: { backup: string; candidate: string }) {
 async function stageArtifacts(finalPath: string, label: "backup" | "candidate") {
 	const prefix = `.${path.basename(finalPath)}.${label}-`;
 	return (await fs.promises.readdir(path.dirname(finalPath))).filter(name => name.startsWith(prefix));
+}
+
+async function candidateStagePath(finalPath: string): Promise<string> {
+	const stage = requireValue(
+		(await stageArtifacts(finalPath, "candidate")).find(name => name.endsWith(".tmp")),
+		"candidate database stage",
+	);
+	return path.join(path.dirname(finalPath), stage);
 }
 
 describe("offline SQLite salvage", () => {
@@ -648,6 +658,82 @@ describe("offline SQLite salvage", () => {
 		}
 	});
 
+	test("raw agent and history sqlite_schema definitions reject trigger, index, and view SQL tampering", async () => {
+		const tamperSql: Record<string, string> = {
+			ext_notes_large_int:
+				"DROP INDEX ext_notes_large_int; CREATE INDEX ext_notes_large_int ON ext_notes(large_int DESC)",
+			ext_notes_view: "DROP VIEW ext_notes_view; CREATE VIEW ext_notes_view AS SELECT key FROM ext_notes",
+			ext_notes_touch:
+				"DROP TRIGGER ext_notes_touch; CREATE TRIGGER ext_notes_touch AFTER UPDATE ON ext_notes BEGIN SELECT NEW.large_int; END",
+			idx_history_created_at:
+				"DROP INDEX idx_history_created_at; CREATE INDEX idx_history_created_at ON history(created_at ASC)",
+			history_ai:
+				"DROP TRIGGER history_ai; CREATE TRIGGER history_ai AFTER INSERT ON history BEGIN INSERT INTO history_fts(rowid, prompt) VALUES (new.id, new.prompt || ''); END",
+		};
+		const tamper = (db: Database, name: string) =>
+			db.exec(requireValue(tamperSql[name], `schema mutation for ${name}`));
+
+		await createAgentSource();
+		for (const name of ["ext_notes_large_int", "ext_notes_view", "ext_notes_touch"]) {
+			const candidate = path.join(root, `agent-schema-${name}.db`);
+			const result = await runStorageRepair(
+				{ target: "agent", apply: true, agentDir: root, output: candidate },
+				{
+					beforeCandidateVerification: async () => {
+						const db = new Database(await candidateStagePath(candidate), { safeIntegers: true });
+						try {
+							tamper(db, name);
+						} finally {
+							closeWal(db);
+						}
+					},
+				},
+			);
+			expect(result.status).toBe("refused");
+			expect(result.refusal).toContain("Candidate sqlite_schema definition differs");
+		}
+
+		await createHistorySource();
+		for (const name of ["idx_history_created_at", "history_ai"]) {
+			const candidate = path.join(root, `history-schema-${name}.db`);
+			const result = await runStorageRepair(
+				{ target: "history", historySource: "fresh", apply: true, agentDir: root, output: candidate },
+				{
+					beforeCandidateVerification: async () => {
+						const db = new Database(await candidateStagePath(candidate), { safeIntegers: true });
+						try {
+							tamper(db, name);
+						} finally {
+							closeWal(db);
+						}
+					},
+				},
+			);
+			expect(result.status).toBe("refused");
+			expect(result.refusal).toContain("Candidate sqlite_schema definition differs");
+		}
+	});
+
+	test("AUTOINCREMENT-only built-in schema drift refuses repair", async () => {
+		const dbPath = await createAgentSource();
+		const db = new Database(dbPath);
+		try {
+			const versions = db.prepare("SELECT version FROM schema_version").values();
+			db.exec("DROP TABLE schema_version; CREATE TABLE schema_version (version INTEGER PRIMARY KEY AUTOINCREMENT)");
+			const insert = db.prepare("INSERT INTO schema_version(version) VALUES (?)");
+			try {
+				for (const [version] of versions) insert.run(version);
+			} finally {
+				insert.finalize();
+			}
+		} finally {
+			closeWal(db);
+		}
+		const result = await runStorageRepair({ target: "agent", apply: false, agentDir: root });
+		expect(result.status).toBe("refused");
+		expect(result.refusal).toContain("Structural drift in built-in schema object: schema_version");
+	});
+
 	test("only a registered corrupt derived table may be omitted", async () => {
 		const dbPath = await createAgentSource();
 		const db = new Database(dbPath);
@@ -749,7 +835,124 @@ describe("offline SQLite salvage", () => {
 		expect(result.refusal).toContain("Unsafe extension table shape");
 	});
 
-	test("sessions rebuild uses strict global ordering, adjacent deduplication, and FTS rank-1 integrity", async () => {
+	test("session history uses valid inner timestamps and falls back for invalid or legacy timestamps", async () => {
+		await createHistorySource();
+		await writeSession("timestamps", "timestamps", [
+			message("inner", "2026-01-01T00:00:03.000Z", "inner", { timestamp: 3_000 }),
+			message("invalid", "2026-01-01T00:00:02.000Z", "invalid", { timestamp: -1 }),
+			message("legacy", "2026-01-01T00:00:01.000Z", "legacy"),
+		]);
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
+		try {
+			expect(db.prepare("SELECT prompt, created_at FROM history ORDER BY id").all()).toEqual([
+				{ prompt: "inner", created_at: 3n },
+				{ prompt: "legacy", created_at: 1_767_225_601n },
+				{ prompt: "invalid", created_at: 1_767_225_602n },
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("session families deduplicate only inherited byte-identical records and bound unresolved graphs", async () => {
+		await createHistorySource();
+		const shared = message("shared", "2026-01-01T00:00:05.000Z", "inherited");
+		const parentFile = await writeSession("parent", "parent", [shared], "title-slot", {
+			timestamp: "2026-01-01T00:00:00.000Z",
+		});
+		await writeSession(
+			"child",
+			"child",
+			[shared, message("child-only", "2026-01-01T00:00:06.000Z", "child only")],
+			"title-slot",
+			{
+				timestamp: "2026-01-01T00:00:01.000Z",
+				parentSession: "parent",
+			},
+		);
+		await writeSession("path-child", "path-child", [shared], "title-slot", { parentSession: parentFile });
+
+		const orphan = message("orphan-shared", "2026-01-01T00:00:07.000Z", "orphan stays separate");
+		await writeSession("orphan", "orphan", [orphan], "title-slot", { parentSession: "missing-parent" });
+		await writeSession("unrelated", "unrelated", [orphan]);
+
+		const ambiguous = message("ambiguous-shared", "2026-01-01T00:00:08.000Z", "ambiguous stays separate");
+		await writeSession("ambiguous-a", "duplicate-parent", [ambiguous]);
+		await writeSession("ambiguous-b", "duplicate-parent", [ambiguous]);
+		await writeSession("ambiguous-child", "ambiguous-child", [ambiguous], "title-slot", {
+			parentSession: "duplicate-parent",
+		});
+
+		const cycle = message("cycle-shared", "2026-01-01T00:00:09.000Z", "cycle deduplicates");
+		await writeSession("cycle-a", "cycle-a", [cycle], "title-slot", {
+			timestamp: "2026-01-01T00:00:02.000Z",
+			parentSession: "cycle-b",
+		});
+		await writeSession("cycle-b", "cycle-b", [cycle], "title-slot", {
+			timestamp: "2026-01-01T00:00:03.000Z",
+			parentSession: "cycle-a",
+		});
+
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
+		try {
+			expect(db.prepare("SELECT prompt, cwd, session_id FROM history ORDER BY created_at, id").all()).toEqual([
+				{ prompt: "inherited", cwd: "/work/parent", session_id: "parent" },
+				{ prompt: "child only", cwd: "/work/child", session_id: "child" },
+				{ prompt: "orphan stays separate", cwd: "/work/orphan", session_id: "orphan" },
+				{ prompt: "orphan stays separate", cwd: "/work/unrelated", session_id: "unrelated" },
+				{ prompt: "ambiguous stays separate", cwd: "/work/ambiguous-a", session_id: "duplicate-parent" },
+				{ prompt: "ambiguous stays separate", cwd: "/work/ambiguous-b", session_id: "duplicate-parent" },
+				{ prompt: "ambiguous stays separate", cwd: "/work/ambiguous-child", session_id: "ambiguous-child" },
+				{ prompt: "cycle deduplicates", cwd: "/work/cycle-a", session_id: "cycle-a" },
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("fork families preserve divergent reused entry IDs", async () => {
+		await createHistorySource();
+		await writeSession("parent", "entry-parent", [message("reused", "2026-01-01T00:00:01.000Z", "parent payload")]);
+		await writeSession(
+			"child",
+			"entry-child",
+			[message("reused", "2026-01-01T00:00:01.000Z", "child payload")],
+			"title-slot",
+			{ parentSession: "entry-parent" },
+		);
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true });
+		try {
+			expect(db.prepare("SELECT prompt FROM history ORDER BY id").all()).toEqual([
+				{ prompt: "child payload" },
+				{ prompt: "parent payload" },
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("sessions rebuild uses strict global ordering, full-record deduplication, and FTS rank-1 integrity", async () => {
 		await createHistorySource();
 		await writeSession("b", "session-b", [
 			message("b1", "2026-01-01T00:00:03.900Z", "third prompt"),
@@ -778,6 +981,7 @@ describe("offline SQLite salvage", () => {
 		try {
 			expect(db.prepare("SELECT prompt, created_at, cwd, session_id FROM history ORDER BY id").all()).toEqual([
 				{ prompt: "first prompt", created_at: 1_767_225_601n, cwd: "/work/a", session_id: "session-a" },
+				{ prompt: "first prompt", created_at: 1_767_225_602n, cwd: "/work/a", session_id: "session-a" },
 				{ prompt: "third prompt", created_at: 1_767_225_603n, cwd: "/work/b", session_id: "session-b" },
 				{ prompt: "user steering", created_at: 1_767_225_604n, cwd: "/work/b", session_id: "session-b" },
 			]);
@@ -864,6 +1068,39 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePublished).toBe(false);
 	});
 
+	test("a mutation between verification and sealing is refused by seal-bound revalidation", async () => {
+		await createHistorySource();
+		const originalChmod = fs.promises.chmod;
+		let mutated = false;
+		const chmodSpy = spyOn(fs.promises, "chmod").mockImplementation((async (target, mode) => {
+			if (!mutated && typeof target === "string" && path.basename(target) === "candidate.db") {
+				mutated = true;
+				const db = new Database(target);
+				try {
+					db.exec(
+						"DROP TRIGGER history_ai; CREATE TRIGGER history_ai AFTER INSERT ON history BEGIN INSERT INTO history_fts(rowid, prompt) VALUES (new.id, new.prompt || ''); END",
+					);
+				} finally {
+					closeWal(db);
+				}
+			}
+			return Reflect.apply(originalChmod, fs.promises, [target, mode]);
+		}) as typeof fs.promises.chmod);
+		try {
+			const result = await runStorageRepair({
+				target: "history",
+				historySource: "fresh",
+				apply: false,
+				agentDir: root,
+			});
+			expect(mutated).toBe(true);
+			expect(result.status).toBe("refused");
+			expect(result.refusal).toContain("Candidate sqlite_schema definition differs");
+		} finally {
+			chmodSpy.mockRestore();
+		}
+	});
+
 	test("session manifest changes during final cleanup make a published candidate untrusted", async () => {
 		await createHistorySource();
 		await writeSession("first", "first-session", [message("m", "2026-01-01T00:00:01.000Z", "first")]);
@@ -879,6 +1116,61 @@ describe("offline SQLite salvage", () => {
 		expect(result.warning).toContain("Session directory changed during storage repair");
 		expect(result.candidatePublished).toBe(true);
 		expect(result.candidatePathTrusted).toBe(false);
+		expect(result.manualNextStep).toContain("Do not install");
+	});
+
+	test("final cleanup revalidation rejects a published candidate mutated during snapshot cleanup", async () => {
+		await createAgentSource();
+		const candidate = path.join(root, "cleanup-mutated-candidate.db");
+		let snapshotTempDir: string | undefined;
+		let mutated = false;
+		const originalRm = fs.promises.rm;
+		const rmSpy = spyOn(fs.promises, "rm").mockImplementation((async (target, options) => {
+			if (!mutated && target === snapshotTempDir) {
+				mutated = true;
+				await fs.promises.appendFile(candidate, "mutated during final cleanup");
+			}
+			return Reflect.apply(originalRm, fs.promises, [target, options]);
+		}) as typeof fs.promises.rm);
+		try {
+			const result = await runStorageRepair(
+				{ target: "agent", apply: true, agentDir: root, output: candidate },
+				{
+					afterPristineCopy: tempDir => {
+						snapshotTempDir = tempDir;
+					},
+				},
+			);
+			expect(mutated).toBe(true);
+			expect(result.status).toBe("published-with-warning");
+			expect(result.candidatePublished).toBe(true);
+			expect(result.candidatePathTrusted).toBe(false);
+			expect(result.warning).toContain("Publication stage changed after verification");
+			expect(result.manualNextStep).toContain("Do not install");
+		} finally {
+			rmSpy.mockRestore();
+		}
+	});
+
+	test("the final content seal runs after published schema validation", async () => {
+		await createAgentSource();
+		const candidate = path.join(root, "post-schema-mutation.db");
+		let mutated = false;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root, output: candidate },
+			{
+				beforeFinalCandidateSeal: async () => {
+					mutated = true;
+					await fs.promises.appendFile(candidate, "mutated after schema validation");
+				},
+			},
+		);
+		expect(mutated).toBe(true);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.candidatePublished).toBe(true);
+		expect(result.candidatePathTrusted).toBe(false);
+		expect(result.warning).toContain("Publication stage changed after verification");
+		expect(result.manualNextStep).toContain("Do not install");
 	});
 
 	test("session rebuild skips blank and malformed JSONL records", async () => {
@@ -1115,8 +1407,7 @@ describe("offline SQLite salvage", () => {
 			{ target: "agent", apply: true, agentDir: root, output: candidate },
 			{
 				beforeCandidatePublication: async () => {
-					const stage = requireValue((await stageArtifacts(candidate, "candidate")).at(0), "candidate stage");
-					await fs.promises.appendFile(path.join(root, stage), "tampered after sealing");
+					await fs.promises.appendFile(await candidateStagePath(candidate), "tampered after sealing");
 				},
 			},
 		);
@@ -1439,7 +1730,7 @@ describe("offline SQLite salvage", () => {
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 	});
 
-	test("text and JSON reports are structured, nonzero-compatible, and include quarantine instructions", async () => {
+	test("text and JSON reports are structured, nonzero-compatible, and include status-aware instructions", async () => {
 		await createHistorySource();
 		let result = await runGcCommand({
 			flags: { agentDir: root, repairStorage: "history", historySource: "fresh", apply: true },
@@ -1459,7 +1750,8 @@ describe("offline SQLite salvage", () => {
 		expect(parsed.repair.dataLoss).toBe(true);
 		expect(parsed.repair.candidatePublished).toBe(false);
 		expect(parsed.repair.candidatePathTrusted).toBe(false);
-		expect(parsed.repair.manualNextStep).toContain("quarantine");
+		expect(parsed.repair.manualNextStep).toContain("Dry run only");
+		expect(parsed.repair.manualNextStep).toContain("Do not install");
 		expect(
 			collectGcErrors({
 				agentDir: root,
@@ -1479,6 +1771,40 @@ describe("offline SQLite salvage", () => {
 		expect(result.repair?.dataLoss).toBe(true);
 		expect(stdout.join("")).toContain("session rebuild retains only session messages");
 		expect(stdout.join("")).toContain("stable row IDs are not preserved");
+	});
+
+	test("manual guidance is status-aware and never installs an absent or untrusted candidate", async () => {
+		const dbPath = await createAgentSource();
+		const dryRun = await runStorageRepair({ target: "agent", apply: false, agentDir: root });
+		expect(dryRun.manualNextStep).toContain("Dry run only");
+		expect(dryRun.manualNextStep).toContain("Do not install");
+
+		const source = new Database(dbPath);
+		source.exec("ALTER TABLE settings ADD COLUMN refusal_drift TEXT");
+		closeWal(source);
+		const refused = await runStorageRepair({ target: "agent", apply: true, agentDir: root });
+		expect(refused.status).toBe("refused");
+		expect(refused.manualNextStep).toContain("Do not install");
+
+		await fs.promises.rm(dbPath, { force: true });
+		await fs.promises.rm(`${dbPath}-wal`, { force: true });
+		await fs.promises.rm(`${dbPath}-shm`, { force: true });
+		await createAgentSource();
+		const warned = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root },
+			{ afterCandidatePublication: () => fs.promises.appendFile(dbPath, "changed after publication") },
+		);
+		expect(warned.status).toBe("published-with-warning");
+		expect(warned.manualNextStep).toContain("Do not install");
+
+		await fs.promises.rm(dbPath, { force: true });
+		await fs.promises.rm(`${dbPath}-wal`, { force: true });
+		await fs.promises.rm(`${dbPath}-shm`, { force: true });
+		await createAgentSource();
+		const trusted = await runStorageRepair({ target: "agent", apply: true, agentDir: root });
+		expect(trusted.status).toBe("ready");
+		expect(trusted.candidatePathTrusted).toBe(true);
+		expect(trusted.manualNextStep).toContain(`Copy ${trusted.candidate}`);
 	});
 
 	test("dry-run and published candidates report distinct checksum lifecycles", async () => {

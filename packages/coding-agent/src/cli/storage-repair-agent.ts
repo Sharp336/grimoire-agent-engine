@@ -6,6 +6,7 @@ import {
 	validateMemoryStorageExactPath,
 } from "../memories/storage";
 import { AGENT_STORAGE_TABLES, AgentStorage, SCHEMA_VERSION } from "../session/agent-storage";
+import type { RawSchemaDefinition } from "./storage-repair-files";
 import {
 	assertInvariant,
 	canonicalSchema,
@@ -13,6 +14,7 @@ import {
 	errorMessage,
 	stableJson,
 	verifyCommonCandidate,
+	verifyRawSchemaDefinitions,
 } from "./storage-repair-files";
 import type { CanonicalSchemaObject, FrozenSqliteSnapshot, StorageRepairObjectResult } from "./storage-repair-types";
 
@@ -579,7 +581,12 @@ export function buildAgentCandidate(
 	}
 }
 
-export function verifyAgentCandidate(candidate: string, source: Database, omitted: readonly string[]) {
+export function verifyAgentCandidate(
+	candidate: string,
+	source: Database,
+	omitted: readonly string[],
+	expectedSchema: readonly RawSchemaDefinition[],
+) {
 	AgentStorage.validateExactPath(candidate);
 	validateMemoryStorageExactPath(candidate);
 	checkpointCandidate(candidate);
@@ -598,6 +605,14 @@ export function verifyAgentCandidate(candidate: string, source: Database, omitte
 	} finally {
 		db.close();
 	}
+	verifyRawSchemaDefinitions(candidate, expectedSchema);
+}
+
+export function verifyPublishedAgentCandidate(candidate: string, expectedSchema: readonly RawSchemaDefinition[]) {
+	AgentStorage.validateExactPath(candidate);
+	validateMemoryStorageExactPath(candidate);
+	verifyCommonCandidate(candidate);
+	verifyRawSchemaDefinitions(candidate, expectedSchema);
 }
 
 function preservedTableNames(source: Database, omitted: readonly string[]) {

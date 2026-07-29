@@ -58,6 +58,7 @@ export interface StorageRepairTestHooks {
 	afterCandidatePublication?: () => void | Promise<void>;
 	beforeCandidateStageUnlink?: () => void | Promise<void>;
 	beforeCandidateDirectorySync?: () => void | Promise<void>;
+	beforeFinalCandidateSeal?: () => void | Promise<void>;
 	isWindows?: () => boolean;
 	onDirectorySync?: () => void;
 }

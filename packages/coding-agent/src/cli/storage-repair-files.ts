@@ -23,6 +23,13 @@ interface SchemaObjectRow {
 	sql: string | null;
 }
 
+export interface RawSchemaDefinition {
+	kind: string;
+	name: string;
+	table: string;
+	sql: string | null;
+}
+
 type SqliteValue = string | number | bigint | Uint8Array | null;
 
 interface SnapshotFingerprint {
@@ -83,8 +90,47 @@ function sqliteRows(db: Database, sql: string, ...bindings: SqliteValue[]): Arra
 
 function schemaObjects(db: Database): SchemaObjectRow[] {
 	return db
-		.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
+		.prepare(
+			"SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type COLLATE BINARY, name COLLATE BINARY",
+		)
 		.all() as SchemaObjectRow[];
+}
+
+export function rawSchemaDefinitions(candidate: string): RawSchemaDefinition[] {
+	const db = new Database(candidate, { readonly: true, safeIntegers: true });
+	try {
+		return schemaObjects(db).map(object => ({
+			kind: object.type,
+			name: object.name,
+			table: object.tbl_name,
+			sql: object.sql,
+		}));
+	} finally {
+		db.close();
+	}
+}
+
+export function verifyRawSchemaDefinitions(candidate: string, expected: readonly RawSchemaDefinition[]): void {
+	const actual = rawSchemaDefinitions(candidate);
+	const key = (object: RawSchemaDefinition) => JSON.stringify([object.kind, object.name]);
+	const expectedByKey = new Map(expected.map(object => [key(object), object]));
+	const actualByKey = new Map(actual.map(object => [key(object), object]));
+	assertInvariant(expectedByKey.size === expected.length, "Candidate expected sqlite_schema has duplicate objects");
+	assertInvariant(actualByKey.size === actual.length, "Candidate sqlite_schema has duplicate objects");
+	for (const object of expected) {
+		const observed = actualByKey.get(key(object));
+		assertInvariant(observed, `Candidate sqlite_schema is missing ${object.kind} ${object.name}`);
+		assertInvariant(
+			stableJson(observed) === stableJson(object),
+			`Candidate sqlite_schema definition differs for ${object.kind} ${object.name}`,
+		);
+	}
+	for (const object of actual) {
+		assertInvariant(
+			expectedByKey.has(key(object)),
+			`Candidate sqlite_schema has unexpected ${object.kind} ${object.name}`,
+		);
+	}
 }
 
 function canonicalTable(db: Database, object: SchemaObjectRow): CanonicalSchemaObject {
@@ -105,7 +151,7 @@ function canonicalTable(db: Database, object: SchemaObjectRow): CanonicalSchemaO
 			columns: sqliteRows(db, "SELECT * FROM pragma_index_xinfo(?) ORDER BY seqno", name).map(canonicalRow),
 		};
 	});
-	if (object.sql && /\b(?:check|collate|generated|without\s+rowid|strict|using)\b/iu.test(object.sql)) {
+	if (object.sql && /\b(?:check|collate|generated|without\s+rowid|strict|using|autoincrement)\b/iu.test(object.sql)) {
 		item.sql = normalizeSql(object.sql);
 	}
 	return item;
@@ -744,6 +790,10 @@ export async function sealCandidate(candidate: string): Promise<PublishedFile> {
 	return sealedFile(candidate);
 }
 
+export async function verifyCandidateSeal(candidate: string, seal: PublishedFile): Promise<void> {
+	await verifySealedFile(candidate, seal);
+}
+
 export async function publishCandidate(
 	stage: string,
 	finalPath: string,
@@ -754,7 +804,27 @@ export async function publishCandidate(
 	await publishNoReplace(stage, finalPath, seal, onLinked, hooks);
 }
 
-export function manualNextStep(source: string, candidate: string, backup: string): string {
+export interface ManualRepairState {
+	status: "ready" | "refused" | "published-with-warning";
+	apply: boolean;
+	backupCreated: boolean;
+	candidatePublished: boolean;
+	candidatePathTrusted: boolean;
+}
+
+export function manualNextStep(source: string, candidate: string, backup: string, state: ManualRepairState): string {
+	if (state.status === "refused") {
+		return `Repair was refused. Do not install ${candidate}.${state.backupCreated ? ` Retain verified backup ${backup}.` : ""}`;
+	}
+	if (!state.apply) {
+		return `Dry run only: no candidate was published. Do not install ${candidate}; rerun with --apply only after reviewing the refusal-free result.`;
+	}
+	if (!state.candidatePublished) {
+		return `No candidate was published. Do not install ${candidate}.${state.backupCreated ? ` Retain verified backup ${backup}.` : ""}`;
+	}
+	if (!state.candidatePathTrusted) {
+		return `Published candidate ${candidate} failed final trust checks. Do not install it.${state.backupCreated ? ` Retain verified backup ${backup}.` : ""}`;
+	}
 	return [
 		"Stop every OMP process.",
 		`Move ${source}, ${source}-wal, and ${source}-shm together into a retained quarantine directory.`,
