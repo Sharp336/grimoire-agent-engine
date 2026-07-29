@@ -175,6 +175,7 @@ describe("issue #967 vision guard", () => {
 				{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 			],
 			false,
+			false,
 			model.compat.supportsImageDetailOriginal,
 		);
 		expect(countTaggedValues(userContent, "input_image")).toBe(0);

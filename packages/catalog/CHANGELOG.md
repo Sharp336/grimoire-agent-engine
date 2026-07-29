@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added audio and video model input modalities for catalog discovery and validation.
+
 ## [17.1.8] - 2026-07-28
 
 ### Added

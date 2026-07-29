@@ -41,6 +41,7 @@ import {
 	type ComputerToolCallMetadata,
 	type Context,
 	type ImageContent,
+	type MediaContent,
 	type Message,
 	type MessageAttribution,
 	type Model,
@@ -96,6 +97,7 @@ import type {
 	ResponseCustomToolCall,
 	ResponseFunctionToolCall,
 	ResponseInput,
+	ResponseInputAudio,
 	ResponseInputContent,
 	ResponseInputImage,
 	ResponseInputItem,
@@ -107,7 +109,7 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 /**
  * Keyless-provider sentinel. Custom providers configured with `auth: none`
@@ -1479,8 +1481,9 @@ function clampResponsesImageDetail(
 }
 
 export function convertResponsesInputContent(
-	content: string | Array<TextContent | ImageContent>,
+	content: string | Array<TextContent | MediaContent>,
 	supportsImages: boolean,
+	supportsAudio: boolean,
 	supportsImageDetailOriginal: boolean,
 ): ResponseInputContent[] | undefined {
 	if (typeof content === "string") {
@@ -1488,28 +1491,46 @@ export function convertResponsesInputContent(
 		return [{ type: "input_text", text: content.toWellFormed() } satisfies ResponseInputText];
 	}
 
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
 	const normalizedContent: ResponseInputContent[] = [];
-	for (const item of textBlocks) {
-		const text = item.text.toWellFormed();
-		if (text.trim().length === 0) continue;
-		normalizedContent.push({
-			type: "input_text",
-			text,
-		} satisfies ResponseInputText);
-	}
-	for (const item of imageBlocks) {
-		normalizedContent.push({
-			type: "input_image",
-			detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
-			image_url: `data:${item.mimeType};base64,${item.data}`,
-		} satisfies ResponseInputImage);
-	}
-	if (omittedImages) {
-		normalizedContent.push({
-			type: "input_text",
-			text: NON_VISION_IMAGE_PLACEHOLDER,
-		} satisfies ResponseInputText);
+	for (const item of content) {
+		if (item.type === "text") {
+			const text = item.text.toWellFormed();
+			if (text.trim().length > 0) normalizedContent.push({ type: "input_text", text } satisfies ResponseInputText);
+			continue;
+		}
+		if (item.type === "image") {
+			if (supportsImages) {
+				normalizedContent.push({
+					type: "input_image",
+					detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
+					image_url: `data:${item.mimeType};base64,${item.data}`,
+				} satisfies ResponseInputImage);
+			} else {
+				normalizedContent.push({
+					type: "input_text",
+					text: NON_VISION_IMAGE_PLACEHOLDER,
+				} satisfies ResponseInputText);
+			}
+			continue;
+		}
+		if (item.type === "audio" && supportsAudio) {
+			const normalizedMimeType = item.mimeType.trim().toLowerCase();
+			normalizedContent.push({
+				type: "input_audio",
+				input_audio: {
+					data: item.data,
+					format: normalizedMimeType === "audio/wav" || normalizedMimeType === "audio/x-wav" ? "wav" : "mp3",
+				},
+			} satisfies ResponseInputAudio);
+		} else {
+			normalizedContent.push({
+				type: "input_text",
+				text:
+					item.type === "audio"
+						? "[audio omitted: model does not support audio input]"
+						: "[video omitted: OpenAI Responses does not support video input]",
+			} satisfies ResponseInputText);
+		}
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
@@ -1666,6 +1687,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 			const content = convertResponsesInputContent(
 				msg.content,
 				options.model.input.includes("image"),
+				options.model.input.includes("audio"),
 				supportsImageDetailOriginal,
 			);
 			if (!content) continue;

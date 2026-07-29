@@ -56,6 +56,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionContext,
 	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ModelUsageHealth,
@@ -4770,9 +4771,9 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			if (streamingBehavior === "followUp") {
-				await this.#queueUserMessage(expandedText, options?.images, "followUp");
+				await this.#queueUserMessage(expandedText, options?.images, "followUp", options?.attachments);
 			} else {
-				await this.#queueUserMessage(expandedText, options?.images, "steer");
+				await this.#queueUserMessage(expandedText, options?.images, "steer", options?.attachments);
 			}
 			return true;
 		}
@@ -4785,9 +4786,12 @@ export class AgentSession {
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		const userContent: (TextContent | MediaContent)[] = [{ type: "text", text: expandedText }];
 		if (normalizedImages?.length) {
 			userContent.push(...normalizedImages);
+		}
+		if (options?.attachments?.length) {
+			userContent.push(...options.attachments);
 		}
 		// Text-only model + image attachment: describe via a vision model and inject the
 		// description as a hidden companion (the image stays in the visible user message).
@@ -5301,7 +5305,7 @@ export class AgentSession {
 		// enqueues as a user-attributed message) and place the developer message
 		// directly on the follow-up queue.
 		const normalizedImages = await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		const content: (TextContent | MediaContent)[] = [{ type: "text", text: expandedText }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
@@ -5322,15 +5326,19 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
+		attachments?: MediaContent[],
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed.
 		this.#advisors.autoResumeSuppressed = false;
 		const normalizedImages = await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		const content: (TextContent | MediaContent)[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
+		}
+		if (attachments?.length) {
+			content.push(...attachments);
 		}
 		// Text-only model + image attachment: describe via a vision model and enqueue the
 		// description as a hidden companion immediately before the user message.
@@ -5659,37 +5667,38 @@ export class AgentSession {
 	 * Explicit `deliverAs` queues without starting a turn in either state.
 	 */
 	async sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
+		content: string | (TextContent | MediaContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
+		let attachments: MediaContent[] | undefined;
 
 		if (typeof content === "string") {
 			text = content;
 		} else {
 			const textParts: string[] = [];
 			images = [];
+			attachments = [];
 			for (const part of content) {
-				if (part.type === "text") {
-					textParts.push(part.text);
-				} else {
-					images.push(part);
-				}
+				if (part.type === "text") textParts.push(part.text);
+				else if (part.type === "image") images.push(part);
+				else attachments.push(part);
 			}
 			text = textParts.join("\n");
 			if (images.length === 0) images = undefined;
+			if (attachments.length === 0) attachments = undefined;
 		}
 
 		if (options?.deliverAs && !(await this.#runUsageAwarePreflight())) return;
 
 		if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp");
+			await this.#queueUserMessage(text, images, "followUp", attachments);
 			return;
 		}
 		if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer");
+			await this.#queueUserMessage(text, images, "steer", attachments);
 			return;
 		}
 
@@ -5699,6 +5708,7 @@ export class AgentSession {
 		await this.prompt(text, {
 			expandPromptTemplates: false,
 			images,
+			attachments,
 			streamingBehavior: "steer",
 		});
 	}

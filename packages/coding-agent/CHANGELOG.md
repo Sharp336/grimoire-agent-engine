@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `.wav`, `.mp3`, and `.mp4` `@file` attachments as model media input.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

@@ -12,7 +12,7 @@ import type {
 	AssistantMessage,
 	Context,
 	FetchImpl,
-	ImageContent,
+	MediaContent,
 	Model,
 	ServiceTier,
 	StopReason,
@@ -202,26 +202,34 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				});
 			} else {
 				const supportsImages = model.input.includes("image");
+				const supportsAudio = model.input.includes("audio");
+				const supportsVideo = model.input.includes("video");
 				const parts: Part[] = [];
-				let omittedImages = false;
+				const omittedMedia = new Set<MediaContent["type"]>();
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
-					} else if (supportsImages) {
-						parts.push({
-							inlineData: {
-								mimeType: item.mimeType,
-								data: item.data,
-							},
-						});
+						continue;
+					}
+					if (
+						(item.type === "image" && supportsImages) ||
+						(item.type === "audio" && supportsAudio) ||
+						(item.type === "video" && supportsVideo)
+					) {
+						parts.push({ inlineData: { mimeType: item.mimeType, data: item.data } });
 					} else {
-						omittedImages = true;
+						omittedMedia.add(item.type);
 					}
 				}
-				if (omittedImages) {
-					parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
+				for (const type of omittedMedia) {
+					parts.push({
+						text:
+							type === "image"
+								? NON_VISION_IMAGE_PLACEHOLDER
+								: `[${type} omitted: model does not support ${type} input]`,
+					});
 				}
 				if (parts.length === 0) continue;
 				contents.push({
@@ -287,35 +295,53 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				parts,
 			});
 		} else if (msg.role === "toolResult") {
-			// Extract text and image content
+			// Extract text and supported media content.
 			const supportsImages = model.input.includes("image");
+			const supportsAudio = model.input.includes("audio");
+			const supportsVideo = model.input.includes("video");
 			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
 			const textResult = textContent.map(c => c.text).join("\n");
-			const imageContent = supportsImages ? msg.content.filter((c): c is ImageContent => c.type === "image") : [];
-			const omittedImages = !supportsImages && msg.content.some((c): c is ImageContent => c.type === "image");
+			const mediaContent = msg.content.filter(
+				(c): c is MediaContent =>
+					(c.type === "image" && supportsImages) ||
+					(c.type === "audio" && supportsAudio) ||
+					(c.type === "video" && supportsVideo),
+			);
+			const omittedMedia = msg.content.filter(
+				(c): c is MediaContent =>
+					c.type !== "text" &&
+					!(
+						(c.type === "image" && supportsImages) ||
+						(c.type === "audio" && supportsAudio) ||
+						(c.type === "video" && supportsVideo)
+					),
+			);
 
 			const hasText = textResult.length > 0;
-			const hasImages = imageContent.length > 0;
+			const hasMedia = mediaContent.length > 0;
 
-			// Gemini 3+ models support multimodal function responses with images nested inside
-			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
-			// Antigravity also accept this shape. Gemini < 3 still needs a separate user image turn.
+			// Gemini 3+ models support multimodal function responses with inline media.
+			// Gemini < 3 still needs a separate user media turn.
 			const modelSupportsMultimodalFunctionResponse = supportsMultimodalFunctionResponse(model.id);
+			const omissionText = omittedMedia
+				.map(media =>
+					media.type === "image"
+						? NON_VISION_IMAGE_PLACEHOLDER
+						: `[${media.type} omitted: model does not support ${media.type} input]`,
+				)
+				.join("\n");
 
 			// Use "output" key for success, "error" key for errors as per SDK documentation
-			const responseValue = omittedImages
-				? [hasText ? textResult.toWellFormed() : "", NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
+			const responseValue = omissionText
+				? [hasText ? textResult.toWellFormed() : "", omissionText].filter(Boolean).join("\n")
 				: hasText
 					? textResult.toWellFormed()
-					: hasImages
-						? "(see attached image)"
+					: hasMedia
+						? "(see attached media)"
 						: "";
 
-			const imageParts: Part[] = imageContent.map(imageBlock => ({
-				inlineData: {
-					mimeType: imageBlock.mimeType,
-					data: imageBlock.data,
-				},
+			const mediaParts: Part[] = mediaContent.map(media => ({
+				inlineData: { mimeType: media.mimeType, data: media.data },
 			}));
 
 			const includeId = supportsFunctionPartId(model);
@@ -324,7 +350,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				functionResponse: {
 					name: emittedName ?? msg.toolName,
 					response: msg.isError ? { error: responseValue } : { output: responseValue },
-					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
+					...(hasMedia && modelSupportsMultimodalFunctionResponse && { parts: mediaParts }),
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
@@ -345,9 +371,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				});
 			}
 
-			// For Gemini < 3, buffer images for a separate user message after the functionResponse turn
-			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
-				pendingToolImageParts.push({ text: "Tool result image:" }, ...imageParts);
+			// For Gemini < 3, buffer media for a separate user message after the functionResponse turn.
+			if (hasMedia && !modelSupportsMultimodalFunctionResponse) {
+				pendingToolImageParts.push({ text: "Tool result media:" }, ...mediaParts);
 			}
 		}
 	}

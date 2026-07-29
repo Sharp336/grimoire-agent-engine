@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
 	directoryExists,
@@ -420,7 +420,7 @@ async function runInteractiveMode(
 	showStartupSplash: boolean,
 	eventBus?: EventBus,
 	initialMessage?: string,
-	initialImages?: ImageContent[],
+	initialImages?: MediaContent[],
 	joinLink?: string,
 ): Promise<void> {
 	const mode = new InteractiveMode(
@@ -506,7 +506,7 @@ async function runInteractiveMode(
 	if (initialMessage !== undefined) {
 		try {
 			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(initialMessage, { images: initialImages });
+			await session.prompt(initialMessage, { attachments: initialImages });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);

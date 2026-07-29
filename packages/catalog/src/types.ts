@@ -789,6 +789,8 @@ export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	model?: string;
 }
 
+export type InputModality = "text" | "image" | "audio" | "video";
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -813,7 +815,7 @@ export interface Model<TApi extends Api = Api> {
 	provider: Provider;
 	baseUrl: string;
 	reasoning: boolean;
-	input: ("text" | "image")[];
+	input: InputModality[];
 	/**
 	 * Decoder family used for image inputs when it has narrower format support
 	 * than OMP's general image pipeline. `stb` local backends reject WebP.

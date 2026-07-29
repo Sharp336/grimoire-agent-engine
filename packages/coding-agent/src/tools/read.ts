@@ -10,7 +10,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { type SummaryResult, summarizeCode } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
@@ -964,7 +964,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
-		const content: Array<TextContent | ImageContent> = [];
+		const content: Array<TextContent | MediaContent> = [];
 		const displayReadTargets: string[] = [];
 		let pendingText = notice;
 		const flushText = () => {

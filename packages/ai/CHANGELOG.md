@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added audio and video input message content, with Gemini inline media, OpenAI audio input, and safe unsupported-media fallbacks.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

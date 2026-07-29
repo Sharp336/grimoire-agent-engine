@@ -1,7 +1,7 @@
 import type {
 	Context,
 	DeveloperMessage,
-	ImageContent,
+	MediaContent,
 	Model,
 	TextContent,
 	ToolResultMessage,
@@ -26,11 +26,11 @@ function countImages(context: Context): number {
 }
 
 function clampContent(
-	content: readonly (TextContent | ImageContent)[],
+	content: readonly (TextContent | MediaContent)[],
 	state: { remainingDrops: number },
-): (TextContent | ImageContent)[] | undefined {
+): (TextContent | MediaContent)[] | undefined {
 	let changed = false;
-	const clamped: (TextContent | ImageContent)[] = [];
+	const clamped: (TextContent | MediaContent)[] = [];
 	for (const part of content) {
 		if (part.type === "image" && state.remainingDrops > 0) {
 			state.remainingDrops--;

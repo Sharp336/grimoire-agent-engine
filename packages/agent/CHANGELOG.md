@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added audio and video message-content support to agent state and compaction contracts.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed

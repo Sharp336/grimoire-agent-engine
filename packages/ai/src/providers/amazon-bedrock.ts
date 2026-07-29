@@ -867,7 +867,9 @@ function convertMessages(
 						content: m.content.map(c =>
 							c.type === "image"
 								? { image: createImageBlock(c.mimeType, c.data) }
-								: { text: c.text.toWellFormed() },
+								: c.type === "text"
+									? { text: c.text.toWellFormed() }
+									: { text: `[unsupported ${c.type}: ${c.mimeType}]` },
 						),
 						status: m.isError ? "error" : "success",
 					},
@@ -882,7 +884,9 @@ function convertMessages(
 							content: nextMsg.content.map(c =>
 								c.type === "image"
 									? { image: createImageBlock(c.mimeType, c.data) }
-									: { text: c.text.toWellFormed() },
+									: c.type === "text"
+										? { text: c.text.toWellFormed() }
+										: { text: `[unsupported ${c.type}: ${c.mimeType}]` },
 							),
 							status: nextMsg.isError ? "error" : "success",
 						},

@@ -60,6 +60,7 @@ import type {
 	ChatCompletionChunk,
 	ChatCompletionContentPart,
 	ChatCompletionContentPartImage,
+	ChatCompletionContentPartInputAudio,
 	ChatCompletionContentPartText,
 	ChatCompletionMessageParam,
 	ChatCompletionTool,
@@ -1774,6 +1775,11 @@ function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: C
 	}
 }
 
+function openAIAudioFormat(mimeType: string): "wav" | "mp3" {
+	const normalized = mimeType.trim().toLowerCase();
+	return normalized === "audio/wav" || normalized === "audio/x-wav" ? "wav" : "mp3";
+}
+
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -1892,17 +1898,21 @@ export function convertMessages(
 				});
 			} else {
 				const supportsImages = model.input.includes("image") && !isDashscopeCompatibleModeTextOnlyQwen(model);
+				const supportsAudio = model.input.includes("audio");
 				const content: ChatCompletionContentPart[] = [];
 				let omittedImages = false;
+				let omittedAudio = false;
+				let omittedVideo = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
-						content.push({
-							type: "text",
-							text,
-						} satisfies ChatCompletionContentPartText);
-					} else if (supportsImages) {
+						content.push({ type: "text", text } satisfies ChatCompletionContentPartText);
+					} else if (item.type === "image") {
+						if (!supportsImages) {
+							omittedImages = true;
+							continue;
+						}
 						content.push({
 							type: "image_url",
 							image_url: {
@@ -1911,16 +1921,32 @@ export function convertMessages(
 								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
 							},
 						} satisfies ChatCompletionContentPartImage);
+					} else if (item.type === "audio" && supportsAudio) {
+						content.push({
+							type: "input_audio",
+							input_audio: { data: item.data, format: openAIAudioFormat(item.mimeType) },
+						} satisfies ChatCompletionContentPartInputAudio);
+					} else if (item.type === "audio") {
+						omittedAudio = true;
 					} else {
-						omittedImages = true;
+						omittedVideo = true;
 					}
 				}
-				if (omittedImages) {
+				if (omittedImages)
 					content.push({
 						type: "text",
 						text: NON_VISION_IMAGE_PLACEHOLDER,
 					} satisfies ChatCompletionContentPartText);
-				}
+				if (omittedAudio)
+					content.push({
+						type: "text",
+						text: "[audio omitted: model does not support audio input]",
+					} satisfies ChatCompletionContentPartText);
+				if (omittedVideo)
+					content.push({
+						type: "text",
+						text: "[video omitted: OpenAI Chat Completions does not support video input]",
+					} satisfies ChatCompletionContentPartText);
 				if (content.length === 0) continue;
 				params.push({
 					role: "user",
@@ -2170,7 +2196,7 @@ export function convertMessages(
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			// Batch consecutive tool results and collect all images
-			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			const mediaBlocks: Array<ChatCompletionContentPartImage | ChatCompletionContentPartInputAudio> = [];
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
@@ -2182,21 +2208,28 @@ export function convertMessages(
 					.map(c => (c as TextContent).text)
 					.join("\n");
 				const supportsImages = model.input.includes("image") && !isDashscopeCompatibleModeTextOnlyQwen(model);
+				const supportsAudio = model.input.includes("audio");
 				const hasImages = toolMsg.content.some(c => c.type === "image");
+				const hasAudio = toolMsg.content.some(c => c.type === "audio");
+				const hasVideo = toolMsg.content.some(c => c.type === "video");
 				const omittedImages = hasImages && !supportsImages;
+				const omittedAudio = hasAudio && !supportsAudio;
 
 				// Always send tool result with text (or placeholder if only images)
 				const hasText = textResult.length > 0;
 				const remappedToolCallId = consumeToolCallId(toolMsg.toolCallId);
 				const resolvedToolCallId =
 					remappedToolCallId ?? ensureToolCallId(toolMsg.toolCallId, `${j}:${toolMsg.toolName ?? "tool"}`);
-				const toolResultContent = omittedImages
-					? joinTextWithImagePlaceholder(textResult, true)
-					: hasText
-						? textResult
-						: hasImages
-							? "(see attached image)"
-							: "";
+				const toolResultContent = [
+					omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult,
+					omittedAudio ? "[audio omitted: model does not support audio input]" : "",
+					hasVideo ? "[video omitted: OpenAI Chat Completions does not support video input]" : "",
+					!hasText && !omittedImages && !omittedAudio && !hasVideo && (hasImages || hasAudio)
+						? "(see attached media)"
+						: "",
+				]
+					.filter(Boolean)
+					.join("\n");
 				const toolResultMsg: OpenAICompletionsToolMessageParam = {
 					role: "tool",
 					content: toolResultContent.toWellFormed(),
@@ -2207,24 +2240,25 @@ export function convertMessages(
 				}
 				params.push(toolResultMsg);
 
-				if (hasImages && supportsImages) {
-					for (const block of toolMsg.content) {
-						if (block.type === "image") {
-							imageBlocks.push({
-								type: "image_url",
-								image_url: {
-									url: `data:${block.mimeType};base64,${block.data}`,
-								},
-							});
-						}
+				for (const block of toolMsg.content) {
+					if (block.type === "image" && supportsImages) {
+						mediaBlocks.push({
+							type: "image_url",
+							image_url: { url: `data:${block.mimeType};base64,${block.data}` },
+						});
+					} else if (block.type === "audio" && supportsAudio) {
+						mediaBlocks.push({
+							type: "input_audio",
+							input_audio: { data: block.data, format: openAIAudioFormat(block.mimeType) },
+						});
 					}
 				}
 			}
 
 			i = j - 1;
 
-			// After all consecutive tool results, add a single user message with all images
-			if (imageBlocks.length > 0) {
+			// After all consecutive tool results, add a single user message with all supported media.
+			if (mediaBlocks.length > 0) {
 				if (compat.requiresAssistantAfterToolResult) {
 					params.push({
 						role: "assistant",
@@ -2237,9 +2271,9 @@ export function convertMessages(
 					content: [
 						{
 							type: "text",
-							text: "Attached image(s) from tool result:",
+							text: "Attached media from tool result:",
 						},
-						...imageBlocks,
+						...mediaBlocks,
 					],
 				});
 				lastRole = "user";
