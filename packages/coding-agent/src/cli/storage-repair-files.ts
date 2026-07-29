@@ -621,7 +621,11 @@ async function publishNoReplace(
 	onLinked();
 	await verifyPublishedFile(stage, finalPath, expected);
 	await runPublicationHook(hooks.afterLink, () => verifyPublishedFile(stage, finalPath, expected), onPublished);
-	await runPublicationHook(hooks.beforeStageUnlink, () => verifyPublishedFile(stage, finalPath, expected), onPublished);
+	await runPublicationHook(
+		hooks.beforeStageUnlink,
+		() => verifyPublishedFile(stage, finalPath, expected),
+		onPublished,
+	);
 	await fs.promises.unlink(stage);
 	onPublished?.();
 	await runPublicationHook(hooks.beforeDirectorySync, () => verifyFinalFile(finalPath, expected), onPublished);

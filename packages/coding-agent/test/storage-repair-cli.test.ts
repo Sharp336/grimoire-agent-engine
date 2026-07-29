@@ -257,7 +257,6 @@ describe("offline SQLite salvage", () => {
 		}
 	});
 
-
 	test("rejects Win32 trailing-dot and trailing-space source-triplet aliases", async () => {
 		const source = path.join(root, "agent.db");
 		await fs.promises.writeFile(source, "source");
@@ -789,7 +788,6 @@ describe("offline SQLite salvage", () => {
 		expect(result.refusal).toContain("Session directory changed");
 	});
 
-
 	test("a primary session discovery access error refuses without publishing artifacts", async () => {
 		const dbPath = await createHistorySource();
 		const sourceBefore = await fingerprint(dbPath);
@@ -798,12 +796,10 @@ describe("offline SQLite salvage", () => {
 		const candidate = path.join(root, "discovery-refused.db");
 		const accessError = Object.assign(new Error("session project access denied"), { code: "EACCES" });
 		const originalReaddir = fs.promises.readdir;
-		const readdirSpy = spyOn(fs.promises, "readdir").mockImplementation(
-			((directory, options) => {
-				if (directory === project) return Promise.reject(accessError);
-				return Reflect.apply(originalReaddir, fs.promises, [directory, options]);
-			}) as typeof fs.promises.readdir,
-		);
+		const readdirSpy = spyOn(fs.promises, "readdir").mockImplementation(((directory, options) => {
+			if (directory === project) return Promise.reject(accessError);
+			return Reflect.apply(originalReaddir, fs.promises, [directory, options]);
+		}) as typeof fs.promises.readdir);
 		try {
 			const result = await runStorageRepair({
 				target: "history",
@@ -1018,7 +1014,6 @@ describe("offline SQLite salvage", () => {
 		expect(await Bun.file(result.backup).exists()).toBe(true);
 	});
 
-
 	test("candidate post-link same-inode same-size mutation fails the SHA proof", async () => {
 		await createAgentSource();
 		const candidate = path.join(root, "candidate-sha-only.db");
@@ -1191,7 +1186,6 @@ describe("offline SQLite salvage", () => {
 		expect(await fingerprint(result.backup)).toEqual(requireValue(replacementIdentity, "replacement identity"));
 	});
 
-
 	test("backup post-link same-inode same-size mutation fails the SHA proof", async () => {
 		await createAgentSource();
 		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
@@ -1200,7 +1194,10 @@ describe("offline SQLite salvage", () => {
 			{
 				afterBackupLink: async () => {
 					const directory = path.dirname(getAgentDbPath(root));
-					const name = requireValue((await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")), "linked backup");
+					const name = requireValue(
+						(await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")),
+						"linked backup",
+					);
 					const backup = path.join(directory, name);
 					const before = await fingerprint(backup);
 					const bytes = await Bun.file(backup).bytes();
@@ -1233,7 +1230,10 @@ describe("offline SQLite salvage", () => {
 			{
 				afterBackupLink: async () => {
 					const directory = path.dirname(getAgentDbPath(root));
-					const name = requireValue((await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")), "linked backup");
+					const name = requireValue(
+						(await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")),
+						"linked backup",
+					);
 					const backup = path.join(directory, name);
 					const before = await fingerprint(backup);
 					const bytes = await Bun.file(backup).bytes();
