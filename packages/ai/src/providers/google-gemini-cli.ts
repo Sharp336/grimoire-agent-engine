@@ -4,6 +4,7 @@
  * Uses the Cloud Code Assist API endpoint to access Gemini and Claude models.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
@@ -40,9 +41,11 @@ import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "./googl
 import {
 	convertMessages,
 	convertTools,
+	EMPTY_STREAM_BASE_DELAY_MS,
 	type GoogleThinkingLevel,
 	hasMeaningfulGoogleContent,
 	isThinkingPart,
+	MAX_EMPTY_STREAM_RETRIES,
 	mapStopReasonString,
 	mapToolChoice,
 	nextToolCallId,
@@ -877,22 +880,22 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			started = false;
 			resetOutput();
 
-			const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
-			let response: Response;
-			try {
-				const url = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
-				if (isAntigravity) {
-					const transport = await postH2Primary({
-						url,
-						provider: model.provider,
-						headers: requestHeaders,
-						body: requestBodyJson,
-						signal: watchdog.signal,
-						fetchOverride: options?.fetch,
-					});
-					response = new Response(transport.body, { status: transport.status, headers: transport.headers });
-				} else {
-					response = await fetchWithRetry(url, {
+			const openResponse = async (): Promise<Response> => {
+				const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+				try {
+					const url = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
+					if (isAntigravity) {
+						const transport = await postH2Primary({
+							url,
+							provider: model.provider,
+							headers: requestHeaders,
+							body: requestBodyJson,
+							signal: watchdog.signal,
+							fetchOverride: options?.fetch,
+						});
+						return new Response(transport.body, { status: transport.status, headers: transport.headers });
+					}
+					return fetchWithRetry(url, {
 						method: "POST",
 						headers: requestHeaders,
 						body: requestBodyJson,
@@ -903,31 +906,49 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						fetch: options?.fetch,
 						timeout: false,
 					});
+				} finally {
+					watchdog.clear();
 				}
-			} finally {
-				watchdog.clear();
+			};
+
+			let receivedContent = false;
+			for (let emptyAttempt = 0; emptyAttempt <= MAX_EMPTY_STREAM_RETRIES; emptyAttempt++) {
+				const response = await openResponse();
+				if (!response.ok) {
+					const errorText = await response.text();
+					const validationUrl = extractGoogleValidationUrl(errorText);
+					const errorMessage = validationUrl
+						? formatGoogleValidationRequiredMessage(validationUrl, "retry your request", parsedCredentials.email)
+						: errorText;
+					throw createCloudCodeApiError(
+						`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
+						response.status,
+						response.headers,
+					);
+				}
+
+				receivedContent = await streamResponse(response);
+				if (output.stopReason === "aborted" || output.stopReason === "error") {
+					throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+						provider: model.provider,
+						kind: "output",
+					});
+				}
+				if (receivedContent) break;
+				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES) {
+					throw new AIError.ProviderResponseError(
+						`Cloud Code Assist API returned an empty response after ${MAX_EMPTY_STREAM_RETRIES + 1} attempts`,
+						{ provider: model.provider, kind: "empty-body" },
+					);
+				}
+				resetOutput();
+				try {
+					await scheduler.wait(EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt, { signal: options?.signal });
+				} catch {
+					throw new AIError.AbortError("Request was aborted");
+				}
 			}
 
-			if (!response.ok) {
-				const errorText = await response.text();
-				const validationUrl = extractGoogleValidationUrl(errorText);
-				const errorMessage = validationUrl
-					? formatGoogleValidationRequiredMessage(validationUrl, "retry your request", parsedCredentials.email)
-					: errorText;
-				throw createCloudCodeApiError(
-					`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
-					response.status,
-					response.headers,
-				);
-			}
-
-			const receivedContent = await streamResponse(response);
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
-					provider: model.provider,
-					kind: "output",
-				});
-			}
 			if (!receivedContent) {
 				throw new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
 					provider: model.provider,

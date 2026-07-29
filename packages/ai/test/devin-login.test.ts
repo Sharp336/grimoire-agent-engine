@@ -18,9 +18,7 @@ describe("Devin direct token exchange", () => {
 		const token = await exchangeDevinCliToken("callback-code", "pkce-verifier", fetchImpl);
 
 		expect(token).toBe("devin-jwt");
-		expect(requestUrl).toBe(
-			"https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode",
-		);
+		expect(requestUrl).toBe("https://api.devin.ai/auth/cli/token");
 		expect(requestInit?.method).toBe("POST");
 		expect(requestInit?.headers).toEqual({
 			Accept: "application/json",

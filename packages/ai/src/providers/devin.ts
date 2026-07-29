@@ -202,6 +202,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				authorization: `Basic ${apiKey}`,
 				"connect-accept-encoding": "gzip",
 				...(options?.headers ?? {}),
+				te: "trailers",
 			};
 
 			response = await postH2Primary({
