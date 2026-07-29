@@ -147,7 +147,10 @@ function bigIntFromBytes(b: Uint8Array): bigint {
  * boundaries: messages may span multiple chunks, and a single chunk may carry
  * many messages.
  */
-export async function* decodeEventStream(source: ReadableStream<Uint8Array>): AsyncGenerator<EventStreamMessage> {
+export async function* decodeEventStream(
+	source: ReadableStream<Uint8Array>,
+	options?: { maxFrameBytes?: number },
+): AsyncGenerator<EventStreamMessage> {
 	const reader = source.getReader();
 	// Single growable buffer; we slide a read cursor along it and compact when a
 	// complete prefix has been consumed. Avoids per-message Uint8Array copies.
@@ -161,6 +164,11 @@ export async function* decodeEventStream(source: ReadableStream<Uint8Array>): As
 			while (buf.length - offset >= 4) {
 				const dv = new DataView(buf.buffer, buf.byteOffset + offset, buf.length - offset);
 				const total = dv.getUint32(0, false);
+				if (options?.maxFrameBytes !== undefined && total > options.maxFrameBytes) {
+					throw new AIError.EventStreamFrameError(
+						`frame length ${total} exceeds maximum ${options.maxFrameBytes}`,
+					);
+				}
 				if (total < MIN_MESSAGE_LEN) throw new AIError.EventStreamFrameError(`total length ${total} below minimum`);
 				if (buf.length - offset < total) break;
 				const frame = buf.subarray(offset, offset + total);
