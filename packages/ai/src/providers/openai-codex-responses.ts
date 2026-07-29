@@ -51,6 +51,7 @@ import {
 	normalizeSystemPrompts,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
+	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
 } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -61,7 +62,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import { getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
+import { getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
@@ -199,6 +200,12 @@ export function createOpenAICodexCompactionRequestContext(options: {
 const CODEX_DEBUG = $flag("PI_CODEX_DEBUG");
 const CODEX_MAX_RETRIES = 5;
 const CODEX_RETRY_DELAY_MS = 500;
+
+function resolveCodexSseMaxAttempts(value: number | undefined): number {
+	if (value === undefined) return CODEX_MAX_RETRIES + 1;
+	if (!Number.isFinite(value)) return 1;
+	return Math.max(1, Math.trunc(value));
+}
 const CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS = 10000;
 const CODEX_WEBSOCKET_PING_INTERVAL_MS = Number($env.PI_CODEX_WEBSOCKET_PING_INTERVAL_MS || 10_000);
 const CODEX_WEBSOCKET_PONG_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_PONG_TIMEOUT_MS || 60_000);
@@ -241,6 +248,42 @@ const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "int
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
+
+/**
+ * Host integration boundary for just-in-time `x-oai-attestation` header
+ * values (codex-rs `AttestationProvider`). Resolves to the full header value
+ * — an `{"v":1,"s":0,"t":"v1.…"}` envelope — or `undefined` when no
+ * attestation should be sent.
+ */
+export type CodexAttestationProvider = () => Promise<string | undefined>;
+
+let codexAttestationProvider: CodexAttestationProvider | undefined;
+
+/**
+ * Install the process-wide attestation hook consulted for upstream Codex
+ * requests (codex-rs stores its provider on `ModelClient` construction). The
+ * hook is only consulted for ChatGPT-OAuth credentials and runs just-in-time
+ * per request; WebSocket handshakes resolve once per connection because the
+ * header is connection-scoped there.
+ */
+export function setCodexAttestationProvider(provider: CodexAttestationProvider | undefined): void {
+	codexAttestationProvider = provider;
+}
+
+/**
+ * Resolve the `x-oai-attestation` header value for one upstream request.
+ * Gated on ChatGPT-OAuth credentials (a Codex JWT carries `chatgpt_account_id`;
+ * codex-rs gates on `auth.is_chatgpt_auth()`). A throwing hook degrades to no
+ * header rather than failing the request.
+ */
+export async function getCodexAttestationHeader(accountId: string | undefined): Promise<string | undefined> {
+	if (!accountId || !codexAttestationProvider) return undefined;
+	try {
+		return await codexAttestationProvider();
+	} catch {
+		return undefined;
+	}
+}
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
 /** WebSocket frames cannot carry per-request HTTP headers; codex-rs mirrors the lite marker into `client_metadata` under this key. */
@@ -1104,13 +1147,17 @@ export function normalizeCodexToolChoice(
 			: undefined;
 		const offeredTool = customTool ?? directTool;
 		if (!offeredTool) return undefined;
+		if (offeredTool.native?.type === "computer" && model?.supportsComputerUse === true) {
+			return { type: "computer" };
+		}
 		return customTool
 			? { type: "custom", name: customTool.customWireName ?? customTool.name }
 			: { type: "function", name: offeredTool.name };
 	};
 	if (choice.type === "computer") {
 		const computer = tools.find(tool => tool.native?.type === "computer");
-		return computer ? { type: "function", name: computer.name } : undefined;
+		if (!computer) return undefined;
+		return model?.supportsComputerUse === true ? { type: "computer" } : { type: "function", name: computer.name };
 	}
 	if (choice.type === "function") {
 		if ("function" in choice && choice.function?.name) {
@@ -1126,8 +1173,9 @@ export function normalizeCodexToolChoice(
 	return undefined;
 }
 function unrollCodexComputerItems(items: ResponseInput, supportsImageDetailOriginal: boolean): ResponseInput {
+	const replayItems = stripOpenAIResponsesComputerLinkedReasoningIdsForReplay(items);
 	const unrolled: ResponseInput = [];
-	for (const item of items) {
+	for (const item of replayItems) {
 		if (item.type === "computer_call") {
 			const actions = item.actions ?? (item.action ? [item.action] : []);
 			unrolled.push({
@@ -1535,6 +1583,7 @@ async function openCodexWebSocketTransport(
 		websocketState,
 		requestContext.responsesLite,
 		requestContext.requestMetadata,
+		await getCodexAttestationHeader(requestContext.accountId),
 	);
 	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
 	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`);
@@ -1635,6 +1684,7 @@ async function openCodexSseTransport(
 				requestContext.requestMetadata,
 				requestSetup.requestSignal,
 				requestSetup.firstEventTimeoutMs,
+				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
 				options?.fetch,
 			),
@@ -2730,6 +2780,7 @@ export async function prewarmOpenAICodexResponses(
 	);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
+	const attestation = await getCodexAttestationHeader(accountId);
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
 		createCodexHeaders,
@@ -2742,6 +2793,7 @@ export async function prewarmOpenAICodexResponses(
 		state,
 		responsesLite,
 		requestIdentity,
+		attestation,
 	);
 	await logger.time(
 		"prewarmCodex:establishWs",
@@ -3805,15 +3857,7 @@ async function getOrCreateCodexWebSocketConnection(
 	provider: string,
 	signal?: AbortSignal,
 ): Promise<CodexWebSocketConnection> {
-	const targetUrl = new URL(url);
-	const proxy = shouldBypassProxy(targetUrl)
-		? undefined
-		: (getProxyForProvider(provider) ??
-			(targetUrl.protocol === "wss:"
-				? Bun.env.HTTPS_PROXY || Bun.env.https_proxy
-				: Bun.env.HTTP_PROXY || Bun.env.http_proxy) ??
-			Bun.env.ALL_PROXY ??
-			Bun.env.all_proxy);
+	const proxy = getProxyForUrl(provider, new URL(url));
 	const headerRecord = headersToRecord(headers);
 	// Join an in-flight handshake instead of tearing it down: closing a
 	// CONNECTING socket rejects the concurrent caller (prewarm racing the first
@@ -3875,6 +3919,7 @@ async function openCodexSseEventStream(
 	requestMetadata: CodexRequestMetadata | undefined,
 	signal: AbortSignal | undefined,
 	firstEventTimeoutMs: number | undefined,
+	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
@@ -3888,6 +3933,7 @@ async function openCodexSseEventStream(
 		state,
 		responsesLite,
 		requestMetadata,
+		await getCodexAttestationHeader(accountId),
 	);
 	CODEX_DEBUG &&
 		logger.debug("[codex] codex request", {
@@ -3922,7 +3968,7 @@ async function openCodexSseEventStream(
 				clearPreResponseTimeout = watchdog.clear;
 				return { signal: watchdog.signal };
 			},
-			maxAttempts: CODEX_MAX_RETRIES + 1,
+			maxAttempts: resolveCodexSseMaxAttempts(codexSseMaxAttempts),
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
 			maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
 			fetch: fetchAttempt,
@@ -3961,11 +4007,17 @@ function createCodexHeaders(
 	state?: CodexWebSocketSessionState,
 	responsesLite = false,
 	requestMetadata?: CodexCompatibilityIdentity,
+	attestation?: string,
 ): Headers {
 	const headers = new Headers(initHeaders ?? {});
 	headers.delete("x-api-key");
 	headers.set("Authorization", `Bearer ${accessToken}`);
 	if (accountId) headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
+	if (attestation) {
+		headers.set(OPENAI_HEADERS.ATTESTATION, attestation);
+	} else {
+		headers.delete(OPENAI_HEADERS.ATTESTATION);
+	}
 	const betaHeader =
 		transport === "websocket"
 			? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2
@@ -4080,6 +4132,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	// `function_call_output` (OpenAI rejects mismatched pairs).
 	const customCallIds = new Set<string>();
 	const knownCallIds = new Set<string>();
+	const computerCallIds = new Set<string>();
 
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
@@ -4089,14 +4142,15 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				| undefined;
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
-				const replayItems = unrollCodexComputerItems(
-					redactedHistoryItems,
-					model.compat.supportsImageDetailOriginal,
-				);
+				const replayItems =
+					model.supportsComputerUse === true
+						? redactedHistoryItems
+						: unrollCodexComputerItems(redactedHistoryItems, model.compat.supportsImageDetailOriginal);
 				for (const item of replayItems) {
 					if (item.type === "custom_tool_call") {
 						customCallIds.add(item.call_id);
 					}
+					if (item.type === "computer_call") computerCallIds.add(item.call_id);
 					if ((item.type === "function_call" || item.type === "custom_tool_call") && item.call_id) {
 						knownCallIds.add(item.call_id);
 					}
@@ -4127,14 +4181,15 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			if (historyItems) {
 				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems);
 				if (sanitizedHistoryItems) {
-					const replayItems = unrollCodexComputerItems(
-						sanitizedHistoryItems,
-						model.compat.supportsImageDetailOriginal,
-					);
+					const replayItems =
+						model.supportsComputerUse === true
+							? sanitizedHistoryItems
+							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
 					for (const item of replayItems) {
 						if (item.type === "custom_tool_call") {
 							customCallIds.add(item.call_id);
 						}
+						if (item.type === "computer_call") computerCallIds.add(item.call_id);
 						if ((item.type === "function_call" || item.type === "custom_tool_call") && item.call_id) {
 							knownCallIds.add(item.call_id);
 						}
@@ -4152,7 +4207,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			}
 
 			const convertedOutputItems = convertResponsesAssistantMessage(
-				unrollCodexComputerAssistantMessage(msg as AssistantMessage),
+				model.supportsComputerUse === true ? assistantMsg : unrollCodexComputerAssistantMessage(assistantMsg),
 				model,
 				msgIndex,
 				knownCallIds,
@@ -4160,6 +4215,8 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				customCallIds,
 				false,
 				true,
+				undefined,
+				computerCallIds,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -4174,13 +4231,14 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 		if (msg.role === "toolResult") {
 			appendResponsesToolResultMessages(
 				messages,
-				unrollCodexComputerToolResult(msg),
+				model.supportsComputerUse === true ? msg : unrollCodexComputerToolResult(msg),
 				model,
 				false,
 				model.compat.supportsImageDetailOriginal,
 				knownCallIds,
 				customCallIds,
 				true,
+				computerCallIds,
 			);
 		}
 
@@ -4209,6 +4267,7 @@ function normalizeInputMessageContent(
 export { convertMessages as convertCodexResponsesMessages };
 
 type CodexToolPayload =
+	| { type: "computer"; name?: never }
 	| {
 			type: "function";
 			name: string;
@@ -4231,8 +4290,12 @@ export function convertOpenAICodexResponsesTools(
 	const allowFreeform = model.applyPatchToolType === "freeform";
 	const payloads: CodexToolPayload[] = [];
 	for (const tool of tools) {
-		// The ChatGPT Codex endpoints reject the native `{ type: "computer" }`
-		// shape, so both standard and Lite transports expose it as a function.
+		// Subscription models default to the function fallback. Explicit metadata
+		// remains authoritative for future Codex endpoints that implement GA computer use.
+		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
+			payloads.push({ type: "computer" });
+			continue;
+		}
 		if (allowFreeform && tool.customFormat) {
 			payloads.push({
 				type: "custom",

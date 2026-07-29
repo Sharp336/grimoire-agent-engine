@@ -52,6 +52,8 @@ import { perplexityProvider } from "./perplexity";
 import { qianfanProvider } from "./qianfan";
 import { qwenPortalProvider } from "./qwen-portal";
 import { sakanaProvider } from "./sakana";
+import { siliconflowProvider } from "./siliconflow";
+import { siliconflowCnProvider } from "./siliconflow-cn";
 import { syntheticProvider } from "./synthetic";
 import { tavilyProvider } from "./tavily";
 import { togetherProvider } from "./together";
@@ -123,6 +125,8 @@ const ALL = [
 	perplexityProvider,
 	qianfanProvider,
 	veniceProvider,
+	siliconflowProvider,
+	siliconflowCnProvider,
 	syntheticProvider,
 	nanogptProvider,
 	waferServerlessProvider,

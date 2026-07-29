@@ -39,6 +39,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
+	$env,
 	APP_NAME,
 	adjustHsv,
 	formatNumber,
@@ -77,7 +78,6 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import { type GuidedGoalMessage, newGuidedGoalSessionId, runGuidedGoalTurn } from "../goals/guided-setup";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
@@ -90,6 +90,7 @@ import {
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
+import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
@@ -113,6 +114,7 @@ import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
@@ -207,6 +209,7 @@ import type {
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
+	RenderSessionContextOptions,
 	SubmittedUserInput,
 	TodoItem,
 	TodoPhase,
@@ -1014,6 +1017,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = true;
 		this.ui.requestRender(true);
 
+		// Prewarm the local tiny-title worker off the submit hot path: spawn it
+		// now, idle and unref'd, so the first submit reuses a live subprocess
+		// instead of paying spawn latency ahead of the first frame (issue #6462).
+		// No-ops for the online default and for already-named sessions that will
+		// not be titled. Deferred via setImmediate so it runs AFTER the render
+		// callback requestRender(true) queued above (immediates are FIFO) — the
+		// spawn syscall never lands in the same loop turn ahead of the first paint.
+		setImmediate(() => {
+			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
+				tinyTitleClient.prewarm(this.settings.get("providers.tinyModel"));
+			}
+		});
+
 		// Initialize hooks with TUI-based UI context
 		await this.initHooksAndCustomTools();
 
@@ -1379,6 +1395,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		if (action === "reset" && this.vibeModeEnabled) {
+			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
+			return;
+		}
+
 		if (!consumeLoopLimitIteration(this.loopLimit)) {
 			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
 			return;
@@ -1725,6 +1746,60 @@ export class InteractiveMode implements InteractiveModeContext {
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: settings.get("display.collapseCompacted"),
 		});
+		const preservedLiveToolCallIds = new Set<string>();
+		// A preserved pending-tool component whose result has already landed in
+		// the replayed transcript is re-rendered by `renderSessionContext` itself
+		// (the toolResult message reconstructs the block with its output). Keeping
+		// it in the live set too re-appends a second identical block below the
+		// replayed one — the tool call renders twice (#6516). The preservation
+		// above assumes every pending-tool component is still dangling (its result
+		// lives outside `state.messages`), which stops holding the instant the
+		// result is persisted while the component lingers in `pendingTools` (a
+		// rebuild racing tool-completion, a background/displaceable snapshot).
+		// Drop the already-resolved ones and let the replay own them; only
+		// genuinely in-flight (dangling, replay-stripped) calls still need
+		// preserving.
+		for (const message of context.messages) {
+			if (message.role !== "toolResult") continue;
+			const resolved = livePendingTools.get(message.toolCallId);
+			if (!resolved) continue;
+			// A background task's initial `async.state === "running"` result is
+			// persisted while `EventController#handleToolExecutionEnd` deliberately
+			// keeps its component in `pendingTools` so a later
+			// `tool_execution_update`/`_end` settles it. Such a handle is still
+			// live — dropping it would strand those updates on the running snapshot
+			// — so keep it and let the live component retain ownership; only
+			// terminal results are owned by the replay. (Cast mirrors the async
+			// detail reads in tool-execution.ts / event-controller.ts.)
+			const details = message.details as { async?: { state?: string } } | undefined;
+			if (details?.async?.state === "running") {
+				preservedLiveToolCallIds.add(message.toolCallId);
+				continue;
+			}
+			livePendingTools.delete(message.toolCallId);
+			// A `ReadToolGroupComponent` is shared by every read id it renders
+			// (ui-helpers sets the same group for each collapsed read call). While a
+			// sibling read id still points at it the component must stay on screen
+			// and preserved — splicing it here would detach the pending read's
+			// display and strand its future result on an off-screen component.
+			// Splice only once no remaining pending id shares it.
+			let stillShared = false;
+			for (const other of livePendingTools.values()) {
+				if (other === resolved) {
+					stillShared = true;
+					break;
+				}
+			}
+			if (stillShared) {
+				// The shared component still owns this completed member as well as
+				// its pending sibling. Suppress the replay copy so the group remains
+				// a single on-screen block while future results keep routing to it.
+				preservedLiveToolCallIds.add(message.toolCallId);
+				continue;
+			}
+			const index = liveComponents.indexOf(resolved as unknown as Component);
+			if (index >= 0) liveComponents.splice(index, 1);
+		}
 		// Prune the settled-component cache to the messages this rebuild will
 		// actually render. Message objects stay strongly reachable through
 		// session entries for the whole session, so entries for compacted-away
@@ -1736,7 +1811,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (component) retained.set(message, component);
 		}
 		this.transcriptMessageComponents = retained;
-		this.renderSessionContext(context, { reuseSettledComponents: options.reuseSettledComponents });
+		this.renderSessionContext(context, {
+			reuseSettledComponents: options.reuseSettledComponents,
+			preservedLiveToolCallIds,
+		});
 		for (const child of liveComponents) {
 			this.chatContainer.addChild(child);
 		}
@@ -3199,9 +3277,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * `/vibe` toggle. Entering installs the ephemeral vibe tools, strips the
-	 * active toolset down to `read` plus those tools, and injects the director
-	 * context. Exiting unregisters them, restores the previous toolset, and kills
-	 * every worker session so workers cannot outlive the mode that directs them.
+	 * active toolset down to `read`, optional parent-owned `todo`, plus those
+	 * tools, and injects the director context. Exiting unregisters them, restores
+	 * the previous toolset, and kills every worker session so workers cannot
+	 * outlive the mode that directs them.
 	 */
 	async handleVibeModeCommand(initialPrompt?: string): Promise<void> {
 		if (this.vibeModeEnabled) {
@@ -3239,7 +3318,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const ownerScope = vibeRegistry.ownerScope(this.#vibeParentSession());
 		vibeRegistry.activateScope(ownerScope);
 		const previousTools = this.session.getEnabledToolNames();
-		await this.session.activateVibeTools(["read"]);
+		const vibeBaseTools = ["read"];
+		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
+		await this.session.activateVibeTools(vibeBaseTools);
 		this.#vibeModePreviousTools = previousTools;
 		this.#vibeModeOwnerScope = ownerScope;
 		this.vibeModeEnabled = true;
@@ -3252,7 +3333,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#updateVibeModeStatus();
 		if (options?.persistModeChange !== false) this.sessionManager.appendModeChange("vibe");
-		this.showStatus("Vibe mode enabled. You direct fast/good worker sessions; toolset is read + vibe tools.");
+		this.showStatus(
+			"Vibe mode enabled. You direct fast/good worker sessions; toolset is read + optional parent Todo + vibe tools.",
+		);
 	}
 
 	async #exitVibeMode(): Promise<void> {
@@ -3356,6 +3439,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showWarning("Exit plan mode first.");
 				return;
 			}
+			if (this.vibeModeEnabled) {
+				this.showWarning("Exit vibe mode first.");
+				return;
+			}
 			if (!this.session.settings.get("goal.enabled")) {
 				this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
 				return;
@@ -3369,51 +3456,31 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			}
 
-			const initial = rest?.trim()
-				? rest.trim()
-				: (await this.showHookEditor("Guided goal", undefined, undefined, { promptStyle: true }))?.trim();
-			if (!initial) return;
-
-			const messages: GuidedGoalMessage[] = [{ role: "user", content: initial }];
-			let latestDraftObjective: string | undefined;
-			// One Codex side session for the whole interview: every follow-up turn
-			// reuses it so a multi-question interview shares a single websocket-only
-			// Codex socket instead of leaking one per turn (#5471 review).
-			const guidedGoalSessionId = newGuidedGoalSessionId(this.session);
-			for (let turn = 0; turn < 6; turn++) {
-				const result = await runGuidedGoalTurn(this.session, { messages, sideSessionId: guidedGoalSessionId });
-				if (result.objective?.trim()) latestDraftObjective = result.objective.trim();
-				if (result.kind === "question") {
-					messages.push({ role: "assistant", content: result.question });
-					const answer = (
-						await this.showHookEditor(result.question, undefined, undefined, { promptStyle: true })
-					)?.trim();
-					if (!answer) return;
-					messages.push({ role: "user", content: answer });
-					continue;
-				}
-
-				const finalObjective = (
-					await this.showHookEditor("Review guided goal", result.objective, undefined, { promptStyle: true })
-				)?.trim();
-				if (!finalObjective) return;
-				await this.#startGoalFromObjective(finalObjective);
-				return;
+			// Expose the goal tool for the interview so the agent can finish by
+			// calling `goal create`. Record the pre-interview toolset first: the
+			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
+			// eventual goal exit restores this set (dropping the goal tool again).
+			const enabledTools = this.session.getEnabledToolNames();
+			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
+			if (!enabledTools.includes("goal")) {
+				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}
 
-			// Hit the turn cap without an explicit `ready`. Rather than discard the whole interview,
-			// salvage the latest non-empty model objective draft seen on any earlier turn. A final
-			// question turn may omit `objective`; that must not erase a usable draft.
-			if (latestDraftObjective) {
-				const finalObjective = (
-					await this.showHookEditor("Review guided goal", latestDraftObjective, undefined, { promptStyle: true })
-				)?.trim();
-				if (finalObjective) {
-					await this.#startGoalFromObjective(finalObjective);
-					return;
+			// The interview is a normal conversation: the kickoff rides in as a
+			// hidden developer message, the agent asks its questions as regular
+			// assistant turns, and the user answers in the ordinary editor. Queue
+			// behind an in-flight run instead of aborting it.
+			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
+			if (this.session.isStreaming) {
+				await this.session.followUp(kickoff, undefined, { synthetic: true });
+			} else {
+				try {
+					await this.session.prompt(kickoff, { synthetic: true });
+				} catch (error) {
+					if (!(error instanceof AgentBusyError)) throw error;
+					await this.session.followUp(kickoff, undefined, { synthetic: true });
 				}
 			}
-			this.showWarning("Guided goal setup needs more detail. Run /guided-goal again with a narrower objective.");
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -3633,6 +3700,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!planContent) {
 			this.showError(`Plan file not found at ${planFilePath}`);
 			return;
+		}
+
+		// resolveApprovedPlan may return a newer draft than the path recorded in
+		// plan-mode state. `AgentSession.#buildPlanModeMessage()` reads that state,
+		// so if the operator refines (or dismisses and keeps planning) the next
+		// planning turn must target the plan just reviewed — promote the reviewed
+		// path into plan-mode state now, mirroring the print-mode approval handler.
+		const planState = this.session.getPlanModeState();
+		if (planState?.enabled && planState.planFilePath !== planFilePath) {
+			this.session.setPlanModeState({ ...planState, planFilePath });
+			this.sessionManager.appendModeChange("plan", { planFilePath });
 		}
 
 		const contextUsage = this.#getPlanApprovalContextUsage();
@@ -4279,10 +4357,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.addMessageToChat(message, options);
 	}
 
-	renderSessionContext(
-		sessionContext: SessionContext,
-		options?: { updateFooter?: boolean; populateHistory?: boolean; reuseSettledComponents?: boolean },
-	): void {
+	renderSessionContext(sessionContext: SessionContext, options?: RenderSessionContextOptions): void {
 		for (const message of sessionContext.messages) {
 			this.noteDisplayableThinkingContent(message);
 		}
@@ -4362,6 +4437,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleContextCommand();
 	}
 
+	#vibeSessionTransitionBlocked(): boolean {
+		if (!this.vibeModeEnabled) return false;
+		this.showWarning("Exit vibe mode first.");
+		return true;
+	}
+
 	#prepareSessionSwitch(): void {
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
@@ -4370,28 +4451,32 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#hidePlanReview();
 	}
 
-	handleClearCommand(): Promise<void> {
+	async handleClearCommand(): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#prepareSessionSwitch();
-		return this.#commandController.handleClearCommand();
+		await this.#commandController.handleClearCommand();
 	}
 
 	handleFreshCommand(): Promise<void> {
 		return this.#commandController.handleFreshCommand();
 	}
 
-	handleDropCommand(): Promise<void> {
+	async handleDropCommand(): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#prepareSessionSwitch();
-		return this.#commandController.handleDropCommand();
+		await this.#commandController.handleDropCommand();
 	}
 
-	handleForkCommand(): Promise<void> {
+	async handleForkCommand(): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
-		return this.#commandController.handleForkCommand();
+		await this.#commandController.handleForkCommand();
 	}
 
-	handleMoveCommand(targetPath?: string): Promise<void> {
-		return this.#commandController.handleMoveCommand(targetPath);
+	async handleMoveCommand(targetPath?: string): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
+		await this.#commandController.handleMoveCommand(targetPath);
 	}
 
 	handleRenameCommand(title: string): Promise<void> {
@@ -4622,6 +4707,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
 		return this.#selectorController.showOAuthSelector(mode, providerId);
+	}
+
+	showSessionPinSelector(): Promise<void> {
+		return this.#selectorController.showSessionPinSelector();
 	}
 
 	showResetUsageSelector(): Promise<void> {

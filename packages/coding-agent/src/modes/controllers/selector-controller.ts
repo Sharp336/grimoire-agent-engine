@@ -40,6 +40,7 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -50,6 +51,7 @@ import {
 	type ResetUsageAccount,
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
+import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -84,6 +86,7 @@ import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { renderSegmentTrack } from "../components/segment-track";
+import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
@@ -417,6 +420,11 @@ export class SelectorController {
 				this.ctx.session.setAutoCompactionEnabled(value as boolean);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
 				break;
+			case "advisor.enabled":
+				this.ctx.session.setAdvisorEnabled(value as boolean);
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+				break;
 			case "steeringMode":
 				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time");
 				break;
@@ -445,6 +453,11 @@ export class SelectorController {
 			case "memory.backend":
 				void this.ctx.session.applyMemoryBackend().catch(err => {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);
+				});
+				break;
+			case "inspect_image.mode":
+				void this.ctx.session.applyInspectImageModeChange().catch(err => {
+					this.ctx.showError(`Failed to apply vision mode: ${err}`);
 				});
 				break;
 
@@ -1089,7 +1102,7 @@ export class SelectorController {
 					}
 
 					this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-					this.ctx.editor.setText(result.selectedText);
+					this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
 					done();
 					this.ctx.showStatus("Branched to new session");
 				},
@@ -1264,9 +1277,18 @@ export class SelectorController {
 						this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 						await this.ctx.reloadTodos();
 						if (result.editorText && !this.ctx.editor.getText().trim()) {
-							this.ctx.editor.setText(result.editorText);
+							this.ctx.editor.setDraft(result.editorText, result.editorImages);
 						}
 						this.ctx.showStatus("Navigated to selected point");
+
+						// Re-answering a past `ask` commits a new sibling answer but,
+						// unlike a live `ask`, leaves the agent idle. Resume it now —
+						// after the transcript rebuild above — so the model consumes the
+						// new answer without the resumed turn rendering against the stale
+						// pre-rebuild UI (issue #6483).
+						if (result.askReanswerCommitted) {
+							this.ctx.session.resumeAfterAskReanswer();
+						}
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					} finally {
@@ -1737,6 +1759,65 @@ export class SelectorController {
 					requestRender: () => {
 						this.ctx.ui.requestRender();
 					},
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	async showSessionPinSelector(): Promise<void> {
+		const session = this.ctx.session;
+		if (session.isStreaming) {
+			this.ctx.showStatus("Cannot pin an account while the session is streaming.");
+			return;
+		}
+		this.ctx.showStatus("Loading provider accounts…", { dim: true });
+		let accountList: SessionOAuthAccountList | undefined;
+		try {
+			accountList = await session.listCurrentProviderOAuthAccounts();
+		} catch (error) {
+			this.ctx.showError(
+				`Could not load provider accounts: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		if (!accountList) {
+			this.ctx.showStatus("Select a model before pinning a provider account.");
+			return;
+		}
+		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
+		const providerName = provider?.name ?? accountList.provider;
+		const accounts = toSessionPinAccounts(accountList.accounts);
+		if (accounts.length === 0) {
+			const source = session.modelRegistry.authStorage.describeCredentialSource(
+				accountList.provider,
+				session.sessionId,
+			);
+			this.ctx.showStatus(
+				source
+					? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
+					: `No stored OAuth accounts for ${providerName}. Use /login to add one.`,
+			);
+			return;
+		}
+
+		this.showSelector(done => {
+			const selector = new SessionAccountSelectorComponent(
+				providerName,
+				accounts,
+				account => {
+					done();
+					if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
+						this.ctx.showWarning(`${account.label} is no longer available to pin.`);
+						return;
+					}
+					this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
+					this.ctx.statusLine.invalidate();
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
 				},
 			);
 			return { component: selector, focus: selector };

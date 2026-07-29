@@ -67,7 +67,7 @@ const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
 export function sanitizeAssistantForReparentedHistory(message: AssistantMessage): AssistantMessage {
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
-		if (block.type === "redactedThinking") continue;
+		if (block.type === "redactedThinking" || block.type === "anthropicServerTool") continue;
 		if (block.type === "thinking") {
 			content.push({ type: "thinking", thinking: block.thinking });
 			continue;
@@ -305,6 +305,9 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 
 /** Fallback type for extension-injected messages that omit a custom type. */
 export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
+
+/** Custom message carrying a coding request delegated by the live voice model. */
+export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
 
 /** Content shape accepted for extension-injected messages. */
 export type CustomMessageContent = string | (TextContent | ImageContent)[];
