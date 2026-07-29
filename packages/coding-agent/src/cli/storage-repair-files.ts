@@ -612,7 +612,16 @@ function backupManifestJson(manifest: SourceTripletManifest): string {
 				const member = manifest.members[role];
 				return [
 					role,
-					member ? { archiveName: member.archiveName, size: member.size, sha256: member.sha256 } : null,
+					member
+						? {
+								archiveName: member.archiveName,
+								size: member.size,
+								mode: member.mode,
+								uid: member.uid,
+								gid: member.gid,
+								sha256: member.sha256,
+							}
+						: null,
 				];
 			}),
 		),
@@ -728,6 +737,7 @@ export function manualNextStep(source: string, candidate: string, backup: string
 		`Move ${source}, ${source}-wal, and ${source}-shm together into a retained quarantine directory.`,
 		"Verify no old sidecar remains at the live basename.",
 		`Copy ${candidate} to an exclusively created mode-0600 sibling staging file, verify its checksum, fsync it, atomically no-replace-rename it to the now-vacant live main path, and sync the parent directory.`,
+		`If manually restoring ${backup}, extract every source member and apply its manifest.json recorded uid, gid, and mode; if ownership cannot be restored, use mode 0600 for that member instead.`,
 		`Keep the candidate, backup tar ${backup}, and quarantine until a normal reopen succeeds; the tar manifest documents byte-exact source restoration if needed. Never stream-copy directly into the live basename.`,
 	].join(" ");
 }

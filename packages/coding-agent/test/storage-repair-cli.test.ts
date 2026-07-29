@@ -1044,4 +1044,31 @@ describe("offline SQLite salvage", () => {
 		expect(staged.path).not.toBe(parsed.repair.candidate);
 		expect(staged.ephemeral).toBe(true);
 	});
+
+	test("backup manifest preserves frozen source member metadata", async () => {
+		const dbPath = await createAgentSource();
+		await Promise.all([
+			fs.promises.chmod(dbPath, 0o640),
+			fs.promises.chmod(`${dbPath}-wal`, 0o620),
+			fs.promises.chmod(`${dbPath}-shm`, 0o600),
+		]);
+		const [main, wal, shm] = await Promise.all(
+			sourceTripletPaths(dbPath).map(async source => {
+				const frozen = await fingerprint(source);
+				return {
+					archiveName: `source/${path.basename(source)}`,
+					size: Number(frozen.size),
+					mode: Number(frozen.mode & 0o7777n),
+					uid: frozen.uid.toString(),
+					gid: frozen.gid.toString(),
+					sha256: frozen.sha256,
+				};
+			}),
+		);
+		const result = await runStorageRepair({ target: "agent", apply: true, agentDir: root });
+		if (result.status !== "ready") throw new Error(result.refusal);
+		const files = await new Bun.Archive(await Bun.file(result.backup).bytes()).files();
+		const manifest = JSON.parse((await files.get("manifest.json")?.text()) ?? "{}");
+		expect(manifest.members).toEqual({ main, wal, shm });
+	});
 });
