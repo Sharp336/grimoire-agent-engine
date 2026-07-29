@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GitHub tool operations targeting a parent repository when a known submodule checkout is selected with `cwd`.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

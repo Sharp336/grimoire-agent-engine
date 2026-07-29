@@ -41,7 +41,7 @@ process.env.GIT_ASKPASS = "true";
 delete process.env.XDG_CONFIG_HOME;
 
 function createSession(
-	cwd: string = "/tmp/test",
+	cwd: string = os.tmpdir(),
 	settings: Settings = Settings.isolated({ "github.enabled": true }),
 	artifactsDir?: string,
 ): ToolSession {
@@ -86,6 +86,41 @@ function runGit(cwd: string, args: string[]): string {
 	}
 
 	return new TextDecoder().decode(result.stdout).trim();
+}
+
+async function createSubmoduleFixture(): Promise<{
+	baseDir: string;
+	parentRoot: string;
+	childRoot: string;
+	parentHead: string;
+	childHead: string;
+}> {
+	const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-cwd-submodule-"));
+	const childSource = path.join(baseDir, "child-source");
+	const parentRoot = path.join(baseDir, "parent");
+	await fs.mkdir(childSource);
+	await fs.mkdir(parentRoot);
+
+	runGit(childSource, ["init", "-b", "child-main"]);
+	await Bun.write(path.join(childSource, "child.txt"), "child\n");
+	runGit(childSource, ["add", "child.txt"]);
+	runGit(childSource, ["commit", "-m", "child"]);
+
+	runGit(parentRoot, ["init", "-b", "parent-main"]);
+	await Bun.write(path.join(parentRoot, "parent.txt"), "parent\n");
+	runGit(parentRoot, ["add", "parent.txt"]);
+	runGit(parentRoot, ["commit", "-m", "parent"]);
+	runGit(parentRoot, ["-c", "protocol.file.allow=always", "submodule", "add", childSource, "child"]);
+	runGit(parentRoot, ["commit", "-am", "add child submodule"]);
+
+	const childRoot = path.join(parentRoot, "child");
+	return {
+		baseDir,
+		parentRoot,
+		childRoot,
+		parentHead: runGit(parentRoot, ["rev-parse", "HEAD"]),
+		childHead: runGit(childRoot, ["rev-parse", "HEAD"]),
+	};
 }
 
 interface PrFixture {
@@ -438,6 +473,86 @@ describe("github tool", () => {
 		expect(text).toContain("Topics: cli, github");
 	});
 
+	it("uses a relative cwd override for repository operations and preserves the session default", async () => {
+		const fixture = await createSubmoduleFixture();
+		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({
+			nameWithOwner: "owner/repo",
+			url: "https://github.com/owner/repo",
+		});
+		try {
+			const tool = new GithubTool(createSession(fixture.parentRoot));
+			await tool.execute("repo-view-child", { op: "repo_view", cwd: "child" });
+			await tool.execute("repo-view-parent", { op: "repo_view" });
+
+			expect(jsonSpy.mock.calls[0]?.[0]).toBe(fixture.childRoot);
+			expect(jsonSpy.mock.calls[1]?.[0]).toBe(fixture.parentRoot);
+			expect(jsonSpy.mock.calls[0]?.[1]?.slice(0, 2)).toEqual(["repo", "view"]);
+		} finally {
+			await removeWithRetries(fixture.baseDir);
+		}
+	});
+
+	it("rejects missing and non-directory cwd overrides", async () => {
+		const fixture = await createSubmoduleFixture();
+		const filePath = path.join(fixture.parentRoot, "parent.txt");
+		try {
+			const tool = new GithubTool(createSession(fixture.parentRoot));
+			await expect(tool.execute("missing-cwd", { op: "repo_view", cwd: "missing" })).rejects.toThrow(
+				`Working directory does not exist: ${path.join(fixture.parentRoot, "missing")}`,
+			);
+			await expect(tool.execute("file-cwd", { op: "repo_view", cwd: filePath })).rejects.toThrow(
+				`Working directory is not a directory: ${filePath}`,
+			);
+		} finally {
+			await removeWithRetries(fixture.baseDir);
+		}
+	});
+
+	it("uses cwd for run_watch repository safety, branch, and HEAD context", async () => {
+		const fixture = await createSubmoduleFixture();
+		const textSpy = vi
+			.spyOn(git.github, "text")
+			.mockImplementation(async cwd => (cwd === fixture.childRoot ? "owner/child" : "owner/parent"));
+		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ workflow_runs: [] });
+		try {
+			const tool = new GithubTool(createSession(fixture.parentRoot));
+			const childAbort = new AbortController();
+			let childDetails: { repo?: string; branch?: string; headSha?: string } | undefined;
+			await tool
+				.execute("watch-child", { op: "run_watch", cwd: "child" }, childAbort.signal, update => {
+					childDetails = update.details;
+					childAbort.abort();
+				})
+				.catch(() => {});
+
+			const parentAbort = new AbortController();
+			let parentDetails: { repo?: string; branch?: string; headSha?: string } | undefined;
+			await tool
+				.execute("watch-parent", { op: "run_watch" }, parentAbort.signal, update => {
+					parentDetails = update.details;
+					parentAbort.abort();
+				})
+				.catch(() => {});
+
+			expect(childDetails).toMatchObject({
+				repo: "owner/child",
+				branch: "child-main",
+				headSha: fixture.childHead,
+			});
+			expect(parentDetails).toMatchObject({
+				repo: "owner/parent",
+				branch: "parent-main",
+				headSha: fixture.parentHead,
+			});
+			expect(textSpy.mock.calls.filter(call => call[0] === fixture.childRoot)).toHaveLength(2);
+			expect(textSpy.mock.calls.filter(call => call[0] === fixture.parentRoot)).toHaveLength(2);
+			expect(jsonSpy.mock.calls.some(call => call[0] === fixture.childRoot)).toBe(true);
+			expect(jsonSpy.mock.calls.some(call => call[0] === fixture.parentRoot)).toBe(true);
+		} finally {
+			await removeWithRetries(fixture.baseDir);
+		}
+	});
+
 	it("reads repository files through the GitHub contents API", async () => {
 		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue('{"version":"16.3.11"}\n');
 		const tool = new GithubTool(createSession());
@@ -451,7 +566,7 @@ describe("github tool", () => {
 
 		expect(text).toBe('{"version":"16.3.11"}\n');
 		expect(textSpy).toHaveBeenCalledWith(
-			"/tmp/test",
+			os.tmpdir(),
 			[
 				"api",
 				"/repos/can1357/oh-my-pi/contents/packages/coding-agent/package.json",
@@ -1209,6 +1324,7 @@ exec ${JSON.stringify(realGit)} "$@"
 		const wire = toolWireSchema(tool);
 		const properties = wire.properties as Record<string, unknown>;
 		expect(properties.op).toBeDefined();
+		expect(properties.cwd).toBeDefined();
 		expect(properties.interval).toBeUndefined();
 		expect(properties.grace).toBeUndefined();
 	});
@@ -1258,7 +1374,7 @@ exec ${JSON.stringify(realGit)} "$@"
 
 		try {
 			const tool = new GithubTool(
-				createSession("/tmp/test", Settings.isolated({ "github.enabled": true }), artifactsDir),
+				createSession(os.tmpdir(), Settings.isolated({ "github.enabled": true }), artifactsDir),
 			);
 			const result = await tool.execute("run-watch", {
 				op: "run_watch",

@@ -19,6 +19,7 @@ import type { ToolSession } from ".";
 import { formatShortSha } from "./gh-format";
 import { type CacheStatus, getOrFetchView, invalidateAllForNumber, resolveGithubCacheAuthKey } from "./github-cache";
 import type { OutputMeta } from "./output-meta";
+import { resolveToCwd } from "./path-utils";
 import { ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -262,6 +263,7 @@ const githubSchema = type({
 	op: type(
 		"'repo_view' | 'file_read' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
 	).describe("github operation"),
+	"cwd?": type("string").describe("working directory; defaults to session directory"),
 	"repo?": type("string").describe("owner/repo"),
 	"branch?": type("string").describe("branch"),
 	"path?": type("string").describe("repository-relative file path"),
@@ -2479,36 +2481,52 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GhToolDetails>> {
 		return untilAborted(signal, async () => {
+			const cwdInput = normalizeOptionalString(params.cwd);
+			const cwd = cwdInput ? resolveToCwd(cwdInput, this.session.cwd) : this.session.cwd;
+			if (cwdInput) {
+				try {
+					const stats = await fs.stat(cwd);
+					if (!stats.isDirectory()) {
+						throw new ToolError(`Working directory is not a directory: ${cwd}`);
+					}
+				} catch (err) {
+					if (isEnoent(err)) {
+						throw new ToolError(`Working directory does not exist: ${cwd}`);
+					}
+					throw err;
+				}
+			}
+
 			switch (params.op) {
 				case "repo_view":
-					return executeRepoView(this.session, params, signal);
+					return executeRepoView(cwd, params, signal);
 				case "file_read":
-					return executeFileRead(this.session, params, signal);
+					return executeFileRead(cwd, params, signal);
 				case "pr_create":
-					return executePrCreate(this.session, params, signal);
+					return executePrCreate(cwd, params, signal);
 				case "pr_checkout":
-					return executePrCheckout(this.session, params, signal);
+					return executePrCheckout(cwd, params, signal);
 				case "pr_push":
-					return executePrPush(this.session, params, signal);
+					return executePrPush(cwd, params, signal);
 				case "search_issues":
-					return executeSearchIssues(this.session, params, signal);
+					return executeSearchIssues(cwd, params, signal);
 				case "search_prs":
-					return executeSearchPrs(this.session, params, signal);
+					return executeSearchPrs(cwd, params, signal);
 				case "search_code":
-					return executeSearchCode(this.session, params, signal);
+					return executeSearchCode(cwd, params, signal);
 				case "search_commits":
-					return executeSearchCommits(this.session, params, signal);
+					return executeSearchCommits(cwd, params, signal);
 				case "search_repos":
-					return executeSearchRepos(this.session, params, signal);
+					return executeSearchRepos(cwd, params, signal);
 				case "run_watch":
-					return executeRunWatch(this.session, this.name, params, signal, onUpdate);
+					return executeRunWatch(this.session, this.name, cwd, params, signal, onUpdate);
 			}
 		});
 	}
 }
 
 async function executeRepoView(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
@@ -2523,18 +2541,18 @@ async function executeRepoView(
 	}
 	args.push("--json", GH_REPO_FIELDS.join(","));
 
-	const data = await git.github.json<GhRepoViewData>(session.cwd, args, signal, {
+	const data = await git.github.json<GhRepoViewData>(cwd, args, signal, {
 		repoProvided: Boolean(repo),
 	});
 	return buildTextResult(formatRepoView(data, { repo, branch }), data.url);
 }
 
 async function executeFileRead(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
-	const repo = await resolveGitHubRepo(session.cwd, normalizeOptionalString(params.repo), undefined, signal);
+	const repo = await resolveGitHubRepo(cwd, normalizeOptionalString(params.repo), undefined, signal);
 	const filePath = requireNonEmpty(normalizeOptionalString(params.path), "path");
 	if (filePath.startsWith("/")) {
 		throw new ToolError("path must be repository-relative");
@@ -2555,7 +2573,7 @@ async function executeFileRead(
 	if (branch) {
 		args.push("-f", `ref=${branch}`);
 	}
-	const text = await git.github.text(session.cwd, args, signal, {
+	const text = await git.github.text(cwd, args, signal, {
 		repoProvided: true,
 		trimOutput: false,
 	});
@@ -3185,7 +3203,7 @@ function joinSections(sections: string[]): string[] {
 }
 
 async function executePrCheckout(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
@@ -3196,7 +3214,7 @@ async function executePrCheckout(
 	const isMulti = prRefs.length > 1;
 
 	const settled = await Promise.allSettled(
-		prRefs.map(prRef => checkoutPullRequest(session, signal, { prRef, repo, force })),
+		prRefs.map(prRef => checkoutPullRequest(cwd, signal, { prRef, repo, force })),
 	);
 	const outcomes: PrCheckoutOutcome[] = [];
 	const failures: Array<{ prRef: string | undefined; reason: unknown }> = [];
@@ -3269,7 +3287,7 @@ interface PrCheckoutOutcome {
 }
 
 async function checkoutPullRequest(
-	session: ToolSession,
+	cwd: string,
 	signal: AbortSignal | undefined,
 	options: PrCheckoutOptions,
 ): Promise<PrCheckoutOutcome> {
@@ -3282,7 +3300,7 @@ async function checkoutPullRequest(
 	appendRepoFlag(args, repo, prRef);
 	args.push("--json", GH_PR_CHECKOUT_FIELDS.join(","));
 
-	const data = await git.github.json<GhPrViewData>(session.cwd, args, signal, {
+	const data = await git.github.json<GhPrViewData>(cwd, args, signal, {
 		repoProvided: Boolean(repo),
 	});
 	const prNumber = data.number;
@@ -3292,7 +3310,7 @@ async function checkoutPullRequest(
 
 	const headRefName = requireNonEmpty(data.headRefName, "head branch");
 	const headRefOid = requireNonEmpty(data.headRefOid, "head commit");
-	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
+	const repoRoot = await requireGitRepoRoot(cwd, signal);
 	const primaryRepoRoot = await requirePrimaryGitRepoRoot(repoRoot, signal);
 	const localBranch = `pr-${prNumber}`;
 	const worktreePath = getWorktreeDir(`${prNumber}-${hashPath(primaryRepoRoot)}`);
@@ -3394,11 +3412,11 @@ function outcomeToSummary(outcome: PrCheckoutOutcome): GhPrCheckoutSummary {
 }
 
 async function executePrPush(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
-	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
+	const repoRoot = await requireGitRepoRoot(cwd, signal);
 	const localBranch = normalizeOptionalString(params.branch) ?? (await requireCurrentGitBranch(repoRoot, signal));
 	const refExists = await git.ref.exists(repoRoot, toLocalBranchRef(localBranch), signal);
 	if (!refExists) {
@@ -3443,7 +3461,7 @@ async function executePrPush(
 }
 
 async function executePrCreate(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
@@ -3492,7 +3510,7 @@ async function executePrCreate(
 			}
 		}
 
-		const output = await git.github.text(session.cwd, args, signal, {
+		const output = await git.github.text(cwd, args, signal, {
 			repoProvided: Boolean(repo),
 		});
 		const url =
@@ -3507,7 +3525,7 @@ async function executePrCreate(
 		if (resolvedRepo && parsed.prNumber !== undefined) {
 			try {
 				prView = await git.github.json<GhPrViewData>(
-					session.cwd,
+					cwd,
 					[
 						"pr",
 						"view",
@@ -3579,7 +3597,7 @@ function formatPrCreateResult(options: {
 }
 
 async function executeSearchIssues(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
@@ -3587,11 +3605,11 @@ async function executeSearchIssues(
 	const dateField = resolveSearchDateField("issues", params.dateField);
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
-	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
+	const repo = await resolveSearchRepoScope(cwd, normalizeOptionalString(params.repo), displayQuery, signal);
 	const apiQuery = composeSearchQuery([displayQuery, repo ? `repo:${repo}` : undefined, "is:issue"]);
 	const args = buildGhApiSearchArgs("issues", apiQuery, limit);
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
+	const response = await git.github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(cwd, args, signal);
 	const items = (response.items ?? []).map(apiIssueToSearchResult);
 	return buildTextResult(formatSearchResults("issues", displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -3599,7 +3617,7 @@ async function executeSearchIssues(
 }
 
 async function executeSearchPrs(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
@@ -3607,11 +3625,11 @@ async function executeSearchPrs(
 	const dateField = resolveSearchDateField("prs", params.dateField);
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
-	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
+	const repo = await resolveSearchRepoScope(cwd, normalizeOptionalString(params.repo), displayQuery, signal);
 	const apiQuery = composeSearchQuery([displayQuery, repo ? `repo:${repo}` : undefined, "is:pr"]);
 	const args = buildGhApiSearchArgs("issues", apiQuery, limit);
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
+	const response = await git.github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(cwd, args, signal);
 	const items = (response.items ?? []).map(apiIssueToSearchResult);
 	return buildTextResult(formatSearchResults("pull requests", displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -3619,7 +3637,7 @@ async function executeSearchPrs(
 }
 
 async function executeSearchCode(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
@@ -3630,11 +3648,11 @@ async function executeSearchCode(
 		throw new ToolError("search_code does not support since/until; GitHub code search has no date qualifier.");
 	}
 	const limit = resolveSearchLimit(params.limit);
-	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), query, signal);
+	const repo = await resolveSearchRepoScope(cwd, normalizeOptionalString(params.repo), query, signal);
 	const apiQuery = composeSearchQuery([query, repo ? `repo:${repo}` : undefined]);
 	const args = buildGhApiSearchArgs("code", apiQuery, limit, ["Accept: application/vnd.github.text-match+json"]);
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchCodeItem>>(session.cwd, args, signal);
+	const response = await git.github.json<GhApiSearchResponse<GhApiSearchCodeItem>>(cwd, args, signal);
 	const items = (response.items ?? []).map(apiCodeToSearchResult);
 	return buildTextResult(formatSearchCodeResults(query, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -3642,7 +3660,7 @@ async function executeSearchCode(
 }
 
 async function executeSearchCommits(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
@@ -3650,11 +3668,11 @@ async function executeSearchCommits(
 	const dateField = resolveSearchDateField("commits", params.dateField);
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
-	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
+	const repo = await resolveSearchRepoScope(cwd, normalizeOptionalString(params.repo), displayQuery, signal);
 	const apiQuery = composeSearchQuery([displayQuery, repo ? `repo:${repo}` : undefined]);
 	const args = buildGhApiSearchArgs("commits", apiQuery, limit);
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchCommitItem>>(session.cwd, args, signal);
+	const response = await git.github.json<GhApiSearchResponse<GhApiSearchCommitItem>>(cwd, args, signal);
 	const items = (response.items ?? []).map(apiCommitToSearchResult);
 	return buildTextResult(formatSearchCommitsResults(displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -3662,7 +3680,7 @@ async function executeSearchCommits(
 }
 
 async function executeSearchRepos(
-	session: ToolSession,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
@@ -3672,7 +3690,7 @@ async function executeSearchRepos(
 	const query = composeSearchQuery([params.query, dateQualifier]);
 	const args = buildGhApiSearchArgs("repositories", query, limit);
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchRepoItem>>(session.cwd, args, signal);
+	const response = await git.github.json<GhApiSearchResponse<GhApiSearchRepoItem>>(cwd, args, signal);
 	const items = (response.items ?? []).map(apiRepoToSearchResult);
 	return buildTextResult(formatSearchReposResults(query, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -3682,6 +3700,7 @@ async function executeSearchRepos(
 async function executeRunWatch(
 	session: ToolSession,
 	toolName: string,
+	cwd: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
 	onUpdate: AgentToolUpdateCallback<GhToolDetails> | undefined,
@@ -3689,7 +3708,7 @@ async function executeRunWatch(
 	const branchInput = normalizeOptionalString(params.branch);
 	const explicitRepo = normalizeOptionalString(params.repo);
 	const runReference = parseRunReference(params.run);
-	const repo = await resolveGitHubRepo(session.cwd, explicitRepo, runReference.repo, signal);
+	const repo = await resolveGitHubRepo(cwd, explicitRepo, runReference.repo, signal);
 	const graceSeconds = RUN_WATCH_GRACE_DEFAULT;
 	const tail = resolveTailLimit(params.tail);
 	const watchStartMs = Date.now();
@@ -3718,7 +3737,7 @@ async function executeRunWatch(
 
 			let run: GhRunSnapshot;
 			try {
-				run = await fetchRunSnapshot(session.cwd, repo, runId, signal);
+				run = await fetchRunSnapshot(cwd, repo, runId, signal);
 			} catch (err) {
 				await handlePollError(err);
 				continue;
@@ -3754,7 +3773,7 @@ async function executeRunWatch(
 					});
 					await scheduler.wait(graceSeconds * 1000, { signal });
 					try {
-						const refetched = await fetchRunSnapshot(session.cwd, repo, runId, signal);
+						const refetched = await fetchRunSnapshot(cwd, repo, runId, signal);
 						const refetchedFailed = refetched.jobs.filter(isFailedJob);
 						// An auto-retry can reset job conclusions between
 						// detection and refetch; keep the originally-detected
@@ -3772,7 +3791,7 @@ async function executeRunWatch(
 				}
 
 				const failedJobLogs = await fetchFailedJobLogs(
-					session.cwd,
+					cwd,
 					repo,
 					failedJobs.map(job => ({ run, job })),
 					tail,
@@ -3810,7 +3829,7 @@ async function executeRunWatch(
 	let headSha: string;
 	if (branchInput) {
 		branch = branchInput;
-		headSha = await resolveGitHubBranchHead(session.cwd, repo, branch, signal);
+		headSha = await resolveGitHubBranchHead(cwd, repo, branch, signal);
 	} else {
 		// No branch/run selector — derive the commit from the current checkout,
 		// but only when cwd actually points at `repo`. Otherwise we'd watch an
@@ -3819,14 +3838,14 @@ async function executeRunWatch(
 		// are case-insensitive — `gh repo view` returns the canonical casing
 		// while callers may pass any casing — so the equality check normalizes
 		// both sides before deciding the cwd is a different repo (PR #1951).
-		const cwdRepo = await tryResolveCurrentRepoFresh(session.cwd, signal);
+		const cwdRepo = await tryResolveCurrentRepoFresh(cwd, signal);
 		if (!githubRepoSlugEquals(cwdRepo, repo)) {
 			throw new ToolError(
 				`Cannot infer the watched commit for ${repo}: current checkout is ${cwdRepo ?? "not a GitHub repository"}. Pass \`branch\` or \`run\` to scope the watch.`,
 			);
 		}
-		branch = await requireCurrentGitBranch(session.cwd, signal);
-		headSha = await requireCurrentGitHead(session.cwd, signal);
+		branch = await requireCurrentGitBranch(cwd, signal);
+		headSha = await requireCurrentGitHead(cwd, signal);
 	}
 	let pollCount = 0;
 	let settledSuccessSignature: string | undefined;
@@ -3839,7 +3858,7 @@ async function executeRunWatch(
 
 		let runs: GhRunSnapshot[];
 		try {
-			runs = await fetchRunsForCommit(session.cwd, repo, headSha, signal, completedRunJobsCache);
+			runs = await fetchRunsForCommit(cwd, repo, headSha, signal, completedRunJobsCache);
 		} catch (err) {
 			await handlePollError(err);
 			continue;
@@ -3875,7 +3894,7 @@ async function executeRunWatch(
 				});
 				await scheduler.wait(graceSeconds * 1000, { signal });
 				try {
-					const refetched = await fetchRunsForCommit(session.cwd, repo, headSha, signal, completedRunJobsCache);
+					const refetched = await fetchRunsForCommit(cwd, repo, headSha, signal, completedRunJobsCache);
 					const refetchedPairs = refetched.flatMap(run => run.jobs.filter(isFailedJob).map(job => ({ run, job })));
 					// Keep the originally-detected failure list when an
 					// auto-retry reset the conclusions during the grace window
@@ -3890,7 +3909,7 @@ async function executeRunWatch(
 				}
 			}
 
-			const failedJobLogs = await fetchFailedJobLogs(session.cwd, repo, failedPairs, tail, signal);
+			const failedJobLogs = await fetchFailedJobLogs(cwd, repo, failedPairs, tail, signal);
 			const finalDetails = buildCommitRunWatchDetails(repo, headSha, branch, runs, {
 				state: "completed",
 				failedJobLogs,

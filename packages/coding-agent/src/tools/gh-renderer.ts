@@ -1,4 +1,5 @@
 import { type Component, padding, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { getProjectDir } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme, ThemeColor } from "../modes/theme/theme";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
@@ -14,6 +15,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	formatToolWorkingDirectory,
 	PREVIEW_LIMITS,
 	replaceTabs,
 	type ToolUIColor,
@@ -23,6 +25,7 @@ import {
 } from "./render-utils";
 
 type GithubToolRenderArgs = {
+	cwd?: string;
 	op?: string;
 	run?: string;
 	branch?: string;
@@ -113,6 +116,8 @@ function buildOpMeta(args: GithubToolRenderArgs): string[] {
 			break;
 		}
 	}
+	const cwd = formatToolWorkingDirectory(args.cwd, getProjectDir());
+	if (cwd) meta.push(cwd);
 	return meta;
 }
 
