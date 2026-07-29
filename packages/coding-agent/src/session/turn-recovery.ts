@@ -137,7 +137,7 @@ export interface TurnRecoveryHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
-	appendSessionMessage(message: AssistantMessage): void;
+	appendSessionMessage(message: AssistantMessage | UserMessage): void;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
@@ -1328,7 +1328,12 @@ export class TurnRecovery {
 			: retrySettings.maxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
 
-		if (classifierRefusal && !this.#refusalParaphraseUsed && retrySettings.refusalParaphrase) {
+		if (
+			classifierRefusal &&
+			!retryBudgetExhausted &&
+			!this.#refusalParaphraseUsed &&
+			retrySettings.refusalParaphrase
+		) {
 			this.#refusalParaphraseUsed = true;
 			if (await this.#retryRefusalWithParaphrase(message, generation, maxRetries)) return true;
 		}
@@ -1669,7 +1674,9 @@ export class TurnRecovery {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
-		this.#retryAbortController?.abort();
+		const controller = this.#retryAbortController;
+		if (!controller) return;
+		controller.abort();
 		// Note: _retryAttempt is reset in the catch block of _autoRetry
 		this.resolveRetry();
 	}
@@ -1711,7 +1718,10 @@ export class TurnRecovery {
 		maxRetries: number,
 	): Promise<boolean> {
 		const messages = this.#host.agent.state.messages;
-		const userIndex = messages.findLastIndex(message => message.role === "user");
+		const assistantIndex = messages.findLastIndex(
+			message => message.role === "assistant" && this.#isSameAssistantMessage(message, assistantMessage),
+		);
+		const userIndex = assistantIndex - 1;
 		const userMessage = messages[userIndex];
 		if (userMessage?.role !== "user") return false;
 		const originalText =
@@ -1737,64 +1747,103 @@ export class TurnRecovery {
 		const registryApiKey = this.#host.modelRegistry.resolver(resolved.model, this.#host.sessionId());
 		let response: AssistantMessage;
 		try {
-			response = await completeSimple(
-				resolved.model,
-				{
-					systemPrompt: [prompt.render(refusalParaphraseTemplate)],
-					messages: [{ role: "user", content: originalText, timestamp: Date.now() }],
-				},
-				{
-					apiKey: async context => {
-						const apiKey = await registryApiKey(context);
-						if (apiKey !== undefined) return apiKey;
-						const agentApiKey = await this.#host.agent.getApiKey?.(resolved.model);
-						return typeof agentApiKey === "function" ? agentApiKey(context) : agentApiKey;
+			try {
+				response = await completeSimple(
+					resolved.model,
+					{
+						systemPrompt: [prompt.render(refusalParaphraseTemplate)],
+						messages: [{ role: "user", content: originalText, timestamp: Date.now() }],
 					},
-					maxTokens: REFUSAL_PARAPHRASE_MAX_TOKENS,
-					disableReasoning: true,
-					signal: abortController.signal,
-				},
-			);
-		} catch (error) {
-			logger.debug("refusal paraphrase retry failed", {
-				error: error instanceof Error ? error.message : String(error),
+					{
+						apiKey: async context => {
+							const apiKey = await registryApiKey(context);
+							if (apiKey !== undefined) return apiKey;
+							const agentApiKey = await this.#host.agent.getApiKey?.(resolved.model);
+							return typeof agentApiKey === "function" ? agentApiKey(context) : agentApiKey;
+						},
+						maxTokens: REFUSAL_PARAPHRASE_MAX_TOKENS,
+						disableReasoning: true,
+						metadata: this.#host.agent.metadataForProvider(resolved.model.provider),
+						sessionId: this.#host.sessionId(),
+						signal: abortController.signal,
+					},
+				);
+			} catch (error) {
+				logger.debug("refusal paraphrase retry failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			}
+
+			if (abortController.signal.aborted || response.stopReason !== "stop") return false;
+			const paraphrasedText = response.content
+				.filter((content): content is TextContent => content.type === "text")
+				.map(content => content.text)
+				.join("\n")
+				.trim();
+			if (!hasNonWhitespace(paraphrasedText)) return false;
+
+			const rewrittenUserMessage = {
+				...userMessage,
+				content: replaceUserText(userMessage.content, paraphrasedText),
+			};
+			await this.#host.waitForSessionMessagePersistence(assistantMessage);
+			if (abortController.signal.aborted) return false;
+			const branch = this.#host.sessionManager.getBranch();
+			const userEntry = branch
+				.slice()
+				.reverse()
+				.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						(entry.message === userMessage || entry.message.timestamp === userMessage.timestamp),
+				);
+			if (userEntry?.type !== "message" || userEntry.message.role !== "user") return false;
+
+			// Commit the rewrite: Escape may still cancel the provider call and persistence
+			// wait above, but cannot split the synchronous state mutation, lifecycle
+			// events, and continuation scheduling below.
+			if (this.#retryAbortController === abortController) this.#retryAbortController = undefined;
+			this.#host.withBashBranchTransition(() => {
+				if (userEntry.parentId === null) {
+					this.#host.sessionManager.resetLeaf();
+				} else {
+					this.#host.sessionManager.branch(userEntry.parentId);
+				}
+				this.#host.appendSessionMessage(rewrittenUserMessage);
 			});
-			return false;
+			const rewrittenMessages = messages.slice();
+			rewrittenMessages[userIndex] = rewrittenUserMessage;
+			this.#host.agent.replaceMessages(rewrittenMessages);
+			this.removeAssistantMessageFromActiveContext(assistantMessage, "refusal-paraphrase");
+			logger.warn("Retrying classifier refusal with paraphrased user prompt", {
+				model: `${resolved.model.provider}/${resolved.model.id}`,
+				originalLength: originalText.length,
+				paraphrasedLength: paraphrasedText.length,
+			});
+			await this.#host.emitSessionEvent({
+				type: "refusal_paraphrase_applied",
+				originalText,
+				paraphrasedText,
+			});
+			await this.#host.emitSessionEvent({
+				type: "auto_retry_start",
+				attempt: this.#retryAttempt,
+				maxAttempts: maxRetries,
+				delayMs: 0,
+				errorMessage: assistantMessage.errorMessage || "Unknown error",
+				errorId: assistantMessage.errorId,
+			});
+			this.#host.scheduleAgentContinue({
+				delayMs: 1,
+				generation,
+				onError: error => void this.#failRetryAfterLocalContinueError(assistantMessage, error),
+			});
+			return true;
 		} finally {
 			if (this.#retryAbortController === abortController) this.#retryAbortController = undefined;
 		}
-		if (response.stopReason === "error") return false;
-		const paraphrasedText = response.content
-			.filter((content): content is TextContent => content.type === "text")
-			.map(content => content.text)
-			.join("\n")
-			.trim();
-		if (!hasNonWhitespace(paraphrasedText)) return false;
-
-		const rewrittenMessages = messages.slice();
-		rewrittenMessages[userIndex] = { ...userMessage, content: replaceUserText(userMessage.content, paraphrasedText) };
-		this.#host.agent.replaceMessages(rewrittenMessages);
-		this.removeAssistantMessageFromActiveContext(assistantMessage, "refusal-paraphrase");
-		logger.warn("Retrying classifier refusal with paraphrased user prompt", { originalText, paraphrasedText });
-		await this.#host.emitSessionEvent({
-			type: "refusal_paraphrase_applied",
-			originalText,
-			paraphrasedText,
-		});
-		await this.#host.emitSessionEvent({
-			type: "auto_retry_start",
-			attempt: this.#retryAttempt,
-			maxAttempts: maxRetries,
-			delayMs: 0,
-			errorMessage: assistantMessage.errorMessage || "Unknown error",
-			errorId: assistantMessage.errorId,
-		});
-		this.#host.scheduleAgentContinue({
-			delayMs: 1,
-			generation,
-			onError: error => void this.#failRetryAfterLocalContinueError(assistantMessage, error),
-		});
-		return true;
 	}
 
 	/**
