@@ -13,6 +13,7 @@ import {
 	getModelMatchPreferences,
 	resolveCliModel,
 } from "../config/model-resolver";
+import { OPENAI_COMPATIBLE_LOGIN_ID } from "../config/openai-compatible-login";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
@@ -1540,6 +1541,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (command, runtime) => {
 			const manualInput = runtime.ctx.oauthManualInput;
 			const args = command.args.trim();
+			if (args === OPENAI_COMPATIBLE_LOGIN_ID) {
+				void runtime.ctx.showOAuthSelector("login", OPENAI_COMPATIBLE_LOGIN_ID);
+				runtime.ctx.editor.setText("");
+				return;
+			}
 			if (args.length > 0) {
 				const matchedProvider = getOAuthProviders().find(provider => provider.id === args);
 				if (matchedProvider) {

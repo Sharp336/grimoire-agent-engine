@@ -4,6 +4,7 @@ import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
 import { openPath } from "../../utils/open";
 import { DynamicBorder } from "./dynamic-border";
+import { HookSelectorComponent } from "./hook-selector";
 
 /**
  * Login dialog component - replaces editor during OAuth login flow
@@ -15,6 +16,7 @@ export class LoginDialogComponent extends Container {
 	#abortController = new AbortController();
 	#inputResolver?: (value: string) => void;
 	#inputRejecter?: (error: Error) => void;
+	#selector?: HookSelectorComponent;
 
 	constructor(
 		tui: TUI,
@@ -60,6 +62,11 @@ export class LoginDialogComponent extends Container {
 
 	#cancel(): void {
 		this.#abortController.abort();
+		if (this.#selector) {
+			this.#contentContainer.removeChild(this.#selector);
+			this.#selector.dispose();
+			this.#selector = undefined;
+		}
 		if (this.#inputRejecter) {
 			this.#inputRejecter(new Error("Login cancelled"));
 			this.#inputResolver = undefined;
@@ -118,6 +125,7 @@ export class LoginDialogComponent extends Container {
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
 	showManualInput(prompt: string): Promise<string> {
+		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
 		// Invalid pastes re-prompt (the OAuth callback loop calls this again), so
 		// reuse the already-mounted input instead of stacking duplicate prompt and
 		// hint lines beneath the dialog. Reset the value so each retry starts clean.
@@ -141,6 +149,7 @@ export class LoginDialogComponent extends Container {
 	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
 	 */
 	showPrompt(message: string, placeholder?: string): Promise<string> {
+		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
 		if (placeholder) {
@@ -155,6 +164,35 @@ export class LoginDialogComponent extends Container {
 		this.#tui.requestRender();
 
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		this.#inputResolver = resolve;
+		this.#inputRejecter = reject;
+		return promise;
+	}
+
+	/** Show a keyboard-navigable selection prompt inside the active login dialog. */
+	showSelect(message: string, options: string[], initialIndex?: number): Promise<string> {
+		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
+		if (this.#contentContainer.children.includes(this.#input)) this.#contentContainer.removeChild(this.#input);
+
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const selector = new HookSelectorComponent(
+			message,
+			options,
+			value => {
+				if (this.#selector !== selector || !this.#inputResolver) return;
+				this.#contentContainer.removeChild(selector);
+				selector.dispose();
+				this.#selector = undefined;
+				this.#inputResolver = undefined;
+				this.#inputRejecter = undefined;
+				resolve(value);
+			},
+			() => this.#cancel(),
+			{ initialIndex },
+		);
+		this.#selector = selector;
+		this.#contentContainer.addChild(selector);
+		this.#tui.requestRender();
 		this.#inputResolver = resolve;
 		this.#inputRejecter = reject;
 		return promise;
@@ -178,8 +216,12 @@ export class LoginDialogComponent extends Container {
 		this.#tui.requestRender();
 	}
 
-	/** Route non-bracketed paste transports into the active login input. */
+	/** Route non-bracketed paste transports into the active login control. */
 	pasteText(text: string): void {
+		if (this.#selector) {
+			this.#selector.handleInput(text);
+			return;
+		}
 		this.#input.pasteText(text);
 	}
 
@@ -191,7 +233,11 @@ export class LoginDialogComponent extends Container {
 			return;
 		}
 
-		// Pass to input
+		if (this.#selector) {
+			this.#selector.handleInput(data);
+			return;
+		}
+
 		this.#input.handleInput(data);
 	}
 }

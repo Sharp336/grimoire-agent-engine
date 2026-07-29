@@ -21,7 +21,7 @@ export default class AuthBroker extends Command {
 		}),
 		// Second positional: provider id (login/logout) or filesystem path (import).
 		source: Args.string({
-			description: "OAuth provider id (login/logout) or path (import)",
+			description: "Provider id (login/logout) or path (import); use openai-compatible to configure an endpoint",
 			required: false,
 		}),
 	};
@@ -58,6 +58,7 @@ export default class AuthBroker extends Command {
 		"# Rotate the bearer token\n  omp auth-broker token --regenerate",
 		"# List supported OAuth providers\n  omp auth-broker list",
 		"# Local login (run on the broker host)\n  omp auth-broker login anthropic",
+		"# Add an OpenAI-compatible endpoint and persist it in models.yml\n  omp auth-broker login openai-compatible",
 		"# Interactive provider selection\n  omp auth-broker login",
 		"# Remote login over SSH tunnel\n  omp auth-broker login anthropic --via=user@broker",
 		"# Log out of a provider (interactive without provider arg)\n  omp auth-broker logout anthropic",

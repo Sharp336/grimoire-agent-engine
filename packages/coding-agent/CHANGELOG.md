@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added an OpenAI-compatible endpoint option to `/login` and `omp auth-broker login` that probes `/models`, writes an inline API key with dynamic model discovery to `models.yml`, and lets the user select the endpoint API.
 
 ## [17.1.8] - 2026-07-28
 

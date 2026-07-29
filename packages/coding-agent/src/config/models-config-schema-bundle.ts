@@ -1,6 +1,18 @@
 import { once } from "@oh-my-pi/pi-utils";
 import { scope } from "arktype";
 
+export const MODELS_CONFIG_API_IDS = [
+	"openai-completions",
+	"openai-responses",
+	"openai-codex-responses",
+	"azure-openai-responses",
+	"anthropic-messages",
+	"bedrock-converse-stream",
+	"google-generative-ai",
+	"google-gemini-cli",
+	"google-vertex",
+] as const;
+
 export const getModelsConfigSchemaBundle = once(() => {
 	// Config schemas validate at most a handful of times per process (on config
 	// load), so the eager JIT codegen ArkType runs at definition time is pure

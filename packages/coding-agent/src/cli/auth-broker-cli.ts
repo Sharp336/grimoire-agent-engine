@@ -27,7 +27,6 @@ import {
 	listProvidersWithEnvKey,
 	type OAuthCredential,
 	type OAuthProvider,
-	type OAuthProviderInfo,
 	PASTE_CODE_LOGIN_PROVIDERS,
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
@@ -37,6 +36,14 @@ import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, V
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
 import chalk from "chalk";
+import {
+	normalizeOpenAICompatibleBaseUrl,
+	OPENAI_COMPATIBLE_LOGIN_ID,
+	probeOpenAICompatibleEndpoint,
+	validateOpenAICompatibleApi,
+	validateOpenAICompatibleProviderName,
+	writeOpenAICompatibleProvider,
+} from "../config/openai-compatible-login";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
@@ -186,7 +193,15 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 				"Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)",
 			);
 		}
-		providerArg = await pickProviderInteractively(providers);
+		providerArg = await pickProviderInteractively([
+			...providers,
+			{ id: OPENAI_COMPATIBLE_LOGIN_ID, name: "OpenAI-compatible endpoint" },
+		]);
+	}
+	if (providerArg === OPENAI_COMPATIBLE_LOGIN_ID) {
+		if (flags.via) throw new Error("OpenAI-compatible login must run on the machine that owns models.yml.");
+		await runOpenAICompatibleLocalLogin();
+		return;
 	}
 	if (!providers.some(p => p.id === providerArg)) {
 		throw new Error(
@@ -259,6 +274,39 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 	}
 }
 
+async function runOpenAICompatibleLocalLogin(): Promise<void> {
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	const ask = (message: string) => promptLine(rl, `${message} `);
+	try {
+		const providerName = validateOpenAICompatibleProviderName(await ask("Provider name (models.yml key):"));
+		const baseUrl = normalizeOpenAICompatibleBaseUrl(await ask("OpenAI-compatible base URL:"));
+		const apiKey = (await ask("API key:")).trim();
+		if (!apiKey) throw new Error("API key is required.");
+		const api = validateOpenAICompatibleApi(await ask("API (openai-completions; e.g. openai-responses):"));
+
+		let modelCount: number | undefined;
+		for (;;) {
+			const probe = await probeOpenAICompatibleEndpoint({ baseUrl, apiKey });
+			if (probe.ok) {
+				modelCount = probe.models.length;
+				break;
+			}
+			process.stderr.write(`${probe.error}\n`);
+			const action = (await ask("Press Enter to retry, or type save to save anyway:")).trim();
+			if (action.toLowerCase() === "save") break;
+		}
+
+		await writeOpenAICompatibleProvider({ providerName, baseUrl, apiKey, api });
+		process.stdout.write(
+			modelCount === undefined
+				? `Added ${providerName} to models.yml. Dynamic discovery will retry /models at runtime.\n`
+				: `Added ${providerName} to models.yml. Probe found ${modelCount} models; dynamic discovery will keep them current.\n`,
+		);
+	} finally {
+		rl.close();
+	}
+}
+
 /**
  * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
  * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
@@ -313,7 +361,7 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 	return promise;
 }
 
-async function pickProviderInteractively(providers: readonly OAuthProviderInfo[]): Promise<string> {
+async function pickProviderInteractively(providers: readonly { id: string; name: string }[]): Promise<string> {
 	if (providers.length === 0) {
 		throw new Error("No OAuth providers registered");
 	}

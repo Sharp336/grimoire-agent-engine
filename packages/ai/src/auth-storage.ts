@@ -2773,6 +2773,19 @@ export class AuthStorage {
 		};
 	}
 
+	/** Persist an API key supplied through an interactive login surface. */
+	async saveApiKeyFromLogin(provider: string, apiKey: string): Promise<void> {
+		const credential: ApiKeyCredential = { type: "api_key", key: apiKey, source: "login" };
+		const stored = this.#store.upsertAuthCredentialRemote
+			? await this.#store.upsertAuthCredentialRemote(provider, credential)
+			: this.#store.upsertAuthCredentialForProvider(provider, credential);
+		this.#setStoredCredentials(
+			provider,
+			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
+		);
+		this.#resetProviderAssignments(provider);
+	}
+
 	/**
 	 * Logout from a provider.
 	 */

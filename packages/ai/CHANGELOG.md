@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added AuthStorage support for persisting API keys supplied through interactive login flows.
 
 ## [17.1.8] - 2026-07-28
 
