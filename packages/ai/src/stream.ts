@@ -24,6 +24,13 @@ import { isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+// `bedrock-mantle` signs its own requests inline (see
+// `createBedrockMantleAuthenticatedFetch`), so these must be callable
+// synchronously from the request path. Both modules are dependency-light —
+// `aws-sigv4` imports nothing and `aws-credentials` only node builtins plus
+// pi-utils — so eager import costs the startup parse graph nothing measurable.
+import { resolveAwsCredentials } from "./providers/aws-credentials";
+import { signRequest } from "./providers/aws-sigv4";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
@@ -679,14 +686,20 @@ async function readBedrockMantleRequestBody(
  * way: a Bedrock API key as a bearer token, or SigV4 over the standard
  * credential chain. This wraps the transport's fetch to substitute `{region}`
  * in the base URL and inject the credentials, so no new transport is needed.
+ *
+ * `resolvedApiKey` carries a caller- or storage-supplied Bedrock API key that
+ * arrived through the ordinary `apiKey` path. It takes precedence over the
+ * credential chain the same way `bearerToken` does, so an explicit key is never
+ * silently discarded in favour of SigV4.
  */
-function createBedrockMantleAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
+function createBedrockMantleAuthenticatedFetch(options: StreamOptions | undefined, resolvedApiKey?: string): FetchImpl {
 	const baseFetch = options?.fetch ?? (globalThis.fetch as FetchImpl);
 	const region = resolveBedrockMantleRegion(options);
 	const mantleFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const rewritten = resolveBedrockMantleRequest(input, region);
 		const headers = new Headers(init?.headers);
-		const bearerToken = (options as BedrockOptions | undefined)?.bearerToken || $env.AWS_BEARER_TOKEN_BEDROCK;
+		const bearerToken =
+			(options as BedrockOptions | undefined)?.bearerToken || resolvedApiKey || $env.AWS_BEARER_TOKEN_BEDROCK;
 		if (bearerToken) {
 			headers.set("Authorization", `Bearer ${bearerToken}`);
 			return baseFetch(rewritten, { ...init, headers });
@@ -697,12 +710,6 @@ function createBedrockMantleAuthenticatedFetch(options: StreamOptions | undefine
 		const url = new URL(rewritten instanceof Request ? rewritten.url : rewritten.toString());
 		const body = await readBedrockMantleRequestBody(rewritten, init);
 		const method = init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST");
-		// Loaded lazily to keep the AWS credential/signing modules out of the CLI
-		// startup parse graph, matching how the provider streams are imported.
-		const [{ resolveAwsCredentials }, { signRequest }] = await Promise.all([
-			import("./providers/aws-credentials"),
-			import("./providers/aws-sigv4"),
-		]);
 		const credentials = await resolveAwsCredentials({
 			profile: (options as BedrockOptions | undefined)?.profile,
 			region,
@@ -937,8 +944,13 @@ function streamDispatch<TApi extends Api>(
 		: isBedrockMantle
 			? {
 					...requestOptions,
+					// A resolver is left for the auth-retry path to unwrap; only a
+					// plain string is a usable Bedrock API key here.
 					apiKey: AWS_AUTHENTICATED_SENTINEL,
-					fetch: createBedrockMantleAuthenticatedFetch(requestOptions),
+					fetch: createBedrockMantleAuthenticatedFetch(
+						requestOptions,
+						typeof apiKey === "string" && apiKey !== AWS_AUTHENTICATED_SENTINEL ? apiKey : undefined,
+					),
 				}
 			: { ...requestOptions, apiKey };
 
