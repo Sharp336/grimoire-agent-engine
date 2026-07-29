@@ -484,15 +484,7 @@ describe("AuthStorage OAuth refresh race", () => {
 	test("invalidating a session-sticky OAuth credential rotates the retry to another active credential", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
-		let sessionId = "";
-		for (let index = 0; index < 32; index++) {
-			const candidate = `session-auth-retry-${index}`;
-			if (Bun.hash.xxHash32(candidate) % 2 === 0) {
-				sessionId = candidate;
-				break;
-			}
-		}
-		if (!sessionId) throw new Error("could not find test session id");
+		const sessionId = "session-auth-retry";
 
 		await authStorage.set("unit-oauth-rotation", [
 			{
@@ -516,15 +508,16 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 
 		const firstKey = await authStorage.getApiKey("unit-oauth-rotation", sessionId);
-		expect(firstKey).toBe("access-a");
+		if (!firstKey) throw new Error("expected an initial OAuth credential");
+		const expectedRetryKey = firstKey === "access-a" ? "access-b" : "access-a";
 
-		const invalidated = await authStorage.invalidateCredentialMatching("unit-oauth-rotation", "access-a", {
+		const invalidated = await authStorage.invalidateCredentialMatching("unit-oauth-rotation", firstKey, {
 			sessionId,
 		});
 		expect(invalidated).toBe(true);
 
 		const retryKey = await authStorage.getApiKey("unit-oauth-rotation", sessionId);
-		expect(retryKey).toBe("access-b");
+		expect(retryKey).toBe(expectedRetryKey);
 	});
 
 	test("persists a refreshed token by id when a concurrent disable shifts indices", async () => {
