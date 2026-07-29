@@ -100,6 +100,15 @@ describe("AgentSession.switchSession previous-context build", () => {
 		};
 	}
 
+	/** Drain the microtask queue enough ticks for the async event-delivery chain
+	 *  (agent.#emit → #handleAgentEvent → #processAgentEvent → #emitSessionEvent
+	 *  → #emit → subscriber) to reach the subscriber callback. */
+	async function flushSubscriberEvents(events: string[], expected: number): Promise<void> {
+		for (let i = 0; i < 20 && events.length < expected; i++) {
+			await Promise.resolve();
+		}
+	}
+
 	it("skips building the previous display context when switching to a different session", async () => {
 		const tempDir = TempDir.createSync("@pi-switch-prev-ctx-different-");
 		tempDirs.push(tempDir);
@@ -117,10 +126,11 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(targetSessionFile).toBeString();
 		expect(targetSessionFile).not.toBe(previousSessionFile);
 		await otherManager.close();
+		if (!targetSessionFile) throw new Error("Expected a target session file");
 
 		const { calls, restore } = instrumentBuildSessionContext(sessionManager);
 		try {
-			const switched = await session.switchSession(targetSessionFile!);
+			const switched = await session.switchSession(targetSessionFile);
 			expect(switched).toBe(true);
 			expect(session.sessionFile).toBe(targetSessionFile);
 		} finally {
@@ -129,7 +139,7 @@ describe("AgentSession.switchSession previous-context build", () => {
 
 		// The previous session's display context MUST NOT be materialized. Only
 		// the new target context (post-`setSessionFile`) should be built.
-		expect(calls).toEqual([{ sessionFile: targetSessionFile!, transcript: undefined }]);
+		expect(calls).toEqual([{ sessionFile: targetSessionFile, transcript: undefined }]);
 	});
 
 	it("builds the previous display context for same-session reloads", async () => {
@@ -141,10 +151,11 @@ describe("AgentSession.switchSession previous-context build", () => {
 		await sessionManager.flush();
 		const sessionFile = sessionManager.getSessionFile();
 		expect(sessionFile).toBeString();
+		if (!sessionFile) throw new Error("Expected a session file");
 
 		const { calls, restore } = instrumentBuildSessionContext(sessionManager);
 		try {
-			const switched = await session.switchSession(sessionFile!);
+			const switched = await session.switchSession(sessionFile);
 			expect(switched).toBe(true);
 			expect(session.sessionFile).toBe(sessionFile);
 		} finally {
@@ -154,13 +165,13 @@ describe("AgentSession.switchSession previous-context build", () => {
 		// Same-session reload must snapshot the pre-reload context so
 		// `#didSessionMessagesChange` can detect rollback edits.
 		expect(calls).toEqual([
-			{ sessionFile: sessionFile!, transcript: undefined },
-			{ sessionFile: sessionFile!, transcript: undefined },
+			{ sessionFile: sessionFile, transcript: undefined },
+			{ sessionFile: sessionFile, transcript: undefined },
 		]);
 	});
 
-	it("drops listeners owned by the previous logical session", async () => {
-		const tempDir = TempDir.createSync("@pi-switch-listener-cleanup-");
+	it("preserves session-lifetime subscribers across a session switch", async () => {
+		const tempDir = TempDir.createSync("@pi-switch-listener-survival-");
 		tempDirs.push(tempDir);
 
 		const { session, sessionManager } = buildSession(tempDir);
@@ -173,16 +184,19 @@ describe("AgentSession.switchSession previous-context build", () => {
 		const targetSessionFile = otherManager.getSessionFile();
 		expect(targetSessionFile).toBeString();
 		await otherManager.close();
+		if (!targetSessionFile) throw new Error("Expected a target session file");
 
 		const events: string[] = [];
 		session.subscribe(event => events.push(event.type));
-		expect(await session.switchSession(targetSessionFile!)).toBe(true);
+		expect(await session.switchSession(targetSessionFile)).toBe(true);
 
 		session.agent.emitExternalEvent({
 			type: "message_start",
 			message: { role: "user", content: "after switch", timestamp: 3 },
 		});
-		await Bun.sleep(0);
-		expect(events).toEqual([]);
+		await flushSubscriberEvents(events, 1);
+		// A subscriber registered before the switch MUST still receive events
+		// emitted after the switch — session-lifetime listeners survive switches.
+		expect(events).toEqual(["message_start"]);
 	});
 });

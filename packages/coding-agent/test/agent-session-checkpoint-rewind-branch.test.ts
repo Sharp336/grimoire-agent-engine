@@ -741,12 +741,32 @@ describe("AgentSession checkpoint rewind branch context", () => {
 
 		await session.prompt("replay the rewind result");
 		expect(mock.calls).toHaveLength(5);
-		expect(
-			session.sessionManager
-				.buildSessionContext()
-				.messages.some(
-					message => message.role === "toolResult" && message.toolCallId === "rewind-replayed-after-compaction",
-				),
-		).toBe(true);
+
+		// The replayed rewind tool result MUST be distinguishable from the stale
+		// pre-compaction one by content — not by toolCallId alone (both share
+		// "rewind-replayed-after-compaction"). The stale result carried
+		// report: "rewind, compact, then replay"; the replayed one carries
+		// report: "replayed" in its details. Compaction dropped the stale
+		// branch entry, so only the replayed result should be present.
+		const replayedResult = session.sessionManager
+			.buildSessionContext()
+			.messages.find(
+				message => message.role === "toolResult" && message.toolCallId === "rewind-replayed-after-compaction",
+			);
+		expect(replayedResult).toBeDefined();
+		if (replayedResult?.role !== "toolResult") throw new Error("Expected a toolResult message");
+		const replayedDetails = replayedResult.details as { report?: string; rewound?: boolean } | undefined;
+		expect(replayedDetails?.report).toBe("replayed");
+		expect(replayedDetails?.rewound).toBe(true);
+		// The stale report MUST NOT appear in any toolResult on the branch.
+		const staleResult = session.sessionManager
+			.buildSessionContext()
+			.messages.find(
+				message =>
+					message.role === "toolResult" &&
+					message.toolCallId === "rewind-replayed-after-compaction" &&
+					(message.details as { report?: string } | undefined)?.report === "rewind, compact, then replay",
+			);
+		expect(staleResult).toBeUndefined();
 	});
 });

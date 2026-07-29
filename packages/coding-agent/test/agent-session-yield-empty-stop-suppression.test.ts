@@ -9,7 +9,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { type AfterToolCallContext, Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { z } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -137,6 +137,16 @@ function assistantText(messages: AgentMessage[]): string {
 		.join("\n");
 }
 
+/** Extract the nested `details.value.value` from the yield toolResult for a
+ *  given tool call id. The yield tool wraps `params.result.data` into
+ *  `details.value`, and the mock response nests the value under `data.value`. */
+function yieldToolResultValue(messages: AgentMessage[], toolCallId: string): unknown {
+	const result = messages.find(message => message.role === "toolResult" && message.toolCallId === toolCallId);
+	if (result?.role !== "toolResult") return undefined;
+	const details = result.details as { value?: { value?: unknown } } | undefined;
+	return details?.value?.value;
+}
+
 afterEach(async () => {
 	for (const harness of activeHarnesses.splice(0)) {
 		await harness.session.dispose();
@@ -196,30 +206,35 @@ describe("AgentSession yield empty-stop suppression", () => {
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
-	it("clears stale terminal-yield dedupe before a new prompt", async () => {
-		const { session } = await createHarness([{ content: ["fresh turn"], stopReason: "stop" }]);
-		const abort = vi.spyOn(session.agent, "abort").mockImplementation(() => {});
-		const afterToolCall = session.agent.afterToolCall;
-		if (!afterToolCall) throw new Error("Expected AgentSession to register an afterToolCall hook");
-		const staleToolCallId = "stale-yield-dedupe";
-
-		afterToolCall({
-			toolCall: { id: staleToolCallId, name: "yield", arguments: {} },
-			result: { content: [], details: {} },
-			isError: false,
-		} as unknown as AfterToolCallContext);
-		expect(abort).toHaveBeenCalledTimes(1);
-		abort.mockClear();
-
-		await session.prompt("start fresh");
-		session.agent.emitExternalEvent({
-			type: "tool_execution_end",
-			toolCallId: staleToolCallId,
-			toolName: "yield",
-			result: { details: {} },
+	it("emits each terminal yield completion before the following prompt", async () => {
+		const { session, mock } = await createHarness([
+			yieldCall("first-result", "call-yield-turn-1"),
+			yieldCall("second-result", "call-yield-turn-2"),
+			emptyStop(),
+		]);
+		const completedYieldCallIds: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "tool_execution_end" && event.toolName === "yield") {
+				completedYieldCallIds.push(event.toolCallId);
+			}
 		});
-		await Bun.sleep(0);
-		expect(abort).toHaveBeenCalledTimes(1);
+
+		await session.prompt("yield the first result");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+		expect(completedYieldCallIds).toEqual(["call-yield-turn-1"]);
+		expect(yieldToolResultValue(session.agent.state.messages, "call-yield-turn-1")).toBe("first-result");
+
+		await session.prompt("yield the second result");
+		await session.waitForIdle();
+
+		// The next turn stopped at its own yield; its scripted empty continuation
+		// was never consumed. Each completed yield has already emitted the event
+		// that consumes the synchronous termination marker.
+		expect(mock.calls).toHaveLength(2);
+		expect(completedYieldCallIds).toEqual(["call-yield-turn-1", "call-yield-turn-2"]);
+		expect(yieldToolResultValue(session.agent.state.messages, "call-yield-turn-2")).toBe("second-result");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("treats an idle IRC wake after a yielded run as a fresh turn for empty-stop retry", async () => {

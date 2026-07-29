@@ -592,7 +592,6 @@ export class AgentSession {
 	#resetPromptMaintenanceState(): void {
 		this.#recovery.resetForNewPrompt();
 		this.#yieldTerminationPending = false;
-		this.#synchronouslyTerminatedYieldToolCallIds.clear();
 	}
 
 	#pruneRewoundToolResultIds(messages: readonly AgentMessage[]): void {
@@ -7169,7 +7168,6 @@ export class AgentSession {
 			if (switchingToDifferentSession) {
 				await this.#memory.resetContextForNewTranscript();
 				this.#clearSessionScopedToolState();
-				this.#eventListeners = [];
 			}
 			this.#reconnectToAgent();
 			try {
