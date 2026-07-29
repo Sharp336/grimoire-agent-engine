@@ -407,20 +407,28 @@ export interface ResolveArtifactPathOptions {
 	platform?: () => NodeJS.Platform;
 }
 
-function caselessFilesystem(platform: NodeJS.Platform): boolean {
-	return platform === "darwin" || platform === "win32";
+type PathComparisonMode = "posix" | "darwin" | "win32";
+
+function pathComparisonMode(platform: NodeJS.Platform): PathComparisonMode {
+	if (platform === "win32") return "win32";
+	if (platform === "darwin") return "darwin";
+	return "posix";
 }
 
-function pathsAlias(left: string, right: string, caseless: boolean): boolean {
-	const normalizedLeft = normalizePathForComparison(left).normalize("NFC");
-	const normalizedRight = normalizePathForComparison(right).normalize("NFC");
-	if (caseless) {
-		return (
-			normalizedLeft.toUpperCase().toLowerCase().normalize("NFC") ===
-			normalizedRight.toUpperCase().toLowerCase().normalize("NFC")
-		);
+function pathComparisonKey(target: string, mode: PathComparisonMode): string {
+	let normalized = normalizePathForComparison(target).normalize("NFC");
+	if (mode === "win32") {
+		// Inputs are canonical: path.resolve plus realpath(parent) means dot parents cannot survive here.
+		normalized = normalized
+			.split(path.sep)
+			.map(component => component.replace(/[. ]+$/u, ""))
+			.join(path.sep);
 	}
-	return normalizedLeft === normalizedRight;
+	return mode === "posix" ? normalized : normalized.toUpperCase().toLowerCase().normalize("NFC");
+}
+
+function pathsAlias(left: string, right: string, mode: PathComparisonMode): boolean {
+	return pathComparisonKey(left, mode) === pathComparisonKey(right, mode);
 }
 
 export async function resolveArtifactPaths(
@@ -438,15 +446,15 @@ export async function resolveArtifactPaths(
 		await fs.promises.realpath(path.dirname(sourceAbsolute)),
 		path.basename(sourceAbsolute),
 	);
-	const caseless = caselessFilesystem(options.platform?.() ?? process.platform);
+	const mode = pathComparisonMode(options.platform?.() ?? process.platform);
 	const forbidden = [canonicalSource, `${canonicalSource}-wal`, `${canonicalSource}-shm`];
 	assertInvariant(
 		!forbidden.some(
-			forbiddenPath => pathsAlias(candidate, forbiddenPath, caseless) || pathsAlias(backup, forbiddenPath, caseless),
+			forbiddenPath => pathsAlias(candidate, forbiddenPath, mode) || pathsAlias(backup, forbiddenPath, mode),
 		),
 		"Repair artifact collides with source triplet",
 	);
-	assertInvariant(!pathsAlias(candidate, backup, caseless), "Candidate and backup paths collide");
+	assertInvariant(!pathsAlias(candidate, backup, mode), "Candidate and backup paths collide");
 	return { backup, candidate };
 }
 
