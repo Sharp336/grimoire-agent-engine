@@ -437,7 +437,11 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 		displayReadTargets: readTargetOutcomes.map(outcome => outcome.path),
 		readTargetOutcomes,
 	}).content(coalesceBatchTextContent(cappedContent));
-	if (readTargetOutcomes.length > 0 && readTargetOutcomes.every(outcome => outcome.status === "error")) {
+	if (
+		enforceAggregateBudget &&
+		readTargetOutcomes.length > 0 &&
+		readTargetOutcomes.every(outcome => outcome.status === "error")
+	) {
 		resultBuilder.error();
 	}
 	return resultBuilder.done();

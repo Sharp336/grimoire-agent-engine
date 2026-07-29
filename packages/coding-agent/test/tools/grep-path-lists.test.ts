@@ -1035,6 +1035,25 @@ describe("tool path arrays", () => {
 		]);
 	});
 
+	it("preserves non-error semantics when every legacy delimited target is missing", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-legacy-delimited-all-missing", {
+			path: "legacy-missing-a.txt; legacy-missing-b.txt",
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.status)).toEqual([
+			"error",
+			"error",
+		]);
+		expect(getText(result)).toContain("Could not read legacy-missing-a.txt");
+		expect(getText(result)).toContain("Could not read legacy-missing-b.txt");
+	});
+
 	it("bounds aggregate native-array image output and reports dropped images", async () => {
 		const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 		const imagePaths = Array.from({ length: 5 }, (_, index) => `batch-image-${index}.png`);
