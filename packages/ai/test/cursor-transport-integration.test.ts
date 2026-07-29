@@ -11,12 +11,9 @@ import {
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
-import { BidiAppendResponseSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/bidi_pb";
 import { Http2Config } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/server_config_pb";
 import { __evictH2PoolEntry, __getH2PoolStats, acquireH2Session } from "../src/providers/cursor/h2-pool";
 import { __evictServerConfigEntry, selectMode } from "../src/providers/cursor/server-config";
-
-const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	const frame = Buffer.alloc(5 + data.length);
@@ -48,15 +45,6 @@ function turnEndedFrame(): Buffer {
 		},
 	});
 	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
-}
-
-function connectEndErrorFrame(code: string, message: string): Buffer {
-	const payload = Buffer.from(JSON.stringify({ error: { code, message } }), "utf8");
-	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
-}
-
-function connectEndOkFrame(): Buffer {
-	return frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG);
 }
 
 let h2Server: http2.Http2Server | undefined;
@@ -264,40 +252,6 @@ describe("Cursor transport production integration", () => {
 		expect(stats.poolCount).toBe(0);
 	});
 
-	it("retries a transient HTTP/1 SSE error before surfacing it", async () => {
-		const baseUrl = await startH1Server();
-		let runSseCount = 0;
-		handleH1Request = (req, res) => {
-			const url = req.url ?? "";
-			if (url.includes("GetServerConfig")) {
-				res.writeHead(404, { "content-type": "application/json" });
-				res.end();
-				return;
-			}
-			if (url.includes("BidiAppend")) {
-				res.writeHead(200, { "content-type": "application/proto", Connection: "close" });
-				res.end(toBinary(BidiAppendResponseSchema, create(BidiAppendResponseSchema, {})));
-				return;
-			}
-			if (url.includes("RunSSE")) {
-				runSseCount++;
-				res.writeHead(200, { "content-type": "application/connect+proto", Connection: "close" });
-				if (runSseCount === 1) {
-					res.end(connectEndErrorFrame("unavailable", "transient HTTP/1 failure"));
-				} else {
-					res.end(Buffer.concat([textDeltaFrame("retry-ok"), turnEndedFrame(), connectEndOkFrame()]));
-				}
-				return;
-			}
-			res.writeHead(404);
-			res.end();
-		};
-		const result = await collect(makeModel(baseUrl), { useHttp1ForAgent: true });
-		expect(runSseCount).toBe(2);
-		expect(result.stopReason).toBe("stop");
-		expect(result.text).toBe("retry-ok");
-	});
-
 	it("server-force override wins over local preference", () => {
 		expect(selectMode(Http2Config.FORCE_ALL_ENABLED, true)).toBe("http2");
 		expect(selectMode(Http2Config.FORCE_ALL_DISABLED, false)).toBe("http1");
@@ -351,34 +305,6 @@ describe("Cursor transport production integration", () => {
 		serverStream?.close();
 
 		expect(result.stopReason).toBe("aborted");
-		const stats = __getH2PoolStats();
-		expect(stats.retiringCount).toBe(0);
-	});
-
-	it("releases H2 lease on transient error and retries with pool", async () => {
-		const baseUrl = await startH2Server();
-		let attemptCount = 0;
-		handleH2Stream = (stream, headers) => {
-			const path = headers[":path"] ?? "";
-			if (path.includes("GetServerConfig")) {
-				stream.respond({ ":status": 404 });
-				stream.end();
-				return;
-			}
-			attemptCount++;
-			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-			if (attemptCount < 2) {
-				stream.write(connectEndErrorFrame("unavailable", "transient"));
-				stream.end();
-				return;
-			}
-			stream.write(Buffer.concat([textDeltaFrame("retry-ok"), turnEndedFrame()]));
-			stream.end();
-		};
-
-		const { stopReason } = await collect(makeModel(baseUrl));
-		expect(stopReason).toBe("stop");
-		expect(attemptCount).toBe(2);
 		const stats = __getH2PoolStats();
 		expect(stats.retiringCount).toBe(0);
 	});

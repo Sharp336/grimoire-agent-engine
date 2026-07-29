@@ -161,121 +161,45 @@ afterEach(async () => {
 	await stopServer();
 });
 
-describe("Cursor transient Connect retry supervisor", () => {
-	it("retries a replay-safe transient failure twice then succeeds with three request ids and one original id", async () => {
-		const baseUrl = await startServer();
-		handleAttempt = (attemptIndex, stream) => {
-			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-			if (attemptIndex < 2) {
-				// Fail before any server message: replay-safe transient failure.
-				stream.write(connectEndErrorFrame("unavailable", "try again"));
-				stream.end();
-				return;
-			}
-			stream.write(Buffer.concat([textDeltaFrame("hello"), turnEndedFrame()]));
-			stream.end();
-		};
-
-		const { stopReason, retryDelays } = await collect(makeModel(baseUrl));
-
-		expect(stopReason).toBe("stop");
-		// Exactly three total attempts, no fourth.
-		expect(attemptHeaders).toHaveLength(3);
-		const requestIds = attemptHeaders.map(h => h["x-request-id"]);
-		expect(new Set(requestIds).size).toBe(3);
-		const originalIds = attemptHeaders.map(h => h["x-original-request-id"]);
-		expect(new Set(originalIds).size).toBe(1);
-		expect(originalIds[0]).toBeTruthy();
-		// Two backoffs, each within the capped jitter window.
-		expect(retryDelays).toHaveLength(2);
-		for (const delay of retryDelays) {
-			expect(delay).toBeGreaterThanOrEqual(0);
-			expect(delay).toBeLessThanOrEqual(10_000);
-		}
-	});
-
-	it("does not retry after a server message has been observed", async () => {
-		const baseUrl = await startServer();
-		handleAttempt = (_attemptIndex, stream) => {
-			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-			// Emit a decoded server message first — replay is no longer safe.
-			stream.write(textDeltaFrame("partial"));
-			stream.write(connectEndErrorFrame("unavailable", "too late to retry"));
-			stream.end();
-		};
-
-		const { stopReason } = await collect(makeModel(baseUrl));
-
-		expect(stopReason).toBe("error");
-		expect(attemptHeaders).toHaveLength(1);
-	});
-
-	it("does not retry a terminal failure after turnEnded", async () => {
-		const baseUrl = await startServer();
-		handleAttempt = (_attemptIndex, stream) => {
-			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-			stream.write(Buffer.concat([textDeltaFrame("done"), turnEndedFrame()]));
-			stream.write(connectEndErrorFrame("unavailable", "post-turn failure"));
-			stream.end();
-		};
-
-		const { stopReason } = await collect(makeModel(baseUrl));
-
-		expect(stopReason).toBe("error");
-		expect(attemptHeaders).toHaveLength(1);
-	});
-
-	it("stops after three attempts when every attempt fails transiently", async () => {
-		const baseUrl = await startServer();
-		handleAttempt = (_attemptIndex, stream) => {
-			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-			stream.write(connectEndErrorFrame("unavailable", "still failing"));
-			stream.end();
-		};
-
-		const { stopReason, retryDelays } = await collect(makeModel(baseUrl));
-
-		expect(stopReason).toBe("error");
-		expect(attemptHeaders).toHaveLength(3);
-		expect(retryDelays).toHaveLength(2);
-	});
-
-	it("does not retry a non-transient credential failure", async () => {
-		const baseUrl = await startServer();
-		handleAttempt = (_attemptIndex, stream) => {
-			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-			stream.write(connectEndErrorFrame("unauthenticated", "bad token"));
-			stream.end();
-		};
-
-		const { stopReason } = await collect(makeModel(baseUrl));
-
-		expect(stopReason).toBe("error");
-		expect(attemptHeaders).toHaveLength(1);
-	});
-
-	it("aborts during backoff without a further attempt", async () => {
+describe("Cursor Connect terminal behavior without the CLI retry feature signal", () => {
+	it("does not automatically replay a transient failure", async () => {
 		const baseUrl = await startServer();
 		handleAttempt = (_attemptIndex, stream) => {
 			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 			stream.write(connectEndErrorFrame("unavailable", "try again"));
 			stream.end();
 		};
-		const controller = new AbortController();
+
+		const { stopReason, retryDelays } = await collect(makeModel(baseUrl));
+
+		expect(stopReason).toBe("error");
+		expect(attemptHeaders).toHaveLength(1);
+		expect(attemptHeaders[0]?.["x-request-id"]).toBeTruthy();
+		expect(attemptHeaders[0]?.["x-original-request-id"]).toBeTruthy();
+		expect(retryDelays).toEqual([]);
+	});
+
+	it("does not invoke retry waiting for a transient failure", async () => {
+		const baseUrl = await startServer();
+		handleAttempt = (_attemptIndex, stream) => {
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			stream.write(connectEndErrorFrame("unavailable", "try again"));
+			stream.end();
+		};
+		let waited = false;
 		const stream = streamCursor(makeModel(baseUrl), context, {
 			apiKey: "test-token",
-			signal: controller.signal,
-			// Abort while the first backoff is pending.
 			providerRetryWait: async () => {
-				controller.abort();
-				throw new Error("aborted during backoff");
+				waited = true;
 			},
 		});
-		const eventTypes: string[] = [];
-		for await (const event of stream) eventTypes.push(event.type);
+		for await (const _event of stream) {
+			// drain
+		}
 		const result = await stream.result();
 
-		expect(result.stopReason).toBe("aborted");
+		expect(result.stopReason).toBe("error");
+		expect(waited).toBe(false);
 		expect(attemptHeaders).toHaveLength(1);
 	});
 });

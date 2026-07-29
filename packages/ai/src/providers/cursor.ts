@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import type http2 from "node:http2";
 import { create, fromBinary, fromJson, type JsonValue, toBinary, toJson } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
-import { Code, ConnectError } from "@connectrpc/connect";
 import type { McpToolDefinition } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import {
 	AgentClientMessageSchema,
@@ -154,7 +153,7 @@ import { toolWireSchema } from "../utils/schema/wire";
 import { acquireH2Session, type H2Lease } from "./cursor/h2-pool";
 import { buildCursorHeaders } from "./cursor/headers";
 import { type CursorHttp1Bridge, createCursorHttp1Bridge } from "./cursor/http1-bridge";
-import { type CursorTransportMode, evictServerConfig, resolveCursorTransportMode } from "./cursor/server-config";
+import { type CursorTransportMode, resolveCursorTransportMode } from "./cursor/server-config";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 
@@ -396,104 +395,6 @@ function omitTypeName(record: Record<string, unknown>): Record<string, unknown> 
 	return rest;
 }
 
-/** Maximum total transport attempts for one logical Cursor turn. */
-const CURSOR_MAX_ATTEMPTS = 3;
-
-/**
- * Monotonic replay markers for one logical turn. Retry is permitted only while
- * all three are false; none is ever reset. Any decoded server message, any
- * checkpoint mutation, or any outbound server-triggered side effect makes the
- * turn non-replayable.
- */
-interface CursorReplayState {
-	sawServerMessage: boolean;
-	sawCheckpoint: boolean;
-	sentSideEffect: boolean;
-}
-
-// Vendor gRPC status codes treated as transient: CANCELLED(1), UNKNOWN(2),
-// DEADLINE_EXCEEDED(4), ABORTED(10), INTERNAL(13), UNAVAILABLE(14), DATA_LOSS(15).
-const CURSOR_TRANSIENT_GRPC_CODES: Record<number, true> = {
-	1: true,
-	2: true,
-	4: true,
-	10: true,
-	13: true,
-	14: true,
-	15: true,
-};
-const CURSOR_TRANSIENT_CONNECT_CODES: Record<number, true> = {
-	[Code.Canceled]: true,
-	[Code.Unknown]: true,
-	[Code.DeadlineExceeded]: true,
-	[Code.Aborted]: true,
-	[Code.Internal]: true,
-	[Code.Unavailable]: true,
-	[Code.DataLoss]: true,
-};
-const CURSOR_TRANSIENT_CONNECT_NAMES: Record<string, true> = {
-	cancelled: true,
-	unknown: true,
-	deadline_exceeded: true,
-	aborted: true,
-	internal: true,
-	unavailable: true,
-	data_loss: true,
-};
-const CURSOR_TRANSIENT_NETWORK_PATTERN =
-	/econnreset|econnrefused|etimedout|eai_again|socket hang up|other side closed|fetch failed|network.?error|stream stall|\bterminated\b|reset before headers|h2 is not supported/i;
-
-/**
- * Whether a failed attempt may be replayed. Caller cancellation, auth, request
- * validation, and quota/usage-limit are excluded (auth and quota rotate at the
- * credential/model layer instead). Recognized transient signals are the vendor
- * gRPC/Connect status codes and network-level transport faults.
- */
-function isTransientCursorError(error: unknown): boolean {
-	if (error instanceof AIError.AbortError) return false;
-	if (error instanceof AIError.CursorCredentialError) return false;
-	if (error instanceof AIError.ValidationError) return false;
-	if (AIError.isUsageLimit(error)) return false;
-	if (error instanceof ConnectError) return CURSOR_TRANSIENT_CONNECT_CODES[error.code] === true;
-	const message = error instanceof Error ? error.message : String(error);
-	const grpc = message.match(/gRPC error (\d+):/i);
-	if (grpc) return CURSOR_TRANSIENT_GRPC_CODES[Number(grpc[1])] === true;
-	const connect = message.match(/Connect error ([a-z_]+):/i);
-	if (connect) return CURSOR_TRANSIENT_CONNECT_NAMES[connect[1].toLowerCase()] === true;
-	return CURSOR_TRANSIENT_NETWORK_PATTERN.test(message);
-}
-
-/** Capped exponential backoff with 50% jitter, per the transport plan. */
-function cursorRetryDelayMs(retryIndex: number): number {
-	const base = Math.min(1000 * 2 ** retryIndex, 10000);
-	return Math.floor(base * (0.5 + 0.5 * Math.random()));
-}
-
-/** Abortable retry sleep; a caller abort rejects instead of resolving. */
-async function waitCursorRetry(
-	delayMs: number,
-	signal: AbortSignal | undefined,
-	providerRetryWait: StreamOptions["providerRetryWait"],
-): Promise<void> {
-	if (providerRetryWait) {
-		await providerRetryWait(delayMs, signal);
-		return;
-	}
-	if (signal?.aborted) throw signal.reason ?? new AIError.AbortError();
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	const onAbort = (): void => {
-		clearTimeout(timer);
-		signal?.removeEventListener("abort", onAbort);
-		reject(signal?.reason ?? new AIError.AbortError());
-	};
-	const timer = setTimeout(() => {
-		signal?.removeEventListener("abort", onAbort);
-		resolve();
-	}, delayMs);
-	signal?.addEventListener("abort", onAbort, { once: true });
-	await promise;
-}
-
 /** Map a Connect end-stream error code to an HTTP-equivalent auth status. */
 function connectCodeToAuthStatus(code: string): 401 | 403 | undefined {
 	const normalized = code.toLowerCase();
@@ -556,10 +457,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			conversationId: string;
 			originalRequestId: string;
 			requestId: string;
-			replay: CursorReplayState;
 		}): Promise<void> => {
-			const { apiKey, agentUrl, mode, requestBytes, requestContextTools, blobStore, conversationId, replay } =
-				attemptCtx;
+			const { apiKey, agentUrl, mode, requestBytes, requestContextTools, blobStore, conversationId } = attemptCtx;
 			let lease: H2Lease | null = null;
 			let h2Request: http2.ClientHttp2Stream | null = null;
 			let bridge: CursorHttp1Bridge | null = null;
@@ -671,7 +570,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			};
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				replay.sawCheckpoint = true;
 				conversationStateCache.set(conversationId, checkpoint);
 			};
 
@@ -687,11 +585,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			// Shared message-processing callback for decoded server messages.
 			const processServerMessage = (serverMessage: AgentServerMessage): void => {
 				if (isSealing) return;
-				replay.sawServerMessage = true;
-				const msgCase = serverMessage.message.case;
-				if (msgCase === "execServerMessage" || msgCase === "kvServerMessage") {
-					replay.sentSideEffect = true;
-				}
 				const isTurnEnded =
 					serverMessage.message.case === "interactionUpdate" &&
 					serverMessage.message.value.message?.case === "turnEnded";
@@ -1013,11 +906,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			// One stable original-request-id per logical turn; each attempt mints a fresh request id.
 			const originalRequestId = crypto.randomUUID();
-			const replay: CursorReplayState = {
-				sawServerMessage: false,
-				sawCheckpoint: false,
-				sentSideEffect: false,
-			};
 
 			// Public start event is created once per logical turn, before any attempt
 			// or config discovery. This ensures the start event is always first.
@@ -1048,38 +936,17 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			});
 			const agentUrl = resolveAgentUrl(baseUrl, mode, agentUrlConfig);
 
-			for (let attempt = 0; attempt < CURSOR_MAX_ATTEMPTS; attempt++) {
-				if (attempt > 0) {
-					await waitCursorRetry(cursorRetryDelayMs(attempt - 1), options?.signal, options?.providerRetryWait);
-				}
-				try {
-					await runAttempt({
-						apiKey,
-						agentUrl,
-						mode,
-						requestBytes,
-						requestContextTools,
-						blobStore,
-						conversationId,
-						originalRequestId,
-						requestId: crypto.randomUUID(),
-						replay,
-					});
-					return;
-				} catch (error) {
-					// Evict server config on credential failure before rotation.
-					if (error instanceof AIError.CursorCredentialError) {
-						evictServerConfig(baseUrl, apiKey);
-					}
-					const isLastAttempt = attempt === CURSOR_MAX_ATTEMPTS - 1;
-					const replaySafe = !replay.sawServerMessage && !replay.sawCheckpoint && !replay.sentSideEffect;
-					const aborted = options?.signal?.aborted === true || error instanceof AIError.AbortError;
-					if (isLastAttempt || aborted || !replaySafe || !isTransientCursorError(error)) {
-						throw error;
-					}
-					log("retry", "transient", { attempt: attempt + 1, error: String(error) });
-				}
-			}
+			await runAttempt({
+				apiKey,
+				agentUrl,
+				mode,
+				requestBytes,
+				requestContextTools,
+				blobStore,
+				conversationId,
+				originalRequestId,
+				requestId: crypto.randomUUID(),
+			});
 		} catch (error) {
 			const result = await AIError.finalize(error, {
 				api: model.api,
