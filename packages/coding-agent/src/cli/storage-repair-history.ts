@@ -202,14 +202,7 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 				`Invalid message in ${file.path}:${physicalLine}`,
 			);
 			const typed = message as Record<string, unknown>;
-			if (
-				typed.role !== "user" ||
-				typed.attribution === "agent" ||
-				typed.steering === true ||
-				typed.synthetic === true
-			) {
-				continue;
-			}
+			if (typed.role !== "user" || typed.attribution === "agent" || typed.synthetic === true) { continue; }
 			const prompt = promptContent(typed.content, `${file.path}:${physicalLine}`).trim();
 			if (prompt.length === 0) continue;
 			insert.run(BigInt(timestamp), file.canonicalPath, BigInt(recordOrdinal), prompt, header.cwd, header.id);
