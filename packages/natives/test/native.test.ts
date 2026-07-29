@@ -19,8 +19,8 @@ import {
 	htmlToMarkdown,
 	invalidateFsScanCache,
 	listWorkspace,
-	MacOSPowerAssertion,
 	matchesKey,
+	PowerAssertion,
 	PtySession,
 	parseKey,
 	summarizeCode,
@@ -802,9 +802,9 @@ describe("pi-natives", () => {
 		});
 	});
 
-	describe("MacOSPowerAssertion", () => {
+	describe("PowerAssertion", () => {
 		it("should create a stoppable power assertion handle", () => {
-			const assertion = MacOSPowerAssertion.start({ reason: "pi-natives test" });
+			const assertion = PowerAssertion.start({ reason: "pi-natives test" });
 			assertion.stop();
 			assertion.stop();
 		});

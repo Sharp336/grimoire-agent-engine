@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed `MacOSPowerAssertion` to `PowerAssertion` and added Linux login1 and Windows execution-state sleep inhibition.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed

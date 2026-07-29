@@ -76,7 +76,7 @@ Consumers in `packages/coding-agent` and `packages/tui` import directly from `@o
 | Snapcompact       | `renderSnapcompactPng(text, options)`                                                                     | `snapcompact.rs`                                 | sync                       |
 | Clipboard         | `copyToClipboard`, `readImageFromClipboard`                                                               | `clipboard.rs`                                   | sync / promise             |
 | Tokens            | `countTokens(input, encoding?)`                                                                           | `tokens.rs`                                      | sync                       |
-| System/isolation  | `detectMacOSAppearance`, `MacAppearanceObserver`, `MacOSPowerAssertion`, `getWorkProfile`, `iso*` helpers | `appearance.rs`, `power.rs`, `prof.rs`, `iso.rs` | mixed                      |
+| System/isolation  | `detectMacOSAppearance`, `MacAppearanceObserver`, `PowerAssertion`, `getWorkProfile`, `iso*` helpers | `appearance.rs`, `power.rs`, `prof.rs`, `iso.rs` | mixed                      |
 
 ## Sync vs async contract differences
 

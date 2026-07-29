@@ -4838,6 +4838,7 @@ dependencies = [
  "image",
  "inferno",
  "libc",
+ "log",
  "maudio",
  "napi",
  "napi-build",
@@ -4872,6 +4873,7 @@ dependencies = [
  "xcap",
  "xkeysym",
  "xxhash-rust",
+ "zbus",
 ]
 
 [[package]]

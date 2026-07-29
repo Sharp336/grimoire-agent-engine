@@ -63,6 +63,9 @@ export interface AsyncJob {
 /** Delivery callback for a settled job's result text. */
 export type AsyncJobDeliverySink = (jobId: string, text: string, job?: AsyncJob) => void | Promise<void>;
 
+/** Listener notified after an async job's execution state changes. */
+type AsyncJobListener = () => void;
+
 export interface AsyncJobManagerOptions {
 	/**
 	 * Delivery sink for UNOWNED completions (jobs registered without an
@@ -140,6 +143,7 @@ export class AsyncJobManager {
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
+	readonly #activityListeners = new Set<AsyncJobListener>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
@@ -160,6 +164,22 @@ export class AsyncJobManager {
 		this.#onJobComplete = options.onJobComplete;
 		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
+	}
+
+	/** Subscribe to changes that can affect whether background work is executing. */
+	onChange(listener: AsyncJobListener): () => void {
+		this.#activityListeners.add(listener);
+		return () => this.#activityListeners.delete(listener);
+	}
+
+	#notifyActivityListeners(): void {
+		for (const listener of this.#activityListeners) {
+			try {
+				listener();
+			} catch (error) {
+				logger.warn("Async job activity listener failed", { error: String(error) });
+			}
+		}
 	}
 
 	/** True when the running-job count has reached the configured cap. */
@@ -238,21 +258,25 @@ export class AsyncJobManager {
 					reportProgress,
 					markRunning: () => {
 						job.queued = false;
+						this.#notifyActivityListeners();
 					},
 				});
 				if (job.status === "cancelled") {
 					job.resultText = text;
 					this.#scheduleEviction(id);
+					this.#notifyActivityListeners();
 					return;
 				}
 				job.status = "completed";
 				job.resultText = text;
 				this.#enqueueDelivery(id, text);
 				this.#scheduleEviction(id);
+				this.#notifyActivityListeners();
 			} catch (error) {
 				if (job.status === "cancelled") {
 					job.errorText = error instanceof Error ? error.message : String(error);
 					this.#scheduleEviction(id);
+					this.#notifyActivityListeners();
 					return;
 				}
 				const errorText = error instanceof Error ? error.message : String(error);
@@ -260,10 +284,12 @@ export class AsyncJobManager {
 				job.errorText = errorText;
 				this.#enqueueDelivery(id, errorText);
 				this.#scheduleEviction(id);
+				this.#notifyActivityListeners();
 			}
 		})();
 
 		this.#jobs.set(id, job);
+		this.#notifyActivityListeners();
 		return id;
 	}
 
@@ -279,7 +305,8 @@ export class AsyncJobManager {
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
 		job.abortController.abort();
-		this.#scheduleEviction(id);
+		this.#scheduleEviction(job.id);
+		this.#notifyActivityListeners();
 		return true;
 	}
 
@@ -415,6 +442,7 @@ export class AsyncJobManager {
 			job.abortController.abort();
 			this.#scheduleEviction(job.id);
 		}
+		this.#notifyActivityListeners();
 	}
 
 	/**

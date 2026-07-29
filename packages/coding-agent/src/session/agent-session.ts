@@ -79,7 +79,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
+import { PowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	escapeXmlText,
 	formatDuration,
@@ -165,6 +165,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
+import { AgentRegistry } from "../registry/agent-registry";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -407,7 +408,8 @@ export class AgentSession {
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
 
-	#powerAssertion: MacOSPowerAssertion | undefined;
+	#powerAssertion: PowerAssertion | undefined;
+	#unsubscribePowerAssertionActivity: (() => void) | undefined;
 
 	readonly configWarnings: string[] = [];
 
@@ -485,6 +487,7 @@ export class AgentSession {
 	 * undefined to avoid reading the primary's jobs.
 	 */
 	readonly #asyncJobManager: AsyncJobManager | undefined;
+	readonly #agentRegistry: AgentRegistry;
 	/** Clears this session's owner delivery sink registration; set when a manager + agent id exist. */
 	#unregisterAsyncDeliverySink: (() => void) | undefined;
 	/**
@@ -595,13 +598,12 @@ export class AgentSession {
 	}
 
 	#acquirePowerAssertion(): void {
-		if (process.platform !== "darwin") return;
 		if (isBunTestRuntime()) return;
 		if (this.#powerAssertion) return;
 		const mode = this.settings.get("power.sleepPrevention");
 		if (mode === "off") return;
 		try {
-			this.#powerAssertion = MacOSPowerAssertion.start({
+			this.#powerAssertion = PowerAssertion.start({
 				reason: "Oh My Pi agent session",
 				idle: true,
 				display: mode === "display" || mode === "system",
@@ -609,7 +611,7 @@ export class AgentSession {
 				user: mode === "system",
 			});
 		} catch (error) {
-			logger.warn("Failed to acquire macOS power assertion", { error: String(error) });
+			logger.warn("Failed to acquire power assertion", { error: String(error) });
 		}
 	}
 
@@ -620,21 +622,37 @@ export class AgentSession {
 		try {
 			assertion.stop();
 		} catch (error) {
-			logger.warn("Failed to release macOS power assertion", { error: String(error) });
+			logger.warn("Failed to release power assertion", { error: String(error) });
 		}
+	}
+
+	#shouldHoldPowerAssertion(): boolean {
+		if (this.#promptInFlightCount > 0) return true;
+		const agentId = this.#agentId;
+		if (!agentId) return false;
+		if (this.#asyncJobManager?.getRunningJobs({ ownerId: agentId }).some(job => !job.queued)) return true;
+		return this.#agentRegistry
+			.list()
+			.some(ref => ref.kind === "sub" && ref.status === "running" && ref.parentId === agentId);
+	}
+
+	#syncPowerAssertion(): void {
+		if (this.#shouldHoldPowerAssertion()) {
+			this.#acquirePowerAssertion();
+			return;
+		}
+		this.#releasePowerAssertion();
 	}
 
 	#beginInFlight(): void {
 		this.#promptInFlightCount++;
-		if (this.#promptInFlightCount === 1) {
-			this.#acquirePowerAssertion();
-		}
+		this.#syncPowerAssertion();
 	}
 
 	#endInFlight(): void {
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+		this.#syncPowerAssertion();
 		if (this.#promptInFlightCount === 0) {
-			this.#releasePowerAssertion();
 			this.#flushPendingAgentEnd();
 			this.#drainStrandedQueuedMessages();
 		}
@@ -773,7 +791,7 @@ export class AgentSession {
 
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
-		this.#releasePowerAssertion();
+		this.#syncPowerAssertion();
 		this.#flushPendingAgentEnd();
 		this.#drainStrandedQueuedMessages();
 	}
@@ -904,6 +922,7 @@ export class AgentSession {
 		this.#todo = new TodoTracker(todoHost);
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
 		this.#asyncJobManager = config.asyncJobManager ?? config.ownedAsyncJobManager;
+		this.#agentRegistry = config.agentRegistry ?? AgentRegistry.global();
 		const modelControlsHost: ModelControlsHost = {
 			agent: this.agent,
 			settings: this.settings,
@@ -1166,6 +1185,13 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		const unsubscribeAsyncJobs = this.#asyncJobManager?.onChange(() => this.#syncPowerAssertion());
+		const unsubscribeSubagents = this.#agentRegistry.onChange(() => this.#syncPowerAssertion());
+		this.#unsubscribePowerAssertionActivity = () => {
+			unsubscribeAsyncJobs?.();
+			unsubscribeSubagents();
+		};
+		this.#syncPowerAssertion();
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
@@ -3597,6 +3623,8 @@ export class AgentSession {
 			}
 		}
 
+		this.#unsubscribePowerAssertionActivity?.();
+		this.#unsubscribePowerAssertionActivity = undefined;
 		this.#releasePowerAssertion();
 		await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
 		this.#movedFromEmptySessionFile = undefined;

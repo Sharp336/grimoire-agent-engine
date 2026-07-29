@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Extended sleep prevention to Linux and Windows and keep it active while session-owned background jobs or child subagents run.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

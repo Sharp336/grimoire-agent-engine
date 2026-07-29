@@ -130,7 +130,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Collab",
 		"Magic Keywords",
 		"Startup & Updates",
-		"Power (macOS)",
+		"Power",
 		"Agent",
 		"Git",
 	],
@@ -404,17 +404,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// macOS power assertions (caffeinate flags). No-op on other platforms.
+	// Power assertions on macOS, Linux, and Windows; no-op on unsupported platforms.
 	"power.sleepPrevention": {
 		type: "enum",
 		values: ["off", "idle", "display", "system"] as const,
 		default: "idle",
 		ui: {
 			tab: "interaction",
-			group: "Power (macOS)",
+			group: "Power",
 			label: "Sleep Prevention",
 			description:
-				"Prevent macOS sleep during active sessions. Each level is cumulative — it adds the flags of all lower levels.",
+				"Prevent system sleep during active sessions. Each level is cumulative and adds the protections of all lower levels.",
 			options: [
 				{
 					value: "off",
@@ -424,17 +424,17 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "idle",
 					label: "Prevent Idle Sleep",
-					description: "Keep the system awake while a session is open (caffeinate -i)",
+					description: "Prevent idle-triggered sleep while a session has active work",
 				},
 				{
 					value: "display",
 					label: "Prevent Display Sleep",
-					description: "Also keep the display from idle-sleeping (caffeinate -i -d)",
+					description: "Also prevent the display from sleeping while active work continues",
 				},
 				{
 					value: "system",
 					label: "Prevent System Sleep",
-					description: "Also block all system sleep on AC and declare the user active (caffeinate -i -d -s -u)",
+					description: "Also block system sleep while active work continues",
 				},
 			],
 		},

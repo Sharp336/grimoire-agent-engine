@@ -1,23 +1,23 @@
-//! macOS power assertions for preventing idle sleep.
+//! Cross-platform power assertions for preventing idle sleep.
 //!
-//! Exposes a small N-API handle that acquires a macOS `IOKit` power assertion
-//! on construction and releases it on `stop()`/drop. On non-macOS platforms the
-//! handle is a no-op so higher layers can use one code path.
+//! Exposes a small N-API handle that acquires the platform's sleep-inhibition
+//! primitive on construction and releases it on `stop()`/drop. Unsupported
+//! platforms retain a no-op handle so higher layers can use one code path.
 
 use napi_derive::napi;
 
-/// Options for starting a macOS power assertion.
+/// Options for starting a power assertion.
 ///
-/// Each boolean maps to a `caffeinate(8)` flag and a corresponding `IOKit`
-/// `IOPMAssertion` type. Multiple flags can be combined; when set, one
+/// Each boolean maps to a `caffeinate(8)` flag and the closest corresponding
+/// platform capability. Multiple flags can be combined; when set, one
 /// assertion is taken per flag and all are released together when the
 /// handle is stopped or dropped.
 ///
 /// If every flag is unset (or omitted), the handle behaves as if `idle`
 /// were `true` — preserving the historical default of `caffeinate -i`.
-#[napi(object, js_name = "MacOSPowerAssertionOptions")]
-pub struct MacOSPowerAssertionOptions {
-	/// Human-readable reason shown in macOS power diagnostics.
+#[napi(object, js_name = "PowerAssertionOptions")]
+pub struct PowerAssertionOptions {
+	/// Human-readable reason shown in platform power diagnostics.
 	pub reason:  Option<String>,
 	/// `caffeinate -i`: prevent the system from idle-sleeping.
 	pub idle:    Option<bool>,
@@ -148,7 +148,7 @@ mod platform {
 					assertion_type.as_ptr(),
 					ASSERTION_LEVEL_ON,
 					assertion_reason.as_ptr(),
-					&raw mut assertion_id,
+					&mut assertion_id,
 				)
 			};
 			if status != 0 {
@@ -185,24 +185,167 @@ mod platform {
 	}
 }
 
-/// Long-lived macOS power assertion.
+#[cfg(target_os = "linux")]
+mod platform {
+	use log::debug;
+	use napi::{Error, Result};
+	use parking_lot::Mutex;
+	use zbus::{blocking::Connection, zvariant::OwnedFd};
+
+	const LOGIN1_DESTINATION: &str = "org.freedesktop.login1";
+	const LOGIN1_PATH: &str = "/org/freedesktop/login1";
+	const LOGIN1_MANAGER: &str = "org.freedesktop.login1.Manager";
+	const INHIBIT_MODE: &str = "block";
+	const INHIBIT_WHO: &str = "Oh My Pi";
+
+	// The connection owns the D-Bus transport, while each assertion owns only its
+	// inhibitor fd. Reuse a healthy transport so a new assertion does not
+	// synchronously reconnect from the JavaScript thread; a failed call clears it
+	// for the next acquisition to reconnect.
+	static SYSTEM_BUS: Mutex<Option<Connection>> = Mutex::new(None);
+
+	/// Holds login1's inhibitor descriptor. Closing it releases the inhibit.
+	pub struct AssertionInner {
+		inhibitor: Option<OwnedFd>,
+	}
+
+	impl AssertionInner {
+		pub fn try_start(what: &str, reason: &str) -> Option<Self> {
+			match Self::start(what, reason) {
+				Ok(inner) => Some(inner),
+				Err(error) => {
+					debug!("Unable to acquire login1 sleep inhibitor: {error}");
+					None
+				},
+			}
+		}
+
+		fn start(what: &str, reason: &str) -> Result<Self> {
+			let mut system_bus = SYSTEM_BUS.lock();
+			let connection = system_bus.get_or_insert(Connection::system().map_err(|error| {
+				Error::from_reason(format!("Unable to connect to the system bus: {error}"))
+			})?);
+			let reply = match connection.call_method(
+				Some(LOGIN1_DESTINATION),
+				LOGIN1_PATH,
+				Some(LOGIN1_MANAGER),
+				"Inhibit",
+				&(what, INHIBIT_WHO, reason, INHIBIT_MODE),
+			) {
+				Ok(reply) => reply,
+				Err(error) => {
+					*system_bus = None;
+					return Err(Error::from_reason(format!("login1 Inhibit failed: {error}")));
+				},
+			};
+			let inhibitor = reply.body().deserialize::<OwnedFd>().map_err(|error| {
+				Error::from_reason(format!("Invalid login1 inhibitor response: {error}"))
+			})?;
+			Ok(Self { inhibitor: Some(inhibitor) })
+		}
+
+		pub fn stop(&mut self) {
+			self.inhibitor.take();
+		}
+	}
+
+	impl Drop for AssertionInner {
+		fn drop(&mut self) {
+			self.stop();
+		}
+	}
+}
+
+#[cfg(target_os = "windows")]
+mod platform {
+	use std::{
+		sync::mpsc::{self, Sender},
+		thread::{self, JoinHandle},
+	};
+
+	use napi::{Error, Result};
+	use windows_sys::Win32::System::Power::{
+		ES_CONTINUOUS, EXECUTION_STATE, SetThreadExecutionState,
+	};
+
+	pub struct AssertionInner {
+		release: Option<Sender<()>>,
+		worker:  Option<JoinHandle<()>>,
+	}
+
+	impl AssertionInner {
+		pub fn start(flags: EXECUTION_STATE) -> Result<Self> {
+			let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+			let (release, release_receiver) = mpsc::channel();
+			// SetThreadExecutionState is thread-affine: acquire and release must happen
+			// on the same dedicated thread for the full lifetime of this handle.
+			let worker = thread::spawn(move || {
+				// SAFETY: `flags` contains only documented `EXECUTION_STATE` bits.
+				let result = unsafe { SetThreadExecutionState(flags) };
+				let acquired = result != 0;
+				let _ = ready_sender.send(if acquired {
+					Ok(())
+				} else {
+					Err(std::io::Error::last_os_error().to_string())
+				});
+				if !acquired {
+					return;
+				}
+				let _ = release_receiver.recv();
+				// SAFETY: this is the same dedicated thread that acquired the state.
+				unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+			});
+			match ready_receiver.recv() {
+				Ok(Ok(())) => Ok(Self { release: Some(release), worker: Some(worker) }),
+				Ok(Err(error)) => {
+					let _ = worker.join();
+					Err(Error::from_reason(format!(
+						"Failed to acquire Windows power assertion: {error}"
+					)))
+				},
+				Err(error) => {
+					let _ = worker.join();
+					Err(Error::from_reason(format!(
+						"Windows power assertion worker exited before initialization: {error}"
+					)))
+				},
+			}
+		}
+
+		pub fn stop(&mut self) {
+			if let Some(release) = self.release.take() {
+				let _ = release.send(());
+			}
+			if let Some(worker) = self.worker.take() {
+				let _ = worker.join();
+			}
+		}
+	}
+
+	impl Drop for AssertionInner {
+		fn drop(&mut self) {
+			self.stop();
+		}
+	}
+}
+
+/// Long-lived cross-platform power assertion.
 ///
-/// On macOS this acquires one or more `IOKit` assertions that prevent the
-/// requested sleep modes until the handle is stopped or dropped. On other
-/// platforms it is a no-op handle so the caller can keep one cross-platform
-/// code path.
-#[napi(js_name = "MacOSPowerAssertion")]
-pub struct MacOSPowerAssertion {
-	#[cfg(target_os = "macos")]
+/// macOS uses `IOKit`, Linux holds a login1 inhibitor file descriptor, and
+/// Windows holds thread-affine execution state until the handle is stopped or
+/// dropped. Other platforms return a no-op handle.
+#[napi(js_name = "PowerAssertion")]
+pub struct PowerAssertion {
+	#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 	inners: Vec<platform::AssertionInner>,
 }
 
 #[napi]
-impl MacOSPowerAssertion {
-	/// Acquire a macOS power assertion. On non-macOS platforms returns a
-	/// no-op handle so callers can stay cross-platform.
+impl PowerAssertion {
+	/// Acquire a power assertion. Unsupported platforms return a no-op handle
+	/// so callers can stay cross-platform.
 	#[napi(factory)]
-	pub fn start(options: Option<MacOSPowerAssertionOptions>) -> napi::Result<Self> {
+	pub fn start(options: Option<PowerAssertionOptions>) -> napi::Result<Self> {
 		let reason = options
 			.as_ref()
 			.and_then(|value| value.reason.as_deref())
@@ -238,7 +381,41 @@ impl MacOSPowerAssertion {
 			}
 			Ok(Self { inners })
 		}
-		#[cfg(not(target_os = "macos"))]
+		#[cfg(target_os = "linux")]
+		{
+			let _ = user;
+			let what = match (effective_idle, system, display) {
+				(true, true, true) => "idle:sleep:handle-lid-switch",
+				(true, true, false) => "idle:sleep",
+				(true, false, true) => "idle:handle-lid-switch",
+				(true, false, false) => "idle",
+				(false, true, true) => "sleep:handle-lid-switch",
+				(false, true, false) => "sleep",
+				(false, false, true) => "handle-lid-switch",
+				(false, false, false) => return Ok(Self { inners: Vec::new() }),
+			};
+			let inners = platform::AssertionInner::try_start(what, reason)
+				.into_iter()
+				.collect();
+			Ok(Self { inners })
+		}
+		#[cfg(target_os = "windows")]
+		{
+			use windows_sys::Win32::System::Power::{
+				ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+			};
+
+			let _ = user;
+			let mut flags = ES_CONTINUOUS;
+			if effective_idle || system {
+				flags |= ES_SYSTEM_REQUIRED;
+			}
+			if display {
+				flags |= ES_DISPLAY_REQUIRED;
+			}
+			Ok(Self { inners: vec![platform::AssertionInner::start(flags)?] })
+		}
+		#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 		{
 			let _ = (reason, effective_idle, system, user, display);
 			Ok(Self {})
@@ -248,7 +425,7 @@ impl MacOSPowerAssertion {
 	/// Release every assertion held by this handle. Safe to call multiple
 	/// times; subsequent calls are a no-op.
 	#[napi]
-	#[allow(clippy::missing_const_for_fn, reason = "not const on macOS")]
+	#[allow(clippy::missing_const_for_fn, reason = "not const on supported platforms")]
 	pub fn stop(&mut self) -> napi::Result<()> {
 		#[cfg(target_os = "macos")]
 		{
@@ -263,6 +440,10 @@ impl MacOSPowerAssertion {
 			if let Some(err) = first_err {
 				return Err(err);
 			}
+		}
+		#[cfg(any(target_os = "linux", target_os = "windows"))]
+		for mut inner in self.inners.drain(..) {
+			inner.stop();
 		}
 		Ok(())
 	}

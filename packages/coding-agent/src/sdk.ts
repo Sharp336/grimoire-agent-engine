@@ -3213,6 +3213,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,
+			agentRegistry,
 			agentKind,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
