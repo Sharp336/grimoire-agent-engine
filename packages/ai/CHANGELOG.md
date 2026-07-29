@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Extracted Cursor's HTTP/2 pooling, lifecycle, transient-error classification, and Connect framing into a provider-neutral transport subsystem.
+
 
 ### Changed
 
