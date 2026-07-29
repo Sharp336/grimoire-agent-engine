@@ -1,5 +1,6 @@
 import * as AIError from "../../error";
 import { OAuthCallbackFlow } from "./callback-server";
+import { jwtExpiryMs } from "./jwt";
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
 
@@ -37,14 +38,14 @@ class DevinOAuthFlow extends OAuthCallbackFlow {
 		return crypto.randomUUID();
 	}
 
-	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
+	async generateAuthUrl(state: string, _redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		this.#pkce = await generatePKCE();
 		const params = new URLSearchParams({
-			redirect_uri: redirectUri,
 			state,
 			prompt: "select_account",
 			code_challenge: this.#pkce.challenge,
 			code_challenge_method: "S256",
+			cli_pkce_marker: "1",
 		});
 
 		return {
@@ -108,17 +109,8 @@ export async function exchangeDevinCliToken(
 	return data.token;
 }
 
+// A malformed or non-JWT Devin token keeps the conservative long-lived
+// fallback rather than forcing an immediate refresh.
 function getTokenExpiry(token: string): number {
-	try {
-		const [, payload] = token.split(".");
-		if (payload) {
-			const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: unknown };
-			if (typeof decoded.exp === "number" && Number.isFinite(decoded.exp)) {
-				return decoded.exp * 1000 - 5 * 60 * 1000;
-			}
-		}
-	} catch {
-		// Ignore malformed non-JWT tokens and use a conservative long-lived fallback.
-	}
-	return Date.now() + FALLBACK_EXPIRES_MS;
+	return jwtExpiryMs(token) ?? Date.now() + FALLBACK_EXPIRES_MS;
 }
