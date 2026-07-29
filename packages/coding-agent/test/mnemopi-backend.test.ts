@@ -69,14 +69,16 @@ describe("mnemopiBackend side-request recall", () => {
 			state = getMnemopiSessionState(session as never);
 			expect(state).toBeDefined();
 			if (!state) return;
-			const recallSpy = vi.spyOn(state, "collectScopedRecallResults").mockImplementation(async query => [
-				{ id: query, content: `memory for ${query}` } as never,
-			]);
+			const beforeAgentStartPrompt = mnemopiBackend.beforeAgentStartPrompt;
+			if (!beforeAgentStartPrompt) throw new Error("Mnemopi backend must support agent-start recall");
+			const recallSpy = vi
+				.spyOn(state, "collectScopedRecallResults")
+				.mockImplementation(async query => [{ id: query, content: `memory for ${query}` } as never]);
 
-			const main = await mnemopiBackend.beforeAgentStartPrompt(session as never, "main prompt");
+			const main = await beforeAgentStartPrompt(session as never, "main prompt");
 			const sideOne = await mnemopiBackend.beforeSideRequestPrompt(session as never, "first side prompt");
 			const sideTwo = await mnemopiBackend.beforeSideRequestPrompt(session as never, "second side prompt");
-			const replayedMain = await mnemopiBackend.beforeAgentStartPrompt(session as never, "later main prompt");
+			const replayedMain = await beforeAgentStartPrompt(session as never, "later main prompt");
 
 			expect(recallSpy).toHaveBeenCalledTimes(3);
 			expect(recallSpy.mock.calls[1]?.[0]).toContain("first side prompt");

@@ -461,9 +461,12 @@ describe("hindsightBackend first-turn injection", () => {
 			taskDepth: 0,
 		});
 
-		const recallSpy = vi.spyOn(HindsightApi.prototype, "recall").mockImplementation(async (_bankId, query) => ({
-			results: [{ id: query, text: `memory for ${query}` }],
-		}) as never);
+		const recallSpy = vi.spyOn(HindsightApi.prototype, "recall").mockImplementation(
+			async (_bankId, query) =>
+				({
+					results: [{ id: query, text: `memory for ${query}` }],
+				}) as never,
+		);
 		const main = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "main prompt");
 		const sideOne = await hindsightBackend.beforeSideRequestPrompt(session as never, "first side prompt");
 		const sideTwo = await hindsightBackend.beforeSideRequestPrompt(session as never, "second side prompt");

@@ -399,7 +399,8 @@ type SetSessionNameWithTrigger = (
 	trigger?: SessionNameTrigger,
 ) => Promise<boolean>;
 
-export class AgentSession { readonly agent: Agent;
+export class AgentSession {
+	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
@@ -8434,4 +8435,5 @@ export class AgentSession { readonly agent: Agent;
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
-	} }
+	}
+}

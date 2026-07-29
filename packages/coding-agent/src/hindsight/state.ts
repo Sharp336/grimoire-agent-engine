@@ -466,7 +466,7 @@ export class HindsightSessionState {
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
 		const { context, ok } = await this.recallForContext(truncated);
-		return ok ? context ?? undefined : undefined;
+		return ok ? (context ?? undefined) : undefined;
 	}
 
 	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {
