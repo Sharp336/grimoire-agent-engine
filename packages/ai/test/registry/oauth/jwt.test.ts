@@ -1,6 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { isCursorTokenExpiringSoon } from "../../../src/registry/oauth/cursor";
+import { loginDevin } from "../../../src/registry/oauth/devin";
+import { getOAuthApiKey } from "../../../src/registry/oauth/index";
 import { decodeJwtPayload, JWT_EXPIRY_SKEW_MS, jwtExpiryMs, jwtExpirySeconds } from "../../../src/registry/oauth/jwt";
+import { decodeJwt as decodeOpenAICodexJwt } from "../../../src/registry/oauth/openai-codex";
+import { loginPerplexity } from "../../../src/registry/oauth/perplexity";
 
 function jwt(payload: Record<string, unknown>): string {
 	return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
@@ -71,5 +75,55 @@ describe("isCursorTokenExpiringSoon", () => {
 		// A payload that cannot be read at all still forces a refresh.
 		expect(isCursorTokenExpiringSoon("opaque-api-key")).toBe(true);
 		expect(isCursorTokenExpiringSoon("header.%%%.signature")).toBe(true);
+	});
+});
+
+const originalNoBorrow = process.env.PI_AUTH_NO_BORROW;
+
+afterEach(() => {
+	vi.restoreAllMocks();
+	if (originalNoBorrow === undefined) delete process.env.PI_AUTH_NO_BORROW;
+	else process.env.PI_AUTH_NO_BORROW = originalNoBorrow;
+});
+
+describe("caller-specific unreadable-exp policies", () => {
+	it("keeps Devin opaque tokens for its exact long-lived interval", async () => {
+		const now = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const credentials = await loginDevin({
+			onAuth: () => {},
+			onManualCodeInput: async () => "callback-code",
+			fetch: async () => Response.json({ apiKey: "opaque-devin-token" }),
+		});
+		expect(credentials.expires).toBe(now + 365 * 24 * 60 * 60 * 1000);
+	});
+
+	it("maps Perplexity opaque tokens to the far-future sentinel at login", async () => {
+		process.env.PI_AUTH_NO_BORROW = "1";
+		const prompts = ["user@example.com", "123456"];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+			const url = String(input);
+			if (url.endsWith("/csrf")) return Response.json({ csrfToken: "csrf" });
+			if (url.endsWith("/signin-email")) return Response.json({ ok: true });
+			if (url.endsWith("/signin-otp")) return Response.json({ token: "opaque-perplexity-token" });
+			throw new Error(`unexpected Perplexity URL: ${url}`);
+		});
+		const credentials = await loginPerplexity({
+			onPrompt: async () => prompts.shift() ?? "",
+		});
+		expect(credentials.expires).toBe(8.64e15);
+	});
+
+	it("keeps oauth/index absence undefined until Perplexity applies its sentinel", async () => {
+		expect(jwtExpiryMs("opaque-token")).toBeUndefined();
+		const result = await getOAuthApiKey("perplexity", {
+			perplexity: { access: "opaque-token", refresh: "opaque-token", expires: 0 },
+		});
+		expect(result?.newCredentials.expires).toBe(8.64e15);
+	});
+
+	it("keeps OpenAI Codex unreadable payloads null", () => {
+		expect(decodeOpenAICodexJwt("opaque-token")).toBeNull();
+		expect(decodeOpenAICodexJwt("header.%%%.signature")).toBeNull();
 	});
 });
