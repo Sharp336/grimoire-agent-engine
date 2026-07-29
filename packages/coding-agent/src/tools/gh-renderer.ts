@@ -1,4 +1,5 @@
 import { type Component, padding, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { getProjectDir } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme, ThemeColor } from "../modes/theme/theme";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
@@ -14,6 +15,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	formatToolWorkingDirectory,
 	PREVIEW_LIMITS,
 	replaceTabs,
 	type ToolUIColor,
@@ -23,6 +25,7 @@ import {
 } from "./render-utils";
 
 type GithubToolRenderArgs = {
+	cwd?: string;
 	op?: string;
 	run?: string;
 	branch?: string;
@@ -113,6 +116,8 @@ function buildOpMeta(args: GithubToolRenderArgs): string[] {
 			break;
 		}
 	}
+	const cwd = formatToolWorkingDirectory(args.cwd, getProjectDir());
+	if (cwd) meta.push(cwd);
 	return meta;
 }
 
@@ -410,7 +415,8 @@ function renderWatchCall(args: GithubToolRenderArgs, options: RenderResultOption
 		metaText = theme.fg("muted", "current HEAD");
 	}
 
-	const header = `${icon} ${titleText}  ${metaText}`;
+	const cwdMeta = buildOpMeta(args);
+	const header = `${icon} ${titleText}  ${metaText}${cwdMeta.length > 0 ? `  ${theme.fg("muted", cwdMeta.join("  "))}` : ""}`;
 	const wait = theme.fg("dim", "waiting for workflow data...");
 	return new Text(`${header}\n${wait}`, 0, 0);
 }
@@ -447,19 +453,20 @@ export const githubToolRenderer = {
 		const watch = result.details?.watch;
 		if (watch) {
 			const isError = result.isError === true;
+			const meta = [getWatchHeader(watch), ...buildOpMeta(args ?? {})];
 			const header = renderStatusLine(
 				isError
 					? {
 							icon: "error",
 							title: "GitHub Run Watch",
 							titleColor: "error",
-							meta: [getWatchHeader(watch)],
+							meta,
 						}
 					: {
 							iconOverride: uiTheme.styledSymbol("tool.gh", "accent"),
 							title: "GitHub Run Watch",
 							titleColor: "accent",
-							meta: [getWatchHeader(watch)],
+							meta,
 						},
 				uiTheme,
 			);

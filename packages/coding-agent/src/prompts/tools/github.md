@@ -2,6 +2,7 @@ Op-based `gh` wrapper: repos, repository files, PRs, search, checkout, push, Act
 
 <instruction>
 Pick op via `op`. Beyond the field descriptions, per op:
+- `cwd` — selects the local checkout used to infer repository, branch, HEAD, remotes, and PR push metadata; defaults to the session directory. Set it to a linked worktree or submodule path to operate on that checkout without moving the session.
 - `repo_view` — omit `repo` to view the current checkout.
 - `file_read` — reads `path` from `repo`; omit `repo` for the current checkout and `branch` for its default branch.
 - `pr_create` — `head` defaults to the current branch.
