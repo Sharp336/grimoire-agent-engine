@@ -84,6 +84,10 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 		return new WorkflowTool(session, runtime);
 	}
 
+	cancelActiveWorkflow(): Promise<WorkflowSnapshot> {
+		return this.#runtime.cancel();
+	}
+
 	async execute(
 		toolCallId: string,
 		params: WorkflowToolInput,
@@ -137,7 +141,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			} else if (params.op === "get") {
 				snapshot = this.#runtime.getSnapshot();
 			} else if (params.op === "cancel") {
-				snapshot = await this.#runtime.cancel();
+				snapshot = await this.cancelActiveWorkflow();
 			} else if (params.op === "retry") {
 				if (!params.node_id?.trim()) throw new ToolError("node_id is required when op=retry");
 				await this.#runtime.retryNode(params.node_id.trim());

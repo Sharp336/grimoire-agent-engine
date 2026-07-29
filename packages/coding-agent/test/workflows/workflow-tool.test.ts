@@ -3,7 +3,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { SessionEntry } from "../../src/session/session-entries";
-import { TaskDispatchService } from "../../src/task/dispatch-service";
+import { type SettledTaskRunner, TaskDispatchService } from "../../src/task/dispatch-service";
 import type { AgentDefinition, TaskItem } from "../../src/task/types";
 import type { ToolSession } from "../../src/tools";
 import { WorkflowTool } from "../../src/workflows/tools/workflow-tool";
@@ -45,7 +45,7 @@ function taskResult(id: string): SingleResult {
 	};
 }
 
-function createPersistentSession(spawns: RecordedSpawn[]): ToolSession {
+function createPersistentSession(spawns: RecordedSpawn[], runSettled?: SettledTaskRunner): ToolSession {
 	const entries: SessionEntry[] = [];
 	let nextId = 0;
 	const sessionManager: NonNullable<ToolSession["sessionManager"]> = {
@@ -75,14 +75,18 @@ function createPersistentSession(spawns: RecordedSpawn[]): ToolSession {
 		sessionManager,
 		toolRegistry: new Map(),
 	};
-	session.taskDispatchService = new TaskDispatchService(session, async (_toolCallId, params, item) => {
-		spawns.push(structuredClone({ context: params.context ?? "", item }));
-		const id = item.name ?? "unnamed";
-		return {
-			content: [{ type: "text", text: "done" }],
-			details: { projectAgentsDir: null, results: [taskResult(id)], totalDurationMs: 1 },
-		};
-	});
+	session.taskDispatchService = new TaskDispatchService(
+		session,
+		runSettled ??
+			(async (_toolCallId, params, item) => {
+				spawns.push(structuredClone({ context: params.context ?? "", item }));
+				const id = item.name ?? "unnamed";
+				return {
+					content: [{ type: "text", text: "done" }],
+					details: { projectAgentsDir: null, results: [taskResult(id)], totalDurationMs: 1 },
+				};
+			}),
+	);
 	return session;
 }
 
@@ -196,5 +200,51 @@ describe("WorkflowTool", () => {
 		const tool = await WorkflowTool.createIf(createPersistentSession([]));
 		if (!tool) throw new Error("Expected workflow tool for a persistent top-level session");
 		expect(tool.concurrency).toBe("exclusive");
+	});
+
+	it("lets the operator cancel the live runtime while run is blocked", async () => {
+		mockDiscovery();
+		const dispatchStarted = Promise.withResolvers<void>();
+		const session = createPersistentSession([], async (_toolCallId, _params, item, _defaultAgent, signal) => {
+			dispatchStarted.resolve();
+			const aborted = Promise.withResolvers<void>();
+			signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			const id = item.name ?? "unnamed";
+			return {
+				content: [{ type: "text", text: "cancelled" }],
+				details: {
+					projectAgentsDir: null,
+					results: [{ ...taskResult(id), exitCode: 1, aborted: true, abortReason: "cancelled" }],
+					totalDurationMs: 1,
+				},
+			};
+		});
+		const tool = await WorkflowTool.createIf(session);
+		if (!tool) throw new Error("Expected workflow tool for a persistent top-level session");
+		await tool.execute("workflow-create", {
+			op: "create",
+			id: "operator-cancel",
+			objective: "Stop active work",
+			nodes: [
+				{ id: "active", agent: "task", task: "Wait" },
+				{ id: "downstream", agent: "task", task: "Must not start", needs: ["active"] },
+			],
+		});
+
+		const running = tool.execute("workflow-run", { op: "run" });
+		await dispatchStarted.promise;
+		const cancelling = await tool.cancelActiveWorkflow();
+		expect(["cancelling", "cancelled"]).toContain(cancelling.status);
+
+		const cancelled = await running;
+		expect(cancelled.details?.workflow?.status).toBe("cancelled");
+		expect(cancelled.details?.workflow?.nodes.active.status).toBe("cancelled");
+		expect(cancelled.details?.workflow?.nodes.downstream.status).toBe("cancelled");
+
+		const restored = await WorkflowTool.createIf(session);
+		if (!restored) throw new Error("Expected cancelled workflow to reload");
+		const reloaded = await restored.execute("workflow-get", { op: "get" });
+		expect(reloaded.details?.workflow?.status).toBe("cancelled");
 	});
 });

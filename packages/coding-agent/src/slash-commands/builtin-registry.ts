@@ -69,6 +69,7 @@ import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
+import { handleWorkflowCommand } from "./helpers/workflow";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type {
 	BuiltinSlashCommand,
@@ -1247,6 +1248,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.ctx.handleTodoCommand(command.args);
 			runtime.ctx.editor.setText("");
 		},
+	},
+	{
+		name: "workflow",
+		description: "Control the active durable workflow",
+		acpDescription: "Control the active durable workflow",
+		acpInputHint: "cancel",
+		subcommands: [{ name: "cancel", description: "Cancel the active workflow" }],
+		allowArgs: true,
+		handle: handleWorkflowCommand,
 	},
 	{
 		name: "session",
