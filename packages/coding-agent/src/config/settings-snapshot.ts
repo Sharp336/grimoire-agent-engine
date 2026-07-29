@@ -87,8 +87,9 @@ export interface SettingSnapshotEntry {
 		secret?: true;
 		/**
 		 * Choice metadata. `"runtime"` is preserved verbatim rather than resolved:
-		 * the choices come from a runtime registry this layer cannot see, and a
-		 * client must be able to tell "populated elsewhere" from "no choices".
+		 * the effective choices depend on runtime state this response does not
+		 * expose, and a client must be able to tell "populated elsewhere" from
+		 * "no choices".
 		 */
 		options?: ReadonlyArray<SubmenuOption> | "runtime";
 		/** Selection order is meaningful and the editor supports reordering. */
@@ -119,10 +120,23 @@ function disclosesValue(path: SettingPath): boolean {
 	return isRpcReadable(path) && !isCredential(path);
 }
 
+function getSnapshotOptions(path: SettingPath): ReadonlyArray<SubmenuOption> | "runtime" | undefined {
+	const options = getUi(path)?.options;
+	if (options === undefined) return undefined;
+
+	// The panel narrows these schema choices using state the RPC snapshot does
+	// not disclose: the active model's thinking efforts and the excluded web
+	// search providers. Do not advertise the unfiltered schema lists as the
+	// effective choices.
+	if (path === "defaultThinkingLevel" || path === "providers.webSearchOrder") return "runtime";
+	return options;
+}
+
 export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): SettingsSnapshot {
 	const entries: SettingSnapshotEntry[] = [];
 	for (const path of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		const ui = getUi(path);
+		const options = getSnapshotOptions(path);
 		const renderable = isSettingPanelRenderable(path);
 		if (tab !== undefined && ui?.tab !== tab) continue;
 		const values = getEnumValues(path);
@@ -144,7 +158,7 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 							control: getSettingPanelControlKind(path),
 							visible: renderable && isSettingPanelVisible(path, settings),
 							...(isCredential(path) ? { secret: true } : {}),
-							...(ui.options === undefined ? {} : { options: ui.options }),
+							...(options === undefined ? {} : { options }),
 							...(ui.ordered === undefined ? {} : { ordered: ui.ordered }),
 						},
 					}

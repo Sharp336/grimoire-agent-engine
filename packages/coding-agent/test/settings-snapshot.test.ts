@@ -213,6 +213,13 @@ describe("settings snapshot", () => {
 		});
 		// Ordered selection semantics.
 		expect(byPath.get("providers.webSearchOrder")?.ui?.ordered).toBe(true);
+		// Choices narrowed by undisclosed runtime state must not masquerade as
+		// an authoritative static list.
+		expect(byPath.get("providers.webSearchOrder")?.ui?.options).toBe("runtime");
+		expect(byPath.get("defaultThinkingLevel")?.ui?.options).toBe("runtime");
+		expect(byPath.get("providers.webSearchExclude")?.ui?.options).toEqual(
+			getUi("providers.webSearchExclude")?.options,
+		);
 		// A config-only setting keeps its top-level prose.
 		expect(byPath.get("tui.maxInlineImageColumns")?.description).toContain("inline images");
 	});
