@@ -843,8 +843,8 @@ describe("AuthStorage persistent session stickiness", () => {
 		}
 	});
 
-	it("drops persisted session stickiness after a lower-index credential is removed", async () => {
-		const provider = "unit-sticky-invalidation";
+	it("keeps persisted affinity by credential id after a lower-index credential is removed", async () => {
+		const provider = "unit-sticky-index-shift";
 		const mk = (suffix: string): OAuthCredential => ({
 			type: "oauth",
 			refresh: `refresh-${suffix}`,
@@ -853,41 +853,26 @@ describe("AuthStorage persistent session stickiness", () => {
 			projectId: `project-${suffix}`,
 			email: `user-${suffix}@example.com`,
 		});
-		const initialCredentials = [mk("a"), mk("b"), mk("c"), mk("d")];
-		const remainingCredentials = initialCredentials.slice(1);
 
 		let authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(dbPath)));
-		await authStorage.set(provider, initialCredentials);
+		await authStorage.set(provider, [mk("a"), mk("b"), mk("c"), mk("d")]);
 		let rows = authStorage.listStoredCredentials(provider);
-
-		const control = new AuthStorage(
-			new SqliteAuthCredentialStore(new Database(path.join(tempDir, "sticky-control.db"))),
-		);
-		await control.set(provider, remainingCredentials);
 		let session: string | undefined;
 		let stuckId = -1;
 		let stuckIndex = -1;
 		let stuckToken: string | undefined;
-		let freshToken: string | undefined;
-		try {
-			for (let i = 0; i < 256 && session === undefined; i++) {
-				const candidate = `sticky-probe-${i}`;
-				const token = await authStorage.getApiKey(provider, candidate);
-				const expectedFreshToken = await control.getApiKey(provider, candidate);
-				const index = rows.findIndex(row => (row.credential as OAuthCredential).access === token);
-				if (index >= 1 && index <= rows.length - 2 && token !== expectedFreshToken) {
-					session = candidate;
-					stuckIndex = index;
-					stuckId = rows[index].id;
-					stuckToken = token;
-					freshToken = expectedFreshToken;
-				}
+		for (let i = 0; i < 256 && session === undefined; i++) {
+			const candidate = `sticky-probe-${i}`;
+			const token = await authStorage.getApiKey(provider, candidate);
+			const index = rows.findIndex(row => row.credential.type === "oauth" && row.credential.access === token);
+			if (index >= 1) {
+				session = candidate;
+				stuckIndex = index;
+				stuckId = rows[index].id;
+				stuckToken = token;
 			}
-		} finally {
-			control.close();
 		}
-		expect(session).toBeDefined();
-		expect(freshToken).toBeDefined();
+		if (!session || !stuckToken) throw new Error("expected a session assigned above the first row");
 
 		expect(await authStorage.removeCredential(provider, rows[0].id)).toBe(true);
 		authStorage.close();
@@ -899,7 +884,6 @@ describe("AuthStorage persistent session stickiness", () => {
 
 		const resolved = await authStorage.getApiKey(provider, session);
 		authStorage.close();
-		expect(resolved).toBe(freshToken);
-		expect(resolved).not.toBe(stuckToken);
+		expect(resolved).toBe(stuckToken);
 	});
 });
