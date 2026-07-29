@@ -16,6 +16,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 type Scenario =
 	| { kind: "complete-tool-use" }
+	| { kind: "throttled-tool-use" }
 	| { kind: "truncated-tool-use" }
 	| { kind: "invalid-tool-json" }
 	| { kind: "truncated-text" }
@@ -115,6 +116,12 @@ async function startServer(): Promise<string> {
 		if (scenario.kind === "complete-tool-use") {
 			stream.write(Buffer.concat([toolUseStartFrame(), endTurnMetadataFrame()]));
 			stream.end();
+			return;
+		}
+		if (scenario.kind === "throttled-tool-use") {
+			stream.write(toolUseStartFrame('{"a":1'));
+			stream.write(toolUseStartFrame(',"b":2'));
+			stream.end(Buffer.concat([toolUseStartFrame("}"), endTurnMetadataFrame()]));
 			return;
 		}
 		if (scenario.kind === "invalid-tool-json") {
@@ -260,6 +267,23 @@ describe("Kiro terminal-state invariant", () => {
 		}
 	});
 
+	it("throttles partial tool-argument parsing while strictly parsing completion", async () => {
+		scenario = { kind: "throttled-tool-use" };
+		const stream = streamKiro(makeModel(await startServer()), context, { apiKey: "test-token" });
+		const partialArguments: Record<string, unknown>[] = [];
+		for await (const event of stream) {
+			if (event.type !== "toolcall_delta") continue;
+			const toolCall = event.partial.content.find((block): block is ToolCall => block.type === "toolCall");
+			partialArguments.push(structuredClone(toolCall?.arguments ?? {}));
+		}
+		const result = await stream.result();
+		const finalToolCall = result.content.find((block): block is ToolCall => block.type === "toolCall");
+
+		expect(partialArguments).toHaveLength(3);
+		expect(partialArguments[0]).toEqual({ a: 1 });
+		expect(partialArguments[1]).toEqual({ a: 1 });
+		expect(finalToolCall?.arguments).toEqual({ a: 1, b: 2 });
+	});
 	it("rejects an oversized advertised frame before buffering its body", async () => {
 		const body = new ReadableStream<Uint8Array>({
 			start(controller) {
