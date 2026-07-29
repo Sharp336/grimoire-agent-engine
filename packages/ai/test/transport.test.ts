@@ -16,6 +16,7 @@ import {
 	encodeConnectFrame,
 	isTransientTransportError,
 	normalizeConnectAuthError,
+	postH2Primary,
 	readConnectTrailerError,
 } from "@oh-my-pi/pi-ai/transport";
 import { CursorCredentialError } from "../src/error";
@@ -523,6 +524,51 @@ process.stdout.write(String(isTransportDisposed()));`,
 		expect(stdout).toBe("false");
 	});
 
+	it("registers config cleanup on first lookup and clears the lookup cache", async () => {
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import * as http from "node:http";
+import { create } from "@bufbuild/protobuf";
+import { connectNodeAdapter } from "@connectrpc/connect-node";
+import { GetServerConfigResponseSchema, ServerConfigService } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/server_config_pb";
+import { disposeServerConfigCache, resolveCursorTransportMode } from "./src/providers/cursor/server-config.ts";
+import { registerTransportDisposer } from "./src/transport/lifecycle.ts";
+let requests = 0;
+const server = http.createServer(connectNodeAdapter({
+	routes: router => router.service(ServerConfigService, {
+		getServerConfig: () => { requests++; return create(GetServerConfigResponseSchema); },
+	}),
+}));
+const listening = Promise.withResolvers();
+server.once("error", listening.reject);
+server.listen(0, "127.0.0.1", listening.resolve);
+await listening.promise;
+const address = server.address();
+if (!address || typeof address === "string") throw new Error("missing address");
+const options = { baseUrl: "http://127.0.0.1:" + address.port, apiKey: "key", provider: "cursor" };
+await resolveCursorTransportMode(options);
+let registered = false;
+try { registerTransportDisposer("cursor-server-config", async () => {}); } catch { registered = true; }
+await disposeServerConfigCache();
+await resolveCursorTransportMode(options);
+const closed = Promise.withResolvers();
+server.close(closed.resolve);
+await closed.promise;
+process.stdout.write(JSON.stringify({ registered, requests }));`,
+			],
+			{ cwd: new URL("..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe" },
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({ registered: true, requests: 2 });
+	});
+
 	it("awaits registered disposers before resolving", async () => {
 		const child = Bun.spawn(
 			[
@@ -560,5 +606,84 @@ describe("shared transport classification", () => {
 		expect(isTransientTransportError(Object.assign(new Error("unavailable"), { status: 503 }))).toBeFalse();
 		expect(isTransientTransportError(Object.assign(new Error("forbidden"), { status: 403 }))).toBeFalse();
 		expect(isTransientTransportError(new DOMException("aborted", "AbortError"))).toBeFalse();
+	});
+});
+
+describe("HTTP/2 primary fallback boundary", () => {
+	it("attempts HTTP/1 only for typed pre-dispatch unavailability", async () => {
+		let fetchAttempts = 0;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			fetchAttempts++;
+			return new Response("fallback", { status: 200 });
+		});
+		const unavailable = net.createServer();
+		await new Promise<void>((resolve, reject) => {
+			unavailable.once("error", reject);
+			unavailable.listen(0, "127.0.0.1", resolve);
+		});
+		const address = unavailable.address();
+		if (!address || typeof address === "string") throw new Error("expected unavailable port");
+		await new Promise<void>(resolve => unavailable.close(() => resolve()));
+		const response = await postH2Primary({
+			url: `http://127.0.0.1:${address.port}/dispatch`,
+			provider: "transport-test",
+			headers: {},
+			body: "body",
+		});
+		expect(response.status).toBe(200);
+		expect(fetchAttempts).toBe(1);
+	});
+
+	it("never attempts HTTP/1 after request creation or body dispatch", async () => {
+		let fetchAttempts = 0;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			fetchAttempts++;
+			return new Response();
+		});
+		for (const phase of ["request", "body"] as const) {
+			const { baseUrl } = await listen(stream => {
+				if (phase === "request") {
+					stream.close(http2.constants.NGHTTP2_CANCEL);
+					return;
+				}
+				stream.once("data", () => stream.close(http2.constants.NGHTTP2_CANCEL));
+			});
+			await expect(
+				postH2Primary({ url: `${baseUrl}/${phase}`, provider: "transport-test", headers: {}, body: "body" }),
+			).rejects.toThrow();
+		}
+		expect(fetchAttempts).toBe(0);
+	});
+
+	it("never attempts HTTP/1 after status, frame, or trailer observation", async () => {
+		let fetchAttempts = 0;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			fetchAttempts++;
+			return new Response();
+		});
+		for (const phase of ["status", "frame", "trailer"] as const) {
+			const { baseUrl } = await listen(stream => {
+				stream.on("error", () => {});
+				stream.respond({ ":status": 200 }, phase === "trailer" ? { waitForTrailers: true } : undefined);
+				if (phase === "frame") stream.write(encodeConnectFrame(new Uint8Array([1])));
+				if (phase === "trailer") {
+					stream.once("wantTrailers", () => {
+						stream.sendTrailers({ "grpc-status": "13" });
+					});
+					stream.end();
+					return;
+				}
+				stream.close(http2.constants.NGHTTP2_CANCEL);
+			});
+			const response = await postH2Primary({
+				url: `${baseUrl}/${phase}`,
+				provider: "transport-test",
+				headers: {},
+				body: "body",
+			});
+			await new Response(response.body).arrayBuffer().catch(() => undefined);
+			await response.close();
+		}
+		expect(fetchAttempts).toBe(0);
 	});
 });
