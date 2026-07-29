@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improved grouped read-call layout by nesting each request's usage metrics beneath its final path ([#6946](https://github.com/can1357/oh-my-pi/pull/6946) by [@joshrzemien](https://github.com/joshrzemien)).
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
