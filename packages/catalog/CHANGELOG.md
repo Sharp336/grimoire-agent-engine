@@ -212,6 +212,10 @@
 ### Fixed
 
 - Fixed an issue where LM Studio first turns failed with a 400 Invalid tool_choice error when a named tool was forced, by using the supported tool_choice: "required" string selector.
+### Fixed
+
+- Corrected the AIML API default model to a real catalog id (`openai/gpt-5-5`); the previous value used a bare alias that didn't match AIML API's namespaced model ids, so the provider default silently fell back to the first available model.
+
 ### Added
 
 - AIML API model discovery now surfaces per-model **pricing** and **modalities** (via `/v1/models?include=pricing,modalities`), so cost and vision render instead of "Free"/text-only, and populates friendly model names and context/output limits from the catalog.
