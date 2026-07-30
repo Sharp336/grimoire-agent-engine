@@ -107,6 +107,23 @@ function atomicWriteTarget(fpath: string): string {
 	return path.resolve(fpath);
 }
 
+function openPinnedFileSync(fpath: string, flags: number, mode?: number): number {
+	const fd = fs.openSync(fpath, flags | (fs.constants.O_NOFOLLOW ?? 0), mode);
+	try {
+		const opened = fs.fstatSync(fd);
+		const named = fs.lstatSync(fpath);
+		if (named.isSymbolicLink() || opened.dev !== named.dev || opened.ino !== named.ino) {
+			const error = new Error(`Refusing to follow replacement session symlink: ${fpath}`) as NodeJS.ErrnoException;
+			error.code = "ELOOP";
+			throw error;
+		}
+		return fd;
+	} catch (error) {
+		fs.closeSync(fd);
+		throw error;
+	}
+}
+
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	#closed = false;
@@ -125,9 +142,9 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		// the canonical path after lock acquisition: following it here would let
 		// an append escape to a session this writer does not own. The manager
 		// latches ELOOP and repairs its canonical path with an atomic rewrite.
-		const commonFlags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0);
+		const commonFlags = fs.constants.O_WRONLY | fs.constants.O_CREAT;
 		const openFlags = flags === "w" ? commonFlags | fs.constants.O_TRUNC : commonFlags | fs.constants.O_APPEND;
-		this.#fd = fs.openSync(fpath, openFlags, 0o666);
+		this.#fd = openPinnedFileSync(fpath, openFlags, 0o666);
 		// Register for cleanup if abandoned without close()
 		writerRegistry.register(this, this.#fd, this);
 	}
@@ -219,27 +236,22 @@ export class FileSessionStorage implements SessionStorage {
 			fs.writeFileSync(tempPath, content);
 			fs.renameSync(tempPath, fpath);
 		} catch (err) {
-			try {
-				if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-			} catch (cleanupErr) {
-				if (!isEnoent(cleanupErr)) {
-					logger.warn("Failed to remove session rewrite temp file", {
-						sessionFile: fpath,
-						tempPath,
-						error: toError(cleanupErr).message,
-					});
+			if (hasFsCode(err, "EPERM")) {
+				try {
+					this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err);
+					return;
+				} catch (fallbackErr) {
+					this.#discardTemp(tempPath, fpath);
+					throw fallbackErr;
 				}
 			}
-			if (hasFsCode(err, "EPERM")) {
-				fs.writeFileSync(fpath, content);
-				return;
-			}
+			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
 		}
 	}
 
 	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
-		const fd = fs.openSync(fpath, "r+");
+		const fd = openPinnedFileSync(fpath, fs.constants.O_RDWR);
 		try {
 			const buf = Buffer.from(serializeTitleSlot(update), "utf-8");
 			let offset = 0;

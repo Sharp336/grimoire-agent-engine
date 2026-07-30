@@ -3112,15 +3112,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
 						suppressBreadcrumb: true,
 					});
-					if (options.parentArtifactManager) {
-						reopened.adoptArtifactManager(options.parentArtifactManager);
+					let revived: AgentSession | undefined;
+					try {
+						if (options.parentArtifactManager) {
+							reopened.adoptArtifactManager(options.parentArtifactManager);
+						}
+						({ session: revived } = await createAgentSession(
+							buildSubagentSessionOptions(reopened, expectedAgentRef),
+						));
+						installRegistryStatusSync(revived);
+						installIrcWakeTurnMonitor(revived);
+						return revived;
+					} catch (error) {
+						if (revived) await revived.dispose();
+						else await reopened.close();
+						throw error;
 					}
-					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef),
-					);
-					installRegistryStatusSync(revived);
-					installIrcWakeTurnMonitor(revived);
-					return revived;
+
 				};
 			}
 
