@@ -728,7 +728,11 @@ export class RpcClient {
 	 * Use waitForIdle() to wait for completion.
 	 */
 	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		const response = await this.#send({ type: "prompt", message, images });
+		await this.#sendPrompt(message, images);
+	}
+
+	async #sendPrompt(message: string, images?: ImageContent[], onRequestId?: (id: string) => void): Promise<void> {
+		const response = await this.#send({ type: "prompt", message, images }, 30_000, onRequestId);
 		if (
 			response.success &&
 			response.command === "prompt" &&
@@ -1234,6 +1238,7 @@ export class RpcClient {
 		const events: AgentEvent[] = [];
 		const { promise, resolve, reject } = Promise.withResolvers<AgentEvent[]>();
 		let settled = false;
+		let requestId: string | undefined;
 		const cleanup = () => {
 			unsubscribeEvent();
 			unsubscribePromptResult();
@@ -1250,7 +1255,7 @@ export class RpcClient {
 			if (isTerminalAgentEnd(event)) finish();
 		});
 		const unsubscribePromptResult = this.onPromptResult(result => {
-			if (!result.agentInvoked) finish();
+			if (result.id === requestId && !result.agentInvoked) finish();
 		});
 		const timeoutId = this.#startTimeout(timeout, () => {
 			if (settled) return;
@@ -1260,7 +1265,9 @@ export class RpcClient {
 		});
 
 		try {
-			await this.prompt(message, images);
+			await this.#sendPrompt(message, images, id => {
+				requestId = id;
+			});
 		} catch (error) {
 			if (!settled) {
 				settled = true;
@@ -1403,12 +1410,13 @@ export class RpcClient {
 		}
 	}
 
-	#send(command: RpcCommandBody, timeoutMs = 30_000): Promise<RpcResponse> {
+	#send(command: RpcCommandBody, timeoutMs = 30_000, onRequestId?: (id: string) => void): Promise<RpcResponse> {
 		if (!this.#process?.stdin) {
 			throw new Error("Client not started");
 		}
 
 		const id = `req_${++this.#requestId}`;
+		onRequestId?.(id);
 		const fullCommand = { ...command, id } as RpcCommand;
 		const { promise, resolve, reject } = Promise.withResolvers<RpcResponse>();
 		let settled = false;
