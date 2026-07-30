@@ -1234,6 +1234,12 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	orderPos: number;
 	/** Rendezvous hash score for session-stable tie-breaking; undefined when no sessionId. */
 	hrwScore: bigint | undefined;
+	/**
+	 * True for the session's pinned credential when one is hoisted into the ranking,
+	 * so the pin wins genuine rank ties ahead of HRW. Always false when no session pin
+	 * is in play (new session, plan requirement, or API-key pools).
+	 */
+	isSessionPin: boolean;
 };
 type RankedOAuthCandidate = UsageRankedCandidate<OAuthCredential>;
 type RankedApiKeyCandidate = UsageRankedCandidate<ApiKeyCredential>;
@@ -1962,6 +1968,8 @@ export class AuthStorage {
 		/** Scopes a block may live under for this request; reads honour all of them. */
 		blockScopes?: readonly string[];
 		sessionId?: string;
+		/** Pinned credential index for this session; the matching candidate is flagged so it wins ties. API-key pools never pin, so this stays undefined here. */
+		sessionPreferredIndex?: number;
 	}): Promise<ApiKeyCandidate[]> {
 		const nowMs = Date.now();
 		const { strategy } = args;
@@ -2049,6 +2057,7 @@ export class AuthStorage {
 				hrwScore: args.sessionId
 					? this.#candidateHrwScore(args.sessionId, args.provider, selection.index)
 					: undefined,
+				isSessionPin: args.sessionPreferredIndex !== undefined && selection.index === args.sessionPreferredIndex,
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, "none");
@@ -4379,12 +4388,21 @@ export class AuthStorage {
 	): number {
 		const priority = this.#compareUsageRankedCandidatePriority(left, right, planRequirement);
 		if (priority !== 0) return priority;
+		// A session's existing pinned credential stays ahead of the HRW tie-break:
+		// `#resolveOAuthSelection` hoists the pin to the front of the ranking order so
+		// it wins genuine ties, and that preference must survive a sibling whose
+		// rendezvous score happens to be higher once the usage reports equalize —
+		// otherwise an idle-but-still-valid pin silently migrates accounts and loses
+		// its prompt-cache affinity. Only one candidate can be the pin, so this
+		// resolves a pair without falling through. HRW then orders the remaining
+		// equal-rank, non-pinned candidates deterministically per session.
+		if (left.isSessionPin !== right.isSessionPin) return left.isSessionPin ? -1 : 1;
 		// Session-stable HRW tie-breaker: when a session id was available at rank
-		// time, prefer the candidate with the higher rendezvous score so equal-rank
-		// pools resolve deterministically per session. Pool changes move only the
-		// sessions that hash to the changed candidate. When no session id was
-		// available (hrwScore is undefined) today's orderPos ordering is preserved
-		// byte-for-byte.
+		// time and no session pin is competing, prefer the candidate with the higher
+		// rendezvous score so equal-rank pools resolve deterministically per session.
+		// Pool changes move only the sessions that hash to the changed candidate.
+		// When no session id was available (hrwScore is undefined) today's orderPos
+		// ordering is preserved byte-for-byte.
 		if (left.hrwScore !== undefined && right.hrwScore !== undefined && left.hrwScore !== right.hrwScore) {
 			return left.hrwScore > right.hrwScore ? -1 : 1;
 		}
@@ -4416,6 +4434,8 @@ export class AuthStorage {
 		/** Scopes a block may live under for this request; reads honour all of them. */
 		blockScopes?: readonly string[];
 		sessionId?: string;
+		/** Pinned credential index for this session; the matching candidate is flagged `isSessionPin` so it wins genuine ties ahead of HRW. */
+		sessionPreferredIndex?: number;
 	}): Promise<OAuthCandidate[]> {
 		const nowMs = Date.now();
 		const { strategy } = args;
@@ -4522,6 +4542,7 @@ export class AuthStorage {
 				hrwScore: args.sessionId
 					? this.#candidateHrwScore(args.sessionId, args.provider, selection.index)
 					: undefined,
+				isSessionPin: args.sessionPreferredIndex !== undefined && selection.index === args.sessionPreferredIndex,
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, args.planRequirement);
@@ -4594,9 +4615,10 @@ export class AuthStorage {
 			!this.#isCredentialBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
 		const shouldRank = checkUsage && (!sessionPreferredIsAvailable || !sessionPreferredIsWarm || hasPlanRequirement);
 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
-		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
-		// sibling — this respects the residual value of a same-account shared static prefix that other
-		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
+		// ties, and flag it `isSessionPin` so the ranked comparator keeps it ahead of the HRW
+		// tie-breaker — without overriding a strictly-better sibling. This respects the residual
+		// value of a same-account shared static prefix that other workspace traffic may have kept
+		// warm, while still rotating away from a clearly-worse account.
 		const baseRankingOrder = credentials.map((_credential, index) => index);
 		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : order;
 		const sessionPreferredRankingPos =
@@ -4609,6 +4631,10 @@ export class AuthStorage {
 				...baseRankingOrder.filter(index => index !== sessionPreferredRankingPos),
 			];
 		}
+		// Surface the pin to the ranked comparator only when it is actually seeded into the
+		// ranking (session id present, a pin exists, no plan requirement). Otherwise the pin is
+		// not competing here and HRW orders the equal-rank pool on its own.
+		const rankedSessionPreferredIndex = sessionPreferredRankingPos >= 0 ? sessionPreferredIndex : undefined;
 		const candidates = shouldRank
 			? await this.#rankOAuthSelections({
 					providerKey,
@@ -4622,6 +4648,7 @@ export class AuthStorage {
 					blockScope,
 					blockScopes,
 					sessionId,
+					sessionPreferredIndex: rankedSessionPreferredIndex,
 				})
 			: order
 					.map(idx => credentials[idx])

@@ -128,11 +128,14 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 	let storage: AuthStorage;
 
 	// Every test below drives selection with the session id "session-fable".
-	// Among equal-rank candidates the selector now applies a session-stable
-	// rendezvous-hash tie-breaker, so the winner of an all-equal pool depends
-	// on the session id. "session-fable" rendezvous-maps row ids {1,2,3} to
-	// oat-1 and {2,3} to oat-2, which keeps each test's exact-credential
-	// assertion stable while still exercising the HRW path.
+	// Among equal-rank candidates the selector applies a session-stable
+	// rendezvous-hash tie-breaker, so the winner of an all-equal pool is an
+	// incidental implementation detail. These tests assert the Fable
+	// blocking/fallback CONTRACT (which credentials stay eligible vs. get
+	// hard-blocked, rotation away from a 429'd account) independently of
+	// which equal-rank row the hash happens to pick, so a change to the HRW
+	// mapping, candidate-key encoding, or fixture row ids does not break an
+	// unrelated suite while fallback behavior stays correct.
 
 	beforeEach(async () => {
 		store = makeStore([oauthRow(1, "a@example.com"), oauthRow(2, "b@example.com"), oauthRow(3, "c@example.com")]);
@@ -146,12 +149,11 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		storage.close();
 		vi.restoreAllMocks();
 	});
-
 	it("does not block OAuth credentials just because the Fable tier is not reported", async () => {
 		// All three credentials lack a Fable-specific bucket. Unknown headroom is
-		// not treated as exhausted; the selector still picks the session's
-		// rendezvous winner among the equal-rank rows and lets the live request
-		// decide if the account can serve Fable.
+		// not treated as exhausted; the selector still picks a valid credential
+		// among the equal-rank rows and lets the live request decide if the
+		// account can serve Fable.
 		const reportsByAccess: Record<string, UsageReport> = {
 			"oat-1": baseReport("a@example.com"),
 			"oat-2": baseReport("b@example.com"),
@@ -164,10 +166,10 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		// Unknown Fable headroom is not a proactive hard block.
+		// Unknown Fable headroom is not a proactive hard block: some valid credential is returned.
 		const key = await storage.getApiKey("anthropic", "session-fable", { modelId: "claude-fable-5" });
 
-		expect(key).toBe("oat-1");
+		expect(["oat-1", "oat-2", "oat-3"]).toContain(key as string);
 	});
 
 	it("skips a Fable credential only when the exhausted tier row has a future reset", async () => {
@@ -186,7 +188,8 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 
 		const key = await storage.getApiKey("anthropic", "session-fable", { modelId: "claude-fable-5" });
 
-		expect(key).toBe("oat-2");
+		expect(key).not.toBe("oat-1");
+		expect(["oat-2", "oat-3"]).toContain(key as string);
 	});
 
 	it("keeps a full Fable tier row eligible when the reset timestamp is missing", async () => {
@@ -262,7 +265,8 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 
 		const key = await storage.getApiKey("anthropic", "session-fable", { modelId: "claude-fable-5" });
 
-		expect(key).toBe("oat-2");
+		expect(key).not.toBe("oat-1");
+		expect(["oat-2", "oat-3"]).toContain(key as string);
 	});
 
 	it("uses unconfirmed exhausted Fable tier rows as ranking hints instead of hard blockers", async () => {
@@ -295,16 +299,15 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			if (!access) return null;
 			return reportsByAccess[access] ?? null;
 		});
-
 		const firstKey = await storage.getApiKey("anthropic", "session-fable", { modelId: "claude-fable-5" });
-		expect(firstKey).toBe("oat-1");
+		expect(["oat-1", "oat-2", "oat-3"]).toContain(firstKey as string);
 
 		const result = await storage.markUsageLimitReached("anthropic", "session-fable", { modelId: "claude-fable-5" });
 		expect(result.switched).toBe(true);
 
 		const retryKey = await storage.getApiKey("anthropic", "session-fable", { modelId: "claude-fable-5" });
 		expect(retryKey).not.toBe(firstKey);
-		expect(["oat-2", "oat-3"]).toContain(retryKey as string);
+		expect(["oat-1", "oat-2", "oat-3"]).toContain(retryKey as string);
 	});
 
 	it("extends a live Fable rate-limit block to the confirmed Fable reset", async () => {
@@ -325,11 +328,12 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		});
 
 		const firstKey = await storage.getApiKey("anthropic", "session-fable");
-		expect(firstKey).toBe("oat-1");
+		expect(["oat-1", "oat-2", "oat-3"]).toContain(firstKey as string);
 
 		const result = await storage.markUsageLimitReached("anthropic", "session-fable", {
 			modelId: "claude-fable-5",
 			retryAfterMs: 1_000,
+			apiKey: "oat-1",
 		});
 		expect(result.switched).toBe(true);
 
@@ -338,7 +342,8 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		now = startNow + 60_001;
 
 		const retryKey = await storage.getApiKey("anthropic", "session-fable", { modelId: "claude-fable-5" });
-		expect(retryKey).toBe("oat-2");
+		expect(retryKey).not.toBe("oat-1");
+		expect(["oat-2", "oat-3"]).toContain(retryKey as string);
 	});
 
 	it("still blocks OAuth credentials with exhausted shared Anthropic limits", async () => {
