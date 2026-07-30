@@ -839,8 +839,9 @@ export class CustomEditor extends Editor {
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
 
-		// Vim owns Ctrl-R in normal mode; history search remains available in insert mode.
-		if (canonical === "ctrl+r" && this.getVimMode() === "normal") {
+		const vimMode = this.getVimMode();
+		// Vim owns Ctrl-R outside insert mode; history search remains available while editing text.
+		if (canonical === "ctrl+r" && vimMode !== undefined && vimMode !== "insert") {
 			super.handleInput(data);
 			return;
 		}
@@ -854,7 +855,6 @@ export class CustomEditor extends Editor {
 		}
 
 		// Space-hold push-to-talk is text-entry behavior: visual and normal modes must not mutate the prompt.
-		const vimMode = this.getVimMode();
 		const acceptsTextEntry = vimMode === undefined || vimMode === "insert";
 		if (acceptsTextEntry && this.#handleSpaceHold(data, canonical)) return;
 

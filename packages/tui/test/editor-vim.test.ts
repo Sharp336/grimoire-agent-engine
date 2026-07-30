@@ -354,6 +354,74 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getCursor()).toEqual({ line: 0, col: 1 });
 	});
 
+	it.each([
+		{ name: "Right Arrow", text: "abc", start: "0", key: "\x1b[C", expected: "c" },
+		{ name: "Left Arrow", text: "abc", start: "$", key: "\x1b[D", expected: "a" },
+		{ name: "Down Arrow", text: "a\nb", start: "gg", key: "\x1b[B", expected: "" },
+		{ name: "Up Arrow", text: "a\nb", start: "G", key: "\x1b[A", expected: "" },
+		{ name: "End", text: "abc", start: "0", key: "\x1b[F", expected: "" },
+		{ name: "Ctrl-E", text: "abc", start: "0", key: "\x05", expected: "" },
+		{ name: "Home", text: "abc", start: "$", key: "\x1b[H", expected: "" },
+		{ name: "Ctrl-A", text: "abc", start: "$", key: "\x01", expected: "" },
+		{ name: "Alt-Right", text: "one two", start: "0", key: "\x1bf", expected: "wo" },
+		{ name: "Alt-Left", text: "one two", start: "$", key: "\x1bb", expected: "one " },
+	])("extends visual selections with $name", ({ text, start, key, expected }) => {
+		const editor = createVimEditor();
+		editor.setText(text);
+		typeText(editor, start);
+		editor.handleInput("v");
+
+		editor.handleInput(key);
+		editor.handleInput("d");
+
+		expect(editor.getText()).toBe(expected);
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it.each([
+		{ name: "Down Arrow", start: "gg", key: "\x1b[B", expected: "three" },
+		{ name: "Up Arrow", start: "G", key: "\x1b[A", expected: "one" },
+	])("extends linewise visual selections with $name", ({ start, key, expected }) => {
+		const editor = createVimEditor();
+		editor.setText("one\ntwo\nthree");
+		typeText(editor, start);
+		editor.handleInput("V");
+
+		editor.handleInput(key);
+		editor.handleInput("d");
+
+		expect(editor.getText()).toBe(expected);
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it.each([
+		{ mode: "normal", enterMode: "" },
+
+		{ mode: "visual", enterMode: "0v" },
+	])("blocks modified newlines in $mode mode", ({ enterMode }) => {
+		for (const key of ["\x1b\r", "\x1b[13;2~"]) {
+			const editor = createVimEditor();
+			editor.setText("abc");
+			typeText(editor, enterMode);
+
+			editor.handleInput(key);
+
+			expect(editor.getText()).toBe("abc");
+		}
+	});
+
+	it("leaves visual mode before applying a base-editor undo", () => {
+		const editor = createVimEditor();
+		typeText(editor, "iabc");
+		editor.handleInput("\x1b");
+		typeText(editor, "0v");
+
+		editor.handleInput("\x1f");
+
+		expect(editor.getText()).toBe("");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
 	it("blocks default editing shortcuts in normal mode", () => {
 		const editor = createVimEditor();
 		editor.setText("abc");
@@ -660,6 +728,20 @@ describe("Editor Vim input mode", () => {
 		expect(onSubmit).toHaveBeenCalledWith("send");
 		expect(editor.getText()).toBe("");
 		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("does not submit while a visual selection is active", () => {
+		const editor = createVimEditor();
+		const onSubmit = vi.fn();
+		editor.setText("send");
+		editor.onSubmit = onSubmit;
+		typeText(editor, "0v");
+
+		editor.handleInput("\r");
+
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("send");
+		expect(editor.getVimMode()).toBe("visual");
 	});
 
 	it("applies autocomplete in insert mode and undoes it with the typed prefix", async () => {

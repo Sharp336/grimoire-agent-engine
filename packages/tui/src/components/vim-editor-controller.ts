@@ -135,9 +135,14 @@ export class VimEditorController {
 			}
 			return true;
 		}
+		if (this.#mode === "visual" && this.#handleVisualNavigation(data, kb)) return true;
 		if (data === "\n") return true;
-		if (matchesKey(data, "enter") || matchesKey(data, "return")) return false;
+		if (matchesKey(data, "enter") || matchesKey(data, "return")) return this.#mode === "visual";
 		if (matchesKey(data, "ctrl+r")) {
+			if (this.#mode === "visual") {
+				this.#count = "";
+				return true;
+			}
 			const count = this.#takeCount();
 			for (let i = 0; i < count; i++) {
 				if (!this.#adapter.applyRedo()) break;
@@ -148,6 +153,10 @@ export class VimEditorController {
 		if (
 			kb.matches(data, "tui.input.tab") ||
 			kb.matches(data, "tui.input.newLine") ||
+			matchesKey(data, "alt+enter") ||
+			matchesKey(data, "ctrl+enter") ||
+			data === "\x1b[13;2~" ||
+			(data.length > 1 && (data.charCodeAt(0) === 10 || data.includes("\r"))) ||
 			kb.matches(data, "tui.editor.deleteCharBackward") ||
 			kb.matches(data, "tui.editor.deleteCharForward") ||
 			matchesKey(data, "shift+backspace") ||
@@ -295,6 +304,35 @@ export class VimEditorController {
 				this.#count = "";
 				return true;
 		}
+	}
+
+	#handleVisualNavigation(data: string, kb: KeybindingsManager): boolean {
+		if (kb.matches(data, "tui.editor.cursorLeft")) {
+			this.#moveHorizontal(-1, this.#takeCount());
+		} else if (kb.matches(data, "tui.editor.cursorRight")) {
+			this.#moveHorizontal(1, this.#takeCount());
+		} else if (kb.matches(data, "tui.editor.cursorUp")) {
+			this.#moveVertical(-1, this.#takeCount());
+		} else if (kb.matches(data, "tui.editor.cursorDown")) {
+			this.#moveVertical(1, this.#takeCount());
+		} else if (kb.matches(data, "tui.editor.cursorWordLeft")) {
+			this.#setAbsoluteCursor(this.#wordBackwardPosition(this.#absoluteCursor(), this.#takeCount(), false));
+		} else if (kb.matches(data, "tui.editor.cursorWordRight")) {
+			this.#setAbsoluteCursor(this.#wordForwardPosition(this.#absoluteCursor(), this.#takeCount(), false));
+		} else if (kb.matches(data, "tui.editor.cursorLineStart") || matchesKey(data, "ctrl+a")) {
+			this.#count = "";
+			this.#setCursor(this.#cursor().line, 0);
+		} else if (kb.matches(data, "tui.editor.cursorLineEnd") || matchesKey(data, "ctrl+e")) {
+			this.#count = "";
+			this.#setCursor(this.#cursor().line, this.#lineLastCol(this.#currentLine()));
+		} else if (kb.matches(data, "tui.editor.jumpForward") || kb.matches(data, "tui.editor.jumpBackward")) {
+			this.#count = "";
+			return true;
+		} else {
+			return false;
+		}
+		this.#updateVisualSelection();
+		return true;
 	}
 
 	clampNormalCursor(): void {

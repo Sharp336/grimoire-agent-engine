@@ -113,6 +113,17 @@ describe("CustomEditor keybindings", () => {
 
 		expect(editor.getText()).toBe("hello");
 		expect(onHistorySearch).not.toHaveBeenCalled();
+
+		editor.handleInput("v");
+		editor.handleInput("\x12");
+		expect(editor.getVimMode()).toBe("visual");
+		expect(onHistorySearch).not.toHaveBeenCalled();
+
+		editor.handleInput("\x1b");
+		editor.handleInput("i");
+		editor.handleInput("\x12");
+		expect(editor.getVimMode()).toBe("insert");
+		expect(onHistorySearch).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not start push-to-talk from Vim normal-mode spaces", () => {

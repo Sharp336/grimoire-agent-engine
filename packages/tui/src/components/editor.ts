@@ -1303,7 +1303,10 @@ export class Editor implements Component, Focusable {
 
 		// Undo
 		if (kb.matchesCanonical(canonical, "tui.editor.undo")) {
-			if (this.#inputMode === "vim" && this.#vim.mode === "insert") this.#vim.finishInsertUndo();
+			if (this.#inputMode === "vim") {
+				if (this.#vim.mode === "insert") this.#vim.finishInsertUndo();
+				else if (this.#vim.mode === "visual") this.#vim.enterNormalMode();
+			}
 			this.#applyUndo();
 			return;
 		}
