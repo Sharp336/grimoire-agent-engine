@@ -131,7 +131,11 @@ import {
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
-import { CacheMutationLedger, projectSystemAndToolsWireBytes } from "./session/cache-attribution";
+import {
+	CacheMutationLedger,
+	projectSystemAndToolsWireBytes,
+	projectThinkingControlsWireBytes,
+} from "./session/cache-attribution";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
 	type CustomMessage,
@@ -3025,6 +3029,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const activeProvider = requestModel ?? agent?.state.model ?? model;
 			const cacheIdentity = `${activeProvider?.provider ?? "unknown"}/${activeProvider?.id ?? "unknown"}:${agent?.promptCacheKey ?? agent?.sessionId ?? providerPromptCacheKey ?? providerSessionId}`;
 			cacheMutationLedger.recordMainProviderToolSignature(cacheIdentity, projectSystemAndToolsWireBytes(emitted));
+			cacheMutationLedger.recordThinkingLevelAtWire(cacheIdentity, projectThinkingControlsWireBytes(emitted));
 			return replacement;
 		};
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model) => {
