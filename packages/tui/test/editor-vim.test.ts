@@ -102,6 +102,20 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("stops huge undo and redo counts when history is exhausted", () => {
+		const editor = createVimEditor();
+		typeText(editor, "ia\u001bab\u001b");
+		expect(editor.getText()).toBe("ab");
+
+		typeText(editor, "999999999999u");
+		expect(editor.getText()).toBe("");
+
+		typeText(editor, "999999999999");
+		editor.handleInput("\u0012");
+		expect(editor.getText()).toBe("ab");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
 	it("keeps change-word whitespace and folds replacement text into one undo", () => {
 		const editor = createVimEditor();
 		editor.setText("one two");
@@ -502,6 +516,20 @@ describe("Editor Vim input mode", () => {
 		typeText(above, "top");
 		above.handleInput("\x1b");
 		expect(above.getText()).toBe("top\none\ntwo");
+	});
+
+	it.each(["o", "O"] as const)("limits huge %s counts to 1,000 new lines", command => {
+		const editor = createVimEditor();
+		editor.setText("seed");
+
+		typeText(editor, `999999999999${command}`);
+
+		expect(editor.getVimMode()).toBe("insert");
+		expect(editor.getLines()).toHaveLength(1001);
+
+		editor.handleInput("\u001b");
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("seed");
 	});
 
 	it("applies first-nonblank and counted line-end motions", () => {

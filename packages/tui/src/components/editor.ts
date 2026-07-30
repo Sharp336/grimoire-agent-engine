@@ -2526,20 +2526,22 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	#applyUndo(): void {
+	#applyUndo(): boolean {
 		const snapshot = this.#undoStack.pop();
-		if (!snapshot) return;
+		if (!snapshot) return false;
 		this.#redoStack.push(structuredClone(this.#state));
 		if (this.#redoStack.length > MAX_UNDO_STACK) this.#redoStack.shift();
 		this.#restoreUndoState(snapshot);
+		return true;
 	}
-	#applyRedo(): void {
+	#applyRedo(): boolean {
 		const snapshot = this.#redoStack.pop();
-		if (!snapshot) return;
+		if (!snapshot) return false;
 
 		this.#undoStack.push(structuredClone(this.#state));
 		if (this.#undoStack.length > MAX_UNDO_STACK) this.#undoStack.shift();
 		this.#restoreUndoState(snapshot);
+		return true;
 	}
 
 	#restoreUndoState(snapshot: EditorState): void {

@@ -3,6 +3,7 @@ import { extractPrintableText, matchesKey } from "../keys";
 import { getSegmenter, getWordNavKind } from "../utils";
 
 const segmenter = getSegmenter();
+const MAX_VIM_OPEN_LINES = 1000;
 
 type VimPendingCommand =
 	| { kind: "operator"; operator: "d" | "c"; prefixCount: number; textObject?: "inner" | "around" }
@@ -28,8 +29,8 @@ export interface VimEditorAdapter {
 	isShowingAutocomplete(): boolean;
 	recordUndoState(): void;
 	setUndoSuspended(suspended: boolean): void;
-	applyUndo(): void;
-	applyRedo(): void;
+	applyUndo(): boolean;
+	applyRedo(): boolean;
 	deleteRange(start: number, end: number, enterInsert: boolean): void;
 	deleteLineRange(startLine: number, endLine: number, enterInsert: boolean): void;
 	openLines(line: number, count: number): void;
@@ -138,7 +139,9 @@ export class VimEditorController {
 		if (matchesKey(data, "enter") || matchesKey(data, "return")) return false;
 		if (matchesKey(data, "ctrl+r")) {
 			const count = this.#takeCount();
-			for (let i = 0; i < count; i++) this.#adapter.applyRedo();
+			for (let i = 0; i < count; i++) {
+				if (!this.#adapter.applyRedo()) break;
+			}
 			this.clampNormalCursor();
 			return true;
 		}
@@ -282,7 +285,9 @@ export class VimEditorController {
 				return true;
 			case "u": {
 				const count = this.#takeCount();
-				for (let i = 0; i < count; i++) this.#adapter.applyUndo();
+				for (let i = 0; i < count; i++) {
+					if (!this.#adapter.applyUndo()) break;
+				}
 				this.clampNormalCursor();
 				return true;
 			}
@@ -850,7 +855,8 @@ export class VimEditorController {
 	}
 
 	#openLines(offset: 0 | 1, count: number): void {
-		this.#adapter.openLines(this.#cursor().line + offset, count);
+		const boundedCount = Math.min(count, MAX_VIM_OPEN_LINES);
+		this.#adapter.openLines(this.#cursor().line + offset, boundedCount);
 		this.#enterInsertMode(true, 0);
 	}
 }
