@@ -195,7 +195,10 @@ function normalizeDevinModels(
 		const input: ("text" | "image")[] = config.supportsImages ? ["text", "image"] : ["text"];
 		const modelInfo = config.modelInfo;
 		const contextWindow = firstFinitePositive(modelInfo?.maxTokens, config.maxTokens) ?? DEFAULT_CONTEXT_WINDOW;
-		const maxTokens = firstFinitePositive(modelInfo?.maxOutputTokens, config.maxTokens) ?? DEFAULT_MAX_TOKENS;
+		// Trust the dedicated output cap when the catalog provides it; otherwise
+		// keep the 64k legacy default. `config.maxTokens` is a context-window
+		// value (e.g. 200k) and must not become the output-token limit.
+		const maxTokens = firstFinitePositive(modelInfo?.maxOutputTokens) ?? DEFAULT_MAX_TOKENS;
 		byId.set(id, {
 			id,
 			name: config.label.trim() || id,

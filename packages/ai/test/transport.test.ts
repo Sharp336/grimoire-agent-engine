@@ -23,7 +23,7 @@ import {
 	readConnectTrailerError,
 } from "@oh-my-pi/pi-ai/transport";
 import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
-import { CursorCredentialError } from "../src/error";
+import { CursorCredentialError, ProviderHttpError } from "../src/error";
 import * as proxyUtils from "../src/utils/proxy";
 
 const servers = new Set<http2.Http2Server>();
@@ -351,7 +351,11 @@ describe("shared HTTP/1 bridge", () => {
 				headers: {},
 				requestBytes: new Uint8Array(),
 				normalizeError: error =>
-					normalizeConnectAuthError(error, (message, status) => new CursorCredentialError(message, status)),
+					normalizeConnectAuthError(
+						error,
+						(message, status) => new CursorCredentialError(message, status),
+						(message, status) => new ProviderHttpError(message, status),
+					),
 				createRpc() {
 					return {
 						async append() {
@@ -688,6 +692,31 @@ describe("shared transport classification", () => {
 		expect(isTransientTransportError(Object.assign(new Error("unavailable"), { status: 503 }))).toBeFalse();
 		expect(isTransientTransportError(Object.assign(new Error("forbidden"), { status: 403 }))).toBeFalse();
 		expect(isTransientTransportError(new DOMException("aborted", "AbortError"))).toBeFalse();
+	});
+	it("maps non-auth Connect codes to status-bearing errors so transient semantics survive", () => {
+		const credential = (message: string, status: 401 | 403) => new CursorCredentialError(message, status);
+		const http = (message: string, status: number) => new ProviderHttpError(message, status);
+		// Auth codes keep their credential-error identity.
+		expect(
+			normalizeConnectAuthError(new ConnectError("denied", Code.Unauthenticated), credential, http),
+		).toBeInstanceOf(CursorCredentialError);
+		expect(
+			normalizeConnectAuthError(new ConnectError("denied", Code.PermissionDenied), credential, http),
+		).toBeInstanceOf(CursorCredentialError);
+		// Non-auth codes are now status-bearing so the outer classifier can derive
+		// transient semantics (503/429) instead of receiving a statusless error.
+		const unavailable = normalizeConnectAuthError(new ConnectError("try again", Code.Unavailable), credential, http);
+		expect(unavailable).toBeInstanceOf(ProviderHttpError);
+		expect((unavailable as ProviderHttpError).status).toBe(503);
+		const exhausted = normalizeConnectAuthError(
+			new ConnectError("resource exhausted", Code.ResourceExhausted),
+			credential,
+			http,
+		);
+		expect((exhausted as ProviderHttpError).status).toBe(429);
+		// Non-Connect errors pass through untouched.
+		const passthrough = new Error("boom");
+		expect(normalizeConnectAuthError(passthrough, credential, http)).toBe(passthrough);
 	});
 });
 

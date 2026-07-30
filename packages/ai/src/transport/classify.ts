@@ -1,4 +1,5 @@
 import { Code, ConnectError } from "@connectrpc/connect";
+import { connectCodeToHttpStatus } from "./connect-frame";
 import { H2UnavailableBeforeDispatchError } from "./h2-request";
 
 const TRANSIENT_SYSTEM_CODES: Record<string, true> = {
@@ -21,10 +22,16 @@ const TRANSIENT_SYSTEM_CODES: Record<string, true> = {
 export function normalizeConnectAuthError(
 	error: unknown,
 	createCredentialError: (message: string, status: 401 | 403) => Error,
+	createHttpError: (message: string, status: number) => Error,
 ): Error {
 	if (error instanceof ConnectError) {
 		if (error.code === Code.Unauthenticated) return createCredentialError(error.message, 401);
 		if (error.code === Code.PermissionDenied) return createCredentialError(error.message, 403);
+		// Non-auth Connect codes carry no HTTP status, so the outer classifier
+		// cannot derive transient semantics from them — an Unavailable "try again"
+		// would never be retried. Map every standard code to a status-bearing
+		// error so 503/500/429 keep their meaning.
+		return createHttpError(error.message, connectCodeToHttpStatus(error.code));
 	}
 	return error instanceof Error ? error : new Error(String(error));
 }

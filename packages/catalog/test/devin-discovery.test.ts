@@ -58,6 +58,33 @@ describe("fetchDevinModels", () => {
 		});
 	});
 
+	it("keeps the 64k output default when the catalog omits maxOutputTokens", async () => {
+		const response = create(GetCliModelConfigsResponseSchema, {
+			clientModelConfigs: [
+				create(ClientModelConfigSchema, {
+					modelUid: "legacy-model",
+					label: "Legacy",
+					maxTokens: 200_000,
+					modelInfo: create(ModelInfoSchema, { maxTokens: 200_000 }),
+				}),
+			],
+		});
+		const fetch = async (): Promise<Response> =>
+			new Response(toBinary(GetCliModelConfigsResponseSchema, response), { status: 200 });
+
+		const models = await fetchDevinModels({
+			apiKey: JSON.stringify({ token: "fixture", apiEndpoint: "https://regional.devin.example" }),
+			baseUrl: "https://server.codeium.com",
+			fetch,
+		});
+
+		// A 200k context-window value must not leak into the output-token limit;
+		// the legacy fallback stays at the 64k default.
+		expect(models).toEqual([
+			expect.objectContaining({ id: "legacy-model", contextWindow: 200_000, maxTokens: 64_000 }),
+		]);
+	});
+
 	it("normalizes the Windows wire identity", () => {
 		expect(devinOs("win32")).toBe("windows");
 		expect(devinOs("linux")).toBe("linux");

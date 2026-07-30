@@ -39,9 +39,32 @@ const CONNECT_HTTP_STATUS: Readonly<Record<string, number>> = {
 	data_loss: 500,
 	unauthenticated: 401,
 };
+// Numeric Connect/gRPC `Code` → snake_case name. Mirrors the `Code` enum from
+// `@connectrpc/connect` so a numeric trailer/envelope code resolves through the
+// status map above without each caller rebuilding the table.
+export const CONNECT_CODE_NAMES: Readonly<Record<number, string>> = {
+	1: "canceled",
+	2: "unknown",
+	3: "invalid_argument",
+	4: "deadline_exceeded",
+	5: "not_found",
+	6: "already_exists",
+	7: "permission_denied",
+	8: "resource_exhausted",
+	9: "failed_precondition",
+	10: "aborted",
+	11: "out_of_range",
+	12: "unimplemented",
+	13: "internal",
+	14: "unavailable",
+	15: "data_loss",
+	16: "unauthenticated",
+};
 
-export function connectCodeToHttpStatus(code: string): number {
-	return CONNECT_HTTP_STATUS[code.toLowerCase()] ?? 500;
+/** Resolves a Connect/gRPC code (snake_case string or numeric `Code`) to an HTTP status. */
+export function connectCodeToHttpStatus(code: number | string): number {
+	const key = typeof code === "number" ? CONNECT_CODE_NAMES[code] : code.toLowerCase();
+	return key === undefined ? 500 : (CONNECT_HTTP_STATUS[key] ?? 500);
 }
 
 export function createConnectFrameReader(options?: { maxPayloadBytes?: number }): {

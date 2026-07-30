@@ -18,7 +18,11 @@ import {
 export type CursorHttp1Bridge = Http1Bridge<AgentServerMessage>;
 
 export function normalizeCursorConnectError(error: unknown): Error {
-	return normalizeConnectAuthError(error, (message, status) => new AIError.CursorCredentialError(message, status));
+	return normalizeConnectAuthError(
+		error,
+		(message, status) => new AIError.CursorCredentialError(message, status),
+		(message, status) => new AIError.ProviderHttpError(message, status),
+	);
 }
 
 export async function createCursorHttp1Bridge(options: {

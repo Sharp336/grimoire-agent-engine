@@ -114,6 +114,7 @@ import {
 import * as AIError from "../error";
 import {
 	acquireH2Session,
+	CONNECT_CODE_NAMES,
 	type ConnectFrame,
 	connectCodeToHttpStatus,
 	createConnectFrameReader,
@@ -309,7 +310,8 @@ function cursorHttpError(status: number, body: Uint8Array): Error {
 		status === 401 || status === 403
 			? new AIError.CursorCredentialError(message, status)
 			: new AIError.ProviderHttpError(message, status);
-	if (status === 413 && detail.trimStart().toLowerCase().startsWith("request_too_large:")) {
+	const overflowSignal = detail.trim().toLowerCase();
+	if (status === 413 && (overflowSignal === "request_too_large" || overflowSignal.startsWith("request_too_large:"))) {
 		AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
 	}
 	return error;
@@ -798,8 +800,13 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				};
 
 				const closeDebugLog = async (): Promise<void> => {
-					const log = await debugResponseLogPromise;
-					await log?.close();
+					const responseLog = await debugResponseLogPromise;
+					// Diagnostics only: a post-open write/close failure (e.g. disk
+					// full) must not escalate into the turn's settlement or surface as
+					// an unhandled rejection from the error/close handlers.
+					await responseLog?.close().catch(error => {
+						log("error", "responseLogClose", { error: String(error) });
+					});
 				};
 
 				h2Request.on("trailers", trailers => {
@@ -816,12 +823,11 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						}
 						message = rawMessage;
 					}
-					endStreamError =
-						status === 16
-							? cursorConnectError("unauthenticated", message)
-							: status === 7
-								? cursorConnectError("permission_denied", message)
-								: new AIError.ProviderResponseError(`gRPC error ${status}: ${message}`, { kind: "envelope" });
+					// Map every non-zero trailer code through cursorConnectError (the
+					// same path the end-stream envelope uses) so unavailable/internal/
+					// resource_exhausted keep their 503/500/429 semantics instead of
+					// becoming statusless response errors.
+					endStreamError = cursorConnectError(CONNECT_CODE_NAMES[status] ?? "unknown", message);
 				});
 
 				h2Request.on("end", () => {

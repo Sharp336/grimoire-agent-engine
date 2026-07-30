@@ -322,7 +322,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes.at(-1)).toBe("error");
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("gRPC error 13: post-turn trailer failure");
+		expect(result.errorMessage).toContain("Connect error internal: post-turn trailer failure");
 	});
 
 	it("preserves pre-message HTTP status and marks a 503 transient", async () => {
@@ -361,7 +361,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 			expect(eventTypes.at(-1)).toBe("error");
 			expect(eventTypes).not.toContain("done");
 			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain("gRPC error 13: rate-limit %ZZ blocked");
+			expect(result.errorMessage).toContain("Connect error internal: rate-limit %ZZ blocked");
 			// The stream has fully settled; any synchronous throw from the
 			// callback would have surfaced by now.
 			expect(uncaught).toEqual([]);

@@ -384,7 +384,7 @@ process.exit(0);`,
 		expect(exitCode, stderr).toBe(0);
 		expect(stderr).toContain("UnhandledPromiseRejectionWarning: Error: injected debug-log close failure");
 		expect(JSON.parse(stdout)).toEqual({
-			stopReason: "error",
+			stopReason: "stop",
 			cleanupError: "Error: injected debug-log close failure",
 			afterReject: { idle: 1, inFlight: 0 },
 			final: { idle: 64, inFlight: 0 },
