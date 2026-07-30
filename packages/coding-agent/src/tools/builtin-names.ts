@@ -10,6 +10,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"github",
 	"glob",
 	"grep",
+	"session_search",
 	"lsp",
 	"inspect_image",
 	"browser",

@@ -60,6 +60,7 @@ import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
+import { SessionSearchTool } from "./session-search";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
@@ -99,6 +100,7 @@ export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
+export * from "./session-search";
 export * from "./todo";
 export * from "./tts";
 export * from "./vibe";
@@ -404,6 +406,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	github: GithubTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
+	session_search: s => new SessionSearchTool(s),
 	lsp: LspTool.createIf,
 	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
