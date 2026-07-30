@@ -578,14 +578,44 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "switch",
-		description: "Switch model for this session (same as alt+p)",
+		description: "Switch model for this session (same as alt+p), optionally naming the model directly",
+		inlineHint: "[model]",
+		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const model = runtime.ctx.session.model;
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
 		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showModelSelector({ temporaryOnly: true });
+		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
+			const selectorArg = command.args.trim();
+			if (!selectorArg) {
+				runtime.ctx.showModelSelector({ temporaryOnly: true });
+				return;
+			}
+			const resolved = resolveCliModel({
+				cliModel: selectorArg,
+				modelRegistry: runtime.ctx.session.modelRegistry,
+				settings: runtime.ctx.settings,
+				preferences: getModelMatchPreferences(runtime.ctx.settings),
+			});
+			if (resolved.error || !resolved.model) {
+				runtime.ctx.showError(resolved.error ?? `Model "${selectorArg}" not found.`);
+				return;
+			}
+			try {
+				// Session-only, mirroring the picker: never persist to settings.
+				const thinkingLevel =
+					resolved.thinkingLevel ?? runtime.ctx.session.resolveTemporaryModelThinkingLevel(resolved.model);
+				await runtime.ctx.session.setModelTemporary(resolved.model, thinkingLevel);
+				runtime.ctx.statusLine.invalidate();
+				runtime.ctx.updateEditorBorderColor();
+				const roleSelectorHint = runtime.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
+				runtime.ctx.showStatus(
+					`Session-only model: ${resolved.selector ?? formatModelString(resolved.model)}. Use ${roleSelectorHint} or /model for roles.`,
+				);
+			} catch (error) {
+				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+			}
 		},
 	},
 	{
