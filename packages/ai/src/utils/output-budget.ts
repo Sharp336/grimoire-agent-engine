@@ -81,7 +81,14 @@ export function estimatePromptTokens(
 				} else if (block.type === "thinking") {
 					tokens += estimateTextTokens(block.thinking);
 				} else if (block.type === "redactedThinking") {
-					tokens += estimateTextTokens(block.data);
+					// Opaque encrypted payload. It is native-only: transformMessages
+					// drops it for every target that isn't an anthropic-messages
+					// provider (e.g. a Bedrock turn after an Anthropic one), so when a
+					// target is known, charge nothing for bytes that never reach the
+					// wire — those phantom tokens would otherwise shrink max_tokens.
+					const droppedByTarget =
+						targetModel !== undefined && !replaysAnthropicRedactedThinking(message, targetModel);
+					if (!droppedByTarget) tokens += estimateTextTokens(block.data);
 				} else if (block.type === "toolCall") {
 					tokens += estimateTextTokens(JSON.stringify({ name: block.name, arguments: block.arguments }));
 				} else if (block.type === "anthropicServerTool") {
@@ -125,4 +132,19 @@ function replaysAnthropicServerTool(message: Message, target: Pick<Model, "api" 
 	if (target.api !== "anthropic-messages") return false;
 	if (message.role !== "assistant") return false;
 	return message.provider === target.provider;
+}
+
+/**
+ * Mirror transformMessages' replay predicate for redacted (encrypted) thinking:
+ * the opaque payload is native-only — it survives on the wire solely for an
+ * anthropic-messages target (signed replay, latest same-provider turn, or an
+ * unsigned-thinking-compatible sibling). Every other target (e.g. Bedrock after
+ * an Anthropic turn) drops it in transformMessages, so its bytes add no prompt
+ * tokens here. The gate stays permissive for anthropic-messages targets (those
+ * bytes are still charged even when the richer transform predicate might drop
+ * them): over-counting is safe, while charging dropped bytes is the bug fixed.
+ */
+function replaysAnthropicRedactedThinking(message: Message, target: Pick<Model, "api" | "provider">): boolean {
+	if (target.api !== "anthropic-messages") return false;
+	return message.role === "assistant";
 }

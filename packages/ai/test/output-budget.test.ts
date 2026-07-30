@@ -161,6 +161,23 @@ describe("estimatePromptTokens", () => {
 		const expected = (Buffer.byteLength(data, "utf-8") + 3) >> 2;
 		expect(estimatePromptTokens(undefined, [msg])).toBe(expected);
 	});
+	it("excludes a redactedThinking block a foreign target provider will drop", () => {
+		// transformMessages drops redacted (encrypted) thinking for every target
+		// that isn't an anthropic-messages provider, so a Bedrock turn after an
+		// Anthropic turn sends none of the opaque payload. The estimate must not
+		// charge bytes that never reach the wire.
+		const data = "x".repeat(100_000);
+		const msg = assistantMessage([{ type: "redactedThinking", data }]);
+		const bedrockTarget = makeBedrockModel(200_000, 8_192);
+		expect(estimatePromptTokens(undefined, [msg], undefined, bedrockTarget)).toBe(0);
+	});
+	it("counts a redactedThinking block for an anthropic target", () => {
+		const data = "x".repeat(100_000);
+		const msg = assistantMessage([{ type: "redactedThinking", data }]);
+		const sameProvider = makeModel(200_000, 8_192);
+		const expected = (Buffer.byteLength(data, "utf-8") + 3) >> 2;
+		expect(estimatePromptTokens(undefined, [msg], undefined, sameProvider)).toBe(expected);
+	});
 
 	it("counts toolCall blocks in array content", () => {
 		const arguments_ = { command: "ls -la /workspace", cwd: "/home" };
@@ -488,11 +505,12 @@ describe("bedrock output-budget clamp integration", () => {
 		expect(payload.additionalModelRequestFields).toBeUndefined();
 	});
 
-	it("retains thinking for mandatory-reasoning Bedrock models with a sub-floor budget", async () => {
+	it("retains thinking for mandatory-reasoning Bedrock models at the reasoning minimum", async () => {
 		// contextWindow=11500, prompt≈6000 → clamp budget = max(1, 11500-6000-4000)=1500.
 		// reconcile: clampedBudget = 1500 - 1024 = 476 (< MIN_BEDROCK 1024). A
-		// mandatory (requiresEffort) model keeps the largest valid split (476)
-		// instead of dropping thinking, which those endpoints would reject.
+		// mandatory (requiresEffort) model prioritizes Bedrock's 1024-token
+		// reasoning minimum (output takes the 476-token remainder) instead of
+		// emitting an invalid sub-minimum budget those endpoints would reject.
 		const model = makeBedrockModel(11_500, 8_192, true);
 		const context: Context = {
 			messages: [{ role: "user", content: "x".repeat(24_000), timestamp: Date.now() }],
@@ -500,8 +518,32 @@ describe("bedrock output-budget clamp integration", () => {
 		const payload = await captureBedrockPayload(model, context, { maxTokens: 8192, reasoning: "medium" });
 		expect(payload.inferenceConfig).toMatchObject({ maxTokens: 1500 });
 		expect(payload.additionalModelRequestFields).toMatchObject({
-			thinking: { type: "enabled", budget_tokens: 476 },
+			thinking: { type: "enabled", budget_tokens: 1024 },
 		});
+	});
+
+	it("errors when mandatory thinking cannot fit even Bedrock's reasoning minimum", async () => {
+		// contextWindow=11024, prompt≈6000 → clamp = max(1, 11024-6000-4000) = 1024.
+		// reconcile: clampedBudget = 1024 - 1024 = 0; mandatory, and maxTokens (1024)
+		// is not greater than the 1024-token minimum, so no valid split fits. The
+		// reconcile throw surfaces as a stream error; a non-aborted signal keeps it
+		// from being reclassified as an abort.
+		const model = makeBedrockModel(11_024, 8_192, true);
+		const context: Context = {
+			messages: [{ role: "user", content: "x".repeat(24_000), timestamp: Date.now() }],
+		};
+		const stream = streamBedrock(model, context, {
+			apiKey: "test-key",
+			signal: new AbortController().signal,
+			maxTokens: 8192,
+			reasoning: Effort.Medium,
+		});
+		for await (const _ of stream) {
+			// drain
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Bedrock mandatory thinking requires maxTokens");
 	});
 
 	it("excludes unsent tools from the prompt estimate (toolChoice none, no tool history)", async () => {

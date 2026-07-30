@@ -1074,8 +1074,9 @@ const MIN_BEDROCK_THINKING_BUDGET_TOKENS = 1024;
  * which must stay below `maxTokens` or the request is rejected with HTTP 400.
  * Reserves Bedrock's minimum output capacity; optional thinking is disabled when
  * too little headroom remains for a viable budget, while mandatory-thinking
- * models (`thinking.requiresEffort`) retain the largest valid split instead —
- * those endpoints reject omitted/disabled reasoning.
+ * models (`thinking.requiresEffort`) keep Bedrock's 1024-token reasoning
+ * minimum (giving output the remainder), since those endpoints reject both
+ * omitted reasoning and any sub-minimum budget.
  */
 function reconcileBedrockThinkingBudget(
 	additionalModelRequestFields: Record<string, unknown> | undefined,
@@ -1092,15 +1093,17 @@ function reconcileBedrockThinkingBudget(
 		return additionalModelRequestFields;
 	}
 	// Below the minimum viable budget. Mandatory-reasoning endpoints reject
-	// omitted/disabled thinking, so retain the largest valid split (or fail
-	// loudly when no positive budget fits) rather than dropping thinking.
+	// omitted/disabled thinking AND any sub-minimum budget, so prioritize
+	// Bedrock's 1024-token reasoning minimum and give output the remainder
+	// (valid whenever maxTokens still exceeds that minimum); fail loudly only
+	// when even that split cannot fit.
 	if (mandatory) {
-		if (clampedBudget > 0) {
-			thinking.budget_tokens = clampedBudget;
+		if (maxTokens > MIN_BEDROCK_THINKING_BUDGET_TOKENS) {
+			thinking.budget_tokens = MIN_BEDROCK_THINKING_BUDGET_TOKENS;
 			return additionalModelRequestFields;
 		}
 		throw new AIError.ConfigurationError(
-			`Bedrock mandatory thinking requires maxTokens greater than ${MIN_OUTPUT_TOKENS}; got ${maxTokens}`,
+			`Bedrock mandatory thinking requires maxTokens greater than ${MIN_BEDROCK_THINKING_BUDGET_TOKENS}; got ${maxTokens}`,
 		);
 	}
 	// Too little headroom for a viable optional-thinking budget — drop thinking
