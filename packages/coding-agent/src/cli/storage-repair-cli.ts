@@ -23,7 +23,7 @@ import {
 	resolveArtifactPaths,
 	sealCandidate,
 	sourceStillMatches,
-	verifyCandidateSeal,
+	verifyPublishedSeal,
 } from "./storage-repair-files";
 import {
 	buildHistoryCandidate,
@@ -121,6 +121,7 @@ export async function runStorageRepair(
 	let candidateStage: string | null = null;
 	let expectedSchema: RawSchemaDefinition[] | null = null;
 	let candidateSeal: PublishedFile | null = null;
+	let backupSeal: PublishedFile | null = null;
 	try {
 		if (flags.target === "agent" && flags.historySource !== undefined) {
 			throw new Error("--history-source is only valid with --repair-storage history");
@@ -153,9 +154,10 @@ export async function runStorageRepair(
 				() => {
 					result.backupCreated = true;
 				},
-				checksum => {
+				(checksum, seal) => {
 					result.backupVerified = true;
 					result.checksums.push(checksum);
+					backupSeal = seal;
 				},
 				hooks.afterBackupLink,
 				hooks.isWindows,
@@ -193,7 +195,7 @@ export async function runStorageRepair(
 			if (!historySource) throw new Error("History source is missing");
 			verifyHistoryCandidate(candidateStage, historySource, prompts, expectedSchema);
 		}
-		await verifyCandidateSeal(candidateStage, seal);
+		await verifyPublishedSeal(candidateStage, seal);
 		const candidateChecksum = {
 			path: candidateStage,
 			sha256: seal.sha256,
@@ -206,7 +208,7 @@ export async function runStorageRepair(
 		if (flags.apply) {
 			await hooks.beforeCandidatePublication?.();
 			if (!candidateStage) throw new Error("Candidate publication stage is missing");
-			await verifyCandidateSeal(candidateStage, seal);
+			await verifyPublishedSeal(candidateStage, seal);
 			await sourceStillMatches(snapshot.manifest);
 			if (historySource === "sessions") await promptManifestStillMatches(prompts);
 			await publishCandidate(
@@ -265,6 +267,14 @@ export async function runStorageRepair(
 		} catch (error) {
 			cleanupErrors.push(error);
 		}
+		try {
+			if (result.backupCreated && backupSeal) {
+				await verifyPublishedSeal(result.backup, backupSeal);
+			}
+		} catch (error) {
+			result.backupVerified = false;
+			cleanupErrors.push(error);
+		}
 		if (result.candidatePublished && result.status === "ready" && cleanupErrors.length === 0) {
 			if (!candidateSeal || !expectedSchema) {
 				cleanupErrors.push(new Error("Published candidate verification data is missing"));
@@ -273,7 +283,7 @@ export async function runStorageRepair(
 					if (flags.target === "agent") verifyPublishedAgentCandidate(result.candidate, expectedSchema);
 					else verifyPublishedHistoryCandidate(result.candidate, expectedSchema);
 					await hooks.beforeFinalCandidateSeal?.();
-					await verifyCandidateSeal(result.candidate, candidateSeal);
+					await verifyPublishedSeal(result.candidate, candidateSeal);
 				} catch (error) {
 					cleanupErrors.push(error);
 				}

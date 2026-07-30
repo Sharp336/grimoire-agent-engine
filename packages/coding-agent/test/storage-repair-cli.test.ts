@@ -1738,6 +1738,45 @@ describe("offline SQLite salvage", () => {
 		expect(result.refusal).toContain("Published output no longer matches staging file");
 	});
 
+	test("backup mutation after publication downgrades backupVerified on final revalidation", async () => {
+		await createAgentSource();
+		let mutation: { before: FileFingerprint; after: FileFingerprint } | undefined;
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root },
+			{
+				beforeCandidatePublication: async () => {
+					const directory = path.dirname(getAgentDbPath(root));
+					const name = requireValue(
+						(await fs.promises.readdir(directory)).find(entry => entry.endsWith(".tar")),
+						"published backup",
+					);
+					const backup = path.join(directory, name);
+					const before = await fingerprint(backup);
+					const bytes = await Bun.file(backup).bytes();
+					bytes[0] ^= 0xff;
+					const handle = await fs.promises.open(backup, "r+");
+					try {
+						await handle.write(bytes, 0, bytes.byteLength, 0);
+						await handle.sync();
+					} finally {
+						await handle.close();
+					}
+					mutation = { before, after: await fingerprint(backup) };
+				},
+			},
+		);
+		const { before, after } = requireValue(mutation, "backup post-publication mutation");
+		expect(after).toMatchObject({ dev: before.dev, ino: before.ino, size: before.size });
+		expect(after.sha256).not.toBe(before.sha256);
+		expect(result.backupCreated).toBe(true);
+		expect(result.candidatePublished).toBe(true);
+		expect(result.backupVerified).toBe(false);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.candidatePathTrusted).toBe(false);
+		expect(result.warning).toContain("changed after verification");
+		expect(result.manualNextStep).not.toContain("Retain verified backup");
+	});
+
 	test("primary refusal and cleanup invariant failures retain both causes in deterministic order", async () => {
 		const dbPath = await createAgentSource();
 		const result = await runStorageRepair(

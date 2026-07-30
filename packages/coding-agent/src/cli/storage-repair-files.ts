@@ -203,7 +203,6 @@ function inspect(db: Database): SnapshotFingerprint {
 
 function openImmutableSnapshot(workingMain: string): FrozenSqliteSnapshot {
 	const working = new Database(workingMain, { safeIntegers: true });
-	let serialized: Buffer | null = null;
 	let before: SnapshotFingerprint | null = null;
 	try {
 		try {
@@ -222,16 +221,20 @@ function openImmutableSnapshot(workingMain: string): FrozenSqliteSnapshot {
 		}
 		working.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 		working.exec("PRAGMA journal_mode=DELETE");
-		serialized = working.serialize();
 	} finally {
 		working.close();
 	}
-	assertInvariant(serialized && before, "Working SQLite snapshot did not serialize");
-	const immutable = Database.deserialize(serialized, { readonly: true, safeIntegers: true });
+	assertInvariant(before, "Working SQLite snapshot was not inspected");
+	// Reopen the checkpointed working copy read-only so SQLite page-caches it on
+	// demand instead of cloning the entire database into memory (serialize plus
+	// deserialize would hold a full buffer and an in-memory image for all of
+	// diagnosis, row copying, and verification, which can exhaust memory on a
+	// large, unbounded agent database and prevent salvage).
+	const immutable = new Database(workingMain, { readonly: true, safeIntegers: true });
 	const after = inspect(immutable);
 	if (stableJson(before) === stableJson(after)) return { db: immutable, ...after };
 	immutable.close();
-	throw new Error("Serialized SQLite snapshot changed its schema/version/corruption manifest");
+	throw new Error("Checkpointed working copy changed its schema/version/corruption manifest");
 }
 
 async function lstatIfPresent(target: string): Promise<fs.Stats | null> {
@@ -735,7 +738,7 @@ export async function publishBackup(
 	backup: string,
 	snapshot: PristineSnapshot,
 	onLinked: () => void,
-	onVerified: (checksum: StorageRepairChecksum) => void,
+	onVerified: (checksum: StorageRepairChecksum, seal: PublishedFile) => void,
 	afterLink?: () => void | Promise<void>,
 	isWindows?: () => boolean,
 	onDirectorySync?: () => void,
@@ -755,7 +758,7 @@ export async function publishBackup(
 	const seal = await sealedFile(stage);
 	const checksum = { path: backup, sha256: seal.sha256, size: Number(seal.size), ephemeral: false };
 	await publishNoReplace(stage, backup, seal, onLinked, { afterLink, isWindows, onDirectorySync });
-	onVerified(checksum);
+	onVerified(checksum, seal);
 	return checksum;
 }
 
@@ -790,8 +793,8 @@ export async function sealCandidate(candidate: string): Promise<PublishedFile> {
 	return sealedFile(candidate);
 }
 
-export async function verifyCandidateSeal(candidate: string, seal: PublishedFile): Promise<void> {
-	await verifySealedFile(candidate, seal);
+export async function verifyPublishedSeal(file: string, seal: PublishedFile): Promise<void> {
+	await verifySealedFile(file, seal);
 }
 
 export async function publishCandidate(
