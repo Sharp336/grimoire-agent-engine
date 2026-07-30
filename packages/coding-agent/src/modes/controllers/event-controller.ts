@@ -10,6 +10,7 @@ import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
 import {
+	groupedReadUsageCallIds,
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
 	readArgsHaveTarget,
@@ -193,6 +194,10 @@ export class EventController {
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
 			notice: e => this.#handleNotice(e),
+			model_changed: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
 			thinking_level_changed: async () => {
 				this.ctx.statusLine.invalidate();
 				this.ctx.updateEditorBorderColor();
@@ -954,14 +959,28 @@ export class EventController {
 			}
 			this.#lastAssistantComponent = lastPostToolAssistantComponent ?? this.ctx.streamingComponent;
 			if (settings.get("display.showTokenUsage") && assistantUsageIsBilled(event.message.usage)) {
-				this.ctx.chatContainer.addChild(
-					createUsageRowBlock(
+				const readCallIds = groupedReadUsageCallIds(event.message);
+				const usageAttached =
+					readCallIds !== undefined &&
+					(this.#lastReadGroup?.attachUsage(
+						readCallIds,
 						event.message.usage,
 						event.message.duration,
 						event.message.ttft,
 						event.message.timestamp,
-					),
-				);
+					) ??
+						false);
+				if (!usageAttached) {
+					this.#resetReadGroup();
+					this.ctx.chatContainer.addChild(
+						createUsageRowBlock(
+							event.message.usage,
+							event.message.duration,
+							event.message.ttft,
+							event.message.timestamp,
+						),
+					);
+				}
 			}
 			if (displayMessage === event.message) {
 				this.ctx.transcriptMessageComponents.set(event.message, this.ctx.streamingComponent);
