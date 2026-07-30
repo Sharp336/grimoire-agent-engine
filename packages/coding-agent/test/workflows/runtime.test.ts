@@ -53,6 +53,16 @@ class RejectingCompletionStore extends MemoryWorkflowStore {
 	}
 }
 
+class LeafChangingWorkflowStore extends MemoryWorkflowStore {
+	override async append(snapshot: WorkflowSnapshot): Promise<void> {
+		await super.append(snapshot);
+		this.activeBranch = `leaf-${this.snapshots.length}`;
+		if (Object.values(snapshot.nodes).filter(node => node.status === "succeeded").length === 1) {
+			await Bun.sleep(10);
+		}
+	}
+}
+
 function resultFor(request: WorkflowDispatchRequest, overrides: Partial<SingleResult> = {}): SingleResult {
 	return {
 		index: 0,
@@ -148,6 +158,23 @@ describe("WorkflowRuntime", () => {
 			nodes: [{ id: "only", agent: "task", task: "Second" }],
 		});
 		expect(alternate.definition.id).toBe("alternate");
+	});
+
+	it("serializes branch checks with concurrent workflow saves", async () => {
+		const runtime = await createRuntime(new LeafChangingWorkflowStore());
+		await runtime.createWorkflow({
+			objective: "Persist parallel completions",
+			nodes: [
+				{ id: "left", agent: "task", task: "Left" },
+				{ id: "right", agent: "task", task: "Right" },
+			],
+		});
+
+		const completed = await runtime.run(async request => ({ result: resultFor(request) }));
+
+		expect(completed.status).toBe("succeeded");
+		expect(completed.nodes.left.status).toBe("succeeded");
+		expect(completed.nodes.right.status).toBe("succeeded");
 	});
 
 	it("runs independent roots concurrently and holds a join until both settle", async () => {

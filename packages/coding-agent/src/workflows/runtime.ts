@@ -461,18 +461,22 @@ export class WorkflowRuntime {
 	}
 
 	async #persist(onChange?: (snapshot: WorkflowSnapshot) => void | Promise<void>): Promise<void> {
-		const branchKey = this.#store.branchKey?.();
-		if (branchKey !== undefined && branchKey !== this.#branchKey) {
-			throw new Error("Workflow session branch changed during operation");
-		}
 		const snapshot = this.#requireSnapshot();
 		snapshot.revision += 1;
 		snapshot.updatedAt = this.#now();
 		const durable = cloneWorkflowSnapshot(snapshot);
-		const operation = this.#saveTail.catch(() => {}).then(() => this.#store.append(durable));
+		const operation = this.#saveTail
+			.catch(() => {})
+			.then(async () => {
+				const branchKey = this.#store.branchKey?.();
+				if (branchKey !== undefined && branchKey !== this.#branchKey) {
+					throw new Error("Workflow session branch changed during operation");
+				}
+				await this.#store.append(durable);
+				this.#branchKey = this.#store.branchKey?.();
+			});
 		this.#saveTail = operation;
 		await operation;
-		this.#branchKey = this.#store.branchKey?.();
 		await onChange?.(cloneWorkflowSnapshot(durable));
 	}
 }
