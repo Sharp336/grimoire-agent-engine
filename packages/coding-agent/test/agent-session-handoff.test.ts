@@ -1890,6 +1890,68 @@ describe("AgentSession handoff", () => {
 		expect(handoffCall[0].systemPrompt).toEqual(["Test", expect.stringMatching(/^Today is .+\.$/)]);
 	});
 
+	it("does not append the turn-context date for a verbatim system-prompt plan on handoff", async () => {
+		// A verbatim plan (NULL_PROMPT or an explicit systemPrompt) must reach the
+		// handoff summarizer byte-for-byte — appending the date would make a null
+		// prompt nonempty and break the verbatim contract, mirroring
+		// buildSystemPromptForAgentStart / buildSystemPromptForSideRequest.
+		await session.dispose();
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const verbatimAgent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Custom verbatim prompt"],
+				tools: [],
+				messages: [],
+			},
+		});
+		session = new AgentSession({
+			agent: verbatimAgent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			obfuscator,
+			systemPromptPlan: {
+				systemPrompt: ["Custom verbatim prompt"],
+				stableSystemPromptBlockCount: 1,
+				compositionPolicy: "verbatim",
+			},
+		});
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "seed" }],
+			timestamp: Date.now() - 2,
+		});
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "seed response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 16,
+				output: 8,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 24,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now() - 1,
+		});
+
+		const generateHandoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nContinue from here");
+		await session.handoff();
+
+		const handoffCall = generateHandoffSpy.mock.calls[0];
+		if (!handoffCall) throw new Error("Expected generateHandoffFromContext call");
+		const handoffSystemPrompt = handoffCall[0].systemPrompt ?? [];
+		expect(handoffSystemPrompt).toEqual(["Custom verbatim prompt"]);
+		expect(handoffSystemPrompt.join("\n")).not.toContain("Today is ");
+	});
+
 	it("forwards the agent's provider prompt-cache key to the handoff request", async () => {
 		// Cache parity: the live loop routes on the agent's promptCacheKey
 		// (providerPromptCacheKey), so handoff must reuse it rather than this.sessionId

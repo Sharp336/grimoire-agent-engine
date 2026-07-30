@@ -1119,4 +1119,31 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(session.getToolByName(oldTool.name)).toBeUndefined();
 		expect(session.getToolByName(newTool.name)).toBeDefined();
 	});
+
+	it("preserves the volatile turn suffix when a tool refresh rebuilds mid-turn", async () => {
+		// Deferred MCP discovery (refreshMCPTools → applyActiveToolsByName) can
+		// complete while a turn is streaming, so the live prompt already carries
+		// a volatile suffix (date + recalled memory from before_agent_start).
+		// The rebuild must refresh only the stable base and carry that suffix
+		// across, or the next tool-loop model call loses the date/memory context.
+		const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search");
+		await session.refreshMCPTools([search]);
+		const base = session.systemPrompt; // ["tools:read,mcp__nucleus_search"]
+
+		// Simulate the in-flight turn suffix a real turn composes.
+		const dateSuffix = "Today is 2026-07-30.";
+		const memorySuffix = "recalled-memory-injection";
+		session.agent.setSystemPrompt([...base, dateSuffix, memorySuffix], base.length);
+
+		// A different tool set forces a rebuild, which must preserve the suffix.
+		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch");
+		await session.refreshMCPTools([search, fetch]);
+
+		expect(session.systemPrompt).toEqual([
+			"tools:read,mcp__nucleus_search,mcp__nucleus_fetch",
+			dateSuffix,
+			memorySuffix,
+		]);
+	});
 });

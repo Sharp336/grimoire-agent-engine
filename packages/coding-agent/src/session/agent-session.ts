@@ -1311,6 +1311,7 @@ export class AgentSession {
 			sessionId: () => this.sessionId,
 			messages: () => this.messages,
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
+			baseSystemPromptPlan: () => this.#tools.baseSystemPromptPlan,
 			goalModeState: () => this.#goalModeState,
 			planReferencePath: () => this.#planReferencePath,
 			nonMessageTokenSource: () => this,

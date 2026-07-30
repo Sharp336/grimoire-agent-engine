@@ -46,7 +46,7 @@ import type { AssistantMessage, CodexCompactionContext, Message, Model, Provider
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
@@ -60,7 +60,10 @@ import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import type { NonMessageTokenSource } from "../modes/utils/context-usage";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
+import turnContextPrompt from "../prompts/system/turn-context.md" with { type: "text" };
+import type { SystemPromptPlan } from "../system-prompt";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import { formatLocalCalendarDate } from "../utils/local-date";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
@@ -187,6 +190,7 @@ export interface SessionMaintenanceHost {
 	sessionId(): string;
 	messages(): AgentMessage[];
 	baseSystemPrompt(): string[];
+	baseSystemPromptPlan(): SystemPromptPlan;
 	goalModeState(): GoalModeState | undefined;
 	planReferencePath(): string;
 	nonMessageTokenSource(): NonMessageTokenSource;
@@ -275,6 +279,27 @@ export class SessionMaintenance {
 
 	get #goalModeState(): GoalModeState | undefined {
 		return this.#host.goalModeState();
+	}
+
+	/**
+	 * The base system prompt handed to the summarizer as `remoteInstructions`,
+	 * with the date-only turn-context block restored for `append-turn-context`
+	 * plans. The date moved out of the base project prompt into the volatile
+	 * turn suffix, so without this the summarizer would no longer know today's
+	 * date and could anchor relative dates ("tomorrow") in the transcript
+	 * incorrectly. Verbatim plans (NULL_PROMPT / explicit systemPrompt) opt out,
+	 * matching buildSystemPromptForAgentStart — and they never carried the date
+	 * in the base prompt before this refactor either. No prompt-specific recall
+	 * is pulled in, only the date.
+	 */
+	#compactionRemoteInstructions(): string {
+		const plan = this.#host.baseSystemPromptPlan();
+		const blocks = [...plan.systemPrompt];
+		if (plan.compositionPolicy === "append-turn-context") {
+			const dateContext = prompt.render(turnContextPrompt, { date: formatLocalCalendarDate() }).trim();
+			if (dateContext) blocks.push(dateContext);
+		}
+		return blocks.join("\n\n");
 	}
 
 	constructor(host: SessionMaintenanceHost) {
@@ -785,7 +810,7 @@ export class SessionMaintenance {
 						{
 							promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 							extraContext: compactionPrep.hookContext,
-							remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+							remoteInstructions: this.#compactionRemoteInstructions(),
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
 						},
@@ -2499,7 +2524,7 @@ export class SessionMaintenance {
 								{
 									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: compactionPrep.hookContext,
-									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+									remoteInstructions: this.#compactionRemoteInstructions(),
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),

@@ -634,11 +634,12 @@ export class SessionTools {
 		this.#host.agent.setTools(tools);
 		if (rebuiltSystemPromptPlan && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
-			this.#systemPromptPlan = rebuiltSystemPromptPlan;
-			this.#host.agent.setSystemPrompt(
-				this.#systemPromptPlan.systemPrompt,
-				this.#systemPromptPlan.stableSystemPromptBlockCount,
-			);
+			// Carry the live turn suffix (date + recalled memory) across this
+			// rebuild, just like refreshBaseSystemPrompt(): this path is reached
+			// mid-turn via deferred MCP discovery (refreshMCPTools), and setting
+			// the base-only plan would strip the suffix before the next tool-loop
+			// model call copies it via syncContextBeforeModelCall.
+			this.#commitBasePlanPreservingTurnSuffix(rebuiltSystemPromptPlan, this.#systemPromptPlan);
 			this.#lastAppliedToolSignature = rebuiltSignature;
 			this.#promptModelKey = this.#currentPromptModelKey();
 		}
@@ -975,33 +976,13 @@ export class SessionTools {
 		const previousSystemPromptPlan = this.#systemPromptPlan;
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
-		this.#systemPromptPlan = built;
 		if (
-			previousSystemPromptPlan.systemPrompt.length !== this.#systemPromptPlan.systemPrompt.length ||
-			previousSystemPromptPlan.systemPrompt.some(
-				(part, index) => part !== this.#systemPromptPlan.systemPrompt[index],
-			)
+			previousSystemPromptPlan.systemPrompt.length !== built.systemPrompt.length ||
+			previousSystemPromptPlan.systemPrompt.some((part, index) => part !== built.systemPrompt[index])
 		) {
 			this.#host.clearInheritedProviderPromptCacheKey();
 		}
-		// A turn in flight composes the base plan with a volatile turn suffix
-		// (date, and any recalled-memory injection from before_agent_start).
-		// Setting the base-only plan here would strip that suffix mid-turn, so
-		// syncContextBeforeModelCall would send the base plan without the
-		// date/memory context on the next tool-loop model call. Carry the live
-		// suffix (the part of the current agent prompt beyond the previous base)
-		// so only the stable base is refreshed, not the active turn's context.
-		const liveSystemPrompt = this.#host.agent.state.systemPrompt;
-		const previousBase = previousSystemPromptPlan.systemPrompt;
-		const turnSuffix =
-			liveSystemPrompt.length > previousBase.length &&
-			previousBase.every((part, index) => liveSystemPrompt[index] === part)
-				? liveSystemPrompt.slice(previousBase.length)
-				: [];
-		this.#host.agent.setSystemPrompt(
-			[...this.#systemPromptPlan.systemPrompt, ...turnSuffix],
-			this.#systemPromptPlan.stableSystemPromptBlockCount,
-		);
+		this.#commitBasePlanPreservingTurnSuffix(built, previousSystemPromptPlan);
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we
@@ -1010,6 +991,29 @@ export class SessionTools {
 			.map(name => this.#toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool != null);
 		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(activeToolNames, activeTools);
+	}
+
+	/**
+	 * Commit a freshly rebuilt base {@link SystemPromptPlan} as the session's
+	 * stable prompt while preserving any volatile turn suffix currently on the
+	 * live agent prompt (the date block plus recalled-memory injection from
+	 * before_agent_start). Tool/model refreshes can land mid-turn — deferred
+	 * MCP discovery fires refreshMCPTools → applyActiveToolsByName while a turn
+	 * streams — and committing the base-only plan would strip that suffix, so
+	 * the next tool-loop model call would lose the date/memory context. Carry
+	 * the live suffix (the part of the current agent prompt beyond the previous
+	 * base) so only the stable base is refreshed.
+	 */
+	#commitBasePlanPreservingTurnSuffix(newPlan: SystemPromptPlan, previousPlan: SystemPromptPlan): void {
+		this.#systemPromptPlan = newPlan;
+		const liveSystemPrompt = this.#host.agent.state.systemPrompt;
+		const previousBase = previousPlan.systemPrompt;
+		const turnSuffix =
+			liveSystemPrompt.length > previousBase.length &&
+			previousBase.every((part, index) => liveSystemPrompt[index] === part)
+				? liveSystemPrompt.slice(previousBase.length)
+				: [];
+		this.#host.agent.setSystemPrompt([...newPlan.systemPrompt, ...turnSuffix], newPlan.stableSystemPromptBlockCount);
 	}
 
 	/** Builds the stable prompt plus volatile turn context before an agent run. */

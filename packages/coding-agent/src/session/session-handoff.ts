@@ -32,6 +32,12 @@ function createHandoffFileName(date = new Date()): string {
 	return `handoff-${fileTimestamp}.md`;
 }
 
+/** Append the date-only turn-context block to a base plan (verbatim plans opt out at the call site). */
+function withDateContext(plan: SystemPromptPlan): SystemPromptPlan {
+	const dateContext = prompt.render(turnContextPrompt, { date: formatLocalCalendarDate() }).trim();
+	return dateContext ? { ...plan, systemPrompt: [...plan.systemPrompt, dateContext] } : plan;
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionHandoffHost {
 	agent: Agent;
@@ -172,11 +178,15 @@ export class SessionHandoff {
 			// suffix now (moved out of buildSystemPrompt), so compose it onto the
 			// base plan without pulling in before_agent_start recall: relative dates
 			// in the transcript/handoff instructions must resolve against today.
+			// Mirror buildSystemPromptForAgentStart / buildSystemPromptForSideRequest:
+			// a `verbatim` plan (NULL_PROMPT or an explicit systemPrompt) must NOT
+			// gain turn-specific context — appending the date would make a null
+			// prompt nonempty and break the verbatim contract the session asked for.
 			const handoffBasePlan = this.#host.baseSystemPromptPlan();
-			const handoffDateContext = prompt.render(turnContextPrompt, { date: formatLocalCalendarDate() }).trim();
-			const handoffPromptPlan: SystemPromptPlan = handoffDateContext
-				? { ...handoffBasePlan, systemPrompt: [...handoffBasePlan.systemPrompt, handoffDateContext] }
-				: handoffBasePlan;
+			const handoffPromptPlan: SystemPromptPlan =
+				handoffBasePlan.compositionPolicy === "append-turn-context"
+					? withDateContext(handoffBasePlan)
+					: handoffBasePlan;
 			const handoffContext = await this.#host.agent.buildSideRequestContext(handoffLlmMessages, handoffPromptPlan);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{
