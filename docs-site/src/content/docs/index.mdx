@@ -1,0 +1,36 @@
+---
+title: omp
+description: Documentation for omp, the coding agent with the IDE wired in.
+template: splash
+hero:
+  tagline: A coding agent with the IDE wired in.
+  image:
+    file: ../../assets/hero.png
+  actions:
+    - text: Get started
+      link: /getting-started/installation/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/can1357/oh-my-pi
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Where to next?
+
+<CardGrid stagger>
+	<Card title="Getting Started" icon="rocket">
+		Install omp and run your first session — see [Installation](/getting-started/installation/).
+	</Card>
+	<Card title="Configuration" icon="setting">
+		Settings, environment variables, keybindings, and themes — see [Settings](/configuration/settings/).
+	</Card>
+	<Card title="Models & Providers" icon="star">
+		Connect any of 40+ providers or run local models — see [Providers](/models/providers/).
+	</Card>
+	<Card title="Extending omp" icon="puzzle">
+		Extensions, skills, MCP servers, hooks, and custom tools — see [Extensions](/extending/extensions/).
+	</Card>
+</CardGrid>

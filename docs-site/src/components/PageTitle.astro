@@ -1,0 +1,58 @@
+---
+const { entry } = Astro.locals.starlightRoute;
+const coverage = entry.data.coverage as 'A' | 'B' | 'C' | undefined;
+
+const LABELS = { A: 'High coverage', B: 'Medium coverage', C: 'Low coverage' } as const;
+---
+
+<div class="page-title-row">
+	<h1 id="_top">{entry.data.title}</h1>
+	{
+		coverage && (
+			<span class:list={['coverage-badge', `coverage-${coverage.toLowerCase()}`]} title={LABELS[coverage]}>
+				{coverage} · {LABELS[coverage]}
+			</span>
+		)
+	}
+</div>
+
+<style>
+	@layer starlight.core {
+		.page-title-row {
+			display: flex;
+			align-items: baseline;
+			gap: 0.75rem;
+			flex-wrap: wrap;
+		}
+		h1 {
+			margin-top: 1rem;
+			font-size: var(--sl-text-h1);
+			line-height: var(--sl-line-height-headings);
+			font-weight: 600;
+			color: var(--sl-color-white);
+		}
+		.coverage-badge {
+			font-size: var(--sl-text-xs);
+			font-weight: 600;
+			padding: 0.15rem 0.55rem;
+			border-radius: 999px;
+			border: 1px solid;
+			white-space: nowrap;
+		}
+		.coverage-a {
+			color: var(--sl-color-green-high);
+			border-color: var(--sl-color-green);
+			background: var(--sl-color-green-low);
+		}
+		.coverage-b {
+			color: var(--sl-color-orange-high);
+			border-color: var(--sl-color-orange);
+			background: var(--sl-color-orange-low);
+		}
+		.coverage-c {
+			color: var(--sl-color-red-high);
+			border-color: var(--sl-color-red);
+			background: var(--sl-color-red-low);
+		}
+	}
+</style>
