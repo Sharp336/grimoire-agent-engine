@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed turning off Cursor config discovery also removing the Cursor model backend from `/model` and `/login`. `disabledProviders` is one id namespace shared by discovery providers and model providers, and `cursor` is the only id registered as both, so the unqualified entry written by `/extensions` and the settings selector matched the model registry too. Discovery toggles now persist `discovery:<id>`, which the model registry does not match; unqualified entries keep disabling both ([#PRNUM](https://github.com/can1357/oh-my-pi/pull/PRNUM) by [@Gy-Hu](https://github.com/Gy-Hu)).
+
 ## [17.2.0] - 2026-07-30
 
 ### Breaking Changes

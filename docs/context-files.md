@@ -189,10 +189,21 @@ disabledProviders:
 
 | Id kind | Examples | Effect when listed |
 |---|---|---|
-| Discovery provider ids | `native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md` | The entire config source is removed — not just its context files, but also any MCP servers, slash commands, skills, hooks, tools, prompts, and settings it would have contributed. |
+| Discovery provider ids | `native`, `agents`, `agents-md`, `claude`, `claude-plugins`, `cline`, `codex`, `cursor`, `gemini`, `github`, `mcp-json`, `omp-plugins`, `opencode`, `ssh-json`, `vscode`, `windsurf` | The entire config source is removed — not just its context files, but also any MCP servers, slash commands, skills, hooks, tools, prompts, and settings it would have contributed. |
 | Model provider ids | `anthropic`, `openai`, `google`, `groq`, `ollama`, `openrouter` | The model backend is removed from selection even when its credentials are present. See [Providers](./providers.md). |
 
-Ids are exact and the two namespaces do not collide by accident: `google` disables the Google model backend, while `gemini` disables the Gemini CLI discovery files. Disabling a discovery provider is heavier than it looks — disabling `claude`, for instance, also drops Claude-discovered MCP servers, commands, skills, hooks, tools, and settings, not only `CLAUDE.md`.
+Ids are exact, and the two namespaces mostly stay clear of each other: `google` disables the Google model backend, while `gemini` disables the Gemini CLI discovery files. `cursor` is the exception — it names both the Cursor discovery provider and the Cursor model backend, so an unqualified entry disables both.
+
+Prefix an entry with `discovery:` to scope it to config discovery and leave a same-named model backend alone:
+
+```yaml
+disabledProviders:
+  - discovery:cursor  # ignore .cursor rules/MCP, keep the Cursor models in /model
+```
+
+Toggling a provider off in `/extensions` or the settings selector writes this qualified form. An unqualified `cursor` keeps its documented meaning and disables both.
+
+Disabling a discovery provider is heavier than it looks — disabling `claude`, for instance, also drops Claude-discovered MCP servers, commands, skills, hooks, tools, and settings, not only `CLAUDE.md`.
 
 Only `enabledModels` and `disabledProviders` support **path-scoped** entries, so you can vary provider availability per subtree:
 

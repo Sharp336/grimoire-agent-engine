@@ -36,8 +36,36 @@ const providerCapabilities = new Map<string, Set<string>>();
 /** Provider display metadata (shared across capabilities) */
 const providerMeta = new Map<string, { displayName: string; description: string }>();
 
-/** Disabled providers (by ID) */
+/**
+ * Scope qualifier for `disabledProviders` entries owned by this registry.
+ *
+ * The setting is one array shared with the model registry
+ * (`config/model-registry.ts`), matched there against model provider ids. An
+ * unqualified entry therefore disables both subsystems, and `cursor` is the one
+ * id registered as a discovery provider and a model provider, so disabling
+ * Cursor config discovery also dropped the Cursor models from `/model` and
+ * `/login`. Toggles made through this API persist the qualified form, which the
+ * model registry does not match.
+ */
+const DISCOVERY_SCOPE_PREFIX = "discovery:";
+
+/**
+ * Raw `disabledProviders` entries as persisted. Kept verbatim so writing a
+ * discovery toggle cannot drop an entry that belongs to another subsystem.
+ */
+let disabledEntries: string[] = [];
+
+/** Disabled providers (by ID), resolved from `disabledEntries` */
 const disabledProviders = new Set<string>();
+
+function syncDisabledProviders(): void {
+	disabledProviders.clear();
+	for (const entry of disabledEntries) {
+		disabledProviders.add(
+			entry.startsWith(DISCOVERY_SCOPE_PREFIX) ? entry.slice(DISCOVERY_SCOPE_PREFIX.length) : entry,
+		);
+	}
+}
 
 /** Settings manager for persistence (if set) */
 let settings: Settings | null = null;
@@ -282,11 +310,8 @@ export async function loadCapability<T>(
 export function initializeWithSettings(activeSettings: Settings): void {
 	settings = activeSettings;
 	// Load disabled providers from settings
-	const disabled = settings.get("disabledProviders");
-	disabledProviders.clear();
-	for (const id of disabled) {
-		disabledProviders.add(id);
-	}
+	disabledEntries = [...settings.get("disabledProviders")];
+	syncDisabledProviders();
 }
 
 /**
@@ -294,7 +319,7 @@ export function initializeWithSettings(activeSettings: Settings): void {
  */
 function persistDisabledProviders(): void {
 	if (settings) {
-		settings.set("disabledProviders", Array.from(disabledProviders));
+		settings.set("disabledProviders", [...disabledEntries]);
 	}
 }
 
@@ -302,15 +327,23 @@ function persistDisabledProviders(): void {
  * Disable a provider globally (across all capabilities).
  */
 export function disableProvider(providerId: string): void {
-	disabledProviders.add(providerId);
+	if (disabledProviders.has(providerId)) return;
+	disabledEntries.push(`${DISCOVERY_SCOPE_PREFIX}${providerId}`);
+	syncDisabledProviders();
 	persistDisabledProviders();
 }
 
 /**
  * Enable a previously disabled provider.
+ *
+ * Drops the qualified and the unqualified entry: an unqualified one carries no
+ * evidence that the model registry was the intended target, so rewriting it to
+ * keep that half disabled would disable a backend the user never named.
  */
 export function enableProvider(providerId: string): void {
-	disabledProviders.delete(providerId);
+	const qualified = `${DISCOVERY_SCOPE_PREFIX}${providerId}`;
+	disabledEntries = disabledEntries.filter(entry => entry !== providerId && entry !== qualified);
+	syncDisabledProviders();
 	persistDisabledProviders();
 }
 
@@ -332,10 +365,8 @@ export function getDisabledProviders(): string[] {
  * Set disabled providers from a list (replaces current set).
  */
 export function setDisabledProviders(providerIds: string[]): void {
-	disabledProviders.clear();
-	for (const id of providerIds) {
-		disabledProviders.add(id);
-	}
+	disabledEntries = [...providerIds];
+	syncDisabledProviders();
 	persistDisabledProviders();
 }
 
