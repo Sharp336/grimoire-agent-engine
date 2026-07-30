@@ -407,6 +407,67 @@ describe("provider in-flight request limits", () => {
 		expect(calls).toBe(4);
 	});
 
+	test("persists a learned cap reduction to the shared lease directory", async () => {
+		registerMockApi();
+		const mock = createMockModel({
+			provider: "tests",
+			responses: [{ errorMessage: "concurrent_limit_reached", stopReason: "error" }, { content: ["recovered"] }],
+		});
+		await streamSimple(mock.model, context(), {
+			apiKey: "static-key",
+			maxInFlightRequests: { tests: 3 },
+			providerRetryWait: async () => {},
+		}).result();
+		// Configured cap 3, reduced by one rejection → shared learned cap 2,
+		// visible to a peer process through the lease directory rather than only
+		// in this process's in-memory map.
+		expect(await __providerInFlightForTesting.learnedCap("tests")).toBe(2);
+	});
+
+	test("observes a learned cap written by another process", async () => {
+		registerMockApi();
+		const twoRunning = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let active = 0;
+		let maxActive = 0;
+		const mock = createMockModel({
+			provider: "tests",
+			handler: async () => {
+				active++;
+				maxActive = Math.max(maxActive, active);
+				if (active === 2) twoRunning.resolve();
+				try {
+					await release.promise;
+					return { content: ["reply"] };
+				} finally {
+					active--;
+				}
+			},
+		});
+		// Simulate a peer process that already lowered the cap from 3 to 2 in the
+		// shared lease directory, then clear the in-memory map so this process
+		// must read the reduction from disk to honour it.
+		const dir = __providerInFlightForTesting.providerDir("tests");
+		await fs.mkdir(dir, { recursive: true });
+		await Bun.write(path.join(dir, ".learned-cap"), "2");
+		__providerInFlightForTesting.resetReducedLimits();
+
+		const options = { maxInFlightRequests: { tests: 3 } };
+		const first = streamSimple(mock.model, context(), options);
+		const second = streamSimple(mock.model, context(), options);
+		const third = streamSimple(mock.model, context(), options);
+		await twoRunning.promise;
+		await Bun.sleep(20);
+
+		// Only two run concurrently — the third is queued behind the peer's cap.
+		expect(maxActive).toBe(2);
+		expect(mock.calls).toHaveLength(2);
+
+		release.resolve();
+		await Promise.all([first.result(), second.result(), third.result()]);
+		expect(maxActive).toBe(2);
+	});
+
 	test("aborts a static-key concurrent-limit backoff without waiting", async () => {
 		registerMockApi();
 		const controller = new AbortController();

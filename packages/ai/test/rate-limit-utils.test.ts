@@ -45,6 +45,14 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("authentication failed for concurrent request")).toBe("UNKNOWN");
 	});
 
+	it("classifies implicit 'too many'/'maximum' concurrent-request caps", () => {
+		expect(parseRateLimitReason("Too many concurrent requests")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("Maximum number of concurrent requests")).toBe("CONCURRENT_LIMIT");
+		// Guard retained: descriptive "concurrent request" wording with no cap
+		// signal stays UNKNOWN and never triggers slot shedding.
+		expect(parseRateLimitReason("supports concurrent requests")).toBe("UNKNOWN");
+	});
+
 	it("classifies overloaded 529 as MODEL_CAPACITY_EXHAUSTED", () => {
 		expect(parseRateLimitReason("Service overloaded 529")).toBe("MODEL_CAPACITY_EXHAUSTED");
 	});
@@ -137,6 +145,18 @@ describe("isUsageLimit", () => {
 				"Cloud Code Assist API error (429): Individual quota reached. Contact your administrator to enable overages.",
 			),
 		).toBe(true);
+	});
+
+	it("classifies an account-scoped 403 cap as a usage limit (mirrors isUsageLimitOutcome)", () => {
+		// Devin returns HTTP 403 permission_denied with an account message-rate
+		// limit. isUsageLimitOutcome rotates on it; the flag classifier must set
+		// Flag.UsageLimit too so turn recovery honours the recorded reset/backoff
+		// rather than treating it as a generic auth/transient failure.
+		const message =
+			"Devin stream error permission_denied: Reached overall message rate limit. Please try again later. Your limit will reset in 13 minutes.";
+		expect(isUsageLimit(Object.assign(new Error(message), { status: 403 }))).toBe(true);
+		// A bare 403 with no cap wording stays an auth failure, not a usage limit.
+		expect(isUsageLimit(Object.assign(new Error("Forbidden"), { status: 403 }))).toBe(false);
 	});
 
 	// Anthropic returns a `rate_limit_error` when the account's monthly spend

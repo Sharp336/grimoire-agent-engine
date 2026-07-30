@@ -30,8 +30,8 @@ describe("AuthStorage.getApiKeyResolution captures credentialId before configVal
 	// the code is sitting at the capture site, then blocks until the test
 	// releases it after mutating the stored credential set. No sleeps — the
 	// deferred promise is the sole synchronization point.
-	let resolverGate: ReturnType<typeof Promise.withResolvers<void>>;
-	let resolverEntered: ReturnType<typeof Promise.withResolvers<void>>;
+	let resolverGate: PromiseWithResolvers<void>;
+	let resolverEntered: PromiseWithResolvers<void>;
 	let resolverKey: string | undefined;
 
 	beforeEach(async () => {

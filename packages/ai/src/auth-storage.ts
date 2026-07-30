@@ -1203,6 +1203,11 @@ type StoredCredential = { id: number; credential: AuthCredential };
 type CredentialSelection<T extends AuthCredential> = { credential: T; index: number };
 type OAuthSelection = CredentialSelection<OAuthCredential>;
 type ApiKeySelection = CredentialSelection<ApiKeyCredential>;
+/** An API-key selection plus the stable SQLite row id captured from the same
+ * snapshot as the credential bytes. Re-reading the id by positional index
+ * after an await is unsafe — a broker reload or credential removal during
+ * usage ranking shifts indices and re-attributes the key to a sibling row. */
+type ApiKeyCredentialSelection = { credential: ApiKeyCredential; index: number; credentialId: number };
 type StoredOAuthSelection = { credentialId: number; credential: OAuthCredential; index: number };
 
 type UsageCandidate<T extends AuthCredential> = {
@@ -2028,10 +2033,14 @@ export class AuthStorage {
 		sessionId: string | undefined,
 		options: AuthApiKeyOptions | undefined,
 		filter?: (credential: ApiKeyCredential) => boolean,
-	): Promise<ApiKeySelection | undefined> {
-		const credentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is ApiKeySelection => {
+	): Promise<ApiKeyCredentialSelection | undefined> {
+		// Snapshot the full stored set ONCE, pairing each row with its stable id.
+		// The credential bytes and the id both originate here, before any await, so
+		// a broker reload or credential removal during the usage-ranking await below
+		// cannot re-pair the resolved key with a sibling row by positional index.
+		const credentials: ApiKeyCredentialSelection[] = this.#getStoredCredentials(provider)
+			.map((entry, index) => ({ credential: entry.credential, index, credentialId: entry.id }))
+			.filter((entry): entry is ApiKeyCredentialSelection => {
 				if (entry.credential.type !== "api_key") return false;
 				return filter?.(entry.credential) ?? true;
 			});
@@ -2041,12 +2050,12 @@ export class AuthStorage {
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
-		const fallback = credentials[order[0]];
+		const fallback = credentials[order[0] ?? 0];
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (!strategy) {
 			for (const idx of order) {
 				const candidate = credentials[idx];
-				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index)) {
+				if (candidate && !this.#isCredentialBlocked(provider, providerKey, candidate.index)) {
 					return candidate;
 				}
 			}
@@ -2067,7 +2076,14 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 		});
-		return candidates[0]?.selection ?? fallback;
+		const ranked = candidates[0]?.selection;
+		if (!ranked) return fallback;
+		// #rankApiKeySelections forwards its input selections by reference, so the
+		// ranked pick is one of the entries above; recover its stable id rather than
+		// re-reading the (possibly shifted) positional index from a fresh snapshot.
+		return (
+			credentials.find(entry => entry.index === ranked.index && entry.credential === ranked.credential) ?? fallback
+		);
 	}
 
 	#clearProviderSessionCredentialCache(provider: string): void {
@@ -5222,7 +5238,7 @@ export class AuthStorage {
 		);
 		if (loginApiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
-			const credentialId = this.#getStoredCredentials(provider)[loginApiKeySelection.index]?.id;
+			const credentialId = loginApiKeySelection.credentialId;
 			const apiKey = await this.#configValueResolver(loginApiKeySelection.credential.key);
 			if (apiKey) {
 				return {
@@ -5247,7 +5263,7 @@ export class AuthStorage {
 		);
 		if (apiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
-			const credentialId = this.#getStoredCredentials(provider)[apiKeySelection.index]?.id;
+			const credentialId = apiKeySelection.credentialId;
 			const apiKey = await this.#configValueResolver(apiKeySelection.credential.key);
 			if (apiKey) {
 				return {

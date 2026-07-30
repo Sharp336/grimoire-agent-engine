@@ -7,7 +7,13 @@ import {
 	ProviderHttpError,
 	STREAM_ENVELOPE_ERROR_PREFIX,
 } from "./classes";
-import { isOpaqueStatusBody, isUsageLimitStatus, matchesUsageLimitText, parseRateLimitReason } from "./rate-limit";
+import {
+	ACCOUNT_SCOPED_403_PATTERN,
+	isOpaqueStatusBody,
+	isUsageLimitStatus,
+	matchesUsageLimitText,
+	parseRateLimitReason,
+} from "./rate-limit";
 
 export const Flag = {
 	Class: 0x1000,
@@ -319,8 +325,15 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
+		// Mirror isUsageLimitOutcome: a 403 carrying an account-scoped cap
+		// (Devin/Codeium "overall message rate limit ... will reset in …",
+		// GitHub Copilot) is a usage-limit outcome, not an auth failure —
+		// classify it as UsageLimit so turn recovery honours the recorded
+		// reset/backoff instead of generic short retries.
+		const isAccountScopedCap = statusClean === 403 && ACCOUNT_SCOPED_403_PATTERN.test(cleanMessage);
 		if (
 			matchesUsageLimitText(cleanMessage) ||
+			isAccountScopedCap ||
 			(isLimitStatus && (isOpaque || parseRateLimitReason(cleanMessage) === "QUOTA_EXHAUSTED"))
 		) {
 			kinds |= Flag.UsageLimit;

@@ -200,7 +200,12 @@ function reduceProviderInFlightLimit(
 	const currentLimit = resolveProviderInFlightLimit(provider, options);
 	if (currentLimit === undefined) return;
 	const key = providerInFlightKey(provider, options?.credentialId);
-	reducedProviderInFlightLimits.set(key, Math.max(1, currentLimit - 1));
+	const reduced = Math.max(1, currentLimit - 1);
+	reducedProviderInFlightLimits.set(key, reduced);
+	// Mirror the reduction into the shared lease directory so peer processes
+	// acquiring the same credential bucket observe the lower cap instead of
+	// refilling the slot the provider just rejected.
+	void persistProviderInFlightLearnedCap(providerInFlightDir(key), reduced);
 }
 
 function providerInFlightRoot(): string {
@@ -259,6 +264,34 @@ async function writeProviderInFlightInfo(dir: string, token: string): Promise<vo
 	} catch (error) {
 		await fs.rm(tempPath, { force: true }).catch(() => {});
 		throw error;
+	}
+}
+
+// The learned concurrency cap a provider rejected is shared across every OMP
+// process using the same lease directory: a reduction observed by one process
+// must bound acquires in the others, or queued peers refill the rejected slot
+// and keep the provider over its true limit. The value lives next to the leases
+// as a plain `.learned-cap` file (min-write so a stale in-process snapshot can
+// never raise the shared floor); reads are best-effort and degrade to the
+// configured cap when the file is absent or unreadable.
+async function readProviderInFlightLearnedCap(dir: string): Promise<number | undefined> {
+	try {
+		const content = await fs.readFile(path.join(dir, ".learned-cap"), "utf-8");
+		const parsed = Number.parseInt(content, 10);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function persistProviderInFlightLearnedCap(dir: string, cap: number): Promise<void> {
+	try {
+		await fs.mkdir(dir, { recursive: true });
+		const existing = await readProviderInFlightLearnedCap(dir);
+		const next = existing === undefined ? cap : Math.min(existing, cap);
+		await Bun.write(path.join(dir, ".learned-cap"), String(next));
+	} catch {
+		// Best-effort: cross-process coordination degrades to in-process only.
 	}
 }
 
@@ -422,8 +455,10 @@ async function tryAcquireProviderInFlightLease(
 	try {
 		const dir = providerInFlightDir(provider);
 		await fs.mkdir(dir, { recursive: true });
+		const learnedCap = await readProviderInFlightLearnedCap(dir);
+		const effectiveLimit = learnedCap === undefined ? limit : Math.min(learnedCap, limit);
 		const active = await cleanupProviderInFlightLeases(dir);
-		if (active >= limit) return null;
+		if (active >= effectiveLimit) return null;
 
 		const leaseDir = path.join(dir, `${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
 		const token = crypto.randomUUID();
@@ -579,6 +614,16 @@ export const __providerInFlightForTesting = {
 	},
 	resetReducedLimits(): void {
 		reducedProviderInFlightLimits.clear();
+	},
+	async learnedCap(provider: string, credentialId?: number): Promise<number | undefined> {
+		return readProviderInFlightLearnedCap(providerInFlightDir(providerInFlightKey(provider, credentialId)));
+	},
+	async clearLearnedCap(provider: string, credentialId?: number): Promise<void> {
+		await fs
+			.rm(path.join(providerInFlightDir(providerInFlightKey(provider, credentialId)), ".learned-cap"), {
+				force: true,
+			})
+			.catch(() => {});
 	},
 };
 

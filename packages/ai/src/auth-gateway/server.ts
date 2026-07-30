@@ -21,7 +21,7 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
-import type { AuthStorage } from "../auth-storage";
+import type { ApiKeyResolution, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -239,7 +239,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	signal: AbortSignal,
 	format: string,
 	peer: string,
-): Promise<string | undefined> {
+): Promise<ApiKeyResolution | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
@@ -261,7 +261,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+		return storage.getApiKeyResolution(provider, sessionId, { modelId: model.id, signal });
 	}
 	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -270,7 +270,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		peer,
 		error: message,
 	});
-	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+	return storage.getApiKeyResolution(provider, sessionId, { modelId: model.id, signal });
 }
 
 /**
@@ -290,25 +290,29 @@ function buildGatewayApiKeyResolver(
 	storage: AuthStorage,
 	model: Model<Api>,
 	sessionId: string,
-	initialKey: string,
+	initialResolution: ApiKeyResolution,
 	requestSignal: AbortSignal,
 	format: string,
 	peer: string,
 ): ApiKeyResolver {
-	let lastKey = initialKey;
+	// Track the most recent bearer so the switch step (c) invalidates the
+	// credential that actually failed. Resolutions carry the stable credentialId
+	// so the per-credential in-flight cap buckets each stored account separately
+	// instead of collapsing every gateway account into one "default" bucket.
+	let lastKey = initialResolution.apiKey;
 	return async ({ lastChance, error, signal }) => {
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
-			lastKey = initialKey;
-			return initialKey;
+			lastKey = initialResolution.apiKey;
+			return initialResolution;
 		}
 		if (!lastChance) {
-			const refreshed = await storage.getApiKey(model.provider, sessionId, {
+			const refreshed = await storage.getApiKeyResolution(model.provider, sessionId, {
 				modelId: model.id,
 				signal: sig,
 				forceRefresh: true,
 			});
-			lastKey = refreshed ?? lastKey;
+			lastKey = refreshed?.apiKey ?? lastKey;
 			return refreshed;
 		}
 		const next = await refreshGatewayApiKeyAfterAuthError(
@@ -322,7 +326,7 @@ function buildGatewayApiKeyResolver(
 			format,
 			peer,
 		);
-		lastKey = next ?? lastKey;
+		lastKey = next?.apiKey ?? lastKey;
 		return next;
 	};
 }
@@ -414,9 +418,9 @@ async function handleFormatEndpoint(
 	// expected to resolve the credential and pass it as `options.apiKey`.
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
-	let apiKey: string | undefined;
+	let initialResolution: ApiKeyResolution | undefined;
 	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
+		initialResolution = await bootOpts.storage.getApiKeyResolution(model.provider, sessionId, {
 			modelId: model.id,
 			signal: controller.signal,
 		});
@@ -427,7 +431,7 @@ async function handleFormatEndpoint(
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
-	if (!apiKey) {
+	if (!initialResolution?.apiKey) {
 		return route.module.formatError(
 			401,
 			"authentication_error",
@@ -440,7 +444,7 @@ async function handleFormatEndpoint(
 		bootOpts.storage,
 		model,
 		sessionId,
-		apiKey,
+		initialResolution,
 		controller.signal,
 		route.label,
 		peer,
@@ -578,9 +582,9 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const sessionId = parsed.options.sessionId ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.sessionId ??= sessionId;
 
-	let apiKey: string | undefined;
+	let resolution: ApiKeyResolution | undefined;
 	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
+		resolution = await bootOpts.storage.getApiKeyResolution(model.provider, sessionId, {
 			modelId: model.id,
 			signal: controller.signal,
 		});
@@ -591,13 +595,14 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return aborted();
-	if (!apiKey) {
+	if (!resolution?.apiKey) {
 		return piNative.formatError(
 			401,
 			"authentication_error",
 			`No credential available for provider ${model.provider}`,
 		);
 	}
+	const apiKey = resolution.apiKey;
 
 	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
 	// trust the client's options (already allow-listed by `parseRequest`) and
@@ -608,7 +613,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		bootOpts.storage,
 		model,
 		sessionId,
-		apiKey,
+		resolution,
 		controller.signal,
 		"pi-native",
 		peer,
