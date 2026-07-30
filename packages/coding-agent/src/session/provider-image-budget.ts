@@ -118,20 +118,36 @@ function replayImageSlots(messageIndex: number, items: Array<Record<string, unkn
  * actually serializes: content-array blocks, native computer screenshots
  * (toolResult metadata, uploaded directly as `computer_call_output`), and native
  * replay `input_image`s (providerPayload.items, uploaded unchanged when the
- * payload's provider matches). Assistant content images are counted toward the
- * image cap but contribute zero bytes — provider serializers never re-upload
- * them — so they cannot force elision of real uploaded images.
+ * payload's provider matches) — on both user/developer turns and same-model
+ * assistant snapshot turns, which the Responses serializer replays verbatim.
+ * Assistant content images are counted toward the image cap but contribute zero
+ * bytes — provider serializers never re-upload them — so they cannot force
+ * elision of real uploaded images. A native computer result carries the same
+ * screenshot in both `content` and `providerMetadata.screenshot`; only the
+ * representation the active serializer uploads is collected, so the screenshot
+ * is never double-budgeted.
  */
-function collectImageStats(context: Context, provider: string): { count: number; slots: ImageSlot[] } {
+function collectImageStats(context: Context, model: Model): { count: number; slots: ImageSlot[] } {
+	const provider = model.provider;
+	const nativeComputerUse = model.supportsComputerUse === true;
 	let count = 0;
 	const slots: ImageSlot[] = [];
 	for (let mi = 0; mi < context.messages.length; mi++) {
 		const message = context.messages[mi];
+		// A native computer result duplicates its screenshot in `content` and in
+		// `providerMetadata.screenshot`. The Responses serializer uploads the
+		// screenshot (as `computer_call_output`) and drops the content image on
+		// computer-capable models; every other serializer uploads the content
+		// image and stringifies the screenshot to text. Budget only the one the
+		// active serializer uploads so a single screenshot is never counted twice.
+		const computerScreenshotSerialized =
+			message.role === "toolResult" && message.providerMetadata?.type === "computer" && nativeComputerUse;
 		if (Array.isArray(message.content)) {
 			const droppable = message.role !== "assistant";
 			for (let pi = 0; pi < message.content.length; pi++) {
 				const part = message.content[pi];
 				if (part.type !== "image") continue;
+				if (computerScreenshotSerialized) continue; // content copy is dropped by the serializer
 				count++;
 				slots.push({
 					messageIndex: mi,
@@ -147,7 +163,12 @@ function collectImageStats(context: Context, provider: string): { count: number;
 		}
 		if (message.role === "toolResult") {
 			const screenshot = message.providerMetadata?.screenshot;
-			if (screenshot && typeof screenshot.image_url === "string" && screenshot.image_url.startsWith("data:")) {
+			if (
+				nativeComputerUse &&
+				screenshot &&
+				typeof screenshot.image_url === "string" &&
+				screenshot.image_url.startsWith("data:")
+			) {
 				count++;
 				slots.push({
 					messageIndex: mi,
@@ -159,8 +180,18 @@ function collectImageStats(context: Context, provider: string): { count: number;
 				});
 			}
 		}
-		if (message.role === "user" || message.role === "developer") {
-			const items = getOpenAIResponsesHistoryItems(message.providerPayload, provider);
+		if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
+			// The Responses serializer only replays a same-model assistant snapshot,
+			// passing the assistant's own provider as the payload fallback; mirror
+			// that gate so foreign-model snapshots (re-encoded, not replayed) are not
+			// collected, while still catching historical input_images a full snapshot
+			// splices back into the request.
+			const items =
+				message.role === "assistant"
+					? message.api === model.api && message.model === model.id
+						? getOpenAIResponsesHistoryItems(message.providerPayload, provider, message.provider)
+						: undefined
+					: getOpenAIResponsesHistoryItems(message.providerPayload, provider);
 			if (items) {
 				const replaySlots = replayImageSlots(mi, items);
 				count += replaySlots.length;
@@ -185,7 +216,14 @@ function planImageBudget(slots: ImageSlot[], limit: number): ImageBudgetPlan {
 	let drops = 0;
 	for (let i = 0; i < slots.length; i++) {
 		if (drops >= dropCount) break;
-		if (!slots[i].droppable) continue;
+		const slot = slots[i];
+		if (!slot.droppable) continue;
+		// Screenshots cannot be cleanly removed without breaking the
+		// computer_call/computer_call_output pairing the Responses grammar
+		// requires, and shrinking one to a placeholder does not reduce the image
+		// count the cap measures. Skip them in the count clamp so droppable
+		// content/replay images absorb the overflow instead.
+		if (slot.kind === "screenshot") continue;
 		countElided.add(i);
 		drops++;
 	}
@@ -196,8 +234,13 @@ function planImageBudget(slots: ImageSlot[], limit: number): ImageBudgetPlan {
 	for (let i = slots.length - 1; i >= 0; i--) {
 		if (countElided.has(i)) continue;
 		const slot = slots[i];
+		// Non-serialized images (assistant content blocks, bytes 0) are never
+		// uploaded, so they neither occupy the byte budget nor claim the
+		// unconditional newest-retention slot — otherwise a trailing assistant
+		// display image would let the real newest uploaded image be elided.
+		if (slot.bytes === 0) continue;
 		if (!seenNewest) {
-			// The newest surviving image is always retained.
+			// The newest surviving uploaded image is always retained.
 			accumulated += slot.bytes;
 			seenNewest = true;
 			continue;
@@ -269,28 +312,84 @@ function applyScreenshotElide(message: ProviderMessage): ProviderMessage {
 	};
 }
 
-/** Rewrite a message's native replay payload, replacing elided `input_image`
- *  data URLs with the elision placeholder without touching any other item fields. */
-function applyReplayElide(message: ProviderMessage, elisions: ReplayElision[]): ProviderMessage {
-	if ((message.role !== "user" && message.role !== "developer") || !message.providerPayload) return message;
+/** Rewrite a message's native replay payload. Count-dropped `input_image`s are
+ *  removed — top-level items dropped, nested parts filtered out — so the
+ *  provider image-count cap is actually enforced rather than merely shrinking
+ *  the image to a placeholder that still counts. Byte-dropped `input_image`s
+ *  collapse to the elision placeholder, keeping the surrounding item
+ *  structurally valid. Every matching elision is applied: one `message` item can
+ *  carry several nested `input_image` parts, all of which may be selected. */
+function applyReplayElide(
+	message: ProviderMessage,
+	countElisions: ReplayElision[],
+	byteElisions: ReplayElision[],
+): ProviderMessage {
+	if (
+		(message.role !== "user" && message.role !== "developer" && message.role !== "assistant") ||
+		!message.providerPayload
+	) {
+		return message;
+	}
 	const payload = message.providerPayload;
-	let changed = false;
-	const items = payload.items.map((item, ii) => {
-		const elision = elisions.find(e => e.itemIndex === ii);
-		if (!elision) return item;
-		if (elision.nestedIndex < 0) {
-			changed = true;
-			return { ...item, image_url: ELIDED_IMAGE_DATA_URL };
+	const removedTopLevel = new Set<number>();
+	const removedNested = new Map<number, Set<number>>();
+	const shrunkTopLevel = new Set<number>();
+	const shrunkNested = new Map<number, Set<number>>();
+	const index = (table: Map<number, Set<number>>, itemIndex: number, nestedIndex: number): void => {
+		let set = table.get(itemIndex);
+		if (!set) {
+			set = new Set();
+			table.set(itemIndex, set);
 		}
-		if (item.type !== "message" || !Array.isArray(item.content)) return item;
-		const content = item.content as Array<Record<string, unknown>>;
-		const part = content[elision.nestedIndex];
-		if (!part) return item;
-		changed = true;
-		const nextContent = content.slice();
-		nextContent[elision.nestedIndex] = { ...part, image_url: ELIDED_IMAGE_DATA_URL };
-		return { ...item, content: nextContent };
-	});
+		set.add(nestedIndex);
+	};
+	for (const e of countElisions) {
+		if (e.nestedIndex < 0) removedTopLevel.add(e.itemIndex);
+		else index(removedNested, e.itemIndex, e.nestedIndex);
+	}
+	for (const e of byteElisions) {
+		if (e.nestedIndex < 0) shrunkTopLevel.add(e.itemIndex);
+		else index(shrunkNested, e.itemIndex, e.nestedIndex);
+	}
+
+	let changed = false;
+	const items = payload.items
+		.map((item, ii): Record<string, unknown> | undefined => {
+			if (removedTopLevel.has(ii)) {
+				changed = true;
+				return undefined; // whole input_image item dropped (count cap)
+			}
+			const removedParts = removedNested.get(ii);
+			const shrunkParts = shrunkNested.get(ii);
+			if (shrunkTopLevel.has(ii)) {
+				changed = true;
+				return { ...item, image_url: ELIDED_IMAGE_DATA_URL };
+			}
+			if (!removedParts && !shrunkParts) return item;
+			if (item.type !== "message" || !Array.isArray(item.content)) return item;
+			const content = item.content as Array<Record<string, unknown>>;
+			let rewrote = false;
+			const nextContent: Array<Record<string, unknown>> = [];
+			for (let ci = 0; ci < content.length; ci++) {
+				const part = content[ci];
+				if (removedParts?.has(ci)) {
+					rewrote = true; // nested input_image filtered out (count cap)
+					continue;
+				}
+				if (shrunkParts?.has(ci)) {
+					rewrote = true;
+					nextContent.push({ ...part, image_url: ELIDED_IMAGE_DATA_URL });
+					continue;
+				}
+				nextContent.push(part);
+			}
+			if (!rewrote) return item;
+			changed = true;
+			// A message item emptied of every image by the count clamp carries no
+			// content; drop it rather than emit an empty message item.
+			return nextContent.length > 0 ? { ...item, content: nextContent } : undefined;
+		})
+		.filter((item): item is Record<string, unknown> => item !== undefined);
 	return changed ? { ...message, providerPayload: { ...payload, items } } : message;
 }
 
@@ -303,7 +402,7 @@ function applyReplayElide(message: ProviderMessage, elisions: ReplayElision[]): 
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
 	const limit = providerImageBudget(model.provider);
-	const { count, slots } = collectImageStats(context, model.provider);
+	const { count, slots } = collectImageStats(context, model);
 	// 0-1 images: the byte budget always retains the newest and has nothing
 	// older to elide, and a single image never reaches a provider count cap (>=1).
 	if (count <= 1) return context;
@@ -329,7 +428,8 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 		const contentCount = new Set<number>();
 		const contentByte = new Set<number>();
 		let screenshotElided = false;
-		const replayElided: ReplayElision[] = [];
+		const replayCount: ReplayElision[] = [];
+		const replayByte: ReplayElision[] = [];
 		for (const index of indices) {
 			const slot = slots[index];
 			switch (slot.kind) {
@@ -341,14 +441,17 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 					screenshotElided = true;
 					break;
 				case "replay":
-					replayElided.push({ itemIndex: slot.partIndex, nestedIndex: slot.nestedIndex });
+					(countElided.has(index) ? replayCount : replayByte).push({
+						itemIndex: slot.partIndex,
+						nestedIndex: slot.nestedIndex,
+					});
 					break;
 			}
 		}
 		let next: ProviderMessage = message;
 		if (contentCount.size > 0 || contentByte.size > 0) next = applyContentClamp(next, contentCount, contentByte);
 		if (screenshotElided) next = applyScreenshotElide(next);
-		if (replayElided.length > 0) next = applyReplayElide(next, replayElided);
+		if (replayCount.length > 0 || replayByte.length > 0) next = applyReplayElide(next, replayCount, replayByte);
 		return next;
 	});
 	return { ...context, messages };

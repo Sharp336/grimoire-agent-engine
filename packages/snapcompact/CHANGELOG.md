@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the exported `PROVIDER_IMAGE_BYTES_BUDGET` constant (24 MiB aggregate decoded-image byte budget) colocated with the per-provider image-count budgets so every provider-image limit lives in one place; the coding-agent clamps its throwaway provider view to it.
+
 ## [17.1.5] - 2026-07-27
 
 ### Fixed

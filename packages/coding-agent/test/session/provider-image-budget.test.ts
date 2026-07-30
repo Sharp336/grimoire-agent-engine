@@ -165,6 +165,20 @@ const ANTHROPIC_MODEL = buildModel({
 	maxTokens: 16384,
 });
 
+const COMPUTER_MODEL = buildModel({
+	id: "gpt-5.4",
+	name: "gpt-5.4",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com",
+	reasoning: true,
+	input: ["text", "image"],
+	supportsComputerUse: true,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 16384,
+});
+
 /** Create an ImageContent whose decoded byte size (Math.floor(data.length * 3 / 4)) equals `decodedBytes`. */
 function imageOfDecodedBytes(decodedBytes: number): ImageContent {
 	const len = Math.ceil((decodedBytes * 4) / 3);
@@ -390,9 +404,9 @@ describe("transport image byte budget", () => {
 		expect(imageData(result).length).toBe(1);
 	});
 	it("elides native computer screenshots under the byte budget", () => {
-		// A computer tool result carries its image in providerMetadata.screenshot,
-		// which the Responses serializer uploads directly as computer_call_output
-		// (content is never consulted). The screenshot must count and be elided.
+		// A computer tool result duplicates its screenshot in providerMetadata
+		// (uploaded as computer_call_output) and in content (dropped by the
+		// serializer). On a computer-capable model only the screenshot counts.
 		const big = dataUrlOfDecodedBytes(20 * MIB);
 		const context: Context = {
 			systemPrompt: [],
@@ -402,7 +416,7 @@ describe("transport image byte budget", () => {
 					role: "toolResult",
 					toolCallId: "call-0",
 					toolName: "computer",
-					content: [],
+					content: [imageOfDecodedBytes(20 * MIB)],
 					isError: false,
 					timestamp: 0,
 					providerMetadata: {
@@ -414,9 +428,10 @@ describe("transport image byte budget", () => {
 				{ role: "user", content: [imageOfDecodedBytes(10 * MIB)], timestamp: 1 },
 			],
 		};
-		// 20 MiB screenshot + 10 MiB user image = 30 MiB > 24 MiB → screenshot elided.
+		// One 20 MiB screenshot (not double-counted with the content copy) + 10 MiB
+		// user image = 30 MiB > 24 MiB → screenshot elided, content copy untouched.
 
-		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const result = clampProviderContextImages(context, COMPUTER_MODEL);
 		const first = result.messages[0];
 		expect(first?.role).toBe("toolResult");
 		if (first?.role === "toolResult" && first.providerMetadata?.type === "computer") {
@@ -427,7 +442,12 @@ describe("transport image byte budget", () => {
 				expect(screenshot.image_url.length).toBeLessThan(big.length);
 			}
 		}
-		expect(imageData(result).length).toBe(1);
+		// The duplicated content copy is not budgeted on a computer-capable model,
+		// so it is left byte-identical (not elided) even though the screenshot was.
+		const toolResultMsg = result.messages[0];
+		if (toolResultMsg?.role === "toolResult") {
+			expect(toolResultMsg.content).toEqual([imageOfDecodedBytes(20 * MIB)]);
+		}
 	});
 
 	it("accounts for base64 padding in the decoded-byte budget", () => {
@@ -511,5 +531,205 @@ describe("transport image byte budget", () => {
 		if (elided?.role === "user") {
 			expect(elided.content).toEqual([{ type: "text", text: "[image omitted: transport image budget]" }]);
 		}
+	});
+	it("does not double-budget a single under-budget computer screenshot", () => {
+		// The same 13 MiB screenshot lives in both content and providerMetadata.
+		// Pre-fix it was counted twice (26 MiB > 24 MiB) and one copy was wrongly
+		// elided; only the representation the serializer uploads is counted, so a
+		// single 13 MiB screenshot + 5 MiB user image (18 MiB) fits untouched.
+		const big = dataUrlOfDecodedBytes(13 * MIB);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call-0",
+					toolName: "computer",
+					content: [imageOfDecodedBytes(13 * MIB)],
+					isError: false,
+					timestamp: 0,
+					providerMetadata: {
+						type: "computer",
+						screenshot: { type: "computer_screenshot", image_url: big },
+						acknowledgedSafetyChecks: [],
+					},
+				},
+				{ role: "user", content: [imageOfDecodedBytes(5 * MIB)], timestamp: 1 },
+			],
+		};
+
+		const result = clampProviderContextImages(context, COMPUTER_MODEL);
+		expect(result).toBe(context);
+		if (result.messages[0]?.role === "toolResult" && result.messages[0].providerMetadata?.type === "computer") {
+			expect(result.messages[0].providerMetadata.screenshot.image_url).toBe(big);
+		}
+	});
+
+	it("applies every nested replay-image elision within one item", () => {
+		// One replay `message` item carries two nested input_image data URLs.
+		// Both are over budget relative to a newer image, so both must be elided —
+		// pre-fix only the first matching elision was rewritten.
+		const bigA = dataUrlOfDecodedBytes(20 * MIB);
+		const bigB = dataUrlOfDecodedBytes(20 * MIB);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: "describe these",
+					timestamp: 0,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "anthropic",
+						items: [
+							{
+								type: "message",
+								role: "user",
+								content: [
+									{ type: "input_image", detail: "auto", image_url: bigA },
+									{ type: "input_text", text: "and" },
+									{ type: "input_image", detail: "auto", image_url: bigB },
+								],
+							},
+						],
+					},
+				},
+				{ role: "user", content: [imageOfDecodedBytes(10 * MIB)], timestamp: 1 },
+			],
+		};
+		// Two 20 MiB replay images + 10 MiB content image. Newest (10 MiB)
+		// retained; each 20 MiB image crosses 24 MiB on its own → both elided.
+
+		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const first = result.messages[0];
+		if (first?.role === "user" && first.providerPayload) {
+			const item = first.providerPayload.items[0] as {
+				content?: Array<{ type: string; image_url?: string; text?: string }>;
+			};
+			const nested = item.content ?? [];
+			const images = nested.filter(p => p.type === "input_image");
+			expect(images.length).toBe(2);
+			for (const part of images) {
+				expect(part.image_url).not.toBe(bigA);
+				expect(part.image_url).not.toBe(bigB);
+				expect(part.image_url?.length).toBeLessThan(bigA.length);
+			}
+			// The non-image part between them is preserved.
+			expect(nested.some(p => p.type === "input_text" && p.text === "and")).toBe(true);
+		}
+	});
+
+	it("removes count-dropped replay images instead of shrinking them", () => {
+		// UMANS cap is 10. 12 top-level replay input_image items exceed it; the 2
+		// oldest must be removed (not shrunk to a placeholder that still counts).
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 12 }, (_, i) => ({
+				role: "user" as const,
+				content: `msg-${i}`,
+				timestamp: i,
+				providerPayload: {
+					type: "openaiResponsesHistory" as const,
+					provider: "umans",
+					items: [{ type: "input_image", detail: "auto", image_url: dataUrlOfDecodedBytes(1 * MIB) }],
+				},
+			})),
+		};
+
+		const result = clampProviderContextImages(context, UMANS_MODEL);
+		// The 2 oldest items are dropped entirely; 10 remain.
+		const first = result.messages[0];
+		if (first?.role === "user" && first.providerPayload) {
+			expect(first.providerPayload.items.length).toBe(0);
+		}
+		const survivor = result.messages[2];
+		if (survivor?.role === "user" && survivor.providerPayload) {
+			expect(survivor.providerPayload.items.length).toBe(1);
+		}
+	});
+
+	it("budgets images carried in a same-model assistant snapshot payload", () => {
+		// The Responses serializer replays same-model assistant providerPayload
+		// items verbatim; an input_image data URL in that snapshot must be counted
+		// and elided, not bypass the budget.
+		const big = dataUrlOfDecodedBytes(20 * MIB);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "assistant",
+					content: [],
+					timestamp: 0,
+					stopReason: "stop",
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-5.4",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "openai",
+						items: [{ type: "input_image", detail: "auto", image_url: big }],
+					},
+				},
+				{ role: "user", content: [imageOfDecodedBytes(10 * MIB)], timestamp: 1 },
+			],
+		};
+		// 20 MiB assistant-snapshot image + 10 MiB user image = 30 MiB > 24 MiB.
+
+		const result = clampProviderContextImages(context, COMPUTER_MODEL);
+		const assistant = result.messages[0];
+		if (assistant?.role === "assistant" && assistant.providerPayload) {
+			const item = assistant.providerPayload.items[0] as { image_url?: string };
+			expect(item.image_url).not.toBe(big);
+			expect(item.image_url?.length).toBeLessThan(big.length);
+		}
+		expect(imageData(result).length).toBe(1);
+	});
+
+	it("does not let a zero-byte assistant image steal the newest-retention slot", () => {
+		// A 25 MiB user image is the only uploaded image; an assistant display
+		// image follows it. Provider serializers never upload the assistant image,
+		// so it must not claim the unconditional newest-retention slot and force
+		// the real 25 MiB image to be elided.
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [imageOfDecodedBytes(25 * MIB)], timestamp: 0 },
+				{
+					role: "assistant",
+					content: [imageOfDecodedBytes(1 * MIB)],
+					timestamp: 1,
+					stopReason: "stop",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				},
+			],
+		};
+		// Pre-fix the assistant image set seenNewest, so the 25 MiB user image was
+		// elided even though it is the sole uploaded image and fits the budget.
+
+		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		expect(result).toBe(context);
 	});
 });
