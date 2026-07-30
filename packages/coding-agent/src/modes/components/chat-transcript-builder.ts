@@ -18,6 +18,7 @@ import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
+import { detectCacheInvalidation } from "../../session/cache-telemetry";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
@@ -41,7 +42,6 @@ import { createAdvisorMessageCard } from "./advisor-message";
 import { AssistantMessageComponent } from "./assistant-message";
 import { createBackgroundTanDispatchBlock } from "./background-tan-message";
 import { BashExecutionComponent } from "./bash-execution";
-import { detectCacheInvalidation } from "./cache-invalidation-marker";
 import { CollabPromptMessageComponent } from "./collab-prompt-message";
 import {
 	BranchSummaryMessageComponent,

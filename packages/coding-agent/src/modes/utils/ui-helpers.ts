@@ -11,7 +11,6 @@ import { createAdvisorMessageCard } from "../../modes/components/advisor-message
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
-import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
 import { CollabPromptMessageComponent } from "../../modes/components/collab-prompt-message";
 import {
 	BranchSummaryMessageComponent,
@@ -39,7 +38,13 @@ import { UserMessageComponent } from "../../modes/components/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "../../modes/image-references";
 import { theme } from "../../modes/theme/theme";
-import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
+import type {
+	CompactionQueuedMessage,
+	InteractiveModeContext,
+	NewVersionNotificationOptions,
+	RenderSessionContextOptions,
+} from "../../modes/types";
+import { detectCacheInvalidation } from "../../session/cache-telemetry";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
@@ -48,6 +53,7 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { replaceTabs } from "../../tools/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
@@ -740,16 +746,16 @@ export class UiHelpers {
 		this.ctx.present([new Spacer(1), text]);
 	}
 
-	showNewVersionNotification(newVersion: string): void {
+	showNewVersionNotification(newVersion: string, options: NewVersionNotificationOptions = {}): void {
 		const block = new TranscriptBlock();
+		const source = options.sourceLabel ? `${options.sourceLabel} ` : "";
+		const actionText = options.actionText ?? "Run: omp update";
 		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
 		const title = "Update Available";
-		const prefix = `New version ${newVersion} is available. Run: `;
-		const command = "omp update";
 		block.addChild(
-			new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
+			new Text(`${title}\nNew ${source}version ${newVersion} is available. ${actionText}`, 1, 0).setStyleFn(
 				() =>
-					`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
+					`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", `New ${source}version ${newVersion} is available. ${actionText}`)}`,
 			),
 		);
 		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
@@ -827,10 +833,9 @@ export class UiHelpers {
 	}
 
 	isKnownSlashCommand(text: string): boolean {
-		if (!text.startsWith("/")) return false;
-		const spaceIndex = text.indexOf(" ");
-		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		if (!commandName) return false;
+		const parsed = parseSlashCommand(text);
+		if (!parsed) return false;
+		const commandName = parsed.name;
 
 		if (this.ctx.session.extensionRunner?.getCommand(commandName)) {
 			return true;
@@ -842,7 +847,7 @@ export class UiHelpers {
 			}
 		}
 
-		return this.ctx.fileSlashCommands.has(commandName);
+		return this.ctx.fileSlashCommands.has(commandName) || this.ctx.routineSlashCommands.has(commandName);
 	}
 
 	async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {

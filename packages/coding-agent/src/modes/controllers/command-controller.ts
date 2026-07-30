@@ -34,6 +34,7 @@ import { BorderedLoader } from "../../modes/components/bordered-loader";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
+import { PromptCacheAuditComponent } from "../../modes/components/prompt-cache-audit";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
@@ -42,6 +43,7 @@ import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
+import { buildPromptCacheAudit } from "../../session/cache-telemetry";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
@@ -57,7 +59,7 @@ import {
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
-import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { generateSessionTitleFromRecentTranscript, setSessionTerminalTitle } from "../../utils/title-generator";
 
 function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
 	const block = new TranscriptBlock();
@@ -610,6 +612,26 @@ export class CommandController {
 		this.ctx.presentCommandOutput(block);
 	}
 
+	handlePromptCacheAuditCommand(): void {
+		if (this.ctx.session.agentKind() !== "main") {
+			this.ctx.showWarning("Prompt cache audit is available only for main-agent sessions.");
+			return;
+		}
+		const model = this.ctx.session.model;
+		if (!model) {
+			this.ctx.showWarning("Prompt cache audit unavailable: no model is selected.");
+			return;
+		}
+		const audit = buildPromptCacheAudit(this.ctx.sessionManager.getBranch(), model);
+		if (!audit) {
+			this.ctx.showWarning("Prompt cache audit unavailable: no model is selected.");
+			return;
+		}
+		const component = new PromptCacheAuditComponent(audit);
+		component.setExpanded(this.ctx.toolOutputExpanded);
+		this.ctx.presentCommandOutput(component);
+	}
+
 	async handleMemoryCommand(text: string): Promise<void> {
 		const argumentText = text.slice(7).trim();
 		const action = argumentText.split(/\s+/, 1)[0]?.toLowerCase() || "view";
@@ -1122,8 +1144,26 @@ export class CommandController {
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
+		const explicitTitle = title.trim();
 		try {
-			const stored = await this.ctx.sessionManager.setSessionName(title, "user");
+			if (!explicitTitle) {
+				this.ctx.showStatus("Generating session name from recent messages...");
+			}
+			const resolvedTitle =
+				explicitTitle ||
+				(await generateSessionTitleFromRecentTranscript(
+					this.ctx.session.messages,
+					this.ctx.session.modelRegistry,
+					this.ctx.settings,
+					this.ctx.session.sessionId,
+					this.ctx.session.model,
+					provider => this.ctx.session.agent.metadataForProvider(provider),
+				));
+			if (!resolvedTitle) {
+				this.ctx.showError("No conversation content to generate a title from.");
+				return;
+			}
+			const stored = await this.ctx.sessionManager.setSessionName(resolvedTitle, "user");
 			if (!stored) {
 				this.ctx.showError("Session name cannot be empty.");
 				return;

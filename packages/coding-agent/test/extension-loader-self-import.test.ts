@@ -71,6 +71,23 @@ describe("extension loader host runtime binding", () => {
 				}
 			`,
 		);
+		const legacyImportToolPath = writeModule(
+			"legacy-import-tool.ts",
+			`
+				import { HubTool } from "@mariozechner/pi-coding-agent/tools/hub";
+				export default function(api) {
+					${identityGuard}
+					if (typeof HubTool !== "function") throw new Error("legacy HubTool alias missing");
+					return {
+						name: "legacy_import_tool",
+						label: "Legacy Import Tool",
+						description: "Loads a legacy package subpath through the host runtime",
+						parameters: api.zod.object({}),
+						execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+					};
+				}
+			`,
+		);
 		const agentDir = path.join(cwd, "agent");
 		const commandPath = writeModule(
 			path.join("agent", "commands", "identity", "index.ts"),
@@ -100,9 +117,9 @@ describe("extension loader host runtime binding", () => {
 		expect(extensionResult.extensions).toHaveLength(1);
 		expect(extensionResult.extensions[0].commands.has("identity_extension")).toBe(true);
 
-		const toolResult = await loadCustomTools([{ path: toolPath }], cwd, []);
+		const toolResult = await loadCustomTools([{ path: toolPath }, { path: legacyImportToolPath }], cwd, []);
 		expect(toolResult.errors).toEqual([]);
-		expect(toolResult.tools.map(tool => tool.tool.name)).toEqual(["identity_tool"]);
+		expect(toolResult.tools.map(tool => tool.tool.name)).toEqual(["identity_tool", "legacy_import_tool"]);
 
 		const commandResult = await loadCustomCommands({ cwd, agentDir });
 		expect(commandResult.errors.filter(error => error.path === commandPath)).toEqual([]);

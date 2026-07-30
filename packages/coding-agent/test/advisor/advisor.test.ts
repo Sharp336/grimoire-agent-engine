@@ -4516,60 +4516,60 @@ describe("advisor", () => {
 			expect(promptInputs[1]).toContain("keep me");
 		});
 
-		it.each(["success", "error"] as const)(
-			"releases blocked %s hooks so reset can run replacement work",
-			async hookKind => {
-				const hookStarted = Promise.withResolvers<void>();
-				const releaseHook = Promise.withResolvers<void>();
-				const replacementPromptStarted = Promise.withResolvers<void>();
-				let promptCalls = 0;
-				let hookCalls = 0;
-				const blockHook = async () => {
-					if (++hookCalls !== 1) return;
-					hookStarted.resolve();
-					await releaseHook.promise;
-				};
-				const agent: AdvisorAgent = {
-					prompt: async () => {
-						promptCalls++;
-						if (promptCalls === 1 && hookKind === "error") throw new Error("provider failure");
-						if (promptCalls === 2) replacementPromptStarted.resolve();
-					},
-					abort: () => {},
-					reset: () => {},
-					state: { messages: [] },
-				};
-				const runtime = new AdvisorRuntime(agent, {
-					snapshotMessages: () => [],
-					enqueueAdvice: () => {},
-					...(hookKind === "success"
-						? { onTurnSuccess: blockHook }
-						: {
-								onTurnError: async () => {
-									await blockHook();
-									return false;
-								},
-							}),
-				});
+		it.each([
+			"success",
+			"error",
+		] as const)("releases blocked %s hooks so reset can run replacement work", async hookKind => {
+			const hookStarted = Promise.withResolvers<void>();
+			const releaseHook = Promise.withResolvers<void>();
+			const replacementPromptStarted = Promise.withResolvers<void>();
+			let promptCalls = 0;
+			let hookCalls = 0;
+			const blockHook = async () => {
+				if (++hookCalls !== 1) return;
+				hookStarted.resolve();
+				await releaseHook.promise;
+			};
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					promptCalls++;
+					if (promptCalls === 1 && hookKind === "error") throw new Error("provider failure");
+					if (promptCalls === 2) replacementPromptStarted.resolve();
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => [],
+				enqueueAdvice: () => {},
+				...(hookKind === "success"
+					? { onTurnSuccess: blockHook }
+					: {
+							onTurnError: async () => {
+								await blockHook();
+								return false;
+							},
+						}),
+			});
 
-				runtime.onTurnEnd([{ role: "user", content: "old session", timestamp: 1 } as AgentMessage]);
-				await hookStarted.promise;
-				const pause = runtime.pauseForSessionTransition();
-				const pausedQuickly = await Promise.race([pause.then(() => true), Bun.sleep(50).then(() => false)]);
-				runtime.reset();
-				runtime.onTurnEnd([{ role: "user", content: "replacement session", timestamp: 2 } as AgentMessage]);
-				const replacementRan = await Promise.race([
-					replacementPromptStarted.promise.then(() => true),
-					Bun.sleep(50).then(() => false),
-				]);
-				releaseHook.resolve();
-				await pause;
-				runtime.dispose();
+			runtime.onTurnEnd([{ role: "user", content: "old session", timestamp: 1 } as AgentMessage]);
+			await hookStarted.promise;
+			const pause = runtime.pauseForSessionTransition();
+			const pausedQuickly = await Promise.race([pause.then(() => true), Bun.sleep(50).then(() => false)]);
+			runtime.reset();
+			runtime.onTurnEnd([{ role: "user", content: "replacement session", timestamp: 2 } as AgentMessage]);
+			const replacementRan = await Promise.race([
+				replacementPromptStarted.promise.then(() => true),
+				Bun.sleep(50).then(() => false),
+			]);
+			releaseHook.resolve();
+			await pause;
+			runtime.dispose();
 
-				expect(pausedQuickly).toBe(true);
-				expect(replacementRan).toBe(true);
-			},
-		);
+			expect(pausedQuickly).toBe(true);
+			expect(replacementRan).toBe(true);
+		});
 		it("aborts retry backoff before pausing for a session transition", async () => {
 			const recoveryStarted = Promise.withResolvers<void>();
 			const agent: AdvisorAgent = {

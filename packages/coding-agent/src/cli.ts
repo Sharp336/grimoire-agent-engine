@@ -16,17 +16,11 @@ try {
  */
 import { parentPort } from "node:worker_threads";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
-import {
-	APP_NAME,
-	getActiveProfile,
-	MIN_BUN_VERSION,
-	resolveProfileEnv,
-	setProfile,
-	VERSION,
-} from "@oh-my-pi/pi-utils/dirs";
+import { getActiveProfile, MIN_BUN_VERSION, resolveProfileEnv, setProfile } from "@oh-my-pi/pi-utils/dirs";
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { APP_DISPLAY_NAME, APP_VERSION } from "./app-version";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { startJsEvalProcess } from "./eval/js/process-entry";
@@ -45,7 +39,7 @@ if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.exit(1);
 }
 
-setProcessName(APP_NAME);
+setProcessName(APP_DISPLAY_NAME);
 
 // `Bun.build`-API compiled Windows executables report `import.meta.main ===
 // false`: the standalone loader keys the entry module with native backslashes
@@ -409,7 +403,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	return run({ bin: APP_DISPLAY_NAME, version: APP_VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS

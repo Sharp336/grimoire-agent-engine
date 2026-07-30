@@ -231,7 +231,7 @@ describe("issue #1974: tmux scrollback rendering", () => {
 					await settle(term);
 				}
 
-				// ED3 would either be a no-op or yank a scrolled tmux reader.
+				// ED3 clears tmux pane history and pulls a scrolled reader to the end.
 				// The tmux path must commit incrementally via \r\n.
 				expect(writes.join("").match(ERASE_SCROLLBACK)?.length ?? 0).toBe(0);
 			} finally {

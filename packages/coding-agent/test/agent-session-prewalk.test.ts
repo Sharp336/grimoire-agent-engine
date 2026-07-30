@@ -14,7 +14,9 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { isIrcEnabled } from "@oh-my-pi/pi-coding-agent/tools/hub";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -35,6 +37,7 @@ describe("AgentSession prewalk", () => {
 		tempDir = TempDir.createSync("@pi-prewalk-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("openai", "test-key");
 	});
 
 	afterEach(async () => {
@@ -641,6 +644,80 @@ describe("AgentSession prewalk", () => {
 			`${target.provider}/${target.id}`,
 		]);
 		expect(session.model?.id).toBe(target.id);
+	});
+
+	it("rebuilds a custom hidden-model task policy after the real prewalk switch", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = getBundledModel("openai", "gpt-5.6-sol");
+		if (!target) throw new Error("Expected bundled openai/gpt-5.6-sol");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			includeModelInPrompt: false,
+			"task.eager": "always",
+			"task.batch": false,
+			"task.maxConcurrency": 7,
+			"task.maxRecursionDepth": 3,
+		});
+		const template =
+			"CUSTOM_PREWALK_POLICY|{{#if useCodexTaskPrompt}}codex{{else}}default{{/if}}|{{eagerTasks}}|{{eagerTasksAlways}}|{{taskBatch}}|{{MAX_CONCURRENCY}}|{{taskIrcEnabled}}|model={{model}}";
+		const mock = createMockModel({
+			responses: [toolCall("t1", "todo"), toolCall("t2", "write"), { content: ["done"] }],
+		});
+		const calls: Array<{ model: string; systemPrompt: string }> = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Initial"],
+				tools: [writeTool as AgentTool, todoTool as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				calls.push({
+					model: `${model.provider}/${model.id}`,
+					systemPrompt: context.systemPrompt?.join("\n\n") ?? "",
+				});
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map([
+				[writeTool.name, writeTool as AgentTool],
+				[todoTool.name, todoTool as AgentTool],
+			]),
+			prewalk: { target },
+			rebuildSystemPrompt: async toolNames =>
+				buildSystemPrompt({
+					cwd: tempDir.path(),
+					contextFiles: [],
+					systemPromptTemplate: template,
+					toolNames,
+					model: `${agent.state.model?.provider}/${agent.state.model?.id}`,
+					includeModelInPrompt: settings.get("includeModelInPrompt"),
+					eagerTasks: settings.get("task.eager") !== "default",
+					eagerTasksAlways: settings.get("task.eager") === "always",
+					taskBatch: settings.get("task.batch"),
+					taskMaxConcurrency: settings.get("task.maxConcurrency"),
+					taskIrcEnabled: isIrcEnabled(settings, 0),
+				}),
+		});
+
+		await session.prompt("do the task");
+
+		expect(calls.map(call => call.model)).toEqual([
+			`${primary.provider}/${primary.id}`,
+			`${primary.provider}/${primary.id}`,
+			`${target.provider}/${target.id}`,
+		]);
+		expect(calls[2]?.systemPrompt).toContain("CUSTOM_PREWALK_POLICY|codex|true|true|false|7|true|model=");
+		expect(calls[2]?.systemPrompt).not.toContain(target.id);
 	});
 
 	it("armPrewalk (the /prewalk slash command) pre-arms the switch for the very next edit/write", async () => {

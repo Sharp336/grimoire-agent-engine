@@ -19,6 +19,13 @@ describe("task agent capability descriptions", () => {
 		}
 	});
 
+	it("ships bundled Scout with LSP and structural search capabilities", () => {
+		const scout = agentByName(loadBundledAgents(), "scout");
+
+		expect(scout.tools).toContain("lsp");
+		expect(scout.tools).toContain("ast_grep");
+	});
+
 	it("disables read summarization for scout and librarian, leaves other agents summarizing", () => {
 		const agents = loadBundledAgents();
 

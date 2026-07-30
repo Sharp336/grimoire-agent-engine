@@ -34,6 +34,7 @@ import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResu
 import type { ToolSession } from "../tools";
 import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
+import { isAgentsContextFile } from "../utils/context-files";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
 /** The two worker CLI flavors the director drives. */
@@ -1431,7 +1432,7 @@ export class VibeSessionRegistry {
 			modelRegistry: session.modelRegistry,
 			settings: session.settings,
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
-			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+			contextFiles: session.contextFiles?.filter(file => !isAgentsContextFile(file)),
 			skills: [...(session.skills ?? [])],
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,

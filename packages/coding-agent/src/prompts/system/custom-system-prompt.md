@@ -3,7 +3,9 @@
 {{/if}}
 {{customPrompt}}
 {{#if appendPrompt}}
+{{#inspectPart "append-prompt"}}
 {{appendPrompt}}
+{{/inspectPart}}
 {{/if}}
 {{#ifAny contextFiles.length git.isRepo}}
 <project>

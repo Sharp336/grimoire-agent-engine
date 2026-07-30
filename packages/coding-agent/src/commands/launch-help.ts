@@ -1,5 +1,5 @@
 import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
-import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
+import { APP_DISPLAY_NAME } from "../app-version";
 import { CLI_THINKING_LEVELS } from "../cli/thinking-levels";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 
@@ -35,6 +35,7 @@ export const launchHelp = {
 		"api-key": Flags.string({ description: "API key (defaults to env vars)" }),
 		"system-prompt": Flags.string({ description: "System prompt (default: coding assistant prompt)" }),
 		"append-system-prompt": Flags.string({ description: "Append text or file contents to the system prompt" }),
+		"agents-file": Flags.string({ description: "Replace the user-level AGENTS.md for this process" }),
 		"allow-home": Flags.boolean({ description: "Allow starting in ~ without auto-switching to a temp dir" }),
 		profile: Flags.string({ description: "Use an isolated profile for auth, sessions, settings, and caches" }),
 		alias: Flags.string({ description: "Create a shell shortcut for the selected profile and exit" }),
@@ -103,14 +104,14 @@ export const launchHelp = {
 		}),
 	},
 	examples: [
-		`# Interactive mode\n  ${APP_NAME}`,
-		`# Interactive mode with initial prompt\n  ${APP_NAME} "List all .ts files in src/"`,
-		`# Include files in initial message\n  ${APP_NAME} @prompt.md @image.png "What color is the sky?"`,
-		`# Non-interactive mode (process and exit)\n  ${APP_NAME} -p "List all .ts files in src/"`,
-		`# Continue previous session\n  ${APP_NAME} --continue "What did we discuss?"`,
-		`# Create a shell shortcut for a work profile\n  ${APP_NAME} --profile work --alias omp-work`,
-		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
-		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
-		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,
+		`# Interactive mode\n  ${APP_DISPLAY_NAME}`,
+		`# Interactive mode with initial prompt\n  ${APP_DISPLAY_NAME} "List all .ts files in src/"`,
+		`# Include files in initial message\n  ${APP_DISPLAY_NAME} @prompt.md @image.png "What color is the sky?"`,
+		`# Non-interactive mode (process and exit)\n  ${APP_DISPLAY_NAME} -p "List all .ts files in src/"`,
+		`# Continue previous session\n  ${APP_DISPLAY_NAME} --continue "What did we discuss?"`,
+		`# Create a shell shortcut for a work profile\n  ${APP_DISPLAY_NAME} --profile work --alias omp-work`,
+		`# Use different model (fuzzy matching)\n  ${APP_DISPLAY_NAME} --model opus "Help me refactor this code"`,
+		`# Limit model cycling to specific models\n  ${APP_DISPLAY_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
+		`# Export a session file to HTML and exit\n  ${APP_DISPLAY_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,
 	],
 } satisfies CommandMetadata;

@@ -4,7 +4,9 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	disposeTerminalTitleState,
+	formatRecentTitleTranscript,
 	generateSessionTitle,
+	generateSessionTitleFromRecentTranscript,
 	setExtensionTerminalTitle,
 	setSessionTerminalTitle,
 	setTerminalTitle,
@@ -76,6 +78,34 @@ describe("title generator", () => {
 		expect(request?.tools).toBeUndefined();
 		expect(options?.toolChoice).toBeUndefined();
 		expect(options?.disableReasoning).toBe(true);
+	});
+
+	it("generates recent transcript titles through marker text without tools", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Generated transcript title</title>" }],
+		} as never);
+
+		const title = await generateSessionTitleFromRecentTranscript(
+			[
+				{ role: "user", content: [{ type: "text", text: "Fix transcript rename transport" }] },
+				{ role: "assistant", content: [{ type: "text", text: "I found the unavailable tool call." }] },
+			] as never,
+			createRegistry(model),
+			createSettings(model),
+		);
+
+		expect(title).toBe("Generated transcript title");
+		const request = completeSimpleMock.mock.calls[0]?.[1] as
+			| { systemPrompt?: string[]; tools?: unknown; messages?: Array<{ content?: string }> }
+			| undefined;
+		const options = completeSimpleMock.mock.calls[0]?.[2] as { toolChoice?: unknown } | undefined;
+		expect(request?.systemPrompt).toHaveLength(2);
+		expect(request?.systemPrompt?.join("\n")).not.toContain("set_title");
+		expect(request?.messages?.[0]?.content).toContain("<user-message>");
+		expect(request?.tools).toBeUndefined();
+		expect(options?.toolChoice).toBeUndefined();
 	});
 
 	it.each([
@@ -427,24 +457,25 @@ describe("title generator", () => {
 		expect(title).toBe("Fix login button on mobile");
 	});
 
-	it.each(["Here's a thinking process:", "Thinking process:", "Reasoning process:"])(
-		"rejects a markerless prose thinking preamble: %s",
-		async responseText => {
-			const model = getModelFor("deepseek", "deepseek-v4-pro");
-			vi.spyOn(ai, "completeSimple").mockResolvedValue({
-				stopReason: "stop",
-				content: [{ type: "text", text: responseText }],
-			} as never);
+	it.each([
+		"Here's a thinking process:",
+		"Thinking process:",
+		"Reasoning process:",
+	])("rejects a markerless prose thinking preamble: %s", async responseText => {
+		const model = getModelFor("deepseek", "deepseek-v4-pro");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: responseText }],
+		} as never);
 
-			const title = await generateSessionTitle(
-				"the login button is broken on mobile",
-				createRegistry(model),
-				createSettings(model),
-			);
+		const title = await generateSessionTitle(
+			"the login button is broken on mobile",
+			createRegistry(model),
+			createSettings(model),
+		);
 
-			expect(title).toBeNull();
-		},
-	);
+		expect(title).toBeNull();
+	});
 
 	it("preserves a markerless title that mentions a <think> tag", async () => {
 		const model = getModelFor("deepseek", "deepseek-v4-pro");
@@ -576,6 +607,43 @@ describe("title generator", () => {
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
 		expect(mockComplete.mock.calls[0]?.[0]).toBe(smolModel);
+	});
+
+	it("formats a recent text-only transcript for auto rename", () => {
+		const transcript = formatRecentTitleTranscript([
+			{ role: "user", content: [{ type: "text", text: "user 1 should be dropped" }] },
+			{ role: "assistant", content: [{ type: "text", text: "assistant 1 should be dropped" }] },
+			{ role: "toolResult", content: [{ type: "text", text: "tool output should be ignored" }] },
+			{
+				role: "user",
+				content: [{ type: "text", text: "user 2 implement rename\n```ts\nconst leaked = true;\n```" }],
+			},
+			{ role: "assistant", content: [{ type: "text", text: "assistant 2 discussed rename" }] },
+			{ role: "user", content: [{ type: "text", text: "user 3 wants smol" }] },
+			{ role: "assistant", content: [{ type: "text", text: "assistant 3 explains smol path" }] },
+			{ role: "user", content: [{ type: "text", text: "user 4 wants larger context" }] },
+			{ role: "assistant", content: [{ type: "text", text: "assistant 4 proposes 40000 chars" }] },
+			{ role: "user", content: [{ type: "text", text: "user 5 approves simple prompt" }] },
+			{ role: "assistant", content: [{ type: "text", text: "assistant 5 drops regex parsing" }] },
+			{ role: "user", content: [{ type: "text", text: "user 6 says continue" }] },
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "thinking leak" },
+					{ type: "text", text: "assistant 6 final rename plan" },
+					{ type: "toolCall", name: "search", arguments: { pattern: "leak" } },
+				],
+			},
+		] as never);
+
+		expect(transcript).toContain("<user>\nuser 2 implement rename\n</user>");
+		expect(transcript).toContain("<assistant>\nassistant 6 final rename plan\n</assistant>");
+		expect(transcript).not.toContain("user 1 should be dropped");
+		expect(transcript).not.toContain("assistant 1 should be dropped");
+		expect(transcript).not.toContain("tool output should be ignored");
+		expect(transcript).not.toContain("const leaked");
+		expect(transcript).not.toContain("thinking leak");
+		expect(transcript).not.toContain("search");
 	});
 });
 

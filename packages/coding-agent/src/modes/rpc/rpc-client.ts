@@ -552,7 +552,7 @@ export class RpcClient {
 	 * Use waitForIdle() to wait for completion.
 	 */
 	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "prompt", message, images });
+		this.#getData<void>(await this.#send({ type: "prompt", message, images }));
 	}
 
 	/**

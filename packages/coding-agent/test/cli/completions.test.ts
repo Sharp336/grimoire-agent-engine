@@ -25,6 +25,7 @@ const spec: CompletionSpec = {
 			{ name: "resume", char: "r", description: "Resume", value: { kind: "sessions" }, repeatable: false },
 			{ name: "print", char: "p", description: "Print", value: { kind: "flag" }, repeatable: false },
 			{ name: "extension", char: "e", description: "Ext", value: { kind: "file" }, repeatable: true },
+			{ name: "cwd", description: "Working directory", value: { kind: "dir" }, repeatable: false },
 			{ name: "session-dir", description: "Dir", value: { kind: "dir" }, repeatable: false },
 		],
 		args: [],
@@ -66,6 +67,7 @@ describe("generateCompletion — bash", () => {
 		expect(out).toContain('--tools)\n\t\t\t_omp_comma "read bash"');
 		// multiple-value models flag also uses the comma helper
 		expect(out).toContain("--models)\n\t\t\t_omp_comma");
+		expect(out).toContain('--cwd)\n\t\t\tCOMPREPLY=( $(compgen -d -- "$cur")');
 	});
 
 	it("offers subcommand names and root flags at the top level", () => {
@@ -96,6 +98,7 @@ describe("generateCompletion — zsh", () => {
 		expect(out).toContain("'--tools[Tools]:value:_omp_tools'");
 		expect(out).toContain("'(-r --resume)'{-r,--resume}'[Resume]:session:_omp_call sessions'");
 		expect(out).toContain("'--session-dir[Dir]:dir:_files -/'");
+		expect(out).toContain("'--cwd[Working directory]:dir:_files -/'");
 		// repeatable short+long flag uses the `*{...}` form
 		expect(out).toContain("'*'{-e,--extension}'[Ext]:file:_files'");
 		// the static tool list helper is baked
@@ -126,6 +129,8 @@ describe("generateCompletion — fish", () => {
 		expect(out).toContain("-l thinking -d 'Effort' -x -a 'low high'");
 		expect(out).toContain("-l tools -d 'Tools' -x -a 'read bash'");
 		expect(out).toContain("-s r -l resume -d 'Resume' -x -a '(command omp __complete sessions");
+		expect(out).toContain("-l cwd -d 'Working directory' -x -a '(__fish_complete_directories (commandline -ct))'");
+		expect(out).not.toContain("-l cwd -d 'Working directory' -r -F");
 		// a bare boolean flag takes no value
 		expect(out).toContain("-s p -l print -d 'Print'");
 		expect(out).not.toContain("-l print -d 'Print' -x");
@@ -173,6 +178,7 @@ describe("buildSpec", () => {
 							thinking: { kind: "string", options: ["low", "high"] },
 							"no-tools": { kind: "boolean" },
 							"session-dir": { kind: "string" },
+							cwd: { kind: "string" },
 						},
 						args: {},
 					}),
@@ -185,6 +191,7 @@ describe("buildSpec", () => {
 		expect(byName.get("thinking")).toBe("enum");
 		expect(byName.get("no-tools")).toBe("flag");
 		expect(byName.get("session-dir")).toBe("dir");
+		expect(byName.get("cwd")).toBe("dir");
 	});
 });
 

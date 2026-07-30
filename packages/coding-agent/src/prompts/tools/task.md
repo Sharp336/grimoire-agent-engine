@@ -54,7 +54,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 
 # Communication
-Subagents start blank — no conversation history.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{/if}}
+Subagents start blank — no conversation history or inherited parent AGENTS context.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{/if}}
 Pass large payloads via `local://<path>` URIs, NEVER inline text.
 
 # Format Contracts

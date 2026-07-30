@@ -21,6 +21,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { isAgentsContextFile } from "../utils/context-files";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
@@ -430,7 +431,7 @@ function buildExecutorOptions(
 		settings: session.settings,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
-		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+		contextFiles: session.contextFiles?.filter(file => !isAgentsContextFile(file)),
 		skills,
 		autoloadSkills,
 		workspaceTree: session.workspaceTree,

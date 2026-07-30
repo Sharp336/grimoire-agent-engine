@@ -4,6 +4,11 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	comparableVersionForUpstreamCheck,
+	isUpstreamVersionNewer,
+	updateNotificationDetails,
+} from "@oh-my-pi/pi-coding-agent/app-version";
 import * as pluginCli from "@oh-my-pi/pi-coding-agent/cli/plugin-cli";
 import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import {
@@ -11,9 +16,11 @@ import {
 	buildHomebrewUpdateArgs,
 	buildMiseForceInstallArgs,
 	buildMiseUpgradeArgs,
+	buildMompUpdateInstruction,
 	buildNpmInstallArgs,
 	downloadVerifiedBinary,
 	isMuslLinuxForTest,
+	isMompPackage,
 	parseUpdateArgs,
 	pruneBunInstallCache,
 	replaceBinaryForUpdate,
@@ -237,6 +244,32 @@ describe("update-cli package manager commands", () => {
 		expect(args).toContain("@oh-my-pi/pi-coding-agent@16.3.15");
 		expect(args).toContain("@oh-my-pi/pi-natives@16.3.15");
 		expect(args).toContain("@oh-my-pi/pi-natives-win32-x64@16.3.15");
+	});
+});
+
+describe("update-cli momp safety", () => {
+	it("recognizes only the published personal fork package", () => {
+		expect(isMompPackage("@mikeei/momp")).toBe(true);
+		expect(isMompPackage("@oh-my-pi/pi-coding-agent")).toBe(false);
+	});
+
+	it("prints the explicit manual install command for the personal fork", () => {
+		expect(buildMompUpdateInstruction()).toBe("bun install -g @mikeei/momp@latest --force --minimum-release-age 0");
+	});
+
+	it("compares momp against the upstream base version, not the fork prerelease suffix", () => {
+		expect(comparableVersionForUpstreamCheck("@mikeei/momp", "16.1.22-mikeei-2")).toBe("16.1.22");
+		expect(isUpstreamVersionNewer("16.1.22", "16.1.22-mikeei-2", "@mikeei/momp")).toBe(false);
+		expect(isUpstreamVersionNewer("16.1.23", "16.1.22-mikeei-2", "@mikeei/momp")).toBe(true);
+		expect(isUpstreamVersionNewer("16.1.22", "16.1.21", "@oh-my-pi/pi-coding-agent")).toBe(true);
+	});
+
+	it("labels momp startup updates as upstream work instead of runnable omp updates", () => {
+		expect(updateNotificationDetails("@mikeei/momp")).toEqual({
+			sourceLabel: "upstream",
+			actionText: "Rebase momp from upstream.",
+		});
+		expect(updateNotificationDetails("@oh-my-pi/pi-coding-agent")).toEqual({ actionText: "Run: omp update" });
 	});
 });
 

@@ -19,7 +19,33 @@ import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+function applySystemPromptOverride(options: CreateAgentSessionOptions): string[] {
+	if (typeof options.systemPrompt !== "function") {
+		throw new Error("Expected a system prompt override function");
+	}
+	const prompt = options.systemPrompt(["Built-in base", "Built-in project"]);
+	return typeof prompt === "string" ? [prompt] : prompt;
+}
+
+function createSessionResult(session: AgentSession): CreateAgentSessionResult {
+	return {
+		session,
+		extensionsResult: {
+			extensions: [],
+			errors: [],
+			runner: undefined,
+		} as unknown as CreateAgentSessionResult["extensionsResult"],
+		setToolUIContext: () => {},
+		eventBus: {
+			emit: () => {},
+			on: () => () => {},
+			off: () => {},
+		} as unknown as CreateAgentSessionResult["eventBus"],
+	};
+}
 
 describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 	it("forces enableMCP=false even when baseOptions opts in", async () => {
@@ -230,6 +256,141 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 				await Bun.sleep(0);
 				await tempDir.remove();
 			}
+		}
+	});
+});
+
+describe("createAcpSessionFactory system prompts per workspace", () => {
+	it("replaces launch-cwd prompt discovery with the target workspace sources", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-system-prompt-");
+		let authStorage: AuthStorage | undefined;
+		try {
+			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const workspaceB = tempDir.join("workspace-b");
+			const templatePath = `${workspaceB}/.omp/SYSTEM.template.md`;
+			await Bun.write(templatePath, "Workspace B {{cwd}}");
+			await Bun.write(`${workspaceB}/.omp/APPEND_SYSTEM.md`, "Workspace B append");
+			const fakeSession = {} as AgentSession;
+			const captured: CreateAgentSessionOptions[] = [];
+			const factory = createAcpSessionFactory({
+				baseOptions: {
+					systemPrompt: () => ["Workspace A raw marker"],
+					systemPromptTemplate: "Workspace A template marker",
+				},
+				settings: Settings.isolated({}),
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				parsedArgs: {},
+				rawArgs: [],
+				createSession: async options => {
+					captured.push(options);
+					return createSessionResult(fakeSession);
+				},
+			});
+
+			await factory(workspaceB);
+
+			expect(captured).toHaveLength(1);
+			expect(captured[0].systemPromptTemplate).toBe(templatePath);
+			expect(applySystemPromptOverride(captured[0])).toEqual([
+				"Built-in base",
+				"Built-in project",
+				"Workspace B append",
+			]);
+			expect(applySystemPromptOverride(captured[0]).join("\n")).not.toContain("Workspace A");
+		} finally {
+			authStorage?.close();
+			await tempDir.remove();
+		}
+	});
+
+	it("keeps explicit CLI prompt sources above target workspace discovery", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-system-prompt-explicit-");
+		let authStorage: AuthStorage | undefined;
+		try {
+			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const workspaceB = tempDir.join("workspace-b");
+			await Bun.write(`${workspaceB}/.omp/SYSTEM.template.md`, "Workspace B {{cwd}}");
+			await Bun.write(`${workspaceB}/.omp/APPEND_SYSTEM.md`, "Workspace B append");
+			const fakeSession = {} as AgentSession;
+			let captured: CreateAgentSessionOptions | undefined;
+			const factory = createAcpSessionFactory({
+				baseOptions: {
+					systemPrompt: () => ["Workspace A raw marker"],
+					systemPromptTemplate: "Workspace A template marker",
+				},
+				settings: Settings.isolated({}),
+				sessionDir: tempDir.join("sessions"),
+				systemPromptSource: "Explicit raw {{cwd}}",
+				appendSystemPromptSource: "Explicit append {{cwd}}",
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				parsedArgs: {},
+				rawArgs: [],
+				createSession: async options => {
+					captured = options;
+					return createSessionResult(fakeSession);
+				},
+			});
+
+			await factory(workspaceB);
+
+			expect(captured?.systemPromptTemplate).toBeUndefined();
+			expect(applySystemPromptOverride(captured!)).toEqual([
+				"Explicit raw {{cwd}}",
+				"Built-in project",
+				"Explicit append {{cwd}}",
+			]);
+		} finally {
+			authStorage?.close();
+			await tempDir.remove();
+		}
+	});
+
+	it("fails session creation when the selected workspace template is malformed", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-system-prompt-malformed-");
+		let authStorage: AuthStorage | undefined;
+		try {
+			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const workspaceB = tempDir.join("workspace-b");
+			await Bun.write(`${workspaceB}/.omp/SYSTEM.template.md`, "{{#if}}");
+			const fakeSession = {} as AgentSession;
+			const factory = createAcpSessionFactory({
+				baseOptions: {
+					systemPrompt: () => ["Workspace A raw marker"],
+				},
+				settings: Settings.isolated({}),
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				parsedArgs: {},
+				rawArgs: [],
+				createSession: async options => {
+					await buildSystemPrompt({
+						cwd: options.cwd,
+						systemPromptTemplate: options.systemPromptTemplate,
+						contextFiles: [],
+						skills: [],
+						rules: [],
+						toolNames: ["read"],
+						workspaceTree: {
+							rootPath: options.cwd ?? workspaceB,
+							rendered: "",
+							truncated: false,
+							totalLines: 0,
+							agentsMdFiles: [],
+						},
+						activeRepoContext: null,
+					});
+					return createSessionResult(fakeSession);
+				},
+			});
+
+			await expect(factory(workspaceB)).rejects.toThrow();
+		} finally {
+			authStorage?.close();
+			await tempDir.remove();
 		}
 	});
 });

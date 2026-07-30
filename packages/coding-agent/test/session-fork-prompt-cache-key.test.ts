@@ -47,6 +47,40 @@ async function createSourceSessionFixture(tempDir: TempDir, parentId: string): P
 	return { cwd, sourceFile, sourceHeader, forkSessionDir };
 }
 
+async function withIsolatedPromptConfig<T>(name: string, run: () => Promise<T>): Promise<T> {
+	const originalConfigDir = process.env.PI_CONFIG_DIR;
+	process.env.PI_CONFIG_DIR = `.omp-test-${name}`;
+	try {
+		return await run();
+	} finally {
+		if (originalConfigDir === undefined) {
+			delete process.env.PI_CONFIG_DIR;
+		} else {
+			process.env.PI_CONFIG_DIR = originalConfigDir;
+		}
+	}
+}
+
+async function buildMainOptions(
+	tempDir: TempDir,
+	source: SourceSessionFixture,
+	forkedManager: SessionManager,
+	extraArgs: string[] = [],
+): Promise<CreateAgentSessionOptions> {
+	const authStorage = await AuthStorage.create(tempDir.join("main-auth.db"));
+	try {
+		return await buildSessionOptions(
+			parseArgs(["--cwd", source.cwd, ...extraArgs]),
+			[],
+			forkedManager,
+			new ModelRegistry(authStorage, tempDir.join("models.yml")),
+			Settings.isolated({ "marketplace.autoUpdate": "off" }),
+		);
+	} finally {
+		authStorage.close();
+	}
+}
+
 async function createMinimalSession(
 	tempDir: TempDir,
 	options: CreateAgentSessionOptions,
@@ -68,7 +102,7 @@ async function createMinimalSession(
 		disableExtensionDiscovery: true,
 		preloadedExtensions: undefined,
 		skills: [],
-		contextFiles: [],
+		...(options.userAgentsFile === undefined ? { contextFiles: [] } : {}),
 		promptTemplates: [],
 		slashCommands: [],
 		workspaceTree: {
@@ -151,6 +185,29 @@ describe("provider prompt-cache key session affinity", () => {
 		}
 	});
 
+	it("keeps an explicit prompt-cache key when a direct SDK fork changes templates", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-template-explicit-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-template-explicit");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createMinimalSession(tempDir, {
+				cwd: source.cwd,
+				sessionManager: forkedManager,
+				systemPromptTemplate: "Different {{cwd}}",
+				providerPromptCacheKey: "caller-pinned-cache",
+			});
+			session = created.session;
+			authStorage = created.authStorage;
+
+			expect(session.agent.promptCacheKey).toBe("caller-pinned-cache");
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+		}
+	});
+
 	it("does not auto-inherit parent prompt-cache affinity when fork startup changes request-shaping inputs", async () => {
 		const cases: Array<{ name: string; options: CreateAgentSessionOptions }> = [
 			{
@@ -164,6 +221,10 @@ describe("provider prompt-cache key session affinity", () => {
 			{
 				name: "system",
 				options: { customSystemPrompt: "Use a different provider prompt." },
+			},
+			{
+				name: "template",
+				options: { systemPromptTemplate: "Use {{cwd}} in a different provider template." },
 			},
 			{
 				name: "tools",
@@ -228,6 +289,106 @@ describe("provider prompt-cache key session affinity", () => {
 			expect(options.providerPromptCacheKey).toBeUndefined();
 		} finally {
 			authStorage.close();
+		}
+	});
+	it("does not pre-pin parent prompt-cache affinity for a CLI AGENTS override", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-agents-cli-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-agents-cli");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("agents-cli-auth.db"));
+		const agentsFile = tempDir.join("strict.md");
+		await Bun.write(agentsFile, "Use strict test instructions.");
+		try {
+			const options = await buildSessionOptions(
+				parseArgs(["--cwd", source.cwd, "--agents-file", agentsFile]),
+				[],
+				forkedManager,
+				new ModelRegistry(authStorage, tempDir.join("models.yml")),
+				Settings.isolated({ "marketplace.autoUpdate": "off" }),
+			);
+
+			expect(options.userAgentsFile).toBe(agentsFile);
+			expect(options.providerPromptCacheKey).toBeUndefined();
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("does not pre-pin fork cache affinity for discovered project prompt shapes", async () => {
+		const cases = [
+			{ name: "template", fileName: "SYSTEM.template.md", option: "systemPromptTemplate" },
+			{ name: "append", fileName: "APPEND_SYSTEM.md", option: "systemPrompt" },
+		] as const;
+
+		for (const entry of cases) {
+			using tempDir = TempDir.createSync(`@omp-prompt-cache-discovered-${entry.name}-`);
+			const source = await createSourceSessionFixture(tempDir, `parent-cache-session-discovered-${entry.name}`);
+			const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+			const promptPath = path.join(source.cwd, ".omp", entry.fileName);
+			await fs.mkdir(path.dirname(promptPath), { recursive: true });
+			await Bun.write(promptPath, `${entry.name} prompt`);
+
+			const options = await withIsolatedPromptConfig(`prompt-cache-${entry.name}`, () =>
+				buildMainOptions(tempDir, source, forkedManager),
+			);
+
+			expect(options[entry.option], entry.name).toBeDefined();
+			expect(options.providerPromptCacheKey, entry.name).toBeUndefined();
+		}
+	});
+
+	it("retains fork cache affinity when Main has no effective prompt override", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-main-inherited-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-main-inherited");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+
+		const options = await withIsolatedPromptConfig("prompt-cache-main-inherited", () =>
+			buildMainOptions(tempDir, source, forkedManager),
+		);
+
+		expect(options.systemPrompt).toBeUndefined();
+		expect(options.systemPromptTemplate).toBeUndefined();
+		expect(options.providerPromptCacheKey).toBe(source.sourceHeader.id);
+		expect(options.providerPromptCacheKeySource).toBe("fork");
+	});
+
+	it("keeps explicit Main cache affinity when a discovered template changes prompt shape", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-main-explicit-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-main-explicit");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		const templatePath = path.join(source.cwd, ".omp", "SYSTEM.template.md");
+		await fs.mkdir(path.dirname(templatePath), { recursive: true });
+		await Bun.write(templatePath, "Discovered {{cwd}} template");
+
+		const options = await withIsolatedPromptConfig("prompt-cache-main-explicit", () =>
+			buildMainOptions(tempDir, source, forkedManager, ["--prompt-cache-key", "caller-pinned-cache"]),
+		);
+
+		expect(options.systemPromptTemplate).toBe(templatePath);
+		expect(options.providerPromptCacheKey).toBe("caller-pinned-cache");
+		expect(options.providerPromptCacheKeySource).toBe("explicit");
+	});
+	it("does not inherit parent prompt-cache affinity for a direct SDK AGENTS override", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-agents-sdk-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-agents-sdk");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		const agentsFile = tempDir.join("strict.md");
+		await Bun.write(agentsFile, "Use strict test instructions.");
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createMinimalSession(tempDir, {
+				cwd: source.cwd,
+				sessionManager: forkedManager,
+				userAgentsFile: agentsFile,
+			});
+			session = created.session;
+			authStorage = created.authStorage;
+
+			expect(session.agent.promptCacheKey).toBeUndefined();
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
 		}
 	});
 });

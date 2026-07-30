@@ -77,6 +77,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
+import { loadRoutines, validateRoutineCommandNames } from "../extensibility/routines";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
@@ -214,6 +215,7 @@ import type {
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
+	NewVersionNotificationOptions,
 	RenderSessionContextOptions,
 	SubmittedUserInput,
 	TodoItem,
@@ -549,6 +551,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastStatusSpacer: Spacer | undefined = undefined;
 	lastStatusText: Text | undefined = undefined;
 	fileSlashCommands: Set<string> = new Set();
+	routineSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
 	collabHost?: CollabHost;
@@ -1209,7 +1212,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			for (const skill of this.session.skills) {
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill);
-				commands.push({ name: commandName, description: skill.description });
+				commands.push({
+					name: commandName,
+					description: skill.description,
+					argumentCompletionMode: "prompt",
+				});
 			}
 		}
 		return commands;
@@ -1226,23 +1233,41 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Reload slash commands and autocomplete for the provided working directory. */
 	async refreshSlashCommandState(cwd?: string): Promise<void> {
 		const basePath = cwd ?? this.sessionManager.getCwd();
-		const fileCommands = await loadSlashCommands({ cwd: basePath });
-		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
+		const [fileCommands, routines] = await Promise.all([
+			loadSlashCommands({ cwd: basePath }),
+			loadRoutines({ cwd: basePath }),
+		]);
 		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
 			name: cmd.name,
 			description: cmd.description,
+			argumentCompletionMode: "prompt",
+		}));
+		const existingCommandNames = new Set<string>();
+		for (const command of this.#pendingSlashCommands) {
+			existingCommandNames.add(command.name);
+			for (const alias of command.aliases ?? []) existingCommandNames.add(alias);
+		}
+		for (const command of fileSlashCommands) {
+			existingCommandNames.add(command.name);
+			for (const alias of command.aliases ?? []) existingCommandNames.add(alias);
+		}
+		const routineNames = validateRoutineCommandNames(routines, existingCommandNames);
+		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
+		this.routineSlashCommands = routineNames;
+		this.session.setSlashCommands(fileCommands);
+		this.session.setRoutines(routines);
+		const routineSlashCommands: SlashCommand[] = routines.map(routine => ({
+			name: routine.name,
+			description: routine.description,
+			argumentCompletionMode: "prompt",
 		}));
 		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
 		// `expandSlashCommand` before `expandPromptTemplate`, and builtin command
 		// execution resolves aliases before template expansion. Mirror that command
 		// resolution order by skipping templates whose names already appear in any
-		// builtin/hook/custom/skill/file command token.
-		const reservedNames = new Set<string>();
-		for (const command of this.#pendingSlashCommands) {
-			reservedNames.add(command.name);
-			for (const alias of command.aliases ?? []) reservedNames.add(alias);
-		}
-		for (const command of fileSlashCommands) {
+		// builtin/hook/custom/skill/file/routine command token.
+		const reservedNames = new Set<string>(existingCommandNames);
+		for (const command of routineSlashCommands) {
 			reservedNames.add(command.name);
 			for (const alias of command.aliases ?? []) reservedNames.add(alias);
 		}
@@ -1253,13 +1278,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				// `PromptTemplate.description` from `loadTemplatesFromDir` already includes the
 				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
 				description: template.description,
+				argumentCompletionMode: "prompt",
 			}));
 		this.#baseAutocompleteProvider = this.#inputController.createAutocompleteProvider(
-			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],
+			[...this.#pendingSlashCommands, ...fileSlashCommands, ...routineSlashCommands, ...promptTemplateCommands],
 			basePath,
 		);
 		this.#applyAutocompleteProvider();
-		this.session.setSlashCommands(fileCommands);
 	}
 
 	/**
@@ -4381,8 +4406,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.setWorkingMessage(message);
 	}
 
-	showNewVersionNotification(newVersion: string): void {
-		this.#uiHelpers.showNewVersionNotification(newVersion);
+	showNewVersionNotification(newVersion: string, options?: NewVersionNotificationOptions): void {
+		this.#uiHelpers.showNewVersionNotification(newVersion, options);
 	}
 
 	clearEditor(): void {
@@ -4498,6 +4523,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleContextCommand(): void {
 		this.#commandController.handleContextCommand();
+	}
+
+	handlePromptCacheAuditCommand(): void {
+		this.#commandController.handlePromptCacheAuditCommand();
 	}
 
 	#vibeSessionTransitionBlocked(): boolean {

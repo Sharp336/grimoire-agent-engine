@@ -184,6 +184,8 @@ export interface SlashCommand {
 	argumentHint?: string;
 	/** Whether the command consumes argument text after the command name. False means the full input stays normal prompt text once args are present. */
 	allowArgs?: boolean;
+	/** Whether generic prompt completions may serve command arguments when command-specific completion has no match. */
+	argumentCompletionMode?: "exclusive" | "prompt";
 	/** Dynamic display-only description for slash-command autocomplete. Must be synchronous and side-effect free. */
 	getAutocompleteDescription?: () => string | undefined;
 	// Function to get argument completions for this command
@@ -464,29 +466,25 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				// path (`/tmp/fo` at prompt start, `see /tmp` mid-prompt); fall
 				// through to file-path completion.
 			} else if (!isMidPromptSkillLookup) {
-				// Give matched commands first chance to complete arguments, then
-				// fall through to prompt-composer file completion when they have
-				// no argument provider or it has no matches.
+
 				const commandName = commandText.slice(1, spaceIndex); // Command without "/"
 				const argumentText = commandText.slice(spaceIndex + 1); // Text after space
-
 				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+
 				if (command && "allowArgs" in command && command.allowArgs === false && !/\S/.test(argumentText)) {
 					return null;
 				}
-				if (
-					command &&
-					(!("allowArgs" in command) || command.allowArgs !== false) &&
-					"getArgumentCompletions" in command &&
-					command.getArgumentCompletions
-				) {
-					const argumentSuggestions = await command.getArgumentCompletions(argumentText);
-					if (Array.isArray(argumentSuggestions) && argumentSuggestions.length > 0) {
-						return {
-							items: argumentSuggestions,
-							prefix: argumentText,
-						};
+				if (command && (!("allowArgs" in command) || command.allowArgs !== false)) {
+					if ("getArgumentCompletions" in command && command.getArgumentCompletions) {
+						const argumentSuggestions = await command.getArgumentCompletions(argumentText);
+						if (Array.isArray(argumentSuggestions) && argumentSuggestions.length > 0) {
+							return {
+								items: argumentSuggestions,
+								prefix: argumentText,
+							};
+						}
 					}
+					if ("argumentCompletionMode" in command && command.argumentCompletionMode === "exclusive") return null;
 				}
 			}
 		}

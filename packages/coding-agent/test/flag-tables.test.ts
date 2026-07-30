@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { parseArgs } from "../src/cli/args";
-import { OPTIONAL_VALUE_FLAGS, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
+import { EXTENSION_SHADOWABLE_STRING_FLAGS, OPTIONAL_VALUE_FLAGS, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
 
 /**
@@ -42,6 +42,13 @@ describe("STRING_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 			}
 		});
 	}
+
+	for (const flag of STRING_VALUE_FLAGS) {
+		if (EXTENSION_SHADOWABLE_STRING_FLAGS.has(flag)) continue;
+		it(`${flag} rejects a missing value`, () => {
+			expect(() => parseArgs([flag])).toThrow(`${flag} requires a value`);
+		});
+	}
 });
 
 describe("OPTIONAL_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
@@ -52,6 +59,14 @@ describe("OPTIONAL_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 				result.profile,
 				`parseArgs should release --profile back to its own handler when it follows ${flag}`,
 			).toBe("work");
+		});
+	}
+
+	for (const flag of OPTIONAL_VALUE_FLAGS) {
+		it(`${flag} accepts the bare form`, () => {
+			const result = parseArgs([flag]);
+			expect(result.unrecognizedFlags).toEqual([]);
+			expect(result.messages).toEqual([]);
 		});
 	}
 });

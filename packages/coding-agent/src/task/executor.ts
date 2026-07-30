@@ -35,7 +35,7 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
-import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
+import defaultSubagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -47,12 +47,14 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
+import { discoverSubagentSystemPromptTemplate } from "../system-prompt";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
+import { shortenPath } from "../tools/render-utils";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -2993,6 +2995,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				});
 			}
 
+			const customSubagentTemplatePath = discoverSubagentSystemPromptTemplate(options.cwd);
+			let effectiveSubagentSystemPromptTemplate = defaultSubagentSystemPromptTemplate;
+			if (customSubagentTemplatePath) {
+				try {
+					effectiveSubagentSystemPromptTemplate = await Bun.file(customSubagentTemplatePath).text();
+				} catch (error) {
+					throw new Error(
+						`Could not read subagent system prompt template: ${shortenPath(customSubagentTemplatePath)}`,
+						{ cause: error },
+					);
+				}
+				if (effectiveSubagentSystemPromptTemplate.replace(/^\uFEFF/, "").trim().length === 0) {
+					throw new Error(`Subagent system prompt template is empty: ${shortenPath(customSubagentTemplatePath)}`);
+				}
+			}
+
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
@@ -3032,7 +3050,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+					const subagentPrompt = prompt.render(effectiveSubagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
 						context: options.context?.trim() ?? "",
 						planReference: options.planReference?.content ?? "",

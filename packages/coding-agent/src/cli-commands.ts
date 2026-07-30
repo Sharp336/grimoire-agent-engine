@@ -136,6 +136,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.shellHelp,
 	},
 	{
+		name: "system-prompt",
+		load: () => import("./commands/system-prompt").then(m => m.default),
+		help: commandHelp.systemPromptHelp,
+	},
+	{
 		name: "read",
 		load: () => import("./commands/read").then(m => m.default),
 		help: commandHelp.readHelp,

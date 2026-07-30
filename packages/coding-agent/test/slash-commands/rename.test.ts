@@ -33,14 +33,13 @@ describe("/rename slash command", () => {
 		expect(harness.handleRenameCommand).toHaveBeenCalledWith("my session");
 	});
 
-	it("handles a blank /rename invocation without error", async () => {
+	it("routes a blank /rename invocation through the rename handler for auto-generation", async () => {
 		const harness = createRuntime();
 
 		const handled = await executeBuiltinSlashCommand("/rename   ", harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(harness.showError).toHaveBeenCalledWith("Usage: /rename <title>");
 		expect(harness.setText).toHaveBeenCalledWith("");
-		expect(harness.handleRenameCommand).not.toHaveBeenCalled();
+		expect(harness.handleRenameCommand).toHaveBeenCalledWith("");
 	});
 });

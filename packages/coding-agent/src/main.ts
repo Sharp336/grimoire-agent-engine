@@ -19,9 +19,14 @@ import {
 	postmortem,
 	setInteractiveHost,
 	setProjectDir,
-	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import {
+	APP_PACKAGE_NAME,
+	isUpstreamVersionNewer,
+	updateNotificationDetails,
+	APP_VERSION as VERSION,
+} from "./app-version";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -29,7 +34,6 @@ import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
@@ -87,7 +91,7 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { discoverSystemPromptSources, discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
@@ -122,7 +126,7 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		const data = (await response.json()) as { version?: string };
 		const latestVersion = data.version;
 
-		if (latestVersion && Bun.semver.order(latestVersion, currentVersion) > 0) {
+		if (latestVersion && isUpstreamVersionNewer(latestVersion, currentVersion, APP_PACKAGE_NAME)) {
 			return latestVersion;
 		}
 
@@ -357,6 +361,8 @@ export interface AcpSessionFactoryOptions {
 	baseOptions: CreateAgentSessionOptions;
 	settings: Settings;
 	sessionDir?: string;
+	systemPromptSource?: string;
+	appendSystemPromptSource?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
 	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions">;
@@ -405,7 +411,14 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// replan-driven title refresh consistent with the target project's
 		// policy (PR #3736 follow-up).
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
-		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
+		const [titleSystemPrompt, systemPromptOptions] = await Promise.all([
+			resolvePromptInput(titleSystemPromptSource, "title system prompt"),
+			buildDiscoveredSystemPromptOptions({
+				cwd,
+				systemPromptSource: args.systemPromptSource,
+				appendSystemPromptSource: args.appendSystemPromptSource,
+			}),
+		]);
 		const eventBus = new EventBus();
 		const trustedExtensions =
 			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
@@ -418,6 +431,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		}
 		const { session: nextSession } = await args.createSession({
 			...args.baseOptions,
+			...systemPromptOptions,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,
@@ -507,7 +521,7 @@ async function runInteractiveMode(
 				return;
 			}
 			if (newVersion) {
-				mode.showNewVersionNotification(newVersion);
+				mode.showNewVersionNotification(newVersion, updateNotificationDetails(APP_PACKAGE_NAME));
 			}
 		})
 		.catch(() => {});
@@ -842,46 +856,49 @@ export async function createSessionManager(
 	return undefined;
 }
 
-/** Discover SYSTEM.md file if no CLI system prompt was provided */
-function discoverSystemPromptFile(): string | undefined {
-	// Check project-local first (.omp/SYSTEM.md, .pi/SYSTEM.md legacy)
-	const projectPath = findConfigFile("SYSTEM.md", { user: false });
-	if (projectPath) {
-		return projectPath;
-	}
-	// If not found, check SYSTEM.md file in the global directory.
-	const globalPath = findConfigFile("SYSTEM.md", { user: true });
-	if (globalPath) {
-		return globalPath;
-	}
-	return undefined;
+function buildRawSystemPromptOverride(
+	systemPrompt: string | undefined,
+	appendPrompt: string | undefined,
+): CreateAgentSessionOptions["systemPrompt"] | undefined {
+	if (!systemPrompt && !appendPrompt) return undefined;
+	return defaultPrompt => {
+		if (systemPrompt && appendPrompt) {
+			return [systemPrompt, ...defaultPrompt.slice(1), appendPrompt];
+		}
+		if (systemPrompt) {
+			return [systemPrompt, ...defaultPrompt.slice(1)];
+		}
+		return [...defaultPrompt, appendPrompt ?? ""];
+	};
 }
 
-/** Discover APPEND_SYSTEM.md file if no CLI append system prompt was provided */
-function discoverAppendSystemPromptFile(): string | undefined {
-	const projectPath = findConfigFile("APPEND_SYSTEM.md", { user: false });
-	if (projectPath) {
-		return projectPath;
+export async function buildDiscoveredSystemPromptOptions({
+	cwd,
+	systemPromptSource,
+	appendSystemPromptSource,
+}: {
+	cwd: string;
+	systemPromptSource?: string;
+	appendSystemPromptSource?: string;
+}): Promise<Pick<CreateAgentSessionOptions, "systemPrompt" | "systemPromptTemplate">> {
+	const discoveredSystemPrompt = discoverSystemPromptSources(cwd);
+	if (!systemPromptSource && discoveredSystemPrompt.suppressedTemplatePath) {
+		process.stderr.write(
+			`${chalk.yellow(
+				`Warning: ${discoveredSystemPrompt.rawPath} takes precedence over ${discoveredSystemPrompt.suppressedTemplatePath}; ignoring the template.\n`,
+			)}`,
+		);
 	}
-	const globalPath = findConfigFile("APPEND_SYSTEM.md", { user: true });
-	if (globalPath) {
-		return globalPath;
-	}
-	return undefined;
-}
+	const rawSystemPromptSource = systemPromptSource ?? discoveredSystemPrompt?.rawPath;
+	const systemPromptTemplateSource = systemPromptSource ? undefined : discoveredSystemPrompt?.templatePath;
+	const resolvedSystemPrompt = await resolvePromptInput(rawSystemPromptSource, "system prompt");
+	const appendPromptSource = appendSystemPromptSource ?? discoveredSystemPrompt?.appendPath;
+	const resolvedAppendPrompt = await resolvePromptInput(appendPromptSource, "append system prompt");
 
-/** Apply resolved CLI/discovered prompt files without bypassing system prompt templates. */
-export function applyResolvedSystemPromptInputs(
-	options: CreateAgentSessionOptions,
-	resolvedSystemPrompt: string | undefined,
-	resolvedAppendPrompt: string | undefined,
-): void {
-	if (resolvedSystemPrompt) {
-		options.customSystemPrompt = resolvedSystemPrompt;
-	}
-	if (resolvedAppendPrompt) {
-		options.appendSystemPrompt = resolvedAppendPrompt;
-	}
+	return {
+		systemPromptTemplate: systemPromptTemplateSource,
+		systemPrompt: buildRawSystemPromptOverride(resolvedSystemPrompt, resolvedAppendPrompt),
+	};
 }
 
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
@@ -892,8 +909,9 @@ export async function buildSessionOptions(
 	modelRegistry: ModelRegistry,
 	activeSettings: Settings,
 ): Promise<CreateAgentSessionOptions> {
+	const cwd = parsed.cwd ?? getProjectDir();
 	const options: CreateAgentSessionOptions = {
-		cwd: parsed.cwd ?? getProjectDir(),
+		cwd,
 		autoApprove: parsed.autoApprove ?? false,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
@@ -908,16 +926,15 @@ export async function buildSessionOptions(
 	if (parsed.maxTime !== undefined) {
 		options.deadline = Date.now() + parsed.maxTime * 1000;
 	}
-
-	// Auto-discover SYSTEM.md if no CLI system prompt provided
-	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
-	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
-	const titleSystemPromptSource = discoverTitleSystemPromptFile();
-	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt] = await Promise.all([
-		resolvePromptInput(systemPromptSource, "system prompt"),
-		resolvePromptInput(appendPromptSource, "append system prompt"),
-		resolvePromptInput(titleSystemPromptSource, "title system prompt"),
-	]);
+	if (parsed.agentsFile !== undefined) {
+		options.userAgentsFile = parsed.agentsFile;
+	}
+	const systemPromptOptions = await buildDiscoveredSystemPromptOptions({
+		cwd,
+		systemPromptSource: parsed.systemPrompt,
+		appendSystemPromptSource: parsed.appendSystemPrompt,
+	});
+	Object.assign(options, systemPromptOptions);
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
@@ -935,8 +952,9 @@ export async function buildSessionOptions(
 			scopedModelOverride ||
 			parsed.model !== undefined ||
 			parsed.thinking !== undefined ||
-			parsed.systemPrompt !== undefined ||
-			parsed.appendSystemPrompt !== undefined ||
+			options.systemPrompt !== undefined ||
+			options.systemPromptTemplate !== undefined ||
+			parsed.agentsFile !== undefined ||
 			parsed.tools !== undefined ||
 			parsed.noTools === true;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
@@ -1114,12 +1132,12 @@ export async function buildSessionOptions(
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)
 
-	// System prompt
-	applyResolvedSystemPromptInputs(options, resolvedSystemPrompt, resolvedAppendPrompt);
 	// Replan-driven title refresh resolves the override from this same field on
 	// `AgentSession`, so threading it through `CreateAgentSessionOptions` keeps
 	// both first-input titling (`input-controller.ts`) and replan refresh
 	// (`AgentSession.#refreshTitleAfterReplan`) on one source of truth.
+	const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
+	const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 	if (titleSystemPrompt) {
 		options.titleSystemPrompt = titleSystemPrompt;
 	}
@@ -1582,6 +1600,8 @@ export async function runRootCommand(
 			baseOptions: sessionOptions,
 			settings: settingsInstance,
 			sessionDir: parsedArgs.sessionDir,
+			systemPromptSource: parsedArgs.systemPrompt,
+			appendSystemPromptSource: parsedArgs.appendSystemPrompt,
 			authStorage,
 			modelRegistry,
 			parsedArgs,

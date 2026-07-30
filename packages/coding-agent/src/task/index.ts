@@ -121,6 +121,7 @@ export {
 	taskSchema,
 } from "./types";
 
+
 /**
  * Preview text for a child result. Falls back to "(no output)" — annotated
  * with the request count when the child actually did work, so the parent can
@@ -657,7 +658,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
-			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 		});
@@ -1432,7 +1432,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				acquiredAt: launchTiming?.acquiredAt,
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 				blockedAgent: this.#blockedAgent,
-				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 				signal,

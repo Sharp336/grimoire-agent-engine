@@ -54,7 +54,6 @@ import {
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
-import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../../internal-urls";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
@@ -1918,12 +1917,15 @@ export class AcpAgent implements Agent {
 		});
 	}
 
-	async #emitAvailableCommandsUpdate(record: ManagedSessionRecord): Promise<void> {
+	async #emitAvailableCommandsUpdate(
+		record: ManagedSessionRecord,
+		availableCommands?: AvailableCommand[],
+	): Promise<void> {
 		await this.#connection.sessionUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "available_commands_update",
-				availableCommands: await this.#buildAvailableCommands(record.session),
+				availableCommands: availableCommands ?? (await this.#buildAvailableCommands(record.session)),
 			},
 		});
 	}
@@ -1942,9 +1944,8 @@ export class AcpAgent implements Agent {
 		await refreshAgentDiscovery(cwd);
 		resetCapabilities();
 		await record.session.refreshSkills();
-		const fileCommands = await loadSlashCommands({ cwd });
-		record.session.setSlashCommands(fileCommands);
-		await this.#emitAvailableCommandsUpdate(record);
+		const availableCommands = await this.#buildAvailableCommands(record.session);
+		await this.#emitAvailableCommandsUpdate(record, availableCommands);
 	}
 
 	async #emitEndOfTurnUpdates(record: ManagedSessionRecord): Promise<void> {

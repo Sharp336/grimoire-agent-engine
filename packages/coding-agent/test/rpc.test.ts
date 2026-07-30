@@ -28,6 +28,65 @@ const isCompactionEntry = (entry: FileEntry): entry is CompactionEntry => entry.
 /**
  * RPC mode tests.
  */
+describe("RPC plugin reload", () => {
+	test("keeps the advertised command state when candidate routines conflict", async () => {
+		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-rpc-reload-test-"));
+		const agentDir = path.join(root, "agent");
+		const projectDir = path.join(root, "project");
+		const commandsDir = path.join(agentDir, "commands");
+		const routinesDir = path.join(agentDir, "routines");
+		await fs.promises.mkdir(projectDir, { recursive: true });
+		await fs.promises.mkdir(commandsDir, { recursive: true });
+		await fs.promises.mkdir(routinesDir, { recursive: true });
+		await fs.promises.writeFile(
+			path.join(commandsDir, "stable.md"),
+			"---\ndescription: Stable command\n---\nStable $ARGUMENTS\n",
+		);
+		await fs.promises.writeFile(
+			path.join(routinesDir, "old-routine.yaml"),
+			"description: Old routine\nsteps:\n  - message: Old routine remains available\n",
+		);
+		const rpcClient = new RpcClient({
+			cliPath: path.join(import.meta.dir, "..", "src", "cli.ts"),
+			cwd: projectDir,
+			env: {
+				ANTHROPIC_API_KEY: "test-key",
+				PI_CODING_AGENT_DIR: agentDir,
+				PI_NO_TITLE: "1",
+			},
+			provider: "anthropic",
+			model: "claude-sonnet-4-20250514",
+		});
+		const updates: Array<Array<{ name: string }>> = [];
+		const unsubscribe = rpcClient.onAvailableCommandsUpdate(commands => {
+			updates.push(commands);
+		});
+
+		try {
+			await rpcClient.start();
+			const committed = (await rpcClient.getAvailableCommands()).map(command => command.name);
+			expect(committed).toContain("stable");
+			expect(committed).toContain("old-routine");
+			const updateCount = updates.length;
+			await fs.promises.writeFile(
+				path.join(routinesDir, "stable.yaml"),
+				"description: Rejected conflict\nsteps:\n  - message: Must not replace state\n",
+			);
+
+			await expect(rpcClient.prompt("/reload-plugins")).rejects.toThrow(
+				"Routine /stable conflicts with existing slash command /stable",
+			);
+
+			expect(updates).toHaveLength(updateCount);
+			expect(updates.at(-1)?.map(command => command.name)).toEqual(committed);
+		} finally {
+			unsubscribe();
+			rpcClient.stop();
+			removeSyncWithRetries(root);
+		}
+	}, 30000);
+});
+
 describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 	let client: RpcClient;
 	let sessionDir: string;

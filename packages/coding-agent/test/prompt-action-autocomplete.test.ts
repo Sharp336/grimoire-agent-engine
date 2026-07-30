@@ -113,7 +113,14 @@ describe("prompt action autocomplete", () => {
 
 	it("treats # prompt-action tokens as literal text inside slash command arguments without completions", async () => {
 		const provider = createPromptActionAutocompleteProvider({
-			commands: [{ name: "rename", description: "Rename current session", allowArgs: true }],
+			commands: [
+				{
+					name: "rename",
+					description: "Rename current session",
+					allowArgs: true,
+					argumentCompletionMode: "exclusive",
+				},
+			],
 			basePath: "/tmp",
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
@@ -129,6 +136,34 @@ describe("prompt action autocomplete", () => {
 		const suggestions = await provider.getSuggestions([line], 0, line.length);
 
 		expect(suggestions).toBeNull();
+	});
+
+	it("returns prompt actions inside prompt-producing slash command arguments", async () => {
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [
+				{
+					name: "review",
+					description: "Review files",
+					allowArgs: true,
+					argumentCompletionMode: "prompt",
+				},
+			],
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const line = "/review inspect #copy";
+		const suggestions = await provider.getSuggestions([line], 0, line.length);
+
+		expect(suggestions?.prefix).toBe("#copy");
+		expect(suggestions?.items.map(item => item.label)).toEqual(["Copy current line", "Copy whole prompt"]);
 	});
 
 	it("returns # prompt-action completions for matched slash commands that reject arguments", async () => {

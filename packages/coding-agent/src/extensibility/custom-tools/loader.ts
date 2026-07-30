@@ -17,6 +17,7 @@ import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
+import { loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import * as typebox from "../legacy-typebox";
 import { createNoOpUIContext, resolvePath, withHostGuard } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
@@ -75,8 +76,12 @@ async function loadTool(
 	}
 
 	try {
-		const module = await withHostGuard(() => import(resolvedPath));
-		const factory = (module.default ?? module) as CustomToolFactory;
+		const loadedModule = await withHostGuard(() => loadLegacyPiModule(resolvedPath));
+		const factory = (
+			typeof loadedModule === "object" && loadedModule !== null && "default" in loadedModule
+				? loadedModule.default
+				: loadedModule
+		) as CustomToolFactory;
 
 		if (typeof factory !== "function") {
 			return { tools: [], errors: [{ path: toolPath, error: "Tool must export a default function", source }] };

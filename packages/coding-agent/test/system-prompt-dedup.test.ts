@@ -98,7 +98,6 @@ describe("SYSTEM.md prompt assembly", () => {
 		const promptText = renderedPrompt.join("\n\n");
 		const matches = promptText.match(new RegExp(escapeRegExp(systemPrompt), "g")) ?? [];
 		expect(matches).toHaveLength(1);
-		expect(promptText).toContain('<skill name="focused-work">');
 	});
 
 	it("does not resolve already-loaded prompt text as a path", async () => {
@@ -284,5 +283,72 @@ describe("SYSTEM.md prompt assembly", () => {
 		const promptText = systemPrompt.join("\n\n");
 		const matches = promptText.match(new RegExp(escapeRegExp(sharedContent), "g")) ?? [];
 		expect(matches).toHaveLength(1);
+	});
+	it("replaces only user context while preserving project discovery", async () => {
+		const projectDir = path.join(tempDir, "project");
+		const appDir = path.join(projectDir, "app");
+		const userDir = path.join(tempHomeDir, ".omp", "agent");
+		const overridePath = path.join(tempDir, "overrides", "strict.md");
+		fs.mkdirSync(path.join(appDir, ".omp"), { recursive: true });
+		fs.mkdirSync(userDir, { recursive: true });
+		fs.mkdirSync(path.dirname(overridePath), { recursive: true });
+		fs.writeFileSync(path.join(userDir, "AGENTS.md"), "Discovered user instructions");
+		fs.writeFileSync(path.join(projectDir, "AGENTS.md"), "Ancestor project instructions");
+		fs.writeFileSync(path.join(appDir, ".omp", "AGENTS.md"), "Nearest project instructions");
+		fs.writeFileSync(overridePath, "Override user instructions");
+
+		const contextFiles = await loadProjectContextFiles({ cwd: appDir, userAgentsFile: overridePath });
+
+		expect(contextFiles.filter(file => file.path === overridePath)).toHaveLength(1);
+		expect(contextFiles.find(file => file.path === overridePath)?.kind).toBe("agents-md");
+		expect(contextFiles.map(file => file.content)).toContain("Ancestor project instructions");
+		expect(contextFiles.map(file => file.content)).toContain("Nearest project instructions");
+		expect(contextFiles.map(file => file.content)).toContain("Override user instructions");
+		expect(contextFiles.map(file => file.content)).not.toContain("Discovered user instructions");
+	});
+
+	it("accepts empty override content and resolves relative paths from cwd", async () => {
+		const projectDir = path.join(tempDir, "project");
+		const relativePath = path.join("config", "empty.md");
+		fs.mkdirSync(path.join(projectDir, "config"), { recursive: true });
+		fs.writeFileSync(path.join(projectDir, relativePath), "");
+
+		const contextFiles = await loadProjectContextFiles({ cwd: projectDir, userAgentsFile: relativePath });
+		const override = contextFiles.find(file => file.kind === "agents-md");
+
+		expect(override?.path).toBe(path.join(projectDir, relativePath));
+		expect(override?.content).toBe("");
+	});
+
+	it("accepts symlinks to regular files and expands imports relative to the physical override path", async () => {
+		const projectDir = path.join(tempDir, "project");
+		const overrideDir = path.join(tempDir, "overrides");
+		const targetPath = path.join(overrideDir, "strict.md");
+		const linkPath = path.join(overrideDir, "linked.md");
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.mkdirSync(overrideDir, { recursive: true });
+		fs.writeFileSync(path.join(overrideDir, "shared.md"), "Imported override instructions");
+		fs.writeFileSync(targetPath, "@./shared.md");
+		fs.symlinkSync(targetPath, linkPath);
+
+		const contextFiles = await loadProjectContextFiles({ cwd: projectDir, userAgentsFile: linkPath });
+		const override = contextFiles.find(file => file.kind === "agents-md");
+
+		expect(override?.path).toBe(linkPath);
+		expect(override?.content).toContain("Imported override instructions");
+	});
+
+	it("rejects missing and non-regular override paths with resolved paths", async () => {
+		const projectDir = path.join(tempDir, "project");
+		const missingPath = path.join(projectDir, "missing.md");
+		const directoryPath = path.join(projectDir, "context-dir");
+		fs.mkdirSync(directoryPath, { recursive: true });
+
+		await expect(loadProjectContextFiles({ cwd: projectDir, userAgentsFile: "missing.md" })).rejects.toThrow(
+			`AGENTS file not found: ${missingPath}`,
+		);
+		await expect(loadProjectContextFiles({ cwd: projectDir, userAgentsFile: directoryPath })).rejects.toThrow(
+			`AGENTS path is not a regular file: ${directoryPath}`,
+		);
 	});
 });

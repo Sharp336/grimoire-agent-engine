@@ -304,6 +304,25 @@ describe("structured subagent primitive", () => {
 		expect(evalPolicy.enableIrc).toBe(taskPolicy.enableIrc);
 	});
 
+	it("filters canonical and explicitly marked AGENTS context before child execution", async () => {
+		mockDiscovery();
+		const childSession = session();
+		childSession.contextFiles = [
+			{ path: "/project/AGENTS.md", content: "canonical" },
+			{ path: "/tmp/strict.md", content: "override", kind: "agents-md" },
+			{ path: "/project/context.md", content: "project" },
+		];
+		let forwardedContextFiles: executorModule.ExecutorOptions["contextFiles"];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			forwardedContextFiles = options.contextFiles;
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: childSession }));
+
+		expect(forwardedContextFiles).toEqual([{ path: "/project/context.md", content: "project" }]);
+	});
+
 	it("rejects an invalid caller schema before executor dispatch in both modes", async () => {
 		mockDiscovery();
 		const dispatch = vi.spyOn(executorModule, "runSubprocess");

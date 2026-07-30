@@ -203,15 +203,46 @@ describe("CombinedAutocompleteProvider", () => {
 			}
 		});
 
-		it("returns @ file-reference completions inside slash command arguments without command completions", async () => {
+		it("keeps @ literal when a slash command exclusively owns its arguments", async () => {
 			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-rename-args-"));
 			try {
 				fs.writeFileSync(path.join(baseDir, "copy-target.ts"), "export {};\n");
 				const provider = new CombinedAutocompleteProvider(
-					[{ name: "rename", description: "Rename current session", allowArgs: true }],
+					[
+						{
+							name: "rename",
+							description: "Rename current session",
+							allowArgs: true,
+							argumentCompletionMode: "exclusive",
+						},
+					],
 					baseDir,
 				);
 				const line = "/rename repro @";
+				const result = await provider.getSuggestions([line], 0, line.length);
+
+				expect(result).toBeNull();
+			} finally {
+				fs.rmSync(baseDir, { recursive: true, force: true });
+			}
+		});
+
+		it("returns @ file-reference completions for prompt-producing slash command arguments", async () => {
+			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-prompt-command-args-"));
+			try {
+				fs.writeFileSync(path.join(baseDir, "copy-target.ts"), "export {};\n");
+				const provider = new CombinedAutocompleteProvider(
+					[
+						{
+							name: "review",
+							description: "Review files",
+							allowArgs: true,
+							argumentCompletionMode: "prompt",
+						},
+					],
+					baseDir,
+				);
+				const line = "/review inspect @";
 				const result = await provider.getSuggestions([line], 0, line.length);
 
 				expect(result?.prefix).toBe("@");

@@ -7,6 +7,7 @@ import * as url from "node:url";
 import type { ParseResult, ParserPlugin } from "@babel/parser";
 import { parse as parseBabel } from "@babel/parser";
 import { isCompiledBinary, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
+import { APP_PACKAGE_NAME } from "../../app-version";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
 
 const IS_COMPILED_BINARY = isCompiledBinary();
@@ -963,7 +964,12 @@ function resolveCanonicalPiSpecifier(remappedSpecifier: string): string {
 	if (override) {
 		return override;
 	}
-	return getResolvedSpecifier(remappedSpecifier);
+	const canonicalCodingAgent = `${CANONICAL_PI_SCOPE}/pi-coding-agent`;
+	const selfSpecifier =
+		remappedSpecifier === canonicalCodingAgent || remappedSpecifier.startsWith(`${canonicalCodingAgent}/`)
+			? `${APP_PACKAGE_NAME}${remappedSpecifier.slice(canonicalCodingAgent.length)}`
+			: remappedSpecifier;
+	return getResolvedSpecifier(selfSpecifier);
 }
 
 function toImportSpecifier(resolvedPath: string): string {

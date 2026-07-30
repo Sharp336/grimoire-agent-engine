@@ -30,6 +30,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
+import type { Routine } from "../extensibility/routines";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -145,6 +146,8 @@ export interface AgentSessionConfig {
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion. */
 	slashCommands?: FileSlashCommand[];
+	/** User-defined routines for slash-style sequential execution. */
+	routines?: Routine[];
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
 	/** Loaded skills already discovered by the SDK. */

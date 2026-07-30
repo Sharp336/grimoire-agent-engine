@@ -4,6 +4,7 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as path from "node:path";
 
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { isConPTYHosted } from "@oh-my-pi/pi-tui";
@@ -14,13 +15,15 @@ import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
-import { formatTitleUserMessage } from "../tiny/message-preproc";
+import titleTranscriptSystemPrompt from "../prompts/system/title-transcript-system.md" with { type: "text" };
+import { formatTitleUserMessage, stripCodeBlocks } from "../tiny/message-preproc";
 import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
+const TITLE_TRANSCRIPT_SYSTEM_PROMPT = prompt.render(titleTranscriptSystemPrompt);
 
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
@@ -87,6 +90,16 @@ function disposeWindowsConsoleTitleApi(): void {
 // ceiling costs nothing when thinking is genuinely suppressed and keeps the
 // `<title>` marker output reachable when it isn't (issue #4355).
 const TITLE_MAX_TOKENS = 1024;
+const TITLE_TRANSCRIPT_MAX_USER_MESSAGES = 5;
+const TITLE_TRANSCRIPT_MAX_ASSISTANT_MESSAGES = 5;
+const TITLE_TRANSCRIPT_MAX_MESSAGE_CHARS = 10_000;
+const TITLE_TRANSCRIPT_MAX_TOTAL_CHARS = 40_000;
+
+interface TitleModelSelectionOptions {
+	roleOrder?: readonly string[];
+	fallbackToCurrentModel?: boolean;
+	userMessageFormatter?: (message: string) => string;
+}
 
 /** Matches the title the model wraps in `<title>...</title>`. */
 const TITLE_MARKER_GLOBAL_RE = /<title>([\s\S]*?)<\/title>|<title\s*\/>|<title>\s*$/gi;
@@ -98,16 +111,133 @@ const LEADING_THINKING_FENCE_RE = /^\s*```(?:thinking|reasoning)\b[\s\S]*?```\s*
 const LEADING_PROSE_THINKING_PREAMBLE_RE =
 	/^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?(?:thinking|thought|reasoning)[ \t]+process[ \t]*:?[ \t]*(?:\r?\n|$)/i;
 
-function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api> | undefined {
+function getTitleModel(
+	registry: ModelRegistry,
+	settings: Settings,
+	currentModel?: Model<Api>,
+	options?: TitleModelSelectionOptions,
+): Model<Api> | undefined {
 	const availableModels = registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
 
-	const titleModel = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels)?.model;
+	const roleOrder = options?.roleOrder ?? ["tiny", "commit", "smol"];
+	const titleModel = resolveRoleSelection(roleOrder, settings, availableModels)?.model;
 	if (titleModel) return titleModel;
 
-	if (currentModel) return currentModel;
+	if (options?.fallbackToCurrentModel !== false && currentModel) return currentModel;
 
 	return undefined;
+}
+
+interface TextBlock {
+	type: "text";
+	text: string;
+}
+
+interface RecentTitleMessage {
+	role: "user" | "assistant";
+	text: string;
+	index: number;
+}
+
+function isTextBlock(value: unknown): value is TextBlock {
+	if (typeof value !== "object" || value === null) return false;
+	const block = value as { type?: unknown; text?: unknown };
+	return block.type === "text" && typeof block.text === "string";
+}
+
+function extractTextOnly(message: AgentMessage): string {
+	const content = "content" in message ? message.content : undefined;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter(isTextBlock)
+		.map(block => block.text)
+		.join("\n");
+}
+
+function capTranscriptMessage(text: string): string {
+	const cleaned = stripCodeBlocks(text).trim();
+	return cleaned.length > TITLE_TRANSCRIPT_MAX_MESSAGE_CHARS
+		? `${cleaned.slice(0, TITLE_TRANSCRIPT_MAX_MESSAGE_CHARS)}…`
+		: cleaned;
+}
+
+function selectRecentTitleMessages(messages: readonly AgentMessage[]): RecentTitleMessage[] {
+	const selected: RecentTitleMessage[] = [];
+	let userCount = 0;
+	let assistantCount = 0;
+
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (!message || (message.role !== "user" && message.role !== "assistant")) continue;
+		if (message.role === "user" && userCount >= TITLE_TRANSCRIPT_MAX_USER_MESSAGES) continue;
+		if (message.role === "assistant" && assistantCount >= TITLE_TRANSCRIPT_MAX_ASSISTANT_MESSAGES) continue;
+
+		const text = capTranscriptMessage(extractTextOnly(message));
+		if (!text) continue;
+
+		selected.push({ role: message.role, text, index });
+		if (message.role === "user") userCount++;
+		else assistantCount++;
+
+		if (
+			userCount >= TITLE_TRANSCRIPT_MAX_USER_MESSAGES &&
+			assistantCount >= TITLE_TRANSCRIPT_MAX_ASSISTANT_MESSAGES
+		) {
+			break;
+		}
+	}
+
+	return selected.sort((a, b) => a.index - b.index);
+}
+
+export function formatRecentTitleTranscript(messages: readonly AgentMessage[]): string | null {
+	const rendered = selectRecentTitleMessages(messages).map(item => `<${item.role}>\n${item.text}\n</${item.role}>`);
+	if (rendered.length === 0) return null;
+
+	const transcript = rendered.join("\n\n");
+	return transcript.length > TITLE_TRANSCRIPT_MAX_TOTAL_CHARS
+		? `…${transcript.slice(-TITLE_TRANSCRIPT_MAX_TOTAL_CHARS)}`
+		: transcript;
+}
+
+function formatTitleTranscriptUserMessage(message: string): string {
+	return `<user-message>\n${message}\n</user-message>`;
+}
+
+export async function generateSessionTitleFromRecentTranscript(
+	messages: readonly AgentMessage[],
+	registry: ModelRegistry,
+	settings: Settings,
+	sessionId?: string,
+	currentModel?: Model<Api>,
+	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
+): Promise<string | null> {
+	const transcript = formatRecentTitleTranscript(messages);
+	if (!transcript) {
+		logger.debug("title-generator: skipped empty transcript", { sessionId, reason: "empty-transcript" });
+		return null;
+	}
+
+	const smolModel = resolveRoleSelection(["smol"], settings, registry.getAvailable())?.model;
+	if (!smolModel) {
+		throw new Error(
+			"Cannot auto-generate session name: no smol model configured. Set `modelRoles.smol` or `PI_SMOL_MODEL`.",
+		);
+	}
+
+	return generateTitleOnline(
+		transcript,
+		registry,
+		settings,
+		sessionId,
+		currentModel,
+		metadataResolver,
+		undefined,
+		TITLE_TRANSCRIPT_SYSTEM_PROMPT,
+		{ roleOrder: ["smol"], fallbackToCurrentModel: false, userMessageFormatter: formatTitleTranscriptUserMessage },
+	);
 }
 
 /**
@@ -214,8 +344,9 @@ export async function generateTitleOnline(
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
+	modelSelection?: TitleModelSelectionOptions,
 ): Promise<string | null> {
-	const model = getTitleModel(registry, settings, currentModel);
+	const model = getTitleModel(registry, settings, currentModel, modelSelection);
 	if (!model) {
 		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
 		return null;
@@ -228,7 +359,7 @@ export async function generateTitleOnline(
 	// the prompt's `{"title": ...}` JSON example verbatim as the session title;
 	// markers work uniformly everywhere.
 	const systemPrompt = titleSystemPrompt ? [titleSystemPrompt, TITLE_MARKER_INSTRUCTION] : [TITLE_SYSTEM_PROMPT];
-	const userMessage = formatTitleUserMessage(firstMessage);
+	const userMessage = (modelSelection?.userMessageFormatter ?? formatTitleUserMessage)(firstMessage);
 	const modelName = `${model.provider}/${model.id}`;
 	const modelContext = {
 		sessionId,

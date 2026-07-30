@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -123,6 +123,8 @@ class FakeAgentSession {
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
 	customCommands: [] = [];
+	slashCommands: Array<{ name: string }> = [];
+	routines: Array<{ name: string }> = [];
 	extensionRunner = undefined;
 	isStreaming = false;
 	queuedMessageCount = 0;
@@ -195,8 +197,19 @@ class FakeAgentSession {
 		}
 	}
 
-	setSlashCommands(_commands: unknown[]): void {
-		// no-op for tests
+	setSlashCommands(commands: Array<{ name: string }>): void {
+		this.slashCommands = [...commands];
+	}
+
+	setRoutines(routines: Array<{ name: string }>): void {
+		this.routines = [...routines];
+	}
+
+	hasRegisteredCommand(name: string): boolean {
+		return (
+			this.slashCommands.some(command => command.name === name) ||
+			this.routines.some(routine => routine.name === name)
+		);
 	}
 	setUsageFallbackConfirmer(
 		confirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined,
@@ -452,6 +465,7 @@ const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 afterEach(async () => {
+	vi.useRealTimers();
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {
@@ -1762,6 +1776,76 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("keeps ACP command state atomic when plugin reload validation fails", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const bootstrapCommitted = Promise.withResolvers<void>();
+		const setRoutines = session.setRoutines.bind(session);
+		session.setRoutines = routines => {
+			setRoutines(routines);
+			bootstrapCommitted.resolve();
+		};
+		try {
+			vi.advanceTimersByTime(ACP_BOOTSTRAP_RACE_GUARD_MS);
+			vi.useRealTimers();
+			await bootstrapCommitted.promise;
+		} finally {
+			vi.useRealTimers();
+			session.setRoutines = setRoutines;
+		}
+		const agentDir = path.join(path.dirname(harness.cwdA), "agent");
+		const commandsDir = path.join(agentDir, "commands");
+		const routinesDir = path.join(agentDir, "routines");
+		await fs.promises.mkdir(commandsDir, { recursive: true });
+		await fs.promises.mkdir(routinesDir, { recursive: true });
+		await fs.promises.writeFile(
+			path.join(commandsDir, "stable.md"),
+			"---\ndescription: Stable command\n---\nStable $ARGUMENTS\n",
+		);
+		await fs.promises.writeFile(
+			path.join(routinesDir, "old-routine.yaml"),
+			"description: Old routine\nsteps:\n  - message: Old routine remains available\n",
+		);
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000006",
+			prompt: [{ type: "text", text: "/reload-plugins" }],
+		} as PromptRequest);
+		expect(session.hasRegisteredCommand("stable")).toBe(true);
+		expect(session.hasRegisteredCommand("old-routine")).toBe(true);
+
+		await fs.promises.writeFile(
+			path.join(routinesDir, "stable.yaml"),
+			"description: Rejected conflict\nsteps:\n  - message: Must not replace state\n",
+		);
+		const updateCount = harness.updates.filter(
+			update =>
+				update.sessionId === created.sessionId && update.update.sessionUpdate === "available_commands_update",
+		).length;
+
+		await expect(
+			harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000007",
+				prompt: [{ type: "text", text: "/reload-plugins" }],
+			} as PromptRequest),
+		).rejects.toThrow("Routine /stable conflicts with existing slash command /stable");
+		harness.abortController.abort();
+
+		expect(session.hasRegisteredCommand("stable")).toBe(true);
+		expect(session.hasRegisteredCommand("old-routine")).toBe(true);
+		expect(session.routines.some(routine => routine.name === "stable")).toBe(false);
+		expect(
+			harness.updates.filter(
+				update =>
+					update.sessionId === created.sessionId && update.update.sessionUpdate === "available_commands_update",
+			),
+		).toHaveLength(updateCount);
 	});
 
 	it("includes extension-registered commands in available_commands_update and excludes ACP-builtin collisions", async () => {

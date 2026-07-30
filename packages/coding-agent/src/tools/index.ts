@@ -116,6 +116,7 @@ export type ContextFileEntry = {
 	path: string;
 	content: string;
 	depth?: number;
+	kind?: "agents-md";
 };
 
 /** Image attachment handle exposed to tools for user-facing labels such as `Image #1`. */
