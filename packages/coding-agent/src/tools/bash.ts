@@ -518,6 +518,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		return [`Command: ${truncateForPrompt(command)}`];
 	};
 	readonly label = "Bash";
+	readonly intent = () => "Running shell command";
 	readonly loadMode = "essential";
 	get description(): string {
 		const evalBackends = resolveEvalBackends(this.session);

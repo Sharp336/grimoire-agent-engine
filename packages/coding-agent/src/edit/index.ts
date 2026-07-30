@@ -12,6 +12,7 @@ import patchDescription from "../prompts/tools/patch.md" with { type: "text" };
 import replaceDescription from "../prompts/tools/replace.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
+import { deriveToolIntent } from "../tools/derived-intent";
 import { findUniqueWorkspaceSuffix, isInternalUrlPath } from "../tools/path-utils";
 import { resolvePlanPath } from "../tools/plan-mode-guard";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
@@ -389,6 +390,10 @@ export class EditTool implements AgentTool<TInput> {
 	];
 	readonly name = "edit";
 	readonly label = "Edit";
+	readonly intent = (args: unknown) => {
+		const path = extractApprovalPath(args);
+		return deriveToolIntent("Editing", path === "(unknown)" ? undefined : path, "Editing files");
+	};
 	readonly loadMode = "essential";
 	readonly concurrency = "exclusive";
 	readonly strict = true;

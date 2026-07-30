@@ -47,6 +47,7 @@ import {
 	parseConflictUri,
 	spliceConflict,
 } from "./conflict-detect";
+import { deriveToolIntent } from "./derived-intent";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { type OutputMeta, outputMeta } from "./output-meta";
 import {
@@ -557,6 +558,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
 	};
 	readonly label = "Write";
+	readonly intent = (args: Partial<WriteToolInput>) => deriveToolIntent("Writing", args.path, "Writing file");
 	readonly description: string;
 	readonly parameters = writeSchema;
 	readonly strict = true;

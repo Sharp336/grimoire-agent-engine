@@ -5,7 +5,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { estimateToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { GlobTool, GrepTool, ReadTool } from "@oh-my-pi/pi-coding-agent/tools";
+import { BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool } from "@oh-my-pi/pi-coding-agent/tools";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function makeSession(): ToolSession {
@@ -21,11 +21,13 @@ function makeSession(): ToolSession {
 }
 
 function requireModelIntent(tool: AgentTool): AgentTool {
-	return {
-		...tool,
-		intent: "require",
-		execute: tool.execute.bind(tool),
-	};
+	return new Proxy(tool, {
+		get(target, property) {
+			if (property === "intent") return "require";
+			if (property === "execute") return target.execute.bind(target);
+			return Reflect.get(target, property, target);
+		},
+	});
 }
 
 function wireProperties(tool: { parameters: unknown }): Record<string, unknown> {
@@ -84,5 +86,45 @@ describe("built-in tool intent token usage", () => {
 		const optimized = providerFootprint(tools, optimizedCalls);
 
 		expect(optimized).toBeLessThan(baseline);
+	});
+
+	test("iteration 2 derives mutation intents without a provider-generated i field", () => {
+		const session = makeSession();
+		const readTools: AgentTool[] = [new ReadTool(session), new GrepTool(session), new GlobTool(session)];
+		const mutationTools: AgentTool[] = [new BashTool(session), new EditTool(session), new WriteTool(session)];
+		const tools = [...readTools, ...mutationTools];
+		const normalized = normalizeTools(tools, true) ?? [];
+
+		for (const tool of normalized) {
+			expect(wireProperties(tool)).not.toHaveProperty(INTENT_FIELD);
+		}
+		expect(derivedIntent(mutationTools[0], { command: "bun test packages/coding-agent/test" })).toBe(
+			"Running shell command",
+		);
+		expect(
+			derivedIntent(mutationTools[1], {
+				input: "*** Begin Patch\n*** Update File: src/example.ts\n*** End Patch\n",
+			}),
+		).toBe("Editing src/example.ts");
+		expect(derivedIntent(mutationTools[2], { path: "src/output.ts", content: "result\n" })).toBe(
+			"Writing src/output.ts",
+		);
+
+		const iteration1Calls = [
+			{ path: "src/example.ts:1-20" },
+			{ pattern: "TODO", path: "src" },
+			{ path: "src/**/*.ts" },
+			{ i: "Running focused tests", command: "bun test packages/coding-agent/test" },
+			{
+				i: "Editing source file",
+				input: "*** Begin Patch\n*** Update File: src/example.ts\n*** End Patch\n",
+			},
+			{ i: "Writing output file", path: "src/output.ts", content: "result\n" },
+		];
+		const iteration2Calls = iteration1Calls.map(({ i: _intent, ...args }) => args);
+		const iteration1 = providerFootprint([...readTools, ...mutationTools.map(requireModelIntent)], iteration1Calls);
+		const iteration2 = providerFootprint(tools, iteration2Calls);
+
+		expect(iteration2).toBeLessThan(iteration1);
 	});
 });
