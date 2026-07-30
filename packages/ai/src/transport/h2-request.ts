@@ -31,6 +31,12 @@ export class H2UnavailableBeforeDispatchError extends Error {
 
 export function isH2UnavailableBeforeDispatch(error: unknown): boolean {
 	if (error instanceof AIError.AbortError || error instanceof AIError.ValidationError) return false;
+	// A pre-dispatch connection-establishment timeout (proxy CONNECT tunnel or
+	// direct TLS handshake) surfaces as a StreamTimeoutError with no `.code`,
+	// so it is missed by both the code table and the ALPN/connect regex below.
+	// This predicate is only consulted on establishment-phase errors, so any
+	// StreamTimeoutError reaching it is a pre-dispatch H2 unavailability.
+	if (error instanceof AIError.StreamTimeoutError) return true;
 	const code = (error as { code?: unknown } | null)?.code;
 	if (typeof code === "string" && PRE_DISPATCH_CODES[code]) return true;
 	const message = error instanceof Error ? error.message : String(error);

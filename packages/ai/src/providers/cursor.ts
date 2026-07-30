@@ -948,7 +948,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				requestAbortListener = undefined;
 			}
 			const log = await debugResponseLogPromise;
-			await log?.close();
+			await log?.close().catch(() => undefined);
 			if (heartbeatTimer) {
 				clearInterval(heartbeatTimer);
 				heartbeatTimer = null;
