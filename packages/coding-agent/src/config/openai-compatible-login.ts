@@ -180,7 +180,7 @@ async function writeModelsConfigAtomically(
 		null,
 		2,
 	);
-	const content = serialized.replace(apiKeyMarker, JSON.stringify(apiKey));
+	const content = serialized.replace(apiKeyMarker, () => JSON.stringify(apiKey));
 	try {
 		signal?.throwIfAborted();
 		await fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });

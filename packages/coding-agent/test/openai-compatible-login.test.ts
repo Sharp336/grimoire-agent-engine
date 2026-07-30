@@ -123,6 +123,35 @@ test("stores compatible keys in a scoped literal field without rewriting legacy 
 	}
 });
 
+test("persists API keys containing String.replace special tokens verbatim", async () => {
+	const tempDir = TempDir.createSync("@openai-compatible-login-");
+	const modelsPath = path.join(tempDir.path(), "models.yml");
+	try {
+		// `$&`, `` $` ``, `$'` are special replacement patterns for String.replace
+		// when the replacement is a string; the serialized key must survive literally.
+		const apiKey = "tok$&pre`mid$'end";
+		await writeOpenAICompatibleProvider(
+			{ providerName: "team-proxy", baseUrl: "https://models.example.test/v1", apiKey },
+			modelsPath,
+		);
+
+		const emitted = YAML.parse(await fs.readFile(modelsPath, "utf-8")) as {
+			providers: Record<string, Record<string, string>>;
+		};
+		expect(emitted.providers["team-proxy"]?.openaiCompatibleApiKey).toBe(apiKey);
+
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		try {
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			expect(await registry.getApiKeyForProvider("team-proxy")).toBe(apiKey);
+		} finally {
+			authStorage.close();
+		}
+	} finally {
+		await tempDir.remove().catch(() => {});
+	}
+});
+
 test("cancels an atomic compatible-provider write before rename and removes its temp file", async () => {
 	const tempDir = TempDir.createSync("@openai-compatible-login-");
 	const modelsPath = path.join(tempDir.path(), "models.yml");
