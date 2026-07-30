@@ -1,11 +1,55 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+/** @import { Element, Root } from 'hast'; */
 
 // https://astro.build/config
+
+// GitHub Pages serves this site under the project path (/oh-my-pi/), so every
+// internal URL needs the `base` prefix. Astro prefixes the links it generates
+// (sidebar, pagination, assets) but not absolute paths authored in markdown —
+// and the docs convention is exactly those (`[Sessions](/features/sessions/)`,
+// per src/content/docs/_template.md). This rehype plugin prepends `base` to
+// root-relative hrefs/srcs in rendered content so authored links resolve under
+// the project path, with zero content edits and surviving upstream syncs.
+const base = '/oh-my-pi/';
+function rehypePrefixBase() {
+	const prefix = base.replace(/\/$/, '');
+	/**
+	 * @param {string} value
+	 * @returns {string}
+	 */
+	const rewrite = (value) =>
+		value.startsWith('/') && !value.startsWith('//') && !value.startsWith(prefix)
+			? `${prefix}${value}`
+			: value;
+	/**
+	 * @param {Root | Element} node
+	 * @returns {void}
+	 */
+	const visit = (node) => {
+		if (node.type === 'element') {
+			const { properties } = node;
+			if (properties) {
+				if (typeof properties.href === 'string') properties.href = rewrite(properties.href);
+				if (typeof properties.src === 'string') properties.src = rewrite(properties.src);
+			}
+		}
+		for (const child of node.children) {
+			if (child.type === 'element') visit(child);
+		}
+	};
+	return /** @param {Root} tree */ (tree) => {
+		visit(tree);
+	};
+}
+
 export default defineConfig({
 	site: 'https://nibblebot.github.io',
-	base: '/oh-my-pi/',
+	base,
+	markdown: {
+		rehypePlugins: [rehypePrefixBase],
+	},
 	integrations: [
 		starlight({
 			title: 'omp',
