@@ -40,6 +40,7 @@ import {
 	openrouterModelManagerOptions,
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
+	requestyModelManagerOptions,
 	sakanaModelManagerOptions,
 	siliconflowCnModelManagerOptions,
 	siliconflowModelManagerOptions,
@@ -362,6 +363,14 @@ export const CATALOG_PROVIDERS = [
 			label: "Qwen Portal",
 			oauthProvider: "qwen-portal",
 		},
+	},
+	{
+		id: "requesty",
+		defaultModel: "openai/gpt-5.5",
+		envVars: ["REQUESTY_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => requestyModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Requesty", allowUnauthenticated: true, ignoreApiKey: true },
 	},
 	{
 		id: "sakana",

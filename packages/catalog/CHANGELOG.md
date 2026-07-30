@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Requesty as a model provider, including public catalog discovery from `https://router.requesty.ai/v1/models`, per-model pricing and limits, and dual-API routing — Claude-family ids (including upstream-prefixed ids like `bedrock/claude-sonnet-4@us-west-2`) via `anthropic-messages`, everything else via `openai-completions`.
+
 ## [17.2.0] - 2026-07-30
 
 ### Added
