@@ -19,7 +19,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
-import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
+import { getEnvApiKey } from "../stream";
 import type {
 	AnthropicFallbackContent,
 	AnthropicServerToolContent,
@@ -59,7 +59,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
-import { clampMaxTokensToContext, estimatePromptTokens } from "../utils/output-budget";
+import { clampMaxTokensToContext, estimatePromptTokens, OUTPUT_FALLBACK_BUFFER } from "../utils/output-budget";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
@@ -3096,7 +3096,8 @@ const MIN_THINKING_BUDGET_TOKENS = 1024;
  * guarantees `budget + OUTPUT_FALLBACK_BUFFER <= max` before the clamp runs;
  * this re-establishes it on the clamped value using the same buffer. Optional
  * thinking is disabled when too little headroom remains for a viable budget,
- * while mandatory-thinking models retain every positive clamped budget.
+ * while mandatory-thinking models (`compat.requiresThinkingEnabled` or
+ * `thinking.requiresEffort`) retain every positive clamped budget.
  */
 function reconcileThinkingForClampedMaxTokens(
 	params: MessageCreateParamsStreaming,
@@ -3109,7 +3110,7 @@ function reconcileThinkingForClampedMaxTokens(
 	const budgetTokens = thinking.budget_tokens ?? 0;
 	if (budgetTokens + OUTPUT_FALLBACK_BUFFER <= maxTokens) return;
 	const clampedBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
-	if (model.compat.requiresThinkingEnabled) {
+	if (model.compat.requiresThinkingEnabled || model.thinking?.requiresEffort) {
 		if (clampedBudget <= 0) {
 			throw new AIError.ConfigurationError(
 				`Anthropic thinking budget requires max_tokens greater than ${OUTPUT_FALLBACK_BUFFER}; got ${maxTokens}`,

@@ -1236,7 +1236,6 @@ function maxTokensWithThinkingBudget(
 	const uncappedMaxTokens = baseMaxTokens === undefined ? OUTPUT_CAP_WHEN_UNKNOWN : baseMaxTokens + thinkingBudget;
 	return Math.min(uncappedMaxTokens, modelMaxTokens ?? Number.POSITIVE_INFINITY);
 }
-export const OUTPUT_FALLBACK_BUFFER = 4000;
 const ANTHROPIC_USE_INTERLEAVED_THINKING = Bun.env.PI_NO_INTERLEAVED_THINKING !== "1";
 
 export const ANTHROPIC_THINKING: Record<Effort, number> = {

@@ -339,7 +339,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 							estimatedPromptTokens: estimatePromptTokens(
 								context.systemPrompt?.join("\n"),
 								context.messages,
-								context.tools,
+								toolConfig ? context.tools : undefined,
 							),
 						})
 					: undefined;
@@ -347,7 +347,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// context-window clamp can shrink maxTokens below the budget, so reconcile
 			// the thinking budget the same way the anthropic transport does.
 			if (maxTokens !== undefined) {
-				additionalModelRequestFields = reconcileBedrockThinkingBudget(additionalModelRequestFields, maxTokens);
+				additionalModelRequestFields = reconcileBedrockThinkingBudget(
+					additionalModelRequestFields,
+					maxTokens,
+					model.thinking?.requiresEffort === true,
+				);
 			}
 
 			const commandInput: ConverseStreamRequest = {
@@ -1067,12 +1071,15 @@ const MIN_BEDROCK_THINKING_BUDGET_TOKENS = 1024;
  * context-window clamp shrinks `inferenceConfig.maxTokens`. Bedrock exposes the
  * Anthropic thinking budget inside `additionalModelRequestFields.thinking`,
  * which must stay below `maxTokens` or the request is rejected with HTTP 400.
- * Reserves Bedrock's minimum output capacity and disables optional thinking when
- * too little headroom remains for a viable budget.
+ * Reserves Bedrock's minimum output capacity; optional thinking is disabled when
+ * too little headroom remains for a viable budget, while mandatory-thinking
+ * models (`thinking.requiresEffort`) retain the largest valid split instead —
+ * those endpoints reject omitted/disabled reasoning.
  */
 function reconcileBedrockThinkingBudget(
 	additionalModelRequestFields: Record<string, unknown> | undefined,
 	maxTokens: number,
+	mandatory = false,
 ): Record<string, unknown> | undefined {
 	const thinking = additionalModelRequestFields?.thinking as { type?: string; budget_tokens?: number } | undefined;
 	if (thinking?.type !== "enabled") return additionalModelRequestFields;
@@ -1083,8 +1090,20 @@ function reconcileBedrockThinkingBudget(
 		thinking.budget_tokens = clampedBudget;
 		return additionalModelRequestFields;
 	}
-	// Too little headroom for a viable thinking budget — drop thinking entirely,
-	// along with the interleaved-thinking beta that is meaningless without it.
+	// Below the minimum viable budget. Mandatory-reasoning endpoints reject
+	// omitted/disabled thinking, so retain the largest valid split (or fail
+	// loudly when no positive budget fits) rather than dropping thinking.
+	if (mandatory) {
+		if (clampedBudget > 0) {
+			thinking.budget_tokens = clampedBudget;
+			return additionalModelRequestFields;
+		}
+		throw new AIError.ConfigurationError(
+			`Bedrock mandatory thinking requires maxTokens greater than ${MIN_OUTPUT_TOKENS}; got ${maxTokens}`,
+		);
+	}
+	// Too little headroom for a viable optional-thinking budget — drop thinking
+	// entirely, along with the interleaved-thinking beta that is meaningless without it.
 	const next = { ...additionalModelRequestFields };
 	delete next.thinking;
 	if (Array.isArray(next.anthropic_beta)) {
