@@ -16,6 +16,11 @@ interface OutcomeGate {
 
 class MemoryWorkflowStore implements WorkflowStore {
 	snapshots: WorkflowSnapshot[] = [];
+	activeBranch = "main";
+
+	branchKey(): string {
+		return this.activeBranch;
+	}
 
 	load(): WorkflowSnapshot | null {
 		return this.snapshots.at(-1) ? structuredClone(this.snapshots.at(-1)!) : null;
@@ -124,6 +129,27 @@ describe("WorkflowRuntime", () => {
 		expect(next.definition.id).toBe("next");
 	});
 
+	it("reloads the active branch before reading or mutating workflow state", async () => {
+		const store = new MemoryWorkflowStore();
+		const runtime = await createRuntime(store);
+		await runtime.createWorkflow({
+			id: "abandoned",
+			objective: "Remain on the first branch",
+			nodes: [{ id: "only", agent: "task", task: "First" }],
+		});
+
+		store.activeBranch = "alternate";
+		store.snapshots = [];
+		expect(runtime.getSnapshot()).toBeNull();
+
+		const alternate = await runtime.createWorkflow({
+			id: "alternate",
+			objective: "Belong to the active branch",
+			nodes: [{ id: "only", agent: "task", task: "Second" }],
+		});
+		expect(alternate.definition.id).toBe("alternate");
+	});
+
 	it("runs independent roots concurrently and holds a join until both settle", async () => {
 		const runtime = await createRuntime();
 		await runtime.createWorkflow({
@@ -215,16 +241,16 @@ describe("WorkflowRuntime", () => {
 			(request, signal) => {
 				started.push(request.nodeId);
 				if (request.nodeId === "lingering") {
-					return new Promise(resolve => {
-						signal.addEventListener(
-							"abort",
-							() => {
-								lingeringDrained = true;
-								resolve({ status: "interrupted", error: "aborted" });
-							},
-							{ once: true },
-						);
-					});
+					const gate = Promise.withResolvers<WorkflowDispatchOutcome>();
+					signal.addEventListener(
+						"abort",
+						() => {
+							lingeringDrained = true;
+							gate.resolve({ status: "interrupted", error: "aborted" });
+						},
+						{ once: true },
+					);
+					return gate.promise;
 				}
 				const gate = Promise.withResolvers<WorkflowDispatchOutcome>();
 				gates.set(request.nodeId, gate);
@@ -299,6 +325,32 @@ describe("WorkflowRuntime", () => {
 		expect(dispatched).not.toContain("blocked");
 	});
 
+	it("treats settled Task results with executor errors as failed", async () => {
+		const runtime = await createRuntime();
+		await runtime.createWorkflow({
+			objective: "Do not dispatch after an isolated merge failure",
+			nodes: [
+				{ id: "isolated", agent: "task", task: "Commit changes", isolated: true },
+				{ id: "dependent", agent: "task", task: "Use committed changes", needs: ["isolated"] },
+			],
+		});
+		const dispatched: string[] = [];
+		const snapshot = await runtime.run(async request => {
+			dispatched.push(request.nodeId);
+			return {
+				result: resultFor(request, {
+					error: "Failed to apply isolated worktree changes",
+				}),
+			};
+		});
+
+		expect(snapshot.status).toBe("failed");
+		expect(snapshot.nodes.isolated.status).toBe("failed");
+		expect(snapshot.nodes.isolated.error).toBe("Failed to apply isolated worktree changes");
+		expect(snapshot.nodes.dependent.status).toBe("blocked");
+		expect(dispatched).toEqual(["isolated"]);
+	});
+
 	it("retry reopens only the selected failure's descendant closure", async () => {
 		const runtime = await createRuntime();
 		await runtime.createWorkflow({
@@ -350,11 +402,11 @@ describe("WorkflowRuntime", () => {
 			async (request, signal) => {
 				started.push(request.nodeId);
 				if (request.nodeId === "done") return { result: resultFor(request) };
-				return new Promise(resolve => {
-					signal.addEventListener("abort", () => resolve({ status: "interrupted", error: "aborted" }), {
-						once: true,
-					});
+				const gate = Promise.withResolvers<WorkflowDispatchOutcome>();
+				signal.addEventListener("abort", () => gate.resolve({ status: "interrupted", error: "aborted" }), {
+					once: true,
 				});
+				return gate.promise;
 			},
 			{ signal: controller.signal },
 		);
@@ -399,11 +451,11 @@ describe("WorkflowRuntime", () => {
 		const dispatched: string[] = [];
 		const running = runtime.run(async (request, signal) => {
 			dispatched.push(request.nodeId);
-			return new Promise(resolve => {
-				signal.addEventListener("abort", () => resolve({ status: "interrupted", error: "cancelled" }), {
-					once: true,
-				});
+			const gate = Promise.withResolvers<WorkflowDispatchOutcome>();
+			signal.addEventListener("abort", () => gate.resolve({ status: "interrupted", error: "cancelled" }), {
+				once: true,
 			});
+			return gate.promise;
 		});
 		await waitFor(() => dispatched.includes("first"));
 		await runtime.cancel();

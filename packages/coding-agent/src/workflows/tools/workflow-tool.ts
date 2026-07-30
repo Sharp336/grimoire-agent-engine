@@ -5,6 +5,7 @@ import workflowPreflightContext from "../../prompts/system/workflow-preflight-co
 import workflowDescription from "../../prompts/tools/workflow.md" with { type: "text" };
 import type { SettledTaskSpawn, TaskDispatchService } from "../../task/dispatch-service";
 import type { ToolSession } from "../../tools";
+import { previewLine, replaceTabs, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { type WorkflowDispatchOutcome, type WorkflowDispatchRequest, WorkflowRuntime } from "../runtime";
 import { SessionWorkflowStore } from "../store";
@@ -35,6 +36,11 @@ const workflowSchema = type({
 
 export type WorkflowToolInput = typeof workflowSchema.infer;
 
+function safeSummaryText(text: string): string {
+	const shortened = text.replace(/(?:[A-Za-z]:[\\/]|\/)[^\s'")\]]+/g, match => shortenPath(match));
+	return previewLine(replaceTabs(shortened), TRUNCATE_LENGTHS.LINE);
+}
+
 function summarize(snapshot: WorkflowSnapshot | null): string {
 	if (!snapshot) return "No workflow exists in this session.";
 	const counts = new Map<string, number>();
@@ -47,13 +53,13 @@ function summarize(snapshot: WorkflowSnapshot | null): string {
 		.join(", ");
 	const lines = [
 		`Workflow ${snapshot.definition.id}: ${snapshot.status}`,
-		`Objective: ${snapshot.definition.objective}`,
+		`Objective: ${safeSummaryText(snapshot.definition.objective)}`,
 		`Nodes: ${countText}`,
 	];
 	for (const node of snapshot.definition.nodes) {
 		const state = snapshot.nodes[node.id]!;
 		const refs = [state.outputRef, state.historyRef].filter(Boolean).join(", ");
-		const detail = refs || state.error;
+		const detail = refs || (state.error ? safeSummaryText(state.error) : undefined);
 		lines.push(`- ${node.id}: ${state.status}${detail ? ` — ${detail}` : ""}`);
 	}
 	return lines.join("\n");

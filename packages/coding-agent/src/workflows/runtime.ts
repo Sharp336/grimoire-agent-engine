@@ -113,6 +113,7 @@ export class WorkflowRuntime {
 	readonly #now: () => number;
 	readonly #idFactory: () => string;
 	#snapshot: WorkflowSnapshot | null;
+	#branchKey: string | null | undefined;
 	#runAbort: AbortController | undefined;
 	#cancelRequested = false;
 	#saveTail: Promise<void> = Promise.resolve();
@@ -122,6 +123,7 @@ export class WorkflowRuntime {
 		this.#now = options.now ?? Date.now;
 		this.#idFactory = options.idFactory ?? defaultWorkflowId;
 		this.#snapshot = snapshot;
+		this.#branchKey = options.store.branchKey?.();
 	}
 
 	static async create(options: WorkflowRuntimeOptions): Promise<WorkflowRuntime> {
@@ -134,10 +136,12 @@ export class WorkflowRuntime {
 	}
 
 	getSnapshot(): WorkflowSnapshot | null {
+		if (!this.#runAbort) this.#syncBranch();
 		return this.#snapshot ? cloneWorkflowSnapshot(this.#snapshot) : null;
 	}
 
 	async createWorkflow(draft: WorkflowDraft): Promise<WorkflowSnapshot> {
+		this.#syncBranch();
 		if (this.#snapshot && !isReplaceable(this.#snapshot.status)) {
 			throw new Error(
 				`Workflow ${this.#snapshot.definition.id} is ${this.#snapshot.status}; complete or cancel it before creating another`,
@@ -176,6 +180,7 @@ export class WorkflowRuntime {
 	}
 
 	async run(dispatcher: WorkflowDispatcher, options: WorkflowRunOptions = {}): Promise<WorkflowSnapshot> {
+		this.#syncBranch();
 		const snapshot = this.#requireSnapshot();
 		if (this.#runAbort) throw new Error(`Workflow ${snapshot.definition.id} is already running`);
 		if (snapshot.status === "succeeded" || snapshot.status === "cancelled") {
@@ -284,6 +289,7 @@ export class WorkflowRuntime {
 	}
 
 	async retryNode(nodeId: string): Promise<WorkflowSnapshot> {
+		this.#syncBranch();
 		const snapshot = this.#requireSnapshot();
 		if (this.#runAbort) throw new Error("Cannot retry a node while the workflow is running");
 		const selected = snapshot.nodes[nodeId];
@@ -317,6 +323,7 @@ export class WorkflowRuntime {
 	}
 
 	async cancel(): Promise<WorkflowSnapshot> {
+		if (!this.#runAbort) this.#syncBranch();
 		const snapshot = this.#requireSnapshot();
 		if (snapshot.status === "succeeded" || snapshot.status === "cancelled") {
 			return cloneWorkflowSnapshot(snapshot);
@@ -379,7 +386,7 @@ export class WorkflowRuntime {
 		} else if (result.aborted || parentAborted) {
 			state.status = "interrupted";
 			state.error = resultError(result);
-		} else if (result.exitCode !== 0 || strictSchemaFailure) {
+		} else if (result.exitCode !== 0 || result.error?.trim() || strictSchemaFailure) {
 			state.status = "failed";
 			state.error = strictSchemaFailure
 				? result.structuredOutput?.error || "Strict output schema validation failed"
@@ -445,7 +452,19 @@ export class WorkflowRuntime {
 		return true;
 	}
 
+	#syncBranch(): void {
+		const branchKey = this.#store.branchKey?.();
+		if (branchKey === undefined || branchKey === this.#branchKey) return;
+		this.#snapshot = this.#store.load();
+		this.#branchKey = branchKey;
+		this.#cancelRequested = false;
+	}
+
 	async #persist(onChange?: (snapshot: WorkflowSnapshot) => void | Promise<void>): Promise<void> {
+		const branchKey = this.#store.branchKey?.();
+		if (branchKey !== undefined && branchKey !== this.#branchKey) {
+			throw new Error("Workflow session branch changed during operation");
+		}
 		const snapshot = this.#requireSnapshot();
 		snapshot.revision += 1;
 		snapshot.updatedAt = this.#now();
@@ -453,6 +472,7 @@ export class WorkflowRuntime {
 		const operation = this.#saveTail.catch(() => {}).then(() => this.#store.append(durable));
 		this.#saveTail = operation;
 		await operation;
+		this.#branchKey = this.#store.branchKey?.();
 		await onChange?.(cloneWorkflowSnapshot(durable));
 	}
 }

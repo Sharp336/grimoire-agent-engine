@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -179,6 +180,43 @@ describe("WorkflowTool", () => {
 			],
 		});
 		expect(corrected.details?.workflow?.definition.id).toBe("atomic-preflight");
+	});
+
+	it("sanitizes objectives and Task errors in generic tool output", async () => {
+		mockDiscovery();
+		const session = createPersistentSession([], async (_toolCallId, _params, item) => {
+			const id = item.name ?? "unnamed";
+			return {
+				content: [{ type: "text", text: "failed" }],
+				details: {
+					projectAgentsDir: null,
+					results: [
+						{
+							...taskResult(id),
+							error: `merge failed\tat ${os.homedir()}/private/${"x".repeat(200)}`,
+						},
+					],
+					totalDurationMs: 1,
+				},
+			};
+		});
+		const tool = await WorkflowTool.createIf(session);
+		if (!tool) throw new Error("Expected workflow tool for a persistent top-level session");
+		const created = await tool.execute("workflow-create", {
+			op: "create",
+			id: "safe-output",
+			objective: `Inspect\t${os.homedir()}/secret/${"x".repeat(200)}`,
+			nodes: [{ id: "only", agent: "task", task: "Fail safely" }],
+		});
+		const createdText = created.content.find(part => part.type === "text")?.text ?? "";
+		expect(createdText).not.toContain(os.homedir());
+		expect(createdText).not.toContain("\t");
+
+		const failed = await tool.execute("workflow-run", { op: "run" });
+		const failedText = failed.content.find(part => part.type === "text")?.text ?? "";
+		expect(failedText).not.toContain(os.homedir());
+		expect(failedText).not.toContain("\t");
+		for (const line of failedText.split("\n")) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(140);
 	});
 
 	it("is unavailable without a persistent parent session", async () => {

@@ -15,6 +15,7 @@ export interface WorkflowStore {
 	load(): WorkflowSnapshot | null;
 	hasWorkflowId(id: string): boolean;
 	append(snapshot: WorkflowSnapshot): Promise<void>;
+	branchKey?(): string | null;
 }
 
 type WorkflowSessionManager = NonNullable<ToolSession["sessionManager"]>;
@@ -108,6 +109,10 @@ export class SessionWorkflowStore implements WorkflowStore {
 
 	constructor(sessionManager: WorkflowSessionManager) {
 		this.#sessionManager = sessionManager;
+	}
+
+	branchKey(): string | null {
+		return this.#sessionManager.getBranch().at(-1)?.id ?? null;
 	}
 
 	load(): WorkflowSnapshot | null {
