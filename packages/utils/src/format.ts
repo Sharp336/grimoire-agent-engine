@@ -32,13 +32,16 @@ export function formatDuration(ms: number): string {
  * Examples: "999", "1K", "1.5K", "25K", "1M", "1.5M", "25M", "1.5B"
  */
 export function formatNumber(n: number): string {
-	if (n < 1_000) return n.toString();
-	if (n < 10_000) return `${trim1(n / 1_000)}K`;
-	if (n < 1_000_000) return `${Math.round(n / 1_000)}K`;
-	if (n < 10_000_000) return `${trim1(n / 1_000_000)}M`;
-	if (n < 1_000_000_000) return `${Math.round(n / 1_000_000)}M`;
-	if (n < 10_000_000_000) return `${trim1(n / 1_000_000_000)}B`;
-	return `${Math.round(n / 1_000_000_000)}B`;
+	if (!Number.isFinite(n)) return "0";
+	const abs = Math.abs(n);
+	const sign = n < 0 ? "-" : "";
+	if (abs < 1_000) return `${sign}${abs}`;
+	if (abs < 9_950) return `${sign}${trim1(abs / 1_000)}K`;
+	if (abs < 999_500) return `${sign}${Math.round(abs / 1_000)}K`;
+	if (abs < 9_950_000) return `${sign}${trim1(abs / 1_000_000)}M`;
+	if (abs < 999_500_000) return `${sign}${Math.round(abs / 1_000_000)}M`;
+	if (abs < 9_950_000_000) return `${sign}${trim1(abs / 1_000_000_000)}B`;
+	return `${sign}${Math.round(abs / 1_000_000_000)}B`;
 }
 
 /** Format with up to 1 decimal place, dropping trailing `.0`. */
@@ -52,6 +55,7 @@ function trim1(n: number): string {
  * Examples: "512B", "1.5KB", "2.3MB", "1.2GB"
  */
 export function formatBytes(bytes: number): string {
+	if (!Number.isFinite(bytes) || bytes <= 0) return "0B";
 	if (bytes < 1024) return `${bytes}B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
 	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
@@ -109,5 +113,6 @@ export function pluralize(label: string, count: number): string {
  * Format a ratio as a percentage.
  */
 export function formatPercent(ratio: number): string {
+	if (!Number.isFinite(ratio)) return "0.0%";
 	return `${(ratio * 100).toFixed(1)}%`;
 }

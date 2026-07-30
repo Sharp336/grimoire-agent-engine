@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `formatNumber` tier boundary rounding (`999,500` -> `"1M"`), negative number formatting (`-1,500` -> `"-1.5K"`), and non-finite value handling.
 
 ## [17.1.8] - 2026-07-28
 
