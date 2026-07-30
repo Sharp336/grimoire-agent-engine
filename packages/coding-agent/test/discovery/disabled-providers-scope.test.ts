@@ -23,6 +23,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+// Registers the discovery providers. `setDisabledProviders()` decides what it
+// owns from that registry, so the import is load-bearing rather than incidental.
+import "@oh-my-pi/pi-coding-agent/discovery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
