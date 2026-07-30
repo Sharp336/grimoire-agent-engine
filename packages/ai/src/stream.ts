@@ -844,7 +844,12 @@ function streamDispatch<TApi extends Api>(
 				apiKey: "vertex-adc",
 				fetch: createVertexAuthenticatedFetch(requestOptions),
 			}
-		: { ...requestOptions, apiKey };
+		: // Resolve the request-key sentinel (authHeader models) against apiKey here
+			// too: the low-level stream() dispatch reaches the OpenAI transport with
+			// model.headers still carrying the placeholder, and resolveOpenAIRequestSetup
+			// keeps an existing model Authorization via `??=`, so without this the
+			// direct stream() path authenticates with the unresolved sentinel.
+			materializeRequestAuthorization(model, { ...requestOptions, apiKey }, apiKey);
 
 	const api: Api = model.api;
 	switch (api) {
@@ -1025,18 +1030,18 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 	}
 }
 
-function materializeRequestAuthorization<TApi extends Api>(
+function materializeRequestAuthorization<TApi extends Api, TOpt extends SimpleStreamOptions>(
 	model: Model<TApi>,
-	options: SimpleStreamOptions,
+	options: TOpt,
 	apiKey: string,
-): SimpleStreamOptions {
+): TOpt {
 	if (model.headers?.Authorization !== REQUEST_API_KEY_AUTHORIZATION) return options;
 	// A keyless provider (`auth: none`) resolves to the N/A sentinel — don't
 	// materialize it as `Bearer N/A`. Downstream OpenAI transports already omit
 	// Authorization for the sentinel, and keyless endpoints reject a bogus bearer.
 	if (apiKey === NO_AUTH_SENTINEL) return options;
 	if (Object.keys(options.headers ?? {}).some(header => header.toLowerCase() === "authorization")) return options;
-	return { ...options, headers: { ...options.headers, Authorization: `Bearer ${apiKey}` } };
+	return { ...options, headers: { ...options.headers, Authorization: `Bearer ${apiKey}` } } as TOpt;
 }
 
 export function streamSimple<TApi extends Api>(

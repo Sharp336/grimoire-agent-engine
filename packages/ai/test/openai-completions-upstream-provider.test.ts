@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { stream } from "@oh-my-pi/pi-ai";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { REQUEST_API_KEY_AUTHORIZATION } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const model = {
@@ -69,5 +71,37 @@ describe("openai-completions upstream provider capture", () => {
 		}).result();
 
 		expect(result.upstreamProvider).toBeUndefined();
+	});
+});
+
+describe("stream() request-key sentinel materialization", () => {
+	// Contract: the low-level stream() dispatch reaches the OpenAI transport with
+	// model.headers still carrying the `Bearer __PI_REQUEST_API_KEY__` placeholder,
+	// and resolveOpenAIRequestSetup keeps an existing model Authorization via `??=`.
+	// A direct stream() consumer passing a real apiKey must authenticate with that
+	// key, not the unresolved sentinel.
+	it("resolves the authHeader sentinel against apiKey on the direct stream path", async () => {
+		const sentinelModel = {
+			...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
+			api: "openai-completions",
+			headers: { Authorization: REQUEST_API_KEY_AUTHORIZATION },
+		} satisfies Model<"openai-completions">;
+
+		const captured: { authorization: string | null } = { authorization: null };
+		const fetchMock: FetchImpl = (_input, init) => {
+			captured.authorization = new Headers(init?.headers).get("authorization");
+			return Promise.resolve(
+				createSseResponse([
+					chunk({ choices: [{ index: 0, delta: { content: "Hi" } }] }),
+					chunk({
+						choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+						usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+					}),
+				]),
+			);
+		};
+
+		await stream(sentinelModel, baseContext(), { apiKey: "resolved-bearer", fetch: fetchMock }).result();
+		expect(captured.authorization).toBe("Bearer resolved-bearer");
 	});
 });

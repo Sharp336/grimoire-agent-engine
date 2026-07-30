@@ -126,4 +126,18 @@ describe("error-id classification", () => {
 		expect(AIError.is(id, AIError.Flag.UsageLimit)).toBe(true);
 		expect(assistant.errorId).toBe(id);
 	});
+	it("marks a concurrent-limit 429 transient so it stays retriable", () => {
+		// A concurrent cap is reported as a bare 429 with a `concurrent_limit_*`
+		// body. It must not burn a sibling credential (no UsageLimit) but must stay
+		// retriable (Transient) so the short concurrency backoff applies — the body
+		// wording does not match the broad transient transport pattern, so without
+		// the explicit flag classifyMessage leaves a bare numeric 429 that
+		// retriable() rejects.
+		const id = AIError.classifyMessage(
+			message({ errorStatus: 429, errorMessage: "Maximum concurrent invocation limit reached" }),
+		);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.UsageLimit)).toBe(false);
+	});
 });

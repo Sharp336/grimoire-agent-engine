@@ -1055,6 +1055,9 @@ export class ModelRegistry {
 		// Drop config-sourced apiKeys from AuthStorage before reload; entries
 		// removed from models.yml must actually disappear from the resolver, not
 		// linger from the previous parse. The post-load setters below repopulate.
+		// Snapshot config-key quota backoffs so an unrelated models.yml edit does
+		// not wipe a server-reported block for a provider whose keys are unchanged.
+		const configKeyBackoff = this.authStorage.snapshotConfigKeyBackoffForReload();
 		this.authStorage.clearConfigApiKeys();
 		// Restore runtime API keys before #loadModels — survives because
 		// #loadModels only calls .set() on #customProviderApiKeys, never reassigns it.
@@ -1066,6 +1069,7 @@ export class ModelRegistry {
 		this.#configError = undefined;
 		this.#providerDiscoveryStates.clear();
 		this.#loadModels();
+		this.authStorage.restoreConfigKeyBackoffAfterReload(configKeyBackoff);
 	}
 
 	/**

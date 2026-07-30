@@ -7,7 +7,7 @@ import {
 	ProviderHttpError,
 	STREAM_ENVELOPE_ERROR_PREFIX,
 } from "./classes";
-import { isUsageLimitOutcome } from "./rate-limit";
+import { isUsageLimitOutcome, parseRateLimitReason } from "./rate-limit";
 
 export const Flag = {
 	Class: 0x1000,
@@ -322,6 +322,15 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		// of burning a healthy sibling credential.
 		if (isUsageLimitOutcome(statusClean, errorMessage)) {
 			kinds |= Flag.UsageLimit;
+		}
+		// A concurrency cap surfaces as a bare 429 whose body parses to
+		// CONCURRENT_LIMIT. isUsageLimitOutcome withholds UsageLimit so it never
+		// burns a sibling credential, but the wording ("concurrent_limit_*") does
+		// not match the broad transient transport pattern — without this flag
+		// classifyText returns a bare numeric 429 that retriable() rejects, so the
+		// short concurrency backoff (turn recovery) never applies.
+		if (parseRateLimitReason(errorMessage) === "CONCURRENT_LIMIT") {
+			kinds |= Flag.Transient;
 		}
 
 		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;

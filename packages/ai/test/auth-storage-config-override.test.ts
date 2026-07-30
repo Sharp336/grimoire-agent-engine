@@ -163,4 +163,29 @@ describe("AuthStorage config-override apiKey", () => {
 			expect(authStorage.describeCredentialSource("anthropic")).toBe("config override (models.yml)");
 		});
 	});
+	test("preserves a config-key quota backoff across a reload when keys are unchanged", async () => {
+		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+			if (!authStorage) throw new Error("test setup failed");
+			authStorage.setConfigApiKeys("anthropic", ["config-first", "config-second"]);
+			expect(await authStorage.getApiKey("anthropic")).toBe("config-first");
+			await authStorage.markUsageLimitReached("anthropic", undefined, { apiKey: "config-first" });
+			// config-first is now backed off → selection rotates to config-second.
+			expect(await authStorage.getApiKey("anthropic")).toBe("config-second");
+
+			// Replay the ModelRegistry.#reloadStaticModels sequence: a models.yml
+			// edit must not wipe a server-reported block for a provider whose key
+			// list is byte-for-byte unchanged.
+			const snapshot = authStorage.snapshotConfigKeyBackoffForReload();
+			authStorage.clearConfigApiKeys();
+			authStorage.setConfigApiKeys("anthropic", ["config-first", "config-second"]);
+			authStorage.restoreConfigKeyBackoffAfterReload(snapshot);
+
+			// config-first (index 0) stays blocked, so blocking config-second
+			// (index 1) leaves no healthy sibling — markUsageLimitReached reports no
+			// switch. Without preservation the reload would have cleared
+			// config-first's block and this would report { switched: true } instead.
+			const blocked = await authStorage.markUsageLimitReached("anthropic", undefined, { apiKey: "config-second" });
+			expect(blocked.switched).toBe(false);
+		});
+	});
 });

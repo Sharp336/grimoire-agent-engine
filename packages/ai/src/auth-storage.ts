@@ -1228,6 +1228,13 @@ type RankedApiKeyCandidate = UsageRankedCandidate<ApiKeyCredential>;
 // AuthStorage Class
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Round-trip snapshot of a provider's config-key quota backoff for reload preservation. */
+type ConfigKeyBackoffSnapshot = {
+	keys: readonly string[];
+	backoff: ReadonlyMap<number, number> | undefined;
+	probeAfter: ReadonlyMap<number, number> | undefined;
+};
+
 /**
  * Credential storage backed by an AuthCredentialStore.
  * Reads from storage on reload(), manages round-robin credential selection,
@@ -1462,6 +1469,54 @@ export class AuthStorage {
 	clearConfigApiKeys(): void {
 		for (const provider of this.#configOverrides.keys()) this.#clearVirtualApiKeyBlocks(provider, "config");
 		this.#configOverrides.clear();
+	}
+
+	/**
+	 * Snapshot each provider's config-key quota backoff (and the key list it was
+	 * recorded against) so {@link restoreConfigKeyBackoffAfterReload} can reapply
+	 * the blocks once a models.yml reload has finished repopulating config keys.
+	 * Providers without an active backoff are omitted; the snapshot is opaque to
+	 * the caller, which only round-trips it back to the restore call.
+	 */
+	snapshotConfigKeyBackoffForReload(): ReadonlyMap<string, ConfigKeyBackoffSnapshot> {
+		const snapshot = new Map<string, ConfigKeyBackoffSnapshot>();
+		for (const [provider, keys] of this.#configOverrides) {
+			const providerKey = `${provider}:config_api_key`;
+			const backoff = this.#credentialBackoff.get(providerKey);
+			const probeAfter = this.#credentialBackoffProbeAfter.get(providerKey);
+			if (!backoff && !probeAfter) continue;
+			snapshot.set(provider, {
+				keys: [...keys],
+				backoff: backoff ? new Map(backoff) : undefined,
+				probeAfter: probeAfter ? new Map(probeAfter) : undefined,
+			});
+		}
+		return snapshot;
+	}
+
+	/**
+	 * Reapply backoffs captured by {@link snapshotConfigKeyBackoffForReload}, but
+	 * only for providers whose config key list survived the reload byte-for-byte.
+	 * The reload's clearConfigApiKeys otherwise wipes every provider's quota
+	 * backoff, letting an unrelated models.yml edit immediately reselect a key
+	 * the server had blocked until a reported reset time. A changed or removed
+	 * key list invalidates the credential indices a backoff is keyed on, so the
+	 * stale block is left cleared.
+	 */
+	restoreConfigKeyBackoffAfterReload(snapshot: ReadonlyMap<string, ConfigKeyBackoffSnapshot>): void {
+		for (const [provider, entry] of snapshot) {
+			const current = this.#configOverrides.get(provider);
+			if (
+				!current ||
+				current.length !== entry.keys.length ||
+				!current.every((apiKey, index) => apiKey === entry.keys[index])
+			) {
+				continue;
+			}
+			const providerKey = `${provider}:config_api_key`;
+			if (entry.backoff) this.#credentialBackoff.set(providerKey, new Map(entry.backoff));
+			if (entry.probeAfter) this.#credentialBackoffProbeAfter.set(providerKey, new Map(entry.probeAfter));
+		}
 	}
 
 	#clearVirtualApiKeyBlocks(provider: string, source: "config" | "env"): void {
