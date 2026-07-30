@@ -21,16 +21,53 @@ async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
 }
 
-function makeDeepSeekSession(): AgentSession {
+interface TestModel {
+	contextWindow: number;
+	provider: string;
+	baseUrl: string;
+}
+
+function setActiveModelForTest(session: AgentSession, model: TestModel): void {
+	// AgentSession exposes model changes through setModel(), but these unit tests
+	// need a synchronous switch while a controlled promise remains pending.
+	const mutable = session as unknown as { model: TestModel; state: { model: TestModel } };
+	mutable.model = model;
+	mutable.state.model = model;
+}
+
+function makeDeepSeekSession(
+	options: { baseUrl?: string; getApiKey?: () => Promise<string | undefined> } = {},
+): AgentSession {
 	const messages: unknown[] = [];
-	const model = { contextWindow: 200_000, provider: "deepseek" };
+	const model = {
+		contextWindow: 200_000,
+		provider: "deepseek",
+		baseUrl: options.baseUrl ?? "",
+	};
 	return {
 		sessionId: "session-1",
 		messages,
 		state: { messages, model },
 		model,
 		isStreaming: false,
-		modelRegistry: { getApiKey: async () => "sk-test" },
+		isFastModeActive: () => false,
+		modelRegistry: { getApiKey: options.getApiKey ?? (async () => "sk-test") },
+		sessionManager: {
+			getUsageStatistics: () => ({
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+				orchestrationCacheRead: 0,
+				premiumRequests: 0,
+				cost: 0,
+			}),
+			getSessionName: () => "test",
+		},
+		getAsyncJobSnapshot: () => ({ running: [] }),
 		getContextUsage: () => undefined,
 		contextUsageRevision: 0,
 	} as unknown as AgentSession;
@@ -100,5 +137,142 @@ describe("StatusLineComponent balance refresh", () => {
 		vi.advanceTimersByTime(5 * 60_000 + 1);
 		await render(component);
 		expect(fetchCalls).toBe(2);
+	});
+
+	it("does not resolve or send a custom gateway key to DeepSeek's public endpoint", async () => {
+		const getApiKey = vi.fn(async () => "gateway-secret");
+		const component = new StatusLineComponent(
+			makeDeepSeekSession({ baseUrl: "https://deepseek.internal.example/v1", getApiKey }),
+		);
+
+		await render(component);
+
+		expect(getApiKey).not.toHaveBeenCalled();
+		expect(fetchCalls).toBe(0);
+	});
+
+	it("allows the built-in DeepSeek model whose baseUrl is empty", async () => {
+		const getApiKey = vi.fn(async () => "sk-test");
+		const component = new StatusLineComponent(makeDeepSeekSession({ getApiKey }));
+
+		await render(component);
+
+		expect(getApiKey).toHaveBeenCalledTimes(1);
+		expect(fetchCalls).toBe(1);
+	});
+
+	it("allows the explicit first-party DeepSeek API host", async () => {
+		const getApiKey = vi.fn(async () => "sk-test");
+		const component = new StatusLineComponent(
+			makeDeepSeekSession({ baseUrl: "https://api.deepseek.com/v1", getApiKey }),
+		);
+
+		await render(component);
+
+		expect(getApiKey).toHaveBeenCalledTimes(1);
+		expect(fetchCalls).toBe(1);
+	});
+
+	it("rejects a gateway whose hostname only contains the DeepSeek marker", async () => {
+		const getApiKey = vi.fn(async () => "gateway-secret");
+		const component = new StatusLineComponent(
+			makeDeepSeekSession({ baseUrl: "https://api.deepseek.com.gateway.example/v1", getApiKey }),
+		);
+
+		await render(component);
+
+		expect(getApiKey).not.toHaveBeenCalled();
+		expect(fetchCalls).toBe(0);
+	});
+	it("does not fetch during rendering when the balance segment is absent", async () => {
+		const getApiKey = vi.fn(async () => "sk-test");
+		const component = new StatusLineComponent(makeDeepSeekSession({ getApiKey }));
+
+		component.updateSettings({ preset: "custom", leftSegments: ["model"], rightSegments: [] });
+		component.getTopBorder(120);
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+
+		expect(getApiKey).not.toHaveBeenCalled();
+		expect(fetchCalls).toBe(0);
+
+		component.updateSettings({ preset: "custom", leftSegments: ["balance"], rightSegments: [] });
+		component.getTopBorder(120);
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+
+		expect(getApiKey).toHaveBeenCalledTimes(1);
+		expect(fetchCalls).toBe(1);
+	});
+
+	it("clears a fresh cached balance immediately when the provider changes", async () => {
+		const session = makeDeepSeekSession();
+		const component = new StatusLineComponent(session);
+
+		await render(component);
+		pending.resolve(new Response(JSON.stringify({ balance_infos: [{ total_balance: "42.00", currency: "CNY" }] })));
+		await flushMicrotasks();
+		component.updateSettings({ preset: "custom", leftSegments: ["balance"], rightSegments: [] });
+		expect(component.getTopBorder(120).content).toContain("42.00");
+
+		const otherModel = { contextWindow: 200_000, provider: "openai", baseUrl: "" };
+		setActiveModelForTest(session, otherModel);
+
+		expect(component.getTopBorder(120).content).not.toContain("42.00");
+	});
+
+	it("discards an old DeepSeek response that resolves after a model switch", async () => {
+		const session = makeDeepSeekSession();
+		const component = new StatusLineComponent(session);
+
+		await render(component);
+		const otherModel = { contextWindow: 200_000, provider: "openai", baseUrl: "" };
+		setActiveModelForTest(session, otherModel);
+		component.refreshBalanceInBackground();
+
+		pending.resolve(new Response(JSON.stringify({ balance_infos: [{ total_balance: "42.00", currency: "CNY" }] })));
+		await flushMicrotasks();
+
+		const nextDeepSeek = { contextWindow: 200_000, provider: "deepseek", baseUrl: "" };
+		setActiveModelForTest(session, nextDeepSeek);
+		pending = Promise.withResolvers<Response>();
+		component.updateSettings({ preset: "custom", leftSegments: ["balance"], rightSegments: [] });
+
+		expect(component.getTopBorder(120).content).not.toContain("42.00");
+	});
+
+	it("can refresh again after a provider switch cancels an armed timer", async () => {
+		const session = makeDeepSeekSession();
+		const component = new StatusLineComponent(session);
+
+		component.refreshBalanceInBackground();
+		const otherModel = { contextWindow: 200_000, provider: "openai", baseUrl: "" };
+		setActiveModelForTest(session, otherModel);
+		component.refreshBalanceInBackground();
+
+		const nextDeepSeek = { contextWindow: 200_000, provider: "deepseek", baseUrl: "" };
+		setActiveModelForTest(session, nextDeepSeek);
+		component.refreshBalanceInBackground();
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+
+		expect(fetchCalls).toBe(1);
+	});
+
+	it("clears a fresh cached balance when switching between DeepSeek models", async () => {
+		const session = makeDeepSeekSession();
+		const component = new StatusLineComponent(session);
+
+		await render(component);
+		pending.resolve(new Response(JSON.stringify({ balance_infos: [{ total_balance: "42.00", currency: "CNY" }] })));
+		await flushMicrotasks();
+		component.updateSettings({ preset: "custom", leftSegments: ["balance"], rightSegments: [] });
+		expect(component.getTopBorder(120).content).toContain("42.00");
+
+		const nextDeepSeek = { contextWindow: 200_000, provider: "deepseek", baseUrl: "" };
+		setActiveModelForTest(session, nextDeepSeek);
+		pending = Promise.withResolvers<Response>();
+
+		expect(component.getTopBorder(120).content).not.toContain("42.00");
 	});
 });

@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	type ComposerStyle,
@@ -454,6 +454,7 @@ export class StatusLineComponent implements Component {
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
 	// API-key provider balance caching (e.g. DeepSeek)
 	#cachedBalance: string | null = null;
+	#balanceModel: Model | null = null;
 	#balanceFetchedAt = 0;
 	#balanceInFlight = false;
 	#balanceTimer: Timer | null = null;
@@ -787,6 +788,7 @@ export class StatusLineComponent implements Component {
 		if (!this.#balanceTimer) return;
 		clearTimeout(this.#balanceTimer);
 		this.#balanceTimer = null;
+		this.#balanceInFlight = false;
 	}
 
 	invalidate(): void {
@@ -810,6 +812,7 @@ export class StatusLineComponent implements Component {
 		this.#usageFetchedAt = 0;
 		this.#usageInFlight = false;
 		this.#cachedBalance = null;
+		this.#balanceModel = null;
 		this.#balanceFetchedAt = 0;
 		this.#balanceInFlight = false;
 		this.#contextUsageCache = undefined;
@@ -1373,49 +1376,68 @@ export class StatusLineComponent implements Component {
 	 * {@link refreshUsageInBackground}.
 	 */
 	refreshBalanceInBackground(): void {
-		const now = Date.now();
 		const session = this.session;
-		if (this.#balanceInFlight || this.#balanceTimer) return;
-		if (this.#balanceFetchedAt > 0 && now - this.#balanceFetchedAt < STATUS_BALANCE_REFRESH_MS) return;
-
-		const provider = session.state.model?.provider ?? session.model?.provider;
-		if (provider !== "deepseek") {
-			// Clear stale balance when switching away from DeepSeek (the
-			// session cache invalidation may fire after the next render).
-			if (this.#cachedBalance !== null) this.#cachedBalance = null;
+		const model = session.state.model ?? session.model;
+		if (model?.provider !== "deepseek") {
+			// Model switches happen within the same session and do not invalidate
+			// these caches. Clear before the TTL guard so a fresh DeepSeek balance
+			// is never rendered under the next provider.
+			this.#clearBalanceTimer();
+			this.#cachedBalance = null;
+			this.#balanceModel = null;
+			this.#balanceFetchedAt = 0;
 			return;
 		}
+		if (this.#balanceModel !== null && this.#balanceModel !== model) {
+			this.#cachedBalance = null;
+			this.#balanceModel = null;
+			this.#balanceFetchedAt = 0;
+		}
+		if (this.#balanceInFlight || this.#balanceTimer) return;
+		const now = Date.now();
+		if (this.#balanceFetchedAt > 0 && now - this.#balanceFetchedAt < STATUS_BALANCE_REFRESH_MS) return;
+
 		this.#balanceInFlight = true;
 		this.#balanceTimer = setTimeout(() => {
 			this.#balanceTimer = null;
-			void this.#runBalanceRefresh(session);
+			void this.#runBalanceRefresh(session, model);
 		}, 0);
 	}
 
-	async #runBalanceRefresh(session: AgentSession): Promise<void> {
-		if (this.#disposed || this.session !== session) {
+	async #runBalanceRefresh(session: AgentSession, model: Model): Promise<void> {
+		if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) {
 			this.#balanceInFlight = false;
 			return;
 		}
 		try {
-			const balance = await this.#fetchDeepSeekBalance(session);
-			if (this.#disposed || this.session !== session) return;
+			const balance = await this.#fetchDeepSeekBalance(session, model);
+			if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) return;
 			this.#cachedBalance = balance;
+			this.#balanceModel = model;
 			this.#balanceFetchedAt = Date.now();
 		} catch {
-			if (this.#disposed || this.session !== session) return;
+			if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) return;
 			this.#balanceFetchedAt = Date.now();
 		} finally {
 			if (this.session === session) this.#balanceInFlight = false;
 		}
 	}
 
-	async #fetchDeepSeekBalance(session: AgentSession): Promise<string | null> {
-		const apiKey = await session.modelRegistry?.getApiKey(
-			session.state.model ?? session.model!,
-			session.sessionId,
-		);
-		if (!apiKey) return null;
+	async #fetchDeepSeekBalance(session: AgentSession, model: Model): Promise<string | null> {
+		// A gateway key must never be sent to DeepSeek's public balance endpoint.
+		// Empty uses the first-party default; an explicit URL must have the exact
+		// direct API hostname. Substring matching is unsafe for credential gates.
+		if (model.baseUrl) {
+			let hostname: string;
+			try {
+				hostname = new URL(model.baseUrl).hostname.toLowerCase();
+			} catch {
+				return null;
+			}
+			if (hostname !== "api.deepseek.com") return null;
+		}
+		const apiKey = await session.modelRegistry?.getApiKey(model, session.sessionId);
+		if (!apiKey || (session.state.model ?? session.model) !== model) return null;
 
 		const signal = AbortSignal.timeout(STATUS_BALANCE_FETCH_TIMEOUT_MS);
 		const resp = await fetch("https://api.deepseek.com/user/balance", {
@@ -1430,14 +1452,16 @@ export class StatusLineComponent implements Component {
 		if (Number.isNaN(total)) return null;
 
 		const currencySymbol: Record<string, string> = { CNY: "¥", USD: "$", EUR: "€", GBP: "£" };
-		const symbol = currencySymbol[info?.currency ?? ""] ?? (info?.currency ?? "¥");
+		const symbol = currencySymbol[info?.currency ?? ""] ?? info?.currency ?? "¥";
 
 		// Colour-code inline: green >50, yellow >10, red <=10
-		const G = "\x1b[32m", Y = "\x1b[33m", R = "\x1b[31m", E = "\x1b[0m";
+		const G = "\x1b[32m",
+			Y = "\x1b[33m",
+			R = "\x1b[31m",
+			E = "\x1b[0m";
 		const color = total > 50 ? G : total > 10 ? Y : R;
 		return `${color}${symbol}${total.toFixed(2)}${E}`;
 	}
-
 
 	async #raceUsageRefreshWithSignal(promise: Promise<unknown>, signal: AbortSignal): Promise<unknown> {
 		if (signal.aborted) throw signal.reason;
@@ -1694,13 +1718,16 @@ export class StatusLineComponent implements Component {
 		includePath: boolean,
 		includeGit: boolean,
 		includePr: boolean,
+		includeBalance: boolean,
 		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
 
-		// Trigger background fetch (5-min TTL); render uses cached value
+		// Trigger background fetches; render uses cached values. Balance is
+		// opt-in, so default presets must not make authenticated requests that
+		// can never produce visible output.
 		this.refreshUsageInBackground();
-		this.refreshBalanceInBackground();
+		if (includeBalance) this.refreshBalanceInBackground();
 
 		// Get usage statistics
 		const aggregateUsageStats = this.session.sessionManager?.getUsageStatistics() ?? {
@@ -1866,6 +1893,8 @@ export class StatusLineComponent implements Component {
 		const plain = layout !== "box";
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
+		const includeBalance =
+			effectiveSettings.leftSegments.includes("balance") || effectiveSettings.rightSegments.includes("balance");
 		const gitEnabled = this.#gitEnabled();
 		const includeGit =
 			gitEnabled &&
@@ -1878,6 +1907,7 @@ export class StatusLineComponent implements Component {
 			includePath,
 			includeGit,
 			includePr,
+			includeBalance,
 			previewTitle,
 		);
 		const separatorDef = plain

@@ -270,6 +270,9 @@
 - Fixed retry-fallback selection switching to a fallback model with a context window too small to hold the current session context.
 - Fixed OpenCode discovery ignoring `opencode.jsonc` files and rejecting comments in `opencode.json`.
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
+### Added
+
+- Added a `balance` status-line segment reporting the remaining account balance for API-key providers such as DeepSeek. It only fetches when the segment is actually configured, resolves the key against a strictly parsed `api.deepseek.com`, and owns its cache by model object so switching provider or model cannot leave a stale figure on screen ([#6361](https://github.com/can1357/oh-my-pi/pull/6361)).
 
 ## [17.2.15] - 2026-08-12
 
