@@ -85,6 +85,45 @@ describe("SessionManager persistent lock integration", () => {
 		expect(fs.existsSync(lockPath)).toBe(false);
 	});
 
+	it("retries lock cleanup when a failed open cannot release immediately", async () => {
+		const { cwd, sessions } = fixture();
+		const source = SessionManager.create(cwd, sessions);
+		source.appendMessage({ role: "user", content: "open cleanup", timestamp: Date.now() });
+		await source.ensureOnDisk();
+		const sessionFile = source.getSessionFile();
+		if (!sessionFile) throw new Error("missing session file");
+		await source.close();
+
+		class FailingLoadStorage extends FileSessionStorage {
+			#reads = 0;
+			override readText(filePath: string): Promise<string> {
+				this.#reads++;
+				if (this.#reads === 2) return Promise.reject(new Error("load after lock failed"));
+				return super.readText(filePath);
+			}
+		}
+		const lockPath = lockPathForSession(sessionFile);
+		const unlinkSync = fs.unlinkSync;
+		let releaseFailed = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (!releaseFailed && String(target) === lockPath) {
+				releaseFailed = true;
+				const error = new Error("transient unlink failure") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		try {
+			await expect(SessionManager.open(sessionFile, undefined, new FailingLoadStorage())).rejects.toThrow(
+				"load after lock failed",
+			);
+			expect(fs.existsSync(lockPath)).toBe(false);
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+	});
+
 	it("preserves source state when branching cannot release its lock", async () => {
 		const { cwd, sessions } = fixture();
 		const manager = SessionManager.create(cwd, sessions);

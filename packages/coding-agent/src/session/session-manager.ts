@@ -64,6 +64,7 @@ import {
 	acquireSessionLock,
 	inspectSessionLock,
 	lockPathForSession,
+	SESSION_LOCK_HEARTBEAT_MS,
 	SessionLockError,
 	type SessionLockHandle,
 } from "./session-lock";
@@ -438,6 +439,30 @@ export class SessionPersistenceIndeterminateError extends AggregateError {
  * repointed.
  */
 export class SessionManager {
+	static readonly #failedOpenManagers = new Set<SessionManager>();
+	static #failedOpenCleanupScheduled = false;
+
+	static #retainFailedOpenManager(manager: SessionManager): void {
+		SessionManager.#failedOpenManagers.add(manager);
+		if (SessionManager.#failedOpenCleanupScheduled) return;
+		SessionManager.#failedOpenCleanupScheduled = true;
+		const timer = setTimeout(() => {
+			SessionManager.#failedOpenCleanupScheduled = false;
+			for (const pending of SessionManager.#failedOpenManagers) {
+				try {
+					pending.#releaseAllSessionLocks();
+					SessionManager.#failedOpenManagers.delete(pending);
+				} catch {
+					// Keep the manager reachable and retry transient cleanup later.
+				}
+			}
+			if (SessionManager.#failedOpenManagers.size > 0) {
+				SessionManager.#retainFailedOpenManager(SessionManager.#failedOpenManagers.values().next().value!);
+			}
+		}, SESSION_LOCK_HEARTBEAT_MS);
+		timer.unref?.();
+	}
+
 	#cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
 	#additionalDirectories: string[] = [];
@@ -1507,7 +1532,12 @@ export class SessionManager {
 
 			if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
 		} catch (error) {
-			this.#releaseSessionLock();
+			try {
+				this.#releaseSessionLock();
+			} catch {
+				// Keep the original load/publish failure. The manager remains the
+				// owner so its caller, or open() below, can retry cleanup.
+			}
 			throw error;
 		}
 	}
@@ -2931,8 +2961,17 @@ export class SessionManager {
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		await manager.setSessionFile(filePath);
-		return manager;
+		try {
+			await manager.setSessionFile(filePath);
+			return manager;
+		} catch (error) {
+			try {
+				manager.#releaseAllSessionLocks();
+			} catch {
+				SessionManager.#retainFailedOpenManager(manager);
+			}
+			throw error;
+		}
 	}
 
 	/**

@@ -913,6 +913,35 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		}
 		throw error;
 	}
+	const lockedIdentity = fileIdentity(normalized);
+	if (
+		(ownedIdentity === undefined) !== (lockedIdentity === undefined) ||
+		(ownedIdentity !== undefined &&
+			lockedIdentity !== undefined &&
+			(ownedIdentity.dev !== lockedIdentity.dev || ownedIdentity.ino !== lockedIdentity.ino))
+	) {
+		let releaseError: unknown;
+		try {
+			pathHandle.release();
+		} catch (error) {
+			releaseError = error;
+		}
+		try {
+			identityHandle?.release();
+		} catch (error) {
+			if (releaseError) {
+				throw new AggregateError([releaseError, error], "Session file changed while releasing acquisition locks");
+			}
+			throw error;
+		}
+		if (releaseError) throw releaseError;
+		throw new SessionLockError(
+			"locked",
+			`Session file changed while acquiring writable ownership: ${normalized}`,
+			normalized,
+			pathHandle.lockPath,
+		);
+	}
 	return {
 		record: pathHandle.record,
 		lockPath: pathHandle.lockPath,

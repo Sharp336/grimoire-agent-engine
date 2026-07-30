@@ -456,6 +456,33 @@ describe("session lock", () => {
 		aliasLock.release();
 	});
 
+	it("rejects ownership when the session inode changes during acquisition", () => {
+		const { dir, session } = fixture();
+		fs.writeFileSync(session, "original");
+		const replacement = path.join(dir, "replacement.jsonl");
+		fs.writeFileSync(replacement, "replacement");
+		const linkSync = fs.linkSync;
+		let publications = 0;
+		const linkSpy = vi.spyOn(fs, "linkSync").mockImplementation((existingPath, newPath) => {
+			publications++;
+			if (publications === 2) fs.renameSync(replacement, session);
+			return linkSync(existingPath, newPath);
+		});
+		try {
+			expect(() =>
+				acquireSessionLock(session, {
+					pid: 42,
+					processStartMarker: "marker",
+					processProbe: probe(true),
+				}),
+			).toThrow(expect.objectContaining({ name: "SessionLockError", code: "locked" }));
+			expect(fs.readFileSync(session, "utf8")).toBe("replacement");
+			expect(fs.existsSync(lockPathForSession(session))).toBe(false);
+		} finally {
+			linkSpy.mockRestore();
+		}
+	});
+
 	it("claims the inode published after locking a missing session path", () => {
 		const { dir, session } = fixture();
 		const options = {
