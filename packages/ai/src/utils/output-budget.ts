@@ -14,7 +14,7 @@
  * `packages/agent/src/tokenizer.ts`).
  */
 
-import type { Message } from "../types";
+import type { Message, Model } from "../types";
 
 /**
  * Image content has no tokenizer representation; charge a fixed estimate
@@ -60,6 +60,7 @@ export function estimatePromptTokens(
 	systemPrompt: string | undefined,
 	messages: readonly Message[],
 	tools?: readonly unknown[],
+	targetModel?: Pick<Model, "api" | "provider">,
 ): number {
 	let tokens = 0;
 
@@ -86,8 +87,13 @@ export function estimatePromptTokens(
 				} else if (block.type === "anthropicServerTool") {
 					// Verbatim server-tool call/result (e.g. web_search_tool_result)
 					// replayed on the wire — potentially large, so charge its
-					// serialized form like the agent's compaction estimator.
-					tokens += estimateTextTokens(JSON.stringify(block.block));
+					// serialized form. It travels only to the anthropic-messages
+					// provider that produced it; every cross-provider target (e.g.
+					// Bedrock after an Anthropic web-search turn) drops it in
+					// transformMessages, so when a target is known, charge nothing
+					// for bytes that never reach the wire.
+					const droppedByTarget = targetModel !== undefined && !replaysAnthropicServerTool(message, targetModel);
+					if (!droppedByTarget) tokens += estimateTextTokens(JSON.stringify(block.block));
 				} else if (block.type === "fallback") {
 					tokens += estimateTextTokens(JSON.stringify(block));
 				}
@@ -108,4 +114,15 @@ export function estimatePromptTokens(
  */
 export function estimateTextTokens(text: string): number {
 	return (Buffer.byteLength(text, "utf-8") + 3) >> 2;
+}
+
+/**
+ * Mirror transformMessages' replay predicate for native server-tool blocks: they
+ * survive on the wire only when the target is the anthropic-messages provider that
+ * produced them. Cross-provider targets drop them, so they add no wire bytes here.
+ */
+function replaysAnthropicServerTool(message: Message, target: Pick<Model, "api" | "provider">): boolean {
+	if (target.api !== "anthropic-messages") return false;
+	if (message.role !== "assistant") return false;
+	return message.provider === target.provider;
 }

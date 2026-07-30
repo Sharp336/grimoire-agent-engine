@@ -3617,6 +3617,7 @@ function buildParams(
 		context.systemPrompt?.join("\n"),
 		context.messages,
 		context.tools,
+		model,
 	);
 	params.max_tokens = clampMaxTokensToContext({
 		requestedMaxTokens: params.max_tokens,
@@ -3625,10 +3626,14 @@ function buildParams(
 	});
 	reconcileThinkingForClampedMaxTokens(params, model);
 
-	// Opus 4.7+ and Fable/Mythos 5 reject non-default sampling parameters with 400 error.
+	// Opus 4.7+ and Fable/Mythos 5 reject non-default sampling parameters with a 400.
+	// Adaptive-only models can never switch thinking off — disableThinking deletes
+	// params.thinking but pins output_config.effort, so a forced-tool turn still
+	// reasons. Treat that implicit-on state as active so caller-supplied sampling
+	// params aren't attached to a thinking request (otherwise a provider 400).
 	const thinkingType = params.thinking?.type;
-	const allowSamplingParams =
-		model.compat.supportsSamplingParams && (thinkingType === undefined || thinkingType === "disabled");
+	const thinkingActive = (thinkingType !== undefined && thinkingType !== "disabled") || isAdaptiveOnlyThinking(model);
+	const allowSamplingParams = model.compat.supportsSamplingParams && !thinkingActive;
 	if (allowSamplingParams && options?.temperature !== undefined) {
 		params.temperature = options.temperature;
 	}

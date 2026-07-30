@@ -340,6 +340,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 								context.systemPrompt?.join("\n"),
 								context.messages,
 								toolConfig ? context.tools : undefined,
+								model,
 							),
 						})
 					: undefined;

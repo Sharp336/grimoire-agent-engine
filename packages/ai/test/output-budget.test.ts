@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { Effort } from "@oh-my-pi/pi-ai";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { clampMaxTokensToContext, estimatePromptTokens } from "@oh-my-pi/pi-ai/utils/output-budget";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 // ─── clampMaxTokensToContext ─────────────────────────────────────────────────
 
@@ -178,6 +178,33 @@ describe("estimatePromptTokens", () => {
 		const msg = assistantMessage([{ type: "anthropicServerTool", block }]);
 		const expected = (Buffer.byteLength(JSON.stringify(block), "utf-8") + 3) >> 2;
 		expect(estimatePromptTokens(undefined, [msg])).toBe(expected);
+	});
+
+	it("excludes an anthropicServerTool block a foreign target provider will drop", () => {
+		// transformMessages drops native server-tool blocks for every target that
+		// isn't the anthropic-messages provider that produced them, so a Bedrock
+		// turn after an Anthropic web-search replays nothing for the block. The
+		// estimate must not charge bytes that never reach the wire.
+		const block = {
+			type: "web_search_tool_result" as const,
+			tool_use_id: "srv_1",
+			content: [{ type: "text", text: "x".repeat(100_000) }],
+		};
+		const msg = assistantMessage([{ type: "anthropicServerTool", block }]);
+		const bedrockTarget = makeBedrockModel(200_000, 8_192);
+		expect(estimatePromptTokens(undefined, [msg], undefined, bedrockTarget)).toBe(0);
+	});
+
+	it("counts an anthropicServerTool block for its originating anthropic target", () => {
+		const block = {
+			type: "web_search_tool_result" as const,
+			tool_use_id: "srv_1",
+			content: [{ type: "text", text: "x".repeat(100_000) }],
+		};
+		const msg = assistantMessage([{ type: "anthropicServerTool", block }]);
+		const sameProvider = makeModel(200_000, 8_192);
+		const expected = (Buffer.byteLength(JSON.stringify(block), "utf-8") + 3) >> 2;
+		expect(estimatePromptTokens(undefined, [msg], undefined, sameProvider)).toBe(expected);
 	});
 
 	it("counts serialized tools", () => {

@@ -62,6 +62,9 @@ type CapturedPayload = {
 	thinking?: { type: string };
 	tool_choice?: { type: string };
 	output_config?: { effort?: string };
+	temperature?: number;
+	top_p?: number;
+	top_k?: number;
 };
 
 function capturePayload(
@@ -156,5 +159,36 @@ describe("MiniMax Anthropic adaptive thinking", () => {
 
 		expect(payload.thinking).toEqual({ type: "adaptive" });
 		expect(payload.output_config?.effort).toBeUndefined();
+	});
+});
+
+describe("Anthropic adaptive-only thinking + sampling params", () => {
+	it("withholds sampling params from a forced-tool adaptive-only turn (thinking stays implicitly on)", async () => {
+		// Forced tool choice routes through disableThinking, which deletes
+		// params.thinking but pins output_config.effort="low" for adaptive-only
+		// models — the request still reasons, so caller-supplied sampling params
+		// would trip a provider 400. They must be withheld.
+		const base = makeAnthropicModel("claude-opus-4-8");
+		const model = buildModel({
+			...base,
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+			compat: { ...base.compatConfig, supportsSamplingParams: true },
+		} as ModelSpec<"anthropic-messages">);
+		const payload = await capturePayload(model, {
+			toolChoice: { type: "tool", name: "get_weather" },
+			temperature: 0.7,
+			topP: 0.5,
+			topK: 40,
+		});
+		// disableThinking ran for the forced-tool adaptive-only turn.
+		expect(payload.thinking).toBeUndefined();
+		expect(payload.output_config?.effort).toBe("low");
+		// Still-adaptive request must not carry sampling params.
+		expect(payload.temperature).toBeUndefined();
+		expect(payload.top_p).toBeUndefined();
+		expect(payload.top_k).toBeUndefined();
 	});
 });
