@@ -24,7 +24,7 @@ export function handleGetSettings(settings: Settings, id: string | undefined, ta
 			type: "response",
 			command: "get_settings",
 			success: false,
-			error: `Unknown settings tab: ${String(tab)}`,
+			error: typeof tab === "string" ? `Unknown settings tab: ${tab}` : "Settings tab must be a string",
 			code: "invalid_tab",
 		};
 	}

@@ -9,7 +9,12 @@ import { handleGetSettings } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-get-s
  */
 describe("handleGetSettings", () => {
 	it("rejects a tab the wire could carry but the schema does not define", () => {
-		for (const tab of ["appearence", "", 7, null, {}, ["appearance"]]) {
+		const hostileObject = {
+			toString(): string {
+				throw new Error("must not coerce");
+			},
+		};
+		for (const tab of ["appearence", "", 7, null, {}, ["appearance"], hostileObject]) {
 			const response = handleGetSettings(Settings.isolated(), "req-3", tab);
 			expect(response).toMatchObject({
 				id: "req-3",
