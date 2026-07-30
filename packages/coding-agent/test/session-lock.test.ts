@@ -433,6 +433,29 @@ describe("session lock", () => {
 		lock.release();
 	});
 
+	it("keeps file-identity ownership after the original hard-link path is removed", () => {
+		const { dir, session } = fixture();
+		fs.writeFileSync(session, "session");
+		const options = {
+			pid: 42,
+			processStartMarker: "marker",
+			processProbe: probe(true),
+		};
+		const lock = acquireSessionLock(session, options);
+		const alias = path.join(dir, "late-alias.jsonl");
+		fs.linkSync(session, alias);
+		fs.unlinkSync(session);
+		expect(fs.statSync(alias).nlink).toBe(1);
+
+		expect(() => acquireSessionLock(alias, { ...options, ownerId: OWNER_B })).toThrow(
+			expect.objectContaining({ name: "SessionLockError", code: "locked" }),
+		);
+
+		lock.release();
+		const aliasLock = acquireSessionLock(alias, { ...options, ownerId: OWNER_B });
+		aliasLock.release();
+	});
+
 	it("does not publish ownership while another mutation claim is live", () => {
 		const { session } = fixture();
 		const claimPath = `${lockPathForSession(session)}.steal`;

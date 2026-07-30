@@ -628,7 +628,7 @@ function rejectHardLinkedSessionFile(sessionFile: string, lockPath: string): voi
 }
 
 /** Acquire exclusive write ownership for a session until the returned handle is released. */
-export function acquireSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockHandle {
+function acquirePathSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockHandle {
 	const normalized = normalizeSessionFile(sessionFile);
 	if (byteLength(normalized) > MAX_SESSION_PATH_BYTES) {
 		throw new SessionLockError(
@@ -847,6 +847,72 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		},
 		get released() {
 			return released;
+		},
+	};
+}
+
+function identityLockTarget(sessionFile: string): string | undefined {
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(sessionFile);
+	} catch (error) {
+		if (errorCode(error) === "ENOENT") return undefined;
+		throw error;
+	}
+	const uid = typeof process.getuid === "function" ? process.getuid() : "user";
+	const identityDir = path.join(os.tmpdir(), `oh-my-pi-session-identities-${uid}`);
+	fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
+	fs.chmodSync(identityDir, 0o700);
+	return path.join(identityDir, `${stat.dev.toString(16)}-${stat.ino.toString(16)}.identity`);
+}
+
+/** Acquire exclusive write ownership for a session until the returned handle is released. */
+export function acquireSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockHandle {
+	const normalized = normalizeSessionFile(sessionFile);
+	const identityTarget = identityLockTarget(normalized);
+	const identityHandle = identityTarget ? acquirePathSessionLock(identityTarget, options) : undefined;
+	let pathHandle: SessionLockHandle;
+	try {
+		pathHandle = acquirePathSessionLock(normalized, options);
+	} catch (error) {
+		try {
+			identityHandle?.release();
+		} catch (releaseError) {
+			throw new AggregateError(
+				[error, releaseError],
+				"Failed to acquire session path lock and release identity lock",
+			);
+		}
+		throw error;
+	}
+	if (!identityHandle) return pathHandle;
+
+	return {
+		record: pathHandle.record,
+		lockPath: pathHandle.lockPath,
+		heartbeat(): void {
+			identityHandle.heartbeat();
+			pathHandle.heartbeat();
+		},
+		release(): void {
+			let pathError: unknown;
+			try {
+				pathHandle.release();
+			} catch (error) {
+				pathError = error;
+			}
+			try {
+				identityHandle.release();
+			} catch (identityError) {
+				if (pathError) {
+					throw new AggregateError([pathError, identityError], "Failed to release session locks");
+				}
+				throw identityError;
+			}
+			if (pathError) throw pathError;
+		},
+		get released() {
+			return pathHandle.released && identityHandle.released;
 		},
 	};
 }
