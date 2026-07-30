@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [17.2.0] - 2026-07-30
+
 ### Fixed
 
-- Fixed the agent appearing to stop silently with no message: terminal `auto_retry_end` failures now surface as an error notice instead of being discarded. ([#6992](https://github.com/can1357/oh-my-pi/pull/6992) by [@metaphorics](https://github.com/metaphorics))
+- Fixed an issue where the agent would stop silently without a message by ensuring terminal auto-retry failures are properly surfaced as error notices.
 
 ## [17.1.0] - 2026-07-24
 

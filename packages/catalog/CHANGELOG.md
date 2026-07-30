@@ -2,10 +2,21 @@
 
 ## [Unreleased]
 
+## [17.2.1] - 2026-07-30
+
 ### Fixed
 
-- Fixed LM Studio first turns failing with `400 Invalid tool_choice type: 'object'` when eager todo forced a named tool. LM Studio now receives the supported string selector `tool_choice: "required"` while the requested tool remains available ([#6925](https://github.com/can1357/oh-my-pi/issues/6925)).
-- Fixed spawn-based lazy-loading tests (`bundled-reference-laziness`, `models-lazy-provider-cache`) flaking under CPU contention by giving each an explicit 60s per-test timeout instead of relying on bun's 5s default ([#7018](https://github.com/can1357/oh-my-pi/issues/7018)).
+- Fixed Ollama model-manager caches being reused after the configured base URL changed by scoping cache namespaces to the normalized native discovery endpoint, including reverse-proxy path prefixes ([#7087](https://github.com/can1357/oh-my-pi/issues/7087)).
+
+## [17.2.0] - 2026-07-30
+
+### Added
+
+- Regenerated the Cursor agent protobufs (`discovery/cursor-gen/agent_pb.ts`) against the modern `agent.proto`, adding the message and enum families current Cursor CLI builds emit: Pi tool exec frames, hook queries and responses, subagents, allowlist prechecks, MCP state, smart-mode classification, canvas diagnostics, conversation search, agent-store conflicts and git diff. Purely additive — no existing exported symbol changed shape.
+
+### Fixed
+
+- Fixed an issue where LM Studio first turns failed with a 400 Invalid tool_choice error when a named tool was forced, by using the supported tool_choice: "required" string selector.
 
 ## [17.1.8] - 2026-07-28
 
