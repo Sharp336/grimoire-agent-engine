@@ -65,6 +65,16 @@ function entryNames(entry: unknown, providerId: string): boolean {
 	return entry === providerId || entry === qualify(providerId);
 }
 
+/**
+ * Whether this registry owns a persisted entry: the qualified form, or a plain
+ * id that names a registered discovery provider. A plain id belonging only to
+ * the model registry is not ours to rewrite.
+ */
+function ownsEntry(entry: unknown): boolean {
+	if (typeof entry !== "string") return false;
+	return entry.startsWith(DISCOVERY_SCOPE_PREFIX) || providerCapabilities.has(entry);
+}
+
 /** Settings manager for persistence (if set) */
 let settings: Settings | null = null;
 
@@ -379,11 +389,10 @@ export function setDisabledProviders(providerIds: string[]): void {
 	for (const id of providerIds) {
 		disabledProviders.add(unqualify(id));
 	}
-	// Replaces this registry's own ids; path-scoped rules stay as authored.
-	editPersistedEntries(entries => [
-		...entries.filter(entry => typeof entry !== "string"),
-		...providerIds.map(qualify),
-	]);
+	// Replaces this registry's own ids. Path-scoped rules and plain ids that name
+	// no discovery provider — a model-only disable such as `anthropic` — stay as
+	// authored, since replacing the discovery set says nothing about them.
+	editPersistedEntries(entries => [...entries.filter(entry => !ownsEntry(entry)), ...providerIds.map(qualify)]);
 }
 
 // =============================================================================
@@ -489,6 +498,20 @@ export function getAllProvidersInfo(): ProviderInfo[] {
  */
 export function reset(): void {
 	clearFsCache();
+}
+
+/**
+ * Drop the provider disable state and the settings handle.
+ *
+ * `initializeWithSettings()` mutates module-level state that outlives a test
+ * file, so a suite that disables a provider would otherwise suppress discovery
+ * in whichever file runs next.
+ *
+ * @internal
+ */
+export function resetProviderStateForTest(): void {
+	disabledProviders.clear();
+	settings = null;
 }
 
 /**

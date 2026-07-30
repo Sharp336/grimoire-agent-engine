@@ -18,6 +18,8 @@ import {
 	enableProvider,
 	initializeWithSettings,
 	isProviderEnabled,
+	resetProviderStateForTest,
+	setDisabledProviders,
 } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -57,6 +59,8 @@ describe("disabledProviders — discovery/model namespace", () => {
 	});
 
 	afterEach(async () => {
+		// initializeWithSettings() mutates module state that outlives this file.
+		resetProviderStateForTest();
 		authStorage?.close();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
@@ -154,6 +158,17 @@ describe("disabledProviders — discovery/model namespace", () => {
 		await active.flush();
 
 		expect(await readGlobalConfig()).not.toHaveProperty("disabledProviders");
+	});
+
+	test("replacing the discovery set keeps a model-only disable", async () => {
+		await writeGlobalConfig({ disabledProviders: ["anthropic", "cursor"] });
+		const active = await initSettings();
+
+		setDisabledProviders(["opencode"]);
+		await active.flush();
+
+		expect((await readGlobalConfig()).disabledProviders).toEqual(["anthropic", "discovery:opencode"]);
+		expect(await selectableProviders()).not.toContain("anthropic");
 	});
 
 	test("a toggle preserves path-scoped entries instead of flattening them", async () => {
