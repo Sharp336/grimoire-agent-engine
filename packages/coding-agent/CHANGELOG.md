@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Formalized `@oh-my-pi/pi-coding-agent/sdk` as an explicit package entrypoint and exposed the reusable session, model, auth, event, and persistence primitives embedders need without deep imports.
+
 
 ### Added
 
