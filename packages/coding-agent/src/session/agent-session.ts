@@ -71,6 +71,7 @@ import type {
 	ToolCall,
 	ToolChoice,
 	ToolResultMessage,
+	Usage,
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
@@ -144,6 +145,7 @@ import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-ur
 import type { IrcMessage } from "../irc/bus";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
+import { type CacheInvalidation, reportCacheInvalidation } from "../modes/components/cache-invalidation-marker";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
@@ -235,7 +237,7 @@ import {
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
-import { CacheMutationLedger } from "./cache-attribution";
+import { addPromptTraffic, CacheMutationLedger } from "./cache-attribution";
 import {
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
@@ -577,6 +579,9 @@ export class AgentSession {
 	 * (which reports) share one instance.
 	 */
 	readonly cacheMutationLedger: CacheMutationLedger;
+	#lastAssistantUsage: Usage | undefined;
+	#lastAssistantUsageCacheIdentity: string | undefined;
+	#cacheInvalidationByTimestamp = new Map<number, CacheInvalidation>();
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -949,6 +954,7 @@ export class AgentSession {
 			modelRegistry: this.#modelRegistry,
 			configWarnings: this.configWarnings,
 			recordCacheMutation: tag => this.cacheMutationLedger.record(tag),
+			queueCacheMutationForNextProviderRequest: tag => this.cacheMutationLedger.queueForNextProviderRequest(tag),
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
@@ -2186,6 +2192,10 @@ export class AgentSession {
 		}
 		return true;
 	}
+	/** Cache invalidation calculated before this message was emitted to all modes. */
+	getCacheInvalidation(message: AssistantMessage): CacheInvalidation | undefined {
+		return this.#cacheInvalidationByTimestamp.get(message.timestamp);
+	}
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
 		// A fresh run supersedes the previously settled (and pruned) refusal
@@ -2238,6 +2248,23 @@ export class AgentSession {
 			} else if (this.#pendingAbortErrorId) {
 				message.errorId = this.#pendingAbortErrorId;
 				this.#pendingAbortErrorId = undefined;
+			}
+		}
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			const assistantMessage = event.message;
+			this.#cacheInvalidationByTimestamp.clear();
+			const cacheIdentity = `${assistantMessage.provider}/${assistantMessage.model}`;
+			const invalidation = reportCacheInvalidation({
+				prev: this.#lastAssistantUsageCacheIdentity === cacheIdentity ? this.#lastAssistantUsage : undefined,
+				current: assistantMessage.usage,
+				ledger: this.cacheMutationLedger,
+				logger,
+				cumulativeUsage: addPromptTraffic(this.sessionManager.getUsageStatistics(), assistantMessage.usage),
+			});
+			if (invalidation) this.#cacheInvalidationByTimestamp.set(assistantMessage.timestamp, invalidation);
+			if (assistantMessage.usage.cacheRead + assistantMessage.usage.cacheWrite + assistantMessage.usage.input > 0) {
+				this.#lastAssistantUsage = assistantMessage.usage;
+				this.#lastAssistantUsageCacheIdentity = cacheIdentity;
 			}
 		}
 

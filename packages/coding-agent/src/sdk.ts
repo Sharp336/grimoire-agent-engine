@@ -136,7 +136,6 @@ import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
 	type CustomMessage,
 	convertToLlm,
-	demoteInterruptedThinking,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	replaceLlmImagesWithText,
@@ -234,7 +233,6 @@ function demoteInterruptedThinkingBeforeProviderReplay(messages: AgentMessage[])
 	messages: AgentMessage[];
 	pairs?: Array<{ continuity: CustomMessage; assistant: AgentMessage }>;
 } {
-	let transformed: AgentMessage[] | undefined;
 	let pairs: Array<{ continuity: CustomMessage; assistant: AgentMessage }> | undefined;
 
 	for (let index = 0; index < messages.length - 1; index++) {
@@ -248,15 +246,11 @@ function demoteInterruptedThinkingBeforeProviderReplay(messages: AgentMessage[])
 			continue;
 		}
 
-		const demoted = demoteInterruptedThinking(assistant);
-		if (!demoted) continue;
-		if (!transformed) transformed = messages.slice();
-		transformed[index] = { ...assistant, content: demoted.strippedContent };
-		if (!pairs) pairs = [];
+		pairs ??= [];
 		pairs.push({ continuity, assistant });
 	}
 
-	return { messages: transformed ?? messages, pairs };
+	return { messages, pairs };
 }
 
 function digestSteeringWrappedMessages(source: readonly AgentMessage[], emitted: readonly AgentMessage[]): bigint {
@@ -2986,6 +2980,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
+			cacheMutationLedger.recordContextHookAtWire(messages, withContext);
 			const wrapped = wrapSteeringForModel(withContext);
 			cacheMutationLedger.recordSteeringWrapAtWire(
 				wrapped === withContext ? undefined : digestSteeringWrappedMessages(withContext, wrapped),
@@ -3012,19 +3007,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					)
 				: undefined;
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
-			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
-			return clampProviderContextImages(transformed, transformModel);
+			const obfuscated = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			const snapcompacted = snapcompactInline
+				? await snapcompactInline.transform(obfuscated, transformModel)
+				: obfuscated;
+			cacheMutationLedger.recordSnapcompactAtWire(obfuscated.messages, snapcompacted.messages);
+			const clamped = clampProviderContextImages(snapcompacted, transformModel);
+			cacheMutationLedger.recordProviderImageStripAtWire(snapcompacted.messages, clamped.messages);
+			return clamped;
 		};
 		const onAuxiliaryProviderPayload = (payload: unknown, model?: Model) =>
 			extensionRunner.emitBeforeProviderRequest(payload, model);
 		const onMainProviderPayload = async (payload: unknown, requestModel?: Model) => {
+			cacheMutationLedger.recordQueuedMutationsAtMainProviderBoundary();
 			const replacement = await onAuxiliaryProviderPayload(payload, requestModel);
 			const emitted = replacement ?? payload;
 			const activeProvider = requestModel ?? agent?.state.model ?? model;
-			const cacheIdentity = `${activeProvider?.provider ?? "unknown"}/${activeProvider?.id ?? "unknown"}:${providerPromptCacheKey ?? providerSessionId}`;
+			const cacheIdentity = `${activeProvider?.provider ?? "unknown"}/${activeProvider?.id ?? "unknown"}:${agent?.promptCacheKey ?? agent?.sessionId ?? providerPromptCacheKey ?? providerSessionId}`;
 			cacheMutationLedger.recordMainProviderToolSignature(cacheIdentity, projectSystemAndToolsWireBytes(emitted));
-			cacheMutationLedger.recordQueuedMutationsAtMainProviderBoundary();
 			return replacement;
 		};
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model) => {

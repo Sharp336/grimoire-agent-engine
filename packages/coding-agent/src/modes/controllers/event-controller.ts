@@ -8,7 +8,6 @@ import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
-import { reportCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
 import {
 	groupedReadUsageCallIds,
 	ReadToolGroupComponent,
@@ -23,7 +22,6 @@ import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { addPromptTraffic } from "../../session/cache-attribution";
 import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
 import { type ApprovalMode, resolveApproval } from "../../tools/approval";
 import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
@@ -941,32 +939,16 @@ export class EventController {
 				// waiting poll cannot be displaced anymore — freeze it in place.
 				this.#resolveDisplaceablePoll();
 			}
-			// Surface + attribute a prompt-cache invalidation: detect the prefix
-			// loss, log the reprocessed tokens with the mutators active this turn
-			// and the session-cumulative hit ratio, and (when the marker is on)
-			// render the divider. Attribution runs on every turn so the mutation
-			// ledger is consumed even on aborted/all-zero responses — otherwise a
-			// tag recorded this turn (compaction, image-strip) would be mis-attributed
-			// to the next nonzero turn's miss. detectCacheInvalidation returns
-			// undefined for zero traffic, so no warn fires on an empty turn. The
-			// visual marker is setting-gated.
-			const usage = event.message.usage;
-			// AgentSession delivers message_end to this controller before it persists
-			// the assistant into SessionManager, so the aggregate still excludes this
-			// turn at this point. Add it exactly once for the cumulative hit ratio.
-			const persistedUsage = this.ctx.sessionManager.getUsageStatistics();
-			const invalidation = reportCacheInvalidation({
-				prev: this.ctx.lastAssistantUsage,
-				current: usage,
-				ledger: this.ctx.session.cacheMutationLedger,
-				logger,
-				cumulativeUsage: addPromptTraffic(persistedUsage, usage),
-			});
-			if (invalidation && settings.get("display.cacheMissMarker")) {
+			// The cache-miss divider is an opt-in display feature. Fetch the
+			// precomputed invalidation (a pure map read fed by AgentSession) only
+			// when it is enabled, so the controller also tolerates a session that
+			// doesn't expose cache-invalidation data. AgentSession reports the
+			// invalidation for non-interactive attribution regardless of this gate.
+			const invalidation = settings.get("display.cacheMissMarker")
+				? this.ctx.session.getCacheInvalidation(event.message)
+				: undefined;
+			if (invalidation) {
 				this.ctx.streamingComponent.setCacheInvalidation(invalidation);
-			}
-			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
-				this.ctx.lastAssistantUsage = usage;
 			}
 			this.ctx.streamingComponent.markTranscriptBlockFinalized();
 			let lastPostToolAssistantComponent: AssistantMessageComponent | undefined;

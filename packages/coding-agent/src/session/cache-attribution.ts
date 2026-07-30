@@ -1,3 +1,5 @@
+import { stringifyJson } from "@oh-my-pi/pi-utils";
+
 /**
  * Prompt-cache attribution instrumentation.
  *
@@ -28,6 +30,8 @@ export type CacheMutationTag =
 	| "thinking-demote"
 	| "retry-recovery"
 	| "tool-signature"
+	| "context-hook"
+	| "snapcompact"
 	| "shake";
 
 /** The fingerprint state of a mutator on the current provider request. */
@@ -112,8 +116,11 @@ export class CacheMutationLedger {
 	#steeringWrapState: WireMutationState = ABSENT_WIRE_MUTATION;
 	#obfuscationState: WireMutationState = ABSENT_WIRE_MUTATION;
 	#imageStripState: WireMutationState = ABSENT_WIRE_MUTATION;
+	#providerImageStripState: WireMutationState = ABSENT_WIRE_MUTATION;
+	#contextHookState: WireMutationState = ABSENT_WIRE_MUTATION;
+	#snapcompactState: WireMutationState = ABSENT_WIRE_MUTATION;
 	#nextProviderRequestTags = new Set<CacheMutationTag>();
-	#lastEmittedToolSignatureByCacheIdentity = new Map<string, string>();
+	#lastEmittedToolSignatureByCacheIdentity = new Map<string, bigint>();
 
 	/** Record that mutator `tag` rewrote the message array for the wire this turn. */
 	record(tag: CacheMutationTag): void {
@@ -132,7 +139,10 @@ export class CacheMutationLedger {
 		previous: WireMutationState,
 		next: WireMutationState,
 	): WireMutationState {
-		if (next.state === "absent") return next;
+		if (next.state === "absent") {
+			if (previous.state === "present") this.record(tag);
+			return next;
+		}
 		if (previous.state === "present" && previous.digest === next.digest) return next;
 		this.record(tag);
 		return next;
@@ -148,7 +158,7 @@ export class CacheMutationLedger {
 		const next: WireMutationState =
 			changed.length === 0
 				? ABSENT_WIRE_MUTATION
-				: { state: "present", digest: Bun.hash.wyhash(JSON.stringify(changed)) };
+				: { state: "present", digest: Bun.hash.wyhash(stringifyJson(changed) ?? "") };
 		return this.#advancePresentMutation(tag, previous, next);
 	}
 
@@ -162,6 +172,36 @@ export class CacheMutationLedger {
 		this.#imageStripState = this.#recordChangedMessagesAtWire("image-strip", this.#imageStripState, before, emitted);
 	}
 
+	/** Record image stripping needed to fit the active provider's image budget. */
+	recordProviderImageStripAtWire(before: readonly object[], emitted: readonly object[]): void {
+		this.#providerImageStripState = this.#recordChangedMessagesAtWire(
+			"image-strip",
+			this.#providerImageStripState,
+			before,
+			emitted,
+		);
+	}
+
+	/** Record rewrites made by extension context handlers. */
+	recordContextHookAtWire(before: readonly object[], emitted: readonly object[]): void {
+		this.#contextHookState = this.#recordChangedMessagesAtWire(
+			"context-hook",
+			this.#contextHookState,
+			before,
+			emitted,
+		);
+	}
+
+	/** Record rewrites made by snapcompact after provider conversion. */
+	recordSnapcompactAtWire(before: readonly object[], emitted: readonly object[]): void {
+		this.#snapcompactState = this.#recordChangedMessagesAtWire(
+			"snapcompact",
+			this.#snapcompactState,
+			before,
+			emitted,
+		);
+	}
+
 	/** Queue a mutation that must be attributed to the next real provider request, not an in-flight one. */
 	queueForNextProviderRequest(tag: CacheMutationTag): void {
 		this.#nextProviderRequestTags.add(tag);
@@ -173,9 +213,10 @@ export class CacheMutationLedger {
 	 * rather than by calls that happen to share this SDK instance.
 	 */
 	recordMainProviderToolSignature(cacheIdentity: string, wireBytes: string): void {
+		const digest = Bun.hash.wyhash(wireBytes);
 		const previous = this.#lastEmittedToolSignatureByCacheIdentity.get(cacheIdentity);
-		if (previous !== undefined && previous !== wireBytes) this.record("tool-signature");
-		this.#lastEmittedToolSignatureByCacheIdentity.set(cacheIdentity, wireBytes);
+		if (previous !== undefined && previous !== digest) this.record("tool-signature");
+		this.#lastEmittedToolSignatureByCacheIdentity.set(cacheIdentity, digest);
 	}
 
 	/** Move queued mutations onto the main request being emitted. Each queued tag is consumed exactly once. */
@@ -197,7 +238,7 @@ export class CacheMutationLedger {
 				: {
 						state: "present",
 						digest: Bun.hash.wyhash(
-							JSON.stringify(pairs.map(({ continuity, assistant }) => [continuity, assistant])),
+							stringifyJson(pairs.map(({ continuity, assistant }) => [continuity, assistant])) ?? "",
 						),
 					};
 		this.#thinkingReplayState = this.#advancePresentMutation("thinking-demote", this.#thinkingReplayState, next);
