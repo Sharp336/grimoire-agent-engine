@@ -42,6 +42,7 @@ import {
 	formatAskValidationTitle,
 	getAskCustomInputValidationError,
 	isSafeAskCustomInputPattern,
+	MAX_ASK_CUSTOM_INPUT_LENGTH,
 } from "./ask-validation";
 import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
 import { ToolAbortError } from "./tool-errors";
@@ -70,10 +71,18 @@ const CustomInputValidation = arkType({
 	),
 }).narrow((validation, ctx) => {
 	if (
-		(validation.minLength !== undefined && (!Number.isInteger(validation.minLength) || validation.minLength < 0)) ||
-		(validation.maxLength !== undefined && (!Number.isInteger(validation.maxLength) || validation.maxLength < 0))
+		(validation.minLength !== undefined &&
+			(!Number.isInteger(validation.minLength) ||
+				validation.minLength < 0 ||
+				validation.minLength > MAX_ASK_CUSTOM_INPUT_LENGTH)) ||
+		(validation.maxLength !== undefined &&
+			(!Number.isInteger(validation.maxLength) ||
+				validation.maxLength < 0 ||
+				validation.maxLength > MAX_ASK_CUSTOM_INPUT_LENGTH))
 	) {
-		return ctx.mustBe("defined with non-negative integer minLength and maxLength values");
+		return ctx.mustBe(
+			`defined with non-negative integer minLength and maxLength values no greater than ${MAX_ASK_CUSTOM_INPUT_LENGTH}`,
+		);
 	}
 	if (
 		validation.minLength !== undefined &&

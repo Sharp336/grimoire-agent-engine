@@ -423,7 +423,7 @@ export class AskDialogComponent implements Component {
 		this.#countdown?.reset();
 		if (matchesSelectCancel(keyData)) {
 			const active = this.#activeQuestionState();
-			if (active?.state.searchActive) {
+			if (active?.state.searchActive && !this.#isSubmitTab()) {
 				active.state.searchActive = false;
 				active.state.searchQuery = "";
 				active.state.cursorIndex = 0;
@@ -609,14 +609,14 @@ export class AskDialogComponent implements Component {
 
 	#handleSearchInput(question: ExtensionAskDialogQuestion, state: QuestionState, keyData: string): boolean {
 		if (!this.#isSearchEnabled(question)) return false;
-		if (keyData === "/") {
+		if (!state.searchActive && keyData === "/") {
 			state.searchActive = true;
 			this.#requestRender();
 			return true;
 		}
 		if (!state.searchActive) return false;
 		if (matchesKey(keyData, "backspace")) {
-			state.searchQuery = state.searchQuery.slice(0, -1);
+			state.searchQuery = Array.from(state.searchQuery).slice(0, -1).join("");
 			state.cursorIndex = 0;
 			state.manualScroll = false;
 			this.#requestRender();
@@ -776,16 +776,18 @@ export class AskDialogComponent implements Component {
 					prefill,
 				);
 				if (input === undefined || this.#closed) return;
-				if (input.trim() === "") {
-					// Submitting an empty value unselects the custom answer.
-					state.customInput = undefined;
-					clearNoteIfRow(state, rowItem.key);
-					return;
-				}
 				validationError = getAskCustomInputValidationError(input, question.validation);
 				if (validationError !== undefined) {
 					prefill = input;
 					continue;
+				}
+				// With no validation constraint, an empty value unselects the
+				// custom answer; a validated answer (including whitespace the
+				// pattern accepts) is kept, matching the degraded path.
+				if (input.trim() === "" && question.validation === undefined) {
+					state.customInput = undefined;
+					clearNoteIfRow(state, rowItem.key);
+					return;
 				}
 				state.customInput = input;
 				if (!question.multi) {

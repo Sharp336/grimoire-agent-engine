@@ -100,8 +100,17 @@ export function getAskCustomInputValidationError(
 	if (validation.maxLength !== undefined && input.length > validation.maxLength) failed = true;
 	if (validation.pattern !== undefined) {
 		try {
-			if (!isSafeAskCustomInputPattern(validation.pattern) || !new RegExp(validation.pattern).test(input))
+			if (!isSafeAskCustomInputPattern(validation.pattern)) {
 				failed = true;
+			} else {
+				// Require the whole input to match, not just a substring:
+				// unanchored patterns such as `\d+` would otherwise accept
+				// "abc123", and JS `$` admits a trailing line terminator.
+				const match = new RegExp(validation.pattern).exec(input);
+				if (match === null || match.index !== 0 || match[0].length !== input.length) {
+					failed = true;
+				}
+			}
 		} catch {
 			failed = true;
 		}
