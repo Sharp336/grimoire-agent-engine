@@ -7,7 +7,13 @@ import {
 	ProviderHttpError,
 	STREAM_ENVELOPE_ERROR_PREFIX,
 } from "./classes";
-import { isOpaqueStatusBody, isUsageLimitStatus, matchesUsageLimitText, parseRateLimitReason } from "./rate-limit";
+import {
+	isAccountScopedCapText,
+	isOpaqueStatusBody,
+	isUsageLimitStatus,
+	matchesUsageLimitText,
+	parseRateLimitReason,
+} from "./rate-limit";
 
 export const Flag = {
 	Class: 0x1000,
@@ -333,6 +339,7 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		if (
 			!concurrencyExcluded &&
 			(matchesUsageLimitText(cleanMessage) ||
+				((statusClean === 403 || statusClean === undefined) && isAccountScopedCapText(cleanMessage)) ||
 				(isLimitStatus &&
 					(isOpaque || reason === "QUOTA_EXHAUSTED" || (isBillingCapStatus && reason === "CONCURRENT_LIMIT"))))
 		) {
@@ -341,6 +348,11 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 
 		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
 		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
+		// quota exceeded") is transient — shed-and-backoff. The bare wording need
+		// not match TRANSIENT_TRANSPORT_PATTERN, so flag it explicitly to keep
+		// AIError.retriable from treating the temporary cap as terminal.
+		if (reason === "CONCURRENT_LIMIT") kinds |= Flag.Transient;
 		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
 			kinds |= Flag.StaleResponsesItem;
 		}

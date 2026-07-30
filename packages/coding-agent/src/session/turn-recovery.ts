@@ -1312,6 +1312,22 @@ export class TurnRecovery {
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+		// Concurrency caps shed-and-backoff (5s) rather than burning a sibling
+		// credential, so the usage-limit rotation branch below is deliberately
+		// skipped for them. Apply the reason-based backoff to the transient
+		// same-model retry path too — otherwise the default exponential base
+		// (≈500ms) re-hits the cap immediately and burns the retry budget while
+		// the concurrency slot stays occupied. A categorical 402 billing cap whose
+		// body merely mentions concurrency is still a usage limit (handled below),
+		// so gate on the flag matching the rotation decision.
+		if (
+			!staleOpenAIResponsesReplayError &&
+			!AIError.is(id, AIError.Flag.UsageLimit) &&
+			parseRateLimitReason(errorMessage) === "CONCURRENT_LIMIT"
+		) {
+			const concurrentBackoffMs = calculateRateLimitBackoffMs("CONCURRENT_LIMIT");
+			if (concurrentBackoffMs > delayMs) delayMs = concurrentBackoffMs;
+		}
 		let switchedCredential = false;
 		let switchedModel = false;
 		// Set when a usage-limit error pinned the wait to credential

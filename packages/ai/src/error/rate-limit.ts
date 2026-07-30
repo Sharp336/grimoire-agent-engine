@@ -174,9 +174,11 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 	if (message && matchesUsageLimitText(message)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
 	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,
-	// GitHub Copilot). Rotate only when the body names a cap that resets —
-	// never on a bare 403, which stays an auth failure.
-	if (status === 403 && message && ACCOUNT_SCOPED_403_PATTERN.test(message)) return true;
+	// GitHub Copilot). Devin's end-of-stream Connect trailer carries no HTTP
+	// status at all (it arrives as a `permission_denied` ValidationError), so
+	// accept an undefined status too — but only when the body names a cap that
+	// resets, never on a bare 403, which stays an auth failure.
+	if ((status === 403 || status === undefined) && message && isAccountScopedCapText(message)) return true;
 	if (!isUsageLimitStatus(status)) return false;
 	if (!message || isOpaqueStatusBody(message)) return true;
 	const reason = parseRateLimitReason(message);
@@ -212,4 +214,15 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 		ACCOUNT_RATE_LIMIT_PATTERN.test(errorMessage) ||
 		OPENROUTER_DAILY_FREE_LIMIT_PATTERN.test(errorMessage)
 	);
+}
+
+/**
+ * Account-scoped cap phrasing delivered on a 403 (or a statusless Connect
+ * trailer): "Reached overall message rate limit", "Your limit will reset in …".
+ * Kept separate from {@link matchesUsageLimitText} because the bare wording is
+ * ambiguous without the 403 / statusless-account context; consumed by both
+ * {@link isUsageLimitOutcome} (rotation decision) and `flags.ts` (Flag.UsageLimit).
+ */
+export function isAccountScopedCapText(message: string): boolean {
+	return ACCOUNT_SCOPED_403_PATTERN.test(message);
 }

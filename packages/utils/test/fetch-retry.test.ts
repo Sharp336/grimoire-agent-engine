@@ -96,4 +96,12 @@ describe("extractRetryHint", () => {
 	it("parses 'will reset in 2h' phrasing", () => {
 		expect(extractRetryHint(undefined, "will reset in 2h")).toBe(2 * 60 * 60_000);
 	});
+
+	// A quota body can carry both a generic retry hint and the account reset
+	// window ("Please retry in 5s. Your limit will reset in 13 minutes"). The
+	// account-reset hint must take precedence so the exhausted credential stays
+	// blocked for the full stated window instead of the short generic retry.
+	it("prefers the account reset window over a shorter retry hint", () => {
+		expect(extractRetryHint(undefined, "Please retry in 5s. Your limit will reset in 13 minutes")).toBe(13 * 60_000);
+	});
 });

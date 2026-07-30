@@ -85,7 +85,11 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 			if (totalMs > 0) return totalMs;
 		}
 	}
-	for (const pattern of [PLEASE_RETRY_PATTERN, RETRY_DELAY_FIELD_PATTERN, TRY_AGAIN_PATTERN, WILL_RESET_IN_PATTERN]) {
+	// Account-reset hints ("will reset in …") take precedence over short
+	// retry hints ("please retry in 5s"): a body carrying both must honour the
+	// longer account window, not the shorter generic one. QUOTA_RESET_PATTERN
+	// ("reset after …") above already runs first and stays first.
+	for (const pattern of [WILL_RESET_IN_PATTERN, PLEASE_RETRY_PATTERN, RETRY_DELAY_FIELD_PATTERN, TRY_AGAIN_PATTERN]) {
 		const match = pattern.exec(body);
 		if (match?.[1]) {
 			const value = Number.parseFloat(match[1]);

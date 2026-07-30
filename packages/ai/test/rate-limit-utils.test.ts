@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { isUsageLimit } from "@oh-my-pi/pi-ai/error/flags";
+import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
 import {
 	calculateRateLimitBackoffMs,
 	isUsageLimitOutcome,
@@ -241,13 +241,16 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(429, message)).toBe(true);
 	});
 
-	it("rotates only account-scoped cap 403s", () => {
-		expect(
-			isUsageLimitOutcome(
-				403,
-				"Devin stream error permission_denied: Reached overall message rate limit. Please try again later. Your limit will reset in 13 minutes.",
-			),
-		).toBe(true);
+	it("rotates only account-scoped cap 403s and statusless trailers", () => {
+		const devinTrailer =
+			"Devin stream error permission_denied: Reached overall message rate limit. Please try again later. Your limit will reset in 13 minutes.";
+		// HTTP 403 with the account-scoped body rotates.
+		expect(isUsageLimitOutcome(403, devinTrailer)).toBe(true);
+		// Devin's Connect trailer carries no HTTP status (a permission_denied
+		// ValidationError), so it must rotate on an undefined status too —
+		// otherwise the exhausted credential is retried as a transient failure.
+		expect(isUsageLimitOutcome(undefined, devinTrailer)).toBe(true);
+		expect(isUsageLimit(devinTrailer)).toBe(true);
 		expect(isUsageLimitOutcome(403, "Forbidden")).toBe(false);
 	});
 
@@ -281,6 +284,18 @@ describe("isUsageLimitOutcome", () => {
 		expect(parseRateLimitReason(message)).toBe("CONCURRENT_LIMIT");
 		expect(isUsageLimitOutcome(429, message)).toBe(false);
 		expect(isUsageLimit(message)).toBe(false);
+	});
+
+	// The same bare concurrency wording can reach turn recovery without a
+	// preserved HTTP status (Vertex/Bedrock paths that bypass API-key
+	// resolution). The body misses TRANSIENT_TRANSPORT_PATTERN, so without an
+	// explicit Flag.Transient the temporary cap classifies as terminal and is
+	// never retried. It must stay shed-and-backoff (transient/retriable).
+	it("keeps statusless concurrency caps transient and retriable", () => {
+		const message = "Online prediction concurrent requests quota exceeded";
+		const id = classify(message);
+		expect(is(id, Flag.Transient)).toBe(true);
+		expect(retriable(id)).toBe(true);
 	});
 
 	// HTTP 402 is categorically an account-billing cap, so a 402 whose body is
