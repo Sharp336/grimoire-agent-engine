@@ -63,6 +63,9 @@ describe("TurnRecovery refusal paraphrase", () => {
 			paraphraseModelProvider?: string;
 			obfuscateTextForProvider?: (text: string) => string;
 			deobfuscateFromProvider?: (text: string) => string;
+			paraphraseRole?: "tiny" | "smol";
+			configuredSmolRole?: string;
+			extraAvailableModels?: MockModel[];
 		} = {},
 	): {
 		recovery: TurnRecovery;
@@ -99,11 +102,17 @@ describe("TurnRecovery refusal paraphrase", () => {
 			"retry.refusalParaphrase": true,
 			"retry.maxRetries": options.maxRetries ?? 10,
 		});
-		if (!options.useSmolPriorityDefault) {
+		if (options.paraphraseRole) settings.set("retry.refusalParaphraseRole", options.paraphraseRole);
+		if (options.configuredSmolRole) {
+			settings.setModelRole("smol", options.configuredSmolRole);
+		} else if (!options.useSmolPriorityDefault) {
 			settings.setModelRole("smol", `mock/${options.paraphraseModelId ?? "refusal-paraphraser"}`);
 		}
 		const modelRegistry = new ModelRegistry(authStorage);
-		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([paraphraseModel]);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
+			paraphraseModel,
+			...(options.extraAvailableModels ?? []),
+		]);
 		const events: AgentSessionEvent[] = [];
 		const scheduled: Parameters<TurnRecoveryHost["scheduleAgentContinue"]>[0][] = [];
 		const sessionManager = SessionManager.inMemory();
@@ -199,7 +208,7 @@ describe("TurnRecovery refusal paraphrase", () => {
 	});
 
 	it("rewrites the user turn when companion messages precede the refusal", async () => {
-		const { recovery, paraphraseModel, agent } = createRecovery();
+		const { recovery, paraphraseModel, agent, sessionManager } = createRecovery();
 		const companion = {
 			role: "custom" as const,
 			customType: "before-agent-start",
@@ -214,6 +223,12 @@ describe("TurnRecovery refusal paraphrase", () => {
 		expect(await recovery.handleRetryableError(companionRefusal)).toBe(true);
 		expect(paraphraseModel.calls).toHaveLength(1);
 		expect(agent.state.messages).toEqual([{ ...originalUserMessage, content: rewrittenPrompt }, companion]);
+		// The replacement branch must recreate the post-user companion so a
+		// reload/transcript rebuild keeps the same context the live retry sees.
+		expect(sessionManager.buildSessionContext().messages).toEqual([
+			{ ...originalUserMessage, content: rewrittenPrompt },
+			companion,
+		]);
 	});
 
 	it("obfuscates the paraphrase request and restores the rewritten response", async () => {
@@ -241,6 +256,25 @@ describe("TurnRecovery refusal paraphrase", () => {
 
 		expect(await recovery.handleRetryableError(refusal)).toBe(true);
 		expect(paraphraseModel.calls).toHaveLength(1);
+	});
+
+	it("honours the configured paraphrase role alias instead of @smol when the role is unset", async () => {
+		// refusalParaphraseRole is `tiny`, but modelRoles.tiny is unset while
+		// modelRoles.smol is explicitly configured. The fallback must resolve the
+		// selected role's chain (@tiny -> MODEL_PRIO.smol), not @smol, so the
+		// user's choice of Tiny is not silently overridden by the smol role.
+		const smolConfiguredModel = createMockModel({ provider: "mock", id: "smol-explicit", responses: [] });
+		const { recovery, paraphraseModel } = createRecovery({
+			paraphraseRole: "tiny",
+			paraphraseModelId: "zai-glm-4.7",
+			paraphraseModelProvider: "cerebras",
+			configuredSmolRole: "mock/smol-explicit",
+			extraAvailableModels: [smolConfiguredModel],
+		});
+
+		expect(await recovery.handleRetryableError(refusal)).toBe(true);
+		expect(paraphraseModel.calls).toHaveLength(1);
+		expect(smolConfiguredModel.calls).toHaveLength(0);
 	});
 
 	it("honours an abort that lands during the persistence wait, before branch mutation and scheduling", async () => {

@@ -29,6 +29,7 @@ import {
 	resolveModelRoleValue,
 	resolveRoleSelection,
 } from "../config/model-resolver";
+import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { RecoveredRetryError } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
@@ -95,6 +96,18 @@ function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }
 
+/**
+ * The subset of {@link AgentMessage} that `SessionManager.appendMessage`
+ * accepts — every role except the structural `branchSummary`/
+ * `compactionSummary` summaries, which live in their own entry types.
+ */
+type PersistableAgentMessage = Parameters<SessionManager["appendMessage"]>[0];
+
+/** True for agent messages that can be re-appended to a session branch. */
+function isPersistableAgentMessage(message: AgentMessage): message is PersistableAgentMessage {
+	return message.role !== "branchSummary" && message.role !== "compactionSummary";
+}
+
 function syntheticToolResultTailStart(messages: readonly AgentMessage[]): number {
 	let index = messages.length;
 	while (index > 0 && isSyntheticToolResultMessage(messages[index - 1])) {
@@ -144,7 +157,7 @@ export interface TurnRecoveryHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
-	appendSessionMessage(message: AssistantMessage | UserMessage): void;
+	appendSessionMessage(message: PersistableAgentMessage): void;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
@@ -1750,7 +1763,9 @@ export class TurnRecovery {
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		const configuredRole = this.#host.settings.getGroup("retry").refusalParaphraseRole;
 		const configuredResolution = resolveRoleSelection([configuredRole], this.#host.settings, availableModels);
-		const aliasResolution = resolveModelRoleValue("@smol", availableModels, { settings: this.#host.settings });
+		const aliasResolution = resolveModelRoleValue(formatModelRoleAlias(configuredRole), availableModels, {
+			settings: this.#host.settings,
+		});
 		const resolved =
 			configuredResolution ??
 			(aliasResolution.model
@@ -1832,6 +1847,13 @@ export class TurnRecovery {
 					this.#host.sessionManager.branch(userEntry.parentId);
 				}
 				this.#host.appendSessionMessage(rewrittenUserMessage);
+				// Recreate the post-user segment (generated @file context,
+				// before_agent_start extension messages, etc.) on the replacement
+				// branch so a reload/transcript rebuild keeps the same companions the
+				// live retry sees via `rewrittenMessages` below.
+				for (const companion of messages.slice(userIndex + 1, assistantIndex)) {
+					if (isPersistableAgentMessage(companion)) this.#host.appendSessionMessage(companion);
+				}
 			});
 			const rewrittenMessages = messages.slice();
 			rewrittenMessages[userIndex] = rewrittenUserMessage;
