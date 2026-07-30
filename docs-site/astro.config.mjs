@@ -4,6 +4,8 @@ import starlight from '@astrojs/starlight';
 
 // https://astro.build/config
 export default defineConfig({
+	site: 'https://nibblebot.github.io',
+	base: '/oh-my-pi/',
 	integrations: [
 		starlight({
 			title: 'omp',
@@ -16,7 +18,7 @@ export default defineConfig({
 				PageTitle: './src/components/PageTitle.astro',
 			},
 			editLink: {
-				baseUrl: 'https://github.com/can1357/oh-my-pi/edit/main/docs-site/',
+				baseUrl: 'https://github.com/nibblebot/oh-my-pi/edit/docs/docs-site/',
 			},
 			sidebar: [
 				{
