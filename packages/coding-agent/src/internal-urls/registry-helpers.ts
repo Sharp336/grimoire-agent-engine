@@ -41,10 +41,7 @@ export function artifactsDirsFromRegistry(): string[] {
 	};
 	for (const ref of AgentRegistry.global().list()) {
 		addDir(ref.session?.sessionManager?.getArtifactsDir());
-		if (ref.sessionFile) {
-			addDir(ref.sessionFile.slice(0, -6));
-			addDir(path.dirname(ref.sessionFile));
-		}
+		if (ref.sessionFile) addDir(ref.sessionFile.slice(0, -6));
 	}
 	for (const dir of extraArtifactsDirs) addDir(dir);
 	return dirs;
@@ -87,16 +84,7 @@ export async function sessionFilesFromDisk(): Promise<Map<string, string>> {
 			if (!name.endsWith(".jsonl")) continue;
 			if (name.startsWith("__advisor")) continue;
 			const id = name.slice(0, -".jsonl".length);
-			const fullPath = path.join(dir, name);
-			if (!found.has(id)) found.set(id, fullPath);
-
-			const sep = name.lastIndexOf("_");
-			if (sep >= 0) {
-				const sessionId = name.slice(sep + 1, -".jsonl".length);
-				if (sessionId && !found.has(sessionId)) {
-					found.set(sessionId, fullPath);
-				}
-			}
+			if (!found.has(id)) found.set(id, path.join(dir, name));
 		}
 	};
 	for (const dir of artifactsDirsFromRegistry()) await scan(dir, 0);

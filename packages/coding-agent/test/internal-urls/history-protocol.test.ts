@@ -55,21 +55,22 @@ function makeToolSession(cwd: string): ToolSession {
 }
 
 /** Minimal current-version session JSONL: header + a linear user/assistant chain. */
-function sessionFixtureJsonl(id = "fixture-session"): string {
+function sessionFixtureJsonl(id = "fixture-session", cwd = "/tmp", userText = "parked hello", title?: string): string {
 	const timestamp = new Date().toISOString();
 	const header = {
 		type: "session",
 		version: CURRENT_SESSION_VERSION,
 		id,
+		title,
 		timestamp,
-		cwd: "/tmp",
+		cwd,
 	};
 	const userEntry = {
 		type: "message",
 		id: "m1",
 		parentId: null,
 		timestamp,
-		message: { role: "user", content: "parked hello", timestamp: 1 },
+		message: { role: "user", content: userText, timestamp: 1 },
 	};
 	const assistantEntry = {
 		type: "message",
@@ -89,15 +90,18 @@ function sessionFixtureJsonl(id = "fixture-session"): string {
 	};
 	return `${JSON.stringify(header)}\n${JSON.stringify(userEntry)}\n${JSON.stringify(assistantEntry)}\n`;
 }
+let originalAgentDir: string;
 
 describe("history:// protocol", () => {
 	beforeEach(() => {
+		originalAgentDir = getAgentDir();
 		AgentRegistry.resetGlobalForTests();
 		InternalUrlRouter.resetForTests();
 		resetRegisteredArtifactDirsForTests();
 	});
 
 	afterEach(() => {
+		setAgentDir(originalAgentDir);
 		InternalUrlRouter.resetForTests();
 		AgentRegistry.resetGlobalForTests();
 		resetRegisteredArtifactDirsForTests();
@@ -405,44 +409,109 @@ describe("history:// protocol", () => {
 			await Bun.write(candidate, "not a directory");
 			registerArtifactsDir(candidate);
 
-			await expect(new HistoryProtocolHandler().complete()).resolves.toEqual([]);
+			await expect(new HistoryProtocolHandler().complete()).resolves.toEqual([
+				{ value: "agent/", description: "explicit agent transcript namespace" },
+				{ value: "session/", description: "archived top-level session namespace" },
+			]);
 		});
 	});
-	it("resolves a top-level session transcript by session ID and prefix", async () => {
+	it("separates agent and archived-session IDs and rejects ambiguous prefixes", async () => {
 		await withTempDir(async dir => {
 			const agentDir = path.join(dir, "agent");
 			const sessionsDir = path.join(agentDir, "sessions", "project");
 			await fs.mkdir(sessionsDir, { recursive: true });
 
-			const sessionId = "019f0000-aaaa-7000-8000-000000000001";
-			const sessionFile = path.join(sessionsDir, `2026-07-21T12-00-00-000Z_${sessionId}.jsonl`);
-			await Bun.write(sessionFile, sessionFixtureJsonl(sessionId));
-
-			const previousAgentDir = getAgentDir();
+			const firstId = "019f0000-aaaa-7000-8000-000000000001";
+			const secondId = "019f0000-bbbb-7000-8000-000000000002";
+			const firstFile = path.join(sessionsDir, `2026-07-21T12-00-00-000Z_${firstId}.jsonl`);
+			await Bun.write(firstFile, sessionFixtureJsonl(firstId, "/tmp/project", "archived hello"));
+			await Bun.write(
+				path.join(sessionsDir, `2026-07-21T13-00-00-000Z_${secondId}.jsonl`),
+				sessionFixtureJsonl(secondId, "/tmp/project", "second archive"),
+			);
 			setAgentDir(agentDir);
-			try {
-				const fullRes = await InternalUrlRouter.instance().resolve(`history://${sessionId}`);
-				expect(fullRes.content).toContain(sessionId);
-				expect(fullRes.content).toContain("parked hello");
-				expect(fullRes.sourcePath).toBe(sessionFile);
+			AgentRegistry.global().register({
+				id: firstId,
+				displayName: "task",
+				kind: "sub",
+				session: fakeLiveSession([{ role: "user", content: "live agent", timestamp: 1 }]),
+				status: "idle",
+			});
 
-				const prefixRes = await InternalUrlRouter.instance().resolve("history://019f0000-aaaa");
-				expect(prefixRes.content).toContain("parked hello");
-				expect(prefixRes.sourcePath).toBe(sessionFile);
-			} finally {
-				setAgentDir(previousAgentDir);
-			}
+			const legacyAgent = await InternalUrlRouter.instance().resolve(`history://${firstId}`);
+			expect(legacyAgent.content).toContain("live agent");
+			const explicitAgent = await InternalUrlRouter.instance().resolve(`history://agent/${firstId}`);
+			expect(explicitAgent.content).toContain("live agent");
+
+			const archived = await InternalUrlRouter.instance().resolve(`history://session/${firstId}`);
+			expect(archived.content).toContain("archived hello");
+			expect(archived.sourcePath).toBe(firstFile);
+			const uniquePrefix = await InternalUrlRouter.instance().resolve("history://session/019f0000-a");
+			expect(uniquePrefix.sourcePath).toBe(firstFile);
+
+			await expect(InternalUrlRouter.instance().resolve("history://session/019f0000")).rejects.toThrow(
+				"Ambiguous archived session prefix",
+			);
 		});
 	});
 
-	it("resolves a session transcript by direct file path", async () => {
+	it("lists archived sessions with project scope, filtering, pagination, and no alias duplicates", async () => {
 		await withTempDir(async dir => {
-			const sessionFile = path.join(dir, "custom-session.jsonl");
-			await Bun.write(sessionFile, sessionFixtureJsonl());
+			const agentDir = path.join(dir, "agent");
+			const projectDir = path.join(agentDir, "sessions", "project");
+			const otherDir = path.join(agentDir, "sessions", "other");
+			await fs.mkdir(projectDir, { recursive: true });
+			await fs.mkdir(otherDir, { recursive: true });
+			const firstId = "019f1000-aaaa-7000-8000-000000000001";
+			const secondId = "019f1000-aaaa-7000-8000-000000000002";
+			const otherId = "019f1000-aaaa-7000-8000-000000000003";
+			const firstFile = path.join(projectDir, `2026-07-21T12-00-00-000Z_${firstId}.jsonl`);
+			const secondFile = path.join(projectDir, `2026-07-21T13-00-00-000Z_${secondId}.jsonl`);
+			const otherFile = path.join(otherDir, `2026-07-21T14-00-00-000Z_${otherId}.jsonl`);
+			await Bun.write(firstFile, sessionFixtureJsonl(firstId, "/tmp/project-a", "alpha prompt", "Alpha"));
+			await Bun.write(secondFile, sessionFixtureJsonl(secondId, "/tmp/project-a", "beta prompt", "Beta"));
+			await Bun.write(otherFile, sessionFixtureJsonl(otherId, "/tmp/project-b", "gamma prompt", "Gamma"));
+			await fs.utimes(firstFile, new Date(1_000), new Date(1_000));
+			await fs.utimes(secondFile, new Date(2_000), new Date(2_000));
+			await fs.utimes(otherFile, new Date(3_000), new Date(3_000));
+			setAgentDir(agentDir);
 
-			const resource = await InternalUrlRouter.instance().resolve(`history://${sessionFile}`);
-			expect(resource.content).toContain("parked hello");
-			expect(resource.sourcePath).toBe(sessionFile);
+			const firstPage = await InternalUrlRouter.instance().resolve("history://session?limit=1", {
+				cwd: "/tmp/project-a",
+			});
+			expect(firstPage.content).toContain("Showing 1–1 of 2");
+			expect(firstPage.content).toContain(secondId);
+			expect(firstPage.content).not.toContain(firstId);
+			expect(firstPage.content).not.toContain(otherId);
+			expect(firstPage.content).toContain("offset=1");
+
+			const secondPage = await InternalUrlRouter.instance().resolve("history://session?limit=1&offset=1", {
+				cwd: "/tmp/project-a",
+			});
+			expect(secondPage.content).toContain(firstId);
+			expect(secondPage.content).not.toContain(secondId);
+
+			const filtered = await InternalUrlRouter.instance().resolve("history://session?q=alpha", {
+				cwd: "/tmp/project-a",
+			});
+			expect(filtered.content).toContain(firstId);
+			expect(filtered.content).not.toContain(secondId);
+
+			const global = await InternalUrlRouter.instance().resolve("history://session?scope=all", {
+				cwd: "/tmp/project-a",
+			});
+			expect(global.content).toContain(otherId);
+			expect(global.content.split("\n").filter(line => line.includes(`history://session/${firstId}`))).toHaveLength(
+				1,
+			);
 		});
+	});
+	it("rejects direct transcript paths and invalid archive pagination", async () => {
+		await expect(InternalUrlRouter.instance().resolve("history:///tmp/session.jsonl")).rejects.toThrow(
+			"Direct transcript paths are not supported",
+		);
+		await expect(InternalUrlRouter.instance().resolve("history://session?limit=0")).rejects.toThrow(
+			"Expected an integer 1–100",
+		);
 	});
 });

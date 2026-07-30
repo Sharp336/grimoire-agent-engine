@@ -6,6 +6,7 @@
 
 - Added server-name autocomplete for `/mcp` commands (`enable`, `disable`, `test`, `remove`, `reconnect`, `reauth`, `unauth`) using configured and runtime-discovered MCP servers.
 - Added `--from-claude` and `--from-codex` session imports, also available from `/resume @claude` and `/resume @codex`.
+- Added bounded `history://session` archive browsing and a `session_search` tool for persisted transcript content, including pre-compaction turns.
 
 ### Changed
 
@@ -32,7 +33,6 @@
 - Fixed redundant `xd://` mount notices and prompt-cache invalidation when resuming sessions or reconnecting devices.
 - Fixed the model picker displaying placeholder model lists instead of the actual credential-aware catalog resolved at registration.
 - Fixed file corruption and snapshot mismatches when writing files through the ACP client bridge by verifying the final on-disk content after client-side post-save formatting.
-- Fixed `omp ttsr test` silently evaluating source files as prose when their extensions were missing from the allowlist, and expanded the allowlist to support .NET, Shell, SQL, Zig, Dart, Scala, Elixir, and Protobuf files.
 - Fixed automatic light/dark theme switching in direct WezTerm sessions on macOS when DEC Mode 2031 is unsupported, and improved theme-change color responsiveness.
 
 ## [17.1.8] - 2026-07-28
