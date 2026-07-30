@@ -42,6 +42,7 @@ import {
 	isPersonalGitHubCopilotBaseUrl,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
+import { getAimlApiCommonHeaders } from "./aimlapi";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import type { ModelManagerConfig } from "./descriptor-types";
@@ -1598,18 +1599,68 @@ export function xaiOAuthModelManagerOptions(
 // 6.4 AIML API
 // ---------------------------------------------------------------------------
 
-const AIML_API_NON_CHAT_MODEL_ID_PATTERN =
-	/(?:^|[/:._-])(?:audio|embed|embedding|embeddings|i2i|i2v|image|speech|t2i|t2v|tts|video)(?:$|[/:._-])/i;
+/** AIML API endpoint type carrying chat/LLM models (one id may be served under several types). */
+const AIML_API_CHAT_COMPLETIONS_TYPE = "openai/chat-completions";
 
-const AIML_API_NON_CHAT_MODEL_ID_SUBSTRINGS = ["dall-e", "dalle", "flux", "imagen", "sora", "veo", "whisper"] as const;
+/**
+ * Image-generation models that ride the chat protocol but reject tool use; their
+ * `modalities.output` under-reports `image`, so they are excluded by id.
+ * Temporary until the catalog reports their output modalities honestly (MODELS.md).
+ */
+const AIML_API_IMAGE_ON_CHAT_ID_PATTERN = /-image(-|$)/i;
 
-export function isLikelyAimlApiChatModelId(id: string): boolean {
-	const normalized = id.trim().toLowerCase();
-	if (!normalized) return false;
-	return (
-		!AIML_API_NON_CHAT_MODEL_ID_PATTERN.test(normalized) &&
-		!AIML_API_NON_CHAT_MODEL_ID_SUBSTRINGS.some(token => normalized.includes(token))
-	);
+interface AimlApiPricingUnit {
+	name?: unknown;
+	content?: unknown;
+	origin?: unknown;
+	price?: unknown;
+	per?: unknown;
+}
+
+/** Normalize a token price given as `price` per `per` tokens to $/million tokens. */
+function aimlApiPricePerMillion(price: unknown, per: unknown): number {
+	const priceNum = toNumber(price);
+	const perNum = toNumber(per);
+	if (priceNum === undefined || perNum === undefined || perNum <= 0) return 0;
+	return (priceNum / perNum) * 1_000_000;
+}
+
+/**
+ * Map an AIML API `pricing.units[]` tariff to the host cost shape. The unit
+ * discriminator is `origin` (not `measure`): provided→input, generated→output,
+ * cached→cacheRead, cache_write→cacheWrite. Only text token charges count.
+ */
+function aimlApiCostFromEntry(entry: OpenAICompatibleModelRecord): ModelSpec<"openai-completions">["cost"] | undefined {
+	const pricing = entry.pricing;
+	if (!isRecord(pricing) || !Array.isArray(pricing.units)) return undefined;
+	const units = pricing.units as AimlApiPricingUnit[];
+	const priceForOrigin = (origin: string): number => {
+		const unit = units.find(
+			candidate => candidate.name === "token" && candidate.content === "text" && candidate.origin === origin,
+		);
+		return unit ? aimlApiPricePerMillion(unit.price, unit.per) : 0;
+	};
+	return {
+		input: priceForOrigin("provided"),
+		output: priceForOrigin("generated"),
+		cacheRead: priceForOrigin("cached"),
+		cacheWrite: priceForOrigin("cache_write"),
+	};
+}
+
+/** Input modalities the host model shape understands (`text`/`image`). */
+function aimlApiInputModalities(entry: OpenAICompatibleModelRecord): ("text" | "image")[] | undefined {
+	const modalities = entry.modalities;
+	if (!isRecord(modalities) || !Array.isArray(modalities.input)) return undefined;
+	const mapped = modalities.input.filter((value): value is "text" | "image" => value === "text" || value === "image");
+	return mapped.length > 0 ? mapped : undefined;
+}
+
+/** A chat model is LLM-usable only if every output modality is text (drops audio/image-output chat models). */
+function aimlApiOutputIsTextOnly(entry: OpenAICompatibleModelRecord): boolean {
+	const modalities = entry.modalities;
+	if (!isRecord(modalities) || !Array.isArray(modalities.output)) return true;
+	return modalities.output.every(value => value === "text");
 }
 
 export interface AimlApiModelManagerConfig {
@@ -1621,16 +1672,71 @@ export interface AimlApiModelManagerConfig {
 export function aimlApiModelManagerOptions(
 	config?: AimlApiModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createOpenAICompatibleModelManagerOptions({
-		api: "openai-completions",
+	const apiKey = config?.apiKey;
+	// Base URL for both model discovery and inference (each model's baseUrl is set
+	// here at discovery time). Defaults to production; override with
+	// AIMLAPI_INFERENCE_URL (e.g. staging) so the key issued by the matching
+	// environment's login flow is valid for inference too. Resolved centrally
+	// (getDefaultModelDiscoveryBaseUrl) so the model cache keys by the same URL.
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("aimlapi")!;
+	const references = createBundledReferenceMap<"openai-completions">("aimlapi");
+	return {
 		providerId: "aimlapi",
-		defaultBaseUrl: "https://api.aimlapi.com/v1",
-		config,
+		cacheProviderId: resolveModelCacheProviderId("aimlapi", { baseUrl }),
 		dynamicModelsAuthoritative: true,
-		requireApiKey: true,
-		filterModel: (_entry, model) => isLikelyAimlApiChatModelId(model.id),
-		mapModel: mapWithBundledReference,
-	});
+		...(apiKey && {
+			fetchDynamicModels: async () => {
+				// Models flagged `isHottest` sort to the top of the list; collected while mapping.
+				const hottestIds = new Set<string>();
+				const models = await fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "aimlapi",
+					baseUrl,
+					apiKey,
+					headers: getAimlApiCommonHeaders(),
+					// Pull pricing + modalities so cost and vision render instead of "Free"/text-only.
+					query: { include: "pricing,modalities" },
+					// LLM-only: chat-completions entries whose output is purely text, minus the
+					// image-on-chat models that reject tool use (see MODELS.md § filter).
+					filterModel: (entry, model) =>
+						entry.type === AIML_API_CHAT_COMPLETIONS_TYPE &&
+						aimlApiOutputIsTextOnly(entry) &&
+						!AIML_API_IMAGE_ON_CHAT_ID_PATTERN.test(model.id),
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id);
+						const base = mapWithBundledReference(entry, defaults, reference);
+						// Overlay live catalog metadata (authoritative over the bundled snapshot).
+						const info = isRecord(entry.info) ? entry.info : undefined;
+						const name = typeof info?.name === "string" && info.name.length > 0 ? info.name : undefined;
+						const cost = aimlApiCostFromEntry(entry);
+						const input = aimlApiInputModalities(entry);
+						if (info?.isHottest === true) hottestIds.add(base.id);
+						return {
+							...base,
+							...(name && { name }),
+							contextWindow: toPositiveNumber(info?.contextLength, base.contextWindow),
+							maxTokens: toPositiveNumber(info?.outputMax, base.maxTokens),
+							...(cost && { cost }),
+							...(input && { input }),
+						};
+					},
+					fetch: config?.fetch,
+				});
+				if (!models) return models;
+				// Hottest first, then the rest — each group alphabetical (the fetch returns
+				// models id-sorted, so a stable partition keeps alphabetical order within each
+				// group). Encoded into `priority` (lower = earlier), which the host model list honors.
+				const ordered = [
+					...models.filter(model => hottestIds.has(model.id)),
+					...models.filter(model => !hottestIds.has(model.id)),
+				];
+				ordered.forEach((model, index) => {
+					model.priority = index;
+				});
+				return ordered;
+			},
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------

@@ -84,6 +84,7 @@ import { zhipuCodingPlanProvider } from "./zhipu-coding-plan";
  * list for the loginable providers; non-login model providers are appended.
  */
 const ALL = [
+	aimlApiProvider,
 	azureProvider,
 	openaiCodexProvider,
 	anthropicProvider,
@@ -104,7 +105,6 @@ const ALL = [
 	alibabaCodingPlanProvider,
 	alibabaTokenPlanProvider,
 	aiandProvider,
-	aimlApiProvider,
 	zhipuCodingPlanProvider,
 	umansProvider,
 	qwenPortalProvider,

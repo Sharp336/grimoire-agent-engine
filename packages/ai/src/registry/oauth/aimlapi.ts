@@ -1,0 +1,197 @@
+/**
+ * AIML API "Get API key" login — Device Authorization Grant (RFC 8628).
+ *
+ * Selecting AIML API in `/login` runs this flow: it starts a device
+ * authorization, shows the user a consent link to open in their browser, and
+ * polls until they approve — at which point AIML API mints an API key that is
+ * returned and stored as the provider credential. No local callback server and
+ * no redirect URI, so it works over SSH / in sandboxes just like the other
+ * device-code providers here (see `kilo.ts`).
+ *
+ * Endpoints default to production and are overridable for testing via
+ * `AIMLAPI_APP_URL` (start + poll host) and `AIMLAPI_VERIFICATION_BASE_URL`
+ * (the browser consent page). Every request carries the partner attribution
+ * headers so the sign-up is credited to this client.
+ */
+
+import {
+	AIMLAPI_SOURCE,
+	getAimlApiCommonHeaders,
+	resolveAimlApiPartnerId,
+	resolveAimlApiPartnerName,
+} from "@oh-my-pi/pi-catalog/provider-models/aimlapi";
+import * as AIError from "../../error";
+import type { OAuthController } from "./types";
+
+const PROVIDER = "aimlapi";
+const AGENT_NAME = "Oh My Pi";
+const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+
+const DEFAULT_APP_URL = "https://app.aimlapi.com";
+const DEFAULT_VERIFICATION_BASE_URL = "https://aimlapi.com/app";
+
+const DEFAULT_INTERVAL_SECONDS = 5;
+const DEFAULT_EXPIRES_IN_SECONDS = 900;
+/** Requested spend cap for the minted key, in USD minor units (cents). */
+const DEFAULT_REQUESTED_USD_LIMIT_MINOR = 1000;
+
+/** Poll statuses that mean the flow is over and no key will be issued. */
+const TERMINAL_FAILURE_STATUSES = new Set([
+	"cancelled",
+	"canceled",
+	"denied",
+	"error",
+	"expired",
+	"failed",
+	"rejected",
+]);
+
+interface StartAuthorizationResponse {
+	requestId?: string;
+	deviceCode?: string;
+	interval?: number;
+	expiresIn?: number;
+}
+
+interface PollTokenResponse {
+	status?: string;
+	apiKey?: string;
+	api_key?: string;
+	access_token?: string;
+	key?: string;
+}
+
+function envOrDefault(name: string, fallback: string): string {
+	const value = Bun.env[name]?.trim();
+	return value ? value : fallback;
+}
+
+function resolveAppUrl(): string {
+	return envOrDefault("AIMLAPI_APP_URL", DEFAULT_APP_URL).replace(/\/+$/, "");
+}
+
+function resolveVerificationBaseUrl(): string {
+	return envOrDefault("AIMLAPI_VERIFICATION_BASE_URL", DEFAULT_VERIFICATION_BASE_URL);
+}
+
+function resolveRequestedUsdLimitMinor(): number {
+	const raw = Bun.env.AIMLAPI_REQUESTED_USD_LIMIT_MINOR;
+	if (raw === undefined) return DEFAULT_REQUESTED_USD_LIMIT_MINOR;
+	const value = Number.parseInt(raw, 10);
+	return Number.isFinite(value) && value > 0 ? value : DEFAULT_REQUESTED_USD_LIMIT_MINOR;
+}
+
+/**
+ * Build the browser consent URL from the configured verification base — never
+ * trusted from the response — so a compromised backend can't redirect the user
+ * to an arbitrary host. Carries `source=<channel>/<client>` so the consent page
+ * can attribute the sign-up: the query survives the browser redirect that
+ * creates the account, where the `X-AIMLAPI-Source` request header cannot.
+ */
+function buildVerificationUrl(requestId: string): string {
+	const base = resolveVerificationBaseUrl().replace(/\/+$/, "");
+	const params = new URLSearchParams({ request: requestId, source: AIMLAPI_SOURCE });
+	return `${base}/agent/authorize?${params.toString()}`;
+}
+
+function positiveOrDefault(value: number | undefined, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export async function loginAimlApi(callbacks: OAuthController): Promise<string> {
+	const fetchImpl = callbacks.fetch ?? fetch;
+	const appUrl = resolveAppUrl();
+	const requestHeaders = {
+		"Content-Type": "application/json",
+		Accept: "application/json",
+		...getAimlApiCommonHeaders(),
+	};
+
+	callbacks.onProgress?.("Starting AIML API authorization…");
+	const startResponse = await fetchImpl(`${appUrl}/v3/agent-auth/authorizations`, {
+		method: "POST",
+		headers: requestHeaders,
+		body: JSON.stringify({
+			partnerId: resolveAimlApiPartnerId(),
+			partnerName: resolveAimlApiPartnerName(),
+			agentName: AGENT_NAME,
+			returnUrl: resolveVerificationBaseUrl(),
+			requestedUsdLimitMinor: resolveRequestedUsdLimitMinor(),
+		}),
+		signal: callbacks.signal,
+	});
+
+	if (!startResponse.ok) {
+		throw new AIError.OAuthError(`Failed to start AIML API authorization: ${startResponse.status}`, {
+			kind: "device-auth",
+			provider: PROVIDER,
+			status: startResponse.status,
+		});
+	}
+
+	const startData = (await startResponse.json()) as StartAuthorizationResponse;
+	const requestId = startData.requestId?.trim();
+	const deviceCode = startData.deviceCode?.trim();
+	if (!requestId || !deviceCode) {
+		throw new AIError.OAuthError("AIML API authorization response is incomplete", {
+			kind: "validation",
+			provider: PROVIDER,
+		});
+	}
+
+	const intervalMs = positiveOrDefault(startData.interval, DEFAULT_INTERVAL_SECONDS) * 1000;
+	const expiresInSeconds = positiveOrDefault(startData.expiresIn, DEFAULT_EXPIRES_IN_SECONDS);
+
+	callbacks.onAuth?.({
+		url: buildVerificationUrl(requestId),
+		instructions: "Open this link, sign in, and approve access to generate your AIML API key.",
+	});
+
+	const deadline = Date.now() + expiresInSeconds * 1000;
+	while (Date.now() < deadline) {
+		if (callbacks.signal?.aborted) {
+			throw new AIError.LoginCancelledError();
+		}
+
+		const pollResponse = await fetchImpl(`${appUrl}/v3/agent-auth/token`, {
+			method: "POST",
+			headers: requestHeaders,
+			body: JSON.stringify({
+				partnerId: resolveAimlApiPartnerId(),
+				deviceCode,
+				grant_type: DEVICE_CODE_GRANT,
+			}),
+			signal: callbacks.signal,
+		});
+
+		if (!pollResponse.ok) {
+			throw new AIError.OAuthError(`AIML API authorization check failed: ${pollResponse.status}`, {
+				kind: "polling",
+				provider: PROVIDER,
+				status: pollResponse.status,
+			});
+		}
+
+		const pollData = (await pollResponse.json()) as PollTokenResponse;
+		const apiKey = (pollData.apiKey || pollData.api_key || pollData.access_token || pollData.key || "").trim();
+		if (apiKey) {
+			callbacks.onProgress?.("Your API key was successfully generated.");
+			return apiKey;
+		}
+
+		const status = (pollData.status ?? "").trim().toLowerCase();
+		if (TERMINAL_FAILURE_STATUSES.has(status)) {
+			throw new AIError.OAuthError(`AIML API authorization ${status}`, {
+				kind: "device-auth",
+				provider: PROVIDER,
+			});
+		}
+
+		await Bun.sleep(intervalMs);
+	}
+
+	throw new AIError.OAuthError("AIML API authorization timed out. Please try again.", {
+		kind: "timeout",
+		provider: PROVIDER,
+	});
+}
