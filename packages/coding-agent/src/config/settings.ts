@@ -112,7 +112,7 @@ const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fro
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed.
  */
-function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
+function setByPath(obj: RawSettings, segments: readonly string[], value: unknown): void {
 	let current = obj;
 	for (let i = 0; i < segments.length - 1; i++) {
 		const segment = segments[i];
@@ -348,7 +348,7 @@ export class Settings {
 	#editVariantCache: readonly EditVariantEntry[] | undefined;
 
 	/** Paths modified during this session (for partial save) */
-	#modified = new Set<string>();
+	#modified = new Set<SettingPath>();
 	/** Individual project model roles modified during this session */
 	#modifiedProjectModelRoles = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
@@ -554,6 +554,7 @@ export class Settings {
 		if (path === "modelRoles") {
 			modelRolesSignal.fire();
 		}
+		settingChangedSignal.fire(path, value, prev);
 	}
 
 	/** Set once this instance is discarded; background saves become no-ops. */
@@ -1962,7 +1963,7 @@ export class Settings {
 		this.#saveTimer = setTimeout(() => {
 			this.#saveTimer = undefined;
 			const previousSave = this.#savePromise;
-			const savePromise = previousSave ? previousSave.then(() => this.#saveNow()) : this.#saveNow();
+			const savePromise = previousSave ? previousSave.catch(() => {}).then(() => this.#saveNow()) : this.#saveNow();
 			this.#savePromise = savePromise;
 			savePromise
 				.catch(err => {
@@ -1998,7 +1999,7 @@ export class Settings {
 
 				// Apply only our modified whole-value paths
 				for (const modPath of modifiedPaths) {
-					const segments = modPath.split(".");
+					const segments = SETTING_PATH_SEGMENTS[modPath];
 					const value = getByPath(this.#global, segments);
 					setByPath(current, segments, value);
 				}
@@ -2038,6 +2039,13 @@ export class Settings {
 					setByPath(current, ["modelRoles"], mergedRoles);
 				}
 
+				// Preserve paths changed while this save awaited I/O. They stay
+				// modified so their queued save still persists the latest value.
+				for (const pendingPath of this.#modified) {
+					const segments = SETTING_PATH_SEGMENTS[pendingPath];
+					setByPath(current, segments, getByPath(this.#global, segments));
+				}
+
 				// Update our global with any external changes we preserved
 				this.#global = current;
 				await this.#writeYamlAtomically(writePath, this.#global);
@@ -2061,6 +2069,9 @@ export class Settings {
 				this.#modifiedGlobalModelRoles.add(role);
 			}
 			this.#rebuildMerged();
+			// Rethrow so an explicit `flush()` reports the failure instead of
+			// resolving as if the write landed. Background saves stay quiet:
+			// `#queueSave` already attaches a `.catch` to the queued promise.
 			throw error;
 		}
 
@@ -2279,6 +2290,13 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 		}
 	},
 };
+/** Fires when any effective setting value changes at runtime. */
+const settingChangedSignal = new SettingSignal<[SettingPath, unknown, unknown]>("settingChanged");
+
+/** Fires on any effective setting-value change (set, override, clearOverride). Returns an unsubscribe function. */
+export const onSettingChanged = (cb: (path: SettingPath, value: unknown, prev: unknown) => void) =>
+	settingChangedSignal.on(cb);
+
 /** Fires when `provider.appendOnlyContext` changes at runtime. */
 const appendOnlyModeSignal = new SettingSignal<[value: string]>("provider.appendOnlyContext");
 

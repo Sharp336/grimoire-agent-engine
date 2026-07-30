@@ -109,7 +109,7 @@ import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
-import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
+import { buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
@@ -145,8 +145,10 @@ import {
 	aggregateVibeWorkerTokensPerSecond,
 	type VibeOwnerScope,
 	type VibeParentSession,
+	type VibeScopeSuspension,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
+import { buildInteractiveSessionAutocompleteProvider, buildSessionAutocompleteCommands } from "./completions";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
@@ -563,7 +565,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalModePreviousTools: string[] | undefined;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
-	#vibeScopeSuspendedForSwitch = false;
+	#vibeScopeSuspensionForSwitch: VibeScopeSuspension | undefined;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
 	#goalTurnHadToolCalls = false;
 	#goalContinuationTurnInFlight = false;
@@ -776,25 +778,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 		this.proseOnlyThinking = settings.get("proseOnlyThinking");
 
-		const hookCommands: SlashCommand[] = (
-			this.session.extensionRunner?.getRegisteredCommands(BUILTIN_SLASH_COMMAND_RESERVED_NAMES) ?? []
-		).map(cmd => ({
-			name: cmd.name,
-			description: cmd.description ?? "(hook command)",
-			getArgumentCompletions: cmd.getArgumentCompletions,
-		}));
-
-		// Convert custom commands (TypeScript) to SlashCommand format
-		const customCommands: SlashCommand[] = this.session.customCommands.map(loaded => ({
-			name: loaded.command.name,
-			description: `${loaded.command.description} (${loaded.source})`,
-		}));
-
-		const skillCommandList = this.#rebuildSkillCommandsFromSession();
-
-		const builtinCommands = buildTuiBuiltinSlashCommands({ ctx: this });
-		// Store pending commands for init() where file commands are loaded async
-		this.#pendingSlashCommands = [...builtinCommands, ...hookCommands, ...customCommands, ...skillCommandList];
+		this.#refreshAutocompleteCommands();
 
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
@@ -1111,11 +1095,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.#eventBusUnsubscribers.push(
-			this.session.subscribeCommandMetadataChanged(() => {
-				const retainedCommands = this.#pendingSlashCommands.filter(command => !command.name.startsWith("skill:"));
-				const skillCommands = this.#rebuildSkillCommandsFromSession();
-				this.#pendingSlashCommands = [...retainedCommands, ...skillCommands];
-			}),
+			this.session.subscribeCommandMetadataChanged(() => this.#refreshAutocompleteCommands()),
 		);
 		// Set up theme file watcher
 		this.#eventBusUnsubscribers.push(
@@ -1165,64 +1145,41 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.setTitleSystemPrompt(resolved);
 	}
 
-	#rebuildSkillCommandsFromSession(): SlashCommand[] {
-		const commands: SlashCommand[] = [];
+	#refreshSkillCommandsFromSession(): void {
 		this.skillCommands.clear();
-		if (this.session.skillsSettings?.enableSkillCommands !== false) {
-			for (const skill of this.session.skills) {
-				const commandName = `skill:${skill.name}`;
-				this.skillCommands.set(commandName, skill);
-				commands.push({ name: commandName, description: skill.description });
-			}
+		if (this.session.skillsSettings?.enableSkillCommands === false) return;
+		for (const skill of this.session.skills) {
+			this.skillCommands.set(`skill:${skill.name}`, skill);
 		}
-		return commands;
+	}
+
+	#refreshAutocompleteCommands(): void {
+		this.#refreshSkillCommandsFromSession();
+		this.#pendingSlashCommands = buildSessionAutocompleteCommands(
+			this.session,
+			buildTuiBuiltinSlashCommands({ ctx: this }),
+		);
 	}
 
 	/** Reload session skills and the `/skill:<name>` command list. */
 	async refreshSkillState(): Promise<void> {
 		await this.session.refreshSkills();
-		const retainedCommands = this.#pendingSlashCommands.filter(command => !command.name.startsWith("skill:"));
-		const skillCommands = this.#rebuildSkillCommandsFromSession();
-		this.#pendingSlashCommands = [...retainedCommands, ...skillCommands];
+		this.#refreshAutocompleteCommands();
 	}
 
 	/** Reload slash commands and autocomplete for the provided working directory. */
 	async refreshSlashCommandState(cwd?: string): Promise<void> {
 		const basePath = cwd ?? this.sessionManager.getCwd();
 		const fileCommands = await loadSlashCommands({ cwd: basePath });
+		this.session.setSlashCommands(fileCommands);
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
-		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
-			name: cmd.name,
-			description: cmd.description,
-		}));
-		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
-		// `expandSlashCommand` before `expandPromptTemplate`, and builtin command
-		// execution resolves aliases before template expansion. Mirror that command
-		// resolution order by skipping templates whose names already appear in any
-		// builtin/hook/custom/skill/file command token.
-		const reservedNames = new Set<string>();
-		for (const command of this.#pendingSlashCommands) {
-			reservedNames.add(command.name);
-			for (const alias of command.aliases ?? []) reservedNames.add(alias);
-		}
-		for (const command of fileSlashCommands) {
-			reservedNames.add(command.name);
-			for (const alias of command.aliases ?? []) reservedNames.add(alias);
-		}
-		const promptTemplateCommands: SlashCommand[] = this.session.promptTemplates
-			.filter(template => !reservedNames.has(template.name))
-			.map(template => ({
-				name: template.name,
-				// `PromptTemplate.description` from `loadTemplatesFromDir` already includes the
-				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
-				description: template.description,
-			}));
+		this.#refreshAutocompleteCommands();
 		this.#baseAutocompleteProvider = this.#inputController.createAutocompleteProvider(
-			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],
+			this.#pendingSlashCommands,
 			basePath,
+			buildInteractiveSessionAutocompleteProvider(this.session, buildTuiBuiltinSlashCommands({ ctx: this })),
 		);
 		this.#applyAutocompleteProvider();
-		this.session.setSlashCommands(fileCommands);
 	}
 
 	/**
@@ -2207,8 +2164,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #quiesceVibeForSessionSwitch(): Promise<void> {
 		const ownerScope = this.#vibeModeOwnerScope;
 		if (!this.vibeModeEnabled || !ownerScope) return;
-		await VibeSessionRegistry.global().suspendScope(ownerScope, this.session.asyncJobManager);
-		this.#vibeScopeSuspendedForSwitch = true;
+		this.#vibeScopeSuspensionForSwitch = await VibeSessionRegistry.global().suspendScopeReversibly(
+			ownerScope,
+			this.session.asyncJobManager,
+		);
 	}
 
 	#updateGoalModeStatus(): void {
@@ -2454,8 +2413,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
-		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
-		this.#vibeScopeSuspendedForSwitch = false;
+		const vibeSuspension = this.#vibeScopeSuspensionForSwitch;
+		const vibeScopeAlreadySuspended = vibeSuspension !== undefined;
 		const sessionContext = this.sessionManager.buildSessionContext();
 		const vibeSession = this.#vibeParentSession();
 		const targetVibeScope = VibeSessionRegistry.global().ownerScope(vibeSession);
@@ -2465,6 +2424,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#vibeModeOwnerScope?.ownerId === targetVibeScope.ownerId &&
 			this.#vibeModeOwnerScope.parentSessionId === targetVibeScope.parentSessionId &&
 			this.#vibeModeOwnerScope.parentSessionFile === targetVibeScope.parentSessionFile;
+		if (vibeSuspension) {
+			await (preserveVibe ? vibeSuspension.rollback() : vibeSuspension.commit());
+			this.#vibeScopeSuspensionForSwitch = undefined;
+		}
 		await this.#clearTransientModeState({ preserveVibe, vibeScopeAlreadySuspended });
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
 		const goalEnabled = this.session.settings.get("goal.enabled");

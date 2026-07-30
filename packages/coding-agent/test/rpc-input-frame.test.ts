@@ -131,6 +131,60 @@ describe("dispatchRpcInputFrame", () => {
 			expect(bashFrame.data.exitCode).toBe(-1);
 		}
 	});
+	test("python is dispatched in the background so abort_python preempts it", async () => {
+		const pythonResponse: RpcResponse = {
+			id: "p1",
+			type: "response",
+			command: "python",
+			success: true,
+			data: {
+				output: "",
+				exitCode: undefined,
+				cancelled: true,
+				truncated: false,
+				totalLines: 0,
+				totalBytes: 0,
+				outputLines: 0,
+				outputBytes: 0,
+				displayOutputs: [],
+				stdinRequested: false,
+			},
+		};
+		const { promise: pythonPending, resolve: resolvePython } = Promise.withResolvers<RpcResponse>();
+		let abortPythonCalled = false;
+
+		const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
+			if (command.type === "python") return await pythonPending;
+			if (command.type === "abort_python") {
+				abortPythonCalled = true;
+				resolvePython(pythonResponse);
+				return { id: command.id, type: "response", command: "abort_python", success: true };
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		};
+
+		const { deps, outputs } = makeDeps(handleCommand);
+
+		const pythonAwait = dispatchRpcInputFrame({ id: "p1", type: "python", code: "while True: pass" }, deps);
+		expect(pythonAwait).toBeUndefined();
+		await flushMicrotasks();
+		expect(outputs).toHaveLength(0);
+
+		const abortAwait = dispatchRpcInputFrame({ id: "a1", type: "abort_python" }, deps);
+		expect(abortAwait).toBeInstanceOf(Promise);
+		await abortAwait;
+
+		expect(abortPythonCalled).toBe(true);
+		expect(outputs[0]).toEqual({
+			id: "a1",
+			type: "response",
+			command: "abort_python",
+			success: true,
+		});
+
+		await flushMicrotasks();
+		expect(outputs.filter(frame => (frame as RpcResponse).command === "python")).toEqual([pythonResponse]);
+	});
 
 	test("non-bash commands are dispatched serially (ordering preserved)", async () => {
 		const started: string[] = [];
@@ -188,6 +242,30 @@ describe("dispatchRpcInputFrame", () => {
 			success: false,
 			error: "kaboom",
 		});
+	});
+	test("python handler errors identify python on the background frame", async () => {
+		const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
+			if (command.type === "python") throw new Error("kaboom");
+			throw new Error(`unexpected: ${command.type}`);
+		};
+
+		const { deps, outputs } = makeDeps(handleCommand);
+
+		const awaited = dispatchRpcInputFrame({ id: "p2", type: "python", code: "raise Exception()" }, deps);
+		expect(awaited).toBeUndefined();
+
+		await flushMicrotasks();
+		await flushMicrotasks();
+
+		expect(outputs).toEqual([
+			{
+				id: "p2",
+				type: "response",
+				command: "python",
+				success: false,
+				error: "kaboom",
+			},
+		]);
 	});
 
 	test("background bash task is exposed so EOF cleanup can await its response", async () => {
@@ -330,6 +408,12 @@ describe("RpcInputDispatcher", () => {
 						messageCount: 0,
 						queuedMessageCount: 0,
 						todoPhases: [],
+						isRetrying: false,
+						isBashRunning: false,
+						isAborting: false,
+						isGeneratingHandoff: false,
+						configWarnings: [],
+						skillWarnings: [],
 					},
 				};
 			}
@@ -525,6 +609,93 @@ describe("RpcInputDispatcher", () => {
 			},
 		]);
 	});
+
+	test("serializes MCP mutations in arrival order", async () => {
+		const addServer = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const { deps, outputs } = makeDeps(async command => {
+			started.push(command.type);
+			if (command.type === "mcp_add_server") {
+				await addServer.promise;
+				return {
+					id: command.id,
+					type: "response",
+					command: "mcp_add_server",
+					success: true,
+					data: {
+						name: command.name,
+						scope: "project",
+						changed: true,
+						discovered: true,
+						state: "connected",
+						toolCount: 0,
+						errors: {},
+					},
+				};
+			}
+			if (command.type === "mcp_remove_server") {
+				return {
+					id: command.id,
+					type: "response",
+					command: "mcp_remove_server",
+					success: true,
+					data: {
+						name: command.name,
+						scope: "project",
+						changed: true,
+						discovered: false,
+						state: "disconnected",
+						toolCount: 0,
+						errors: {},
+					},
+				};
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({
+			id: "add",
+			type: "mcp_add_server",
+			name: "demo",
+			config: { command: "demo-mcp", args: [] },
+			scope: "project",
+		});
+		dispatcher.dispatch({ id: "remove", type: "mcp_remove_server", name: "demo", scope: "project" });
+		await flushMicrotasks();
+
+		expect(started).toEqual(["mcp_add_server"]);
+		addServer.resolve();
+		await dispatcher.drain();
+
+		expect(started).toEqual(["mcp_add_server", "mcp_remove_server"]);
+		expect((outputs[0] as RpcResponse).id).toBe("add");
+		expect((outputs[1] as RpcResponse).id).toBe("remove");
+	});
+
+	test("runs shutdown after the serial command leaves the dispatcher drain", async () => {
+		let shutdownRequested = false;
+		let dispatcher: RpcInputDispatcher;
+		const shutdownComplete = Promise.withResolvers<void>();
+		const { deps } = makeDeps(async command => {
+			shutdownRequested = true;
+			return { id: command.id, type: "response", command: "prompt", success: true, data: { agentInvoked: false } };
+		});
+		const coordinator = new RpcShutdownCoordinator({
+			isShutdownRequested: () => shutdownRequested,
+			performShutdown: async () => {
+				await dispatcher.drain();
+				shutdownComplete.resolve();
+			},
+		});
+		dispatcher = new RpcInputDispatcher({
+			deps,
+			afterSerialCommand: () => coordinator.checkShutdownRequested(),
+		});
+
+		dispatcher.dispatch({ id: "shutdown", type: "prompt", message: "shutdown" });
+		await shutdownComplete.promise;
+	});
 });
 
 describe("RpcShutdownCoordinator", () => {
@@ -598,6 +769,7 @@ describe("RpcShutdownCoordinator", () => {
 		// settle hook can trigger it.
 		shutdown.requested = true;
 		await flushMicrotasks();
+
 		expect(recorder.state.calls).toBe(0);
 
 		gate.resolve(cancelledBashResponse("s2"));
@@ -607,6 +779,39 @@ describe("RpcShutdownCoordinator", () => {
 		expect(recorder.state.calls).toBe(1);
 		expect(outputs).toEqual([cancelledBashResponse("s2")]);
 		expect(recorder.state.outputsAtShutdown).toBe(1);
+	});
+
+	test("EOF and pi.shutdown cancel a blocked bash before draining it", async () => {
+		for (const trigger of ["eof", "pi.shutdown"] as const) {
+			const gate = Promise.withResolvers<RpcResponse>();
+			const { deps, outputs } = makeDeps(async command => {
+				if (command.type === "bash") return await gate.promise;
+				throw new Error(`unexpected: ${command.type}`);
+			});
+			let requested = false;
+			let bashCancelled = false;
+			let outputsAtShutdown = -1;
+			const coordinator = new RpcShutdownCoordinator({
+				isShutdownRequested: () => requested,
+				cancel: () => {
+					bashCancelled = true;
+					gate.resolve(cancelledBashResponse(trigger));
+					return [];
+				},
+				performShutdown: async () => {
+					outputsAtShutdown = outputs.length;
+				},
+			});
+			deps.trackBackgroundTask = task => coordinator.track(task);
+
+			expect(dispatchRpcInputFrame({ id: trigger, type: "bash", command: "sleep 9999" }, deps)).toBeUndefined();
+			if (trigger === "pi.shutdown") requested = true;
+			await (trigger === "eof" ? coordinator.shutdown() : coordinator.checkShutdownRequested());
+
+			expect(bashCancelled).toBe(true);
+			expect(outputs).toEqual([cancelledBashResponse(trigger)]);
+			expect(outputsAtShutdown).toBe(1);
+		}
 	});
 
 	test("concurrent triggers are latched: performShutdown runs exactly once", async () => {

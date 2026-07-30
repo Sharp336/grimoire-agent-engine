@@ -128,6 +128,75 @@ describe("Settings", () => {
 		});
 	});
 
+	describe("save failures", () => {
+		it("rejects flush and retains the pending value when saving fails", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const saveError = new Error("simulated config write failure");
+			vi.spyOn(fileLock, "withFileLock").mockRejectedValueOnce(saveError);
+
+			settings.set("setupVersion", 1);
+
+			await expect(settings.flush()).rejects.toBe(saveError);
+			expect(settings.get("setupVersion")).toBe(1);
+
+			await settings.flush();
+			expect((await readSettings()).setupVersion).toBe(1);
+		});
+		it("continues background saves after a rejected save without hiding the original flush failure", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const saveError = new Error("simulated first save failure");
+			const firstSaveEntered = Promise.withResolvers<void>();
+			const releaseFirstSave = Promise.withResolvers<void>();
+			const secondSaveFinished = Promise.withResolvers<void>();
+			const withFileLock = fileLock.withFileLock;
+			let saveCount = 0;
+			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
+				saveCount += 1;
+				if (saveCount === 1) {
+					firstSaveEntered.resolve();
+					await releaseFirstSave.promise;
+					throw saveError;
+				}
+				const result = await withFileLock(filePath, fn, options);
+				secondSaveFinished.resolve();
+				return result;
+			});
+
+			settings.set("setupVersion", 1);
+			await firstSaveEntered.promise;
+
+			const firstFlush = settings.flush();
+			const observedFailure = firstFlush.then(
+				() => undefined,
+				error => error,
+			);
+			try {
+				vi.useFakeTimers();
+				try {
+					settings.set("theme.dark", "titanium");
+					vi.advanceTimersByTime(100);
+				} finally {
+					vi.useRealTimers();
+				}
+
+				releaseFirstSave.resolve();
+				expect(await observedFailure).toBe(saveError);
+				await secondSaveFinished.promise;
+
+				expect(saveCount).toBe(2);
+				expect(await readSettings()).toMatchObject({
+					setupVersion: 1,
+					theme: { dark: "titanium" },
+				});
+			} finally {
+				vi.useRealTimers();
+				releaseFirstSave.resolve();
+				settings.cancelPendingSaves();
+				await observedFailure;
+			}
+		});
+	});
+
 	describe("shell configuration errors", () => {
 		it("points to the selected global config in the active agent directory", async () => {
 			const configPath = path.join(agentDir, "config.yaml");
@@ -672,6 +741,39 @@ describe("Settings", () => {
 
 			const savedSettings = await readSettings();
 			expect(savedSettings.defaultThinkingLevel).toBe(Effort.High);
+		});
+
+		it("preserves a setting changed while an unrelated save awaits the file lock", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const firstSaveEntered = Promise.withResolvers<void>();
+			const releaseFirstSave = Promise.withResolvers<void>();
+			const withFileLock = fileLock.withFileLock;
+			let saveCount = 0;
+			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
+				saveCount += 1;
+				if (saveCount === 1) {
+					firstSaveEntered.resolve();
+					await releaseFirstSave.promise;
+				}
+				return withFileLock(filePath, fn, options);
+			});
+
+			settings.set("setupVersion", 1);
+			const firstFlush = settings.flush();
+			await firstSaveEntered.promise;
+
+			settings.set("theme.dark", "titanium");
+			releaseFirstSave.resolve();
+			await firstFlush;
+			await settings.flush();
+
+			expect(saveCount).toBe(2);
+			expect(settings.get("setupVersion")).toBe(1);
+			expect(settings.get("theme.dark")).toBe("titanium");
+			expect(await readSettings()).toEqual({
+				setupVersion: 1,
+				theme: { dark: "titanium" },
+			});
 		});
 	});
 

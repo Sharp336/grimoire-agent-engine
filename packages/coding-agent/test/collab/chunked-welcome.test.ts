@@ -16,7 +16,20 @@ import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import {
+	getRpcCollabGuestLifecycleDisposition,
+	getRpcCollabStatus,
+	joinRpcCollabSession,
+	leaveRpcCollabSession,
+	sendRpcCollabGuestPrompt,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-collab";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type {
+	SessionTransitionOptions,
+	SessionTransitionRunner,
+	SessionTransitionRunOptions,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
@@ -54,6 +67,10 @@ function makeLargeSnapshot(): SizedSnapshot {
 	};
 }
 
+let hostEventListener: ((event: AgentSessionEvent) => void) | undefined;
+let hostStreaming = false;
+let hostPromptObserver: (() => void) | undefined;
+
 function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 	const ctx = {
 		settings: { get: () => "" },
@@ -64,14 +81,24 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 			onEntryAppended: undefined,
 		},
 		session: {
-			isStreaming: false,
+			get isStreaming() {
+				return hostStreaming;
+			},
 			queuedMessageCount: 0,
 			sessionName: "large",
 			model: undefined,
 			thinkingLevel: undefined,
-			subscribe: () => () => {},
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				hostEventListener = listener;
+				return () => {
+					if (hostEventListener === listener) hostEventListener = undefined;
+				};
+			},
 			emitNotice: () => {},
-			promptCustomMessage: () => Promise.resolve(),
+			promptCustomMessage: () => {
+				hostPromptObserver?.();
+				return Promise.resolve();
+			},
 			abort: () => Promise.resolve(),
 		},
 		eventBus: undefined,
@@ -122,6 +149,141 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 		collabGuest: undefined,
 	} as unknown as InteractiveModeContext;
 	return ctx;
+}
+
+const LOCAL_SESSION_FILE = "/tmp/local-session.jsonl";
+
+interface TransactionalGuestHarness {
+	ctx: InteractiveModeContext;
+	activeSession: () => string;
+	switchedPaths: string[];
+	transitionOptions: (SessionTransitionRunOptions | undefined)[];
+	switchOptions: (SessionTransitionOptions | undefined)[];
+	leaseReleases: () => number;
+	clears: { status: number; pending: number };
+}
+
+function makeTransactionalGuestContext(options: {
+	cancelReplica?: boolean;
+	reloadFailure?: Error;
+	events?: string[];
+	cancelLocalWithoutBypass?: boolean;
+	restoreFailure?: { remaining: number; error: Error };
+	newSessionFailure?: { remaining: number; error: Error };
+	noLocalSession?: boolean;
+	onNewSession?: () => void;
+	replicaPostCommitFailure?: Error;
+	replicaBeforeCommit?: () => Promise<void>;
+	replicaAfterCommit?: () => Promise<void>;
+}): TransactionalGuestHarness {
+	let activeSession = LOCAL_SESSION_FILE;
+	const switchedPaths: string[] = [];
+	const transitionOptions: (SessionTransitionRunOptions | undefined)[] = [];
+	const switchOptions: (SessionTransitionOptions | undefined)[] = [];
+	let leaseReleases = 0;
+	const clears = { status: 0, pending: 0 };
+	let transitionRunning = false;
+	const runSessionTransition: SessionTransitionRunner = async (transition, runOptions) => {
+		if (transitionRunning) throw new Error("Session transition is already running");
+		transitionRunning = true;
+		transitionOptions.push(runOptions);
+		try {
+			return (await transition({})).result;
+		} finally {
+			transitionRunning = false;
+		}
+	};
+	const ctx = {
+		settings: { get: () => "" },
+		sessionManager: {
+			getSessionFile: () => (options.noLocalSession && activeSession === LOCAL_SESSION_FILE ? null : activeSession),
+			getSessionName: () => "local",
+			getCwd: () => "/tmp",
+		},
+		session: {
+			switchSession: async (sessionPath: string, switchSessionOptions?: SessionTransitionOptions) => {
+				switchedPaths.push(sessionPath);
+				switchOptions.push(switchSessionOptions);
+				const isReplica = sessionPath !== LOCAL_SESSION_FILE;
+				options.events?.push(isReplica ? "replica committed" : "local restored");
+				if (isReplica && options.cancelReplica) return false;
+				if (!isReplica && options.cancelLocalWithoutBypass && !switchSessionOptions?.bypassBeforeSwitchHook) {
+					return false;
+				}
+				if (!isReplica && options.restoreFailure && options.restoreFailure.remaining > 0) {
+					options.restoreFailure.remaining--;
+					throw options.restoreFailure.error;
+				}
+				if (isReplica) await options.replicaBeforeCommit?.();
+				activeSession = sessionPath;
+				switchSessionOptions?.onCommitted?.();
+				if (isReplica) await options.replicaAfterCommit?.();
+				if (isReplica && options.replicaPostCommitFailure) throw options.replicaPostCommitFailure;
+				return true;
+			},
+			newSession: async () => {
+				options.onNewSession?.();
+				if (options.newSessionFailure && options.newSessionFailure.remaining > 0) {
+					options.newSessionFailure.remaining--;
+					throw options.newSessionFailure.error;
+				}
+				activeSession = LOCAL_SESSION_FILE;
+				return true;
+			},
+			messages: [],
+			agent: {
+				state: { model: undefined },
+				setModel: () => {},
+				setThinkingLevel: () => {},
+				setDisableReasoning: () => {},
+			},
+			getVibeModeState: () => undefined,
+			emitNotice: () => {},
+			acquireSessionTransition: () => ({
+				run: runSessionTransition,
+				release: () => {
+					leaseReleases++;
+				},
+			}),
+			runSessionTransition,
+		},
+		runSessionTransition,
+		statusContainer: {
+			clear: () => {
+				clears.status++;
+			},
+		},
+		pendingMessagesContainer: {
+			clear: () => {
+				clears.pending++;
+			},
+		},
+		compactionQueuedMessages: [],
+		pendingTools: new Map(),
+		resetObserverRegistry: () => {},
+		syncRunningSubagentBadge: () => {},
+		chatContainer: { clear: () => {} },
+		renderInitialMessages: () => {},
+		reloadTodos: async () => {
+			if (!options.reloadFailure) return;
+			options.events?.push("postcommit apply failed");
+			throw options.reloadFailure;
+		},
+		collabGuest: undefined,
+	} as unknown as InteractiveModeContext;
+	Object.assign(ctx.session, {
+		sessionManager: ctx.sessionManager,
+		settings: ctx.settings,
+	});
+	return {
+		ctx,
+		activeSession: () => activeSession,
+		switchedPaths,
+		transitionOptions,
+		switchOptions,
+		leaseReleases: () => leaseReleases,
+		clears,
+	};
 }
 
 // ── Shared host/relay ───────────────────────────────────────────────────────
@@ -219,5 +381,437 @@ describe("collab chunked welcome (#3144)", () => {
 			writeSpy.mockRestore();
 			await guest.leave("test cleanup").catch(() => {});
 		}
+	});
+
+	it("cancels pre-welcome joins and ignores queued or late welcomes after leave", async () => {
+		const sockets = new Map<string, CollabSocket>();
+		const connect = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			sockets.set("guest", this);
+			this.onOpen?.();
+		});
+		const welcome: CollabFrame = {
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: snapshot.header as never,
+			state: {} as never,
+			agents: [],
+			entryCount: 0,
+		};
+		try {
+			for (const mode of ["immediate", "late", "queued"] as const) {
+				sockets.clear();
+				const harness = makeTransactionalGuestContext({});
+				const guest = new CollabGuestLink(harness.ctx);
+				const joining = guest.join(host.link);
+				const joined = joining.then(
+					() => undefined,
+					error => error,
+				);
+				let openedSocket: CollabSocket | undefined;
+				if (mode !== "immediate") {
+					await Promise.resolve();
+					openedSocket = sockets.get("guest");
+					if (!openedSocket) throw new Error("guest socket did not open");
+					if (mode === "queued") openedSocket.onFrame?.(welcome, 0);
+				}
+				await guest.leave("left");
+				const joinError = await joined;
+				if (!(joinError instanceof Error)) throw new Error("join unexpectedly completed");
+				expect(joinError.message).toBe("Collab join cancelled");
+				if (mode === "late") openedSocket?.onFrame?.(welcome, 0);
+				await Promise.resolve();
+
+				if (mode === "immediate") expect(sockets.get("guest")).toBeUndefined();
+				expect(harness.switchedPaths).toEqual([]);
+				expect(harness.ctx.collabGuest).toBeUndefined();
+			}
+		} finally {
+			connect.mockRestore();
+		}
+	});
+
+	it("waits for a replica commit that races leave before restoring and releasing RPC ownership", async () => {
+		const replicaStarted = Promise.withResolvers<void>();
+		const commitReplica = Promise.withResolvers<void>();
+		const harness = makeTransactionalGuestContext({
+			replicaBeforeCommit: async () => {
+				replicaStarted.resolve();
+				await commitReplica.promise;
+			},
+		});
+		const sockets = new Map<string, CollabSocket>();
+		const connect = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			sockets.set("guest", this);
+			this.onOpen?.();
+		});
+		try {
+			const joining = joinRpcCollabSession(harness.ctx.session, host.link);
+			let joinSettled = false;
+			const joined = joining.then(
+				() => undefined,
+				error => error,
+			).finally(() => {
+				joinSettled = true;
+			});
+			await Promise.resolve();
+			const socket = sockets.get("guest");
+			if (!socket) throw new Error("guest socket did not open");
+			socket.onFrame?.(
+				{
+					t: "welcome",
+					proto: COLLAB_PROTO,
+					header: snapshot.header as never,
+					state: {} as never,
+					agents: [],
+					entryCount: 0,
+				},
+				0,
+			);
+			await replicaStarted.promise;
+
+			let leaveSettled = false;
+			const leaving = leaveRpcCollabSession(harness.ctx.session).finally(() => {
+				leaveSettled = true;
+			});
+			await Promise.resolve();
+			expect(joinSettled).toBe(false);
+			expect(leaveSettled).toBe(false);
+			expect(harness.leaseReleases()).toBe(0);
+
+			commitReplica.resolve();
+			await leaving;
+			expect(await joined).toBeInstanceOf(Error);
+			expect(harness.activeSession()).toBe(LOCAL_SESSION_FILE);
+			expect((await getRpcCollabStatus(harness.ctx.session)).role).toBe("none");
+			expect(harness.ctx.collabGuest).toBeUndefined();
+			expect(harness.leaseReleases()).toBe(1);
+		} finally {
+			commitReplica.resolve();
+			connect.mockRestore();
+			await leaveRpcCollabSession(harness.ctx.session).catch(() => {});
+		}
+	});
+
+	it("waits for postcommit snapshot cleanup before restoring an immediately left RPC guest", async () => {
+		const replicaCommitted = Promise.withResolvers<void>();
+		const finishSnapshot = Promise.withResolvers<void>();
+		let leaving: Promise<void> | undefined;
+		const harness = makeTransactionalGuestContext({
+			replicaAfterCommit: async () => {
+				leaving = leaveRpcCollabSession(harness.ctx.session);
+				replicaCommitted.resolve();
+				await finishSnapshot.promise;
+			},
+		});
+		const sockets = new Map<string, CollabSocket>();
+		const connect = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			sockets.set("guest", this);
+			this.onOpen?.();
+		});
+		try {
+			const joining = joinRpcCollabSession(harness.ctx.session, host.link);
+			const joined = joining.then(
+				() => undefined,
+				error => error,
+			);
+			await Promise.resolve();
+			const socket = sockets.get("guest");
+			if (!socket) throw new Error("guest socket did not open");
+			socket.onFrame?.(
+				{
+					t: "welcome",
+					proto: COLLAB_PROTO,
+					header: snapshot.header as never,
+					state: {} as never,
+					agents: [],
+					entryCount: 0,
+				},
+				0,
+			);
+			await replicaCommitted.promise;
+			if (!leaving) throw new Error("leave did not start after replica commit");
+			await Promise.resolve();
+			expect(harness.activeSession()).not.toBe(LOCAL_SESSION_FILE);
+			expect(harness.leaseReleases()).toBe(0);
+
+			finishSnapshot.resolve();
+			await leaving;
+			expect(await joined).toBeInstanceOf(Error);
+			expect(harness.activeSession()).toBe(LOCAL_SESSION_FILE);
+			expect((await getRpcCollabStatus(harness.ctx.session)).role).toBe("none");
+			expect(harness.ctx.collabGuest).toBeUndefined();
+			expect(harness.leaseReleases()).toBe(1);
+		} finally {
+			finishSnapshot.resolve();
+			connect.mockRestore();
+			await leaveRpcCollabSession(harness.ctx.session).catch(() => {});
+		}
+	});
+
+	it("keeps the local session and mirror intact when the replica switch is cancelled", async () => {
+		const harness = makeTransactionalGuestContext({ cancelReplica: true });
+		const guest = new CollabGuestLink(harness.ctx);
+		const localRef = guest.agentRegistry.register({
+			id: "local-peer",
+			displayName: "Local Peer",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/local-peer.jsonl",
+			status: "idle",
+		});
+
+		await expect(guest.join(host.link)).rejects.toThrow("Collab replica session switch was cancelled");
+
+		expect(harness.activeSession()).toBe(LOCAL_SESSION_FILE);
+		expect(guest.agentRegistry.get("local-peer")).toBe(localRef);
+		expect(harness.clears).toEqual({ status: 0, pending: 0 });
+
+		await guest.leave("first cleanup");
+		await guest.leave("second cleanup");
+		expect(harness.switchedPaths).toHaveLength(1);
+	});
+
+	it("bypasses return-hook cancellation while restoring a failed postcommit join", async () => {
+		const failure = new Error("postcommit apply failed");
+		const events: string[] = [];
+		const harness = makeTransactionalGuestContext({
+			reloadFailure: failure,
+			events,
+			cancelLocalWithoutBypass: true,
+		});
+		const guest = new CollabGuestLink(harness.ctx);
+		guest.agentRegistry.register({
+			id: "local-peer",
+			displayName: "Local Peer",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/local-peer.jsonl",
+			status: "idle",
+		});
+		harness.ctx.collabGuest = guest;
+
+		const startup = (async () => {
+			try {
+				await guest.join(host.link);
+			} catch (error) {
+				await guest.leave("join failed");
+				throw error;
+			}
+		})();
+		try {
+			await expect(startup).rejects.toThrow(failure.message);
+		} finally {
+			events.push("lease released");
+		}
+
+		expect(events).toEqual(["replica committed", "postcommit apply failed", "local restored", "lease released"]);
+		expect(harness.activeSession()).toBe(LOCAL_SESSION_FILE);
+		expect(harness.switchOptions.map(options => options?.bypassBeforeSwitchHook)).toEqual([undefined, true]);
+		expect(harness.ctx.collabGuest).toBeUndefined();
+		expect(guest.agentRegistry.list()).toMatchObject([
+			{
+				id: "local-peer",
+				displayName: "Local Peer",
+				sessionFile: "/tmp/local-peer.jsonl",
+				status: "idle",
+			},
+		]);
+
+		await guest.leave("repeated cleanup");
+		expect(harness.switchedPaths).toHaveLength(2);
+		expect(harness.transitionOptions).toEqual([
+			{ preserveCollabAttachmentOnCommit: true },
+			{ preserveCollabAttachmentOnCommit: true },
+		]);
+	});
+
+	it("derives guest lifecycle disposition from host events before forwarding commands", async () => {
+		hostStreaming = false;
+		const harness = makeTransactionalGuestContext({});
+		const emitHostEvent = hostEventListener;
+		if (!emitHostEvent) throw new Error("collab host event bridge is not installed");
+		let dispositionAtForward: "current" | "future" | undefined;
+		let forwardedStarts = 0;
+		let observeEvent: ((event: AgentSessionEvent) => void) | undefined;
+		await joinRpcCollabSession(harness.ctx.session, host.link, undefined, event => {
+			dispositionAtForward = getRpcCollabGuestLifecycleDisposition(harness.ctx.session);
+			if (event.type === "agent_start") forwardedStarts++;
+			observeEvent?.(event);
+		});
+		try {
+			expect(getRpcCollabGuestLifecycleDisposition(harness.ctx.session)).toBe("future");
+
+			const startObserved = Promise.withResolvers<AgentSessionEvent>();
+			observeEvent = startObserved.resolve;
+			hostStreaming = true;
+			emitHostEvent({ type: "agent_start" } as AgentSessionEvent);
+			await startObserved.promise;
+			expect(getRpcCollabGuestLifecycleDisposition(harness.ctx.session)).toBe("current");
+			expect(dispositionAtForward).toBe("current");
+
+			const promptObserved = Promise.withResolvers<void>();
+			hostPromptObserver = promptObserved.resolve;
+			sendRpcCollabGuestPrompt(harness.ctx.session, "guest follow-up");
+			await promptObserved.promise;
+			expect(getRpcCollabGuestLifecycleDisposition(harness.ctx.session)).toBe("current");
+
+			const terminalEndObserved = Promise.withResolvers<AgentSessionEvent>();
+			observeEvent = terminalEndObserved.resolve;
+			hostStreaming = false;
+			emitHostEvent({ type: "agent_end", messages: [], isTerminal: true } as AgentSessionEvent);
+			await terminalEndObserved.promise;
+			expect(getRpcCollabGuestLifecycleDisposition(harness.ctx.session)).toBe("future");
+			expect(dispositionAtForward).toBe("future");
+			expect(forwardedStarts).toBe(1);
+
+			const continuationStartObserved = Promise.withResolvers<AgentSessionEvent>();
+			observeEvent = continuationStartObserved.resolve;
+			hostStreaming = true;
+			emitHostEvent({ type: "agent_start" } as AgentSessionEvent);
+			await continuationStartObserved.promise;
+
+			const intermediateEndObserved = Promise.withResolvers<AgentSessionEvent>();
+			observeEvent = intermediateEndObserved.resolve;
+			hostStreaming = false;
+			emitHostEvent({ type: "agent_end", messages: [], isTerminal: false } as AgentSessionEvent);
+			await intermediateEndObserved.promise;
+			expect(getRpcCollabGuestLifecycleDisposition(harness.ctx.session)).toBe("current");
+			expect(dispositionAtForward).toBe("current");
+			expect(forwardedStarts).toBe(2);
+		} finally {
+			hostPromptObserver = undefined;
+			hostStreaming = false;
+			await leaveRpcCollabSession(harness.ctx.session);
+		}
+
+		expect(getRpcCollabGuestLifecycleDisposition(harness.ctx.session)).toBeUndefined();
+	});
+
+	it("retains failed join ownership and its transition lease until leave can restore", async () => {
+		const replicaFailure = new Error("replica postcommit apply failed");
+		const restoreFailure = { remaining: 1, error: new Error("local storage unavailable") };
+		const harness = makeTransactionalGuestContext({ replicaPostCommitFailure: replicaFailure, restoreFailure });
+
+		try {
+			await expect(joinRpcCollabSession(harness.ctx.session, host.link)).rejects.toThrow(
+				"original local session could not be restored",
+			);
+			expect(harness.activeSession()).not.toBe(LOCAL_SESSION_FILE);
+			expect((await getRpcCollabStatus(harness.ctx.session)).role).toBe("guest");
+			expect(harness.leaseReleases()).toBe(0);
+
+			await leaveRpcCollabSession(harness.ctx.session);
+
+			expect(harness.activeSession()).toBe(LOCAL_SESSION_FILE);
+			expect((await getRpcCollabStatus(harness.ctx.session)).role).toBe("none");
+			expect(harness.leaseReleases()).toBe(1);
+		} finally {
+			await leaveRpcCollabSession(harness.ctx.session).catch(() => {});
+		}
+	});
+
+	it("reports failed automatic restoration without making leave swallow or lose the retry", async () => {
+		for (const trigger of ["close", "bye"] as const) {
+			const restored = Promise.withResolvers<void>();
+			const restoreFailure = { remaining: 2, error: new Error("local session creation failed") };
+			const harness = makeTransactionalGuestContext({
+				noLocalSession: true,
+				newSessionFailure: restoreFailure,
+				onNewSession: restored.resolve,
+			});
+			const errors: string[] = [];
+			harness.ctx.showError = message => {
+				errors.push(message);
+			};
+			const unhandled: unknown[] = [];
+			const observeUnhandled = (reason: unknown): void => {
+				unhandled.push(reason);
+			};
+			const socketReady = Promise.withResolvers<CollabSocket>();
+			const connect = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+				socketReady.resolve(this);
+				this.onOpen?.();
+			});
+			process.on("unhandledRejection", observeUnhandled);
+			try {
+				const guest = new CollabGuestLink(harness.ctx);
+				const joining = guest.join(host.link);
+				const socket = await socketReady.promise;
+				socket.onFrame?.(
+					{
+						t: "welcome",
+						proto: COLLAB_PROTO,
+						header: snapshot.header as never,
+						state: {} as never,
+						agents: [],
+						entryCount: 0,
+					},
+					0,
+				);
+				await joining;
+
+				if (trigger === "close") socket.onClose?.("relay closed", false);
+				else socket.onFrame?.({ t: "bye", reason: "host ended" }, 0);
+				await restored.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+
+				expect(unhandled).toEqual([]);
+				expect(errors).toEqual([
+					"Failed to restore local session after collaboration ended: local session creation failed",
+				]);
+				await expect(guest.leave("retry")).rejects.toThrow("local session creation failed");
+				await expect(guest.leave("retry again")).resolves.toBeUndefined();
+				expect(harness.activeSession()).toBe(LOCAL_SESSION_FILE);
+			} finally {
+				process.off("unhandledRejection", observeUnhandled);
+				connect.mockRestore();
+			}
+		}
+	});
+
+	it("routes replica and return switches through the injected transition runner", async () => {
+		const transitionOptions: (SessionTransitionRunOptions | undefined)[] = [];
+		const switchedPaths: string[] = [];
+		const runSessionTransition: SessionTransitionRunner = async (transition, options) => {
+			transitionOptions.push(options);
+			return (await transition({})).result;
+		};
+		const ctx = {
+			settings: { get: () => "" },
+			sessionManager: {
+				getSessionFile: () => "/tmp/local-session.jsonl",
+				getSessionName: () => "local",
+				getCwd: () => "/tmp",
+			},
+			session: {
+				switchSession: async (sessionPath: string) => {
+					switchedPaths.push(sessionPath);
+					return true;
+				},
+				newSession: async () => true,
+				messages: [],
+				agent: {
+					state: { model: undefined },
+					setModel: () => {},
+					setThinkingLevel: () => {},
+					setDisableReasoning: () => {},
+				},
+			},
+			runSessionTransition,
+			collabGuest: undefined,
+		} as unknown as InteractiveModeContext;
+		const guest = new CollabGuestLink(ctx);
+		guestCleanups.push(() => void guest.leave("test cleanup"));
+
+		await guest.join(host.link);
+		expect(transitionOptions).toEqual([{ preserveCollabAttachmentOnCommit: true }]);
+		expect(switchedPaths).toHaveLength(1);
+
+		await guest.leave("done");
+		expect(transitionOptions).toEqual([
+			{ preserveCollabAttachmentOnCommit: true },
+			{ preserveCollabAttachmentOnCommit: true },
+		]);
+		expect(switchedPaths.at(-1)).toBe("/tmp/local-session.jsonl");
 	});
 });

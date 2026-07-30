@@ -12,20 +12,21 @@
  * Host ask dialogs (`ui-request` select/editor) present through the same
  * hook selector/editor seam and answer with `ui-response`; `ui-request-end`
  * dismisses a pending presentation without responding.
- * Everything renders through the same components, so ctrl+o, theming, and
- * transcript behavior are native by construction.
+ * Renderer hooks are optional; the interactive frontend retains native
+ * rendering while headless frontends still replicate session and agent state.
  */
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/components/agent-hub";
-import type { InteractiveModeContext } from "../modes/types";
-import { AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import type { SessionTransitionOptions } from "../session/agent-session-types";
 import type { SessionEntry } from "../session/session-entries";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
 import { setSessionTerminalTitle } from "../utils/title-generator";
+import type { CollabGuestContext } from "./context";
 import { importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import {
@@ -82,11 +83,16 @@ interface PendingSnapshot {
 	isResync: boolean;
 }
 
+interface AgentMirrorSnapshot {
+	refs: AgentRef[];
+	transcripts: Map<string, boolean>;
+}
+
 /** Minimal context surface the idle-state reconciler mutates. */
 export interface GuestIdleReconcilerCtx {
-	statusLine: { markActivityEnd: () => void };
-	statusContainer: Pick<InteractiveModeContext["statusContainer"], "disposeChildren">;
-	loadingAnimation: { stop: () => void } | undefined;
+	statusLine?: { markActivityEnd: () => void };
+	statusContainer?: { disposeChildren(): void };
+	loadingAnimation?: { stop: () => void };
 }
 
 /**
@@ -103,34 +109,33 @@ export interface GuestIdleReconcilerCtx {
  */
 export function reconcileGuestIdleHostState(ctx: GuestIdleReconcilerCtx, isStreaming: boolean): void {
 	if (isStreaming) return;
-	ctx.statusLine.markActivityEnd();
+	ctx.statusLine?.markActivityEnd();
 	if (ctx.loadingAnimation) {
 		ctx.loadingAnimation.stop();
 		ctx.loadingAnimation = undefined;
-		ctx.statusContainer.disposeChildren();
+		ctx.statusContainer?.disposeChildren();
 	}
 }
 
 /** Reconcile a welcome/resync snapshot's host activity state into the guest meter. */
 export interface GuestSnapshotActivityReconcilerCtx extends GuestIdleReconcilerCtx {
-	statusLine: GuestIdleReconcilerCtx["statusLine"] & { markActivityStart: () => void };
+	statusLine?: { markActivityStart(): void; markActivityEnd(): void };
 	/**
-	 * Start (or re-attach) the live "Working…" loader. Mirrors
-	 * `InteractiveModeContext.ensureLoadingAnimation`, which is what
-	 * `EventController` calls on `agent_start`. Required so a guest that
-	 * missed an earlier `agent_start` (a reconnect dropped it mid-stream)
-	 * starts its spinner when the host later reports it is streaming.
+	 * Start (or re-attach) the live "Working…" loader. Mirrors the interactive
+	 * frontend's `ensureLoadingAnimation`, which `EventController` calls on
+	 * `agent_start`. A guest that missed that event during reconnect can still
+	 * start its spinner when the host later reports it is streaming.
 	 */
-	ensureLoadingAnimation: InteractiveModeContext["ensureLoadingAnimation"];
-	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
-	retryLoader: InteractiveModeContext["retryLoader"];
+	ensureLoadingAnimation?(): void;
+	autoCompactionLoader?: { stop(): void };
+	retryLoader?: { stop(): void };
 }
 
 /** Status-area state which cannot outlive removal of its child components. */
 export interface GuestTransientStatusCtx {
-	statusContainer: Pick<InteractiveModeContext["statusContainer"], "clear">;
-	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
-	retryLoader: InteractiveModeContext["retryLoader"];
+	statusContainer?: { clear(): void };
+	autoCompactionLoader?: { stop(): void };
+	retryLoader?: { stop(): void };
 }
 
 /** Stop and forget status-area loaders before detaching their components. */
@@ -143,20 +148,20 @@ export function clearGuestTransientStatus(ctx: GuestTransientStatusCtx): void {
 		ctx.retryLoader.stop();
 		ctx.retryLoader = undefined;
 	}
-	ctx.statusContainer.clear();
+	ctx.statusContainer?.clear();
 }
 
 export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconcilerCtx, isStreaming: boolean): void {
 	if (isStreaming) {
-		ctx.statusLine.markActivityStart();
-		if (!ctx.autoCompactionLoader && !ctx.retryLoader) ctx.ensureLoadingAnimation();
+		ctx.statusLine?.markActivityStart();
+		if (!ctx.autoCompactionLoader && !ctx.retryLoader) ctx.ensureLoadingAnimation?.();
 		return;
 	}
 	reconcileGuestIdleHostState(ctx, false);
 }
 
 export class CollabGuestLink {
-	#ctx: InteractiveModeContext;
+	readonly #ctx: CollabGuestContext;
 	#socket: CollabSocket | null = null;
 	#roomId = "";
 	/** Previous session file to restore on leave; null = previous session was unsaved. */
@@ -166,6 +171,13 @@ export class CollabGuestLink {
 	/** True after the initial snapshot has been written to disk and resumed. */
 	#welcomed = false;
 	#left = false;
+	/** True once the replica switch committed and the local session needs restoring. */
+	#replicaCommitted = false;
+	/** Original local mirror restored after leaving or rolling back a failed join. */
+	#returnAgentMirror: AgentMirrorSnapshot | null = null;
+	/** Shared cleanup attempt: concurrent/repeated leave calls await the same restoration. */
+	#restorePromise: Promise<void> | null = null;
+	#restoreComplete = false;
 	/**
 	 * Buffer for the in-flight chunked welcome. Set by the small `welcome`
 	 * frame, accumulated by every `snapshot-chunk`, drained when the final
@@ -187,6 +199,8 @@ export class CollabGuestLink {
 	#readOnly = false;
 	/** False until the first assistant message_start (real or synthesized) since (re)sync. */
 	#assistantStreamSynced = false;
+	/** Authoritative logical host lifecycle, independent of the replica AgentSession. */
+	#remoteAgentActive = false;
 	state: CollabSessionState | null = null;
 	/** Local mirror of the host's agent ecosystem (refs carry `session: null`). */
 	readonly agentRegistry = new AgentRegistry();
@@ -239,14 +253,29 @@ export class CollabGuestLink {
 		return this.#readOnly;
 	}
 
+	/** Whether the guest currently has an open relay link for a routed action. */
+	get isConnected(): boolean {
+		return this.#socket?.isOpen === true;
+	}
+
+	/** Whether relayed input would join the host's current logical agent run. */
+	get remoteAgentActive(): boolean {
+		return this.#remoteAgentActive;
+	}
+
+	/** Whether cleanup still owes a switch away from the committed replica. */
+	get hasCommittedReplica(): boolean {
+		return this.#replicaCommitted;
+	}
+
 	/** Shows the read-only status hint when applicable; true when the action must be dropped. */
 	#rejectReadOnly(): boolean {
 		if (!this.#readOnly) return false;
-		this.#ctx.showStatus("This collab link is read-only");
+		this.#ctx.showStatus?.("This collab link is read-only");
 		return true;
 	}
 
-	constructor(ctx: InteractiveModeContext) {
+	constructor(ctx: CollabGuestContext) {
 		this.#ctx = ctx;
 	}
 
@@ -256,6 +285,7 @@ export class CollabGuestLink {
 		this.#roomId = parsed.roomId;
 		this.#writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
 		const key = await importRoomKey(parsed.key);
+		if (this.#left) throw new Error("Collab join cancelled");
 
 		this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;
 
@@ -267,12 +297,13 @@ export class CollabGuestLink {
 		this.#joinReject = err => firstWelcome.reject(err);
 
 		const finishJoin = (): void => {
-			if (joined) return;
+			if (joined || this.#left) return;
 			joined = true;
 			firstWelcome.resolve();
 		};
 
 		socket.onOpen = () => {
+			if (this.#left) return;
 			// (Re)connect: re-introduce ourselves; the host answers with a fresh
 			// welcome which (re)syncs the replica. Discard any partially-streamed
 			// snapshot from a prior connection: the host will resend the full
@@ -291,6 +322,7 @@ export class CollabGuestLink {
 		socket.onFrame = frame => {
 			this.#applyChain = this.#applyChain
 				.then(async () => {
+					if (this.#left) return;
 					if (frame.t === "welcome") {
 						this.#clearWelcomeTimer();
 						this.#beginWelcome(frame, joined);
@@ -314,7 +346,7 @@ export class CollabGuestLink {
 						// Fail the join with the host's message instead of hanging
 						// until the welcome timeout.
 						this.#clearWelcomeTimer();
-						if (joined) this.#ctx.showError(`Collab host: ${frame.message}`);
+						if (joined) this.#ctx.showError?.(`Collab host: ${frame.message}`);
 						else firstWelcome.reject(new Error(frame.message));
 						return;
 					}
@@ -338,11 +370,12 @@ export class CollabGuestLink {
 				return;
 			}
 			if (willReconnect) {
-				this.#ctx.showStatus(`Collab connection lost (${reason}), reconnecting…`, { dim: true });
+				this.#ctx.showStatus?.(`Collab connection lost (${reason}), reconnecting…`, { dim: true });
 				return;
 			}
-			this.#ctx.showStatus(`Collab session ended (${reason})`);
-			void this.#restoreLocalSession();
+			this.#ctx.showStatus?.(`Collab session ended (${reason})`);
+			this.#cancel();
+			this.#restoreLocalSessionAfterDisconnect("connection close");
 		};
 		socket.connect();
 		// Cover the connect phase too: if the relay blackholes the WebSocket
@@ -354,9 +387,15 @@ export class CollabGuestLink {
 		try {
 			await firstWelcome.promise;
 		} catch (err) {
-			this.#left = true;
-			socket.close();
-			this.#socket = null;
+			this.#cancel();
+			try {
+				await this.#restoreLocalSession();
+			} catch (restoreError) {
+				throw new AggregateError(
+					[err, restoreError],
+					"Collab join failed and the original local session could not be restored.",
+				);
+			}
 			throw err;
 		} finally {
 			this.#joinReject = null;
@@ -364,15 +403,36 @@ export class CollabGuestLink {
 			this.#clearSnapshotProgressTimer();
 		}
 
+		if (this.#left) {
+			await this.#restoreLocalSession();
+			throw new Error("Collab join cancelled");
+		}
 		this.#ctx.collabGuest = this;
-		this.#ctx.syncRunningSubagentBadge();
+		this.#ctx.syncRunningSubagentBadge?.();
 	}
 
 	/** User-initiated leave (or post-disconnect cleanup): restore the previous session. */
 	async leave(_reason: string): Promise<void> {
-		if (this.#left) return;
-		this.#socket?.close();
+		this.#cancel();
 		await this.#restoreLocalSession();
+	}
+
+	#restoreLocalSessionAfterDisconnect(source: string): void {
+		void this.#restoreLocalSession().catch(error => {
+			logger.warn("collab guest automatic session restore failed", { source, error: String(error) });
+			this.#ctx.showError?.(
+				`Failed to restore local session after collaboration ended: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		});
+	}
+
+	#cancel(): void {
+		if (this.#left) return;
+		this.#left = true;
+		this.#joinReject?.(new Error("Collab join cancelled"));
+		this.#clearWelcomeTimer();
+		this.#clearSnapshotProgressTimer();
+		this.#socket?.close();
 	}
 
 	sendPrompt(text: string, images?: ImageContent[]): void {
@@ -436,29 +496,55 @@ export class CollabGuestLink {
 		const replicaPath = path.join(getConfigRootDir(), "collab", `${this.#roomId}.jsonl`);
 		const lines = [pending.header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
 		await Bun.write(replicaPath, `${lines}\n`);
+		if (this.#left) return;
 
 		// Resume sequence (selector-controller.handleResumeSession) minus
 		// applyCwdChange: the guest process never chdirs to a host path. The
 		// SessionManager still adopts the header cwd for display/relativization.
+		if (!this.#replicaCommitted && !this.#returnAgentMirror) {
+			this.#returnAgentMirror = this.#captureAgentMirror();
+		}
+		const switchReplica = async (transitionOptions: SessionTransitionOptions) => {
+			const didSwitch = await this.#ctx.session.switchSession(replicaPath, {
+				...transitionOptions,
+				onCommitted: () => {
+					this.#replicaCommitted = true;
+					transitionOptions.onCommitted?.();
+				},
+			});
+			if (didSwitch) this.#replicaCommitted = true;
+			return {
+				result: didSwitch,
+				committed: didSwitch,
+				honorPlanDefault: false,
+			};
+		};
+		const switched = this.#ctx.runSessionTransition
+			? await this.#ctx.runSessionTransition(switchReplica, { preserveCollabAttachmentOnCommit: true })
+			: await switchReplica({});
+		if (this.#left) return;
+		if (!switched) throw new Error("Collab replica session switch was cancelled.");
 		this.#clearTransientUi();
 		this.#clearAgentMirror();
-		await this.#ctx.session.switchSession(replicaPath);
+		this.#remoteAgentActive = pending.state.isStreaming;
 		this.state = pending.state;
-		reconcileGuestSnapshotHostState(this.#ctx, pending.state.isStreaming);
+		if (this.#ctx.statusLine) reconcileGuestSnapshotHostState(this.#ctx, pending.state.isStreaming);
 		this.#applyHostState(pending.state);
-		this.#ctx.resetObserverRegistry();
+		this.#ctx.resetObserverRegistry?.();
 		this.#applyAgentSnapshots(pending.agents);
-		this.#ctx.syncRunningSubagentBadge();
+		this.#ctx.syncRunningSubagentBadge?.();
 		this.#assistantStreamSynced = false;
-		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
-		this.#ctx.chatContainer.clear();
-		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
-		await this.#ctx.reloadTodos();
+		if (this.#ctx.statusLine)
+			setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
+		this.#ctx.chatContainer?.clear();
+		this.#ctx.renderInitialMessages?.({ clearTerminalHistory: true });
+		await this.#ctx.reloadTodos?.();
+		if (this.#left) return;
 		this.#updateStatusSegment();
 		this.#readOnly = pending.readOnly;
 		this.#welcomed = true;
 		const suffix = this.#readOnly ? " (read-only)" : "";
-		this.#ctx.showStatus(
+		this.#ctx.showStatus?.(
 			pending.isResync ? `Reconnected to collab session${suffix}` : `Joined collab session${suffix}`,
 		);
 	}
@@ -513,11 +599,11 @@ export class CollabGuestLink {
 			case "state": {
 				this.state = frame.state;
 				this.#applyHostState(frame.state);
-				setSessionTerminalTitle(frame.state.sessionName, frame.state.cwd);
+				if (this.#ctx.statusLine) setSessionTerminalTitle(frame.state.sessionName, frame.state.cwd);
 				this.#updateStatusSegment();
 				reconcileGuestSnapshotHostState(this.#ctx, frame.state.isStreaming);
-				this.#ctx.statusLine.invalidate();
-				this.#ctx.ui.requestRender();
+				this.#ctx.statusLine?.invalidate();
+				this.#ctx.ui?.requestRender();
 				break;
 			}
 			case "bus":
@@ -527,7 +613,7 @@ export class CollabGuestLink {
 				break;
 			case "agents":
 				this.#applyAgentSnapshots(frame.agents);
-				this.#ctx.syncRunningSubagentBadge();
+				this.#ctx.syncRunningSubagentBadge?.();
 				break;
 			case "ui-request":
 				this.#presentUiRequest(frame.request);
@@ -544,20 +630,30 @@ export class CollabGuestLink {
 				break;
 			}
 			case "bye": {
-				this.#ctx.showStatus(`Collab session ended (${frame.reason})`);
-				this.#socket?.close();
-				void this.#restoreLocalSession();
+				this.#ctx.showStatus?.(`Collab session ended (${frame.reason})`);
+				this.#cancel();
+				this.#restoreLocalSessionAfterDisconnect("host goodbye");
 				break;
 			}
 			case "error":
-				this.#ctx.showError(`Collab host: ${frame.message}`);
+				this.#ctx.showError?.(`Collab host: ${frame.message}`);
 				break;
 			default:
 				logger.debug("collab guest ignoring unexpected frame", { type: frame.t });
 		}
 	}
 
+	#dispatchEvent(event: AgentSessionEvent): void {
+		void this.#ctx.eventController?.handleEvent(event);
+		this.#ctx.handleEvent?.(event);
+	}
+
 	#applyEvent(event: AgentSessionEvent): void {
+		if (event.type === "agent_start") {
+			this.#remoteAgentActive = true;
+		} else if (event.type === "agent_end") {
+			this.#remoteAgentActive = event.isTerminal === false;
+		}
 		// Orphan-delta guard: when joining mid-turn the message_start for the
 		// in-flight assistant message predates the snapshot. message_update
 		// carries the full accumulating message, so synthesize the missing start
@@ -571,9 +667,9 @@ export class CollabGuestLink {
 			!this.#assistantStreamSynced
 		) {
 			this.#assistantStreamSynced = true;
-			void this.#ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+			this.#dispatchEvent({ type: "message_start", message: event.message });
 		}
-		void this.#ctx.eventController.handleEvent(event);
+		this.#dispatchEvent(event);
 	}
 
 	/**
@@ -631,11 +727,40 @@ export class CollabGuestLink {
 		}
 	}
 
+	#captureAgentMirror(): AgentMirrorSnapshot {
+		return {
+			refs: this.agentRegistry.list().map(ref => ({ ...ref })),
+			transcripts: new Map(this.#agentHasTranscript),
+		};
+	}
+
 	#clearAgentMirror(): void {
 		for (const ref of this.agentRegistry.list()) {
 			this.agentRegistry.unregister(ref.id);
 		}
 		this.#agentHasTranscript.clear();
+	}
+
+	#restoreAgentMirror(): void {
+		const snapshot = this.#returnAgentMirror;
+		if (!snapshot) return;
+		this.#clearAgentMirror();
+		for (const ref of snapshot.refs) {
+			const restored = this.agentRegistry.register({
+				id: ref.id,
+				displayName: ref.displayName,
+				kind: ref.kind,
+				parentId: ref.parentId,
+				session: ref.session,
+				sessionFile: ref.sessionFile,
+				status: ref.status,
+			});
+			Object.assign(restored, ref);
+		}
+		for (const [id, hasTranscript] of snapshot.transcripts) {
+			this.#agentHasTranscript.set(id, hasTranscript);
+		}
+		this.#returnAgentMirror = null;
 	}
 
 	/** Resolve every in-flight transcript request with null (resolvers clear their own timers). */
@@ -657,18 +782,24 @@ export class CollabGuestLink {
 		// The host only targets writable peers; drop defensively on a read-only link.
 		if (this.#readOnly || this.#pendingUiRequests.has(request.reqId)) return;
 		const abort = new AbortController();
+		let dialog: Promise<string | undefined>;
+		if (this.#ctx.handleUiRequest) {
+			dialog = this.#ctx.handleUiRequest(request, abort.signal);
+		} else if (request.kind === "select") {
+			if (!this.#ctx.showHookSelector) return;
+			dialog = this.#ctx.showHookSelector(request.title, request.options, {
+				signal: abort.signal,
+				initialIndex: request.initialIndex,
+				selectionMarker: request.selectionMarker,
+				checkedIndices: request.checkedIndices,
+				markableCount: request.markableCount,
+				helpText: request.helpText,
+			});
+		} else {
+			if (!this.#ctx.showHookEditor) return;
+			dialog = this.#ctx.showHookEditor(request.title, request.prefill, { signal: abort.signal });
+		}
 		this.#pendingUiRequests.set(request.reqId, abort);
-		const dialog =
-			request.kind === "select"
-				? this.#ctx.showHookSelector(request.title, request.options, {
-						signal: abort.signal,
-						initialIndex: request.initialIndex,
-						selectionMarker: request.selectionMarker,
-						checkedIndices: request.checkedIndices,
-						markableCount: request.markableCount,
-						helpText: request.helpText,
-					})
-				: this.#ctx.showHookEditor(request.title, request.prefill, { signal: abort.signal });
 		dialog
 			.then(value => {
 				// Identity check: only the presentation that still owns the reqId
@@ -715,11 +846,11 @@ export class CollabGuestLink {
 	#clearTransientUi(): void {
 		this.#clearUiRequests();
 		clearGuestTransientStatus(this.#ctx);
-		this.#ctx.pendingMessagesContainer.clear();
+		this.#ctx.pendingMessagesContainer?.clear();
 		this.#ctx.compactionQueuedMessages = [];
 		this.#ctx.streamingComponent = undefined;
 		this.#ctx.streamingMessage = undefined;
-		this.#ctx.pendingTools.clear();
+		this.#ctx.pendingTools?.clear();
 		if (this.#ctx.loadingAnimation) {
 			this.#ctx.loadingAnimation.stop();
 			this.#ctx.loadingAnimation = undefined;
@@ -727,35 +858,134 @@ export class CollabGuestLink {
 	}
 
 	async #restoreLocalSession(): Promise<void> {
-		if (this.#left) return;
-		this.#left = true;
-		this.#socket = null;
+		if (this.#restoreComplete) return;
+		if (this.#restorePromise) return this.#restorePromise;
+		const restore = (async () => {
+			await this.#applyChain;
+			await this.#performLocalSessionRestore();
+		})();
+		this.#restorePromise = restore;
+		try {
+			await restore;
+			this.#restoreComplete = true;
+		} catch (error) {
+			if (!this.#replicaCommitted) this.#restoreComplete = true;
+			throw error;
+		} finally {
+			if (this.#restoreComplete) {
+				this.#left = true;
+				this.#remoteAgentActive = false;
+				const socket = this.#socket;
+				this.#socket = null;
+				socket?.close();
+			}
+			if (this.#restorePromise === restore) this.#restorePromise = null;
+		}
+	}
+
+	async #performLocalSessionRestore(): Promise<void> {
+		const restoringReplica = this.#replicaCommitted;
+		let committedRestoreError: unknown;
+		if (restoringReplica) {
+			try {
+				await this.#switchToLocalSession();
+			} catch (error) {
+				if (this.#replicaCommitted) throw error;
+				committedRestoreError = error;
+			}
+			this.#restoreAgentMirror();
+		}
 		this.#ctx.collabGuest = undefined;
-		this.#ctx.statusLine.setCollabStatus(null);
+		this.#ctx.statusLine?.setCollabStatus(null);
 		this.#flushPendingTranscripts();
-		this.#clearAgentMirror();
-		this.#ctx.syncRunningSubagentBadge();
-		this.#ctx.resetObserverRegistry();
-		this.#clearTransientUi();
-		// Replica file stays on disk: it is a valid session file outside the
-		// sessions dir, so it never shows up in /resume but remains readable.
-		if (this.#returnSessionFile) {
-			await this.#ctx.handleResumeSession(this.#returnSessionFile);
+		this.state = null;
+		this.#welcomed = false;
+		if (restoringReplica) {
+			this.#ctx.syncRunningSubagentBadge?.();
+			this.#ctx.resetObserverRegistry?.();
+		}
+		if (committedRestoreError) throw committedRestoreError;
+	}
+
+	async #switchToLocalSession(): Promise<void> {
+		const returnSessionFile = this.#returnSessionFile;
+		if (returnSessionFile) {
+			if (this.#ctx.runSessionTransition) {
+				const switched = await this.#ctx.runSessionTransition(
+					async transitionOptions => {
+						const didSwitch = await this.#ctx.session.switchSession(returnSessionFile, {
+							...transitionOptions,
+							bypassBeforeSwitchHook: true,
+							onCommitted: () => {
+								this.#replicaCommitted = false;
+								transitionOptions.onCommitted?.();
+							},
+						});
+						if (didSwitch) this.#replicaCommitted = false;
+						return {
+							result: didSwitch,
+							committed: didSwitch,
+							honorPlanDefault: false,
+						};
+					},
+					{ preserveCollabAttachmentOnCommit: true },
+				);
+				if (!switched) throw new Error("Local session restore was cancelled.");
+			} else if (this.#ctx.handleResumeSession) {
+				await this.#ctx.handleResumeSession(returnSessionFile);
+				this.#replicaCommitted = false;
+			} else {
+				const switched = await this.#ctx.session.switchSession(returnSessionFile, {
+					bypassBeforeSwitchHook: true,
+					onCommitted: () => {
+						this.#replicaCommitted = false;
+					},
+				});
+				if (!switched) throw new Error("Local session restore was cancelled.");
+				this.#replicaCommitted = false;
+			}
 			return;
 		}
-		await this.#ctx.session.newSession();
-		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
-		this.#ctx.statusLine.invalidate();
-		this.#ctx.statusLine.resetActiveTime();
-		this.#ctx.ui.requestRender();
-		this.#ctx.updateEditorBorderColor();
-		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
-		await this.#ctx.reloadTodos();
-		this.#ctx.ui.requestRender(true, { clearScrollback: true });
+		const created = this.#ctx.runSessionTransition
+			? await this.#ctx.runSessionTransition(
+					async transitionOptions => {
+						const didCreate = await this.#ctx.session.newSession({
+							...transitionOptions,
+							onCommitted: () => {
+								this.#replicaCommitted = false;
+								transitionOptions.onCommitted?.();
+							},
+						});
+						if (didCreate) this.#replicaCommitted = false;
+						return {
+							result: didCreate,
+							committed: didCreate,
+							honorPlanDefault: didCreate,
+						};
+					},
+					{ preserveCollabAttachmentOnCommit: true },
+				)
+			: await this.#ctx.session.newSession({
+					onCommitted: () => {
+						this.#replicaCommitted = false;
+					},
+				});
+		if (!created) throw new Error("Local session creation was cancelled.");
+		this.#replicaCommitted = false;
+		if (this.#ctx.statusLine) {
+			setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
+			this.#ctx.statusLine.invalidate();
+			this.#ctx.statusLine.resetActiveTime();
+		}
+		this.#ctx.ui?.requestRender();
+		this.#ctx.updateEditorBorderColor?.();
+		this.#ctx.renderInitialMessages?.({ clearTerminalHistory: true });
+		await this.#ctx.reloadTodos?.();
+		this.#ctx.ui?.requestRender(true, { clearScrollback: true });
 	}
 
 	#updateStatusSegment(): void {
-		this.#ctx.statusLine.setCollabStatus({
+		this.#ctx.statusLine?.setCollabStatus({
 			role: "guest",
 			participantCount: this.state?.participants.length ?? 1,
 			stateOverride: this.state,

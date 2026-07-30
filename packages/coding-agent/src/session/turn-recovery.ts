@@ -114,6 +114,7 @@ export interface TurnRecoveryHost {
 	promptGeneration(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
+	appendContextMessage(message: AgentMessage): void;
 	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
 	appendSessionMessage(message: AssistantMessage): void;
@@ -340,8 +341,12 @@ export class TurnRecovery {
 	}
 
 	/** Prompts after transient overlap with a prior agent run. */
-	promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options);
+	promptAgentWithIdleRetry(
+		messages: AgentMessage[],
+		options?: { toolChoice?: ToolChoice },
+		onDispatchAccepted?: () => void,
+	): Promise<void> {
+		return this.#promptAgentWithIdleRetry(messages, options, onDispatchAccepted);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -535,7 +540,7 @@ export class TurnRecovery {
 			return false;
 		}
 		this.discardAssistantTurn(assistantMessage);
-		this.#host.agent.appendMessage({
+		this.#host.appendContextMessage({
 			role: "developer",
 			content: [{ type: "text", text: this.#emptyStopRetryReminder() }],
 			attribution: "agent",
@@ -625,7 +630,7 @@ export class TurnRecovery {
 			return false;
 		}
 
-		this.#host.agent.appendMessage({
+		this.#host.appendContextMessage({
 			role: "developer",
 			content: [{ type: "text", text: this.#unexpectedStopRetryReminder() }],
 			attribution: "agent",
@@ -724,7 +729,7 @@ export class TurnRecovery {
 		) {
 			return;
 		}
-		this.#host.agent.appendMessage(assistantMessage);
+		this.#host.appendContextMessage(assistantMessage);
 	}
 
 	#discardAcceptedTerminalEmptyStop(assistantMessage: AssistantMessage): void {
@@ -1666,7 +1671,7 @@ export class TurnRecovery {
 	#maybeInjectThinkingLoopRedirect(id: number): void {
 		if (!AIError.is(id, AIError.Flag.ThinkingLoop)) return;
 		if (this.#host.settings.get("model.loopGuard.enabled") !== true) return;
-		this.#host.agent.appendMessage({
+		this.#host.appendContextMessage({
 			role: "custom",
 			customType: THINKING_LOOP_REDIRECT_TYPE,
 			content: thinkingLoopRedirectTemplate,
@@ -1692,11 +1697,18 @@ export class TurnRecovery {
 		this.resolveRetry();
 	}
 
-	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+	async #promptAgentWithIdleRetry(
+		messages: AgentMessage[],
+		options?: { toolChoice?: ToolChoice },
+		onDispatchAccepted?: () => void,
+	): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
 			try {
-				await this.#host.agent.prompt(messages, options);
+				const wasStreaming = this.#host.agent.state.isStreaming;
+				const prompt = this.#host.agent.prompt(messages, options);
+				if (!wasStreaming && this.#host.agent.state.isStreaming) onDispatchAccepted?.();
+				await prompt;
 				return;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {

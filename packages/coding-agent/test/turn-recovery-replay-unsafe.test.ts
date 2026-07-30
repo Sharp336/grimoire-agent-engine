@@ -63,6 +63,7 @@ function createHost(
 		promptGeneration: () => 0,
 		sessionId: () => "test-session",
 		emitSessionEvent: async () => {},
+		appendContextMessage: () => {},
 		scheduleAgentContinue: () => {},
 		waitForSessionMessagePersistence: async () => {},
 		appendSessionMessage: () => {},

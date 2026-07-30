@@ -7,7 +7,13 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
+import { addMCPServer } from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
+import {
+	authorizeMCP,
+	completeMCPReauth,
+	type MCPReauthPlan,
+	MCPCommandController,
+} from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	getConfigRootDir,
@@ -171,11 +177,151 @@ describe("/mcp auth commands", () => {
 		});
 		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(RAW_SERVER_URL))).toBeUndefined();
 
+
 		const saved = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
 		const savedServer = saved.mcpServers?.envserver;
 		const savedUrl = savedServer?.type === "http" || savedServer?.type === "sse" ? savedServer.url : undefined;
 		expect(savedUrl).toBe(RAW_SERVER_URL);
 		expect(savedServer?.auth).toBeUndefined();
+	});
+
+	test("does not recreate a removed server when an OAuth flow completes", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		const config = { type: "http" as const, url: RAW_SERVER_URL };
+		await Bun.write(configPath, JSON.stringify({ mcpServers: {} }));
+		const plan: MCPReauthPlan = {
+			name: "envserver",
+			found: { filePath: configPath, scope: "project", config, discovered: false },
+			baseConfig: config,
+			oauth: { authorizationUrl: "https://auth.example.com/authorize", tokenUrl: "https://auth.example.com/token" },
+			serverUrl: EXPANDED_SERVER_URL,
+			flowClientId: "",
+			flowClientSecret: "",
+			oauthResource: EXPANDED_SERVER_URL,
+			oauthResourceIsFallback: false,
+		};
+
+		await expect(
+			completeMCPReauth(
+				{ session: { modelRegistry: { authStorage } } } as never,
+				plan,
+				{ credentialId: "new-credential" } as never,
+				false,
+			),
+		).rejects.toThrow('server "envserver" changed or was removed');
+		expect(JSON.parse(await Bun.file(configPath).text())).toEqual({ mcpServers: {} });
+	});
+
+	test("does not persist a deferred credential when the reauth snapshot is stale", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		const config = { type: "http" as const, url: RAW_SERVER_URL };
+		const plan: MCPReauthPlan = {
+			name: "envserver",
+			found: { filePath: configPath, scope: "project", config, discovered: false },
+			baseConfig: config,
+			oauth: { authorizationUrl: "https://auth.example.com/authorize", tokenUrl: "https://auth.example.com/token" },
+			serverUrl: EXPANDED_SERVER_URL,
+			flowClientId: "",
+			flowClientSecret: "",
+			oauthResource: EXPANDED_SERVER_URL,
+			oauthResourceIsFallback: false,
+		};
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		await Bun.write(configPath, JSON.stringify({ mcpServers: {} }));
+
+		const result = await authorizeMCP(
+			{ modelRegistry: { authStorage } } as never,
+			{
+				authorizationUrl: plan.oauth.authorizationUrl,
+				tokenUrl: plan.oauth.tokenUrl,
+				serverUrl: plan.serverUrl,
+			},
+			{ onAuth: () => {} },
+			false,
+		);
+
+		await expect(completeMCPReauth({ session: { modelRegistry: { authStorage } } } as never, plan, result, false)).rejects.toThrow(
+			'server "envserver" changed or was removed',
+		);
+		expect(authStorage.get(result.credentialId)).toBeUndefined();
+	});
+
+	test("does not replace a credential when interactive reauth becomes stale", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		const credentialId = oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL);
+		await authStorage.set(credentialId, {
+			type: "oauth",
+			access: "old-access",
+			refresh: "old-refresh",
+			expires: Date.now() + 3_600_000,
+		} as oauthFlow.MCPStoredOAuthCredential);
+		const loginStarted = Promise.withResolvers<void>();
+		const loginResult = Promise.withResolvers<{ access: string; refresh: string; expires: number }>();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async () => {
+			loginStarted.resolve();
+			return loginResult.promise;
+		});
+		const { controller, showError } = createController(authStorage);
+
+		const reauth = controller.handle("/mcp reauth envserver");
+		await loginStarted.promise;
+		await Bun.write(configPath, JSON.stringify({ mcpServers: {} }));
+		loginResult.resolve({ access: "fresh-access", refresh: "fresh-refresh", expires: Date.now() + 3_600_000 });
+		await reauth;
+
+		expect(showError).toHaveBeenCalledWith(expect.stringContaining('server "envserver" changed or was removed'));
+		expect(authStorage.get(credentialId)).toMatchObject({ access: "old-access", refresh: "old-refresh" });
+	});
+
+	test("rejects discovered reauth before persisting when another writer creates its override", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		const config = { type: "http" as const, url: EXPANDED_SERVER_URL };
+		const plan: MCPReauthPlan = {
+			name: "discovered",
+			found: { filePath: configPath, scope: "user", config, discovered: true },
+			baseConfig: config,
+			oauth: { authorizationUrl: "https://auth.example.com/authorize", tokenUrl: "https://auth.example.com/token" },
+			serverUrl: EXPANDED_SERVER_URL,
+			flowClientId: "",
+			flowClientSecret: "",
+			oauthResource: EXPANDED_SERVER_URL,
+			oauthResourceIsFallback: false,
+		};
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const result = await authorizeMCP(
+			{ modelRegistry: { authStorage } } as never,
+			{ authorizationUrl: plan.oauth.authorizationUrl, tokenUrl: plan.oauth.tokenUrl },
+			{ onAuth: () => {} },
+			false,
+		);
+		await addMCPServer(configPath, plan.name, config);
+
+		await expect(
+			completeMCPReauth(
+				{
+					session: { modelRegistry: { authStorage } },
+					mcpManager: { getServerConfig: () => config },
+				} as never,
+				plan,
+				result,
+				false,
+			),
+		).rejects.toThrow('server "discovered" was created');
+		expect(authStorage.get(result.credentialId)).toBeUndefined();
+		expect((JSON.parse(await Bun.file(configPath).text()) as TestConfigFile).mcpServers?.discovered).toEqual(config);
 	});
 
 	test("uses the registration endpoint discovered from a pathful issuer", async () => {
