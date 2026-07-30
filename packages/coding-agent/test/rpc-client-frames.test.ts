@@ -112,6 +112,26 @@ describe("RpcClient frame coverage", () => {
 		expect(promptResults[0]?.id).toMatch(/^req_/);
 	});
 
+	test("completes local-only prompts from response data", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: {
+				MOCK_RPC_CLIENT_FRAMES: "1",
+				MOCK_RPC_LOCAL_PROMPT_RESPONSE: "1",
+			},
+		});
+		const promptResults: Array<{ id?: string; agentInvoked: boolean }> = [];
+		client.onPromptResult(frame => promptResults.push(frame));
+
+		await client.start();
+		await expect(client.promptAndWait("/local-only", undefined, 2_000)).resolves.toEqual([]);
+		expect(promptResults).toHaveLength(1);
+		expect(promptResults[0]).toMatchObject({
+			agentInvoked: false,
+		});
+		expect(promptResults[0]?.id).toMatch(/^req_/);
+	});
+
 	test("cancels an in-flight host URI handler when requested by the server", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,

@@ -728,7 +728,19 @@ export class RpcClient {
 	 * Use waitForIdle() to wait for completion.
 	 */
 	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "prompt", message, images });
+		const response = await this.#send({ type: "prompt", message, images });
+		if (
+			response.success &&
+			response.command === "prompt" &&
+			isRecord(response.data) &&
+			typeof response.data.agentInvoked === "boolean"
+		) {
+			this.#emitPromptResult({
+				type: "prompt_result",
+				id: response.id,
+				agentInvoked: response.data.agentInvoked,
+			});
+		}
 	}
 
 	/**
@@ -1219,9 +1231,44 @@ export class RpcClient {
 	 * Send prompt and wait for completion, returning all events.
 	 */
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
-		const eventsPromise = this.collectEvents(timeout);
-		await this.prompt(message, images);
-		return eventsPromise;
+		const events: AgentEvent[] = [];
+		const { promise, resolve, reject } = Promise.withResolvers<AgentEvent[]>();
+		let settled = false;
+		const cleanup = () => {
+			unsubscribeEvent();
+			unsubscribePromptResult();
+			clearTimeout(timeoutId);
+		};
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve(events);
+		};
+		const unsubscribeEvent = this.onEvent(event => {
+			events.push(event);
+			if (isTerminalAgentEnd(event)) finish();
+		});
+		const unsubscribePromptResult = this.onPromptResult(result => {
+			if (!result.agentInvoked) finish();
+		});
+		const timeoutId = this.#startTimeout(timeout, () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(new Error(`Timeout collecting events. Stderr: ${this.#process?.peekStderr() ?? ""}`));
+		});
+
+		try {
+			await this.prompt(message, images);
+		} catch (error) {
+			if (!settled) {
+				settled = true;
+				cleanup();
+				reject(error);
+			}
+		}
+		return promise;
 	}
 
 	// =========================================================================
@@ -1232,6 +1279,12 @@ export class RpcClient {
 		if (!isRecord(data)) return;
 		for (const listener of this.#rawFrameListeners) {
 			listener(structuredClone(data));
+		}
+	}
+
+	#emitPromptResult(result: RpcPromptResultFrame): void {
+		for (const listener of this.#promptResultListeners) {
+			listener(result);
 		}
 	}
 
@@ -1305,9 +1358,7 @@ export class RpcClient {
 		}
 
 		if (isRpcPromptResultFrame(data)) {
-			for (const listener of this.#promptResultListeners) {
-				listener(data);
-			}
+			this.#emitPromptResult(data);
 			return;
 		}
 
