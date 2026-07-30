@@ -25,11 +25,12 @@ const SPEND_LIMIT_PATTERN = /spend.?limit/i;
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
 const CONCURRENT_LIMIT_PATTERN =
 	// Require an actual cap signal (limit/quota/exceeded/reached) near "concurrent".
-	// Bare nouns ("concurrent request is not supported", "only one concurrent
-	// invocation is supported") are deterministic 4xx feature rejections, not
-	// transient caps — matching them here would set Flag.Transient and retry the
-	// rejection instead of surfacing it.
-	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b/i;
+	// The first two alternatives rely on `\b`, which treats `_` as a word char, so
+	// structured snake_case codes ("concurrent_limit_exceeded",
+	// "concurrent_requests_limit_reached", "concurrency_quota_exceeded") need the
+	// third alternative. Bare space-separated concurrency feature rejections stay
+	// excluded because they neither use `[-_]` nor carry a cap keyword.
+	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b|\bconcurren[a-z]*[-_](?:[a-z]+[_-])*(?:limit|quota|exceed\w*|reach\w*)/i;
 const ACCOUNT_SCOPED_403_PATTERN =
 	// The bare "limit will reset" / "will reset in" phrasing also appears on
 	// statusless per-minute transients ("Rate limit will reset in 30 seconds"),
@@ -180,7 +181,7 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 	// still an exhausted billing cap and must rotate; gate the exclusion on the
 	// status not being that categorical billing cap.
 	const isBillingCapStatus = status === 402;
-	if (message && parseRateLimitReason(message) === "CONCURRENT_LIMIT" && !isBillingCapStatus) return false;
+	if (isConcurrencyCapExclusion(status, message)) return false;
 	if (message && matchesUsageLimitText(message)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
 	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,
@@ -235,4 +236,13 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
  */
 export function isAccountScopedCapText(message: string): boolean {
 	return ACCOUNT_SCOPED_403_PATTERN.test(message);
+}
+
+/**
+ * A concurrency cap on a non-billing status is shed-and-backoff, not
+ * credential-rotatable. This mirrors the exclusion in {@link isUsageLimitOutcome}
+ * for the 403 auth-retry entry points. A 402 remains a categorical billing cap.
+ */
+export function isConcurrencyCapExclusion(status: number | undefined, message: string | undefined): boolean {
+	return message !== undefined && parseRateLimitReason(message) === "CONCURRENT_LIMIT" && status !== 402;
 }

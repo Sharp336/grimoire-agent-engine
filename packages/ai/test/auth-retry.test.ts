@@ -275,6 +275,32 @@ describe("withAuth", () => {
 		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true, true, true]);
 	});
 
+	it("does not directly rotate through every sibling on a 403 concurrency cap", async () => {
+		const keys: string[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const pool = ["k0", "k1", "k2", "k3"];
+		let resolveIndex = 0;
+		const concurrencyCap = Object.assign(new Error("concurrent requests limit reached"), { status: 403 });
+
+		await expect(
+			withAuth(
+				ctx => {
+					contexts.push(ctx);
+					return ctx.error === undefined ? pool[0] : pool[++resolveIndex];
+				},
+				async key => {
+					keys.push(key);
+					throw concurrencyCap;
+				},
+			),
+		).rejects.toBe(concurrencyCap);
+
+		// The concurrency classification takes precedence over plain-403 direct
+		// rotation: refresh once, then take only the legacy sibling switch.
+		expect(keys).toEqual(["k0", "k1", "k2"]);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true]);
+	});
+
 	it("surfaces the last 403 when every sibling is denied", async () => {
 		const errors = [authError(403), authError(403)];
 		const resolved = ["k0", "k1", "k0"];

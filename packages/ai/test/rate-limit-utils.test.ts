@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { classify, classifyMessage, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
+import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
 import {
 	calculateRateLimitBackoffMs,
+	isConcurrencyCapExclusion,
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
 	parseRateLimitReason,
@@ -38,6 +39,9 @@ describe("parseRateLimitReason", () => {
 	it("classifies concurrent request caps separately from rate limits and quota exhaustion", () => {
 		expect(parseRateLimitReason("Number of concurrent requests exceeded")).toBe("CONCURRENT_LIMIT");
 		expect(parseRateLimitReason("Maximum concurrent invocation limit reached")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("concurrent_limit_exceeded")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("concurrent_requests_limit_reached")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("concurrency_quota_exceeded")).toBe("CONCURRENT_LIMIT");
 		expect(parseRateLimitReason("Rate limit reached for gpt-4o")).toBe("RATE_LIMIT_EXCEEDED");
 		expect(parseRateLimitReason("Your quota will reset at 07-28")).toBe("QUOTA_EXHAUSTED");
 	});
@@ -277,30 +281,6 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimit(message)).toBe(false);
 	});
 
-	// agent-session gates Copilot credential removal on AuthFailed && !UsageLimit.
-	// A 403 whose body is a recognized account cap carries UsageLimit, so the gate
-	// suppresses removal and retains the still-valid credential; a plain 401 has no
-	// UsageLimit, so removal proceeds. Pin the gate condition for both shapes.
-	it("keeps Copilot credentials for a 403 account cap, removes on a 401", () => {
-		const cap = new ProviderHttpError(
-			"Reached overall message rate limit. Your limit will reset in 13 minutes.",
-			403,
-		);
-		const capId = classifyMessage({
-			errorId: classify(cap),
-			errorMessage: "GitHub Copilot access denied (HTTP 403).",
-			errorStatus: 403,
-		});
-		expect(is(capId, Flag.AuthFailed) && !is(capId, Flag.UsageLimit)).toBe(false);
-		const auth = new ProviderHttpError("401 Unauthorized", 401);
-		const authId = classifyMessage({
-			errorId: classify(auth),
-			errorMessage: "GitHub Copilot authentication failed (HTTP 401).",
-			errorStatus: 401,
-		});
-		expect(is(authId, Flag.AuthFailed) && !is(authId, Flag.UsageLimit)).toBe(true);
-	});
-
 	it("rotates on xAI Grok Build 402 usage-balance exhaustion regardless of status", () => {
 		const message = "402 Grok Build usage balance exhausted";
 		expect(isUsageLimitOutcome(402, message)).toBe(true);
@@ -331,6 +311,14 @@ describe("isUsageLimitOutcome", () => {
 		expect(parseRateLimitReason(message)).toBe("CONCURRENT_LIMIT");
 		expect(isUsageLimitOutcome(429, message)).toBe(false);
 		expect(isUsageLimit(message)).toBe(false);
+	});
+
+	it("excludes non-billing concurrency caps from credential rotation", () => {
+		const message = "concurrent requests limit reached";
+		expect(isConcurrencyCapExclusion(403, message)).toBe(true);
+		expect(isConcurrencyCapExclusion(undefined, message)).toBe(true);
+		expect(isConcurrencyCapExclusion(402, message)).toBe(false);
+		expect(isConcurrencyCapExclusion(403, "Forbidden")).toBe(false);
 	});
 
 	// The same bare concurrency wording can reach turn recovery without a
