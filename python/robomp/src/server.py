@@ -317,7 +317,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def webhook(
         request: Request,
         x_github_event: str = Header(..., alias="X-GitHub-Event"),
-        x_github_delivery: str = Header(..., alias="X-GitHub-Delivery"),
+        x_github_delivery: str | None = Header(None, alias="X-GitHub-Delivery"),
+        x_gitea_delivery: str | None = Header(None, alias="X-Gitea-Delivery"),
+        x_forgejo_delivery: str | None = Header(None, alias="X-Forgejo-Delivery"),
         x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
     ) -> JSONResponse:
         bag = request.app.state.bag
@@ -334,10 +336,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid json: {exc}") from exc
 
-        # Detect platform: Forgejo sends X-Gitea-Delivery or X-Forgejo-Delivery
-        platform = "forgejo" if (
-            request.headers.get("X-Gitea-Delivery") or request.headers.get("X-Forgejo-Delivery")
-        ) else "github"
+        # Detect platform from Forgejo-specific headers before assuming GitHub.
+        platform = "forgejo" if (x_gitea_delivery or x_forgejo_delivery) else "github"
+        delivery_id = x_github_delivery or x_gitea_delivery or x_forgejo_delivery or ""
 
         db: Database = bag["db"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
@@ -412,7 +413,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not decision.should_queue:
             log.info("skip", extra={"event": x_github_event, "reason": decision.reason})
             db.record_event(
-                delivery_id=x_github_delivery,
+                delivery_id=delivery_id,
                 event_type=x_github_event,
                 repo=decision.repo,
                 issue_key=decision.issue_key,
@@ -421,7 +422,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 last_error=decision.reason,
                 platform=platform,
             )
-            return JSONResponse({"delivery": x_github_delivery, "state": "skipped"}, status_code=202)
+            return JSONResponse({"delivery": delivery_id, "state": "skipped"}, status_code=202)
 
         # Per-user rate limiting. Lifecycle events (cleanup) carry no submitter
         # and are not gated. For everything user-driven, atomically record the
@@ -437,7 +438,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             since = iso_seconds_ago(cfg.rate_limit_window_seconds)
             admission = db.admit_submission(
-                delivery_id=x_github_delivery,
+                delivery_id=delivery_id,
                 login=submitter,
                 repo=decision.repo,
                 since=since,
@@ -450,7 +451,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "rate_limited",
                     extra={
                         "event": x_github_event,
-                        "delivery": x_github_delivery,
+                        "delivery": delivery_id,
                         "login": submitter,
                         "association": decision.association,
                         "used": admission.used,
@@ -458,7 +459,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     },
                 )
                 db.record_event(
-                    delivery_id=x_github_delivery,
+                    delivery_id=delivery_id,
                     event_type=x_github_event,
                     repo=decision.repo,
                     issue_key=decision.issue_key,
@@ -468,12 +469,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     platform=platform,
                 )
                 return JSONResponse(
-                    {"delivery": x_github_delivery, "state": "skipped", "reason": "rate_limited"},
+                    {"delivery": delivery_id, "state": "skipped", "reason": "rate_limited"},
                     status_code=202,
                 )
 
         inserted = db.record_event(
-            delivery_id=x_github_delivery,
+            delivery_id=delivery_id,
             event_type=x_github_event,
             repo=decision.repo,
             issue_key=decision.issue_key,
@@ -484,12 +485,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if inserted:
             pool: WorkerPool = bag["pool"]
             pool.wake()
-            log.info(
-                "queued", extra={"event": x_github_event, "delivery": x_github_delivery, "key": decision.issue_key}
-            )
+            log.info("queued", extra={"event": x_github_event, "delivery": delivery_id, "key": decision.issue_key})
         else:
-            log.info("duplicate", extra={"event": x_github_event, "delivery": x_github_delivery})
-        return JSONResponse({"delivery": x_github_delivery, "state": "queued"}, status_code=202)
+            log.info("duplicate", extra={"event": x_github_event, "delivery": delivery_id})
+        return JSONResponse({"delivery": delivery_id, "state": "queued"}, status_code=202)
 
     @app.post("/replay")
     async def replay(
