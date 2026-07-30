@@ -1541,8 +1541,12 @@ export class SelectorController {
 			}
 		}
 		// Switch session via AgentSession (emits hook and tool session events). The
-		// SessionManager adopts the resumed session's own cwd when it differs.
-		await this.ctx.session.switchSession(sessionPath);
+		// SessionManager adopts the resumed session's own cwd when it differs. A
+		// session_before_switch hook can cancel the switch; propagate that so a
+		// cancelled resume is not reported as success, and skip the cwd/UI rebind
+		// for a session that was never loaded.
+		const switched = await this.ctx.session.switchSession(sessionPath);
+		if (!switched) return false;
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);

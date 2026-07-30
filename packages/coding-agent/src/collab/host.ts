@@ -12,7 +12,7 @@
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabControlCommand,
@@ -103,10 +103,6 @@ function isWireAgentEvent(event: AgentSessionEvent): event is AgentSessionEvent 
 
 function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEntry & WireSessionEntry {
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Validate decrypted control input before it can enter the host mutation queue. */
@@ -243,7 +239,11 @@ export class CollabHost {
 	}
 
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
-		if (!this.#socket || !this.#hasWritablePeers()) return null;
+		// While a cross-project session switch is mid-resume, the destination
+		// project's collab.allowRemoteControl has not been rechecked yet, so do
+		// not let writable guests read/answer host UI (e.g. a hook dialog) for
+		// the session being loaded — handle it locally instead.
+		if (!this.#socket || !this.#hasWritablePeers() || this.#resumingSession) return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
@@ -384,6 +384,10 @@ export class CollabHost {
 		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
 		this.#pendingUi.clear();
 		this.#peers.clear();
+		// Flush any correlated reply still buffered under backpressure (e.g. a
+		// control-disabled ctl-result sent just before this teardown) so close()
+		// does not drop it from the reconnect buffer.
+		await this.#socket?.flush();
 		this.#socket?.close();
 		this.#socket = null;
 		this.#ctx.collabHost = undefined;
@@ -608,16 +612,21 @@ export class CollabHost {
 			);
 			return;
 		}
-		void this.#enqueueMutation(async () => {
-			const peer = this.#peers.get(fromPeer);
-			if (this.#stopped || !peer?.canWrite) return;
-			try {
-				await this.#ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
-				this.#ctx.session.emitNotice("info", `${peer.name} interrupted`, "collab");
-			} catch (err) {
-				logger.warn("collab guest abort failed", { error: String(err) });
-			}
-		});
+		// Dispatch directly, NOT through #mutationTail: a prompt task holds that
+		// queue for a whole agent turn, so an abort queued behind it would only
+		// fire after the turn it is meant to interrupt has already finished.
+		void this.#dispatchAbort(fromPeer);
+	}
+
+	async #dispatchAbort(fromPeer: number): Promise<void> {
+		const peer = this.#peers.get(fromPeer);
+		if (this.#stopped || !peer?.canWrite) return;
+		try {
+			await this.#ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			this.#ctx.session.emitNotice("info", `${peer.name} interrupted`, "collab");
+		} catch (err) {
+			logger.warn("collab guest abort failed", { error: String(err) });
+		}
 	}
 
 	#handlePeerLeft(peer: number): void {
@@ -704,6 +713,14 @@ export class CollabHost {
 			);
 			return;
 		}
+		// `kill` must reach a running subagent immediately: a `chat` task holds
+		// #mutationTail for the whole subagent turn, so queueing kill behind it
+		// would make cancellation fire only after the turn it should stop. Chat
+		// and revive stay serialized so concurrent prompts to one agent order.
+		if (cmd === "kill") {
+			void this.#dispatchAgentKill(agentId, fromPeer);
+			return;
+		}
 		void this.#enqueueMutation(async () => {
 			if (this.#stopped || !this.#peers.get(fromPeer)?.canWrite) return;
 			if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
@@ -732,14 +749,6 @@ export class CollabHost {
 							.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }));
 						return;
 					}
-					case "kill": {
-						const ref = AgentRegistry.global().get(agentId);
-						if (!ref) return;
-						if (ref.status === "running" && ref.session)
-							await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-						await AgentLifecycleManager.global().release(agentId, ref);
-						return;
-					}
 					case "revive":
 						await AgentLifecycleManager.global().ensureLive(agentId);
 						return;
@@ -748,6 +757,25 @@ export class CollabHost {
 				fail(err);
 			}
 		});
+	}
+
+	async #dispatchAgentKill(agentId: string, fromPeer: number): Promise<void> {
+		if (this.#stopped || !this.#peers.get(fromPeer)?.canWrite) return;
+		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
+			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+			return;
+		}
+		try {
+			const ref = AgentRegistry.global().get(agentId);
+			if (!ref) return;
+			if (ref.status === "running" && ref.session) await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
+			await AgentLifecycleManager.global().release(agentId, ref);
+		} catch (err) {
+			logger.warn("collab agent-cmd failed", { cmd: "kill", agentId, error: String(err) });
+			if (this.#peers.has(fromPeer)) {
+				this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+			}
+		}
 	}
 
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
@@ -967,10 +995,16 @@ export class CollabHost {
 				return { level };
 			}
 			case "compact": {
-				const result = await session.compact(cmd.customInstructions);
-				this.#ctx.finishCompaction();
-				await this.#ctx.flushCompactionQueue({ willRetry: false });
-				return result;
+				try {
+					const result = await session.compact(cmd.customInstructions);
+					this.#ctx.finishCompaction();
+					return result;
+				} finally {
+					// Failure-safe cleanup: a cancelled/failed compact must still release
+					// queued user input, mirroring CommandController's path. The
+					// finishCompaction transcript rebuild stays success-only.
+					await this.#ctx.flushCompactionQueue({ willRetry: false });
+				}
 			}
 			case "switch-session": {
 				const target = (await this.#prepareLiveControl(fromPeer, () => SessionManager.listAll())).find(
