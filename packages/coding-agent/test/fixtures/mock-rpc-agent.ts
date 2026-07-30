@@ -244,9 +244,18 @@ for await (const raw of console) {
 				type: "response",
 				command: frame.type,
 				success: true,
-				data: supportsProtocolV2 ? { payload: "😀".repeat(400_000) } : {},
+				data:
+					Bun.env.MOCK_RPC_LOCAL_PROMPT_RESPONSE === "1" && frame.type === "prompt"
+						? { agentInvoked: false }
+						: supportsProtocolV2
+							? { payload: "😀".repeat(400_000) }
+							: {},
 			});
-			if (Bun.env.MOCK_RPC_CLIENT_FRAMES === "1" && frame.type === "prompt") {
+			if (
+				Bun.env.MOCK_RPC_CLIENT_FRAMES === "1" &&
+				Bun.env.MOCK_RPC_LOCAL_PROMPT_RESPONSE !== "1" &&
+				frame.type === "prompt"
+			) {
 				writeFrame({ type: "prompt_result", id, agentInvoked: true });
 				writeFrame({ type: "agent_end", messages: [], isTerminal: false });
 				await Bun.sleep(75);
