@@ -194,11 +194,33 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		['"mcpServers" is an array', { mcpServers: ["a", "b"] }, /"mcpServers" must be an object/],
 		["a server entry is not an object", { mcpServers: { broken: "oops" } }, /server "broken" must be an object/],
 		["the root is not an object", ["mcpServers"], /expected a JSON object at the top level/],
+		// Pointing the flag at some other valid JSON file is a mistake, not a
+		// request for zero servers.
+		[
+			'"mcpServers" is absent (e.g. package.json)',
+			{ name: "my-package", version: "1.0.0" },
+			/missing an "mcpServers" object/,
+		],
 	])("wrong-shape extra config is a hard error: %s", async (_label, contents, expected) => {
 		const wrongShapePath = path.join(projectDir, "wrong-shape.json");
 		await fs.writeFile(wrongShapePath, JSON.stringify(contents));
 
 		await expect(loadAllMCPConfigs(projectDir, { extraConfigPaths: [wrongShapePath] })).rejects.toThrow(expected);
+	});
+
+	// The key has to be present, but declaring no servers is a legitimate way to
+	// say "add nothing here" — only the absent key signals the wrong file.
+	test("an empty mcpServers object is accepted", async () => {
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { discovered: { command: "discovered-server" } } }),
+		);
+		const emptyPath = path.join(projectDir, "empty.json");
+		await fs.writeFile(emptyPath, JSON.stringify({ mcpServers: {} }));
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [emptyPath] });
+
+		expect(configs.discovered).toMatchObject({ type: "stdio", command: "discovered-server" });
 	});
 
 	// `discoverAndLoadMCPTools` degrades discovery failures to a resolved result
@@ -243,6 +265,16 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 	// skipped with a warning rather than iterated into servers named "0".."8".
 	test("wrong-shape discovered config is skipped, not turned into blank servers", async () => {
 		await fs.writeFile(path.join(projectDir, ".mcp.json"), JSON.stringify({ mcpServers: "not-a-map" }));
+
+		const { configs } = await loadAllMCPConfigs(projectDir);
+
+		expect(Object.keys(configs)).toEqual([]);
+	});
+
+	// The `mcpServers` requirement is scoped to explicitly named files: discovery
+	// probes fixed paths, where a file without the key just contributes nothing.
+	test("a discovered config with no mcpServers key is not an error", async () => {
+		await fs.writeFile(path.join(projectDir, ".mcp.json"), JSON.stringify({ someOtherTool: { setting: true } }));
 
 		const { configs } = await loadAllMCPConfigs(projectDir);
 

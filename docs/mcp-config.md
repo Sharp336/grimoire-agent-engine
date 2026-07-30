@@ -477,7 +477,7 @@ omp --mcp-config .devenv/mcp/claude-code.json
 
 When the flag is repeated and two files define the same server name, the last one wins — including when the later entry only sets `"enabled": false`, which turns off a server an earlier file defined.
 
-Unlike discovery, a `--mcp-config` file that cannot be read, is not valid JSON, or has the wrong shape (the top level must be an object whose `mcpServers` maps server names to server objects) is a hard error that aborts startup — it never degrades to a session silently missing those servers. An entry with `"enabled": false` disables the same-named discovered server. Servers loaded this way still pass through `disabledServers` filtering, and `/mcp reload` re-reads the same files.
+Unlike discovery, a `--mcp-config` file that cannot be read, is not valid JSON, or has the wrong shape is a hard error that aborts startup — it never degrades to a session silently missing those servers. The file must be an object with an `mcpServers` object mapping server names to server objects; an empty `mcpServers` is fine, but the key has to be there, so pointing the flag at some other valid JSON file (`package.json`, say) fails instead of contributing nothing. An entry with `"enabled": false` disables the same-named discovered server. Servers loaded this way still pass through `disabledServers` filtering, and `/mcp reload` re-reads the same files.
 
 ## Troubleshooting
 

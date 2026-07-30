@@ -134,8 +134,11 @@ export async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): P
 			throw new ExplicitMCPConfigError(resolved, `Invalid JSON in MCP config ${resolved}`);
 		}
 		// Syntactically valid JSON of the wrong shape would otherwise be iterated
-		// into blank servers named by character/array index.
-		const invalid = validateMCPConfigFile(config);
+		// into blank servers named by character/array index. `mcpServers` must be
+		// present too: pointing the flag at some other valid JSON file (say
+		// `package.json`) is a mistake, and accepting it would start the session
+		// with none of the servers the caller asked for.
+		const invalid = validateMCPConfigFile(config, { requireServers: true });
 		if (invalid) {
 			throw new ExplicitMCPConfigError(resolved, `Invalid MCP config ${resolved}: ${invalid}`);
 		}

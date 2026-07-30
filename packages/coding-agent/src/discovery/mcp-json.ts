@@ -61,14 +61,21 @@ export interface MCPConfigFile {
  * named after character or array indices. Callers validate first and then
  * either warn (discovery) or hard-fail (explicitly named files).
  *
+ * @param options.requireServers Reject a file with no `mcpServers` key at all
+ *   (an empty object is still fine). Discovery leaves this off: it probes fixed
+ *   paths, and a file there without the key simply contributes nothing. A file
+ *   the caller named is the opposite case — `--mcp-config package.json` is a
+ *   mistake, not a request for zero servers.
  * @returns A human-readable reason when the shape is invalid, `null` when valid.
  */
-export function validateMCPConfigFile(value: unknown): string | null {
+export function validateMCPConfigFile(value: unknown, options?: { requireServers?: boolean }): string | null {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		return "expected a JSON object at the top level";
 	}
 	const { mcpServers } = value as { mcpServers?: unknown };
-	if (mcpServers === undefined) return null;
+	if (mcpServers === undefined) {
+		return options?.requireServers ? 'missing an "mcpServers" object' : null;
+	}
 	if (typeof mcpServers !== "object" || mcpServers === null || Array.isArray(mcpServers)) {
 		return '"mcpServers" must be an object mapping server names to server configs';
 	}
