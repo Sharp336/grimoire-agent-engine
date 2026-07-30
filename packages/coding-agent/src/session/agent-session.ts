@@ -523,6 +523,19 @@ export class AgentSession {
 	 * handler runs and skips re-appending the rewound-away result.
 	 */
 	#pendingRewoundToolResultPersistence = new Set<string>();
+	/**
+	 * The message_end persistence slot currently on the call stack — the event whose
+	 * handler may have synchronously invoked compaction (e.g. `ctx.compact()`). Its
+	 * own promise can only settle once `#processAgentEvent` advances past the emit
+	 * to `persist(...)` on the slot it returned — and that persist cannot run
+	 * until the handler returns, which cannot happen until compaction returns.
+	 * Awaiting the full {@link #messageEndPersistenceTail} from within that handler therefore
+	 * self-deadlocks, so {@link #awaitPendingMessagePersistence} drains `base` (the
+	 * tail captured before this slot) instead, excluding the caller's own slot
+	 * (issue #6964). At most one slot is on the stack at a time: message_end events
+	 * are processed sequentially and compaction disconnects the agent first.
+	 */
+	#currentMessageEndPersistence: { base: Promise<void> } | undefined = undefined;
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -1983,14 +1996,22 @@ export class AgentSession {
 				? message.toolCallId
 				: undefined;
 		if (pendingRewindCallId) this.#pendingRewoundToolResultPersistence.add(pendingRewindCallId);
+		// This slot is the one on the call stack until persist/release resolves it.
+		// Captured by reference so a stale slot's clear cannot wipe a newer active
+		// record (only one is live at a time, but the guard is cheap and correct).
+		const current = { base: previous };
 		const clear = () => {
 			if (this.#pendingMessageEndPersistence.get(key) === promise) {
 				this.#pendingMessageEndPersistence.delete(key);
 			}
 			if (pendingRewindCallId) this.#pendingRewoundToolResultPersistence.delete(pendingRewindCallId);
+			if (this.#currentMessageEndPersistence === current) {
+				this.#currentMessageEndPersistence = undefined;
+			}
 		};
 		this.#pendingMessageEndPersistence.set(key, promise);
 		this.#messageEndPersistenceTail = promise.catch(() => {});
+		this.#currentMessageEndPersistence = current;
 		return {
 			promise,
 			persist: async persistMessage => {
@@ -2016,13 +2037,26 @@ export class AgentSession {
 	}
 
 	/**
-	 * Drain every in-flight message_end persistence slot. Manual compaction can
-	 * be invoked (e.g. via the SDK) while a rewind turn is still settling:
-	 * awaiting the tail lets a delayed rewind-result handler run while its
-	 * suppression marker is still present, so it skips re-appending instead of
-	 * landing the rewound-away result on the compacted branch.
+	 * Drain in-flight message_end persistence. Manual compaction can be invoked
+	 * (e.g. via the SDK) while a rewind turn is still settling: awaiting the tail
+	 * lets a delayed rewind-result handler run while its suppression marker is
+	 * still present, so it skips re-appending instead of landing the rewound-away
+	 * result on the compacted branch.
+	 *
+	 * When compaction is invoked from within a message_end handler
+	 * (`ctx.compact()`), the caller's own slot is the current one on the stack:
+	 * its promise only settles after the handler returns, so awaiting the full
+	 * tail would self-deadlock. Drain the tail captured before that slot instead,
+	 * which still flushes every settling rewind turn — the caller's own (still
+	 * in-flight) result is excluded, matching the marker-preservation already
+	 * applied by `#pruneRewoundToolResultIds` (issue #6964).
 	 */
 	async #awaitPendingMessagePersistence(): Promise<void> {
+		const current = this.#currentMessageEndPersistence;
+		if (current !== undefined) {
+			await current.base;
+			return;
+		}
 		await this.#messageEndPersistenceTail;
 	}
 
