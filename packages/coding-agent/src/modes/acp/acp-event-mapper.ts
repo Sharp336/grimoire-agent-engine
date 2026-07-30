@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -8,9 +9,11 @@ import type {
 } from "@agentclientprotocol/sdk";
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { resolveToCwd } from "../../tools/path-utils";
+import { extractPathArguments, resolveToCwd, splitPathAndSel } from "../../tools/path-utils";
+import { parseSqlitePathCandidates } from "../../tools/sqlite-reader";
 import type { TodoStatus } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import { parseArchivePathCandidates } from "../../utils/zip";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -136,9 +139,9 @@ const ACP_TEXT_LIMIT = 4_000;
  */
 function xdevDispatchDevice(toolName: string, args: unknown): string | undefined {
 	if (toolName !== "write" && toolName !== "read") return undefined;
-	const path = extractStringProperty<PathContainer>(args, "path");
-	if (!path) return undefined;
-	return parseXdUrl(path)?.name ?? undefined;
+	const paths = extractPathArguments(args);
+	if (paths.length !== 1) return undefined;
+	return parseXdUrl(paths[0] ?? "")?.name ?? undefined;
 }
 
 /** Whether a Hub call carries peer-to-peer coordination rather than process control. */
@@ -244,7 +247,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			if (content.length > 0) {
 				update.content = content;
 			}
-			const locations = extractToolLocations(event.args, options.cwd);
+			const locations = extractToolLocations(event.args, options.cwd, event.toolName === "read");
 			if (locations.length > 0) {
 				update.locations = locations;
 			}
@@ -267,7 +270,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			if (content.length > 0) {
 				update.content = content;
 			}
-			const locations = extractToolLocationsFromResult(event.result, options.cwd);
+			const locations = extractToolLocationsFromResult(event.result, options.cwd, event.toolName);
 			if (locations.length > 0) {
 				update.locations = locations;
 			}
@@ -495,7 +498,7 @@ export function buildToolCallStartUpdate(input: {
 	if (content.length > 0) {
 		update.content = content;
 	}
-	const locations = extractToolLocations(input.args, input.cwd);
+	const locations = extractToolLocations(input.args, input.cwd, input.toolName === "read");
 	if (locations.length > 0) {
 		update.locations = locations;
 	}
@@ -605,8 +608,9 @@ function buildToolTitle(toolName: string, args: unknown, intent: string | undefi
 		return trimmedIntent;
 	}
 
+	const paths = extractPathArguments(args);
 	const subject =
-		extractStringProperty<PathContainer>(args, "path") ??
+		(paths.length > 0 ? paths.join(", ") : undefined) ??
 		extractStringProperty<CommandContainer>(args, "command") ??
 		extractStringProperty<PatternContainer>(args, "pattern") ??
 		extractStringProperty<QueryContainer>(args, "query");
@@ -642,9 +646,53 @@ function toAcpLocationPath(value: string, cwd?: string): string {
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
-function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
+function readFilesystemLocation(raw: string, cwd?: string): string {
+	const literalPath = toAcpLocationPath(raw, cwd);
+	if (fs.existsSync(literalPath)) return raw;
+
+	const archiveCandidates = parseArchivePathCandidates(raw);
+	for (const candidate of archiveCandidates) {
+		if (fs.existsSync(toAcpLocationPath(candidate.archivePath, cwd))) return candidate.archivePath;
+	}
+
+	const sqliteCandidates = parseSqlitePathCandidates(raw);
+	for (const candidate of sqliteCandidates) {
+		if (fs.existsSync(toAcpLocationPath(candidate.sqlitePath, cwd))) return candidate.sqlitePath;
+	}
+
+	const archivePath = archiveCandidates[0]?.archivePath;
+	if (archivePath) return archivePath;
+	const sqlitePath = sqliteCandidates[0]?.sqlitePath;
+	if (sqlitePath) return sqlitePath;
+	return splitPathAndSel(raw).path;
+}
+
+function extractToolLocations(args: unknown, cwd?: string, normalizeReadTarget = false): ToolCallLocation[] {
 	const locations: ToolCallLocation[] = [];
 	const seen = new Set<string>();
+	const pushPath = (raw: string | undefined) => {
+		if (!raw || INTERNAL_URL_SUBJECT.test(raw)) return;
+		const path = toAcpLocationPath(normalizeReadTarget ? readFilesystemLocation(raw, cwd) : raw, cwd);
+		if (seen.has(path)) return;
+		seen.add(path);
+		locations.push({ path });
+	};
+
+	for (const path of extractPathArguments(args)) pushPath(path);
+	pushPath(extractStringProperty<OldPathContainer>(args, "oldPath"));
+	pushPath(extractStringProperty<NewPathContainer>(args, "newPath"));
+
+	return locations;
+}
+
+/** Pull locations from a tool result's details (e.g. EditToolDetails.perFileResults[].path). */
+function extractToolLocationsFromResult(result: unknown, cwd?: string, toolName?: string): ToolCallLocation[] {
+	if (typeof result !== "object" || result === null) return [];
+	const details = (result as { details?: unknown }).details;
+	if (typeof details !== "object" || details === null) return [];
+	const direct = extractToolLocations(details, cwd);
+	const seen = new Set(direct.map(location => location.path));
+	const locations = [...direct];
 	const pushPath = (raw: string | undefined) => {
 		if (!raw || INTERNAL_URL_SUBJECT.test(raw)) return;
 		const path = toAcpLocationPath(raw, cwd);
@@ -653,32 +701,20 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 		locations.push({ path });
 	};
 
-	pushPath(extractStringProperty<PathContainer>(args, "path"));
-	pushPath(extractStringProperty<OldPathContainer>(args, "oldPath"));
-	pushPath(extractStringProperty<NewPathContainer>(args, "newPath"));
-
-	return locations;
-}
-
-/** Pull locations from a tool result's details (e.g. EditToolDetails.perFileResults[].path). */
-function extractToolLocationsFromResult(result: unknown, cwd?: string): ToolCallLocation[] {
-	if (typeof result !== "object" || result === null) return [];
-	const details = (result as { details?: unknown }).details;
-	if (typeof details !== "object" || details === null) return [];
-	const direct = extractToolLocations(details, cwd);
-	const perFile = (details as { perFileResults?: unknown }).perFileResults;
-	if (!Array.isArray(perFile)) {
-		return direct;
+	const readTargets = (details as { readTargetOutcomes?: unknown }).readTargetOutcomes;
+	if (Array.isArray(readTargets)) {
+		for (const target of readTargets) {
+			const resolvedPath = extractStringProperty<{ resolvedPath?: string }>(target, "resolvedPath");
+			const rawPath = extractStringProperty<PathContainer>(target, "path");
+			pushPath(resolvedPath ?? (toolName === "read" && rawPath ? readFilesystemLocation(rawPath, cwd) : rawPath));
+		}
 	}
-	const seen = new Set(direct.map(loc => loc.path));
-	const locations = [...direct];
-	for (const entry of perFile) {
-		const raw = extractStringProperty<PathContainer>(entry, "path");
-		if (!raw) continue;
-		const path = toAcpLocationPath(raw, cwd);
-		if (seen.has(path)) continue;
-		seen.add(path);
-		locations.push({ path });
+
+	const perFile = (details as { perFileResults?: unknown }).perFileResults;
+	if (Array.isArray(perFile)) {
+		for (const entry of perFile) {
+			pushPath(extractStringProperty<PathContainer>(entry, "path"));
+		}
 	}
 	return locations;
 }

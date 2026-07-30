@@ -1,4 +1,4 @@
-import { getReadToolPath, type ProtectedToolContext } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
+import { getReadToolPaths, type ProtectedToolContext } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import { normalizeLocalScheme } from "../tools/path-utils";
 
 /** Canonical plan alias every session's `local://` root resolves. */
@@ -24,8 +24,9 @@ function readTargetsPlan(readPath: string, planTarget: string): boolean {
  */
 export function createPlanReadMatcher(getPlanReferencePath: () => string): (context: ProtectedToolContext) => boolean {
 	return (context: ProtectedToolContext) => {
-		const path = getReadToolPath(context);
-		if (path === undefined) return false;
-		return readTargetsPlan(path, LOCAL_PLAN_ALIAS) || readTargetsPlan(path, getPlanReferencePath());
+		const paths = getReadToolPaths(context);
+		if (paths === undefined) return false;
+		const planReferencePath = getPlanReferencePath();
+		return paths.some(path => readTargetsPlan(path, LOCAL_PLAN_ALIAS) || readTargetsPlan(path, planReferencePath));
 	};
 }

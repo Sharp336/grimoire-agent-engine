@@ -37,6 +37,8 @@ describe("ssh:// tools require exec-tier approval", () => {
 		expect(callApproval(tool, { path: "/etc/hostname" })).toBe("read");
 		expect(callApproval(tool, { path: "local://notes" })).toBe("read");
 		expect(callApproval(tool, {})).toBe("read");
+		expect(callApproval(tool, { path: ["/tmp/local", "ssh://icaro/etc/hostname"] })).toBe("exec");
+		expect(callApproval(tool, { path: ["/tmp/local", "/tmp/other"] })).toBe("read");
 	});
 
 	it("grep: an ssh:// entry flattened into a delimited path still trips exec", () => {

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -21,7 +22,11 @@ import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-q
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Text } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { InternalUrlRouter } from "../../src/internal-urls";
+import type { ProtocolHandler } from "../../src/internal-urls/types";
 import { grepToolRenderer } from "../../src/tools/grep";
+import type { ReadTargetOutcome } from "../../src/tools/read";
+import { executeReadBatch, type ReadBatchPartDetails } from "../../src/tools/read-batch";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -447,6 +452,54 @@ describe("tool path arrays", () => {
 		expect(rendered).not.toContain("[grep: /space-needle/ in .]");
 	});
 
+	it("tree selector renders native read arrays as separate paths", () => {
+		const root = makeMessageNode({ role: "user", content: "read", timestamp: 1 });
+		const assistant = makeMessageNode(
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "read-call-1",
+						name: "read",
+						arguments: { path: ["first.ts:1-2", "second.ts:3-4"] },
+					},
+				],
+				api: "test",
+				provider: "test",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: 2,
+				stopReason: "stop",
+			} as AgentMessage,
+			root.entry.id,
+		);
+		const toolResult = makeMessageNode(
+			{
+				role: "toolResult",
+				toolCallId: "read-call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "contents" }],
+				isError: false,
+				timestamp: 3,
+			} as AgentMessage,
+			assistant.entry.id,
+		);
+		root.children.push(assistant);
+		assistant.children.push(toolResult);
+
+		const rendered = renderTree([root], toolResult.entry.id);
+
+		expect(rendered).toContain("[read: first.ts:1-2, second.ts:3-4]");
+	});
+
 	it("search keeps a single path that contains spaces", async () => {
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "grep");
@@ -562,6 +615,638 @@ describe("tool path arrays", () => {
 			"Note: interpreted as 2 paths: missing.txt, packages/grep.txt",
 			"Could not read missing.txt: Path 'missing.txt' not found",
 		]);
+	});
+
+	it("read accepts path arrays through validation and preserves input order", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const paths = ["packages/grep.txt", "missing.txt", "apps/grep.txt"];
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "read-path-array",
+			name: tool.name,
+			arguments: { path: paths },
+		});
+		expect(args).toEqual({ path: paths });
+
+		const result = await tool.execute("read-path-array", args);
+		const text = getText(result);
+		const details = result.details as
+			| {
+					notes?: string[];
+					displayReadTargets?: string[];
+					readTargetOutcomes?: Array<{ path: string; status: string; resolvedPath?: string }>;
+			  }
+			| undefined;
+		const packagesIndex = text.indexOf("shared-needle packages");
+		const missingIndex = text.indexOf("[Could not read missing.txt: Path 'missing.txt' not found]");
+		const appsIndex = text.indexOf("shared-needle apps");
+
+		expect(text).toContain("Note: read 3 paths: packages/grep.txt, missing.txt, apps/grep.txt");
+		expect(text.startsWith("Note: read 3 paths: packages/grep.txt, missing.txt, apps/grep.txt\n\n[")).toBe(true);
+		expect(packagesIndex).toBeGreaterThan(-1);
+		expect(missingIndex).toBeGreaterThan(packagesIndex);
+		expect(appsIndex).toBeGreaterThan(missingIndex);
+		expect(details?.displayReadTargets).toEqual(paths);
+		expect(details?.notes).toEqual([
+			"Note: read 3 paths: packages/grep.txt, missing.txt, apps/grep.txt",
+			"Could not read missing.txt: Path 'missing.txt' not found",
+		]);
+		expect(
+			details?.readTargetOutcomes?.map(({ path: targetPath, status }) => ({ path: targetPath, status })),
+		).toEqual([
+			{ path: "packages/grep.txt", status: "success" },
+			{ path: "missing.txt", status: "error" },
+			{ path: "apps/grep.txt", status: "success" },
+		]);
+		expect(details?.readTargetOutcomes?.[0]?.resolvedPath).toBe(path.join(tempDir, "packages", "grep.txt"));
+		expect(details?.readTargetOutcomes?.[2]?.resolvedPath).toBe(path.join(tempDir, "apps", "grep.txt"));
+	});
+
+	it("treats each native array entry as one target instead of recursively expanding encoded arrays", async () => {
+		const encodedArrayName = '["alpha.txt","beta.txt"]';
+		await Promise.all([
+			Bun.write(path.join(tempDir, encodedArrayName), "literal encoded-array filename\n"),
+			Bun.write(path.join(tempDir, "alpha.txt"), "nested alpha should stay unread\n"),
+			Bun.write(path.join(tempDir, "beta.txt"), "nested beta should stay unread\n"),
+		]);
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const scalarResult = await tool.execute("read-json-looking-filename", { path: encodedArrayName });
+		expect(getText(scalarResult)).toContain("literal encoded-array filename");
+		expect(getText(scalarResult)).not.toContain("nested alpha should stay unread");
+
+		const result = await tool.execute("read-flat-native-array", {
+			path: [encodedArrayName, "packages/grep.txt"],
+		});
+		const text = getText(result);
+		const details = result.details as { readTargetOutcomes?: Array<{ path: string; status: string }> } | undefined;
+
+		expect(text).toContain("literal encoded-array filename");
+		expect(text).toContain("shared-needle packages");
+		expect(text).not.toContain("nested alpha should stay unread");
+		expect(text).not.toContain("nested beta should stay unread");
+		expect(details?.readTargetOutcomes).toHaveLength(2);
+		expect(details?.readTargetOutcomes?.map(outcome => outcome.path)).toEqual([
+			encodedArrayName,
+			"packages/grep.txt",
+		]);
+	});
+
+	it("keeps delimiter expansion scalar-only for one-element native arrays", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+		await Promise.all([
+			Bun.write(path.join(tempDir, "scalar-one.txt"), "scalar one\n"),
+			Bun.write(path.join(tempDir, "scalar-two.txt"), "scalar two\n"),
+			Bun.write(path.join(tempDir, "literal-one.txt; literal-two.txt"), "literal combined target\n"),
+		]);
+
+		const scalar = await tool.execute("read-scalar-delimited", {
+			path: "scalar-one.txt; scalar-two.txt",
+		});
+		expect(getText(scalar)).toContain("scalar one");
+		expect(getText(scalar)).toContain("scalar two");
+		expect(getText(scalar)).not.toContain("literal combined target");
+		expect(scalar.details?.readTargetOutcomes).toHaveLength(2);
+
+		const array = await tool.execute("read-array-literal", {
+			path: ["literal-one.txt; literal-two.txt"],
+		});
+		expect(getText(array)).toContain("literal combined target");
+		expect(getText(array)).not.toContain("scalar one");
+		expect(array.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.path)).toEqual([
+			"literal-one.txt; literal-two.txt",
+		]);
+
+		await fs.rm(path.join(tempDir, "literal-one.txt; literal-two.txt"));
+		const missingArray = await tool.execute("read-array-missing-literal", {
+			path: ["literal-one.txt; literal-two.txt"],
+		});
+		expect(missingArray.isError).toBe(true);
+		expect(getText(missingArray)).not.toContain("scalar one");
+		expect(missingArray.details?.readTargetOutcomes).toEqual([
+			{
+				path: "literal-one.txt; literal-two.txt",
+				status: "error",
+				message: "Path 'literal-one.txt; literal-two.txt' not found",
+			},
+		]);
+	});
+
+	it("preserves recursive mixed-delimiter recovery for scalar paths", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+		await Promise.all([
+			Bun.write(path.join(tempDir, "nested-one.txt"), "nested one\n"),
+			Bun.write(path.join(tempDir, "nested-two.txt"), "nested two\n"),
+			Bun.write(path.join(tempDir, "nested-three.txt"), "nested three\n"),
+		]);
+
+		const result = await tool.execute("read-scalar-mixed-delimiters", {
+			path: "nested-one.txt; nested-two.txt, nested-three.txt",
+		});
+		const text = getText(result);
+
+		expect(result.isError).not.toBe(true);
+		expect(text).toContain("nested one");
+		expect(text).toContain("nested two");
+		expect(text).toContain("nested three");
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.path)).toEqual([
+			"nested-one.txt",
+			"nested-two.txt",
+			"nested-three.txt",
+		]);
+	});
+
+	it("preserves selectors when suffix recovery corrects a batched path", async () => {
+		await fs.mkdir(path.join(tempDir, "nested-correction"), { recursive: true });
+		await Bun.write(
+			path.join(tempDir, "nested-correction", "unique-corrected-target.txt"),
+			"selected line\nsecond line\n",
+		);
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-corrected-array", {
+			path: ["unique-corrected-target.txt:1-1", "packages/grep.txt:1-1"],
+		});
+		const corrected = result.details?.readTargetOutcomes?.[0];
+		expect(corrected?.path).toBe("nested-correction/unique-corrected-target.txt:1-1");
+		expect(corrected?.requestedPath).toBe("unique-corrected-target.txt");
+		expect(corrected?.resolvedPath).toBe(path.join(tempDir, "nested-correction", "unique-corrected-target.txt"));
+		expect(getText(result)).toContain("selected line");
+	});
+
+	it("preserves SQLite row selectors when suffix recovery corrects a batched database path", async () => {
+		const correctedDir = path.join(tempDir, "sqlite-correction");
+		const databasePath = path.join(correctedDir, "structured-corrected.db");
+		await fs.mkdir(correctedDir, { recursive: true });
+		const database = new Database(databasePath);
+		try {
+			database.exec(`
+				CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+				INSERT INTO notes (body) VALUES ('corrected structured target');
+			`);
+		} finally {
+			database.close();
+		}
+
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-corrected-structured-array", {
+			path: ["structured-corrected.db:notes:1"],
+		});
+		const corrected = result.details?.readTargetOutcomes?.[0];
+		expect(corrected?.path).toBe("sqlite-correction/structured-corrected.db:notes:1");
+		expect(corrected?.requestedPath).toBe("structured-corrected.db");
+		expect(corrected?.resolvedPath).toBe(databasePath);
+		expect(getText(result)).toContain("corrected structured target");
+	});
+
+	it("rejects empty and oversized native path arrays", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		await expect(tool.execute("read-empty-array", { path: [] })).rejects.toThrow(
+			"At least one read path is required",
+		);
+		await expect(
+			tool.execute("read-oversized-array", {
+				path: Array.from({ length: 33 }, (_, index) => `path-${index}.txt`),
+			}),
+		).rejects.toThrow("Read accepts at most 32 paths per call");
+	});
+
+	it("runs native array targets concurrently while preserving result order", async () => {
+		const router = InternalUrlRouter.instance();
+		const scheme = "readbatchconcurrency";
+		const firstWaveStarted = Promise.withResolvers<void>();
+		const releaseFirstWave = Promise.withResolvers<void>();
+		let active = 0;
+		let maxActive = 0;
+		const handler: ProtocolHandler = {
+			scheme,
+			immutable: true,
+			async resolve(url) {
+				active += 1;
+				maxActive = Math.max(maxActive, active);
+				if (active === 4) firstWaveStarted.resolve();
+				await releaseFirstWave.promise;
+				const index = Number(url.rawHost.replace("target-", ""));
+				active -= 1;
+				return {
+					url: url.rawHref ?? url.href,
+					content: `ordered-target-${index}`,
+					contentType: "text/plain",
+				};
+			},
+		};
+		router.register(handler);
+
+		try {
+			const tools = await createTools(createTestSession(tempDir));
+			const tool = tools.find(entry => entry.name === "read");
+			expect(tool).toBeDefined();
+			if (!tool) throw new Error("Missing read tool");
+			const targets = Array.from({ length: 8 }, (_, index) => `${scheme}://target-${index}`);
+			const pendingResult = tool.execute("read-concurrent-array", { path: targets });
+			await firstWaveStarted.promise;
+			expect(maxActive).toBe(4);
+			releaseFirstWave.resolve();
+			const result = await pendingResult;
+			const text = getText(result);
+
+			for (let index = 1; index < targets.length; index++) {
+				expect(text.indexOf(`ordered-target-${index - 1}`)).toBeLessThan(text.indexOf(`ordered-target-${index}`));
+			}
+		} finally {
+			releaseFirstWave.resolve();
+			router.unregister(scheme);
+		}
+	});
+
+	it("keeps filling the bounded completion queue behind a slow first target", async () => {
+		const router = InternalUrlRouter.instance();
+		const scheme = "readbatchhead";
+		const releaseFirst = Promise.withResolvers<void>();
+		const allTargetsStarted = Promise.withResolvers<void>();
+		const started = new Set<number>();
+		const handler: ProtocolHandler = {
+			scheme,
+			immutable: true,
+			async resolve(url) {
+				const index = Number(url.rawHost.replace("target-", ""));
+				started.add(index);
+				if (started.size === 8) allTargetsStarted.resolve();
+				if (index === 0) await releaseFirst.promise;
+				return {
+					url: url.rawHref ?? url.href,
+					content: `head-target-${index}`,
+					contentType: "text/plain",
+				};
+			},
+		};
+		router.register(handler);
+
+		try {
+			const tools = await createTools(createTestSession(tempDir));
+			const tool = tools.find(entry => entry.name === "read");
+			expect(tool).toBeDefined();
+			if (!tool) throw new Error("Missing read tool");
+			const targets = Array.from({ length: 8 }, (_, index) => `${scheme}://target-${index}`);
+			const pendingResult = tool.execute("read-head-of-line-array", { path: targets });
+			await allTargetsStarted.promise;
+			expect(started).toEqual(new Set(Array.from({ length: 8 }, (_, index) => index)));
+			releaseFirst.resolve();
+			const result = await pendingResult;
+			expect(result.isError).not.toBe(true);
+		} finally {
+			releaseFirst.resolve();
+			router.unregister(scheme);
+		}
+	});
+
+	it("incorporates ordered results before releasing completed-buffer reservations", async () => {
+		const parts = Array.from({ length: 22 }, (_, index) => `custom-part-${index}`);
+		const releaseFirst = Promise.withResolvers<void>();
+		const releaseLast = Promise.withResolvers<void>();
+		const completionQueueSaturated = Promise.withResolvers<void>();
+		const lastPartStarted = Promise.withResolvers<void>();
+		const started = new Set<number>();
+		let firstDetailsAccessed = false;
+		let firstDetailsAccessedWhenLastStarted = false;
+		const firstDetails: ReadBatchPartDetails = {
+			get notes() {
+				firstDetailsAccessed = true;
+				return ["custom-part-0 incorporated"];
+			},
+		};
+
+		const pendingResult = executeReadBatch<ReadBatchPartDetails>({
+			parts,
+			notice: "custom batch",
+			enforceAggregateBudget: true,
+			async readPart(part) {
+				const index = Number(part.slice("custom-part-".length));
+				started.add(index);
+				if (started.size === 20) completionQueueSaturated.resolve();
+				if (index === 0) await releaseFirst.promise;
+				if (index === parts.length - 1) {
+					firstDetailsAccessedWhenLastStarted = firstDetailsAccessed;
+					lastPartStarted.resolve();
+					await releaseLast.promise;
+				}
+				return {
+					content: [{ type: "text", text: `ordered-custom-part-${index}` }],
+					details: index === 0 ? firstDetails : undefined,
+				};
+			},
+		});
+
+		try {
+			await completionQueueSaturated.promise;
+			const lastStartedBeforeFirstRelease = started.has(parts.length - 1);
+			releaseFirst.resolve();
+			await lastPartStarted.promise;
+			releaseLast.resolve();
+			const result = await pendingResult;
+			const text = getText(result);
+
+			expect(lastStartedBeforeFirstRelease).toBe(false);
+			expect(firstDetailsAccessedWhenLastStarted).toBe(true);
+			expect(result.isError).not.toBe(true);
+			expect(result.details?.readTargetOutcomes?.map(outcome => outcome.path)).toEqual(parts);
+			for (let index = 1; index < parts.length; index++) {
+				expect(text.indexOf(`ordered-custom-part-${index - 1}`)).toBeLessThan(
+					text.indexOf(`ordered-custom-part-${index}`),
+				);
+			}
+		} finally {
+			releaseFirst.resolve();
+			releaseLast.resolve();
+		}
+	});
+
+	it("labels every payload in a multi-target read", async () => {
+		const parts = ["first-target.txt", "second-target.txt"];
+		const result = await executeReadBatch<ReadBatchPartDetails>({
+			parts,
+			notice: "custom batch",
+			enforceAggregateBudget: true,
+			async readPart(part) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: part === parts[0] ? "first payload\n\nwith an internal blank line" : "second payload",
+						},
+					],
+				};
+			},
+		});
+		const text = getText(result);
+		const firstHeader = '[Read target 1/2: "first-target.txt"]';
+		const secondHeader = '[Read target 2/2: "second-target.txt"]';
+
+		expect(text).toContain(firstHeader);
+		expect(text).toContain(secondHeader);
+		expect(text.indexOf(firstHeader)).toBeLessThan(text.indexOf("first payload"));
+		expect(text.indexOf(secondHeader)).toBeGreaterThan(text.indexOf("with an internal blank line"));
+		expect(text.indexOf(secondHeader)).toBeLessThan(text.indexOf("second payload"));
+	});
+
+	it("marks budget-limited nested payloads incomplete while complete warnings remain covered", async () => {
+		const result = await executeReadBatch<ReadBatchPartDetails>({
+			parts: ["complete-warning.txt", "nested-budget.txt"],
+			notice: "custom batch",
+			enforceAggregateBudget: true,
+			async readPart(part) {
+				if (part === "complete-warning.txt") {
+					return {
+						content: [{ type: "text", text: "complete warning payload" }],
+						details: { conflictCount: 1 },
+					};
+				}
+				return {
+					content: [{ type: "text", text: "x".repeat(60 * 1024) }],
+					details: {
+						readTargetOutcomes: [
+							{ path: "nested-a.txt", status: "success" },
+							{ path: "nested-b.txt", status: "warning" },
+						],
+					},
+				};
+			},
+		});
+
+		expect(
+			result.details?.readTargetOutcomes?.map(({ status, payloadComplete }) => ({ status, payloadComplete })),
+		).toEqual([
+			{ status: "warning", payloadComplete: undefined },
+			{ status: "warning", payloadComplete: false },
+			{ status: "warning", payloadComplete: false },
+		]);
+	});
+
+	it("preserves each target's truncation notice in native batches", async () => {
+		const largeA = `${"aaaaaaaaaaaaaaaa\n".repeat(3_100)}large-a-end`;
+		const largeB = `${"bbbbbbbbbbbbbbbb\n".repeat(3_100)}large-b-end`;
+		await Promise.all([
+			Bun.write(path.join(tempDir, "notice-large-a.txt"), largeA),
+			Bun.write(path.join(tempDir, "notice-large-b.txt"), largeB),
+		]);
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-truncated-array", {
+			path: ["notice-large-a.txt", "notice-large-b.txt"],
+		});
+		const text = getText(result);
+		const notices = text.match(/\[Showing lines [^\]]+Use :\d+ to continue\]/g) ?? [];
+
+		expect(notices).toHaveLength(2);
+		expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(50 * 1024);
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.status)).toEqual([
+			"warning",
+			"warning",
+		]);
+		expect(text).not.toContain("large-a-end");
+		expect(text).not.toContain("large-b-end");
+	});
+
+	it("bounds aggregate batched-read text and reports per-target truncation", async () => {
+		const largeText = `${"x".repeat(100)}\n`.repeat(400);
+		await Promise.all([
+			Bun.write(path.join(tempDir, "large-a.txt"), largeText),
+			Bun.write(path.join(tempDir, "large-b.txt"), largeText),
+		]);
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-bounded-array", {
+			path: ["large-a.txt:raw", "large-b.txt:raw"],
+		});
+		const text = getText(result);
+		const details = result.details as
+			| {
+					notes?: string[];
+					readTargetOutcomes?: Array<{ path: string; status: string }>;
+			  }
+			| undefined;
+
+		expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(50 * 1024);
+		expect(details?.notes?.filter(note => note.includes("batch text budget was exhausted"))).toHaveLength(1);
+		expect(
+			details?.readTargetOutcomes?.map(({ path: targetPath, status }) => ({ path: targetPath, status })),
+		).toEqual([
+			{ path: "large-a.txt:raw", status: "warning" },
+			{ path: "large-b.txt:raw", status: "warning" },
+		]);
+	});
+
+	it("attributes final aggregate-cap truncation to the target whose text was cut", async () => {
+		const targets = ["owner-large.txt:raw", "owner-missing.txt"];
+		const notice = `Note: read 2 paths: ${targets.join(", ")}`;
+		const largeText = "o".repeat(50 * 1024 - Buffer.byteLength(notice, "utf8") - 10);
+		await Bun.write(path.join(tempDir, "owner-large.txt"), largeText);
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-cap-owner-array", { path: targets });
+		expect(Buffer.byteLength(getText(result), "utf8")).toBeLessThanOrEqual(50 * 1024);
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.status)).toEqual([
+			"warning",
+			"error",
+		]);
+		expect(result.details?.readTargetOutcomes?.[0]?.message).toContain("aggregate batch text cap");
+		expect(result.details?.readTargetOutcomes?.[0]?.payloadComplete).toBe(false);
+	});
+
+	it("keeps legacy scalar-delimited batches on their prior uncapped output path", async () => {
+		const legacyA = `${"a".repeat(40_000)}\nlegacy-a-end`;
+		const legacyB = `${"b".repeat(40_000)}\nlegacy-b-end`;
+		await Promise.all([
+			Bun.write(path.join(tempDir, "legacy-large-a.txt"), legacyA),
+			Bun.write(path.join(tempDir, "legacy-large-b.txt"), legacyB),
+		]);
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-legacy-delimited-large", {
+			path: "legacy-large-a.txt:raw; legacy-large-b.txt:raw",
+		});
+		const text = getText(result);
+		expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(64 * 1024);
+		expect(text).toContain("legacy-a-end");
+		expect(text).toContain("legacy-b-end");
+		expect(text).not.toContain("Batch text output capped");
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.status)).toEqual([
+			"success",
+			"success",
+		]);
+	});
+
+	it("preserves non-error semantics when every legacy delimited target is missing", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-legacy-delimited-all-missing", {
+			path: "legacy-missing-a.txt; legacy-missing-b.txt",
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.status)).toEqual([
+			"error",
+			"error",
+		]);
+		expect(getText(result)).toContain("Could not read legacy-missing-a.txt");
+		expect(getText(result)).toContain("Could not read legacy-missing-b.txt");
+	});
+
+	it("bounds aggregate native-array image output and reports dropped images", async () => {
+		const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const imagePaths = Array.from({ length: 5 }, (_, index) => `batch-image-${index}.png`);
+		await Promise.all(
+			imagePaths.map(async (imagePath, index) => {
+				const bytes = Buffer.alloc(index === imagePaths.length - 1 ? 6_000_000 : 4_000_000, index + 1);
+				pngMagic.copy(bytes);
+				await Bun.write(path.join(tempDir, imagePath), bytes);
+			}),
+		);
+		const tools = await createTools(
+			createTestSession(tempDir, {
+				settings: Settings.isolated({
+					"astGrep.enabled": true,
+					"astEdit.enabled": true,
+					"tools.xdev": false,
+					"inspect_image.mode": "off",
+					"images.autoResize": false,
+				}),
+			}),
+		);
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-bounded-images", { path: imagePaths });
+		const imageBlocks = result.content.filter(block => block.type === "image");
+		const decodedBytes = imageBlocks.reduce((total, block) => total + Buffer.byteLength(block.data, "base64"), 0);
+		expect(decodedBytes).toBeLessThanOrEqual(20 * 1024 * 1024);
+		expect(imageBlocks).toHaveLength(4);
+		expect(result.details?.notes?.filter((note: string) => note.includes("image budget was exhausted"))).toHaveLength(
+			1,
+		);
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.status)).toEqual([
+			"success",
+			"success",
+			"success",
+			"success",
+			"warning",
+		]);
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.payloadComplete)).toEqual([
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+		]);
+	});
+
+	it("marks a batch as failed when no target can be read", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+		const missingPaths = Array.from({ length: 32 }, (_, index) => `missing-${index}.txt`);
+
+		const result = await tool.execute("read-all-missing", { path: missingPaths });
+		const details = result.details as { readTargetOutcomes?: Array<{ path: string; status: string }> } | undefined;
+
+		expect(result.isError).toBe(true);
+		expect(details?.readTargetOutcomes).toHaveLength(32);
+		expect(details?.readTargetOutcomes?.every(outcome => outcome.status === "error")).toBe(true);
+		expect(Buffer.byteLength(getText(result), "utf8")).toBeLessThanOrEqual(50 * 1024);
+	});
+
+	it("aborts a native read batch instead of returning partial success", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+		const controller = new AbortController();
+		controller.abort();
+
+		await expect(
+			tool.execute("read-aborted-array", { path: ["packages/grep.txt", "apps/grep.txt"] }, controller.signal),
+		).rejects.toThrow();
 	});
 
 	it("ast_grep accepts quoted path and glob filters", async () => {

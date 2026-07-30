@@ -29,6 +29,7 @@ import {
 	groupedReadUsageCallIds,
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
+	readArgsHaveIncompleteStreamedPathArray,
 } from "../../modes/components/read-tool-group";
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
@@ -436,6 +437,12 @@ export class UiHelpers {
 						continue;
 					}
 					resolveWaitingPoll(content.name);
+					const partialJson = getStreamingPartialJson(content);
+					if (content.name === "read" && readArgsHaveIncompleteStreamedPathArray(content.arguments, partialJson)) {
+						// Rebuilds can observe the same partial array snapshot as live
+						// streaming. Leave it unbound until every target is available.
+						continue;
+					}
 
 					if (content.name === "read" && readArgsCollapseIntoGroup(content.arguments)) {
 						if (hasErrorStop && errorMessage) {
@@ -479,7 +486,6 @@ export class UiHelpers {
 					readGroup?.seal();
 					readGroup = null;
 					const tool = this.ctx.viewSession.getToolByName(content.name);
-					const partialJson = getStreamingPartialJson(content);
 					// Mid-stream rebuild (theme change, settings, focus replay): decode
 					// display args from the raw stream exactly like the live reveal path.
 					// The provider-parsed `arguments` lag the stream by up to a throttled

@@ -5,6 +5,7 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { theme as activeTheme, getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { readToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 function extractLinkUris(text: string): string[] {
@@ -81,6 +82,97 @@ describe("readToolRenderer hyperlinks", () => {
 		expect(extractLinkUris(rendered)).toContain(exampleUri.href);
 		expect(extractLinkTexts(rendered)).toContain(examplePath);
 		expect(extractLinkTexts(rendered)).not.toContain(`${examplePath}:10-12`);
+	});
+
+	it("sanitizes and bounds native-array paths in the pending status", async () => {
+		settings.override("tui.hyperlinks", "always");
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const paths = Array.from({ length: 32 }, (_, index) => `src/${index}\t${"long-".repeat(30)}.ts`);
+
+		const call = readToolRenderer.renderCall({ path: paths }, { expanded: false, isPartial: false }, theme!);
+		const rawRendered = call.render(400).join("\n");
+		const rendered = Bun.stripANSI(rawRendered).trimEnd();
+		const description = rendered.slice(rendered.indexOf(": ") + 2);
+
+		expect(rawRendered).not.toContain("\t");
+		expect(Bun.stringWidth(description)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
+	});
+
+	it("renders every native-array target in calls and a batch title in results", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const args = { path: ["src/first.ts:10-12", "src/second.ts:20-22"] };
+
+		const call = readToolRenderer.renderCall(args, { expanded: false, isPartial: false }, theme!);
+		const renderedCall = Bun.stripANSI(call.render(200).join("\n"));
+		expect(renderedCall).toContain("src/first.ts:10-12");
+		expect(renderedCall).toContain("src/second.ts:20-22");
+
+		const result = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "first\n\nsecond" }],
+				details: {
+					readTargetOutcomes: [
+						{ path: "src/first.ts:10-12", status: "success" },
+						{ path: "src/second.ts:20-22", status: "success" },
+					],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme!,
+			args,
+		);
+		expect(Bun.stripANSI(result.render(200).join("\n"))).toContain("Read (2)");
+	});
+
+	it("keeps text previews that follow images in native batches", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const result = readToolRenderer.renderResult(
+			{
+				content: [
+					{ type: "text", text: "batch notice" },
+					{ type: "image" },
+					{ type: "text", text: "later file preview" },
+				],
+				details: {
+					readTargetOutcomes: [
+						{ path: "src/preview.png", status: "success" },
+						{ path: "src/later.ts", status: "success" },
+					],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme!,
+			{ path: ["src/preview.png", "src/later.ts"] },
+		);
+
+		const rendered = Bun.stripANSI(result.render(200).join("\n"));
+		expect(rendered).toContain("batch notice");
+		expect(rendered).toContain("later file preview");
+	});
+
+	it("renders a one-URL native array through the batch read renderer", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const component = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "hello" }],
+				details: {
+					readTargetOutcomes: [{ path: "https://example.com/one", status: "success" }],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme!,
+			{ path: ["https://example.com/one"] },
+		);
+
+		const rendered = Bun.stripANSI(component.render(200).join("\n"));
+		expect(rendered).toContain("Read (1)");
+		expect(rendered).not.toContain("Content-Type:");
 	});
 
 	it("links HTTP read result headers to the final URL", async () => {

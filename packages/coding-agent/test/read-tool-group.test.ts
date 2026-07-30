@@ -8,6 +8,7 @@ import {
 	readArgsCollapseIntoGroup,
 } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 
 function extractLinkUris(text: string): string[] {
 	return [...text.matchAll(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/g)].map(match => match[1]!);
@@ -165,6 +166,40 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${threePath}:5-6`);
 	});
 
+	it("renders an explicit path array as child rows while the read is pending", () => {
+		const component = new ReadToolGroupComponent();
+		const onePath = path.resolve("/tmp/one.ts");
+		const twoPath = path.resolve("/tmp/two.ts");
+		component.updateArgs({ path: [onePath, twoPath] }, "read-array");
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(plain).toContain("Read (2)");
+		expect(plain).toContain(onePath);
+		expect(plain).toContain(twoPath);
+	});
+
+	it("sanitizes and bounds every pending native-array path", () => {
+		const component = new ReadToolGroupComponent();
+		const paths = Array.from({ length: 32 }, (_, index) => `src/${index}\t${"long-".repeat(30)}.ts`);
+		component.updateArgs({ path: paths }, "read-long-array");
+
+		const rawLines = component.render(400);
+		const rendered = rawLines.join("\n");
+		const pathRows = rawLines.map(line => Bun.stripANSI(line).trimEnd()).filter(line => line.includes("src/"));
+		const prefixWidth = Math.max(
+			Bun.stringWidth(`   ${themeModule.theme.tree.branch} `),
+			Bun.stringWidth(`   ${themeModule.theme.tree.last} `),
+		);
+		const statusWidth = Bun.stringWidth(`${themeModule.theme.status.pending} `);
+
+		expect(rendered).not.toContain("\t");
+		expect(pathRows).toHaveLength(paths.length);
+		for (const row of pathRows) {
+			expect(Bun.stringWidth(row)).toBeLessThanOrEqual(prefixWidth + statusWidth + TRUNCATE_LENGTHS.LINE);
+		}
+	});
+
 	it("merges multi-range selectors into one file row", () => {
 		const component = new ReadToolGroupComponent();
 		const examplePath = path.resolve("/tmp/example.ts");
@@ -213,6 +248,89 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain("Read (2)");
 		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${twoPath}`);
+	});
+
+	it("renders each batched-read outcome with its own status", () => {
+		const component = new ReadToolGroupComponent();
+		const onePath = path.resolve("/tmp/one.ts");
+		const warningPath = path.resolve("/tmp/warning.ts");
+		const twoPath = path.resolve("/tmp/two.ts");
+		component.updateArgs({ path: [onePath, warningPath, twoPath] }, "read-outcomes");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "partial result" }],
+				details: {
+					readTargetOutcomes: [
+						{ path: onePath, resolvedPath: onePath, status: "success" },
+						{ path: warningPath, resolvedPath: warningPath, status: "warning", message: "truncated" },
+						{ path: twoPath, resolvedPath: twoPath, status: "error", message: "not found" },
+					],
+				},
+			},
+			false,
+			"read-outcomes",
+		);
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
+		expect(plain).toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.warning} ${warningPath}`);
+		expect(plain).toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.error} ${twoPath}`);
+	});
+
+	it("keeps batched-read outcome rows visible with an inline preview", () => {
+		const component = new ReadToolGroupComponent({ showContentPreview: true });
+		const onePath = path.resolve("/tmp/preview-one.ts");
+		const warningPath = path.resolve("/tmp/preview-warning.ts");
+		const errorPath = path.resolve("/tmp/preview-error.ts");
+		component.updateArgs({ path: [onePath, warningPath, errorPath] }, "read-preview-outcomes");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "combined preview content" }],
+				details: {
+					readTargetOutcomes: [
+						{ path: onePath, resolvedPath: onePath, status: "success" },
+						{ path: warningPath, resolvedPath: warningPath, status: "warning", message: "truncated" },
+						{ path: errorPath, resolvedPath: errorPath, status: "error", message: "not found" },
+					],
+				},
+			},
+			false,
+			"read-preview-outcomes",
+		);
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
+		expect(plain).toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.warning} ${warningPath}`);
+		expect(plain).toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.error} ${errorPath}`);
+		expect(plain).toContain("combined preview content");
+	});
+
+	it("keeps text previews that follow images in a native batch", () => {
+		const component = new ReadToolGroupComponent({ showContentPreview: true });
+		component.updateArgs({ path: ["/tmp/preview.png", "/tmp/later.ts"] }, "read-mixed-preview");
+		component.updateResult(
+			{
+				content: [
+					{ type: "text", text: "batch notice" },
+					{ type: "image" },
+					{ type: "text", text: "later file preview" },
+				],
+				details: {
+					readTargetOutcomes: [
+						{ path: "/tmp/preview.png", status: "success" },
+						{ path: "/tmp/later.ts", status: "success" },
+					],
+				},
+			},
+			false,
+			"read-mixed-preview",
+		);
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+		expect(plain).toContain("batch notice");
+		expect(plain).toContain("later file preview");
 	});
 
 	it("renders warning previews with warning styling instead of success styling", () => {
@@ -385,6 +503,17 @@ describe("readArgsCollapseIntoGroup", () => {
 	])("collapses %s into the read group", target => {
 		expect(readArgsCollapseIntoGroup({ path: target })).toBe(true);
 		expect(readArgsCollapseIntoGroup({ file_path: target })).toBe(true);
+	});
+
+	it("groups multi-target arrays whose contents are safe to compact", () => {
+		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "https://example.com/second.ts"] })).toBe(true);
+		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "xd://lsp"] })).toBe(true);
+	});
+
+	it("keeps batches containing handled internal resources as full tool executions", () => {
+		expect(readArgsCollapseIntoGroup({ path: ["./first.ts", "skill://my-skill"] })).toBe(false);
+		expect(readArgsCollapseIntoGroup({ path: ["skill://my-skill", "omp://docs/tools/read.md"] })).toBe(false);
+		expect(readArgsCollapseIntoGroup({ path: ["xd://lsp", "skill://my-skill"] })).toBe(false);
 	});
 
 	it("returns false for non-record / missing arguments", () => {

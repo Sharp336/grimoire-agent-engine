@@ -17,6 +17,8 @@ import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -139,6 +141,7 @@ function hasImageComponent(component: Component): boolean {
 function makeRenderCtx(
 	transcript: SessionContext,
 	showImages = true,
+	isStreaming = false,
 ): { ctx: InteractiveModeContext; chatContainer: Container } {
 	const chatContainer = new Container();
 	let helpers: UiHelpers;
@@ -164,6 +167,7 @@ function makeRenderCtx(
 		viewSession: {
 			buildTranscriptSessionContext: () => transcript,
 			getToolByName: () => undefined,
+			isStreaming,
 			extensionRunner: undefined,
 			sessionManager: {
 				getEntries: vi.fn(() => []),
@@ -427,5 +431,22 @@ describe("UiHelpers.renderSessionContext — mid-stream tool call rebuild", () =
 
 		const rendered = Bun.stripANSI(chatContainer.render(120).join("\n"));
 		expect(rendered).toContain("GROWN_TAIL_SENTINEL");
+	});
+
+	it("defers partially parsed read arrays instead of freezing their first target's renderer", async () => {
+		const partialRead = assistantToolCall("read-mid", "read", { path: ["skill://my-skill"] });
+		const toolCall = partialRead.content[0]!;
+		if (toolCall.type !== "toolCall") throw new Error("expected tool call");
+		toolCall[kStreamingPartialJson] = '{"path":["skill://my-skill","src/local';
+		const { ctx, chatContainer } = makeRenderCtx(transcriptWith([partialRead]), true, true);
+
+		new UiHelpers(ctx).renderInitialMessages();
+
+		expect(
+			chatContainer.children.filter(
+				component => component instanceof ToolExecutionComponent || component instanceof ReadToolGroupComponent,
+			),
+		).toHaveLength(0);
+		expect(ctx.pendingTools.has("read-mid")).toBe(false);
 	});
 });

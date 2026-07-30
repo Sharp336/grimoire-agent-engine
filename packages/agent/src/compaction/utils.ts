@@ -108,23 +108,26 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 
 		const args = block.arguments as Record<string, unknown> | undefined;
 		if (!args) continue;
-
-		const path = typeof args.path === "string" ? args.path : undefined;
-		if (!path) continue;
-
-		// Internal URIs (conflict://, artifact://, local://, history://, …) and
-		// web URLs are not re-groundable files — keep them out of `<files>`.
-		if (isUrlSchemePath(path)) continue;
+		const rawPath = args.path;
+		if (block.name === "read" && Array.isArray(rawPath)) {
+			for (const path of rawPath) {
+				if (typeof path === "string" && path.length > 0 && !isUrlSchemePath(path)) {
+					fileOps.read.add(stripReadSelector(path));
+				}
+			}
+			continue;
+		}
+		if (typeof rawPath !== "string" || rawPath.length === 0 || isUrlSchemePath(rawPath)) continue;
 
 		switch (block.name) {
 			case "read":
-				fileOps.read.add(stripReadSelector(path));
+				fileOps.read.add(stripReadSelector(rawPath));
 				break;
 			case "write":
-				fileOps.written.add(path);
+				fileOps.written.add(rawPath);
 				break;
 			case "edit":
-				fileOps.edited.add(path);
+				fileOps.edited.add(rawPath);
 				break;
 		}
 	}

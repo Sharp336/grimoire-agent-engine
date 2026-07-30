@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `readToolSupersedeKey()` now supports native `read` arrays, emitting one key per usable target so a batch result is pruned only after later reads cover every target; failed reads and errored batch targets remain exempt.
+
 ## [17.2.0] - 2026-07-30
 
 ### Fixed

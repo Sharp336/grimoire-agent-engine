@@ -4,29 +4,34 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 import { InternalUrlRouter, XD_URL_PREFIX } from "../../internal-urls";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
-import { parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tools/path-utils";
-import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
+import { extractPathArguments, parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tools/path-utils";
+import type { ReadTargetOutcome } from "../../tools/read";
+import {
+	joinTextContentBlocks,
+	PREVIEW_LIMITS,
+	previewLine,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+} from "../../tools/render-utils";
 import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "./usage-row";
 
-/**
- * Extract the read call's target path. `path` is the canonical arg; `file_path`
- * is the legacy alias still tolerated by the read tool schema.
- */
-function readArgsTarget(args: unknown): string | undefined {
-	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
-	const record = args as Record<string, unknown>;
-	return typeof record.path === "string"
-		? record.path
-		: typeof record.file_path === "string"
-			? record.file_path
-			: undefined;
+export function readArgsHaveTarget(args: unknown): boolean {
+	return extractPathArguments(args).length > 0;
 }
 
-export function readArgsHaveTarget(args: unknown): boolean {
-	return readArgsTarget(args) !== undefined;
+/**
+ * Whether a permissive streaming parse has exposed completed elements from a
+ * read path array before the array itself has closed. Renderer selection must
+ * wait for the complete array because later targets can change its UI shape.
+ */
+export function readArgsHaveIncompleteStreamedPathArray(args: unknown, partialJson: string | undefined): boolean {
+	if (!partialJson || typeof args !== "object" || args === null) return false;
+	const { path, file_path: filePath } = args as { path?: unknown; file_path?: unknown };
+	return Array.isArray(path ?? filePath);
 }
 
 /**
@@ -37,9 +42,13 @@ export function readArgsHaveTarget(args: unknown): boolean {
  * they list devices/docs and read better in the compact grouped view.
  */
 export function readArgsCollapseIntoGroup(args: unknown): boolean {
-	const target = readArgsTarget(args);
-	if (target === undefined) return false;
-	return target.startsWith(XD_URL_PREFIX) || !InternalUrlRouter.instance().canHandle(target);
+	const targets = extractPathArguments(args);
+	if (targets.length === 0) return false;
+	// A handled internal resource needs the full renderer so its resolved body
+	// remains visible. This holds for mixed and all-internal batches as well as
+	// singleton reads; filesystem, external, and xd:// targets stay compact.
+	const router = InternalUrlRouter.instance();
+	return targets.every(target => target.startsWith(XD_URL_PREFIX) || !router.canHandle(target));
 }
 
 /**
@@ -70,7 +79,7 @@ export function groupedReadUsageCallIds(message: AssistantMessage): string[] | u
 }
 
 type ReadRenderArgs = {
-	path?: string;
+	path?: string | string[];
 	file_path?: string;
 };
 
@@ -87,6 +96,7 @@ type ReadToolResultDetails = {
 	};
 	conflictCount?: number;
 	displayReadTargets?: unknown;
+	readTargetOutcomes?: unknown;
 	displayContent?: {
 		text?: string;
 		startLine?: number;
@@ -122,6 +132,7 @@ type ReadEntry = {
 	conflictCount?: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
+	targetOutcomes?: ReadTargetOutcome[];
 };
 
 type ReadUsageRow = {
@@ -139,8 +150,11 @@ type ReadDisplayTarget = {
 	entry: ReadEntry;
 	targetPath: string;
 	basePath: string;
+	status: ReadEntry["status"];
 	linkPath?: string;
 	selector?: string;
+	correctedFrom?: string;
+	conflictCount?: number;
 };
 
 type ReadSummaryRow = {
@@ -165,6 +179,30 @@ function getDisplayReadTargets(details: ReadToolResultDetails | undefined): stri
 		.map(target => target.trim())
 		.filter(target => target.length > 0);
 	return targets.length > 0 ? targets : undefined;
+}
+
+function getReadTargetOutcomes(details: ReadToolResultDetails | undefined): ReadTargetOutcome[] | undefined {
+	if (!Array.isArray(details?.readTargetOutcomes)) return undefined;
+	const outcomes: ReadTargetOutcome[] = [];
+	for (const value of details.readTargetOutcomes) {
+		if (typeof value !== "object" || value === null) continue;
+		const record = value as Record<string, unknown>;
+		const targetPath = typeof record.path === "string" ? record.path.trim() : "";
+		const status = record.status;
+		if (targetPath.length === 0 || (status !== "success" && status !== "warning" && status !== "error")) {
+			continue;
+		}
+		outcomes.push({
+			path: targetPath,
+			status,
+			requestedPath: typeof record.requestedPath === "string" ? record.requestedPath : undefined,
+			resolvedPath: typeof record.resolvedPath === "string" ? record.resolvedPath : undefined,
+			conflictCount:
+				typeof record.conflictCount === "number" && record.conflictCount > 0 ? record.conflictCount : undefined,
+			message: typeof record.message === "string" ? record.message : undefined,
+		});
+	}
+	return outcomes.length > 0 ? outcomes : undefined;
 }
 
 function displayPathWithSuffixResolution(currentPath: string, suffixResolution: ReadToolSuffixResolution): string {
@@ -386,13 +424,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	updateArgs(args: ReadRenderArgs, toolCallId?: string): void {
 		if (!toolCallId) return;
-		const rawPath = args.file_path || args.path || "";
+		const targets = args.file_path ? [args.file_path] : Array.isArray(args.path) ? args.path : [args.path ?? ""];
+		const rawPath = targets[0] ?? "";
 		const entry: ReadEntry = this.#entries.get(toolCallId) ?? {
 			toolCallId,
 			path: rawPath,
 			status: "pending",
 		};
 		entry.path = rawPath;
+		entry.displayPaths = targets.length > 1 ? targets : undefined;
 		this.#entries.set(toolCallId, entry);
 		this.#updateDisplay();
 	}
@@ -408,24 +448,38 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (isPartial) return;
 		const details = result.details as ReadToolResultDetails | undefined;
 		const suffixResolution = getSuffixResolution(details);
-		const displayPaths = getDisplayReadTargets(details);
+		const targetOutcomes = getReadTargetOutcomes(details);
 		entry.linkPath = readResultLinkPath(details);
-		if (suffixResolution) {
+		entry.targetOutcomes = targetOutcomes;
+		if (targetOutcomes) {
+			entry.correctedFrom = undefined;
+			entry.displayPaths = undefined;
+		} else if (suffixResolution) {
 			entry.path = displayPathWithSuffixResolution(entry.path, suffixResolution);
 			entry.correctedFrom = suffixResolution.from;
 			entry.displayPaths = undefined;
 		} else {
 			entry.correctedFrom = undefined;
-			entry.displayPaths = displayPaths;
+			entry.displayPaths = getDisplayReadTargets(details);
 		}
 		const conflictCount =
 			typeof details?.conflictCount === "number" && details.conflictCount > 0 ? details.conflictCount : undefined;
 		entry.conflictCount = conflictCount;
-		entry.status = result.isError ? "error" : suffixResolution ? "warning" : "success";
+		entry.status = result.isError
+			? "error"
+			: targetOutcomes
+				? targetOutcomes.reduce<ReadEntry["status"]>(
+						(status, outcome) =>
+							READ_STATUS_RANK[outcome.status] > READ_STATUS_RANK[status] ? outcome.status : status,
+						"success",
+					)
+				: suffixResolution || conflictCount
+					? "warning"
+					: "success";
 		// Store clean display content for preview/expanded display when the read
 		// tool provides it; fall back to model-facing text for legacy results.
 		const displayContent = details?.displayContent;
-		const textContent = result.content?.find(c => c.type === "text")?.text;
+		const textContent = joinTextContentBlocks(result.content);
 		if (displayContent !== undefined || textContent !== undefined) {
 			entry.contentText = displayContent?.text ?? textContent;
 			entry.codeStartLine = displayContent?.startLine;
@@ -491,7 +545,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		if (displayRows.length === 1) {
 			const row = displayRows[0]!;
-			if (!this.#shouldRenderPreviewRow(row)) {
+			if (
+				!this.#shouldRenderPreviewRow(row) ||
+				row.targets.some(target => (target.entry.targetOutcomes?.length ?? 0) > 1)
+			) {
 				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
 				const pathDisplay = this.#formatRowPath(row);
 				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
@@ -509,8 +566,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		const header = `${theme.fg("toolTitle", theme.bold("Read"))}${theme.fg("dim", ` (${displayRows.length})`)}`;
 		const lines = [` ${theme.format.bullet} ${header}`];
-		const entriesWithoutPreview = entries.filter(entry => !this.#shouldRenderPreview(entry));
-		const summaryTargets = this.#displayTargetsForEntries(entriesWithoutPreview);
+		const summaryEntries = entries.filter(
+			entry => !this.#shouldRenderPreview(entry) || (entry.targetOutcomes?.length ?? 0) > 1,
+		);
+		const summaryTargets = this.#displayTargetsForEntries(summaryEntries);
 		const rows = this.#buildSummaryRows(summaryTargets);
 		const usageRowsBySummaryRow = this.#usageRowsBySummaryRow(rows);
 		for (const [index, row] of rows.entries()) {
@@ -531,18 +590,28 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#displayTargetsForEntries(entries: ReadEntry[]): ReadDisplayTarget[] {
 		const targets: ReadDisplayTarget[] = [];
 		for (const entry of entries) {
-			const pathSpecs = entry.displayPaths ?? splitReadDisplayPathSpecs(entry.path);
+			const pathSpecs =
+				entry.targetOutcomes?.map(outcome => outcome.path) ??
+				entry.displayPaths ??
+				splitReadDisplayPathSpecs(entry.path);
 			const useEntryLinkPath = pathSpecs.length === 1;
-			for (const pathSpec of pathSpecs) {
+			for (const [index, pathSpec] of pathSpecs.entries()) {
+				const outcome = entry.targetOutcomes?.[index];
 				const split = splitPathAndSel(pathSpec);
-				const linkPath = readTargetLinkPath(split.path, useEntryLinkPath ? entry.linkPath : undefined);
+				const linkPath = readTargetLinkPath(
+					split.path,
+					outcome?.resolvedPath ?? (useEntryLinkPath ? entry.linkPath : undefined),
+				);
 				for (const selector of splitSelectorDisplayParts(split.sel)) {
 					targets.push({
 						entry,
 						targetPath: selector ? `${split.path}:${selector}` : pathSpec,
 						basePath: split.path,
+						status: outcome?.status ?? entry.status,
 						linkPath,
 						selector,
+						correctedFrom: outcome?.requestedPath ?? entry.correctedFrom,
+						conflictCount: outcome?.conflictCount ?? entry.conflictCount,
 					});
 				}
 			}
@@ -672,8 +741,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#statusForTargets(targets: ReadDisplayTarget[]): ReadEntry["status"] {
 		let status: ReadEntry["status"] = "success";
 		for (const target of targets) {
-			if (READ_STATUS_RANK[target.entry.status] > READ_STATUS_RANK[status]) {
-				status = target.entry.status;
+			if (READ_STATUS_RANK[target.status] > READ_STATUS_RANK[status]) {
+				status = target.status;
 			}
 		}
 		return status;
@@ -681,7 +750,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#correctedFromForTargets(targets: ReadDisplayTarget[]): string | undefined {
 		for (const target of targets) {
-			if (target.entry.correctedFrom) return target.entry.correctedFrom;
+			if (target.correctedFrom) return target.correctedFrom;
 		}
 		return undefined;
 	}
@@ -689,8 +758,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#conflictCountForTargets(targets: ReadDisplayTarget[]): number | undefined {
 		let conflictCount = 0;
 		for (const target of targets) {
-			if (target.entry.conflictCount && target.entry.conflictCount > conflictCount) {
-				conflictCount = target.entry.conflictCount;
+			if (target.conflictCount && target.conflictCount > conflictCount) {
+				conflictCount = target.conflictCount;
 			}
 		}
 		return conflictCount > 0 ? conflictCount : undefined;
@@ -731,7 +800,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(options.correctedFrom)})`);
 		}
 		pathDisplay += this.#formatConflictBadge(options.conflictCount);
-		return pathDisplay;
+		return previewLine(replaceTabs(pathDisplay), TRUNCATE_LENGTHS.LINE);
 	}
 
 	#formatConflictBadge(conflictCount: number | undefined): string {

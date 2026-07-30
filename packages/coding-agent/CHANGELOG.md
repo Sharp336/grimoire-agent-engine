@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Expanded the read tool's `path` input from `string` to `string | string[]` so one call can read independent targets with bounded concurrency, ordered output, and partial successes. Typed extensions that inspect `ReadToolCallEvent.input.path` must now narrow it with `Array.isArray()` before using string-only methods.
+
 ## [17.2.1] - 2026-07-30
 
 ### Added

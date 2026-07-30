@@ -15,8 +15,8 @@ import type { TreeFilterMode } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { SessionTreeNode } from "../../session/session-entries";
-import { toPathList } from "../../tools/path-utils";
-import { shortenPath } from "../../tools/render-utils";
+import { extractPathArguments, toPathList } from "../../tools/path-utils";
+import { previewLine, replaceTabs, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { DynamicBorder } from "./dynamic-border";
@@ -719,15 +719,16 @@ class TreeList implements Component {
 	#formatToolCall(name: string, args: Record<string, unknown>): string {
 		switch (name) {
 			case "read": {
-				const path = shortenPath(String(args.path || args.file_path || ""));
-				const offset = args.offset as number | undefined;
-				const limit = args.limit as number | undefined;
-				let display = path;
-				if (offset !== undefined || limit !== undefined) {
+				const paths = extractPathArguments(args);
+				const offset = typeof args.offset === "number" ? args.offset : undefined;
+				const limit = typeof args.limit === "number" ? args.limit : undefined;
+				let display = paths.map(path => replaceTabs(shortenPath(path))).join(", ");
+				if (paths.length <= 1 && (offset !== undefined || limit !== undefined)) {
 					const start = offset ?? 1;
 					const end = limit !== undefined ? start + limit - 1 : "";
 					display += `:${start}${end ? `-${end}` : ""}`;
 				}
+				display = previewLine(display, TRUNCATE_LENGTHS.LINE);
 				return `[read: ${display}]`;
 			}
 			case "write": {
