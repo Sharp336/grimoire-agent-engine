@@ -6,17 +6,18 @@ import { type GetServerConfigResponse, Http2Config } from "@oh-my-pi/pi-catalog/
 import * as AIError from "../../error";
 import { isTransportDisposed, registerTransportDisposer } from "../../transport";
 import { createProxiedAgent, getProxyForUrl } from "../../utils/proxy";
-import { buildCursorHeaders } from "./headers";
+import { buildCursorHeaders, resolveCursorClientVersion } from "./headers";
 import { normalizeCursorConnectError } from "./http1";
 import { CursorServerConfigService, GetServerConfigRequestSchema } from "./transport-descriptors";
 
 /**
  * Server-config discovery cache.
  *
- * Keyed by normalized base URL and hashed credential; credential text is
- * never retained. Auth failures evict the entry before outer credential
- * rotation. Caller abort only stops that caller's wait. Disposal aborts
- * pending fetches and clears cached results.
+ * Keyed by normalized base URL, hashed credential, and resolved client version
+ * (the value sent as `x-cursor-client-version`); credential text is never
+ * retained. Auth failures evict the entry before outer credential rotation.
+ * Caller abort only stops that caller's wait. Disposal aborts pending
+ * fetches and clears cached results.
  */
 
 type ConfigState =
@@ -46,10 +47,21 @@ function ensureDisposerRegistered(): void {
 const DISCOVERY_TIMEOUT_MS = 10_000;
 const TRANSIENT_RETRY_MS = 5_000;
 
-function configKey(baseUrl: string, apiKey: string): string {
+/** Stable per-account prefix: normalized base URL plus hashed credential (never the raw key). */
+function accountKey(baseUrl: string, apiKey: string): string {
 	const url = new URL(baseUrl);
 	const normalized = `${url.origin}${url.pathname.replace(/\/$/, "")}`;
 	return `${normalized}:${Bun.hash(apiKey)}`;
+}
+
+/**
+ * Cache key for one (account, resolved client version) tuple. The server may
+ * return version-specific HTTP/2 policy or agent URLs, and the resolved
+ * client version is the same value sent as `x-cursor-client-version`, so it
+ * must participate in the key — otherwise a version switch reuses a stale entry.
+ */
+function configKey(baseUrl: string, apiKey: string, clientVersion: string): string {
+	return `${accountKey(baseUrl, apiKey)}:${clientVersion}`;
 }
 
 /**
@@ -77,7 +89,7 @@ export async function resolveCursorTransportMode(
 		throw new Error("Transport disposed");
 	}
 	ensureDisposerRegistered();
-	const key = configKey(opts.baseUrl, opts.apiKey);
+	const key = configKey(opts.baseUrl, opts.apiKey, resolveCursorClientVersion(opts.clientVersion));
 	let entry = configCache.get(key);
 	if (entry?.state.kind === "ready" && entry.state.retryAt !== undefined && entry.state.retryAt <= Date.now()) {
 		configCache.delete(key);
@@ -222,8 +234,10 @@ function raceFetchWithSignal(
  * Evict a cache entry on auth failure. Called before credential rotation.
  */
 export function evictServerConfig(baseUrl: string, apiKey: string): void {
-	const key = configKey(baseUrl, apiKey);
-	configCache.delete(key);
+	const prefix = `${accountKey(baseUrl, apiKey)}:`;
+	for (const key of Array.from(configCache.keys())) {
+		if (key.startsWith(prefix)) configCache.delete(key);
+	}
 }
 
 /**
@@ -252,16 +266,22 @@ export function __resetServerConfigCache(): void {
  * different endpoints/credentials are unaffected.
  */
 export function __evictServerConfigEntry(baseUrl: string, apiKey: string): void {
-	const key = configKey(baseUrl, apiKey);
-	const entry = configCache.get(key);
-	if (entry?.state.kind === "fetching") {
-		entry.state.controller.abort(new Error("Test evicted server config"));
+	const prefix = `${accountKey(baseUrl, apiKey)}:`;
+	for (const key of Array.from(configCache.keys())) {
+		if (!key.startsWith(prefix)) continue;
+		const entry = configCache.get(key);
+		if (entry?.state.kind === "fetching") {
+			entry.state.controller.abort(new Error("Test evicted server config"));
+		}
+		configCache.delete(key);
 	}
-	configCache.delete(key);
 }
 
 /** Test-only: make a transient neutral entry eligible for immediate retry. */
 export function __expireServerConfigEntry(baseUrl: string, apiKey: string): void {
-	const state = configCache.get(configKey(baseUrl, apiKey))?.state;
-	if (state?.kind === "ready" && state.retryAt !== undefined) state.retryAt = 0;
+	const prefix = `${accountKey(baseUrl, apiKey)}:`;
+	for (const [key, entry] of configCache) {
+		if (!key.startsWith(prefix)) continue;
+		if (entry.state.kind === "ready" && entry.state.retryAt !== undefined) entry.state.retryAt = 0;
+	}
 }

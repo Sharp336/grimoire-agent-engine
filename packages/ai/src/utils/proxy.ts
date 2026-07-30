@@ -197,7 +197,7 @@ export async function connectProxiedSocket(
 	proxyUrlStr: string,
 	targetUrlStr: string,
 	options?: ConnectProxiedSocketOptions,
-): Promise<tls.TLSSocket> {
+): Promise<net.Socket | tls.TLSSocket> {
 	if (options?.signal?.aborted) {
 		throw new AIError.AbortError("Proxy tunnel aborted");
 	}
@@ -212,7 +212,7 @@ export async function connectProxiedSocket(
 	const targetPort = targetUrl.port ? parseInt(targetUrl.port, 10) : targetUrl.protocol === "https:" ? 443 : 80;
 	const targetHost = targetUrl.hostname;
 
-	const { promise, resolve, reject } = Promise.withResolvers<tls.TLSSocket>();
+	const { promise, resolve, reject } = Promise.withResolvers<net.Socket | tls.TLSSocket>();
 
 	const readyEvent = useProxySsl ? "secureConnect" : "connect";
 	let rawSocket: net.Socket | undefined;
@@ -244,7 +244,7 @@ export async function connectProxiedSocket(
 		destroyInProgress();
 		reject(error);
 	};
-	const resolveOnce = (socket: tls.TLSSocket): void => {
+	const resolveOnce = (socket: net.Socket | tls.TLSSocket): void => {
 		if (settled) return;
 		settled = true;
 		cleanup();
@@ -296,7 +296,7 @@ export async function connectProxiedSocket(
 
 		if (targetUrl.protocol === "http:") {
 			rawSocket.resume();
-			resolveOnce(rawSocket as tls.TLSSocket);
+			resolveOnce(rawSocket);
 			return;
 		}
 
@@ -374,6 +374,7 @@ export function createProxiedAgent(
 			signal: options?.signal,
 			timeoutMs: options?.timeoutMs,
 			alpnProtocols: options?.alpnProtocols ?? ["http/1.1"],
+			ca: options?.ca,
 		}).then(
 			socket => callback(null, socket),
 			error => callback(error instanceof Error ? error : new Error(String(error))),

@@ -163,6 +163,51 @@ describe("Cursor HTTP/1 fallback selection", () => {
 		expect(requests).toBe(2);
 	});
 
+	it("re-discovers when the resolved client version changes for the same account", async () => {
+		let requests = 0;
+		const server = http.createServer(
+			connectNodeAdapter({
+				routes: router => {
+					router.service(ServerConfigService, {
+						getServerConfig: () => {
+							requests++;
+							return create(GetServerConfigResponseSchema, {
+								http2Config: Http2Config.FORCE_BIDI_DISABLED,
+							});
+						},
+					});
+				},
+			}),
+		);
+		servers.add(server);
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("Test server has no TCP address");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		const apiKey = "version-key";
+
+		// Default resolved version: caches after a single discovery.
+		expect((await resolveCursorTransportMode({ baseUrl, apiKey, provider: "cursor" })).mode).toBe("http1");
+		expect((await resolveCursorTransportMode({ baseUrl, apiKey, provider: "cursor" })).mode).toBe("http1");
+		expect(requests).toBe(1);
+
+		// A different resolved client version is a distinct cache key: it forces a fresh discovery
+		// instead of reusing the default-version entry.
+		expect(
+			(await resolveCursorTransportMode({ baseUrl, apiKey, provider: "cursor", clientVersion: "0.99.0-test" })).mode,
+		).toBe("http1");
+		expect(requests).toBe(2);
+
+		// The alt-version entry is itself cached for repeat calls.
+		expect(
+			(await resolveCursorTransportMode({ baseUrl, apiKey, provider: "cursor", clientVersion: "0.99.0-test" })).mode,
+		).toBe("http1");
+		expect(requests).toBe(2);
+	});
+
 	it("falls back to the HTTP/1 bridge when H2 setup is unavailable before dispatch", async () => {
 		if (await runFallbackTestInIsolatedProcess()) return;
 		const turnEnded = create(AgentServerMessageSchema, {
