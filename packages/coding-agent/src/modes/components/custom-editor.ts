@@ -861,19 +861,18 @@ export class CustomEditor extends Editor {
 			canonical !== undefined &&
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
+			const vimMode = this.getVimMode();
+			const acceptsClipboardPaste = vimMode === undefined || vimMode === "insert";
+
 			// Intercept configured image paste (async - fires and handles result)
-			if (
-				this.getVimMode() !== "normal" &&
-				this.#matchesAction(canonical, "app.clipboard.pasteImage") &&
-				this.onPasteImage
-			) {
+			if (acceptsClipboardPaste && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
 				void this.onPasteImage();
 				return;
 			}
 
 			// Intercept configured raw text paste (fires and handles result)
 			if (
-				this.getVimMode() !== "normal" &&
+				acceptsClipboardPaste &&
 				this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") &&
 				this.onPasteTextRaw
 			) {

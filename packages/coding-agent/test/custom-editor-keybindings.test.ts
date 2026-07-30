@@ -138,6 +138,13 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("\x1bp");
 		expect(onPasteImage).not.toHaveBeenCalled();
 
+		editor.setText("text");
+		editor.handleInput("v");
+		expect(editor.getVimMode()).toBe("visual");
+		editor.handleInput("\x1bp");
+		expect(onPasteImage).not.toHaveBeenCalled();
+		editor.handleInput("\x1b");
+
 		editor.handleInput("i");
 		editor.handleInput("\x1bp");
 		expect(onPasteImage).toHaveBeenCalledTimes(1);
@@ -186,6 +193,13 @@ describe("CustomEditor keybindings", () => {
 
 		editor.handleInput("\x1bt");
 		expect(onPasteTextRaw).not.toHaveBeenCalled();
+
+		editor.setText("text");
+		editor.handleInput("v");
+		expect(editor.getVimMode()).toBe("visual");
+		editor.handleInput("\x1bt");
+		expect(onPasteTextRaw).not.toHaveBeenCalled();
+		editor.handleInput("\x1b");
 
 		editor.handleInput("i");
 		editor.handleInput("\x1bt");
