@@ -36,6 +36,7 @@ import {
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
 	splitAssistantMessageToolTimeline,
+	userMessageDisplayText,
 } from "../utils/transcript-render-helpers";
 import { createAdvisorMessageCard } from "./advisor-message";
 import { AssistantMessageComponent } from "./assistant-message";
@@ -66,15 +67,6 @@ export interface ChatTranscriptBuilderDeps {
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	requestRender: () => void;
-}
-
-/** Extracts the plain-text content of a user message (string or text blocks). */
-function userMessageText(message: Extract<AgentMessage, { role: "user" }>): string {
-	if (typeof message.content === "string") return message.content;
-	return message.content
-		.filter((block): block is { type: "text"; text: string } => block.type === "text")
-		.map(block => block.text)
-		.join("");
 }
 
 export class ChatTranscriptBuilder {
@@ -230,7 +222,7 @@ export class ChatTranscriptBuilder {
 				// A user prompt closes the poll-displacement window, same as the live path.
 				if (message.role === "user") this.#resolveWaitingPoll();
 				if (message.role === "user") this.#resolveTodoSnapshot();
-				const textContent = message.role === "user" ? userMessageText(message) : "";
+				const textContent = message.role === "user" ? userMessageDisplayText(message) : "";
 				if (textContent) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					// Synthetic (agent-attributed) inputs — chiefly the advisor's `Session

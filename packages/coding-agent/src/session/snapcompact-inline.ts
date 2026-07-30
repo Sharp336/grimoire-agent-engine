@@ -148,7 +148,7 @@ export interface InlineToolResultCandidate {
 	textTokens: number;
 	/** Frames needed to render the text (0 = empty, below floor, image-carrying, or error). */
 	frames: number;
-	/** Already carries an image (screenshot etc.) — never re-imaged. */
+	/** Carries non-text media (image/audio/video) — never re-imaged: the swap rebuilds content from only the note + frames and would drop those blocks. */
 	hasImage: boolean;
 	/** Error tool results must stay text-only for provider API validation. */
 	isError?: boolean;
@@ -305,7 +305,9 @@ export function estimateInlineSavings(input: {
 			if (message.role !== "toolResult" || typeof message.toolCallId !== "string") continue;
 			if (message.isError) continue;
 			const blocks: BlockViews = Array.isArray(message.content) ? (message.content as BlockViews) : [];
-			const hasImage = blocks.some(block => block.type === "image");
+			const hasImage = blocks.some(
+				block => block.type === "image" || block.type === "audio" || block.type === "video",
+			);
 			const text = hasImage
 				? ""
 				: blocks
@@ -443,8 +445,11 @@ export class SnapcompactInlineTransformer {
 				const message = messages[i];
 				if (message.role !== "toolResult") continue;
 				liveToolCallIds.add(message.toolCallId);
-				// Don't re-image results that already carry images (screenshots etc.).
-				const hasImage = message.content.some(block => block.type === "image");
+				// Don't re-image results carrying media (image/audio/video): the
+				// swap rebuilds content from only the note + frames and would drop it.
+				const hasImage = message.content.some(
+					block => block.type === "image" || block.type === "audio" || block.type === "video",
+				);
 				if (message.isError) continue;
 				const text = hasImage
 					? ""
