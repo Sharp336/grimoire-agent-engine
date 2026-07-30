@@ -1,27 +1,31 @@
-import { expect, type Mock, test, vi } from "bun:test";
+import { afterAll, expect, type Mock, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-
-// The config singleton resolves its default path at module initialization, so
-// load the login modules only after this test's agent directory is isolated.
-const { ModelsConfigFile } = await import("../src/config/models-config");
-const { ModelRegistry } = await import("../src/config/model-registry");
-const { AuthStorage } = await import("../src/session/auth-storage");
-const {
+import { ModelRegistry } from "../src/config/model-registry";
+import { ModelsConfigFile } from "../src/config/models-config";
+import {
 	normalizeOpenAICompatibleBaseUrl,
 	OPENAI_COMPATIBLE_API_IDS,
 	probeOpenAICompatibleEndpoint,
 	validateOpenAICompatibleApi,
 	validateOpenAICompatibleProviderName,
 	writeOpenAICompatibleProvider,
-} = await import("../src/config/openai-compatible-login");
+} from "../src/config/openai-compatible-login";
+import { LoginDialogComponent } from "../src/modes/components/login-dialog";
+import { SelectorController } from "../src/modes/controllers/selector-controller";
+import { initTheme } from "../src/modes/theme/theme";
+import { AuthStorage } from "../src/session/auth-storage";
+import {
+	openAICompatibleLoginAgentDir,
+	restoreOpenAICompatibleLoginAgentDir,
+} from "./fixtures/openai-compatible-login-agent-dir";
 
-const { LoginDialogComponent } = await import("../src/modes/components/login-dialog");
-const { SelectorController } = await import("../src/modes/controllers/selector-controller");
-const { initTheme } = await import("../src/modes/theme/theme");
-
+restoreOpenAICompatibleLoginAgentDir();
+afterAll(async () => {
+	await openAICompatibleLoginAgentDir.remove().catch(() => {});
+});
 await initTheme();
 
 test("writes a schema-valid dynamically discovered OpenAI-compatible provider and updates it on re-login", async () => {
@@ -155,6 +159,10 @@ test("cancels an atomic compatible-provider write before rename and removes its 
 
 test("rejects built-in provider names, malformed compatible endpoint URLs, and unsupported APIs", () => {
 	expect(() => validateOpenAICompatibleProviderName("OpenAI")).toThrow('Provider name "OpenAI" is built in');
+	expect(() => validateOpenAICompatibleProviderName("team/proxy")).toThrow("must not contain forward or back slashes");
+	expect(() => validateOpenAICompatibleProviderName("team\\proxy")).toThrow(
+		"must not contain forward or back slashes",
+	);
 	expect(() => normalizeOpenAICompatibleBaseUrl("not a URL")).toThrow("well-formed absolute http(s) URL");
 	expect(validateOpenAICompatibleApi("")).toBe("openai-completions");
 	expect(validateOpenAICompatibleApi("openai-responses")).toBe("openai-responses");
@@ -303,6 +311,14 @@ test("passes cancellation into the bounded endpoint probe", async () => {
 	expect(result.ok).toBe(false);
 });
 
+test("sanitizes endpoint response bodies before returning probe errors", async () => {
+	const result = await probeOpenAICompatibleEndpoint(
+		{ baseUrl: "https://models.example.test", apiKey: "sk-test" },
+		async () => new Response("\x1b]52;c;clipboard\x07\x1b[31mnot available\x1b[0m", { status: 503 }),
+	);
+	expect(result).toEqual({ ok: false, error: "GET /models failed (503): not available" });
+});
+
 test("stores inline keys in the scoped field and removes incompatible retained transport", async () => {
 	const tempDir = TempDir.createSync("@openai-compatible-literal-");
 	const modelsPath = path.join(tempDir.path(), "models.yml");
@@ -327,6 +343,66 @@ test("stores inline keys in the scoped field and removes incompatible retained t
 	}
 });
 
+test("updates custom providers case-insensitively without dropping manual models", async () => {
+	const tempDir = TempDir.createSync("@openai-compatible-preserve-models-");
+	const modelsPath = path.join(tempDir.path(), "models.yml");
+	try {
+		await fs.writeFile(
+			modelsPath,
+			YAML.stringify({
+				providers: {
+					TeamProxy: {
+						baseUrl: "https://old.example.test/v1",
+						apiKey: "old-key",
+						api: "openai-completions",
+						models: [{ id: "hand-tuned", contextWindow: 32_768 }],
+					},
+				},
+			}),
+		);
+		const savedProviderName = await writeOpenAICompatibleProvider(
+			{ providerName: "teamproxy", baseUrl: "https://new.example.test", apiKey: "new-key" },
+			modelsPath,
+		);
+		const providers = (
+			YAML.parse(await fs.readFile(modelsPath, "utf-8")) as {
+				providers: Record<string, { baseUrl: string; models: unknown[] }>;
+			}
+		).providers;
+		expect(savedProviderName).toBe("TeamProxy");
+		expect(Object.keys(providers)).toEqual(["TeamProxy"]);
+		expect(providers.TeamProxy).toMatchObject({
+			baseUrl: "https://new.example.test/v1",
+			models: [{ id: "hand-tuned", contextWindow: 32_768 }],
+		});
+	} finally {
+		await tempDir.remove().catch(() => {});
+	}
+});
+
+test("rejects an update when complete models configuration validation fails", async () => {
+	const tempDir = TempDir.createSync("@openai-compatible-validation-");
+	const modelsPath = path.join(tempDir.path(), "models.yml");
+	try {
+		await fs.writeFile(
+			modelsPath,
+			YAML.stringify({
+				providers: {
+					broken: { baseUrl: "https://broken.example.test/v1", apiKey: "key", models: [{ id: "missing-api" }] },
+				},
+			}),
+		);
+		await expect(
+			writeOpenAICompatibleProvider(
+				{ providerName: "new", baseUrl: "https://new.example.test", apiKey: "new-key" },
+				modelsPath,
+			),
+		).rejects.toThrow('Provider broken, model missing-api: no "api" specified');
+	} finally {
+		await tempDir.remove().catch(() => {});
+	}
+});
+
 test("migrates legacy models.json before updating models.yml and preserves a symlink", async () => {
 	const tempDir = TempDir.createSync("@openai-compatible-migration-");
 	const jsonPath = path.join(tempDir.path(), "models.json");
@@ -343,6 +419,7 @@ test("migrates legacy models.json before updating models.yml and preserves a sym
 		).toEqual(["legacy", "new"]);
 		await fs.rename(modelsPath, targetPath);
 		await fs.symlink(targetPath, modelsPath);
+		await fs.unlink(targetPath);
 		await writeOpenAICompatibleProvider(
 			{ providerName: "newer", baseUrl: "https://newer.example.test", apiKey: "newer-key" },
 			modelsPath,
@@ -368,6 +445,7 @@ test("masks each API-key prompt and keeps the shared input below the active ques
 		.render(120)
 		.map(line => Bun.stripANSI(line))
 		.join("\n");
+	expect(rendered).not.toContain("First question");
 	expect(rendered).toContain("API key:");
 	expect(rendered).toContain("••••••");
 	expect(rendered.indexOf("API key:")).toBeLessThan(rendered.indexOf("••••••"));
@@ -378,17 +456,18 @@ test("Escape during probe aborts login flow without mounting retry selector", as
 	const harness = createCompatibleLoginHarness();
 
 	const blockingFetch: typeof fetch = Object.assign(
-		(_url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) =>
-			new Promise<Response>((_resolve, reject) => {
-				const signal = options?.signal;
-				if (signal?.aborted) {
-					reject(new DOMException("aborted", "AbortError"));
-					return;
-				}
+		(_url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
+			const { promise, reject } = Promise.withResolvers<Response>();
+			const signal = options?.signal;
+			if (signal?.aborted) {
+				reject(new DOMException("aborted", "AbortError"));
+			} else {
 				signal?.addEventListener("abort", () => {
 					reject(new DOMException("aborted", "AbortError"));
 				});
-			}),
+			}
+			return promise;
+		},
 		{ preconnect: (_url: string | URL): void => {} },
 	);
 	const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(blockingFetch);

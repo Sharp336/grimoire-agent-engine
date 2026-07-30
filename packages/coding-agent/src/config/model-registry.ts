@@ -895,6 +895,11 @@ export class ModelRegistry {
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
 
+	/** Force the next refresh to reload static models even on coarse-mtime filesystems. */
+	invalidateModelsConfig(): void {
+		this.#lastStaticLoadMtime = null;
+	}
+
 	refreshInBackground(strategy: ModelRefreshStrategy = "online-if-uncached"): void {
 		if (this.#backgroundRefresh) {
 			return;

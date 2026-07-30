@@ -21,6 +21,7 @@ export interface ProviderValidationConfig {
 	baseUrl?: string;
 	headers?: Record<string, string>;
 	apiKey?: string;
+	openaiCompatibleApiKey?: string;
 	api?: Api;
 	auth?: ProviderAuthMode;
 	oauthConfigured?: boolean;
@@ -48,6 +49,7 @@ export function validateProviderConfiguration(
 				!config.headers &&
 				!config.compat &&
 				!config.apiKey &&
+				!config.openaiCompatibleApiKey &&
 				config.auth !== "none" &&
 				!config.disableStrictTools &&
 				!config.remoteCompaction &&
@@ -65,8 +67,8 @@ export function validateProviderConfiguration(
 		}
 		const requiresAuth =
 			mode === "runtime-register"
-				? !config.apiKey && !config.oauthConfigured
-				: !config.apiKey && (config.auth ?? "apiKey") !== "none";
+				? !config.apiKey && !config.openaiCompatibleApiKey && !config.oauthConfigured
+				: !config.apiKey && !config.openaiCompatibleApiKey && (config.auth ?? "apiKey") !== "none";
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"
@@ -102,10 +104,7 @@ export function validateProviderConfiguration(
 	}
 }
 
-export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
-	kind: "deferred",
-	resolve: getModelsConfigSchema,
-}).withValidation("models", config => {
+export function validateModelsConfig(config: ModelsConfig): void {
 	const providers = config.providers ?? {};
 	for (const providerName in providers) {
 		const providerConfig = providers[providerName];
@@ -115,6 +114,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 				baseUrl: providerConfig.baseUrl,
 				headers: providerConfig.headers,
 				apiKey: providerConfig.apiKey,
+				openaiCompatibleApiKey: providerConfig.openaiCompatibleApiKey,
 				api: providerConfig.api as Api | undefined,
 				auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
 				discovery: providerConfig.discovery as ProviderDiscovery | undefined,
@@ -127,4 +127,9 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 			"models-config",
 		);
 	}
-});
+}
+
+export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
+	kind: "deferred",
+	resolve: getModelsConfigSchema,
+}).withValidation("models", validateModelsConfig);

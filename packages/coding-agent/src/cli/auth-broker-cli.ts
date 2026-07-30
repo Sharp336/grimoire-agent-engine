@@ -297,11 +297,11 @@ async function runOpenAICompatibleLocalLogin(): Promise<void> {
 			if (action.toLowerCase() === "save") break;
 		}
 
-		await writeOpenAICompatibleProvider({ providerName, baseUrl, apiKey, api });
+		const savedProviderName = await writeOpenAICompatibleProvider({ providerName, baseUrl, apiKey, api });
 		process.stdout.write(
 			modelCount === undefined
-				? `Added ${providerName} to models.yml. Dynamic discovery will retry /models at runtime.\n`
-				: `Added ${providerName} to models.yml. Probe found ${modelCount} models; dynamic discovery will keep them current.\n`,
+				? `Added ${savedProviderName} to models.yml. Dynamic discovery will retry /models at runtime.\n`
+				: `Added ${savedProviderName} to models.yml. Probe found ${modelCount} models; dynamic discovery will keep them current.\n`,
 		);
 	} finally {
 		rl.close();
@@ -322,20 +322,21 @@ function promptLine(rl: readline.Interface, question: string, options: { secret?
 	if (options.secret && supportsRawMode) {
 		let value = "";
 		const onData = (data: Buffer | string) => {
-			const chunk = data.toString();
-			if (chunk === "\u0003" || chunk === "\u0004" || chunk === "\u001b") {
-				finish(() => reject(new Error("Login cancelled")));
-				return;
+			for (const character of data.toString()) {
+				if (character === "\u0003" || character === "\u0004" || character === "\u001b") {
+					finish(() => reject(new Error("Login cancelled")));
+					return;
+				}
+				if (character === "\r" || character === "\n") {
+					finish(() => resolve(value));
+					return;
+				}
+				if (character === "\u007f" || character === "\b") {
+					value = value.slice(0, -1);
+					continue;
+				}
+				if (!/[\u0000-\u001f\u007f]/.test(character)) value += character;
 			}
-			if (chunk === "\r" || chunk === "\n") {
-				finish(() => resolve(value));
-				return;
-			}
-			if (chunk === "\u007f" || chunk === "\b") {
-				value = value.slice(0, -1);
-				return;
-			}
-			value += chunk.replace(/[\u0000-\u001f\u007f]/g, "");
 		};
 		const cleanupSecret = () => {
 			input.off("data", onData);

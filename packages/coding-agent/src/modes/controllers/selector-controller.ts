@@ -1574,6 +1574,7 @@ export class SelectorController {
 		this.ctx.ui.setFocus(dialog);
 		this.ctx.ui.requestRender();
 
+		let writeCompleted = false;
 		try {
 			const providerName = validateOpenAICompatibleProviderName(
 				await dialog.showPrompt("Provider name (models.yml key):", "my-openai-proxy"),
@@ -1609,28 +1610,32 @@ export class SelectorController {
 				if (action === "Cancel") return false;
 			}
 
-			await writeOpenAICompatibleProvider({ providerName, baseUrl, apiKey, api }, undefined, dialog.signal);
 			if (dialog.signal.aborted) return false;
-			await this.ctx.session.modelRegistry.refreshProvider(providerName, "online");
-			if (dialog.signal.aborted) return false;
+			const savedProviderName = await writeOpenAICompatibleProvider(
+				{ providerName, baseUrl, apiKey, api },
+				undefined,
+				dialog.signal,
+			);
+			writeCompleted = true;
+			this.ctx.session.modelRegistry.invalidateModelsConfig();
+			await this.ctx.session.modelRegistry.refreshProvider(savedProviderName, "online");
 			const block = new TranscriptBlock();
 			block.addChild(
 				new Text(
 					theme.fg(
 						"success",
 						modelCount === undefined
-							? `${theme.status.success} Added ${providerName} to models.yml; dynamic discovery will retry /models at runtime`
-							: `${theme.status.success} Added ${providerName} to models.yml; probe found ${modelCount} models and dynamic discovery will keep them current`,
+							? `${theme.status.success} Added ${savedProviderName} to models.yml; dynamic discovery will retry /models at runtime`
+							: `${theme.status.success} Added ${savedProviderName} to models.yml; probe found ${modelCount} models and dynamic discovery will keep them current`,
 					),
 					1,
 					0,
 				),
 			);
-			if (dialog.signal.aborted) return false;
 			this.ctx.present(block);
 			return true;
 		} catch (error: unknown) {
-			if (dialog.signal.aborted) return false;
+			if (dialog.signal.aborted && !writeCompleted) return false;
 			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
 			return false;
 		} finally {

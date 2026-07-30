@@ -1,5 +1,14 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { Container, getKeybindings, Input, Spacer, Text, type TUI, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	getKeybindings,
+	Input,
+	Spacer,
+	Text,
+	type TUI,
+	wrapTextWithAnsi,
+} from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
 import { openPath } from "../../utils/open";
@@ -17,6 +26,7 @@ export class LoginDialogComponent extends Container {
 	#inputResolver?: (value: string) => void;
 	#inputRejecter?: (error: Error) => void;
 	#selector?: HookSelectorComponent;
+	#promptContent: Component[] = [];
 
 	constructor(
 		tui: TUI,
@@ -88,6 +98,7 @@ export class LoginDialogComponent extends Container {
 	 */
 	showAuth(url: string, instructions?: string, launchUrl?: string): void {
 		this.#contentContainer.clear();
+		this.#promptContent = [];
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(
 			new WidthAwareText(
@@ -146,20 +157,24 @@ export class LoginDialogComponent extends Container {
 	}
 
 	/**
-	 * Called by onPrompt callback - show prompt and wait for input
-	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
+	 * Called by onPrompt callback - show prompt and wait for input.
+	 * Retains authorization content while replacing the previous prompt's controls.
 	 */
 	showPrompt(message: string, placeholder?: string, options?: { secret?: boolean }): Promise<string> {
 		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
 		this.#input.mask = options?.secret === true;
-		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
-		if (placeholder) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0));
-		}
+		for (const child of this.#promptContent) this.#contentContainer.removeChild(child);
+		this.#promptContent = [];
 		if (this.#contentContainer.children.includes(this.#input)) this.#contentContainer.removeChild(this.#input);
+
+		const spacer = new Spacer(1);
+		const prompt = new Text(theme.fg("text", message), 1, 0);
+		const placeholderHint = placeholder ? new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0) : undefined;
+		const submitHint = new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 1, 0);
+		this.#promptContent = [spacer, prompt, ...(placeholderHint ? [placeholderHint] : []), submitHint];
+		for (const child of this.#promptContent.slice(0, -1)) this.#contentContainer.addChild(child);
 		this.#contentContainer.addChild(this.#input);
-		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 1, 0));
+		this.#contentContainer.addChild(submitHint);
 
 		this.#input.setValue("");
 		this.#tui.requestRender();
@@ -173,8 +188,9 @@ export class LoginDialogComponent extends Container {
 	/** Show a keyboard-navigable selection prompt inside the active login dialog. */
 	showSelect(message: string, options: string[], initialIndex?: number): Promise<string> {
 		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
+		for (const child of this.#promptContent) this.#contentContainer.removeChild(child);
+		this.#promptContent = [];
 		if (this.#contentContainer.children.includes(this.#input)) this.#contentContainer.removeChild(this.#input);
-
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		const selector = new HookSelectorComponent(
 			message,

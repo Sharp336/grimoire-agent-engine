@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type FetchImpl, PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
-import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { withTimeoutSignal } from "../utils/fetch-timeout";
 import { withFileLock } from "./file-lock";
 import { normalizeOpenAIModelsListBaseUrl } from "./model-discovery";
-import { ModelsConfigFile } from "./models-config";
+import { ModelsConfigFile, validateModelsConfig } from "./models-config";
 import type { ModelsConfig } from "./models-config-schema";
 import { MODELS_CONFIG_API_IDS } from "./models-config-schema-bundle";
 import { OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD } from "./openai-compatible-api-key";
@@ -25,7 +25,7 @@ export interface OpenAICompatibleEndpoint {
 export type OpenAICompatibleProbeResult = { ok: true; models: string[] } | { ok: false; error: string };
 
 function formatResponseBody(body: string): string {
-	const trimmed = body.trim();
+	const trimmed = sanitizeText(body).trim();
 	if (!trimmed) return "(empty response body)";
 	return trimmed.length <= 2_000 ? trimmed : `${trimmed.slice(0, 2_000)}…`;
 }
@@ -52,6 +52,9 @@ export function normalizeOpenAICompatibleBaseUrl(value: string): string {
 export function validateOpenAICompatibleProviderName(value: string): string {
 	const providerName = value.trim();
 	if (!providerName) throw new Error("Provider name is required.");
+	if (/[\\/]/.test(providerName)) {
+		throw new Error("Provider name must not contain forward or back slashes.");
+	}
 	if (PROVIDER_REGISTRY.some(provider => provider.id.toLowerCase() === providerName.toLowerCase())) {
 		throw new Error(`Provider name "${providerName}" is built in. Choose a different name.`);
 	}
@@ -118,7 +121,7 @@ export async function probeOpenAICompatibleEndpoint(
 async function readModelsConfigForWrite(filePath: string): Promise<Record<string, unknown>> {
 	let content: string;
 	try {
-		content = await fs.readFile(filePath, "utf-8");
+		content = await Bun.file(filePath).text();
 	} catch (error) {
 		if (isEnoent(error)) return {};
 		throw error;
@@ -138,6 +141,20 @@ async function readModelsConfigForWrite(filePath: string): Promise<Record<string
 	return parsed;
 }
 
+async function resolveModelsConfigWritePath(filePath: string): Promise<string> {
+	try {
+		return await fs.realpath(filePath);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	const stat = await fs.lstat(filePath).catch(error => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	if (!stat?.isSymbolicLink()) return filePath;
+	return path.resolve(path.dirname(filePath), await fs.readlink(filePath));
+}
+
 async function writeModelsConfigAtomically(
 	filePath: string,
 	config: ModelsConfig,
@@ -145,10 +162,8 @@ async function writeModelsConfigAtomically(
 	apiKey: string,
 	signal?: AbortSignal,
 ): Promise<void> {
-	const resolvedPath = await fs.realpath(filePath).catch(error => {
-		if (isEnoent(error)) return filePath;
-		throw error;
-	});
+	const resolvedPath = await resolveModelsConfigWritePath(filePath);
+	await fs.mkdir(path.dirname(resolvedPath), { recursive: true, mode: 0o700 });
 	const tempPath = `${resolvedPath}.${process.pid}.${randomUUID()}.tmp`;
 	const apiKeyMarker = `__OMP_OPENAI_COMPAT_API_KEY_${randomUUID()}__`;
 	const serialized = YAML.stringify(
@@ -183,24 +198,33 @@ async function writeModelsConfigAtomically(
  */
 export async function writeOpenAICompatibleProvider(
 	endpoint: OpenAICompatibleEndpoint & { api?: string },
-	modelsPath: string = ModelsConfigFile.path(),
+	modelsPath?: string,
 	signal?: AbortSignal,
-): Promise<void> {
+): Promise<string> {
 	const providerName = validateOpenAICompatibleProviderName(endpoint.providerName);
 	const baseUrl = normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl);
 	const apiKey = endpoint.apiKey.trim();
 	if (!apiKey) throw new Error("API key is required.");
 	const api = validateOpenAICompatibleApi(endpoint.api);
-	await fs.mkdir(path.dirname(modelsPath), { recursive: true, mode: 0o700 });
-	await withFileLock(modelsPath, async () => {
+	const configFile = ModelsConfigFile.relocate(modelsPath);
+	configFile.invalidate();
+	const existingConfig = configFile.tryLoad();
+	if (existingConfig.status === "error") {
+		throw new Error(
+			`Cannot update ${configFile.path()}: the existing models.yml is invalid: ${existingConfig.error.message}`,
+		);
+	}
+	const resolvedModelsPath = configFile.path();
+	await fs.mkdir(path.dirname(resolvedModelsPath), { recursive: true, mode: 0o700 });
+	return await withFileLock(resolvedModelsPath, async () => {
 		signal?.throwIfAborted();
-		ModelsConfigFile.relocate(modelsPath).load();
-		const current = await readModelsConfigForWrite(modelsPath);
+		const current = await readModelsConfigForWrite(resolvedModelsPath);
 		const providers = isRecord(current.providers) ? current.providers : {};
-		const existing = isRecord(providers[providerName]) ? providers[providerName] : {};
+		const storedProviderName = Object.keys(providers).find(name => name.toLowerCase() === providerName.toLowerCase());
+		const savedProviderName = storedProviderName ?? providerName;
+		const existing = isRecord(providers[savedProviderName]) ? providers[savedProviderName] : {};
 		const {
 			auth: _auth,
-			models: _models,
 			transport: _transport,
 			apiKey: _apiKey,
 			[OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD]: _openAICompatibleApiKey,
@@ -210,7 +234,7 @@ export async function writeOpenAICompatibleProvider(
 			...current,
 			providers: {
 				...providers,
-				[providerName]: {
+				[savedProviderName]: {
 					...preservedProviderFields,
 					baseUrl,
 					[OPENAI_COMPATIBLE_LITERAL_API_KEY_FIELD]: apiKey,
@@ -222,8 +246,26 @@ export async function writeOpenAICompatibleProvider(
 		};
 		const validated = ModelsConfigFile.schema(candidate);
 		if (validated instanceof Error) {
-			throw new Error(`Cannot update ${modelsPath}: the resulting models.yml is invalid: ${validated.message}`);
+			throw new Error(
+				`Cannot update ${resolvedModelsPath}: the resulting models.yml is invalid: ${validated.message}`,
+			);
 		}
-		await writeModelsConfigAtomically(modelsPath, validated as ModelsConfig, providerName, apiKey, signal);
+		try {
+			validateModelsConfig(validated as ModelsConfig);
+		} catch (error) {
+			throw new Error(
+				`Cannot update ${resolvedModelsPath}: the resulting models.yml is invalid: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+		await writeModelsConfigAtomically(
+			resolvedModelsPath,
+			validated as ModelsConfig,
+			savedProviderName,
+			apiKey,
+			signal,
+		);
+		return savedProviderName;
 	});
 }
