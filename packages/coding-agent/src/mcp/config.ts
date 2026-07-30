@@ -211,10 +211,23 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		// upstream one generated.
 		const resolved = new Map<string, MCPServer>();
 		for (const server of extraServers) resolved.set(server.name, server);
-		servers = [
-			...[...resolved.values()].filter(server => !suppressServer(server)),
-			...servers.filter(server => !resolved.has(server.name)),
-		];
+
+		const kept: MCPServer[] = [];
+		const claimed = new Set<string>();
+		for (const server of resolved.values()) {
+			// An `enabled: false` entry is a tombstone: it carries no transport, so
+			// it never becomes a config in its own right — it only takes the
+			// same-named discovered server down with it. The user's force-enable
+			// list overrides it, and then it has to yield the name back to
+			// discovery, the only source holding a real definition for it.
+			// Otherwise the tombstone would survive as a blank stdio config and
+			// fail to connect, which is neither what the file nor the allowlist
+			// asked for.
+			if (server.enabled === false && forcedEnabled.has(server.name)) continue;
+			claimed.add(server.name);
+			if (!suppressServer(server)) kept.push(server);
+		}
+		servers = [...kept, ...servers.filter(server => !claimed.has(server.name))];
 	}
 
 	// Convert to legacy format and preserve source metadata.

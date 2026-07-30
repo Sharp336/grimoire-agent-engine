@@ -173,6 +173,78 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		});
 	});
 
+	// `enabledServers` is the user-level allowlist that overrides a source
+	// config's `enabled: false` (what `/mcp enable` writes for a server the user
+	// does not own). An explicit tombstone carries no transport, so it must never
+	// survive as a config of its own when the allowlist keeps it from suppressing.
+	describe("force-enable vs an explicit enabled: false entry", () => {
+		const forceEnable = async (...names: string[]) => {
+			const userConfigPath = path.join(tempHome, ".omp", "agent", "mcp.json");
+			await fs.mkdir(path.dirname(userConfigPath), { recursive: true });
+			await fs.writeFile(userConfigPath, JSON.stringify({ enabledServers: names }));
+			clearFsCache();
+		};
+
+		test("a force-enabled name falls back to the discovered definition", async () => {
+			await fs.writeFile(
+				path.join(projectDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { shared: { command: "discovered-server" } } }),
+			);
+			const tombstonePath = path.join(projectDir, "tombstone.json");
+			await fs.writeFile(tombstonePath, JSON.stringify({ mcpServers: { shared: { enabled: false } } }));
+			await forceEnable("shared");
+
+			const { configs, sources } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [tombstonePath] });
+
+			// Not a blank stdio config synthesized from the tombstone.
+			expect(configs.shared).toMatchObject({ type: "stdio", command: "discovered-server" });
+			expect(sources.shared.provider).toBe("mcp-json");
+		});
+
+		test("a force-enabled tombstone with nothing to fall back to yields no server", async () => {
+			const tombstonePath = path.join(projectDir, "tombstone.json");
+			await fs.writeFile(tombstonePath, JSON.stringify({ mcpServers: { orphan: { enabled: false } } }));
+			await forceEnable("orphan");
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [tombstonePath] });
+
+			expect(configs.orphan).toBeUndefined();
+		});
+
+		test("the denylist still wins over a force-enabled name", async () => {
+			await fs.writeFile(
+				path.join(projectDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { shared: { command: "discovered-server" } } }),
+			);
+			const userConfigPath = path.join(tempHome, ".omp", "agent", "mcp.json");
+			await fs.mkdir(path.dirname(userConfigPath), { recursive: true });
+			await fs.writeFile(
+				userConfigPath,
+				JSON.stringify({ enabledServers: ["shared"], disabledServers: ["shared"] }),
+			);
+			clearFsCache();
+			const tombstonePath = path.join(projectDir, "tombstone.json");
+			await fs.writeFile(tombstonePath, JSON.stringify({ mcpServers: { shared: { enabled: false } } }));
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [tombstonePath] });
+
+			expect(configs.shared).toBeUndefined();
+		});
+
+		test("without force-enable the tombstone still disables the discovered server", async () => {
+			await fs.writeFile(
+				path.join(projectDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { shared: { command: "discovered-server" } } }),
+			);
+			const tombstonePath = path.join(projectDir, "tombstone.json");
+			await fs.writeFile(tombstonePath, JSON.stringify({ mcpServers: { shared: { enabled: false } } }));
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [tombstonePath] });
+
+			expect(configs.shared).toBeUndefined();
+		});
+	});
+
 	test("missing extra config file is a hard error", async () => {
 		await expect(
 			loadAllMCPConfigs(projectDir, { extraConfigPaths: [path.join(projectDir, "does-not-exist.json")] }),

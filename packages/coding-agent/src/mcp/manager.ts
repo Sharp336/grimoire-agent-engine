@@ -812,6 +812,18 @@ export class MCPManager {
 	}
 
 	/**
+	 * Explicit MCP config files (`--mcp-config`) this manager was started with.
+	 *
+	 * Callers that reload configs outside {@link discoverAndConnect} — `/mcp
+	 * enable` re-reads them to find the server it just took off the denylist —
+	 * have to pass these back, or a server defined only in an explicit file is
+	 * invisible to the reload and silently never reconnects.
+	 */
+	getExtraConfigPaths(): string[] | undefined {
+		return this.#extraConfigPaths;
+	}
+
+	/**
 	 * Get the preserved (pre-auth) config for a known server — whether currently
 	 * connected or merely discovered (a connect was attempted but may have failed,
 	 * e.g. an OAuth server that has not been authorized yet). Mirrors the
