@@ -1775,6 +1775,9 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePathTrusted).toBe(false);
 		expect(result.warning).toContain("changed after verification");
 		expect(result.manualNextStep).not.toContain("Retain verified backup");
+		const backupChecksums = result.checksums.filter(checksum => checksum.path === result.backup);
+		expect(backupChecksums).toHaveLength(0);
+		expect(result.checksums.some(checksum => checksum.path === result.candidate)).toBe(true);
 	});
 
 	test("primary refusal and cleanup invariant failures retain both causes in deterministic order", async () => {

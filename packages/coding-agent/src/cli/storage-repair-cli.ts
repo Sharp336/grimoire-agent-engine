@@ -273,6 +273,7 @@ export async function runStorageRepair(
 			}
 		} catch (error) {
 			result.backupVerified = false;
+			result.checksums = result.checksums.filter(checksum => checksum.path !== result.backup);
 			cleanupErrors.push(error);
 		}
 		if (result.candidatePublished && result.status === "ready" && cleanupErrors.length === 0) {
