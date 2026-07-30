@@ -497,6 +497,14 @@ export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 export function providerImageBudget(provider: string | undefined): number {
 	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
+/**
+ * Aggregate decoded-image byte budget for a single provider request. Above
+ * this, provider backends accept the HTTP body but fail mid-stream with opaque
+ * 5xx errors; the coding-agent clamps its throwaway provider view to it. Kept
+ * beside the per-provider count budgets so every provider-image limit lives in
+ * one place.
+ */
+export const PROVIDER_IMAGE_BYTES_BUDGET = 24 * 1024 * 1024;
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */
 export const PRESERVE_KEY = "snapcompact";

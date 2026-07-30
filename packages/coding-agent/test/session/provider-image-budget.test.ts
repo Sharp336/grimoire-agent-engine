@@ -171,6 +171,12 @@ function imageOfDecodedBytes(decodedBytes: number): ImageContent {
 	return { type: "image", data: "A".repeat(len), mimeType: "image/png" };
 }
 
+/** Create a `data:<mime>;base64,<payload>` URL whose decoded byte size (accounting for padding) equals `decodedBytes`. */
+function dataUrlOfDecodedBytes(decodedBytes: number): string {
+	const len = Math.ceil((decodedBytes * 4) / 3);
+	return `data:image/png;base64,${"A".repeat(len)}`;
+}
+
 const MIB = 1024 * 1024;
 
 describe("transport image byte budget", () => {
@@ -216,10 +222,12 @@ describe("transport image byte budget", () => {
 		expect(textData(result)).toContain("msg-2");
 	});
 
-	it("counts assistant image bytes toward the budget but never elides them", () => {
-		// user 5 MiB (oldest) + assistant 10 MiB + user 10 MiB (newest) = 25 MiB > 24 MiB.
-		// Without the assistant bytes the total (15 MiB) would fit; with them the
-		// oldest droppable image must be elided, while the assistant image stays.
+	it("excludes assistant image bytes from the transport byte budget", () => {
+		// user 5 MiB (oldest) + assistant 20 MiB + user 10 MiB (newest).
+		// Assistant image blocks are never re-serialized by the provider, so their
+		// bytes must not count: only the 15 MiB of real user images is budgeted,
+		// which fits under 24 MiB and elides nothing. (Counting the assistant
+		// bytes would total 35 MiB and wrongly elide the oldest user image.)
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
@@ -227,7 +235,7 @@ describe("transport image byte budget", () => {
 				{ role: "user", content: [imageOfDecodedBytes(5 * MIB)], timestamp: 0 },
 				{
 					role: "assistant",
-					content: [imageOfDecodedBytes(10 * MIB)],
+					content: [imageOfDecodedBytes(20 * MIB)],
 					timestamp: 1,
 					stopReason: "stop",
 					api: "anthropic-messages",
@@ -247,15 +255,9 @@ describe("transport image byte budget", () => {
 		};
 
 		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
-
-		const first = result.messages[0];
-		expect(first?.role).toBe("user");
-		if (first?.role === "user") {
-			expect(first.content).toEqual([{ type: "text", text: "[image omitted: transport image budget]" }]);
-		}
-		// Assistant message untouched; newest user image retained.
-		expect(result.messages[1]).toBe(context.messages[1]);
-		expect(imageData(result).length).toBe(2);
+		// Nothing elided: assistant bytes are excluded, so the user images fit.
+		expect(result).toBe(context);
+		expect(imageData(result).length).toBe(3);
 	});
 
 	it("composes count cap and byte cap", () => {
@@ -386,5 +388,128 @@ describe("transport image byte budget", () => {
 			expect(first.content).toEqual([{ type: "text", text: "[image omitted: transport image budget]" }]);
 		}
 		expect(imageData(result).length).toBe(1);
+	});
+	it("elides native computer screenshots under the byte budget", () => {
+		// A computer tool result carries its image in providerMetadata.screenshot,
+		// which the Responses serializer uploads directly as computer_call_output
+		// (content is never consulted). The screenshot must count and be elided.
+		const big = dataUrlOfDecodedBytes(20 * MIB);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call-0",
+					toolName: "computer",
+					content: [],
+					isError: false,
+					timestamp: 0,
+					providerMetadata: {
+						type: "computer",
+						screenshot: { type: "computer_screenshot", image_url: big },
+						acknowledgedSafetyChecks: [],
+					},
+				},
+				{ role: "user", content: [imageOfDecodedBytes(10 * MIB)], timestamp: 1 },
+			],
+		};
+		// 20 MiB screenshot + 10 MiB user image = 30 MiB > 24 MiB → screenshot elided.
+
+		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const first = result.messages[0];
+		expect(first?.role).toBe("toolResult");
+		if (first?.role === "toolResult" && first.providerMetadata?.type === "computer") {
+			const screenshot = first.providerMetadata.screenshot;
+			expect(typeof screenshot.image_url === "string" && screenshot.image_url).not.toBe(big);
+			// Collapsed to a tiny placeholder, shedding the original payload bytes.
+			if (typeof screenshot.image_url === "string") {
+				expect(screenshot.image_url.length).toBeLessThan(big.length);
+			}
+		}
+		expect(imageData(result).length).toBe(1);
+	});
+
+	it("accounts for base64 padding in the decoded-byte budget", () => {
+		// Two images whose decoded sizes (padding-aware) sit just under the budget,
+		// but whose base64 carries `==` padding so the old floor(len*3/4) math
+		// over-counted them past it. Both must be retained.
+		const oldest = image(`${"A".repeat(33554430)}==`); // 25165822 decoded bytes (2 padding)
+		const newest = image("AA=="); // 1 decoded byte (2 padding)
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [oldest], timestamp: 0 },
+				{ role: "user", content: [newest], timestamp: 1 },
+			],
+		};
+		// Decoded total 25165823 ≤ 25165824 (24 MiB) once padding is subtracted;
+		// the encoded-length estimate (25165827) would have elided the oldest.
+
+		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		expect(result).toBe(context);
+	});
+
+	it("counts and elides native replay payload images", () => {
+		// A user turn can store its image only in providerPayload.items (as a
+		// data-URL input_image) while content stays plain text; the Responses
+		// serializer uploads the payload items unchanged, bypassing content.
+		const big = dataUrlOfDecodedBytes(20 * MIB);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: "describe this",
+					timestamp: 0,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "anthropic",
+						items: [{ type: "input_image", detail: "auto", image_url: big }],
+					},
+				},
+				{ role: "user", content: [imageOfDecodedBytes(10 * MIB)], timestamp: 1 },
+			],
+		};
+		// 20 MiB replay image + 10 MiB content image = 30 MiB > 24 MiB.
+
+		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const first = result.messages[0];
+		expect(first?.role).toBe("user");
+		if (first?.role === "user" && first.providerPayload) {
+			const item = first.providerPayload.items[0] as { image_url?: string; type?: string; detail?: string };
+			expect(item.image_url).not.toBe(big);
+			expect(item.image_url?.length).toBeLessThan(big.length);
+			// Non-image fields preserved.
+			expect(item).toMatchObject({ type: "input_image", detail: "auto" });
+		}
+		expect(imageData(result).length).toBe(1);
+	});
+
+	it("retains smaller older images once a larger one is elided", () => {
+		// oldest → newest: 3 MiB, 3 MiB, 20 MiB, 5 MiB. Adding the 20 MiB image to
+		// the 5 MiB newest would cross the budget, so it is elided; its bytes are
+		// then skipped and the two 3 MiB images fit. The pre-fix accumulator kept
+		// elided bytes, cascading elision past them (only the newest survived).
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [imageOfDecodedBytes(3 * MIB)], timestamp: 0 },
+				{ role: "user", content: [imageOfDecodedBytes(3 * MIB)], timestamp: 1 },
+				{ role: "user", content: [imageOfDecodedBytes(20 * MIB)], timestamp: 2 },
+				{ role: "user", content: [imageOfDecodedBytes(5 * MIB)], timestamp: 3 },
+			],
+		};
+
+		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		// Newest (5 MiB) + both 3 MiB images retained (11 MiB); only 20 MiB elided.
+		expect(imageData(result).length).toBe(3);
+		const elided = result.messages[2];
+		if (elided?.role === "user") {
+			expect(elided.content).toEqual([{ type: "text", text: "[image omitted: transport image budget]" }]);
+		}
 	});
 });
