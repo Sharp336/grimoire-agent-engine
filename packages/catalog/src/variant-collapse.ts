@@ -209,7 +209,7 @@ function devinGpt56Families(variant: "luna" | "sol" | "terra", name: string): re
 const GEMINI_3_FLASH_FAMILY_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High];
 const GEMINI_3_PRO_FAMILY_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High];
 
-const GEMINI_3_FLASH_FAMILY_BUDGETS: Readonly<Partial<Record<Effort, number>>> = {
+export const GEMINI_3_FLASH_FAMILY_BUDGETS: Readonly<Partial<Record<Effort, number>>> = {
 	[Effort.Minimal]: 1000,
 	[Effort.Low]: 1000,
 	[Effort.Medium]: 4000,

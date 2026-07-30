@@ -94,6 +94,21 @@ describe("Antigravity web search", () => {
 		});
 	});
 
+	it("forwards generation controls", async () => {
+		const requests: CapturedRequest[] = [];
+		await searchAntigravity({
+			query: "captured query",
+			maxOutputTokens: 1234,
+			temperature: 0.25,
+			authStorage: oauthStorage(["google-antigravity"], []),
+			fetch: capture(new Response(JSON.stringify(fixture.response), { status: 200 }), requests),
+		});
+
+		expect(requests[0]?.body).toMatchObject({
+			request: { generationConfig: { candidateCount: 1, maxOutputTokens: 1234, temperature: 0.25 } },
+		});
+	});
+
 	it("keeps Antigravity and Gemini OAuth credential selection isolated", async () => {
 		const antigravityRequested: string[] = [];
 		await searchAntigravity({

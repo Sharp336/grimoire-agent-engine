@@ -21,6 +21,8 @@ export interface AntigravitySearchParams {
 	parsedQuery?: StructuredQuery;
 	systemPrompt?: string;
 	numResults?: number;
+	maxOutputTokens?: number;
+	temperature?: number;
 	signal?: AbortSignal;
 	authStorage: AuthStorage;
 	sessionId?: string;
@@ -63,15 +65,17 @@ async function callAntigravitySearch(
 	projectId: string,
 	model: string,
 	query: string,
-	systemPrompt: string | undefined,
-	fetchImpl: FetchImpl | undefined,
-	signal: AbortSignal | undefined,
+	params: Pick<AntigravitySearchParams, "systemPrompt" | "maxOutputTokens" | "temperature" | "fetch" | "signal">,
 ): Promise<SearchResponse> {
-	const instruction = [ANTIGRAVITY_SYSTEM_INSTRUCTION, systemPrompt?.toWellFormed()].filter(Boolean).join("\n");
+	const instruction = [ANTIGRAVITY_SYSTEM_INSTRUCTION, params.systemPrompt?.toWellFormed()].filter(Boolean).join("\n");
 	const request = {
 		systemInstruction: { role: "user", parts: [{ text: instruction }] },
 		contents: [{ role: "user", parts: [{ text: query }] }],
-		generationConfig: { candidateCount: 1 },
+		generationConfig: {
+			candidateCount: 1,
+			...(params.maxOutputTokens !== undefined ? { maxOutputTokens: params.maxOutputTokens } : {}),
+			...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+		},
 		tools: [{ googleSearch: { enhancedContent: { imageSearch: { maxResultCount: 5 } } } }],
 	};
 	const response = await fetchWithRetry(() => `${ANTIGRAVITY_DAILY_ENDPOINT}/v1internal:generateContent`, {
@@ -83,8 +87,8 @@ async function callAntigravitySearch(
 			"Accept-Encoding": "gzip",
 		},
 		body: JSON.stringify({ model, project: projectId, request, requestType: "agent", userAgent: "antigravity" }),
-		signal: withHardTimeout(signal),
-		fetch: fetchImpl,
+		signal: withHardTimeout(params.signal),
+		fetch: params.fetch,
 		maxAttempts: MAX_RETRIES + 1,
 		defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 		maxDelayMs: RATE_LIMIT_BUDGET_MS,
@@ -144,16 +148,7 @@ export async function searchAntigravity(params: AntigravitySearchParams): Promis
 	const response = await withOAuthAccess(
 		params.authStorage,
 		ANTIGRAVITY_OAUTH_PROVIDER,
-		access =>
-			callAntigravitySearch(
-				access.accessToken,
-				access.projectId ?? projectId,
-				model,
-				query,
-				params.systemPrompt,
-				params.fetch,
-				params.signal,
-			),
+		access => callAntigravitySearch(access.accessToken, access.projectId ?? projectId, model, query, params),
 		{ sessionId: params.sessionId, signal: params.signal, seed },
 	);
 	return params.numResults ? { ...response, sources: response.sources.slice(0, params.numResults) } : response;

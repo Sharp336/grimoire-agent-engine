@@ -42,6 +42,7 @@ import type {
 	ResolvedOpenAIResponsesCompat,
 	ThinkingConfig,
 } from "./types";
+import { GEMINI_3_FLASH_FAMILY_BUDGETS } from "./variant-collapse";
 
 /**
  * Runtime helpers read baked metadata only, so they accept both pre-build
@@ -109,13 +110,6 @@ const MIMO_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
 	[Effort.XHigh]: "high",
 };
 
-const ANTIGRAVITY_GEMINI_36_FLASH_EFFORT_BUDGETS: Readonly<Partial<Record<Effort, number>>> = {
-	[Effort.Minimal]: 1000,
-	[Effort.Low]: 1000,
-	[Effort.Medium]: 4000,
-	[Effort.High]: 10000,
-};
-
 const MINIMAX_ANTHROPIC_ADAPTIVE_EFFORT_MAP: Readonly<EffortMap> = {
 	[Effort.Low]: "adaptive",
 	[Effort.Medium]: "adaptive",
@@ -138,7 +132,7 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
 		model.thinking = {
 			...model.thinking,
 			mode: "budget",
-			effortBudgets: ANTIGRAVITY_GEMINI_36_FLASH_EFFORT_BUDGETS,
+			effortBudgets: GEMINI_3_FLASH_FAMILY_BUDGETS,
 		};
 	}
 }

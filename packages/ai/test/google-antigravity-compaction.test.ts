@@ -63,6 +63,22 @@ describe("Antigravity Cloud Code Assist oversized-request compaction signals", (
 		expect(AIError.isContextOverflow(result, model.contextWindow ?? undefined)).toBe(true);
 	});
 
+	it("uses a configured Antigravity base URL override", async () => {
+		const override = "https://gateway.example.test/cloudcode";
+		const endpoints: string[] = [];
+		const fetch: FetchImpl = async input => {
+			endpoints.push(endpointFromInput(input));
+			return new Response(
+				JSON.stringify({ error: { code: 400, status: "INVALID_ARGUMENT", message: OVERSIZED_REQUEST } }),
+				{ status: 400, headers: { "content-type": "application/json" } },
+			);
+		};
+
+		await streamGoogleGeminiCli({ ...model, baseUrl: override }, context, streamOptions(fetch)).result();
+
+		expect(endpoints).toEqual([`${override}/v1internal:streamGenerateContent?alt=sse`]);
+	});
+
 	it("maps the daily endpoint's SSE oversized-request error without empty-stream retry or sandbox fallback", async () => {
 		const endpoints: string[] = [];
 		const fetch: FetchImpl = async input => {
