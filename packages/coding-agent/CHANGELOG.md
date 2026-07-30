@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Fixed a resume failure in the session selector killing the whole session: the picker fires its selection callback without awaiting it, so a rejecting resume escaped as an unhandled rejection instead of being reported ([#7047](https://github.com/can1357/oh-my-pi/pull/7047) by [@k1riiiii](https://github.com/k1riiiii)).
 - Fixed `/tan` agents being unable to read parent-session `local://` attachments by correctly resolving local protocol options against the parent session's artifacts.
 - Fixed Codex web search silently returning plain completions when the hosted web search tool was skipped.
 - Fixed TUI collaboration guest loader not starting when joining or reconnecting mid-turn.

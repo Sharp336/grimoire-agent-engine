@@ -1465,6 +1465,11 @@ export class SelectorController {
 						this.ctx.ui.requestRender();
 					}
 				} catch (error) {
+					// SessionSelectorComponent invokes this callback without awaiting it, so
+					// nothing consumes a rejection here: it would reach the process-level
+					// unhandledRejection handler and take the whole session down. Both the
+					// native resume and the foreign-session import must surface failures
+					// through showError and close the picker instead.
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 				} finally {
 					if (!keepOpen) done();
