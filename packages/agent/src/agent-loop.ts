@@ -1641,6 +1641,17 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			if (config.onProviderContext) {
+				try {
+					await config.onProviderContext({
+						context: structuredCloneJSON(llmContext),
+						model: { provider: model.provider, id: model.id },
+						timestamp: Date.now(),
+					});
+				} catch {
+					// Observation must never prevent provider dispatch.
+				}
+			}
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				apiKey,

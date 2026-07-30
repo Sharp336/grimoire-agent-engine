@@ -49,6 +49,7 @@ import type {
 	AgentToolContext,
 	AgentTurnEndContext,
 	AsideMessage,
+	ProviderContextSnapshot,
 	StreamFn,
 	ToolCallContext,
 	ToolChoiceDirective,
@@ -115,6 +116,9 @@ export interface AgentOptions {
 	 * telemetry capture/provider send.
 	 */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+
+	/** Observes the final credential-free provider context snapshot before dispatch. */
+	onProviderContext?: (snapshot: ProviderContextSnapshot) => void | Promise<void>;
 
 	/**
 	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn
@@ -370,6 +374,7 @@ export class Agent {
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	#onProviderContext?: (snapshot: ProviderContextSnapshot) => void | Promise<void>;
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
 	#steeringWaiters = new Set<() => void>();
@@ -507,6 +512,7 @@ export class Agent {
 		this.#telemetry = opts.telemetry;
 		this.#appendOnlyContext = opts.appendOnlyContext;
 		this.#transformProviderContext = opts.transformProviderContext;
+		this.#onProviderContext = opts.onProviderContext;
 	}
 
 	/**
@@ -1312,6 +1318,7 @@ export class Agent {
 			preferWebsockets: this.#preferWebsockets,
 			convertToLlm: this.#convertToLlm,
 			transformProviderContext: this.#transformProviderContext,
+			onProviderContext: this.#onProviderContext,
 			transformContext: this.#transformContext,
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,

@@ -129,6 +129,18 @@ export interface SteeringQueueState {
 }
 
 /**
+ * Credential-free snapshot of the final semantic context sent to a provider.
+ *
+ * `context` is deep-cloned at the dispatch boundary, so consumers cannot mutate
+ * the request that is sent. Transport options and credentials are absent.
+ */
+export interface ProviderContextSnapshot {
+	readonly context: Context;
+	readonly model: Readonly<Pick<Model, "provider" | "id">>;
+	readonly timestamp: number;
+}
+
+/**
  * Configuration for the agent loop.
  */
 export interface AgentLoopConfig extends SimpleStreamOptions {
@@ -210,6 +222,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * and provider send.
 	 */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+
+	/**
+	 * Observes a credential-free, deep-cloned snapshot of the final provider context
+	 * after transforms and owned-dialect rewriting, immediately before dispatch.
+	 * Unlike {@link transformProviderContext} it cannot alter the request, and unlike
+	 * `onPayload` it sees the semantic context rather than a provider wire payload.
+	 * Callback failures are isolated and never prevent provider dispatch.
+	 */
+	onProviderContext?: (snapshot: ProviderContextSnapshot) => void | Promise<void>;
 
 	/**
 	 * Resolves the API key or resolver for the current model before each LLM call.
