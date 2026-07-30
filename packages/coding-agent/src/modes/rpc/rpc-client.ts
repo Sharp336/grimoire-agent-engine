@@ -1283,10 +1283,9 @@ export class RpcClient {
 	// =========================================================================
 
 	#emitRawFrame(data: unknown): void {
-		if (!isRecord(data)) return;
-		for (const listener of this.#rawFrameListeners) {
-			listener(structuredClone(data));
-		}
+		if (!isRecord(data) || this.#rawFrameListeners.size === 0) return;
+		const frame = structuredClone(data);
+		for (const listener of this.#rawFrameListeners) listener(frame);
 	}
 
 	#emitPromptResult(result: RpcPromptResultFrame): void {
