@@ -35,6 +35,7 @@ import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { isKimiModel, streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
+import { NO_AUTH_SENTINEL } from "./providers/openai-shared";
 import { streamPiNative } from "./providers/pi-native-client";
 // Heavy provider stream functions are imported lazily via register-builtins,
 // which wraps each provider module in a dynamic import. This keeps the
@@ -1030,6 +1031,10 @@ function materializeRequestAuthorization<TApi extends Api>(
 	apiKey: string,
 ): SimpleStreamOptions {
 	if (model.headers?.Authorization !== REQUEST_API_KEY_AUTHORIZATION) return options;
+	// A keyless provider (`auth: none`) resolves to the N/A sentinel — don't
+	// materialize it as `Bearer N/A`. Downstream OpenAI transports already omit
+	// Authorization for the sentinel, and keyless endpoints reject a bogus bearer.
+	if (apiKey === NO_AUTH_SENTINEL) return options;
 	if (Object.keys(options.headers ?? {}).some(header => header.toLowerCase() === "authorization")) return options;
 	return { ...options, headers: { ...options.headers, Authorization: `Bearer ${apiKey}` } };
 }

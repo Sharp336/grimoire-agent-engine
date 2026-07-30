@@ -105,7 +105,14 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 }
 
 function mergeProviderApiKeyConfigs(apiKey: string | undefined, apiKeys: readonly string[] | undefined): string[] {
-	return [...new Set([apiKey, ...(apiKeys ?? [])].filter((value): value is string => Boolean(value?.trim())))];
+	// Trim before resolving indirection so quoted entries like " OPENAI_API_KEY "
+	// or " !secret-command " match their env var / command instead of becoming a
+	// literal bearer — matches the documented models.yml trimming behavior.
+	return [
+		...new Set(
+			[apiKey, ...(apiKeys ?? [])].map(value => value?.trim()).filter((value): value is string => Boolean(value)),
+		),
+	];
 }
 
 function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
@@ -343,6 +350,7 @@ type HeaderSource = Record<string, string> | undefined;
 interface HeaderResolutionOptions {
 	authHeader?: boolean;
 	apiKey?: string;
+	keyless?: boolean;
 }
 
 function materializeConfigHeaderSources(
@@ -357,7 +365,7 @@ function materializeConfigHeaderSources(
 			if (next) resolved[key] = next;
 		}
 	}
-	if (options?.authHeader && options.apiKey !== kNoAuth) {
+	if (options?.authHeader && !options?.keyless && options.apiKey !== kNoAuth) {
 		resolved.Authorization = options.apiKey ? `Bearer ${options.apiKey}` : REQUEST_API_KEY_AUTHORIZATION;
 	}
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
@@ -610,15 +618,22 @@ function mergeCustomModelHeaders(
 	providerHeaders: Record<string, string> | undefined,
 	modelHeaders: Record<string, string> | undefined,
 	authHeader: boolean | undefined,
+	keyless = false,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader });
+	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader, keyless });
 }
 
 function mergeAuthHeaderSources(
 	sources: readonly HeaderSource[],
 	authHeader: boolean | undefined,
+	keyless = false,
+	apiKey?: string,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders(sources, { authHeader });
+	// Thread the explicit apiKey so a runtime-registered provider with
+	// `authHeader: true` materializes the real bearer instead of the
+	// request-time sentinel. When apiKey is absent the sentinel is kept,
+	// preserving key rotation for keys resolved from AuthStorage at request time.
+	return createLiveConfigHeaders(sources, { authHeader, keyless, apiKey });
 }
 
 /**
@@ -662,7 +677,7 @@ function buildCustomModelOverlay(
 		contextWindow: modelDef.contextWindow,
 		maxTokens: modelDef.maxTokens,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
-		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader),
+		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerAuth === "none"),
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,
@@ -1517,7 +1532,6 @@ export class ModelRegistry {
 							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
 							: providerConfig.baseUrl,
 					headers: resolvedProviderHeaders,
-					apiKey: providerApiKeyConfigs[0],
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
@@ -2042,6 +2056,8 @@ export class ModelRegistry {
 		const headers = mergeAuthHeaderSources(
 			override.headers ? [entry.headers, override.headers] : [entry.headers],
 			override.authHeader,
+			this.#keylessProviders.has(entry.provider),
+			override.apiKey,
 		);
 		return {
 			...entry,

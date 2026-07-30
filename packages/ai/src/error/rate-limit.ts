@@ -24,7 +24,7 @@ const INSUFFICIENT_BALANCE_PATTERN = /insufficient.?balance/i;
 const SPEND_LIMIT_PATTERN = /spend.?limit/i;
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
 const CONCURRENT_LIMIT_PATTERN =
-	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|request|invocation|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b/i;
+	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|request|invocation|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b|\bconcurren[a-z]*[-_](?:limit|quota|request|invocation|exceed\w*|reach\w*)/i;
 const ACCOUNT_SCOPED_403_PATTERN =
 	/\b(?:overall|account|organization|team|workspace)\b[^\n]{0,40}\b(?:message |request )?rate.?limit\b|\blimit will reset\b|\bwill reset in\b/i;
 
@@ -147,6 +147,9 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
  * Returns true for failures that should burn one credential and rotate to a
  * sibling account. Decision tree:
  *
+ *  0. Concurrent caps (CONCURRENT_LIMIT) are transient and shared across every
+ *     key → never rotate; evaluated before the broad usage matcher, which also
+ *     matches the "quota exceeded" wording a concurrent response may carry.
  *  1. Body matches {@link isUsageLimitError} (Codex `usage_limit_reached`,
  *     Anthropic account rate-limit, Google `resource_exhausted`, OpenAI
  *     `insufficient_quota`, …) → rotate.
@@ -162,6 +165,11 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
  *     credentials.
  */
 export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
+	// Concurrent caps are transient and shared across every key — never rotate
+	// credentials for them. Evaluate before the broad usage matcher, which also
+	// matches "quota exceeded" wording a concurrent response may carry, so the
+	// short concurrency backoff is used instead of burning the whole key pool.
+	if (message && parseRateLimitReason(message) === "CONCURRENT_LIMIT") return false;
 	if (message && matchesUsageLimitText(message)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
 	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,

@@ -67,6 +67,7 @@ import { opencodeGoUsageProvider } from "./usage/opencode-go";
 import { syntheticUsageProvider } from "./usage/synthetic";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "./utils/retry-after";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
@@ -1434,6 +1435,16 @@ export class AuthStorage {
 			return;
 		}
 		this.#configOverrides.set(provider, keys);
+	}
+
+	/**
+	 * Singular compatibility alias for {@link setConfigApiKeys}. The plural API
+	 * superseded the pre-multi-key `setConfigApiKey` (shipped in 15.1.3); keep
+	 * the singular form delegating so existing integrations keep compiling and
+	 * working with a single configured key.
+	 */
+	setConfigApiKey(provider: string, apiKey: string): void {
+		this.setConfigApiKeys(provider, [apiKey]);
 	}
 
 	/**
@@ -3371,11 +3382,23 @@ export class AuthStorage {
 		const entries = this.#getStoredCredentials(provider);
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
 		if (sessionCredential) {
-			const credential = entries[sessionCredential.index]?.credential;
-			if (credential) {
-				return credential.type === "api_key"
-					? { type: "api_key", apiKey: credential.key }
-					: this.#buildUsageCredential(credential);
+			// Virtual config/env keys are not stored credentials — never dereference
+			// their selection index against the stored array, which would charge an
+			// unrelated stored account. Attribute directly to the resolved virtual key.
+			if (sessionCredential.type === "config_api_key") {
+				const configKeys = this.#configOverrides.get(provider) ?? [];
+				const configKey = configKeys[sessionCredential.index];
+				if (configKey) return { type: "api_key", apiKey: configKey };
+			} else if (sessionCredential.type === "env_api_key") {
+				const envKey = getEnvApiKeys(provider)[sessionCredential.index];
+				if (envKey) return { type: "api_key", apiKey: envKey };
+			} else {
+				const credential = entries[sessionCredential.index]?.credential;
+				if (credential) {
+					return credential.type === "api_key"
+						? { type: "api_key", apiKey: credential.key }
+						: this.#buildUsageCredential(credential);
+				}
 			}
 		}
 		if (entries.length === 1) {
@@ -6038,11 +6061,17 @@ export class AuthStorage {
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 		if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
+			// Forward the response's retry interval so an exhausted virtual/config
+			// key is blocked for the server-reported window, not the 60s default —
+			// the internal rotation that lands here (via the resolver's last-chance
+			// path) doesn't otherwise carry retryAfterMs.
+			const retryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
 			return (
 				await this.markUsageLimitReached(provider, sessionId, {
 					modelId: options?.modelId,
 					apiKey: options?.apiKey,
 					credentialId: options?.credentialId,
+					retryAfterMs,
 					signal: options?.signal,
 				})
 			).switched;

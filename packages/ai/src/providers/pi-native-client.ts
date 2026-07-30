@@ -26,6 +26,7 @@ import type {
 	Model,
 	SimpleStreamOptions,
 } from "../types";
+import { REQUEST_API_KEY_AUTHORIZATION } from "../types";
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
@@ -119,7 +120,17 @@ function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<str
 		Accept: "text/event-stream",
 		...(model.headers ?? {}),
 	};
-	if (apiKey && !headers.Authorization) {
+	if (headers.Authorization === REQUEST_API_KEY_AUTHORIZATION) {
+		// The agent loop leaves the request-key sentinel in model.headers until
+		// dispatch; resolve it to the gateway bearer here (mirrors the OpenAI
+		// path's materializeRequestAuthorization). With no key, drop the sentinel
+		// rather than sending the raw placeholder on the wire.
+		if (apiKey) {
+			headers.Authorization = `Bearer ${apiKey}`;
+		} else {
+			delete headers.Authorization;
+		}
+	} else if (apiKey && !headers.Authorization) {
 		headers.Authorization = `Bearer ${apiKey}`;
 	}
 	return headers;

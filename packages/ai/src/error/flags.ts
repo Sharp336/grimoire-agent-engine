@@ -7,7 +7,7 @@ import {
 	ProviderHttpError,
 	STREAM_ENVELOPE_ERROR_PREFIX,
 } from "./classes";
-import { isOpaqueStatusBody, isUsageLimitStatus, matchesUsageLimitText, parseRateLimitReason } from "./rate-limit";
+import { isUsageLimitOutcome } from "./rate-limit";
 
 export const Flag = {
 	Class: 0x1000,
@@ -315,14 +315,12 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		if (isAuthFailureText(errorMessage)) kinds |= Flag.AuthFailed;
 
 		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
-		const cleanMessage = errorMessage;
-		const isOpaque = isOpaqueStatusBody(cleanMessage);
-
-		const isLimitStatus = isUsageLimitStatus(statusClean);
-		if (
-			matchesUsageLimitText(cleanMessage) ||
-			(isLimitStatus && (isOpaque || parseRateLimitReason(cleanMessage) === "QUOTA_EXHAUSTED"))
-		) {
+		// Use the same status-aware classification as the account-rotation
+		// decision so account-scoped 403 caps (Devin/Codeium "overall message
+		// rate limit") populate Flag.UsageLimit, not just AuthFailed. Concurrent
+		// caps are excluded by isUsageLimitOutcome so they stay transient instead
+		// of burning a healthy sibling credential.
+		if (isUsageLimitOutcome(statusClean, errorMessage)) {
 			kinds |= Flag.UsageLimit;
 		}
 
@@ -333,9 +331,9 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		}
 
 		// Copilot per-client routing flap is transient.
-		if (statusClean === 400 && COPILOT_MODEL_NOT_SUPPORTED_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
-		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
-		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
+		if (statusClean === 400 && COPILOT_MODEL_NOT_SUPPORTED_PATTERN.test(errorMessage)) kinds |= Flag.Transient;
+		if (matchesStrictToolsRejection(errorMessage, statusClean)) kinds |= Flag.Grammar;
+		if (matchesFastModeUnsupported(errorMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
 	}
 	if (kinds !== 0) return create(kinds);
 	const fallbackStatus = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
