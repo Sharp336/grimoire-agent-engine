@@ -355,6 +355,7 @@ export class RpcClient {
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
+	#hostUriSchemes: RpcHostUriSchemeDefinition[] = [];
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#pendingHostUriRequests = new Map<string, { controller: AbortController }>();
 	#hostUriHandler: RpcClientHostUriHandler | undefined;
@@ -526,6 +527,9 @@ export class RpcClient {
 			}
 			if (this.#customTools.length > 0) {
 				await this.setCustomTools(this.#customTools);
+			}
+			if (this.#hostUriSchemes.length > 0) {
+				await this.setHostUriSchemes(this.#hostUriSchemes);
 			}
 		} catch (cause) {
 			// Startup failed after spawning the child. Reap it before returning
@@ -798,7 +802,11 @@ export class RpcClient {
 
 	/** Replace the URI schemes served by the embedding host. */
 	async setHostUriSchemes(schemes: RpcHostUriSchemeDefinition[]): Promise<string[]> {
-		const response = await this.#send({ type: "set_host_uri_schemes", schemes });
+		this.#hostUriSchemes = structuredClone(schemes);
+		if (!this.#process) {
+			return this.#hostUriSchemes.map(scheme => scheme.scheme);
+		}
+		const response = await this.#send({ type: "set_host_uri_schemes", schemes: this.#hostUriSchemes });
 		return this.#getData<{ schemes: string[] }>(response).schemes;
 	}
 
