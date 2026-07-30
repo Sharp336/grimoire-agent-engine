@@ -98,9 +98,9 @@ export const getModelsConfigSchemaBundle = once(() => {
 	// in models.yml, so preserve the sparse compat shape for each supported API.
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
-	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex"',
-	);
+	// Derive the API union from the single MODELS_CONFIG_API_IDS source so the
+	// schema and runtime validation can't drift when supported APIs change.
+	const ApiSchema = type.enumerated(...MODELS_CONFIG_API_IDS);
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 

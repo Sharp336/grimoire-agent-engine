@@ -338,9 +338,15 @@ function promptLine(rl: readline.Interface, question: string, options: { secret?
 				if (!/[\u0000-\u001f\u007f]/.test(character)) value += character;
 			}
 		};
+		// readline's keypress decoder stays attached to the stream, so a bare
+		// `input.resume()` would re-deliver each byte to it and echo the secret in
+		// the clear. Detach every pre-existing `data` listener for the duration of
+		// the raw read, then restore them so the next prompt works unchanged.
+		const priorDataListeners = input.rawListeners("data") as Array<(...args: unknown[]) => void>;
 		const cleanupSecret = () => {
 			input.off("data", onData);
 			input.setRawMode?.(wasRaw);
+			for (const listener of priorDataListeners) input.on("data", listener);
 			rl.resume();
 		};
 		const finish = (result: () => void) => {
@@ -351,6 +357,7 @@ function promptLine(rl: readline.Interface, question: string, options: { secret?
 			result();
 		};
 		rl.pause();
+		input.removeAllListeners("data");
 		input.setRawMode(true);
 		input.on("data", onData);
 		input.resume();
