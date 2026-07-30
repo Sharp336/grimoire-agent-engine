@@ -852,8 +852,10 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
-		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
-		if (this.getVimMode() !== "normal" && this.#handleSpaceHold(data, canonical)) return;
+		// Space-hold push-to-talk is text-entry behavior: visual and normal modes must not mutate the prompt.
+		const vimMode = this.getVimMode();
+		const acceptsTextEntry = vimMode === undefined || vimMode === "insert";
+		if (acceptsTextEntry && this.#handleSpaceHold(data, canonical)) return;
 
 		// One union probe decides whether any per-action interception below can
 		// match — plain typing then skips the ~20 per-action set lookups per key.
@@ -861,21 +863,14 @@ export class CustomEditor extends Editor {
 			canonical !== undefined &&
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
-			const vimMode = this.getVimMode();
-			const acceptsClipboardPaste = vimMode === undefined || vimMode === "insert";
-
 			// Intercept configured image paste (async - fires and handles result)
-			if (acceptsClipboardPaste && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
+			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
 				void this.onPasteImage();
 				return;
 			}
 
 			// Intercept configured raw text paste (fires and handles result)
-			if (
-				acceptsClipboardPaste &&
-				this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") &&
-				this.onPasteTextRaw
-			) {
+			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
 				this.onPasteTextRaw();
 				return;
 			}

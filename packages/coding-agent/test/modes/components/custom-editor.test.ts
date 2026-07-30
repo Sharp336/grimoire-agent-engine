@@ -500,6 +500,19 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(events).toEqual(["start", "end"]);
 	});
 
+	it("leaves visual selections untouched by space-hold push-to-talk", () => {
+		const { editor, events } = makeEditor();
+		editor.setInputMode("vim");
+		editor.setText("hello");
+		editor.handleInput("v");
+		expect(editor.getVimMode()).toBe("visual");
+
+		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+
+		expect(editor.getText()).toBe("hello");
+		expect(events).toEqual([]);
+	});
+
 	it("does not trigger when the space bar is smashed at an irregular cadence", () => {
 		const { editor, events } = makeEditor();
 		// Fast but jittery, the way a human mashes — not the metronomic delta of OS auto-repeat.
