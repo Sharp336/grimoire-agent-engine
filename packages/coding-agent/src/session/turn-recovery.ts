@@ -1356,6 +1356,30 @@ export class TurnRecovery {
 		) {
 			this.#refusalParaphraseUsed = true;
 			if (await this.#retryRefusalWithParaphrase(message, generation, maxRetries)) return true;
+			// Escape / abort_retry cancels the paraphrase's provider call or
+			// persistence wait by aborting #retryAbortController, which
+			// #retryRefusalWithParaphrase leaves in place on abort. Distinguish
+			// that user-initiated cancel from an ordinary paraphrase miss (no
+			// resolved model, empty paraphrase, non-"stop" stop reason, etc.) and
+			// close the retry saga here instead of falling through to model
+			// fallback, which would schedule another provider request the user
+			// just asked to stop. Mirrors the backoff-wait cancellation path.
+			if (this.#retryAbortController?.signal.aborted) {
+				if (this.#retryAttempt > 1) {
+					await this.persistTerminalEmptyErrorTurn(message);
+					await this.#host.emitSessionEvent({
+						type: "auto_retry_end",
+						success: false,
+						attempt: this.#retryAttempt - 1,
+						finalError: "Retry cancelled",
+					});
+					this.#clearPendingRecoveredRetryErrors();
+				}
+				this.#retryAttempt = 0;
+				this.#retryAbortController = undefined;
+				this.resolveRetry();
+				return false;
+			}
 		}
 
 		const errorMessage = message.errorMessage || "Unknown error";
@@ -1852,7 +1876,26 @@ export class TurnRecovery {
 				// branch so a reload/transcript rebuild keeps the same companions the
 				// live retry sees via `rewrittenMessages` below.
 				for (const companion of messages.slice(userIndex + 1, assistantIndex)) {
-					if (isPersistableAgentMessage(companion)) this.#host.appendSessionMessage(companion);
+					if (!isPersistableAgentMessage(companion)) continue;
+					// `custom`/`hookMessage` companions (e.g. a before_agent_start
+					// extension message) were originally persisted as
+					// `custom_message` entries with normalization
+					// (stripInternalDetailsFields). Recreate them through that path
+					// instead of a generic `message` entry so type-based consumers
+					// (custom-message branch editing, tree rendering) still recognize
+					// them on reload/transcript rebuild, matching the live path at
+					// AgentSession message_end handling.
+					if (companion.role === "custom" || companion.role === "hookMessage") {
+						this.#host.sessionManager.appendCustomMessageEntry(
+							companion.customType,
+							companion.content,
+							companion.display,
+							companion.details,
+							companion.attribution ?? "agent",
+						);
+					} else {
+						this.#host.appendSessionMessage(companion);
+					}
 				}
 			});
 			const rewrittenMessages = messages.slice();
@@ -1884,7 +1927,13 @@ export class TurnRecovery {
 			});
 			return true;
 		} finally {
-			if (this.#retryAbortController === abortController) this.#retryAbortController = undefined;
+			// Leave the controller in place when it was aborted (Escape /
+			// abort_retry) so #handleRetryableError can detect the cancellation
+			// and close the retry saga rather than falling through to model
+			// fallback; the caller clears it after handling.
+			if (this.#retryAbortController === abortController && !abortController.signal.aborted) {
+				this.#retryAbortController = undefined;
+			}
 		}
 	}
 

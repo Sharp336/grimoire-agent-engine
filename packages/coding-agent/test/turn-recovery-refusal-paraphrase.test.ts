@@ -66,6 +66,8 @@ describe("TurnRecovery refusal paraphrase", () => {
 			paraphraseRole?: "tiny" | "smol";
 			configuredSmolRole?: string;
 			extraAvailableModels?: MockModel[];
+			modelFallback?: boolean;
+			fallbackChains?: Record<string, string[]>;
 		} = {},
 	): {
 		recovery: TurnRecovery;
@@ -74,6 +76,7 @@ describe("TurnRecovery refusal paraphrase", () => {
 		scheduled: Parameters<TurnRecoveryHost["scheduleAgentContinue"]>[0][];
 		agent: Agent;
 		sessionManager: SessionManager;
+		modelRegistry: ModelRegistry;
 	} {
 		const primaryModel = createMockModel({ provider: "anthropic", id: "claude-opus-5" });
 		const paraphraseModel = createMockModel({
@@ -98,9 +101,10 @@ describe("TurnRecovery refusal paraphrase", () => {
 		});
 		agent.setMetadataResolver(() => ({ account_uuid: "selected-account" }));
 		const settings = Settings.isolated({
-			"retry.modelFallback": false,
+			"retry.modelFallback": options.modelFallback ?? false,
 			"retry.refusalParaphrase": true,
 			"retry.maxRetries": options.maxRetries ?? 10,
+			"retry.fallbackChains": options.fallbackChains ?? {},
 		});
 		if (options.paraphraseRole) settings.set("retry.refusalParaphraseRole", options.paraphraseRole);
 		if (options.configuredSmolRole) {
@@ -155,7 +159,15 @@ describe("TurnRecovery refusal paraphrase", () => {
 			runAutoCompaction: async () => ({ deferredHandoff: false, continuationScheduled: false }),
 			withBashBranchTransition: operation => operation(),
 		};
-		return { recovery: new TurnRecovery(host), paraphraseModel, events, scheduled, agent, sessionManager };
+		return {
+			recovery: new TurnRecovery(host),
+			paraphraseModel,
+			events,
+			scheduled,
+			agent,
+			sessionManager,
+			modelRegistry,
+		};
 	}
 
 	it("persists a successful rewrite and retains its provider attribution", async () => {
@@ -187,6 +199,29 @@ describe("TurnRecovery refusal paraphrase", () => {
 			expect(scheduled).toEqual([]);
 		});
 	}
+	it("stops recovery instead of falling through to model fallback when paraphrase cancellation is requested", async () => {
+		const fallbackModel = createMockModel({ provider: "mock", id: "fallback-model" });
+		let recovery!: TurnRecovery;
+		const setup = createRecovery({
+			modelFallback: true,
+			fallbackChains: { "anthropic/claude-opus-5": ["mock/fallback-model"] },
+			extraAvailableModels: [fallbackModel],
+			// Simulate Escape / abort_retry during the paraphrase persistence
+			// wait, after the paraphrase controller has become the active retry
+			// controller.
+			waitForSessionMessagePersistence: async () => {
+				recovery.abortRetry();
+			},
+		});
+		recovery = setup.recovery;
+		vi.spyOn(setup.modelRegistry, "find").mockImplementation((provider, id) =>
+			provider === "mock" && id === "fallback-model" ? fallbackModel : undefined,
+		);
+
+		expect(await recovery.handleRetryableError(refusal)).toBe(false);
+		expect(setup.paraphraseModel.calls).toHaveLength(1);
+		expect(setup.scheduled).toEqual([]);
+	});
 
 	it("does not paraphrase when the retry budget is exhausted", async () => {
 		const { recovery, paraphraseModel, agent } = createRecovery({ maxRetries: 0 });
@@ -223,11 +258,26 @@ describe("TurnRecovery refusal paraphrase", () => {
 		expect(await recovery.handleRetryableError(companionRefusal)).toBe(true);
 		expect(paraphraseModel.calls).toHaveLength(1);
 		expect(agent.state.messages).toEqual([{ ...originalUserMessage, content: rewrittenPrompt }, companion]);
-		// The replacement branch must recreate the post-user companion so a
-		// reload/transcript rebuild keeps the same context the live retry sees.
+		// The replacement branch must recreate the post-user companion as a
+		// custom_message entry (not a generic message) so type-based consumers
+		// (custom-message branch editing, tree rendering) still recognize it on
+		// reload/transcript rebuild, and normalization runs on it. A fresh entry
+		// timestamp is inherent to the custom-message path, so match the
+		// companion's observable fields rather than object identity.
+		expect(
+			sessionManager
+				.getBranch()
+				.some(entry => entry.type === "custom_message" && entry.customType === "before-agent-start"),
+		).toBe(true);
 		expect(sessionManager.buildSessionContext().messages).toEqual([
 			{ ...originalUserMessage, content: rewrittenPrompt },
-			companion,
+			expect.objectContaining({
+				role: "custom",
+				customType: "before-agent-start",
+				content: "Extra turn context.",
+				display: false,
+				attribution: "agent",
+			}),
 		]);
 	});
 
