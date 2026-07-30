@@ -36,6 +36,7 @@ import {
 } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { InitialRetryFallbackState } from "./agent-session-types";
+import type { CacheMutationTag } from "./cache-attribution";
 import { isEmptyErrorTurn } from "./messages";
 import {
 	type ActiveRetryFallbackState,
@@ -100,6 +101,10 @@ export interface TurnRecoveryHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	configWarnings: string[];
+	/** Record a prompt-cache mutation tag on the owning session's ledger. */
+	recordCacheMutation?(tag: CacheMutationTag): void;
+	/** Queue a cache mutation for the retry's upcoming provider request. */
+	queueCacheMutationForNextProviderRequest?(tag: CacheMutationTag): void;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
@@ -644,19 +649,20 @@ export class TurnRecovery {
 
 	removeAssistantMessageFromActiveContext(
 		assistantMessage: AssistantMessage,
-		reason = "assistant-context-cleanup",
+		options?: { reason?: string; retryRecovery?: boolean },
 	): void {
 		const messages = this.#host.agent.state.messages;
 		const lastMessage = messages[messages.length - 1];
 		const lastAssistant: AssistantMessage | undefined = lastMessage?.role === "assistant" ? lastMessage : undefined;
 		if (lastAssistant !== undefined && this.#isSameAssistantMessage(lastAssistant, assistantMessage)) {
 			this.#host.agent.replaceMessages(messages.slice(0, -1));
+			if (options?.retryRecovery) this.#host.recordCacheMutation?.("retry-recovery");
 			return;
 		}
 		// A miss means the failed turn is still in active context (or was never
 		// there); log just enough to explain why the identity check failed.
 		logger.debug("agent active context assistant removal missed", {
-			reason,
+			reason: options?.reason ?? "assistant-context-cleanup",
 			lastRole: lastMessage?.role,
 			candidateTimestamp: assistantMessage.timestamp,
 			lastTimestamp: lastAssistant?.timestamp,
@@ -744,7 +750,7 @@ export class TurnRecovery {
 				: branch.find(entry => entry.id === branchEntry.parentId);
 		const prunePrompt = parentEntry?.type === "custom_message";
 
-		this.removeAssistantMessageFromActiveContext(assistantMessage, "accepted-terminal-empty-stop");
+		this.removeAssistantMessageFromActiveContext(assistantMessage, { reason: "accepted-terminal-empty-stop" });
 		if (prunePrompt && this.#host.agent.state.messages.at(-1)?.role === "custom") {
 			this.#host.agent.replaceMessages(this.#host.agent.state.messages.slice(0, -1));
 		}
@@ -1549,7 +1555,7 @@ export class TurnRecovery {
 		// Resolved stream-stall tools have already emitted results. Keep that failed
 		// turn intact so continuation cannot repeat their side effects.
 		if (!options?.preserveFailedTurn) {
-			this.removeAssistantMessageFromActiveContext(message, "auto-retry");
+			this.removeAssistantMessageFromActiveContext(message, { reason: "auto-retry", retryRecovery: true });
 		}
 
 		// A thinking/response loop retried into identical context loops again. Inject a
@@ -1630,6 +1636,7 @@ export class TurnRecovery {
 			timestamp: tail.timestamp,
 		});
 		this.#host.agent.replaceMessages(messages.slice(0, -1));
+		this.#host.queueCacheMutationForNextProviderRequest?.("retry-recovery");
 	}
 
 	/**

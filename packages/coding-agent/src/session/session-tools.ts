@@ -643,7 +643,8 @@ export class SessionTools {
 		this.#notifyXdevMountDelta(previousMounted);
 		this.#host.agent.setTools(tools);
 		if (rebuiltSystemPrompt && rebuiltSignature) {
-			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
+			const hadAppliedToolSignature = this.#lastAppliedToolSignature !== undefined;
+			if (hadAppliedToolSignature) this.#host.clearInheritedProviderPromptCacheKey();
 			this.#baseSystemPrompt = rebuiltSystemPrompt;
 			this.#host.clearMemoryPromotionSnapshot();
 			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);

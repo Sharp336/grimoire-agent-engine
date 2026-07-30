@@ -3,8 +3,14 @@ import type { Usage } from "@oh-my-pi/pi-ai/types";
 import {
 	CacheInvalidationMarkerComponent,
 	detectCacheInvalidation,
+	reportCacheInvalidation,
 } from "@oh-my-pi/pi-coding-agent/modes/components/cache-invalidation-marker";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	addPromptTraffic,
+	CacheMutationLedger,
+	projectSystemAndToolsWireBytes,
+} from "@oh-my-pi/pi-coding-agent/session/cache-attribution";
 
 function usage(parts: { input?: number; cacheRead?: number; cacheWrite?: number; output?: number }): Usage {
 	const input = parts.input ?? 0;
@@ -90,5 +96,362 @@ describe("CacheInvalidationMarkerComponent", () => {
 		const dividerWidth = Bun.stringWidth(lines[1]);
 		expect(dividerWidth).toBeGreaterThan(0);
 		expect(dividerWidth).toBeLessThan(80);
+	});
+});
+
+describe("cache attribution timing", () => {
+	const thinkingAssistant = {
+		role: "assistant",
+		id: "assistant-1",
+		content: [{ type: "thinking", thinking: "unfinished reasoning" }],
+	};
+	const thinkingContinuity = {
+		role: "custom",
+		customType: "interrupted-thinking",
+		content: "unfinished reasoning",
+		timestamp: 1,
+	};
+
+	it("adds the message_end usage exactly once while it is pending AgentSession persistence", () => {
+		const persisted = { cacheRead: 9_000, cacheWrite: 5_000, input: 1_000 };
+		const current = usage({ cacheRead: 7_000, cacheWrite: 500, input: 99 });
+
+		expect(addPromptTraffic(persisted, current)).toEqual({
+			cacheRead: 16_000,
+			cacheWrite: 5_500,
+			input: 1_099,
+		});
+	});
+
+	it.each([
+		[
+			"present same",
+			[
+				[{ continuity: thinkingContinuity, assistant: thinkingAssistant }],
+				structuredClone([{ continuity: thinkingContinuity, assistant: thinkingAssistant }]),
+			],
+			[["thinking-demote"], []],
+		],
+		[
+			"present changed",
+			[
+				[{ continuity: thinkingContinuity, assistant: thinkingAssistant }],
+				[
+					{
+						continuity: { ...thinkingContinuity, content: "different interrupted reasoning" },
+						assistant: thinkingAssistant,
+					},
+				],
+			],
+			[["thinking-demote"], ["thinking-demote"]],
+		],
+		// present→absent reverts the wire to un-rewritten bytes, which differ from
+		// the previously emitted rewritten wire state — a cache-invalidating change
+		// that must be attributed (symmetric with absent→present).
+		[
+			"present to absent",
+			[[{ continuity: thinkingContinuity, assistant: thinkingAssistant }], []],
+			[["thinking-demote"], ["thinking-demote"]],
+		],
+		// The middle present→absent turn reverts the wire to un-rewritten bytes,
+		// differing from the prior rewritten state, so it is cache-invalidating and
+		// attributed — symmetric with absent→present.
+		[
+			"absent to same present",
+			[
+				[{ continuity: thinkingContinuity, assistant: thinkingAssistant }],
+				[],
+				structuredClone([{ continuity: thinkingContinuity, assistant: thinkingAssistant }]),
+			],
+			[["thinking-demote"], ["thinking-demote"], ["thinking-demote"]],
+		],
+	] as const)("records thinking demotion for %s transition", (_transition, replays, expectedTags) => {
+		const ledger = new CacheMutationLedger();
+
+		const tags = replays.map(replay => {
+			ledger.recordThinkingDemotionsAtWire(replay);
+			return ledger.consume();
+		});
+
+		expect(tags).toEqual([...expectedTags]);
+	});
+
+	it.each([
+		[
+			"present same",
+			[Bun.hash.wyhash("stable wrapped bytes"), Bun.hash.wyhash("stable wrapped bytes")],
+			[["steering-wrap"], []],
+		],
+		[
+			"present changed",
+			[Bun.hash.wyhash("stable wrapped bytes"), Bun.hash.wyhash("changed wrapped bytes")],
+			[["steering-wrap"], ["steering-wrap"]],
+		],
+		// present→absent reverts the wire to unwrapped bytes, which differ from the
+		// previously emitted wrapped wire state — a cache-invalidating change that
+		// must be attributed (symmetric with absent→present).
+		[
+			"present to absent",
+			[Bun.hash.wyhash("stable wrapped bytes"), undefined],
+			[["steering-wrap"], ["steering-wrap"]],
+		],
+		// The middle present→absent turn reverts the wire to unwrapped bytes,
+		// differing from the prior wrapped state, so it is cache-invalidating and
+		// attributed — symmetric with absent→present.
+		[
+			"absent to same present",
+			[Bun.hash.wyhash("stable wrapped bytes"), undefined, Bun.hash.wyhash("stable wrapped bytes")],
+			[["steering-wrap"], ["steering-wrap"], ["steering-wrap"]],
+		],
+	] as const)("records steering wrapping for %s transition", (_transition, digests, expectedTags) => {
+		const ledger = new CacheMutationLedger();
+		const tags = digests.map(digest => {
+			ledger.recordSteeringWrapAtWire(digest);
+			return ledger.consume();
+		});
+
+		expect(tags).toEqual([...expectedTags]);
+	});
+
+	describe("provider-boundary mutations", () => {
+		it("projects only system and tool bytes for each built-in payload shape", () => {
+			const topLevel = {
+				instructions: "Main system",
+				tools: [{ type: "function", function: { name: "read" } }],
+				tool_choice: "auto",
+				input: [{ role: "user", content: "do not fingerprint me" }],
+			};
+			const googleOrVertex = {
+				contents: [{ role: "user", parts: [{ text: "do not fingerprint me" }] }],
+				config: {
+					systemInstruction: { parts: [{ text: "Google system" }] },
+					tools: [{ functionDeclarations: [{ name: "read" }] }],
+					toolConfig: { functionCallingConfig: { mode: "ANY" } },
+				},
+			};
+			const geminiCli = {
+				project: "project",
+				request: {
+					contents: [{ role: "user", parts: [{ text: "do not fingerprint me" }] }],
+					systemInstruction: { parts: [{ text: "CLI system" }] },
+					tools: [{ functionDeclarations: [{ name: "read" }] }],
+					toolConfig: { functionCallingConfig: { mode: "VALIDATED" } },
+				},
+			};
+
+			expect(JSON.parse(projectSystemAndToolsWireBytes(topLevel))).toEqual({
+				instructions: "Main system",
+				tools: topLevel.tools,
+				tool_choice: "auto",
+			});
+			expect(JSON.parse(projectSystemAndToolsWireBytes(googleOrVertex))).toEqual({ config: googleOrVertex.config });
+			expect(JSON.parse(projectSystemAndToolsWireBytes(geminiCli))).toEqual({
+				request: {
+					systemInstruction: geminiCli.request.systemInstruction,
+					tools: geminiCli.request.tools,
+					toolConfig: geminiCli.request.toolConfig,
+				},
+			});
+			expect(projectSystemAndToolsWireBytes(topLevel)).toBe(
+				projectSystemAndToolsWireBytes({ ...topLevel, input: [{ role: "user", content: "different user bytes" }] }),
+			);
+		});
+
+		it("compares only main emissions for each provider cache identity", () => {
+			const ledger = new CacheMutationLedger();
+			const main = "openai:main-cache";
+
+			ledger.recordMainProviderToolSignature(main, "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+			// A→B→A rebuilds before send preserve the actually emitted A baseline.
+			const rebuiltB = "system-and-tools:B";
+			const rebuiltA = "system-and-tools:A";
+			expect(rebuiltB).not.toBe(rebuiltA);
+			ledger.recordMainProviderToolSignature(main, rebuiltA);
+			expect(ledger.consume()).toEqual([]);
+			ledger.recordMainProviderToolSignature(main, rebuiltB);
+			expect(ledger.consume()).toEqual(["tool-signature"]);
+			ledger.recordMainProviderToolSignature(main, rebuiltB);
+			expect(ledger.consume()).toEqual([]);
+
+			// A different main cache identity begins with its own empty baseline.
+			ledger.recordMainProviderToolSignature("google:other-cache", "system-and-tools:advisor");
+			expect(ledger.consume()).toEqual([]);
+			ledger.queueForNextProviderRequest("shake");
+			// Advisor/capture callbacks do not own this ledger and cannot consume pending tags.
+			expect(ledger.tags).toEqual([]);
+			ledger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(ledger.consume()).toEqual(["shake"]);
+		});
+
+		it("fingerprints only emitted obfuscated bytes across clones and ordinary context growth", () => {
+			const ledger = new CacheMutationLedger();
+			const source = [{ role: "user", content: "secret-a" }];
+			const obfuscated = [{ role: "user", content: "[redacted-a]" }];
+
+			ledger.recordObfuscationAtWire(source, obfuscated);
+			expect(ledger.consume()).toEqual(["obfuscate"]);
+
+			const clonedSource = structuredClone(source);
+			const clonedObfuscated = structuredClone(clonedSource);
+			clonedObfuscated[0] = { role: "user", content: "[redacted-a]" };
+			ledger.recordObfuscationAtWire(clonedSource, clonedObfuscated);
+			expect(ledger.consume()).toEqual([]);
+
+			const grownSource = [...structuredClone(source), { role: "user", content: "ordinary context growth" }];
+			const grownObfuscated = [...grownSource];
+			grownObfuscated[0] = { role: "user", content: "[redacted-a]" };
+			ledger.recordObfuscationAtWire(grownSource, grownObfuscated);
+			expect(ledger.consume()).toEqual([]);
+
+			const changedSecret = structuredClone(source);
+			const changedOutput = structuredClone(changedSecret);
+			changedOutput[0] = { role: "user", content: "[redacted-b]" };
+			ledger.recordObfuscationAtWire(changedSecret, changedOutput);
+			expect(ledger.consume()).toEqual(["obfuscate"]);
+
+			// Emitting the un-obfuscated source reverts the wire to bytes that differ
+			// from the previously emitted redacted wire state (present→absent), so it
+			// is cache-invalidating and must be attributed.
+			ledger.recordObfuscationAtWire(changedSecret, changedSecret);
+			expect(ledger.consume()).toEqual(["obfuscate"]);
+			ledger.recordObfuscationAtWire(source, obfuscated);
+			expect(ledger.consume()).toEqual(["obfuscate"]);
+		});
+
+		it("compares tool signatures only at the provider boundary", () => {
+			const ledger = new CacheMutationLedger();
+
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+
+			// A rebuild briefly produces B, then returns to A before any request.
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:B");
+			expect(ledger.consume()).toEqual(["tool-signature"]);
+
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual(["tool-signature"]);
+		});
+
+		it("does not advance the emitted tool baseline for a failed rebuild", () => {
+			const ledger = new CacheMutationLedger();
+
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+			// No provider-boundary call occurs for the failed B rebuild.
+			ledger.recordMainProviderToolSignature("test:main", "system-and-tools:A");
+			expect(ledger.consume()).toEqual([]);
+		});
+
+		it("delivers queued rewrites once at the next provider boundary", () => {
+			const ledger = new CacheMutationLedger();
+			ledger.queueForNextProviderRequest("shake");
+			ledger.queueForNextProviderRequest("shake");
+
+			// A response already in flight, including a zero-usage one, sees no tag.
+			expect(
+				reportCacheInvalidation({ prev: undefined, current: usage({}), ledger, logger: { warn: () => {} } }),
+			).toBeUndefined();
+			ledger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(ledger.consume()).toEqual(["shake"]);
+			ledger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(ledger.consume()).toEqual([]);
+		});
+	});
+});
+
+describe("reportCacheInvalidation", () => {
+	it("logs reprocessed tokens together with the mutator tag recorded this turn", () => {
+		// Contract: a detected prefix loss is attributed to the message-array
+		// mutators that fired on the losing turn, alongside the token cost and the
+		// session-cumulative hit ratio.
+		const ledger = new CacheMutationLedger();
+		ledger.record("compaction");
+		let captured: Record<string, unknown> | undefined;
+		const fakeLogger = {
+			warn: (_message: string, context?: Record<string, unknown>) => {
+				captured = context;
+			},
+		};
+
+		const prev = usage({ cacheRead: 49_837, cacheWrite: 980, output: 79 });
+		const current = usage({ cacheRead: 0, cacheWrite: 50_900, input: 99, output: 99 });
+
+		const invalidation = reportCacheInvalidation({
+			prev,
+			current,
+			ledger,
+			logger: fakeLogger,
+			cumulativeUsage: { cacheRead: 9_000, cacheWrite: 5_000, input: 1_000 },
+		});
+
+		// Detection still surfaces the invalidation for the transcript marker.
+		expect(invalidation).toEqual({ reprocessedTokens: 50_999 });
+		const context = captured;
+		if (!context) throw new Error("expected a warn call");
+		expect(context.reprocessedTokens).toBe(50_999);
+		expect(context.tags as string[]).toContain("compaction");
+		// Same denominator as the status-line cache_hit segment: 9000 / (9000+5000+1000) = 60.
+		expect(context.cumulativeHitRatio).toBe(60);
+		// The ledger is consumed so a tag cannot leak to a later turn.
+		expect([...ledger.tags]).toHaveLength(0);
+	});
+
+	it("consumes the ledger and stays silent when no invalidation is detected", () => {
+		const ledger = new CacheMutationLedger();
+		ledger.record("steering-wrap");
+		const warns: unknown[] = [];
+		const fakeLogger = { warn: () => warns.push(null) };
+
+		// A turn that reused cache is not an invalidation.
+		const prev = usage({ cacheRead: 50_900, cacheWrite: 980 });
+		const current = usage({ cacheRead: 50_900, cacheWrite: 3_459, input: 2 });
+		const invalidation = reportCacheInvalidation({ prev, current, ledger, logger: fakeLogger });
+
+		expect(invalidation).toBeUndefined();
+		expect(warns).toHaveLength(0);
+		// Still cleared so a non-losing turn's tags never attribute a later miss.
+		expect([...ledger.tags]).toHaveLength(0);
+	});
+
+	it("consumes tags on a zero-usage turn so they never leak to a later miss", () => {
+		// Contract: the ledger is consumed on every turn, including aborted or
+		// all-zero responses that carry no prompt traffic. A tag recorded on such
+		// a turn must not be mis-attributed to the next nonzero turn's miss.
+		const ledger = new CacheMutationLedger();
+		const contexts: Array<Record<string, unknown> | undefined> = [];
+		const fakeLogger = {
+			warn: (_message: string, context?: Record<string, unknown>) => contexts.push(context),
+		};
+
+		// A mutator fired on a turn that then reported all-zero usage (e.g. abort).
+		const prevWarm = usage({ cacheRead: 50_000, cacheWrite: 980 });
+		ledger.record("compaction");
+		const zeroUsage = reportCacheInvalidation({
+			prev: prevWarm,
+			current: usage({}),
+			ledger,
+			logger: fakeLogger,
+		});
+		// Zero traffic is not an invalidation, and no warn fires — yet the tag was
+		// consumed despite the empty turn.
+		expect(zeroUsage).toBeUndefined();
+		expect(contexts).toHaveLength(0);
+		expect([...ledger.tags]).toHaveLength(0);
+
+		// A later turn suffers a real prefix loss; the stale "compaction" tag
+		// must NOT carry over from the consumed zero-usage turn.
+		const missed = reportCacheInvalidation({
+			prev: prevWarm,
+			current: usage({ cacheRead: 0, cacheWrite: 50_000, input: 99 }),
+			ledger,
+			logger: fakeLogger,
+		});
+		expect(missed).toEqual({ reprocessedTokens: 50_099 });
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0]?.tags as string[]).toEqual([]);
 	});
 });

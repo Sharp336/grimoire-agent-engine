@@ -65,6 +65,7 @@ import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
+import type { CacheMutationTag } from "./cache-attribution";
 import { findCompactMode } from "./compact-modes";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
@@ -177,6 +178,10 @@ export interface SessionMaintenanceHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	/** Record a prompt-cache mutation tag on the owning session's ledger. */
+	recordCacheMutation?(tag: CacheMutationTag): void;
+	/** Queue a prompt-cache mutation for the next real provider request. */
+	queueCacheMutationForNextProviderRequest?(tag: CacheMutationTag): void;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
@@ -242,7 +247,10 @@ export interface SessionMaintenanceHost {
 	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
 	dropImages(): Promise<{ removed: number }>;
 	runHandoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined>;
-	removeAssistantMessageFromActiveContext(message: AssistantMessage): void;
+	removeAssistantMessageFromActiveContext(
+		message: AssistantMessage,
+		options?: { reason?: string; retryRecovery?: boolean },
+	): void;
 	dropPersistedAssistantTurn(message: AssistantMessage): Promise<void>;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
@@ -420,6 +428,7 @@ export class SessionMaintenance {
 			return { removed: 0 };
 		}
 		await this.#host.sessionManager.rewriteEntries();
+		this.#host.queueCacheMutationForNextProviderRequest?.("shake");
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes();
@@ -477,6 +486,7 @@ export class SessionMaintenance {
 		applyShakeRegions(items);
 
 		await this.#host.sessionManager.rewriteEntries();
+		this.#host.queueCacheMutationForNextProviderRequest?.("shake");
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes();
@@ -823,6 +833,7 @@ export class SessionMaintenance {
 				fromExtension,
 				preserveData,
 			);
+			this.#host.recordCacheMutation?.("compaction");
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
@@ -1139,7 +1150,10 @@ export class SessionMaintenance {
 			// MUST keep the only assistant message explaining why the turn
 			// stopped. The branch entry is dropped further down, but only on the
 			// paths that actually schedule a retry/compaction.
-			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+			this.#host.removeAssistantMessageFromActiveContext(assistantMessage, {
+				reason: "overflow-retry",
+				retryRecovery: true,
+			});
 
 			// Try context promotion first - switch to a larger model and retry without compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
@@ -1191,7 +1205,10 @@ export class SessionMaintenance {
 				modelsAreEqual(promotionTarget, this.#model) &&
 				AIError.isContextOverflow(assistantMessage, failedWindow)
 			) {
-				this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+				this.#host.removeAssistantMessageFromActiveContext(assistantMessage, {
+					reason: "pre-promoted-overflow-retry",
+					retryRecovery: true,
+				});
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
 				logger.debug("Overflow on pre-promotion model; retrying on promoted model", {
 					failed: `${assistantMessage.provider}/${assistantMessage.model}`,
@@ -1212,7 +1229,10 @@ export class SessionMaintenance {
 			// Same active-context vs persisted-history split as the overflow path
 			// above: clear the dead turn from agent state so it cannot be replayed,
 			// but keep it on the branch unless promotion or compaction actually runs.
-			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+			this.#host.removeAssistantMessageFromActiveContext(assistantMessage, {
+				reason: "incomplete-retry",
+				retryRecovery: true,
+			});
 
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (promoted) {

@@ -132,10 +132,16 @@ import {
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import {
+	CacheMutationLedger,
+	projectSystemAndToolsWireBytes,
+	projectThinkingControlsWireBytes,
+} from "./session/cache-attribution";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
 	type CustomMessage,
 	convertToLlm,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	replaceLlmImagesWithText,
 	USER_INTERRUPT_LABEL,
@@ -227,6 +233,64 @@ type McpNotificationEntry = {
 type LateDiagnosticsDetails = {
 	files: Array<{ path: string; summary: string; errored: boolean; messages: string[] }>;
 };
+
+function demoteInterruptedThinkingBeforeProviderReplay(messages: AgentMessage[]): {
+	messages: AgentMessage[];
+	pairs?: Array<{ continuity: CustomMessage; assistant: AgentMessage }>;
+} {
+	let pairs: Array<{ continuity: CustomMessage; assistant: AgentMessage }> | undefined;
+
+	for (let index = 0; index < messages.length - 1; index++) {
+		const assistant = messages[index];
+		const continuity = messages[index + 1];
+		if (
+			assistant?.role !== "assistant" ||
+			continuity?.role !== "custom" ||
+			continuity.customType !== INTERRUPTED_THINKING_MESSAGE_TYPE
+		) {
+			continue;
+		}
+
+		pairs ??= [];
+		pairs.push({ continuity, assistant });
+	}
+
+	return { messages, pairs };
+}
+
+function digestSteeringWrappedMessages(source: readonly AgentMessage[], emitted: readonly AgentMessage[]): bigint {
+	let canonical = "";
+	for (let index = 0; index < source.length; index++) {
+		const original = source[index];
+		const wrapped = emitted[index];
+		if (original?.role !== "user" || original.steering !== true || wrapped === original || wrapped?.role !== "user") {
+			continue;
+		}
+
+		const append = (value: string) => {
+			canonical += `${value.length}:${value}`;
+		};
+		append("user");
+		if (typeof wrapped.content === "string") {
+			append("text");
+			append(wrapped.content);
+			continue;
+		}
+
+		append("parts");
+		for (const part of wrapped.content) {
+			append(part.type);
+			if (part.type === "text") {
+				append(part.text);
+				continue;
+			}
+			append(part.mimeType);
+			append(part.detail ?? "");
+			append(part.data);
+		}
+	}
+	return Bun.hash.wyhash(canonical);
+}
 
 function buildLateDiagnosticsBatchMessage(
 	entries: DeferredDiagnosticsEntry[],
@@ -2982,33 +3046,46 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// one mid-session — historical image blocks would otherwise be replayed to
 		// a provider that 400s on them (#5400). Read both dynamically so a `/model`
 		// switch or setting change takes effect on the next turn.
-		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-			const converted = convertToLlm(messages);
-			if (settings.get("images.blockImages")) {
-				return replaceLlmImagesWithText(converted, "Image reading is disabled.");
-			}
+		const cacheMutationLedger = new CacheMutationLedger();
+		const stripLlmImagesForProvider = (converted: Message[]): Message[] => {
 			const activeModel = agent?.state.model ?? model;
-			if (activeModel && !activeModel.input.includes("image")) {
-				return replaceLlmImagesWithText(
-					converted,
-					"[image omitted: the active model does not support image input]",
-				);
-			}
-			return converted;
+			return settings.get("images.blockImages")
+				? replaceLlmImagesWithText(converted, "Image reading is disabled.")
+				: activeModel && !activeModel.input.includes("image")
+					? replaceLlmImagesWithText(converted, "[image omitted: the active model does not support image input]")
+					: converted;
 		};
 
 		// Final convertToLlm: live provider replay drops API-level refusal errors,
 		// then applies secret obfuscation to the remaining outbound context.
-		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
-			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
-			if (!obfuscator?.hasSecrets()) return converted;
-			return obfuscateMessages(obfuscator, converted);
+		const convertToLlmForProvider = (messages: AgentMessage[]) => {
+			const thinkingDemotion = demoteInterruptedThinkingBeforeProviderReplay(messages);
+			const converted = filterProviderReplayMessages(convertToLlm(thinkingDemotion.messages));
+			const imageStripped = stripLlmImagesForProvider(converted);
+			const emitted = obfuscator?.hasSecrets() ? obfuscateMessages(obfuscator, imageStripped) : imageStripped;
+			return { thinkingDemotion, converted, imageStripped, emitted };
 		};
+		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
+			const { thinkingDemotion, converted, imageStripped, emitted } = convertToLlmForProvider(messages);
+			cacheMutationLedger.recordThinkingDemotionsAtWire(thinkingDemotion.pairs ?? []);
+			cacheMutationLedger.recordImageStripAtWire(converted, imageStripped);
+			cacheMutationLedger.recordObfuscationAtWire(imageStripped, emitted);
+			return emitted;
+		};
+		const convertToLlmForAuxiliaryProvider = (messages: AgentMessage[]): Message[] =>
+			convertToLlmForProvider(messages).emitted;
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
-			return wrapSteeringForModel(withContext);
+			cacheMutationLedger.recordContextHookAtWire(messages, withContext);
+			const wrapped = wrapSteeringForModel(withContext);
+			cacheMutationLedger.recordSteeringWrapAtWire(
+				wrapped === withContext ? undefined : digestSteeringWrappedMessages(withContext, wrapped),
+			);
+			return wrapped;
 		};
+		const transformAuxiliaryContext = async (messages: AgentMessage[], _signal?: AbortSignal) =>
+			wrapSteeringForModel(await extensionRunner.emitContext(messages));
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames, then
 		// clamp images to the active provider budget before the request is sent.
@@ -3027,12 +3104,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					)
 				: undefined;
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
-			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
-			return clampProviderContextImages(transformed, transformModel);
+			const obfuscated = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			const snapcompacted = snapcompactInline
+				? await snapcompactInline.transform(obfuscated, transformModel)
+				: obfuscated;
+			cacheMutationLedger.recordSnapcompactAtWire(obfuscated.messages, snapcompacted.messages);
+			const clamped = clampProviderContextImages(snapcompacted, transformModel);
+			cacheMutationLedger.recordProviderImageStripAtWire(snapcompacted.messages, clamped.messages);
+			return clamped;
 		};
-		const onPayload = async (payload: unknown, model?: Model) => {
-			return await extensionRunner.emitBeforeProviderRequest(payload, model);
+		const onAuxiliaryProviderPayload = (payload: unknown, model?: Model) =>
+			extensionRunner.emitBeforeProviderRequest(payload, model);
+		const onMainProviderPayload = async (payload: unknown, requestModel?: Model) => {
+			cacheMutationLedger.recordQueuedMutationsAtMainProviderBoundary();
+			const replacement = await onAuxiliaryProviderPayload(payload, requestModel);
+			const emitted = replacement ?? payload;
+			const activeProvider = requestModel ?? agent?.state.model ?? model;
+			const cacheIdentity = `${activeProvider?.provider ?? "unknown"}/${activeProvider?.id ?? "unknown"}:${agent?.promptCacheKey ?? agent?.sessionId ?? providerPromptCacheKey ?? providerSessionId}`;
+			cacheMutationLedger.recordMainProviderToolSignature(cacheIdentity, projectSystemAndToolsWireBytes(emitted));
+			cacheMutationLedger.recordThinkingLevelAtWire(cacheIdentity, projectThinkingControlsWireBytes(emitted));
+			return replacement;
 		};
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model) => {
 			await extensionRunner.emitAfterProviderResponse(response, model);
@@ -3100,7 +3191,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// per turn from the SessionManager.
 			cwdResolver: () => sessionManager.getCwd(),
 			convertToLlm: convertToLlmFinal,
-			onPayload,
+			onPayload: onMainProviderPayload,
 			onResponse,
 			sessionId: providerSessionId,
 			promptCacheKey: providerPromptCacheKey,
@@ -3287,14 +3378,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					? () => createVibeTools(toolSession)
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
-			transformContext,
+			transformContext: transformAuxiliaryContext,
 			transformProviderContext,
-			onPayload,
+			onPayload: onAuxiliaryProviderPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
 			advisorStreamFn: settingsAwareStreamFn,
 			preferWebsockets: preferOpenAICodexWebsockets,
-			convertToLlm: convertToLlmFinal,
+			convertToLlm: convertToLlmForAuxiliaryProvider,
+			cacheMutationLedger,
 			rebuildSystemPrompt,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
@@ -3509,7 +3601,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
 			captureTools: autoLearnCaptureTools,
-			onPayload,
+			onPayload: onAuxiliaryProviderPayload,
 			onResponse,
 			createAgent: captureOptions => {
 				const captureModel = captureOptions.initialState?.model;
@@ -3519,7 +3611,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					...captureOptions,
 					cwd: sessionManager.getCwd(),
 					cwdResolver: () => sessionManager.getCwd(),
-					convertToLlm: convertToLlmFinal,
+					convertToLlm: convertToLlmForAuxiliaryProvider,
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
 						const transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;

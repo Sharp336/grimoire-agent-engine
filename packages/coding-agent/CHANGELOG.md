@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added prompt-cache invalidation attribution: the session records which prefix mutator (compaction, image-strip, obfuscation, …) rewrote the wire messages, and a cache-miss warn log now names the cause alongside the reprocessed-token count and the session-cumulative hit ratio ([#6998](https://github.com/can1357/oh-my-pi/pull/6998) by [@metaphorics](https://github.com/metaphorics)).
 - Added server-name autocomplete for `/mcp` commands (`enable`, `disable`, `test`, `remove`, `reconnect`, `reauth`, `unauth`) using configured and runtime-discovered MCP servers.
 - Added `CUT` and `PASTE` ops to the hashline edit tool for moving code without retyping it: `CUT N.=M` (and `.BLK` block forms) capture lines into a clipboard register, and `PASTE` operations insert them. The register flows across sections within a patch (cross-file moves) and persists across edit calls per session.
 - Added `--from-claude` and `--from-codex` session imports (including compaction state for Codex), also available from `/resume @claude` and `/resume @codex`.

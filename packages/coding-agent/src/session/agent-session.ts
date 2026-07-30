@@ -71,6 +71,7 @@ import type {
 	ToolCall,
 	ToolChoice,
 	ToolResultMessage,
+	Usage,
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
@@ -144,6 +145,7 @@ import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-ur
 import type { IrcMessage } from "../irc/bus";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
+import { type CacheInvalidation, reportCacheInvalidation } from "../modes/components/cache-invalidation-marker";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
@@ -235,6 +237,7 @@ import {
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
+import { addPromptTraffic, CacheMutationLedger } from "./cache-attribution";
 import {
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
@@ -575,6 +578,16 @@ export class AgentSession {
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
+	/**
+	 * Session-scoped ledger attributing prompt-cache invalidations to the
+	 * message-array mutators that fired on the losing turn. Public so the wire
+	 * transform pipeline (which mutates outbound bytes) and the detection point
+	 * (which reports) share one instance.
+	 */
+	readonly cacheMutationLedger: CacheMutationLedger;
+	#lastAssistantUsage: Usage | undefined;
+	#lastAssistantUsageCacheIdentity: string | undefined;
+	#cacheInvalidationByTimestamp = new Map<number, CacheInvalidation>();
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -946,6 +959,8 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			configWarnings: this.configWarnings,
+			recordCacheMutation: tag => this.cacheMutationLedger.record(tag),
+			queueCacheMutationForNextProviderRequest: tag => this.cacheMutationLedger.queueForNextProviderRequest(tag),
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
@@ -1140,6 +1155,7 @@ export class AgentSession {
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
 		this.#obfuscator = config.obfuscator;
+		this.cacheMutationLedger = config.cacheMutationLedger ?? new CacheMutationLedger();
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1315,6 +1331,8 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			recordCacheMutation: tag => this.cacheMutationLedger.record(tag),
+			queueCacheMutationForNextProviderRequest: tag => this.cacheMutationLedger.queueForNextProviderRequest(tag),
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
@@ -1358,8 +1376,8 @@ export class AgentSession {
 			shake: (mode, options) => this.shake(mode, options),
 			dropImages: () => this.dropImages(),
 			runHandoff: (customInstructions, options) => this.handoff(customInstructions, options),
-			removeAssistantMessageFromActiveContext: message =>
-				this.#recovery.removeAssistantMessageFromActiveContext(message),
+			removeAssistantMessageFromActiveContext: (message, options) =>
+				this.#recovery.removeAssistantMessageFromActiveContext(message, options),
 			dropPersistedAssistantTurn: message => this.#recovery.dropPersistedAssistantTurn(message),
 			runRecoveryCompactionWithRollback: (reason, message, allowDefer, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, allowDefer, options),
@@ -2188,6 +2206,14 @@ export class AgentSession {
 		}
 		return true;
 	}
+	/** Cache invalidation calculated before this message was emitted to all modes.
+	 *  Consumed on read so an entry survives until its owning message is delivered
+	 *  to every subscriber — a later message_end can no longer clear it first. */
+	getCacheInvalidation(message: AssistantMessage): CacheInvalidation | undefined {
+		const invalidation = this.#cacheInvalidationByTimestamp.get(message.timestamp);
+		if (invalidation) this.#cacheInvalidationByTimestamp.delete(message.timestamp);
+		return invalidation;
+	}
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
 		// A fresh run supersedes the previously settled (and pruned) refusal
@@ -2240,6 +2266,28 @@ export class AgentSession {
 			} else if (this.#pendingAbortErrorId) {
 				message.errorId = this.#pendingAbortErrorId;
 				this.#pendingAbortErrorId = undefined;
+			}
+		}
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			const assistantMessage = event.message;
+			// Partition the warm baseline by the live prompt-cache identity (not
+			// just provider/model): a session created, switched, or branched on the
+			// same model — or a cleared inherited promptCacheKey — gets a fresh
+			// cache key, so its cold write must not be measured against the prior
+			// key's warm prefix and falsely reported as invalidating it. Entries are
+			// consumed per message by getCacheInvalidation, so no global clear here.
+			const cacheIdentity = `${assistantMessage.provider}/${assistantMessage.model}:${this.agent.promptCacheKey ?? this.sessionId}`;
+			const invalidation = reportCacheInvalidation({
+				prev: this.#lastAssistantUsageCacheIdentity === cacheIdentity ? this.#lastAssistantUsage : undefined,
+				current: assistantMessage.usage,
+				ledger: this.cacheMutationLedger,
+				logger,
+				cumulativeUsage: addPromptTraffic(this.sessionManager.getUsageStatistics(), assistantMessage.usage),
+			});
+			if (invalidation) this.#cacheInvalidationByTimestamp.set(assistantMessage.timestamp, invalidation);
+			if (assistantMessage.usage.cacheRead + assistantMessage.usage.cacheWrite + assistantMessage.usage.input > 0) {
+				this.#lastAssistantUsage = assistantMessage.usage;
+				this.#lastAssistantUsageCacheIdentity = cacheIdentity;
 			}
 		}
 
@@ -6500,6 +6548,10 @@ export class AgentSession {
 			activeMessages.splice(0, activeMessages.length, ...sessionContext.messages);
 		}
 		this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
+		// The rewritten prefix shares the same session/model cache identity, so
+		// the next provider request can cold-write it. Queue the cause so the
+		// warning attributes the miss to the rewind rather than an empty list.
+		this.cacheMutationLedger.queueForNextProviderRequest("rewind");
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();

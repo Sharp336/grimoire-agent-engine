@@ -9,7 +9,6 @@ import { settings } from "../../config/settings";
 import { getEditClipboard } from "../../edit/edit-clipboard";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
-import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
 import {
 	groupedReadUsageCallIds,
 	ReadToolGroupComponent,
@@ -942,15 +941,16 @@ export class EventController {
 				// waiting poll cannot be displaced anymore — freeze it in place.
 				this.#resolveDisplaceablePoll();
 			}
-			// Surface a prompt-cache invalidation: if the previous turn cached a
-			// meaningful prefix and this request read none of it back, flag the turn.
-			const usage = event.message.usage;
-			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
-				if (settings.get("display.cacheMissMarker")) {
-					const invalidation = detectCacheInvalidation(this.ctx.lastAssistantUsage, usage);
-					if (invalidation) this.ctx.streamingComponent.setCacheInvalidation(invalidation);
-				}
-				this.ctx.lastAssistantUsage = usage;
+			// The cache-miss divider is an opt-in display feature. Fetch the
+			// precomputed invalidation (a pure map read fed by AgentSession) only
+			// when it is enabled, so the controller also tolerates a session that
+			// doesn't expose cache-invalidation data. AgentSession reports the
+			// invalidation for non-interactive attribution regardless of this gate.
+			const invalidation = settings.get("display.cacheMissMarker")
+				? this.ctx.session.getCacheInvalidation(event.message)
+				: undefined;
+			if (invalidation) {
+				this.ctx.streamingComponent.setCacheInvalidation(invalidation);
 			}
 			this.ctx.streamingComponent.markTranscriptBlockFinalized();
 			let lastPostToolAssistantComponent: AssistantMessageComponent | undefined;

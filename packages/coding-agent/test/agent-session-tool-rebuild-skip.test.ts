@@ -812,6 +812,26 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(2);
 	});
 
+	it("compares rebuilt tool signatures at provider boundaries", async () => {
+		const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`);
+		const baseline = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const changed = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+
+		await session.refreshMCPTools([baseline]);
+		session.cacheMutationLedger.recordMainProviderToolSignature("test:main", "system:tools:search");
+		expect(session.cacheMutationLedger.consume()).toEqual([]);
+
+		// Intermediate rebuilds do not count until one reaches the provider.
+		await session.refreshMCPTools([changed]);
+		await session.refreshMCPTools([baseline]);
+		session.cacheMutationLedger.recordMainProviderToolSignature("test:main", "system:tools:search");
+		expect(session.cacheMutationLedger.consume()).toEqual([]);
+
+		await session.refreshMCPTools([baseline, changed]);
+		session.cacheMutationLedger.recordMainProviderToolSignature("test:main", "system:tools:search,fetch");
+		expect(session.cacheMutationLedger.consume()).toEqual(["tool-signature"]);
+	});
+
 	it("waits for the next user prompt before delivering xd:// mount notices", async () => {
 		const firstCallStarted = Promise.withResolvers<void>();
 		const releaseFirstCall = Promise.withResolvers<void>();
@@ -1123,10 +1143,17 @@ These tools became available:
 		const oldTool = createMcpCustomTool("mcp__nucleus_old", "nucleus", "old", "Old tool");
 		const newTool = createMcpCustomTool("mcp__nucleus_new", "nucleus", "new", "New tool");
 		await session.refreshMCPTools([oldTool]);
+		session.cacheMutationLedger.recordMainProviderToolSignature("test:main", "system:tools:old");
+		expect(session.cacheMutationLedger.consume()).toEqual([]);
 		date = "2026-07-17";
 		failRebuild = true;
 
 		await expect(session.refreshMCPTools([newTool])).rejects.toThrow("rebuild failed");
+		// The failed rebuild never reaches setTools/setSystemPrompt, so it must not
+		// attribute a cache miss to a signature that never reached the provider.
+		expect(session.cacheMutationLedger.tags).not.toContain("tool-signature");
+		session.cacheMutationLedger.recordMainProviderToolSignature("test:main", "system:tools:old");
+		expect(session.cacheMutationLedger.consume()).toEqual([]);
 		expect(session.getToolByName(oldTool.name)).toBeDefined();
 		expect(session.getToolByName(newTool.name)).toBeUndefined();
 		expect(session.getMountedXdevToolNames()).toContain(oldTool.name);

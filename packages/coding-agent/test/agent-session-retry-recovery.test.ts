@@ -23,6 +23,7 @@ type RecoveryRun = {
 	sessionManager: SessionManager;
 	retryEndEvents: AutoRetryEndEvent[];
 	requestedKeys: string[];
+	cacheTagsAtRequests: string[][];
 };
 
 const RATE_LIMIT_ERROR =
@@ -159,6 +160,8 @@ describe("AgentSession retry recovery", () => {
 
 		const mock = createMockModel();
 		const requestedKeys: string[] = [];
+		const cacheTagsAtRequests: string[][] = [];
+		let session: AgentSession | undefined;
 		let agent!: Agent;
 		agent = new Agent({
 			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
@@ -171,6 +174,7 @@ describe("AgentSession retry recovery", () => {
 			streamFn: (requestedModel, context, options) => {
 				const apiKey = resolveInitialApiKey(options?.apiKey);
 				requestedKeys.push(apiKey);
+				cacheTagsAtRequests.push([...(session?.cacheMutationLedger.tags ?? [])]);
 				if (requestedKeys.length === 1) {
 					mock.push({ throw: RATE_LIMIT_ERROR });
 				} else {
@@ -189,26 +193,36 @@ describe("AgentSession retry recovery", () => {
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
 		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
-		const session = new AgentSession({
+		const createdSession = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
 			modelRegistry,
 		});
-		sessions.push(session);
+		session = createdSession;
+		sessions.push(createdSession);
 
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
+		createdSession.subscribe(event => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
 		});
 
-		await session.prompt("Trigger account rate limit recovery");
-		await session.waitForIdle();
+		await createdSession.prompt("Trigger account rate limit recovery");
+		await createdSession.waitForIdle();
 		await sessionManager.flush();
 
-		return { session, sessionManager, retryEndEvents, requestedKeys };
+		return { session: createdSession, sessionManager, retryEndEvents, requestedKeys, cacheTagsAtRequests };
 	}
+
+	it("records retry-recovery before the retried provider request mutates the active context", async () => {
+		const { cacheTagsAtRequests, requestedKeys } = await runCredentialRecovery();
+
+		expect(requestedKeys).toHaveLength(2);
+		// This is sampled at stream dispatch. Display metadata is written only after
+		// the second response, so a late record could not make this request.
+		expect(cacheTagsAtRequests[1]).toContain("retry-recovery");
+	});
 
 	it("marks a recovered retry error, emits it, persists it, and excludes only model-context replay", async () => {
 		const { sessionManager, retryEndEvents, requestedKeys } = await runCredentialRecovery();
@@ -296,21 +310,21 @@ describe("AgentSession retry recovery", () => {
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
 		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
-		const session = new AgentSession({
+		const createdSession = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
 			modelRegistry,
 		});
-		sessions.push(session);
+		sessions.push(createdSession);
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
+		createdSession.subscribe(event => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
 		});
 
-		await session.prompt("Exhaust retry attempts");
-		await session.waitForIdle();
+		await createdSession.prompt("Exhaust retry attempts");
+		await createdSession.waitForIdle();
 
 		expect(mock.calls).toHaveLength(2);
 		expect(retryEndEvents).toHaveLength(1);

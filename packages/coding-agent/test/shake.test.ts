@@ -123,6 +123,27 @@ describe("AgentSession shake", () => {
 			expect(result.blocksDropped).toBe(0);
 			expect(result.tokensFreed).toBe(0);
 		});
+
+		it("queues a successful active-history rewrite for the next provider boundary", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			await session.shake("elide");
+			expect(session.cacheMutationLedger.consume()).toEqual([]);
+			session.cacheMutationLedger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(session.cacheMutationLedger.consume()).toEqual(["shake"]);
+
+			await session.shake("elide");
+			session.cacheMutationLedger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(session.cacheMutationLedger.consume()).toEqual([]);
+		});
+
+		it("does not queue a failed active-history rewrite", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			vi.spyOn(sessionManager, "rewriteEntries").mockRejectedValueOnce(new Error("disk unavailable"));
+
+			await expect(session.shake("elide")).rejects.toThrow("disk unavailable");
+			session.cacheMutationLedger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(session.cacheMutationLedger.consume()).toEqual([]);
+		});
 	});
 
 	describe("images", () => {
@@ -142,6 +163,19 @@ describe("AgentSession shake", () => {
 			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
 			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
 			expect(content.some(b => b.type === "image")).toBe(false);
+		});
+
+		it("queues a committed image drop for the next provider boundary", async () => {
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "image", data: "iVBORw0KGgo", mimeType: "image/png" }],
+				timestamp: Date.now(),
+			});
+
+			await session.dropImages();
+			expect(session.cacheMutationLedger.consume()).toEqual([]);
+			session.cacheMutationLedger.recordQueuedMutationsAtMainProviderBoundary();
+			expect(session.cacheMutationLedger.consume()).toEqual(["shake"]);
 		});
 	});
 
