@@ -382,7 +382,10 @@ process.exit(0);`,
 		]);
 
 		expect(exitCode, stderr).toBe(0);
-		expect(stderr).toContain("UnhandledPromiseRejectionWarning: Error: injected debug-log close failure");
+		// A post-open debug-log write/close failure is contained (caught in the
+		// write chain and the provider's finally), so it must not surface as an
+		// unhandled rejection that could terminate a strict SDK host.
+		expect(stderr).not.toContain("UnhandledPromiseRejectionWarning");
 		expect(JSON.parse(stdout)).toEqual({
 			stopReason: "stop",
 			cleanupError: "Error: injected debug-log close failure",

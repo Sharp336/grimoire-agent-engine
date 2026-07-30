@@ -161,7 +161,16 @@ async function fetchServerConfig(
 ): Promise<ServerConfigResult> {
 	const proxyUrl = getProxyForUrl(opts.provider, new URL(opts.baseUrl));
 	const agent = proxyUrl
-		? createProxiedAgent(proxyUrl, opts.baseUrl, { signal: controllerSignal, alpnProtocols: ["http/1.1"] })
+		? createProxiedAgent(proxyUrl, opts.baseUrl, {
+				signal: controllerSignal,
+				// A proxy that accepts the TCP connection but never completes CONNECT
+				// is invisible to the RPC's own timeout (it only aborts the request,
+				// not the agent's in-flight tunnel). Bound the tunnel by the same
+				// discovery deadline so it self-destructs instead of leaking a raw
+				// socket on every retry until global disposal.
+				timeoutMs: DISCOVERY_TIMEOUT_MS,
+				alpnProtocols: ["http/1.1"],
+			})
 		: undefined;
 
 	const headerInterceptor: Interceptor = next => async req => {

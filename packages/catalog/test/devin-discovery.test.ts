@@ -7,6 +7,7 @@ import {
 } from "../src/discovery/devin-gen/exa/api_server_pb/api_server_pb";
 import {
 	ClientModelConfigSchema,
+	DisplayOption,
 	ModelInfoSchema,
 } from "../src/discovery/devin-gen/exa/codeium_common_pb/codeium_common_pb";
 
@@ -47,6 +48,7 @@ describe("fetchDevinModels", () => {
 		expect(requestHeaders?.get("content-type")).toBe("application/proto");
 		if (!requestBody) throw new Error("Devin discovery did not submit a request body");
 		const request = fromBinary(GetCliModelConfigsRequestSchema, requestBody);
+		if (!request.metadata) throw new Error("Devin discovery request did not include metadata");
 		expect(request.metadata).toMatchObject({
 			apiKey: SESSION_TOKEN,
 			ideName: "chisel",
@@ -56,6 +58,7 @@ describe("fetchDevinModels", () => {
 			locale: "en",
 			os: devinOs(),
 		});
+		expect(request.metadata.supportedModelDisplays).toEqual([DisplayOption.MODEL_ROUTER]);
 	});
 
 	it("keeps the 64k output default when the catalog omits maxOutputTokens", async () => {

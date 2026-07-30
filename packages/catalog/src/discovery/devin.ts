@@ -111,6 +111,12 @@ export async function fetchDevinModels(
 				extensionVersion: DEVIN_EXTENSION_VERSION,
 				locale: "en",
 				os: devinOs(),
+				// Surface the display mode the normalizer below retains. Empty
+				// negotiation can leave accounts with only the legacy catalog and no
+				// user-selectable router entries; advertising MODEL_ROUTER opts the
+				// response into them. Default/UNSPECIFIED models are returned
+				// regardless and still pass the client-side filter.
+				supportedModelDisplays: [DisplayOption.MODEL_ROUTER],
 			}),
 		});
 		const body = toBinary(GetCliModelConfigsRequestSchema, request);

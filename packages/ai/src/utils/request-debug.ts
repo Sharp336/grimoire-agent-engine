@@ -208,6 +208,8 @@ class FileRequestDebugResponseLog implements RequestDebugResponseLog {
 	#handle: fs.FileHandle | undefined;
 	#pending: Promise<void> = Promise.resolve();
 	#closed: Promise<void> | undefined;
+	/** First post-open write failure; flushed through `close()` so the fire-and-forget write chain never sits rejected without a handler. */
+	#writeError: Error | undefined;
 
 	constructor(handle: fs.FileHandle) {
 		this.#handle = handle;
@@ -217,9 +219,21 @@ class FileRequestDebugResponseLog implements RequestDebugResponseLog {
 		const handle = this.#handle;
 		if (!handle) return;
 		const bytes = typeof chunk === "string" ? textEncoder.encode(chunk) : chunk.slice();
-		this.#pending = this.#pending.then(async () => {
-			await handle.write(bytes);
-		});
+		this.#pending = this.#pending
+			.then(async () => {
+				await handle.write(bytes);
+			})
+			.catch(error => {
+				// Writes are fire-and-forget diagnostics from provider stream loops
+				// and socket callbacks, so a `handle.write` rejection (e.g. disk
+				// full) has nowhere to land until `close()` flushes it. A naked
+				// chain surfaces as an unhandled rejection between the write and the
+				// eventual close; capture the first failure and re-raise it from
+				// `close()`, where callers already swallow diagnostics.
+				if (!this.#writeError) {
+					this.#writeError = error instanceof Error ? error : new Error(String(error));
+				}
+			});
 	}
 
 	close(): Promise<void> {
@@ -227,12 +241,14 @@ class FileRequestDebugResponseLog implements RequestDebugResponseLog {
 		const handle = this.#handle;
 		if (!handle) return Promise.resolve();
 		this.#handle = undefined;
+		const writeError = this.#writeError;
 		this.#closed = (async () => {
 			try {
 				await this.#pending;
 			} finally {
 				await handle.close();
 			}
+			if (writeError) throw writeError;
 		})();
 		return this.#closed;
 	}
