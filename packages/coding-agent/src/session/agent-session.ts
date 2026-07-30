@@ -952,6 +952,8 @@ export class AgentSession {
 			streamingEditAbortTriggered: () => this.#streamingEditGuard.abortTriggered,
 			promptGeneration: () => this.#promptGeneration,
 			sessionId: () => this.sessionId,
+			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text) ?? text,
+			deobfuscateFromProvider: text => this.#deobfuscateFromProvider(text),
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),

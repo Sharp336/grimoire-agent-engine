@@ -23,7 +23,12 @@ import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { formatModelStringWithRouting, resolveModelOverride, resolveRoleSelection } from "../config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	resolveModelOverride,
+	resolveModelRoleValue,
+	resolveRoleSelection,
+} from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { RecoveredRetryError } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
@@ -134,6 +139,8 @@ export interface TurnRecoveryHost {
 	streamingEditAbortTriggered(): boolean;
 	promptGeneration(): number;
 	sessionId(): string;
+	obfuscateTextForProvider(text: string): string;
+	deobfuscateFromProvider(text: string): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -1721,7 +1728,13 @@ export class TurnRecovery {
 		const assistantIndex = messages.findLastIndex(
 			message => message.role === "assistant" && this.#isSameAssistantMessage(message, assistantMessage),
 		);
-		const userIndex = assistantIndex - 1;
+		let userIndex = assistantIndex - 1;
+		while (userIndex >= 0) {
+			const candidate = messages[userIndex];
+			if (candidate?.role === "user") break;
+			if (candidate?.role === "assistant" || candidate?.role === "developer") return false;
+			userIndex--;
+		}
 		const userMessage = messages[userIndex];
 		if (userMessage?.role !== "user") return false;
 		const originalText =
@@ -1734,17 +1747,22 @@ export class TurnRecovery {
 						.trim();
 		if (!hasNonWhitespace(originalText)) return false;
 
-		const resolved = resolveRoleSelection(
-			[this.#host.settings.getGroup("retry").refusalParaphraseRole, "smol"],
-			this.#host.settings,
-			this.#host.modelRegistry.getAvailable(),
-		);
+		const availableModels = this.#host.modelRegistry.getAvailable();
+		const configuredRole = this.#host.settings.getGroup("retry").refusalParaphraseRole;
+		const configuredResolution = resolveRoleSelection([configuredRole], this.#host.settings, availableModels);
+		const aliasResolution = resolveModelRoleValue("@smol", availableModels, { settings: this.#host.settings });
+		const resolved =
+			configuredResolution ??
+			(aliasResolution.model
+				? { model: aliasResolution.model, thinkingLevel: aliasResolution.thinkingLevel }
+				: undefined);
 		if (!resolved) return false;
 
 		const abortController = new AbortController();
 		this.#retryAbortController?.abort();
 		this.#retryAbortController = abortController;
 		const registryApiKey = this.#host.modelRegistry.resolver(resolved.model, this.#host.sessionId());
+		const originalTextForProvider = this.#host.obfuscateTextForProvider(originalText);
 		let response: AssistantMessage;
 		try {
 			try {
@@ -1752,7 +1770,7 @@ export class TurnRecovery {
 					resolved.model,
 					{
 						systemPrompt: [prompt.render(refusalParaphraseTemplate)],
-						messages: [{ role: "user", content: originalText, timestamp: Date.now() }],
+						messages: [{ role: "user", content: originalTextForProvider, timestamp: Date.now() }],
 					},
 					{
 						apiKey: async context => {
@@ -1776,10 +1794,14 @@ export class TurnRecovery {
 			}
 
 			if (abortController.signal.aborted || response.stopReason !== "stop") return false;
-			const paraphrasedText = response.content
-				.filter((content): content is TextContent => content.type === "text")
-				.map(content => content.text)
-				.join("\n")
+			const paraphrasedText = this.#host
+				.deobfuscateFromProvider(
+					response.content
+						.filter((content): content is TextContent => content.type === "text")
+						.map(content => content.text)
+						.join("\n")
+						.trim(),
+				)
 				.trim();
 			if (!hasNonWhitespace(paraphrasedText)) return false;
 
@@ -1801,10 +1823,8 @@ export class TurnRecovery {
 				);
 			if (userEntry?.type !== "message" || userEntry.message.role !== "user") return false;
 
-			// Commit the rewrite: Escape may still cancel the provider call and persistence
-			// wait above, but cannot split the synchronous state mutation, lifecycle
-			// events, and continuation scheduling below.
-			if (this.#retryAbortController === abortController) this.#retryAbortController = undefined;
+			// Keep cancellation armed through lifecycle event delivery and continuation
+			// scheduling, so Escape closes the active retry saga in either window.
 			this.#host.withBashBranchTransition(() => {
 				if (userEntry.parentId === null) {
 					this.#host.sessionManager.resetLeaf();

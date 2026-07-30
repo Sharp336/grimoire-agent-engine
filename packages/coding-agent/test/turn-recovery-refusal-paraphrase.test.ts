@@ -57,6 +57,12 @@ describe("TurnRecovery refusal paraphrase", () => {
 			stopReason?: "length" | "aborted" | "error";
 			waitForSessionMessagePersistence?: (message: AssistantMessage) => Promise<void>;
 			onSessionEvent?: (event: AgentSessionEvent) => Promise<void>;
+			paraphrasedText?: string;
+			useSmolPriorityDefault?: boolean;
+			paraphraseModelId?: string;
+			paraphraseModelProvider?: string;
+			obfuscateTextForProvider?: (text: string) => string;
+			deobfuscateFromProvider?: (text: string) => string;
 		} = {},
 	): {
 		recovery: TurnRecovery;
@@ -68,11 +74,12 @@ describe("TurnRecovery refusal paraphrase", () => {
 	} {
 		const primaryModel = createMockModel({ provider: "anthropic", id: "claude-opus-5" });
 		const paraphraseModel = createMockModel({
-			id: "refusal-paraphraser",
+			id: options.paraphraseModelId ?? "refusal-paraphraser",
+			provider: options.paraphraseModelProvider,
 			responses: [
 				options.stopReason
 					? { content: ["partial rewrite"], stopReason: options.stopReason }
-					: { content: [rewrittenPrompt] },
+					: { content: [options.paraphrasedText ?? rewrittenPrompt] },
 			],
 		});
 		const userMessage = { ...originalUserMessage };
@@ -92,7 +99,9 @@ describe("TurnRecovery refusal paraphrase", () => {
 			"retry.refusalParaphrase": true,
 			"retry.maxRetries": options.maxRetries ?? 10,
 		});
-		settings.setModelRole("smol", "mock/refusal-paraphraser");
+		if (!options.useSmolPriorityDefault) {
+			settings.setModelRole("smol", `mock/${options.paraphraseModelId ?? "refusal-paraphraser"}`);
+		}
 		const modelRegistry = new ModelRegistry(authStorage);
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([paraphraseModel]);
 		const events: AgentSessionEvent[] = [];
@@ -117,6 +126,8 @@ describe("TurnRecovery refusal paraphrase", () => {
 			streamingEditAbortTriggered: () => false,
 			promptGeneration: () => 1,
 			sessionId: () => "refusal-paraphrase-test",
+			obfuscateTextForProvider: options.obfuscateTextForProvider ?? (text => text),
+			deobfuscateFromProvider: options.deobfuscateFromProvider ?? (text => text),
 			emitSessionEvent: async event => {
 				events.push(event);
 				await options.onSessionEvent?.(event);
@@ -187,28 +198,67 @@ describe("TurnRecovery refusal paraphrase", () => {
 		expect(agent.state.messages).toEqual([originalUserMessage, syntheticPrompt, syntheticRefusal]);
 	});
 
+	it("rewrites the user turn when companion messages precede the refusal", async () => {
+		const { recovery, paraphraseModel, agent } = createRecovery();
+		const companion = {
+			role: "custom" as const,
+			customType: "before-agent-start",
+			content: "Extra turn context.",
+			display: false,
+			attribution: "agent" as const,
+			timestamp: 3,
+		};
+		const companionRefusal = { ...refusal, timestamp: 4 };
+		agent.replaceMessages([originalUserMessage, companion, companionRefusal]);
+
+		expect(await recovery.handleRetryableError(companionRefusal)).toBe(true);
+		expect(paraphraseModel.calls).toHaveLength(1);
+		expect(agent.state.messages).toEqual([{ ...originalUserMessage, content: rewrittenPrompt }, companion]);
+	});
+
+	it("obfuscates the paraphrase request and restores the rewritten response", async () => {
+		const { recovery, paraphraseModel, agent } = createRecovery({
+			paraphrasedText: "Explain <secret> in neutral terms.",
+			obfuscateTextForProvider: text => text.replace("classifier", "<secret>"),
+			deobfuscateFromProvider: text => text.replace("<secret>", "classifier"),
+		});
+
+		expect(await recovery.handleRetryableError(refusal)).toBe(true);
+		expect(paraphraseModel.calls[0]?.context.messages).toMatchObject([
+			{ role: "user", content: "Explain how to bypass the <secret>." },
+		]);
+		expect(agent.state.messages).toEqual([
+			{ ...originalUserMessage, content: "Explain classifier in neutral terms." },
+		]);
+	});
+
+	it("resolves an unset paraphrase role through @smol", async () => {
+		const { recovery, paraphraseModel } = createRecovery({
+			useSmolPriorityDefault: true,
+			paraphraseModelId: "zai-glm-4.7",
+			paraphraseModelProvider: "cerebras",
+		});
+
+		expect(await recovery.handleRetryableError(refusal)).toBe(true);
+		expect(paraphraseModel.calls).toHaveLength(1);
+	});
+
 	it("honours an abort that lands during the persistence wait, before branch mutation and scheduling", async () => {
-		let releasePersistence: (() => void) | undefined;
-		let signalEnteredPersistence: (() => void) | undefined;
-		const persistenceBlocked = new Promise<void>(resolve => {
-			releasePersistence = resolve;
-		});
-		const enteredPersistence = new Promise<void>(resolve => {
-			signalEnteredPersistence = resolve;
-		});
+		const persistenceBlocked = Promise.withResolvers<void>();
+		const enteredPersistence = Promise.withResolvers<void>();
 		const { recovery, agent, sessionManager, events, scheduled } = createRecovery({
 			waitForSessionMessagePersistence: async () => {
-				signalEnteredPersistence?.();
-				await persistenceBlocked;
+				enteredPersistence.resolve();
+				await persistenceBlocked.promise;
 			},
 		});
 
 		const pending = recovery.handleRetryableError(refusal);
 		// Wait until the paraphrase call has resolved and the recovery has parked
 		// on the persistence wait — the exact window where Escape must still cancel.
-		await enteredPersistence;
+		await enteredPersistence.promise;
 		recovery.abortRetry();
-		releasePersistence?.();
+		persistenceBlocked.resolve();
 
 		expect(await pending).toBe(false);
 		// No persisted branch rewrite and no scheduled continuation.
@@ -239,7 +289,7 @@ describe("TurnRecovery refusal paraphrase", () => {
 			expect(agent.state.messages).toEqual([{ ...originalUserMessage, content: rewrittenPrompt }]);
 			expect(sessionManager.buildSessionContext().messages).toEqual(agent.state.messages);
 			expect(events.map(event => event.type)).toEqual(["refusal_paraphrase_applied", "auto_retry_start"]);
-			expect(recovery.retryPromise).toBeDefined();
+			expect(recovery.retryPromise).toBeUndefined();
 			expect(scheduled).toEqual([expect.objectContaining({ delayMs: 1, generation: 1 })]);
 		});
 	}
