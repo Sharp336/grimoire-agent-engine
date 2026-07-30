@@ -36,6 +36,7 @@ import {
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { type ArchiveReader, type ExtractedArchiveFile, openArchive, parseArchivePathCandidates } from "../utils/zip";
 import type { ToolSession } from ".";
+import { deriveToolIntent } from "./derived-intent";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
@@ -907,6 +908,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		return toPathList(a.path ?? a.paths).some(pathTargetsSsh) ? "exec" : "read";
 	};
 	readonly label = "Grep";
+	readonly intent = (args: Partial<GrepToolInput>) => {
+		const path = typeof args.path === "string" && args.path.trim() ? args.path : "workspace";
+		const pattern = typeof args.pattern === "string" && args.pattern.trim() ? args.pattern : "matches";
+		return deriveToolIntent("Searching", `${path} for ${pattern}`, "Searching workspace");
+	};
 	readonly loadMode = "discoverable";
 	readonly summary = "Grep file contents using ripgrep (fast regex search)";
 	readonly description: string;

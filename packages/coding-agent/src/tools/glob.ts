@@ -15,6 +15,7 @@ import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { type TruncationResult, truncateHead } from "../session/streaming-output";
 import { Ellipsis, fileHyperlink, renderFileList, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
+import { deriveToolIntent } from "./derived-intent";
 import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import {
@@ -106,6 +107,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly approval = "read" as const;
 	readonly loadMode = "essential";
 	readonly label = "Glob";
+	readonly intent = (args: Partial<GlobToolInput>) =>
+		deriveToolIntent("Finding", args.path, "Finding workspace files");
 	readonly description: string;
 	readonly parameters = findSchema;
 

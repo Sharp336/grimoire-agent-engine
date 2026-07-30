@@ -81,6 +81,7 @@ import {
 	scanConflictLines,
 	scanFileForConflicts,
 } from "./conflict-detect";
+import { deriveToolIntent } from "./derived-intent";
 import {
 	executeReadUrl,
 	fetchReadUrl,
@@ -862,6 +863,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly approval = (args: unknown): ToolTier =>
 		pathTargetsSsh(String((args as { path?: unknown }).path ?? "")) ? "exec" : "read";
 	readonly label = "Read";
+	readonly intent = (args: Partial<ReadToolInput>) => deriveToolIntent("Reading", args.path, "Reading input");
 	readonly loadMode = "essential";
 	description: string;
 	readonly parameters = readSchema;
