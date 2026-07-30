@@ -27,7 +27,7 @@ import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
+import { obfuscateMessages, obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -805,6 +805,14 @@ describe("AgentSession message pipeline", () => {
 				settings: Settings.isolated({ "compaction.enabled": false }),
 				modelRegistry: createModelRegistryStub() as never,
 				obfuscator,
+				// Mirror production (sdk.ts convertToLlmFinal): obfuscate the
+				// provider-visible message text inside the conversion pipeline so the
+				// side-request billing seed — now derived from this converted snapshot —
+				// sees the same redacted first-user text the main OAuth turn sends.
+				convertToLlm: (messages: AgentMessage[]) => {
+					const converted = convertToLlm(messages);
+					return obfuscator.hasSecrets() ? obfuscateMessages(obfuscator, converted) : converted;
+				},
 			});
 			sessions.push(session);
 
@@ -838,6 +846,81 @@ describe("AgentSession message pipeline", () => {
 		});
 	});
 
+	it("derives the side billing seed from a context-hook-rewritten first user message", async () => {
+		await withNativeDialectEnv(async () => {
+			const api = "test-ephemeral-transformed-billing-seed";
+			const contexts: Context[] = [];
+			registerCustomApi(api, (_model, context, _options) => {
+				contexts.push(context);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Answer");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			});
+
+			const model = buildModel({
+				id: "side-model-transformed-billing-seed",
+				name: "Side Model Transformed Billing Seed",
+				api,
+				provider: "test-provider",
+				baseUrl: "",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 1024,
+			} as ModelSpec<Api>) as Model<Api>;
+			const firstUserText = "raw first user text";
+			const transformedFirstUserText = "context hook rewrote the first user text";
+			const transformContext = async (messages: AgentMessage[]): Promise<AgentMessage[]> =>
+				messages.map(message => {
+					if (message.role !== "user") return message;
+					if (typeof message.content === "string") {
+						return message.content === firstUserText
+							? { ...message, content: transformedFirstUserText }
+							: message;
+					}
+					return {
+						...message,
+						content: message.content.map(block =>
+							block.type === "text" && block.text === firstUserText
+								? { ...block, text: transformedFirstUserText }
+								: block,
+						),
+					};
+				});
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["stable harness instructions"], messages: [], tools: [] },
+				transformContext,
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+				transformContext,
+			});
+			sessions.push(session);
+
+			await agent.prompt(firstUserText);
+			await session.runEphemeralTurn({ promptText: "unrelated side request" });
+
+			const mainContext = contexts.find(context => context.anthropicBillingSeed === undefined);
+			const sideContext = contexts.at(-1);
+			expect(mainContext).toBeDefined();
+			expect(sideContext).not.toBe(mainContext);
+			expect(getConvertedUserText(mainContext?.messages.find(message => message.role === "user"))).toBe(
+				transformedFirstUserText,
+			);
+			expect(sideContext?.anthropicBillingSeed).toBe(transformedFirstUserText);
+			expect(await captureAnthropicSystemPrefix(sideContext!)).toBe(
+				await captureAnthropicSystemPrefix(mainContext!),
+			);
+		});
+	});
 	it("records raw SSE diagnostics into the session buffer before request hooks", async () => {
 		const requestOnSseEvent = vi.fn();
 		const session = new AgentSession({

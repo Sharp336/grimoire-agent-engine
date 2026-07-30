@@ -558,6 +558,14 @@ export interface SystemPromptPlan {
 	compositionPolicy: SystemPromptCompositionPolicy;
 }
 
+/**
+ * Compatibility alias for the pre-rename result type. The package exposes source
+ * modules through its `./*` export map, so external TypeScript SDK consumers
+ * importing `BuildSystemPromptResult` from `@oh-my-pi/pi-coding-agent/system-prompt`
+ * must keep compiling; `SystemPromptPlan` is the canonical name.
+ */
+export type BuildSystemPromptResult = SystemPromptPlan;
+
 /** Controls whether the session may append turn-specific context to a prompt plan. */
 export type SystemPromptCompositionPolicy = "append-turn-context" | "verbatim";
 

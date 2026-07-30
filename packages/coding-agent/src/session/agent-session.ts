@@ -399,6 +399,25 @@ type SetSessionNameWithTrigger = (
 	trigger?: SessionNameTrigger,
 ) => Promise<boolean>;
 
+/**
+ * Extracts the first text of the first user message from provider-visible
+ * (`Message[]`) output, mirroring the Anthropic provider's Claude Code billing-seed
+ * extraction so a side-request seed matches the main request's derivation.
+ */
+function firstUserMessageText(messages: readonly Message[]): string {
+	for (const message of messages) {
+		if (message.role !== "user") continue;
+		const { content } = message;
+		if (typeof content === "string") return content;
+		if (Array.isArray(content)) {
+			for (const block of content) {
+				if (block.type === "text") return block.text;
+			}
+		}
+		return "";
+	}
+	return "";
+}
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -6833,7 +6852,7 @@ export class AgentSession {
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		const systemPromptPlan = await this.#buildSystemPromptForSideRequest(args.promptText);
 		const context = await this.agent.buildSideRequestContext(llmMessages, systemPromptPlan, {
-			anthropicBillingSeed: this.#getSideRequestAnthropicBillingSeed(cacheSessionId),
+			anthropicBillingSeed: this.#getSideRequestAnthropicBillingSeed(cacheSessionId, llmMessages),
 		});
 		const options = this.prepareSimpleStreamOptions(
 			{
@@ -6962,32 +6981,31 @@ export class AgentSession {
 		return messages;
 	}
 
-	#getSideRequestAnthropicBillingSeed(sessionId: string): string {
+	#getSideRequestAnthropicBillingSeed(sessionId: string, providerMessages: readonly Message[]): string {
 		if (this.#sideRequestAnthropicBillingSeed?.sessionId === sessionId) {
 			return this.#sideRequestAnthropicBillingSeed.seed;
 		}
 
-		const firstUserMessage = this.messages.find((message): message is UserMessage => message.role === "user");
-		// No persisted user message yet (e.g. a side request before the first main
-		// turn): return a transient empty seed WITHOUT freezing it. Freezing "" here
-		// would make every later side request derive an empty Anthropic billing
-		// header while main OAuth requests derive a nonempty one from the first user
-		// text, breaking prefix identity through cache_control. Only a first user
-		// message *object* — including an explicit empty-text one — is a settled
-		// seed worth caching for the rest of the provider session.
-		if (firstUserMessage === undefined) {
+		// Only a first user message persisted into the main turn's history is a
+		// settled seed worth caching. Before that, the only user message in the
+		// ephemeral snapshot is the side prompt itself, so return a transient empty
+		// seed WITHOUT freezing it. Freezing "" here would make every later side
+		// request derive an empty Anthropic billing header while main OAuth requests
+		// derive a nonempty one from the first user text, breaking prefix identity
+		// through cache_control. Only a first user message *object* — including an
+		// explicit empty-text one — is a settled seed worth caching.
+		if (!this.messages.some(message => message.role === "user")) {
 			return "";
 		}
-		const content = firstUserMessage.content;
-		const rawSeed =
-			typeof content === "string"
-				? content
-				: (content.find((block): block is TextContent => block.type === "text")?.text ?? "");
-		// The main OAuth turn derives its Claude Code billing-header seed from the
-		// provider-visible (obfuscated) first-user text. Derive the side seed from
-		// the same obfuscated text so a secret in the first user message does not
-		// split the main/side system-prefix cache breakpoint.
-		const seed = this.#obfuscateTextForProvider(rawSeed) ?? "";
+
+		// Derive the seed from the provider-visible first user message: the same
+		// text — after `transformContext` (context-hook rewriting) and outbound
+		// obfuscation — that the main OAuth request builds its Claude Code billing
+		// header from. The ephemeral side prompt is appended last, so the first user
+		// message here is the persisted one. Reading the raw persisted text instead
+		// would miss a context-hook rewrite of the first user message and split the
+		// main/side system-prefix cache breakpoint.
+		const seed = firstUserMessageText(providerMessages);
 		this.#sideRequestAnthropicBillingSeed = { sessionId, seed };
 		return seed;
 	}
