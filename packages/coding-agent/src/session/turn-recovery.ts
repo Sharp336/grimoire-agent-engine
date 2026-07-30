@@ -103,6 +103,8 @@ export interface TurnRecoveryHost {
 	configWarnings: string[];
 	/** Record a prompt-cache mutation tag on the owning session's ledger. */
 	recordCacheMutation?(tag: CacheMutationTag): void;
+	/** Queue a cache mutation for the retry's upcoming provider request. */
+	queueCacheMutationForNextProviderRequest?(tag: CacheMutationTag): void;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
@@ -1623,6 +1625,7 @@ export class TurnRecovery {
 			timestamp: tail.timestamp,
 		});
 		this.#host.agent.replaceMessages(messages.slice(0, -1));
+		this.#host.queueCacheMutationForNextProviderRequest?.("retry-recovery");
 	}
 
 	/**

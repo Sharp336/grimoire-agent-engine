@@ -145,11 +145,17 @@ describe("cache attribution timing", () => {
 			],
 			[["thinking-demote"], ["thinking-demote"]],
 		],
+		// present→absent reverts the wire to un-rewritten bytes, which differ from
+		// the previously emitted rewritten wire state — a cache-invalidating change
+		// that must be attributed (symmetric with absent→present).
 		[
 			"present to absent",
 			[[{ continuity: thinkingContinuity, assistant: thinkingAssistant }], []],
-			[["thinking-demote"], []],
+			[["thinking-demote"], ["thinking-demote"]],
 		],
+		// The middle present→absent turn reverts the wire to un-rewritten bytes,
+		// differing from the prior rewritten state, so it is cache-invalidating and
+		// attributed — symmetric with absent→present.
 		[
 			"absent to same present",
 			[
@@ -157,7 +163,7 @@ describe("cache attribution timing", () => {
 				[],
 				structuredClone([{ continuity: thinkingContinuity, assistant: thinkingAssistant }]),
 			],
-			[["thinking-demote"], [], ["thinking-demote"]],
+			[["thinking-demote"], ["thinking-demote"], ["thinking-demote"]],
 		],
 	] as const)("records thinking demotion for %s transition", (_transition, replays, expectedTags) => {
 		const ledger = new CacheMutationLedger();
@@ -181,11 +187,21 @@ describe("cache attribution timing", () => {
 			[Bun.hash.wyhash("stable wrapped bytes"), Bun.hash.wyhash("changed wrapped bytes")],
 			[["steering-wrap"], ["steering-wrap"]],
 		],
-		["present to absent", [Bun.hash.wyhash("stable wrapped bytes"), undefined], [["steering-wrap"], []]],
+		// present→absent reverts the wire to unwrapped bytes, which differ from the
+		// previously emitted wrapped wire state — a cache-invalidating change that
+		// must be attributed (symmetric with absent→present).
+		[
+			"present to absent",
+			[Bun.hash.wyhash("stable wrapped bytes"), undefined],
+			[["steering-wrap"], ["steering-wrap"]],
+		],
+		// The middle present→absent turn reverts the wire to unwrapped bytes,
+		// differing from the prior wrapped state, so it is cache-invalidating and
+		// attributed — symmetric with absent→present.
 		[
 			"absent to same present",
 			[Bun.hash.wyhash("stable wrapped bytes"), undefined, Bun.hash.wyhash("stable wrapped bytes")],
-			[["steering-wrap"], [], ["steering-wrap"]],
+			[["steering-wrap"], ["steering-wrap"], ["steering-wrap"]],
 		],
 	] as const)("records steering wrapping for %s transition", (_transition, digests, expectedTags) => {
 		const ledger = new CacheMutationLedger();
@@ -294,8 +310,11 @@ describe("cache attribution timing", () => {
 			ledger.recordObfuscationAtWire(changedSecret, changedOutput);
 			expect(ledger.consume()).toEqual(["obfuscate"]);
 
+			// Emitting the un-obfuscated source reverts the wire to bytes that differ
+			// from the previously emitted redacted wire state (present→absent), so it
+			// is cache-invalidating and must be attributed.
 			ledger.recordObfuscationAtWire(changedSecret, changedSecret);
-			expect(ledger.consume()).toEqual([]);
+			expect(ledger.consume()).toEqual(["obfuscate"]);
 			ledger.recordObfuscationAtWire(source, obfuscated);
 			expect(ledger.consume()).toEqual(["obfuscate"]);
 		});
