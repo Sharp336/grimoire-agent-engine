@@ -108,6 +108,7 @@ export async function runStorageRepair(
 		backup: planned.backup,
 		candidate: planned.candidate,
 		backupCreated: false,
+		backupVerified: false,
 		candidatePublished: false,
 		candidatePathTrusted: false,
 		checksums: [],
@@ -153,6 +154,7 @@ export async function runStorageRepair(
 					result.backupCreated = true;
 				},
 				checksum => {
+					result.backupVerified = true;
 					result.checksums.push(checksum);
 				},
 				hooks.afterBackupLink,

@@ -951,13 +951,35 @@ export async function writeArchive(
 }
 
 /**
+ * Index an archive's file members for extraction. tar/tar.gz opened from a
+ * filesystem path are read through an mmap'd, file-backed byte view (matching
+ * {@link extractFileBackedTar}) so the archive is never duplicated into the JS
+ * heap; member bodies stay lazy `File` references streamed to disk by the
+ * caller. In-memory sources and ZIP fall back to {@link readArchiveEntries}.
+ */
+async function readExtractableEntries(source: ArchiveSource): Promise<Map<string, ArchiveMemberContent>> {
+	if (typeof source === "string") {
+		const format = archiveFormatFromPath(source);
+		if (format === "tar" || format === "tar.gz") {
+			const bytes = mapArchiveFile(archiveFileMember(source, Bun.file(source).size));
+			const entries = new Map<string, ArchiveMemberContent>();
+			for (const [name, file] of await new Bun.Archive(bytes).files()) {
+				entries.set(name.replace(/\\/g, "/"), file);
+			}
+			return entries;
+		}
+	}
+	return readArchiveEntries(source);
+}
+
+/**
  * Extract every file member to `destDir`, creating parent directories as
  * needed. Entries that would escape `destDir` (via `..` or an absolute path)
  * are rejected. Returns the number of files written.
  */
 export async function extractArchive(source: ArchiveSource, destDir: string): Promise<number> {
 	const extractRoot = path.resolve(destDir);
-	const entries = await readArchiveEntries(source);
+	const entries = await readExtractableEntries(source);
 	let count = 0;
 	for (const [name, content] of entries) {
 		if (name.endsWith("/")) continue;

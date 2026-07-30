@@ -38,6 +38,7 @@ export interface StorageRepairResult {
 	backup: string;
 	candidate: string;
 	backupCreated: boolean;
+	backupVerified: boolean;
 	candidatePublished: boolean;
 	candidatePathTrusted: boolean;
 	checksums: StorageRepairChecksum[];

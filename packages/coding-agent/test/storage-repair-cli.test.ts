@@ -924,6 +924,60 @@ describe("offline SQLite salvage", () => {
 		}
 	});
 
+	test("session families deduplicate inherited messages whose migrated copies diverge only in generated ids", async () => {
+		await createHistorySource();
+		// Parent and fork share one inherited user turn (identical content and
+		// timestamp), but the fork's migrated copy carries a regenerated entry
+		// id, so the raw JSONL lines differ. Semantic dedup must still collapse
+		// them to a single rebuilt row instead of hashing the volatile bytes.
+		const sharedTimestamp = "2026-01-01T00:00:05.000Z";
+		await writeSession("parent", "parent", [message("orig", sharedTimestamp, "inherited turn")]);
+		await writeSession(
+			"fork",
+			"fork",
+			[message("fork-regenerated", sharedTimestamp, "inherited turn")],
+			"title-slot",
+			{ parentSession: "parent" },
+		);
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true });
+		try {
+			expect(db.prepare("SELECT prompt FROM history ORDER BY id").all()).toEqual([{ prompt: "inherited turn" }]);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("session rebuild ignores non-session symlinks inside a project directory", async () => {
+		await createHistorySource();
+		await writeSession("primary", "primary-session", [message("m1", "2026-01-01T00:00:01.000Z", "primary prompt")]);
+		// An unrelated symlink whose name is not a session file must not refuse
+		// the sessions-based repair; only */*.jsonl candidates are scanned.
+		const projectDir = path.join(getSessionsDir(root), "primary");
+		const linkTarget = path.join(projectDir, "aux-target.txt");
+		await Bun.write(linkTarget, "aux");
+		await fs.promises.symlink(linkTarget, path.join(projectDir, "aux-link"));
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true });
+		try {
+			expect(db.prepare("SELECT prompt FROM history").get()).toEqual({ prompt: "primary prompt" });
+		} finally {
+			db.close();
+		}
+	});
+
 	test("fork families preserve divergent reused entry IDs", async () => {
 		await createHistorySource();
 		await writeSession("parent", "entry-parent", [message("reused", "2026-01-01T00:00:01.000Z", "parent payload")]);

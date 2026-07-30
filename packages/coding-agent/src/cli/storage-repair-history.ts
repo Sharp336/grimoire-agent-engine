@@ -79,9 +79,14 @@ async function sessionFiles(root: string) {
 		assertInvariant(!project.isSymbolicLink(), `Session manifest refuses symbolic link: ${projectPath}`);
 		if (!project.isDirectory()) continue;
 		for (const file of await fs.promises.readdir(projectPath, { withFileTypes: true })) {
+			// Only actual session candidates (*.jsonl) are subject to the
+			// no-symlink policy — production discovery scans only */*.jsonl,
+			// so an unrelated symlink in a session directory must not refuse
+			// the whole sessions-based repair. Filter before enforcing it.
+			if (!file.name.endsWith(".jsonl")) continue;
 			const filePath = path.join(projectPath, file.name);
 			assertInvariant(!file.isSymbolicLink(), `Session manifest refuses symbolic link: ${filePath}`);
-			if (file.isFile() && file.name.endsWith(".jsonl")) result.push(filePath);
+			if (file.isFile()) result.push(filePath);
 		}
 	}
 	return result.sort();
@@ -291,8 +296,13 @@ function validInnerTimestamp(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function recordSha256(line: string): string {
-	return new Bun.SHA256().update(Buffer.from(line, "utf8")).digest("hex");
+function messageKey(entryMs: number, prompt: string): string {
+	// Semantic identity over migration-stable fields. forkFrom's
+	// migrateToCurrentVersion adds generated id/parentId to inherited copies
+	// (changing the raw JSONL line) but leaves the prompt and message timestamp
+	// intact, so timestamp+prompt identifies the same inherited user turn across
+	// a family instead of hashing volatile serialized line bytes.
+	return new Bun.SHA256().update(Buffer.from(`${entryMs}\0${prompt}`, "utf8")).digest("hex");
 }
 
 async function parseSession(member: SessionMember, promptDb: Database) {
@@ -300,7 +310,7 @@ async function parseSession(member: SessionMember, promptDb: Database) {
 	const input = fs.createReadStream(file.path, { encoding: "utf8" });
 	const lines = readline.createInterface({ input, crlfDelay: Infinity });
 	const insert = promptDb.prepare(
-		"INSERT INTO prompts(entry_ms, header_ms, canonical_path, ordinal, record_sha256, family, prompt, cwd, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO prompts(entry_ms, header_ms, canonical_path, ordinal, message_key, family, prompt, cwd, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 	);
 	let physicalLine = 0;
 	let recordOrdinal = 0;
@@ -342,7 +352,7 @@ async function parseSession(member: SessionMember, promptDb: Database) {
 				BigInt(header.timestamp),
 				file.canonicalPath,
 				BigInt(recordOrdinal),
-				recordSha256(line),
+				messageKey(entryTimestamp, prompt),
 				BigInt(family),
 				prompt,
 				header.cwd,
@@ -377,7 +387,7 @@ export async function freezePromptManifest(
 	const dbPath = path.join(tempDir, "prompts.sqlite");
 	const db = new Database(dbPath, { safeIntegers: true });
 	db.exec(
-		"CREATE TABLE prompts(entry_ms INTEGER NOT NULL, header_ms INTEGER NOT NULL, canonical_path TEXT NOT NULL, ordinal INTEGER NOT NULL, record_sha256 TEXT NOT NULL, family INTEGER NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL, session_id TEXT NOT NULL)",
+		"CREATE TABLE prompts(entry_ms INTEGER NOT NULL, header_ms INTEGER NOT NULL, canonical_path TEXT NOT NULL, ordinal INTEGER NOT NULL, message_key TEXT NOT NULL, family INTEGER NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL, session_id TEXT NOT NULL)",
 	);
 	const fingerprint = stableJson(first);
 	let count = 0;
@@ -415,7 +425,7 @@ function sortedPrompts(manifest: Database) {
 					cwd,
 					session_id,
 					ROW_NUMBER() OVER (
-						PARTITION BY family, record_sha256
+						PARTITION BY family, message_key
 						ORDER BY header_ms ASC, canonical_path COLLATE BINARY ASC, ordinal ASC
 					) AS representative
 				FROM prompts

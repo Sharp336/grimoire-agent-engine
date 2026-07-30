@@ -808,22 +808,23 @@ export interface ManualRepairState {
 	status: "ready" | "refused" | "published-with-warning";
 	apply: boolean;
 	backupCreated: boolean;
+	backupVerified: boolean;
 	candidatePublished: boolean;
 	candidatePathTrusted: boolean;
 }
 
 export function manualNextStep(source: string, candidate: string, backup: string, state: ManualRepairState): string {
 	if (state.status === "refused") {
-		return `Repair was refused. Do not install ${candidate}.${state.backupCreated ? ` Retain verified backup ${backup}.` : ""}`;
+		return `Repair was refused. Do not install ${candidate}.${state.backupVerified ? ` Retain verified backup ${backup}.` : ""}`;
 	}
 	if (!state.apply) {
 		return `Dry run only: no candidate was published. Do not install ${candidate}; rerun with --apply only after reviewing the refusal-free result.`;
 	}
 	if (!state.candidatePublished) {
-		return `No candidate was published. Do not install ${candidate}.${state.backupCreated ? ` Retain verified backup ${backup}.` : ""}`;
+		return `No candidate was published. Do not install ${candidate}.${state.backupVerified ? ` Retain verified backup ${backup}.` : ""}`;
 	}
 	if (!state.candidatePathTrusted) {
-		return `Published candidate ${candidate} failed final trust checks. Do not install it.${state.backupCreated ? ` Retain verified backup ${backup}.` : ""}`;
+		return `Published candidate ${candidate} failed final trust checks. Do not install it.${state.backupVerified ? ` Retain verified backup ${backup}.` : ""}`;
 	}
 	return [
 		"Stop every OMP process.",
