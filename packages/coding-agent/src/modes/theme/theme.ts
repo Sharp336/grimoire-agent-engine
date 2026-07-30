@@ -1118,6 +1118,7 @@ const spinnerFramesSchema = type("unknown").narrow((value): value is SpinnerFram
 const themeJsonSchema = type({
 	"$schema?": "string",
 	name: "string",
+	"extends?": "string",
 	"vars?": "Record<string, string | number>",
 	colors: themeColorsSchema,
 	"export?": {
@@ -1132,7 +1133,28 @@ const themeJsonSchema = type({
 	},
 });
 
+/** A theme file before `extends` is resolved. Every section is optional because a child
+ *  states only what it changes; the merged result is validated by `themeJsonSchema`. */
+const themeSourceSchema = type({
+	"$schema?": "string",
+	"name?": "string",
+	"extends?": "string",
+	"vars?": "Record<string, string | number>",
+	"colors?": "Record<string, string | number>",
+	"export?": {
+		"pageBg?": "string | number",
+		"cardBg?": "string | number",
+		"infoBg?": "string | number",
+	},
+	"symbols?": {
+		"preset?": "'unicode' | 'nerd' | 'ascii'",
+		"overrides?": "Record<string, string>",
+		"spinnerFrames?": spinnerFramesSchema,
+	},
+});
+
 type ThemeJson = typeof themeJsonSchema.infer;
+type ThemeSource = typeof themeSourceSchema.infer;
 
 export type ThemeColor =
 	| "accent"
@@ -2023,7 +2045,8 @@ export async function getAvailableThemesWithPaths(): Promise<ThemeInfo[]> {
 	return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function loadThemeJson(name: string): Promise<ThemeJson> {
+/** Read one theme file without resolving `extends`; built-ins are already complete. */
+async function loadThemeSource(name: string): Promise<ThemeSource> {
 	const builtinThemes = getBuiltinThemes();
 	if (name in builtinThemes) {
 		return builtinThemes[name];
@@ -2043,15 +2066,49 @@ async function loadThemeJson(name: string): Promise<ThemeJson> {
 	} catch (error) {
 		throw new Error(`Failed to parse theme ${name}: ${error}`);
 	}
-	let parsed: ThemeJson;
-	try {
-		parsed = themeJsonSchema(json) as ThemeJson;
-		if (parsed instanceof type.errors) {
-			throw new Error(parsed.summary);
+	const parsed = themeSourceSchema(json);
+	if (parsed instanceof type.errors) {
+		throw new Error(`Invalid theme "${name}":\n\nValidation error:\n  - ${parsed.summary}`);
+	}
+	return parsed as ThemeSource;
+}
+
+/** Layer `child` over `base`. Sections merge key-by-key so a child overrides only what it names. */
+function mergeThemeSource(base: ThemeSource, child: ThemeSource): ThemeSource {
+	const merged: ThemeSource = { ...base, ...child };
+	merged.vars = { ...base.vars, ...child.vars };
+	merged.colors = { ...base.colors, ...child.colors };
+	if (base.export || child.export) merged.export = { ...base.export, ...child.export };
+	if (base.symbols || child.symbols) {
+		merged.symbols = {
+			...base.symbols,
+			...child.symbols,
+			overrides: { ...base.symbols?.overrides, ...child.symbols?.overrides },
+		};
+	}
+	// The child's `extends` is now satisfied by `base`; what remains unresolved is the
+	// base's own parent, so the chain continues from there.
+	if (base.extends) merged.extends = base.extends;
+	else delete merged.extends;
+	return merged;
+}
+
+async function loadThemeJson(name: string): Promise<ThemeJson> {
+	const chain: string[] = [];
+	let source = await loadThemeSource(name);
+	while (source.extends) {
+		const parent = source.extends;
+		if (chain.includes(parent) || parent === name) {
+			throw new Error(`Invalid theme "${name}": circular extends chain (${[name, ...chain, parent].join(" -> ")})`);
 		}
-	} catch (error) {
-		const errorMessage = error instanceof Error ? error.message : String(error);
-		// Extract color key information if available
+		chain.push(parent);
+		source = mergeThemeSource(await loadThemeSource(parent), source);
+	}
+	// A child inherits its base's name unless it set one; validation requires a name.
+	const named: ThemeSource = { ...source, name: source.name ?? name };
+	const parsed = themeJsonSchema(named);
+	if (parsed instanceof type.errors) {
+		const errorMessage = parsed.summary;
 		const missingColorMatch = errorMessage.match(/missing keys: (.+)/i);
 		const missingColors: string[] = missingColorMatch ? missingColorMatch[1].split(",").map(s => s.trim()) : [];
 
@@ -2059,14 +2116,15 @@ async function loadThemeJson(name: string): Promise<ThemeJson> {
 		if (missingColors.length > 0) {
 			fullErrorMessage += `\nMissing required color tokens:\n`;
 			fullErrorMessage += missingColors.map(c => `  - ${c}`).join("\n");
-			fullErrorMessage += `\n\nPlease add these colors to your theme's "colors" object.`;
+			fullErrorMessage += `\n\nPlease add these colors to your theme's "colors" object,`;
+			fullErrorMessage += `\nor set "extends" to inherit them from another theme.`;
 			fullErrorMessage += `\nSee the built-in themes (dark.json, light.json) for reference values.`;
 		}
 		fullErrorMessage += `\n\nValidation error:\n  - ${errorMessage}`;
 
 		throw new Error(fullErrorMessage);
 	}
-	return parsed;
+	return parsed as ThemeJson;
 }
 
 interface CreateThemeOptions {

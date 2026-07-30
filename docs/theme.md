@@ -21,13 +21,33 @@ Theme files are JSON objects validated against the runtime schema in `theme.ts` 
 
 Top-level fields:
 
-- `name` (required)
-- `colors` (required; all color tokens required)
+- `name` (required unless `extends` supplies one; defaults to the file name)
+- `extends` (optional; inherit every section from another theme)
+- `colors` (required; all color tokens required **after** `extends` is resolved)
 - `vars` (optional; reusable color variables)
 - `export` (optional; HTML export colors)
 - `symbols` (optional)
   - `preset` (optional: `unicode | nerd | ascii`)
   - `overrides` (optional: key/value overrides for `SymbolKey`)
+
+### `extends`
+
+A theme that sets `extends` inherits the named theme and overrides only what it declares,
+so changing a few glyphs no longer means copying a full palette:
+
+```json
+{
+  "extends": "titanium",
+  "symbols": { "overrides": { "boxRound.topLeft": "┌", "boxRound.topRight": "┐" } }
+}
+```
+
+- The base may be built-in or another custom theme; chains resolve to any depth.
+- `vars`, `colors`, `export`, and `symbols.overrides` merge key-by-key — a child replaces
+  only the keys it names. `symbols.preset` and `symbols.spinnerFrames` are replaced whole.
+- Validation runs on the **merged** result, so a child may omit `colors` entirely.
+- A cycle is rejected with the offending chain, e.g.
+  `circular extends chain (a -> b -> a)`.
 
 Color values accept:
 
@@ -350,7 +370,7 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes.
+- All `colors` tokens are required for custom themes, checked after `extends` is resolved — a theme that extends another may omit `colors` entirely.
 - `export` and `symbols` are optional.
 - `$schema` in theme JSON is informational; runtime validation is enforced by a Zod schema in code.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.
