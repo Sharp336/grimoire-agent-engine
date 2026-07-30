@@ -39,7 +39,8 @@ export interface ApiKeyResolveContext {
 /** Normalizes legacy string resolvers into a request-scoped selection. */
 export function toApiKeyResolution(value: ApiKeyResolution | string | undefined): ApiKeyResolution | undefined {
 	if (value === undefined || value === "") return undefined;
-	return typeof value === "string" ? { apiKey: value } : value;
+	if (typeof value === "string") return { apiKey: value };
+	return value.apiKey === "" ? undefined : value;
 }
 
 /**

@@ -5222,11 +5222,12 @@ export class AuthStorage {
 		);
 		if (loginApiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
+			const credentialId = this.#getStoredCredentials(provider)[loginApiKeySelection.index]?.id;
 			const apiKey = await this.#configValueResolver(loginApiKeySelection.credential.key);
 			if (apiKey) {
 				return {
 					apiKey,
-					credentialId: this.#getStoredCredentials(provider)[loginApiKeySelection.index]?.id,
+					credentialId,
 				};
 			}
 		}
@@ -5246,11 +5247,12 @@ export class AuthStorage {
 		);
 		if (apiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
+			const credentialId = this.#getStoredCredentials(provider)[apiKeySelection.index]?.id;
 			const apiKey = await this.#configValueResolver(apiKeySelection.credential.key);
 			if (apiKey) {
 				return {
 					apiKey,
-					credentialId: this.#getStoredCredentials(provider)[apiKeySelection.index]?.id,
+					credentialId,
 				};
 			}
 		}

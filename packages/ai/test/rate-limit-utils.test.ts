@@ -42,6 +42,7 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("concurrent_request_limit_reached")).toBe("CONCURRENT_LIMIT");
 		expect(parseRateLimitReason("Rate limit reached for gpt-4o")).toBe("RATE_LIMIT_EXCEEDED");
 		expect(parseRateLimitReason("Your quota will reset at 07-28")).toBe("QUOTA_EXHAUSTED");
+		expect(parseRateLimitReason("authentication failed for concurrent request")).toBe("UNKNOWN");
 	});
 
 	it("classifies overloaded 529 as MODEL_CAPACITY_EXHAUSTED", () => {
@@ -216,6 +217,8 @@ describe("isUsageLimitOutcome", () => {
 		// UNKNOWN but carries a transient retry hint — body is informative,
 		// so we defer to parseRateLimitReason and stay out of the quota lane.
 		expect(isUsageLimitOutcome(429, "Please retry in 5s")).toBe(false);
+		expect(isUsageLimitOutcome(429, "concurrent_limit_reached")).toBe(false);
+		expect(isUsageLimitOutcome(429, "concurrent_request_limit_reached")).toBe(false);
 	});
 
 	it("still rotates on 429 with explicit account rate-limit framing", () => {

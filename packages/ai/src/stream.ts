@@ -190,7 +190,7 @@ function resolveProviderInFlightLimit(
 }
 
 function providerInFlightKey(provider: string, credentialId: number | undefined): string {
-	return `${provider}#${credentialId ?? "default"}`;
+	return `${provider.length}:${provider}#${credentialId ?? "default"}`;
 }
 
 function reduceProviderInFlightLimit(
@@ -534,13 +534,14 @@ async function releaseProviderInFlightLease(lease: ProviderInFlightLease): Promi
 
 async function acquireProviderInFlightSlot(
 	provider: string,
-	limit: number | undefined,
+	resolveLimit: () => number | undefined,
 	signal?: AbortSignal,
 ): Promise<() => Promise<void>> {
-	if (limit === undefined) return async () => {};
 	let loggedWait = false;
 	while (true) {
 		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
+		const limit = resolveLimit();
+		if (limit === undefined) return async () => {};
 		const lease = await tryAcquireProviderInFlightLease(provider, limit, signal);
 		if (lease) return () => releaseProviderInFlightLease(lease);
 		if (!loggedWait) {
@@ -607,7 +608,11 @@ function withProviderInFlightLimit<
 		};
 		try {
 			const startedWaitingAt = Date.now();
-			release = await acquireProviderInFlightSlot(inFlightKey, limit, options?.signal);
+			release = await acquireProviderInFlightSlot(
+				inFlightKey,
+				() => resolveProviderInFlightLimit(model.provider, options),
+				options?.signal,
+			);
 			if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
 				logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
 			}
@@ -1248,7 +1253,7 @@ export function streamSimple<TApi extends Api>(
 				apiKey: string,
 				credentialId: number | undefined,
 			): Promise<AttemptOutcome> => {
-				let failure = await runAttempt(apiKey, credentialId);
+				const failure = await runAttempt(apiKey, credentialId);
 				if (!failure) return { kind: "success" };
 				if (!failure.concurrentLimit) return { kind: "rotatable", failure };
 				reduceProviderInFlightLimit(model.provider, { ...requestOptions, credentialId });

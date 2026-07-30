@@ -421,9 +421,9 @@ describe("provider in-flight request limits", () => {
 			signal: controller.signal,
 			providerRetryWait: async (_delayMs, signal) => {
 				backoffStarted.resolve();
-				await new Promise<never>((_resolve, reject) =>
-					signal?.addEventListener("abort", () => reject(signal.reason), { once: true }),
-				);
+				const aborted = Promise.withResolvers<never>();
+				signal?.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+				await aborted.promise;
 			},
 		});
 		const result = stream.result();

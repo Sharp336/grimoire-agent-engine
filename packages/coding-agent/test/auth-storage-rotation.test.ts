@@ -248,6 +248,31 @@ describe("AuthStorage account rotation", () => {
 		});
 	});
 
+	test("API key resolver does not re-enter an authoritative resolution miss", async () => {
+		let resolutionCalls = 0;
+		let fallbackCalls = 0;
+		const registry: Parameters<typeof createApiKeyResolver>[0] = {
+			async getApiKeyForProvider() {
+				fallbackCalls += 1;
+				return "unexpected-key";
+			},
+			async getApiKeyResolutionForProvider() {
+				resolutionCalls += 1;
+				return undefined;
+			},
+			authStorage: {
+				async rotateSessionCredential() {
+					return false;
+				},
+			},
+		};
+		const resolver = createApiKeyResolver(registry, "openai-codex");
+
+		expect(await resolver({ lastChance: false, error: undefined })).toBeUndefined();
+		expect(resolutionCalls).toBe(1);
+		expect(fallbackCalls).toBe(0);
+	});
+
 	test("API key resolver stops when a usage-limit rotation has no unblocked sibling", async () => {
 		const resolvedKeys = ["quota-blocked-B", "quota-blocked-A"];
 		const registry: Parameters<typeof createApiKeyResolver>[0] = {

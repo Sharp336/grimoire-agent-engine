@@ -44,6 +44,10 @@ describe("isApiKeyResolver / resolveApiKeyOnce", () => {
 		expect(seen).toEqual({ lastChance: false, error: undefined, signal: undefined });
 	});
 
+	it("treats a structured empty bearer as missing", async () => {
+		expect(await resolveApiKeyOnce(() => ({ apiKey: "", credentialId: 17 }))).toBeUndefined();
+	});
+
 	it("keeps a preflight resolver credential id when reusing its seed", async () => {
 		const resolver = () => ({ apiKey: "stored", credentialId: 17 });
 		const seed = await resolveApiKeyOnce(resolver);

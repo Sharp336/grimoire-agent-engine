@@ -59,10 +59,9 @@ export function createApiKeyResolver(
 		forceRefresh?: boolean;
 		signal?: AbortSignal;
 	}): Promise<{ apiKey: string; credentialId?: number } | undefined> => {
-		const resolved = registry.getApiKeyResolutionForProvider
-			? await registry.getApiKeyResolutionForProvider(provider, sessionId, { baseUrl, modelId, ...requestOptions })
-			: undefined;
-		if (resolved) return resolved;
+		if (registry.getApiKeyResolutionForProvider) {
+			return registry.getApiKeyResolutionForProvider(provider, sessionId, { baseUrl, modelId, ...requestOptions });
+		}
 		const apiKey = await registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, ...requestOptions });
 		return apiKey === undefined ? undefined : { apiKey };
 	};
