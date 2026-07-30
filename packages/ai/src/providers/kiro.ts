@@ -25,6 +25,7 @@ import userMessagePrompt from "./kiro-user-message.md" with { type: "text" };
 
 const KIRO_GENERATE_TARGET = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse";
 const KIRO_MAX_EVENTSTREAM_FRAME_BYTES = 16 * 1024 * 1024;
+const KIRO_MIN_OUTPUT_TOKENS = 1024;
 const TEXT_DECODER = new TextDecoder();
 
 type KiroWireToolSpecification = {
@@ -379,13 +380,15 @@ function buildKiroRequest(
 }
 
 /**
- * Serialize the schema-appropriate Kiro reasoning controls. The model's
+ * Serialize the schema-appropriate Kiro additional request fields. The model's
  * `thinking.mode` discriminates the two wire shapes, both of which reject
  * unknown properties (`additionalProperties: false`):
- *  - `kiro-thinking` (Claude-family): `{ thinking: { type, display? }, output_config: { effort } }`
+ *  - `kiro-thinking` (Claude-family): `{ thinking: { type, display? }, output_config: { effort }, max_tokens }`
  *  - `kiro-reasoning` (GPT-family): `{ reasoning: { effort } }`
  * Disabling reasoning emits the schema's off state (`thinking.type: "disabled"`
  * or `reasoning.effort: "none"`) so the server does not fall back to its default.
+ * Claude-family schemas also accept a `max_tokens` output cap, forwarded so the
+ * server honours the caller's (or the model's default) limit instead of its own.
  */
 function buildKiroReasoningFields(
 	model: Model<"kiro-agent">,
@@ -401,9 +404,20 @@ function buildKiroReasoningFields(
 		if (!disabled && !options?.hideThinkingSummary) thinking.display = "summarized";
 		const fields: Record<string, unknown> = { thinking };
 		if (!disabled) fields.output_config = { effort: wireEffort };
+		const maxTokens = kiroMaxTokens(model, options);
+		if (maxTokens !== undefined) fields.max_tokens = maxTokens;
 		return fields;
 	}
 	return { reasoning: { effort: disabled ? "none" : wireEffort } };
+}
+
+/** Validated `max_tokens` for Claude-family models whose schema accepts it (integer, 1024..model cap). */
+function kiroMaxTokens(model: Model<"kiro-agent">, options: KiroOptions | undefined): number | undefined {
+	const modelCap = model.maxTokens ?? undefined;
+	const requested = options?.maxTokens ?? modelCap;
+	if (requested === undefined || !Number.isFinite(requested) || requested <= 0) return undefined;
+	const upper = modelCap ?? requested;
+	return Math.max(KIRO_MIN_OUTPUT_TOKENS, Math.min(Math.round(requested), Math.round(upper)));
 }
 
 function findLastInputMessage(messages: readonly Message[]): number {

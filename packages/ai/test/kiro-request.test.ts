@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { streamKiro } from "@oh-my-pi/pi-ai/providers/kiro";
+import { type KiroOptions, streamKiro } from "@oh-my-pi/pi-ai/providers/kiro";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function model(baseUrl: string | null = "https://kiro.invalid"): Model<"kiro-agent"> {
 	const built = buildModel({
@@ -21,6 +22,23 @@ function model(baseUrl: string | null = "https://kiro.invalid"): Model<"kiro-age
 	return built;
 }
 
+function thinkingModel(maxTokens: number): Model<"kiro-agent"> {
+	return buildModel({
+		id: "kiro-thinking-fixture",
+		name: "Kiro Thinking Fixture",
+		api: "kiro-agent",
+		provider: "kiro",
+		baseUrl: "https://kiro.invalid",
+		reasoning: true,
+		input: ["text"],
+		supportsTools: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 8192,
+		maxTokens,
+		thinking: { mode: "kiro-thinking", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max] },
+	});
+}
+
 async function capturePayload(context: Context): Promise<Record<string, unknown>> {
 	let payload: Record<string, unknown> | undefined;
 	await streamKiro(model(), context, {
@@ -32,6 +50,26 @@ async function capturePayload(context: Context): Promise<Record<string, unknown>
 	}).result();
 	if (!payload) throw new Error("Kiro did not build a payload");
 	return payload;
+}
+
+async function captureAdditionalFields(
+	builtModel: Model<"kiro-agent">,
+	options?: KiroOptions,
+): Promise<Record<string, unknown> | undefined> {
+	let payload: Record<string, unknown> | undefined;
+	await streamKiro(
+		builtModel,
+		{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+		{
+			apiKey: "token",
+			...(options ?? {}),
+			onPayload: value => {
+				payload = value as Record<string, unknown>;
+			},
+			fetch: async () => new Response("fixture", { status: 400 }),
+		},
+	).result();
+	return (payload as { additionalModelRequestFields?: Record<string, unknown> })?.additionalModelRequestFields;
 }
 
 describe("Kiro request encoding", () => {
@@ -129,5 +167,32 @@ describe("Kiro request encoding", () => {
 			},
 		).result();
 		expect(requestUrl).toBe("https://runtime.eu-central-1.kiro.dev/");
+	});
+
+	it("forwards the model's output-token cap as max_tokens for Claude-family models", async () => {
+		const fields = await captureAdditionalFields(thinkingModel(64_000), { reasoning: Effort.High });
+		expect(fields?.max_tokens).toBe(64_000);
+		expect(fields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(fields?.output_config).toEqual({ effort: "high" });
+	});
+
+	it("clamps a caller-selected max_tokens to the model cap", async () => {
+		const fields = await captureAdditionalFields(thinkingModel(64_000), {
+			reasoning: Effort.High,
+			maxTokens: 200_000,
+		});
+		expect(fields?.max_tokens).toBe(64_000);
+	});
+
+	it("emits max_tokens even when reasoning is disabled", async () => {
+		const fields = await captureAdditionalFields(thinkingModel(64_000), { disableReasoning: true });
+		expect(fields?.max_tokens).toBe(64_000);
+		expect(fields?.thinking).toEqual({ type: "disabled" });
+		expect(fields?.output_config).toBeUndefined();
+	});
+
+	it("omits additionalModelRequestFields for non-reasoning models", async () => {
+		const fields = await captureAdditionalFields(model());
+		expect(fields).toBeUndefined();
 	});
 });

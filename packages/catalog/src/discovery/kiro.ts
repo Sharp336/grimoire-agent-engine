@@ -122,21 +122,42 @@ export function normalizeKiroModels(
 	return [...models.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
 
-// Both Kiro reasoning schemas accept the same effort ladder (low..max); the
-// `reasoning` schema's `none` is the off state, expressed via `disableReasoning`
-// rather than a user-facing effort tier. The mode discriminates the wire shape
-// (`thinking`+`output_config` for Claude-family, `reasoning` for GPT-family) so
-// the provider serializes schema-appropriate fields under `additionalProperties: false`.
+// Canonical Kiro effort ladder (low..max). Each model advertises a subset via its
+// schema's `effort` enum — e.g. claude-opus-4.6/sonnet-4.6 omit `xhigh` — so
+// supported efforts are intersected with the reported enum rather than applied
+// as a global union. The `reasoning` schema's `none` is the off state, expressed
+// via `disableReasoning` rather than a user-facing effort tier. The mode
+// discriminates the wire shape (`thinking`+`output_config` for Claude-family,
+// `reasoning` for GPT-family) so the provider serializes schema-appropriate
+// fields under `additionalProperties: false`.
 const KIRO_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
+
+/** Intersect the canonical ladder with a model's reported `effort` enum, preserving canonical order. */
+function kiroEffortsFromSchema(effortEnum: unknown): readonly Effort[] | undefined {
+	if (!Array.isArray(effortEnum)) return undefined;
+	const supported = new Set<string>(effortEnum.filter((value): value is string => typeof value === "string"));
+	const efforts = KIRO_REASONING_EFFORTS.filter(effort => supported.has(effort));
+	return efforts.length > 0 ? efforts : undefined;
+}
+
+/** Read the `effort.enum` nested under a schema property container (`output_config` or `reasoning`). */
+function readKiroEffortEnum(properties: Record<string, unknown>, container: string): unknown {
+	const node = properties[container];
+	if (!isRecord(node) || !isRecord(node.properties)) return undefined;
+	return isRecord(node.properties.effort) ? node.properties.effort.enum : undefined;
+}
 
 function kiroThinkingConfig(candidate: Record<string, unknown>): ThinkingConfig | undefined {
 	const schema = candidate.additionalModelRequestFieldsSchema;
 	if (!isRecord(schema) || !isRecord(schema.properties)) return undefined;
-	if (isRecord(schema.properties.thinking)) {
-		return { mode: "kiro-thinking", efforts: KIRO_REASONING_EFFORTS };
+	const properties = schema.properties;
+	if (isRecord(properties.thinking)) {
+		const efforts = kiroEffortsFromSchema(readKiroEffortEnum(properties, "output_config")) ?? KIRO_REASONING_EFFORTS;
+		return { mode: "kiro-thinking", efforts };
 	}
-	if (isRecord(schema.properties.reasoning)) {
-		return { mode: "kiro-reasoning", efforts: KIRO_REASONING_EFFORTS };
+	if (isRecord(properties.reasoning)) {
+		const efforts = kiroEffortsFromSchema(readKiroEffortEnum(properties, "reasoning")) ?? KIRO_REASONING_EFFORTS;
+		return { mode: "kiro-reasoning", efforts };
 	}
 	return undefined;
 }
