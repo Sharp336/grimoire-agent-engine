@@ -430,17 +430,17 @@ function getReadTargetOutcomes(result: ToolResultMessage | undefined): readonly 
 
 function isUsableReadTargetOutcome(outcome: unknown): boolean {
 	if (typeof outcome !== "object" || outcome === null) return false;
-	const status = (outcome as Record<string, unknown>).status;
-	return status === "success" || status === "warning";
+	const record = outcome as Record<string, unknown>;
+	return (record.status === "success" || record.status === "warning") && record.payloadComplete !== false;
 }
 
 /**
  * Supersede keys for the `read` tool: each file path with its trailing line/raw
  * selector split out using the read tool's own grammar via
  * {@link splitReadSelector} (e.g. `src/foo.ts:50-200`, `:2-4:raw`).
- * Native path arrays produce one key per usable target; errored
- * `readTargetOutcomes` do not cover prior content, so a combined result is
- * pruned only after later reads cover every successful or warning target.
+ * Native path arrays produce one key per complete, usable target; errored or
+ * explicitly incomplete `readTargetOutcomes` do not cover prior content, so a
+ * combined result is pruned only after later reads cover every complete target.
  * Top-level errors and internal/URL-scheme paths (`skill://…`, `https://…`)
  * exempt the whole call because one batch result cannot be pruned safely one
  * target at a time.

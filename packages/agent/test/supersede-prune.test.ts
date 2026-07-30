@@ -137,6 +137,18 @@ describe("readToolSupersedeKey", () => {
 		expect(readToolSupersedeKey("read", { path: ["src/foo.ts", "skill://react"] })).toBeUndefined();
 	});
 
+	test("excludes incomplete targets while accepting complete warnings", () => {
+		const result = toolResultMessage("read", "call-outcomes", FILE_CONTENT, T0);
+		result.details = {
+			readTargetOutcomes: [
+				{ path: "src/foo.ts", status: "warning", payloadComplete: false },
+				{ path: "src/bar.ts", status: "warning" },
+			],
+		};
+
+		expect(readToolSupersedeKey("read", { path: ["src/foo.ts", "src/bar.ts"] }, result)).toEqual(["src/bar.ts"]);
+	});
+
 	test("strips trailing selectors into a \\u0000-separated key", () => {
 		expect(readToolSupersedeKey("read", { path: "src/foo.ts:50-200" })).toBe("src/foo.ts\u000050-200");
 		expect(readToolSupersedeKey("read", { path: "src/foo.ts:raw" })).toBe("src/foo.ts\u0000raw");
@@ -260,6 +272,26 @@ describe("pruneSupersededToolResults — tail case", () => {
 			readTargetOutcomes: [
 				{ path: "src/foo.ts", status: "success" },
 				{ path: "src/bar.ts", status: "error" },
+			],
+		};
+		const entries: SessionEntry[] = [fooCall, fooResult, barCall, barResult, batchCall, batchResult];
+
+		const result = pruneSupersededToolResults(entries, cfg({ now: T0 + 2_000 }));
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(fooResult)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(barResult)).toBe(FILE_CONTENT);
+		expect(resultText(batchResult)).toBe(FILE_CONTENT);
+	});
+
+	test("incomplete warning targets do not supersede while complete warnings still do", () => {
+		const [fooCall, fooResult] = readPair("src/foo.ts", FILE_CONTENT, T0);
+		const [barCall, barResult] = readPair("src/bar.ts", FILE_CONTENT, T0 + 1_000);
+		const [batchCall, batchResult] = readPair(["src/foo.ts", "src/bar.ts"], FILE_CONTENT, T0 + 2_000);
+		resultMessage(batchResult).details = {
+			readTargetOutcomes: [
+				{ path: "src/foo.ts", status: "warning" },
+				{ path: "src/bar.ts", status: "warning", payloadComplete: false },
 			],
 		};
 		const entries: SessionEntry[] = [fooCall, fooResult, barCall, barResult, batchCall, batchResult];

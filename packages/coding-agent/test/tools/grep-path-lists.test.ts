@@ -1013,6 +1013,39 @@ describe("tool path arrays", () => {
 		expect(text.indexOf(secondHeader)).toBeLessThan(text.indexOf("second payload"));
 	});
 
+	it("marks budget-limited nested payloads incomplete while complete warnings remain covered", async () => {
+		const result = await executeReadBatch<ReadBatchPartDetails>({
+			parts: ["complete-warning.txt", "nested-budget.txt"],
+			notice: "custom batch",
+			enforceAggregateBudget: true,
+			async readPart(part) {
+				if (part === "complete-warning.txt") {
+					return {
+						content: [{ type: "text", text: "complete warning payload" }],
+						details: { conflictCount: 1 },
+					};
+				}
+				return {
+					content: [{ type: "text", text: "x".repeat(60 * 1024) }],
+					details: {
+						readTargetOutcomes: [
+							{ path: "nested-a.txt", status: "success" },
+							{ path: "nested-b.txt", status: "warning" },
+						],
+					},
+				};
+			},
+		});
+
+		expect(
+			result.details?.readTargetOutcomes?.map(({ status, payloadComplete }) => ({ status, payloadComplete })),
+		).toEqual([
+			{ status: "warning", payloadComplete: undefined },
+			{ status: "warning", payloadComplete: false },
+			{ status: "warning", payloadComplete: false },
+		]);
+	});
+
 	it("preserves each target's truncation notice in native batches", async () => {
 		const largeA = `${"aaaaaaaaaaaaaaaa\n".repeat(3_100)}large-a-end`;
 		const largeB = `${"bbbbbbbbbbbbbbbb\n".repeat(3_100)}large-b-end`;
@@ -1090,6 +1123,7 @@ describe("tool path arrays", () => {
 			"error",
 		]);
 		expect(result.details?.readTargetOutcomes?.[0]?.message).toContain("aggregate batch text cap");
+		expect(result.details?.readTargetOutcomes?.[0]?.payloadComplete).toBe(false);
 	});
 
 	it("keeps legacy scalar-delimited batches on their prior uncapped output path", async () => {
@@ -1176,6 +1210,13 @@ describe("tool path arrays", () => {
 			"success",
 			"success",
 			"warning",
+		]);
+		expect(result.details?.readTargetOutcomes?.map((outcome: ReadTargetOutcome) => outcome.payloadComplete)).toEqual([
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
 		]);
 	});
 

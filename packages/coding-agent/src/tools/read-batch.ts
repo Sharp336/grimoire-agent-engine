@@ -23,6 +23,11 @@ export interface ReadTargetOutcome {
 	/** Path shown in the grouped read UI, including any inline selector. */
 	path: string;
 	status: ReadTargetStatus;
+	/**
+	 * False when batch budgeting omitted or truncated any of this target's payload.
+	 * Absent (or true) means complete, preserving compatibility with older producers.
+	 */
+	payloadComplete?: boolean;
 	/** Original path when suffix recovery corrected it to {@link path}. */
 	requestedPath?: string;
 	/** Resolved filesystem path used for clickable terminal/ACP locations. */
@@ -59,6 +64,8 @@ interface BufferedBatchPartResult<TDetails extends ReadBatchPartDetails> {
 	settled: PromiseSettledResult<LimitedBatchPartResult<TDetails>>;
 	bufferBytes: number;
 }
+
+type ContentOwner = number | readonly number[] | undefined;
 
 /** Inputs for the ordered, bounded executor used by native arrays and recovered path lists. */
 export interface ExecuteReadBatchOptions<TDetails extends ReadBatchPartDetails> {
@@ -135,7 +142,7 @@ function batchResultBufferBytes(result: AgentToolResult<ReadBatchPartDetails>): 
 
 function capBatchTextContent(
 	content: Array<TextContent | ImageContent>,
-	contentOwners: Array<number | undefined>,
+	contentOwners: ContentOwner[],
 	contentProtected: boolean[],
 	outcomes: ReadTargetOutcome[],
 	notes: string[],
@@ -176,12 +183,20 @@ function capBatchTextContent(
 		} else {
 			regularRemaining -= truncated.bytes;
 		}
-		if (truncated.bytes < blockBytes && owner !== undefined) affectedOutcomes.add(owner);
+		if (truncated.bytes < blockBytes) {
+			if (typeof owner === "number") {
+				affectedOutcomes.add(owner);
+			} else {
+				for (const outcomeIndex of owner ?? []) affectedOutcomes.add(outcomeIndex);
+			}
+		}
 	}
 
 	for (const index of affectedOutcomes) {
 		const outcome = outcomes[index];
-		if (!outcome || outcome.status === "error") continue;
+		if (!outcome) continue;
+		outcome.payloadComplete = false;
+		if (outcome.status === "error") continue;
 		outcome.status = "warning";
 		outcome.message = outcome.message ? `${outcome.message} ${finalCapWarning}` : finalCapWarning;
 	}
@@ -217,14 +232,14 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 	const notes = [notice];
 	const content: Array<TextContent | ImageContent> = [];
 	const contentProtected: boolean[] = [];
-	const contentOwners: Array<number | undefined> = [];
+	const contentOwners: ContentOwner[] = [];
 	const readTargetOutcomes: ReadTargetOutcome[] = [];
 	let remainingTextBytes = enforceAggregateBudget
 		? Math.max(0, READ_BATCH_MAX_TEXT_BYTES - Buffer.byteLength(notice, "utf8"))
 		: Number.MAX_SAFE_INTEGER;
 	let remainingImageBytes = enforceAggregateBudget ? READ_BATCH_MAX_IMAGE_BYTES : Number.MAX_SAFE_INTEGER;
 	let pendingText = notice;
-	let pendingTextOwner: number | undefined;
+	let pendingTextOwner: ContentOwner;
 	let pendingTextProtected = true;
 	let deferredFatal: { reason: unknown } | undefined;
 
@@ -237,7 +252,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 		pendingTextOwner = undefined;
 		pendingTextProtected = false;
 	};
-	const appendText = (text: string, owner?: number, protectedText = false) => {
+	const appendText = (text: string, owner?: number | readonly number[], protectedText = false) => {
 		const groupChanged =
 			pendingText.length > 0 && (pendingTextOwner !== owner || pendingTextProtected !== protectedText);
 		if (groupChanged) flushText();
@@ -245,7 +260,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 		pendingTextOwner = owner;
 		pendingTextProtected = protectedText;
 	};
-	const appendTargetHeader = (part: string, index: number, owner: number) => {
+	const appendTargetHeader = (part: string, index: number, owner: number | readonly number[]) => {
 		if (parts.length < 2) return;
 		appendText(`[Read target ${index + 1}/${parts.length}: ${JSON.stringify(part)}]`, owner, true);
 	};
@@ -280,16 +295,18 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 			if (!notes.includes(nestedNote)) notes.push(nestedNote);
 		}
 		const nestedOutcomes = result.details?.readTargetOutcomes;
-		let owner: number;
+		let owner: number | readonly number[];
 		if (nestedOutcomes?.length) {
+			const firstOwner = readTargetOutcomes.length;
 			for (const outcome of nestedOutcomes) {
-				readTargetOutcomes.push(
+				let combinedOutcome: ReadTargetOutcome =
 					targetWarnings.length > 0 && outcome.status === "success"
-						? { ...outcome, status: "warning", message: targetWarnings.join(" ") }
-						: outcome,
-				);
+						? { ...outcome, status: "warning" as const, message: targetWarnings.join(" ") }
+						: outcome;
+				if (budgetNotes.length > 0) combinedOutcome = { ...combinedOutcome, payloadComplete: false };
+				readTargetOutcomes.push(combinedOutcome);
 			}
-			owner = readTargetOutcomes.length - 1;
+			owner = Array.from({ length: nestedOutcomes.length }, (_, nestedIndex) => firstOwner + nestedIndex);
 		} else {
 			const suffixResolution = result.details?.suffixResolution;
 			const status: ReadTargetStatus = result.isError
@@ -310,6 +327,7 @@ export async function executeReadBatch<TDetails extends ReadBatchPartDetails>(
 				resolvedPath: result.details?.resolvedPath ?? (source?.type === "path" ? source.value : undefined),
 				conflictCount: result.details?.conflictCount,
 				message: targetWarnings.length > 0 ? targetWarnings.join(" ") : undefined,
+				...(budgetNotes.length > 0 ? { payloadComplete: false } : {}),
 			});
 		}
 		appendTargetHeader(part, index, owner);
