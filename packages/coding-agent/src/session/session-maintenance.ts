@@ -233,6 +233,7 @@ export interface SessionMaintenanceHost {
 	resetAdvisorRuntimes(): void;
 	rebaseAfterCompaction(): void;
 	pruneRewoundToolResultIds(messages: readonly AgentMessage[]): void;
+	awaitPendingMessagePersistence(): Promise<void>;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
 		pendingMessages?: AgentMessage[];
@@ -478,6 +479,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.pruneRewoundToolResultIds(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 
@@ -826,6 +828,12 @@ export class SessionMaintenance {
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
 			this.#host.rebaseAfterCompaction();
+			// Drain in-flight message_end persistence before pruning: a rewind turn
+			// settling while manual compaction aborts it can leave a rewind result's
+			// persistence pending, so awaiting lets the delayed handler skip
+			// re-appending (marker still present) instead of landing on the compacted
+			// branch after the marker is pruned (issue #6964).
+			await this.#host.awaitPendingMessagePersistence();
 			this.#host.pruneRewoundToolResultIds(sessionContext.messages);
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads

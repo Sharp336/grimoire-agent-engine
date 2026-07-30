@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Bounded session-scoped rewind, terminal-yield, and subscriber state so long-lived recursive sessions release stale entries after compaction, a new prompt, or a session switch.
+- Bounded the session-scoped rewound-tool-result ID set: stale entries are now pruned after every compaction path (summary, snapcompact, and shake), so long-lived recursive sessions no longer retain rewind markers for tool results the rebuilt context no longer carries. A retained older result that merely shares a call ID no longer keeps a discarded rewind's marker alive, and a marker whose rewind result is still being persisted is preserved until that persistence lands.
 
 ## [17.1.8] - 2026-07-28
 

@@ -516,6 +516,13 @@ export class AgentSession {
 	#turnIndex = 0;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
+	/**
+	 * Call IDs of rewind tool results whose message_end persistence is still in
+	 * flight. #pruneRewoundToolResultIds skips these so a compaction that races a
+	 * settling rewind turn cannot drop the suppression marker before the delayed
+	 * handler runs and skips re-appending the rewound-away result.
+	 */
+	#pendingRewoundToolResultPersistence = new Set<string>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -596,12 +603,24 @@ export class AgentSession {
 
 	#pruneRewoundToolResultIds(messages: readonly AgentMessage[]): void {
 		if (this.#rewoundToolResultIds.size === 0) return;
-		const activeToolResultIds = new Set<string>();
+		// A rewound-tool-result marker only ever marks a rewind tool result, so a
+		// retained tool result that merely shares a call ID (e.g. an older result
+		// left behind by compaction) must NOT keep a discarded rewind's marker
+		// alive — otherwise a later replay of that call ID is silently skipped when
+		// #persistSessionMessageIfMissing consumes the stale marker.
+		const activeRewoundToolResultIds = new Set<string>();
 		for (const message of messages) {
-			if (message.role === "toolResult") activeToolResultIds.add(message.toolCallId);
+			if (message.role === "toolResult" && semanticToolResult(message.toolName, message)?.toolName === "rewind") {
+				activeRewoundToolResultIds.add(message.toolCallId);
+			}
 		}
 		for (const toolCallId of this.#rewoundToolResultIds) {
-			if (!activeToolResultIds.has(toolCallId)) this.#rewoundToolResultIds.delete(toolCallId);
+			// Keep the marker while its rewind result's message_end persistence is
+			// still in flight: the rebuilt context does not yet carry the result, so
+			// pruning now would drop the suppression marker and let the delayed
+			// handler re-append the rewound-away result onto the compacted branch.
+			if (this.#pendingRewoundToolResultPersistence.has(toolCallId)) continue;
+			if (!activeRewoundToolResultIds.has(toolCallId)) this.#rewoundToolResultIds.delete(toolCallId);
 		}
 	}
 
@@ -1353,6 +1372,7 @@ export class AgentSession {
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			pruneRewoundToolResultIds: messages => this.#pruneRewoundToolResultIds(messages),
+			awaitPendingMessagePersistence: () => this.#awaitPendingMessagePersistence(),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
@@ -1958,10 +1978,16 @@ export class AgentSession {
 		if (!key) return undefined;
 		const previous = this.#messageEndPersistenceTail;
 		const { promise, resolve } = Promise.withResolvers<void>();
+		const pendingRewindCallId =
+			message.role === "toolResult" && semanticToolResult(message.toolName, message)?.toolName === "rewind"
+				? message.toolCallId
+				: undefined;
+		if (pendingRewindCallId) this.#pendingRewoundToolResultPersistence.add(pendingRewindCallId);
 		const clear = () => {
 			if (this.#pendingMessageEndPersistence.get(key) === promise) {
 				this.#pendingMessageEndPersistence.delete(key);
 			}
+			if (pendingRewindCallId) this.#pendingRewoundToolResultPersistence.delete(pendingRewindCallId);
 		};
 		this.#pendingMessageEndPersistence.set(key, promise);
 		this.#messageEndPersistenceTail = promise.catch(() => {});
@@ -1987,6 +2013,17 @@ export class AgentSession {
 		const key = sessionMessagePersistenceKey(message);
 		if (!key) return;
 		await this.#pendingMessageEndPersistence.get(key);
+	}
+
+	/**
+	 * Drain every in-flight message_end persistence slot. Manual compaction can
+	 * be invoked (e.g. via the SDK) while a rewind turn is still settling:
+	 * awaiting the tail lets a delayed rewind-result handler run while its
+	 * suppression marker is still present, so it skips re-appending instead of
+	 * landing the rewound-away result on the compacted branch.
+	 */
+	async #awaitPendingMessagePersistence(): Promise<void> {
+		await this.#messageEndPersistenceTail;
 	}
 
 	/**
