@@ -1547,7 +1547,12 @@ export class AuthStorage {
 		if (apiKeys.length === 0) return undefined;
 		const order = this.#getCredentialOrder(providerKey, sessionId, apiKeys.length);
 		const selectedIndex = order.find(index => !this.#isCredentialBlocked(provider, providerKey, index)) ?? order[0];
-		this.#providerRoundRobinIndex.set(providerKey, selectedIndex);
+		// The cursor drives sessionless round-robin load balancing (via
+		// #getNextRoundRobinIndex). A session-scoped selection starts from its
+		// deterministic hash, so writing that index here would pin every
+		// sessionless request that follows to the session's key instead of
+		// rotating across the pool — advance the cursor only for sessionless picks.
+		if (!sessionId) this.#providerRoundRobinIndex.set(providerKey, selectedIndex);
 		this.#recordSessionCredential(provider, sessionId, source, selectedIndex);
 		return apiKeys[selectedIndex];
 	}
@@ -1602,6 +1607,41 @@ export class AuthStorage {
 				if (retryAtMs === undefined || siblingBlockedUntil < retryAtMs) retryAtMs = siblingBlockedUntil;
 			}
 			return { switched: false, retryAtMs };
+		}
+		return undefined;
+	}
+	/**
+	 * Hard-auth (401 / non-quota 403) failure on a virtual config/env key pool:
+	 * block the failed key for the backoff window and report whether an unblocked
+	 * sibling remains selectable. Mirrors {@link #markApiKeyOverrideUsageLimit}
+	 * so the resolver's next selection skips the dead key instead of re-selecting
+	 * it — without this, {@link #resolveCredentialTarget} (which only searches
+	 * stored rows) resolves nothing for a virtual key, `rotateSessionCredential`
+	 * declines, and the resolver hands back the same key, ending retry on
+	 * duplicate-key suppression. Returns `undefined` when `apiKey` is not a
+	 * virtual pool member so the stored-row path still handles OAuth/api_key.
+	 */
+	#rotateVirtualApiKeyOnHardAuth(provider: string, apiKey: string | undefined): boolean | undefined {
+		for (const [providerKey, keys] of [
+			[`${provider}:config_api_key`, this.#configOverrides.get(provider) ?? []],
+			[`${provider}:env_api_key`, getEnvApiKeys(provider)],
+		] as const) {
+			if (keys.length < 2) continue;
+			const index = apiKey === undefined ? -1 : keys.indexOf(apiKey);
+			if (index < 0 || index >= keys.length) continue;
+			this.#markCredentialBlocked(
+				provider,
+				providerKey,
+				index,
+				Date.now() + AuthStorage.#defaultBackoffMs,
+				undefined,
+				false,
+			);
+			for (let sibling = 0; sibling < keys.length; sibling += 1) {
+				if (sibling === index) continue;
+				if (!this.#isCredentialBlocked(provider, providerKey, sibling)) return true;
+			}
+			return false;
 		}
 		return undefined;
 	}
@@ -6131,6 +6171,9 @@ export class AuthStorage {
 				})
 			).switched;
 		}
+
+		const virtualKeyRotation = this.#rotateVirtualApiKeyOnHardAuth(provider, options?.apiKey);
+		if (virtualKeyRotation !== undefined) return virtualKeyRotation;
 
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,

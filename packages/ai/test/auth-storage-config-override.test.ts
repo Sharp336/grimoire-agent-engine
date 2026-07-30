@@ -117,6 +117,56 @@ describe("AuthStorage config-override apiKey", () => {
 		});
 	});
 
+	test("rotates to a sibling configured key after a hard-auth failure", async () => {
+		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+			if (!authStorage) throw new Error("test setup failed");
+			authStorage.setConfigApiKeys("anthropic", ["config-first", "config-second"]);
+
+			const first = await authStorage.getApiKey("anthropic", "hard-auth-session");
+			expect(first).toBeDefined();
+			const rotated = await authStorage.rotateSessionCredential("anthropic", "hard-auth-session", {
+				error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+				apiKey: first,
+			});
+			expect(rotated).toBe(true);
+			expect(await authStorage.getApiKey("anthropic", "hard-auth-session")).not.toBe(first);
+		});
+	});
+
+	test("rotates comma-separated environment keys after a hard-auth failure", async () => {
+		await withEnv({ ...SUPPRESS_ANTHROPIC_ENV, ANTHROPIC_API_KEY: "env-first, env-second" }, async () => {
+			if (!authStorage) throw new Error("test setup failed");
+			const first = await authStorage.getApiKey("anthropic", "env-hard-auth-session");
+			expect(first).toBeDefined();
+			const rotated = await authStorage.rotateSessionCredential("anthropic", "env-hard-auth-session", {
+				error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+				apiKey: first,
+			});
+			expect(rotated).toBe(true);
+			expect(await authStorage.getApiKey("anthropic", "env-hard-auth-session")).not.toBe(first);
+		});
+	});
+
+	test("session selection does not pin sessionless round-robin to one key", async () => {
+		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+			if (!authStorage) throw new Error("test setup failed");
+			authStorage.setConfigApiKeys("anthropic", ["pool-a", "pool-b"]);
+
+			// Interleave a recurring session (deterministic hash) before each
+			// sessionless pick. Writing the session's hash index into the shared
+			// round-robin cursor would force every sessionless pick onto one key
+			// instead of rotating across the pool.
+			const sessionKeys: string[] = [];
+			const sessionlessKeys: string[] = [];
+			for (let i = 0; i < 4; i += 1) {
+				sessionKeys.push((await authStorage.getApiKey("anthropic", "sticky-session")) ?? "");
+				sessionlessKeys.push((await authStorage.getApiKey("anthropic")) ?? "");
+			}
+			expect(new Set(sessionKeys).size).toBe(1);
+			expect(new Set(sessionlessKeys).size).toBe(2);
+		});
+	});
+
 	test("clearConfigApiKeys drops every config override at once", async () => {
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
 			if (!authStorage) throw new Error("test setup failed");
