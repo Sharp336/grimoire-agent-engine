@@ -28,7 +28,9 @@ export type CacheMutationTag =
 	| "image-strip"
 	| "steering-wrap"
 	| "thinking-demote"
+	| "thinking-level"
 	| "retry-recovery"
+	| "rewind"
 	| "tool-signature"
 	| "context-hook"
 	| "snapcompact"
@@ -100,6 +102,26 @@ function projectWireFields(target: Record<string, unknown>, source: Record<strin
 }
 
 /**
+ * Project only the request-control fields that select a thinking/reasoning
+ * configuration, since a mid-session effort change on the same model and
+ * session rewrites the explicit prompt-cache prefix without altering system or
+ * tool bytes. Like {@link projectSystemAndToolsWireBytes} this is a projection,
+ * not a recursive walk: request contents are never fingerprinted.
+ *
+ * Covers the controls each built-in provider emits at the top level: Anthropic
+ * `thinking` / `output_config.effort`, Bedrock `additionalModelRequestFields`,
+ * and OpenAI-style `reasoning_effort` / `reasoning`.
+ */
+export function projectThinkingControlsWireBytes(payload: unknown): string {
+	if (!isRecord(payload)) return "";
+	const projection: Record<string, unknown> = {};
+	for (const key of ["thinking", "output_config", "additionalModelRequestFields", "reasoning_effort", "reasoning"]) {
+		if (key in payload) projection[key] = payload[key];
+	}
+	return stringifyJson(projection) ?? "";
+}
+
+/**
  * Session-scoped ledger of which message-array mutators fired since the last
  * cache-invalidation report. Producers call {@link CacheMutationLedger.record};
  * the detection point calls {@link CacheMutationLedger.consume} once per turn,
@@ -121,6 +143,7 @@ export class CacheMutationLedger {
 	#snapcompactState: WireMutationState = ABSENT_WIRE_MUTATION;
 	#nextProviderRequestTags = new Set<CacheMutationTag>();
 	#lastEmittedToolSignatureByCacheIdentity = new Map<string, bigint>();
+	#lastEmittedThinkingConfigByCacheIdentity = new Map<string, bigint>();
 
 	/** Record that mutator `tag` rewrote the message array for the wire this turn. */
 	record(tag: CacheMutationTag): void {
@@ -217,6 +240,20 @@ export class CacheMutationLedger {
 		const previous = this.#lastEmittedToolSignatureByCacheIdentity.get(cacheIdentity);
 		if (previous !== undefined && previous !== digest) this.record("tool-signature");
 		this.#lastEmittedToolSignatureByCacheIdentity.set(cacheIdentity, digest);
+	}
+
+	/**
+	 * Compare the thinking/reasoning controls emitted at the main provider
+	 * boundary, partitioned by cache identity. A mid-session effort change keeps
+	 * the same provider/model/session identity yet rewrites the explicit cache
+	 * prefix on Anthropic and Bedrock, so the resulting warm-to-cold transition
+	 * is attributed to the effort change rather than an empty cause list.
+	 */
+	recordThinkingLevelAtWire(cacheIdentity: string, wireBytes: string): void {
+		const digest = Bun.hash.wyhash(wireBytes);
+		const previous = this.#lastEmittedThinkingConfigByCacheIdentity.get(cacheIdentity);
+		if (previous !== undefined && previous !== digest) this.record("thinking-level");
+		this.#lastEmittedThinkingConfigByCacheIdentity.set(cacheIdentity, digest);
 	}
 
 	/** Move queued mutations onto the main request being emitted. Each queued tag is consumed exactly once. */

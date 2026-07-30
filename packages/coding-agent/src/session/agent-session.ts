@@ -2192,9 +2192,13 @@ export class AgentSession {
 		}
 		return true;
 	}
-	/** Cache invalidation calculated before this message was emitted to all modes. */
+	/** Cache invalidation calculated before this message was emitted to all modes.
+	 *  Consumed on read so an entry survives until its owning message is delivered
+	 *  to every subscriber — a later message_end can no longer clear it first. */
 	getCacheInvalidation(message: AssistantMessage): CacheInvalidation | undefined {
-		return this.#cacheInvalidationByTimestamp.get(message.timestamp);
+		const invalidation = this.#cacheInvalidationByTimestamp.get(message.timestamp);
+		if (invalidation) this.#cacheInvalidationByTimestamp.delete(message.timestamp);
+		return invalidation;
 	}
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
@@ -2252,8 +2256,13 @@ export class AgentSession {
 		}
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			const assistantMessage = event.message;
-			this.#cacheInvalidationByTimestamp.clear();
-			const cacheIdentity = `${assistantMessage.provider}/${assistantMessage.model}`;
+			// Partition the warm baseline by the live prompt-cache identity (not
+			// just provider/model): a session created, switched, or branched on the
+			// same model — or a cleared inherited promptCacheKey — gets a fresh
+			// cache key, so its cold write must not be measured against the prior
+			// key's warm prefix and falsely reported as invalidating it. Entries are
+			// consumed per message by getCacheInvalidation, so no global clear here.
+			const cacheIdentity = `${assistantMessage.provider}/${assistantMessage.model}:${this.agent.promptCacheKey ?? this.sessionId}`;
 			const invalidation = reportCacheInvalidation({
 				prev: this.#lastAssistantUsageCacheIdentity === cacheIdentity ? this.#lastAssistantUsage : undefined,
 				current: assistantMessage.usage,
@@ -6507,6 +6516,10 @@ export class AgentSession {
 			activeMessages.splice(0, activeMessages.length, ...sessionContext.messages);
 		}
 		this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
+		// The rewritten prefix shares the same session/model cache identity, so
+		// the next provider request can cold-write it. Queue the cause so the
+		// warning attributes the miss to the rewind rather than an empty list.
+		this.cacheMutationLedger.queueForNextProviderRequest("rewind");
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();

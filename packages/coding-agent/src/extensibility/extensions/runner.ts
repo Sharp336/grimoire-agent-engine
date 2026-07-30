@@ -1081,9 +1081,17 @@ export class ExtensionRunner {
 			currentMessages = [...messages];
 		}
 
+		// Track whether any handler actually returned a rewritten array. The
+		// defensive clone above breaks object identity for every message, so without
+		// this guard a registered-but-inert handler would make the cache-attribution
+		// context-hook check see the whole history as rewritten every turn. Returning
+		// the original reference when nothing changed keeps that comparison exact;
+		// extensions are contractually required to return new arrays rather than
+		// mutate in place (see the fallback note above).
+		let rewritten = false;
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("context");
-			if (!handlers || handlers.length === 0) continue;
+			if (handlers === undefined || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
 				const event: ContextEvent = { type: "context", messages: currentMessages };
@@ -1095,13 +1103,15 @@ export class ExtensionRunner {
 					extensionHandlerTimeoutMs,
 				);
 
-				if (handlerResult && (handlerResult as ContextEventResult).messages) {
-					currentMessages = (handlerResult as ContextEventResult).messages!;
+				const rewrittenMessages = (handlerResult as ContextEventResult | undefined)?.messages;
+				if (rewrittenMessages) {
+					currentMessages = rewrittenMessages;
+					rewritten = true;
 				}
 			}
 		}
 
-		return currentMessages;
+		return rewritten ? currentMessages : messages;
 	}
 
 	/** Runs request payload hooks with the model used for that provider request. */
