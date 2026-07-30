@@ -265,7 +265,7 @@ struct FileSearchResult {
 }
 
 /// Outcome of attempting to read a file for searching.
-enum ReadFile {
+pub(crate) enum ReadFile {
 	/// File was read successfully into the provided buffer.
 	Read,
 	/// File exceeds [`MAX_FILE_BYTES`]; callers count these so the skip can be
@@ -323,7 +323,7 @@ fn truncate_line(line: String, max_columns: Option<usize>) -> (String, bool) {
 	}
 }
 
-fn bytes_to_trimmed_string(bytes: &[u8]) -> String {
+pub(crate) fn bytes_to_trimmed_string(bytes: &[u8]) -> String {
 	match std::str::from_utf8(bytes) {
 		Ok(text) => text.trim_end().to_string(),
 		Err(_) => String::from_utf8_lossy(bytes).trim_end().to_string(),
@@ -678,7 +678,7 @@ fn read_owned_prefix(
 }
 
 /// Read file bytes, distinguishing oversized files from other skips.
-fn read_file_bytes(path: &Path, buffer: &mut Vec<u8>) -> io::Result<ReadFile> {
+pub(crate) fn read_file_bytes(path: &Path, buffer: &mut Vec<u8>) -> io::Result<ReadFile> {
 	read_file_bytes_with_size(path, None, buffer)
 }
 

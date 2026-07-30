@@ -45,6 +45,7 @@ export const enclosingBlockBoundaries = nativeBindings.enclosingBlockBoundaries;
 export const encodeSixel = nativeBindings.encodeSixel;
 export const executeShell = nativeBindings.executeShell;
 export const extractSegments = nativeBindings.extractSegments;
+export const fuzzyContentSearch = nativeBindings.fuzzyContentSearch;
 export const fuzzyFind = nativeBindings.fuzzyFind;
 export const getSupportedLanguages = nativeBindings.getSupportedLanguages;
 export const getWorkProfile = nativeBindings.getWorkProfile;

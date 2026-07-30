@@ -834,6 +834,51 @@ export declare enum FileType {
   Symlink = 3
 }
 
+/** A single fuzzy content match. */
+export interface FuzzyContentMatch {
+  /** Absolute filesystem path to the file containing the match. */
+  path: string
+  /** 1-based line number of the match. */
+  line: number
+  /** Matching line text (truncated to `line_char_limit`). */
+  content: string
+  /** Match quality score (higher is better). */
+  score: number
+}
+
+/** Options for fuzzy content search. */
+export interface FuzzyContentOptions {
+  /** Fuzzy query to match against file contents. */
+  query: string
+  /** Directory to search. */
+  path: string
+  /** Include hidden files (default: false). */
+  hidden?: boolean
+  /** Respect .gitignore (default: true). */
+  gitignore?: boolean
+  /** Maximum number of matches to return (default: 20). */
+  maxResults?: number
+  /** Maximum characters per returned match line (default: 1000). */
+  lineCharLimit?: number
+  /** Abort signal for cancelling the operation. */
+  signal?: unknown
+  /** Timeout in milliseconds for the operation. */
+  timeoutMs?: number
+}
+
+/** Result of fuzzy content search. */
+export interface FuzzyContentResult {
+  /** Matched entries (up to `max_results`). */
+  matches: Array<FuzzyContentMatch>
+  /** Total number of matching lines found (may exceed `matches.len()`). */
+  totalMatches: number
+  /** Number of files that were searched. */
+  filesSearched: number
+}
+
+/** Fuzzy content search for file contents. */
+export declare function fuzzyContentSearch(options: FuzzyContentOptions): Promise<FuzzyContentResult>
+
 /** Fuzzy file path search for autocomplete. */
 export declare function fuzzyFind(options: FuzzyFindOptions): Promise<FuzzyFindResult>
 

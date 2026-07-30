@@ -38,6 +38,7 @@ pub mod desktop_x11;
 pub mod devicecheck;
 pub mod diff;
 pub mod fd;
+pub mod fuzzy_find;
 pub mod glob;
 pub mod glob_util;
 pub mod grep;
