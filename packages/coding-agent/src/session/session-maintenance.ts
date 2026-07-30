@@ -422,6 +422,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.pruneRewoundToolResultIds(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return { removed };
