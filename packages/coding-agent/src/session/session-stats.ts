@@ -67,8 +67,8 @@ export class SessionStatsTracker {
 				totalPremiumRequests += assistant.usage.premiumRequests ?? 0;
 				totalCost += assistant.usage.cost.total;
 			}
-			if (message.role === "toolResult" && message.toolName === "task") {
-				const usage = taskToolUsage(message.details);
+			if (message.role === "toolResult" && (message.toolName === "task" || message.toolName === "workflow")) {
+				const usage = nestedToolUsage(message.details);
 				if (!usage) continue;
 				totalInput += usage.input;
 				totalOutput += usage.output;
@@ -274,7 +274,7 @@ export class SessionStatsTracker {
 	}
 }
 
-function taskToolUsage(details: unknown): Usage | undefined {
+function nestedToolUsage(details: unknown): Usage | undefined {
 	if (!details || typeof details !== "object") return undefined;
 	const usage = Reflect.get(details, "usage");
 	return isUsage(usage) ? usage : undefined;

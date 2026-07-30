@@ -106,9 +106,14 @@ export function parseWorkflowSnapshot(value: unknown): WorkflowSnapshot | undefi
 
 export class SessionWorkflowStore implements WorkflowStore {
 	readonly #sessionManager: WorkflowSessionManager;
+	readonly #appendEntriesAtomically: NonNullable<WorkflowSessionManager["appendEntriesAtomically"]>;
 
 	constructor(sessionManager: WorkflowSessionManager) {
+		if (!sessionManager.appendEntriesAtomically) {
+			throw new Error("Session workflow persistence requires atomic journal appends");
+		}
 		this.#sessionManager = sessionManager;
+		this.#appendEntriesAtomically = sessionManager.appendEntriesAtomically.bind(sessionManager);
 	}
 
 	branchKey(): string | null {
@@ -134,8 +139,8 @@ export class SessionWorkflowStore implements WorkflowStore {
 	}
 
 	async append(snapshot: WorkflowSnapshot): Promise<void> {
-		this.#sessionManager.appendCustomEntry(WORKFLOW_SESSION_CUSTOM_TYPE, cloneWorkflowSnapshot(snapshot));
-		await this.#sessionManager.ensureOnDisk();
-		await this.#sessionManager.flush();
+		await this.#appendEntriesAtomically(() => {
+			this.#sessionManager.appendCustomEntry(WORKFLOW_SESSION_CUSTOM_TYPE, cloneWorkflowSnapshot(snapshot));
+		});
 	}
 }

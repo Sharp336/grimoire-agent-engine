@@ -136,12 +136,16 @@ export class WorkflowRuntime {
 	}
 
 	getSnapshot(): WorkflowSnapshot | null {
-		if (!this.#runAbort) this.#syncBranch();
 		return this.#snapshot ? cloneWorkflowSnapshot(this.#snapshot) : null;
 	}
 
+	async getDurableSnapshot(): Promise<WorkflowSnapshot | null> {
+		if (!this.#runAbort) await this.#syncBranch();
+		return this.getSnapshot();
+	}
+
 	async createWorkflow(draft: WorkflowDraft): Promise<WorkflowSnapshot> {
-		this.#syncBranch();
+		await this.#syncBranch();
 		if (this.#snapshot && !isReplaceable(this.#snapshot.status)) {
 			throw new Error(
 				`Workflow ${this.#snapshot.definition.id} is ${this.#snapshot.status}; complete or cancel it before creating another`,
@@ -180,7 +184,7 @@ export class WorkflowRuntime {
 	}
 
 	async run(dispatcher: WorkflowDispatcher, options: WorkflowRunOptions = {}): Promise<WorkflowSnapshot> {
-		this.#syncBranch();
+		await this.#syncBranch();
 		const snapshot = this.#requireSnapshot();
 		if (this.#runAbort) throw new Error(`Workflow ${snapshot.definition.id} is already running`);
 		if (snapshot.status === "succeeded" || snapshot.status === "cancelled") {
@@ -289,7 +293,7 @@ export class WorkflowRuntime {
 	}
 
 	async retryNode(nodeId: string): Promise<WorkflowSnapshot> {
-		this.#syncBranch();
+		await this.#syncBranch();
 		const snapshot = this.#requireSnapshot();
 		if (this.#runAbort) throw new Error("Cannot retry a node while the workflow is running");
 		const selected = snapshot.nodes[nodeId];
@@ -323,7 +327,7 @@ export class WorkflowRuntime {
 	}
 
 	async cancel(): Promise<WorkflowSnapshot> {
-		if (!this.#runAbort) this.#syncBranch();
+		if (!this.#runAbort) await this.#syncBranch();
 		const snapshot = this.#requireSnapshot();
 		if (snapshot.status === "succeeded" || snapshot.status === "cancelled") {
 			return cloneWorkflowSnapshot(snapshot);
@@ -452,12 +456,13 @@ export class WorkflowRuntime {
 		return true;
 	}
 
-	#syncBranch(): void {
+	async #syncBranch(): Promise<void> {
 		const branchKey = this.#store.branchKey?.();
 		if (branchKey === undefined || branchKey === this.#branchKey) return;
 		this.#snapshot = this.#store.load();
 		this.#branchKey = branchKey;
 		this.#cancelRequested = false;
+		if (this.#reconcileInterruptedRun()) await this.#persist();
 	}
 
 	async #persist(onChange?: (snapshot: WorkflowSnapshot) => void | Promise<void>): Promise<void> {

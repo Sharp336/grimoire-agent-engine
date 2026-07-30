@@ -1,3 +1,4 @@
+import type { Usage } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 
 export const WORKFLOW_DEFINITION_VERSION = 1 as const;
@@ -66,6 +67,8 @@ export interface WorkflowSnapshot {
 export interface WorkflowToolDetails {
 	op: "create" | "get" | "run" | "resume" | "retry" | "cancel";
 	workflow: WorkflowSnapshot | null;
+	/** Aggregated usage from Task dispatches performed by this tool call. */
+	usage?: Usage;
 }
 
 export interface WorkflowDraft {

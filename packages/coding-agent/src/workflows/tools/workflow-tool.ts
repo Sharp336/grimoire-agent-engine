@@ -1,9 +1,11 @@
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import workflowPreflightContext from "../../prompts/system/workflow-preflight-context.md" with { type: "text" };
 import workflowDescription from "../../prompts/tools/workflow.md" with { type: "text" };
 import type { SettledTaskSpawn, TaskDispatchService } from "../../task/dispatch-service";
+import { addUsageTotals, createUsageTotals } from "../../task/usage";
 import type { ToolSession } from "../../tools";
 import { previewLine, replaceTabs, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
@@ -85,8 +87,11 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 	}
 
 	static async createIf(session: ToolSession): Promise<WorkflowTool | null> {
-		if (!session.sessionManager || !session.getSessionFile() || (session.taskDepth ?? 0) !== 0) return null;
-		const runtime = await WorkflowRuntime.create({ store: new SessionWorkflowStore(session.sessionManager) });
+		const sessionManager = session.sessionManager;
+		if (!sessionManager?.appendEntriesAtomically || !session.getSessionFile() || (session.taskDepth ?? 0) !== 0) {
+			return null;
+		}
+		const runtime = await WorkflowRuntime.create({ store: new SessionWorkflowStore(sessionManager) });
 		return new WorkflowTool(session, runtime);
 	}
 
@@ -101,10 +106,17 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 		onUpdate?: AgentToolUpdateCallback<WorkflowToolDetails>,
 	): Promise<AgentToolResult<WorkflowToolDetails>> {
 		let snapshot: WorkflowSnapshot | null;
+		const usage = createUsageTotals();
+		let hasUsage = false;
+		const recordUsage = (nodeUsage: Usage | undefined): void => {
+			if (!nodeUsage) return;
+			addUsageTotals(usage, nodeUsage);
+			hasUsage = true;
+		};
 		const runWorkflow = (): Promise<WorkflowSnapshot> => {
 			const taskDispatch = this.#requireTaskDispatch();
 			return this.#runtime.run(
-				(request, runSignal) => this.#dispatchNode(taskDispatch, toolCallId, request, runSignal),
+				(request, runSignal) => this.#dispatchNode(taskDispatch, toolCallId, request, runSignal, recordUsage),
 				{
 					signal,
 					preflight: requests =>
@@ -112,7 +124,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 					onChange: current =>
 						onUpdate?.({
 							content: [{ type: "text", text: summarize(current) }],
-							details: { op: params.op, workflow: current },
+							details: { op: params.op, workflow: current, ...(hasUsage ? { usage } : {}) },
 						}),
 				},
 			);
@@ -145,7 +157,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 					nodes: params.nodes,
 				});
 			} else if (params.op === "get") {
-				snapshot = this.#runtime.getSnapshot();
+				snapshot = await this.#runtime.getDurableSnapshot();
 			} else if (params.op === "cancel") {
 				snapshot = await this.cancelActiveWorkflow();
 			} else if (params.op === "retry") {
@@ -162,7 +174,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 
 		return {
 			content: [{ type: "text", text: summarize(snapshot) }],
-			details: { op: params.op, workflow: snapshot },
+			details: { op: params.op, workflow: snapshot, ...(hasUsage ? { usage } : {}) },
 		};
 	}
 
@@ -177,6 +189,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 		parentToolCallId: string,
 		request: WorkflowDispatchRequest,
 		signal: AbortSignal,
+		recordUsage: (usage: Usage | undefined) => void,
 	): Promise<WorkflowDispatchOutcome> {
 		const result = await taskDispatch.executeSettledSpawn(
 			`${parentToolCallId}:${request.nodeId}`,
@@ -186,7 +199,10 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 		const settled = result.details?.results[0];
 		const content = result.content.find(part => part.type === "text");
 		const error = content?.type === "text" ? content.text : "Task execution failed before producing a settled result";
-		return settled ? { result: settled } : { status: "failed", error };
+		if (!settled) return { status: "failed", error };
+		const usage = settled.usage ?? result.details?.usage;
+		recordUsage(usage);
+		return { result: usage === undefined || settled.usage ? settled : { ...settled, usage } };
 	}
 
 	#settledSpawn(request: WorkflowDispatchRequest): SettledTaskSpawn {

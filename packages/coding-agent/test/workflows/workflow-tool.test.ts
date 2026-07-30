@@ -62,6 +62,7 @@ function createPersistentSession(spawns: RecordedSpawn[], runSettled?: SettledTa
 			});
 			return id;
 		},
+		appendEntriesAtomically: async append => append(),
 		ensureOnDisk: async () => {},
 		flush: async () => {},
 		getBranch: () => entries,
@@ -180,6 +181,49 @@ describe("WorkflowTool", () => {
 			],
 		});
 		expect(corrected.details?.workflow?.definition.id).toBe("atomic-preflight");
+	});
+
+	it("preserves aggregate usage from workflow node Task dispatches", async () => {
+		mockDiscovery();
+		const usage = {
+			input: 10,
+			output: 2,
+			cacheRead: 3,
+			cacheWrite: 1,
+			totalTokens: 16,
+			cost: { input: 0.1, output: 0.2, cacheRead: 0.03, cacheWrite: 0.01, total: 0.34 },
+		};
+		const session = createPersistentSession([], async (_toolCallId, _params, item) => ({
+			content: [{ type: "text", text: "done" }],
+			details: {
+				projectAgentsDir: null,
+				results: [taskResult(item.name ?? "unnamed")],
+				totalDurationMs: 1,
+				usage,
+			},
+		}));
+		const tool = await WorkflowTool.createIf(session);
+		if (!tool) throw new Error("Expected workflow tool for a persistent top-level session");
+		await tool.execute("workflow-create", {
+			op: "create",
+			id: "usage",
+			objective: "Preserve nested usage",
+			nodes: [
+				{ id: "one", agent: "task", task: "One" },
+				{ id: "two", agent: "task", task: "Two" },
+			],
+		});
+
+		const completed = await tool.execute("workflow-run", { op: "run" });
+
+		expect(completed.details?.usage).toEqual({
+			input: 20,
+			output: 4,
+			cacheRead: 6,
+			cacheWrite: 2,
+			totalTokens: 32,
+			cost: { input: 0.2, output: 0.4, cacheRead: 0.06, cacheWrite: 0.02, total: 0.68 },
+		});
 	});
 
 	it("sanitizes objectives and Task errors in generic tool output", async () => {

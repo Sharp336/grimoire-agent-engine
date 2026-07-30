@@ -150,7 +150,7 @@ describe("WorkflowRuntime", () => {
 
 		store.activeBranch = "alternate";
 		store.snapshots = [];
-		expect(runtime.getSnapshot()).toBeNull();
+		expect(await runtime.getDurableSnapshot()).toBeNull();
 
 		const alternate = await runtime.createWorkflow({
 			id: "alternate",
@@ -158,6 +158,39 @@ describe("WorkflowRuntime", () => {
 			nodes: [{ id: "only", agent: "task", task: "Second" }],
 		});
 		expect(alternate.definition.id).toBe("alternate");
+	});
+
+	it("reconciles orphaned running nodes when the active branch is reloaded", async () => {
+		const store = new MemoryWorkflowStore();
+		const runtime = await createRuntime(store);
+		const created = await runtime.createWorkflow({
+			id: "main",
+			objective: "Remain on the first branch",
+			nodes: [{ id: "only", agent: "task", task: "First" }],
+		});
+		store.activeBranch = "alternate";
+		store.snapshots = [
+			{
+				...created,
+				status: "running",
+				nodes: { only: { status: "running", attempts: 1, startedAt: 500 } },
+			},
+		];
+
+		const reloaded = await runtime.getDurableSnapshot();
+
+		expect(reloaded?.nodes.only).toMatchObject({
+			status: "interrupted",
+			attempts: 1,
+			error: "Interrupted by process restart",
+		});
+		expect(reloaded?.status).toBe("interrupted");
+		expect(store.snapshots).toHaveLength(2);
+		expect(store.snapshots.at(-1)?.nodes.only.status).toBe("interrupted");
+
+		const restored = await createRuntime(store);
+		expect(restored.getSnapshot()).toEqual(reloaded);
+		expect(store.snapshots).toHaveLength(2);
 	});
 
 	it("serializes branch checks with concurrent workflow saves", async () => {

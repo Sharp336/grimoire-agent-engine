@@ -135,7 +135,7 @@ function emptyUsageStatistics(): UsageStatistics {
 	};
 }
 
-function taskUsageFrom(details: unknown): Usage | undefined {
+function nestedToolUsageFrom(details: unknown): Usage | undefined {
 	if (details === null || typeof details !== "object") return undefined;
 	const maybeUsage = (details as Record<string, unknown>).usage;
 	return maybeUsage !== null && typeof maybeUsage === "object" ? (maybeUsage as Usage) : undefined;
@@ -145,7 +145,9 @@ function entryUsage(entry: SessionEntry): Usage | undefined {
 	if (entry.type !== "message") return undefined;
 	const message = entry.message;
 	if (message.role === "assistant") return message.usage;
-	if (message.role === "toolResult" && message.toolName === "task") return taskUsageFrom(message.details);
+	if (message.role === "toolResult" && (message.toolName === "task" || message.toolName === "workflow")) {
+		return nestedToolUsageFrom(message.details);
+	}
 	return undefined;
 }
 
