@@ -219,6 +219,23 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("changes a viw selection and groups replacement undo", () => {
+		const editor = createVimEditor();
+		editor.setText("one two");
+
+		typeText(editor, "0viwc");
+
+		expect(editor.getText()).toBe(" two");
+		expect(editor.getVimMode()).toBe("insert");
+
+		typeText(editor, "changed");
+		editor.handleInput("\u001b");
+		expect(editor.getText()).toBe("changed two");
+
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("one two");
+	});
+
 	it("selects and highlights lines with Shift-V", () => {
 		const editor = createVimEditor();
 		editor.setText("one\ntwo\nthree");

@@ -3767,17 +3767,19 @@ export class Editor implements Component, Focusable {
 				if (this.#vimVisualSelection?.kind === "line") this.#enterVimNormalMode();
 				else this.#enterVimVisualLineMode();
 				return true;
-			case "d": {
+			case "d":
+			case "c": {
 				const selection = this.#vimVisualSelection;
 				if (!selection) return true;
+				const enterInsert = char === "c";
 				if (selection.kind === "line") {
 					this.#state.cursorLine = selection.startLine;
 					this.#setCursorCol(0);
 					this.#enterVimNormalMode();
-					this.#deleteVimLines(selection.endLine - selection.startLine, false);
+					this.#deleteVimLines(selection.endLine - selection.startLine, enterInsert);
 				} else {
 					this.#enterVimNormalMode();
-					this.#deleteVimRange(selection.start, selection.end, false);
+					this.#deleteVimRange(selection.start, selection.end, enterInsert);
 				}
 				return true;
 			}

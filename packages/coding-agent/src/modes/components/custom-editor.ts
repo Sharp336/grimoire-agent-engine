@@ -947,8 +947,14 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Escape leaves Vim insert or visual mode before it can act as the app interrupt.
-			// Autocomplete still closes on the same key in the base editor.
+			// Intercept configured interrupt shortcut.
+			// When the autocomplete popup is visible, ESC's first job is to dismiss
+			// the popup — let super.handleInput() route it to #cancelAutocomplete().
+			// The user can press ESC again afterward to fire the global interrupt
+			// handler. This matches the standard TUI/IDE pattern and prevents a
+			// single ESC from both closing an @ completion and aborting an active
+			// agent run (#1655). In Vim insert or visual mode, ESC first returns to
+			// normal mode before it can act as the app interrupt.
 			if (
 				this.#matchesAction(canonical, "app.interrupt") &&
 				this.onEscape &&

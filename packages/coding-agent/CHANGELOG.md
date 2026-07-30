@@ -264,11 +264,7 @@
 
 ### Added
 
-- Added a configurable `inputMode: vim` setting for modal prompt editing, including visible mode labels and safe interaction with app shortcuts and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
-
-### Fixed
-
-- Kept Ctrl-R available for redo in Vim normal mode instead of opening prompt history search.
+- Added a configurable `inputMode: vim` setting for modal prompt editing, including visible mode labels, Vim normal-mode Ctrl-R redo, and safe interaction with app shortcuts and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
 
 ## [17.1.8] - 2026-07-28
 
