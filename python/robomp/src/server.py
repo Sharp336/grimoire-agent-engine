@@ -252,7 +252,6 @@ def _build_state(settings: Settings) -> dict[str, Any]:
         natives_cache=natives_cache,
     )
     pool = WorkerPool(settings=settings, db=db, github=github, sandbox=sandbox, git_transport=git_transport)
-    autoclose = AutocloseScheduler(settings=settings, db=db, github=github)
     forgejo_github: GitHubBackend | None = None
     if settings.forgejo_repos:
         base_url = settings.gh_proxy_url or ""
@@ -260,6 +259,7 @@ def _build_state(settings: Settings) -> dict[str, Any]:
         if settings.gh_proxy_hmac_key:
             key = settings.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
         forgejo_github = GitHubProxyClient(base_url=base_url, hmac_key=key, platform="forgejo")
+    autoclose = AutocloseScheduler(settings=settings, db=db, github=github, forgejo_github=forgejo_github)
     index_sync = IssueIndexSync(settings=settings, db=db, github=github, forgejo_github=forgejo_github)
     return {
         "settings": settings,
