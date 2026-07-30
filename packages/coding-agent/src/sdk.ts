@@ -105,6 +105,7 @@ import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-e
 import {
 	deduplicateMCPToolsByName,
 	discoverAndLoadMCPTools,
+	loadExtraMCPConfigs,
 	type MCPLoadResult,
 	MCPManager,
 	MCPToolCache,
@@ -1849,6 +1850,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			filterBrowser: settings.get("browser.enabled") ?? false,
 			extraConfigPaths: options.mcpConfigPaths,
 		};
+		// `--mcp-config` names exact files, so an unreadable or malformed one has
+		// to fail startup instead of degrading to a session missing those
+		// servers. Checked up front because the deferred-UI branch below runs
+		// discovery in a detached promise, where a rejection can no longer abort
+		// startup — and `discoverAndLoadMCPTools` is reached only in the other
+		// branch. Costs one extra read of a small JSON file.
+		if (enableMCP && !mcpManager && options.mcpConfigPaths?.length) {
+			await loadExtraMCPConfigs(cwd, options.mcpConfigPaths);
+		}
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();

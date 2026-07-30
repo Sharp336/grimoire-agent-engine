@@ -475,7 +475,7 @@ In practice:
 omp --mcp-config .devenv/mcp/claude-code.json
 ```
 
-Unlike discovery, an unreadable or malformed `--mcp-config` file is a hard error. An entry with `"enabled": false` disables the same-named discovered server. Servers loaded this way still pass through `disabledServers` filtering, and `/mcp reload` re-reads the same files.
+Unlike discovery, a `--mcp-config` file that cannot be read, is not valid JSON, or has the wrong shape (the top level must be an object whose `mcpServers` maps server names to server objects) is a hard error that aborts startup — it never degrades to a session silently missing those servers. An entry with `"enabled": false` disables the same-named discovered server. Servers loaded this way still pass through `disabledServers` filtering, and `/mcp reload` re-reads the same files.
 
 ## Troubleshooting
 

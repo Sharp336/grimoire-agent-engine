@@ -4,14 +4,14 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 
-import * as os from "node:os";
 import * as path from "node:path";
 import { getMCPConfigPath, tryParseJson } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
-import { type MCPConfigFile, transformMCPConfig } from "../discovery/mcp-json";
+import { type MCPConfigFile, transformMCPConfig, validateMCPConfigFile } from "../discovery/mcp-json";
+import { expandTilde } from "../tools/path-utils";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
 import type { MCPServerConfig } from "./types";
 
@@ -96,8 +96,21 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 /** Provider id attached to servers loaded from explicit config paths (--mcp-config). */
 const EXTRA_CONFIG_PROVIDER_ID = "mcp-config-flag";
 
-function expandTilde(p: string): string {
-	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+/**
+ * An explicitly named MCP config file (`--mcp-config`) could not be used.
+ *
+ * Distinct from discovery failures so the layers that degrade discovery to a
+ * best-effort result — `discoverAndLoadMCPTools`, session startup — can let
+ * this one through instead of starting without the servers the caller named.
+ */
+export class ExplicitMCPConfigError extends Error {
+	constructor(
+		readonly configPath: string,
+		message: string,
+	) {
+		super(message);
+		this.name = "ExplicitMCPConfigError";
+	}
 }
 
 /**
@@ -105,7 +118,7 @@ function expandTilde(p: string): string {
  * Unlike provider discovery, an unreadable or malformed file is a hard error:
  * the caller asked for this exact file.
  */
-async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): Promise<MCPServer[]> {
+export async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): Promise<MCPServer[]> {
 	const servers: MCPServer[] = [];
 	for (const configPath of configPaths) {
 		const resolved = path.resolve(cwd, expandTilde(configPath));
@@ -114,11 +127,17 @@ async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): Promise<
 			content = await Bun.file(resolved).text();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			throw new Error(`Cannot read MCP config ${resolved}: ${message}`);
+			throw new ExplicitMCPConfigError(resolved, `Cannot read MCP config ${resolved}: ${message}`);
 		}
 		const config = tryParseJson<MCPConfigFile>(content);
 		if (!config) {
-			throw new Error(`Invalid JSON in MCP config ${resolved}`);
+			throw new ExplicitMCPConfigError(resolved, `Invalid JSON in MCP config ${resolved}`);
+		}
+		// Syntactically valid JSON of the wrong shape would otherwise be iterated
+		// into blank servers named by character/array index.
+		const invalid = validateMCPConfigFile(config);
+		if (invalid) {
+			throw new ExplicitMCPConfigError(resolved, `Invalid MCP config ${resolved}: ${invalid}`);
 		}
 		const source: SourceMeta = {
 			provider: EXTRA_CONFIG_PROVIDER_ID,

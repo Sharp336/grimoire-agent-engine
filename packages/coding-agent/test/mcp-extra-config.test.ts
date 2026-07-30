@@ -1,12 +1,20 @@
 /**
- * Contract: `loadAllMCPConfigs` with `extraConfigPaths` (the `--mcp-config`
- * flag) loads servers from explicitly specified `mcpServers` JSON files that
- * live outside every discovery path, with these semantics:
+ * Contract: `extraConfigPaths` (the `--mcp-config` flag) loads servers from
+ * explicitly specified `mcpServers` JSON files that live outside every
+ * discovery path, with these semantics:
  *
  * - servers from an extra config override same-named discovered servers;
  * - an `enabled: false` entry disables the same-named discovered server;
  * - an unreadable or malformed file is a hard error (the caller asked for
- *   this exact file), unlike best-effort provider discovery.
+ *   this exact file), unlike best-effort provider discovery — "malformed"
+ *   covers syntactically valid JSON of the wrong shape;
+ * - that hard error survives the CLI/SDK-facing wrapper, which otherwise
+ *   degrades discovery failures to a resolved, empty result;
+ * - `MCPManager` remembers the paths, so an option-less rediscovery
+ *   (`/mcp reload`) re-reads the same files.
+ *
+ * The shape check is shared with provider discovery, which warns instead of
+ * throwing; the last test covers that half.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -14,6 +22,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { discoverAndLoadMCPTools } from "@oh-my-pi/pi-coding-agent/mcp/loader";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
@@ -111,5 +121,67 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		await expect(loadAllMCPConfigs(projectDir, { extraConfigPaths: [brokenPath] })).rejects.toThrow(
 			/Invalid JSON in MCP config/,
 		);
+	});
+
+	// Valid JSON of the wrong shape used to survive: `Object.entries` iterates a
+	// string or array into blank stdio servers named by index.
+	test.each([
+		['"mcpServers" is a string', { mcpServers: "not-a-map" }, /"mcpServers" must be an object/],
+		['"mcpServers" is an array', { mcpServers: ["a", "b"] }, /"mcpServers" must be an object/],
+		["a server entry is not an object", { mcpServers: { broken: "oops" } }, /server "broken" must be an object/],
+		["the root is not an object", ["mcpServers"], /expected a JSON object at the top level/],
+	])("wrong-shape extra config is a hard error: %s", async (_label, contents, expected) => {
+		const wrongShapePath = path.join(projectDir, "wrong-shape.json");
+		await fs.writeFile(wrongShapePath, JSON.stringify(contents));
+
+		await expect(loadAllMCPConfigs(projectDir, { extraConfigPaths: [wrongShapePath] })).rejects.toThrow(expected);
+	});
+
+	// `discoverAndLoadMCPTools` degrades discovery failures to a resolved result
+	// with an `errors` entry, which startup only logs. An explicitly named file
+	// has to escape that, or `--mcp-config typo.json` starts a session anyway.
+	test("explicit-config failure propagates through discoverAndLoadMCPTools", async () => {
+		await expect(
+			discoverAndLoadMCPTools(projectDir, {
+				extraConfigPaths: [path.join(projectDir, "does-not-exist.json")],
+				cacheStorage: null,
+			}),
+		).rejects.toThrow(/Cannot read MCP config/);
+	});
+
+	// `/mcp reload` calls `discoverAndConnect()` with no options, so the paths
+	// have to survive on the manager. Servers name commands that do not exist:
+	// the connect fails fast and lands in `errors` keyed by server name, which
+	// is enough to observe which file the second pass read.
+	test("manager re-reads remembered extra config paths on option-less rediscovery", async () => {
+		const extraPath = path.join(projectDir, "extra.json");
+		await fs.writeFile(extraPath, JSON.stringify({ mcpServers: { alpha: { command: "omp-no-such-binary-alpha" } } }));
+
+		const manager = new MCPManager(projectDir, null);
+		try {
+			const first = await manager.discoverAndConnect({ extraConfigPaths: [extraPath] });
+			expect([...first.errors.keys()]).toEqual(["alpha"]);
+
+			await fs.writeFile(
+				extraPath,
+				JSON.stringify({ mcpServers: { beta: { command: "omp-no-such-binary-beta" } } }),
+			);
+			clearFsCache();
+
+			const second = await manager.discoverAndConnect();
+			expect([...second.errors.keys()]).toEqual(["beta"]);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	// Discovery keeps its best-effort contract: a wrong-shape `.mcp.json` is
+	// skipped with a warning rather than iterated into servers named "0".."8".
+	test("wrong-shape discovered config is skipped, not turned into blank servers", async () => {
+		await fs.writeFile(path.join(projectDir, ".mcp.json"), JSON.stringify({ mcpServers: "not-a-map" }));
+
+		const { configs } = await loadAllMCPConfigs(projectDir);
+
+		expect(Object.keys(configs)).toEqual([]);
 	});
 });

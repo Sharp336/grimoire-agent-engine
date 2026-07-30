@@ -7,6 +7,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { LoadedCustomTool } from "../extensibility/custom-tools/types";
 import { AgentStorage } from "../session/agent-storage";
 import type { AuthStorage } from "../session/auth-storage";
+import { ExplicitMCPConfigError } from "./config";
 import { type MCPLoadResult, MCPManager } from "./manager";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { MCPToolCache } from "./tool-cache";
@@ -81,6 +82,10 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 			extraConfigPaths: options?.extraConfigPaths,
 		});
 	} catch (error) {
+		// A config file the caller named explicitly (--mcp-config) is a hard
+		// error, not a discovery miss: degrading it to an entry in `errors` would
+		// start a session silently missing the servers that were asked for.
+		if (error instanceof ExplicitMCPConfigError) throw error;
 		// If discovery fails entirely, return empty result
 		const message = error instanceof Error ? error.message : String(error);
 		return {

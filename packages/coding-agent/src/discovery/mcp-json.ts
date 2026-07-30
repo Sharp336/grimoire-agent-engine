@@ -53,7 +53,37 @@ export interface MCPConfigFile {
 }
 
 /**
+ * Validate the runtime shape of a parsed MCP config file.
+ *
+ * `tryParseJson<MCPConfigFile>` only checks syntax — the generic is erased, so
+ * a wrong-shape `mcpServers` (a string, an array, or entries that are not
+ * objects) reaches `transformMCPConfig` and gets iterated into blank servers
+ * named after character or array indices. Callers validate first and then
+ * either warn (discovery) or hard-fail (explicitly named files).
+ *
+ * @returns A human-readable reason when the shape is invalid, `null` when valid.
+ */
+export function validateMCPConfigFile(value: unknown): string | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return "expected a JSON object at the top level";
+	}
+	const { mcpServers } = value as { mcpServers?: unknown };
+	if (mcpServers === undefined) return null;
+	if (typeof mcpServers !== "object" || mcpServers === null || Array.isArray(mcpServers)) {
+		return '"mcpServers" must be an object mapping server names to server configs';
+	}
+	for (const [name, entry] of Object.entries(mcpServers)) {
+		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+			return `server "${name}" must be an object`;
+		}
+	}
+	return null;
+}
+
+/**
  * Transform raw MCP config to canonical MCPServer format.
+ *
+ * Assumes `validateMCPConfigFile` already accepted `config`.
  */
 export function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServer[] {
 	const servers: MCPServer[] = [];
@@ -134,6 +164,12 @@ async function loadMCPJsonFile(
 	const config = tryParseJson<MCPConfigFile>(content);
 	if (!config) {
 		warnings.push(`Failed to parse JSON in ${path}`);
+		return { items, warnings };
+	}
+
+	const invalid = validateMCPConfigFile(config);
+	if (invalid) {
+		warnings.push(`Ignored ${path}: ${invalid}`);
 		return { items, warnings };
 	}
 
