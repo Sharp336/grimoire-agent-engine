@@ -740,8 +740,14 @@ export class CollabGuestLink {
 		// Replica file stays on disk: it is a valid session file outside the
 		// sessions dir, so it never shows up in /resume but remains readable.
 		if (this.#returnSessionFile) {
-			await this.#ctx.handleResumeSession(this.#returnSessionFile);
-			return;
+			const restored = await this.#ctx.handleResumeSession(this.#returnSessionFile);
+			if (restored) return;
+			// The pre-collab session restore was cancelled (e.g. by a
+			// session_before_switch hook). Fall through to a fresh session so the
+			// process is not left attached to the orphaned replica after the collab
+			// UI has already been torn down; the replica file stays on disk for a
+			// manual /resume.
+			this.#ctx.showStatus("Collab ended; session restore was cancelled, starting a new session");
 		}
 		await this.#ctx.session.newSession();
 		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
