@@ -43,13 +43,12 @@ describe("scaleIdleTimeoutByEffort", () => {
 	});
 });
 
-// Anthropic's mapOptionsForApi converts the caller's `reasoning` into
-// `effort` (e.g. "high") without preserving `reasoning` on AnthropicOptions.
-// The provider derives the effective effort via `options?.reasoning ?? options?.effort`
-// so the scaling actually applies on the primary code path.
+// mapOptionsForApi preserves `reasoning` on the base options, but direct
+// callers may set `effort` instead of `reasoning`. The provider derives
+// the effective effort via `options?.reasoning ?? options?.effort`.
 describe("Anthropic effective-effort fallback", () => {
-	it("scales via the effort field when reasoning is absent", () => {
-		// Simulates mapOptionsForApi output: reasoning=undefined, effort="high"
+	it("scales via the effort field for direct callers that skip reasoning", () => {
+		// Direct caller sets effort="high" without going through mapOptionsForApi
 		const reasoning: string | undefined = undefined;
 		const effort: string | undefined = "high";
 		const effectiveEffort = reasoning ?? effort;

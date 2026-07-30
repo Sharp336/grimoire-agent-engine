@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Streaming idle and first-event timeouts now scale with reasoning effort (high 2×, xhigh 3×, max 4×) so high-effort models that think silently for long periods are no longer killed mid-thought by the default 2-minute watchdog. Applies to all provider SSE paths, the Codex WebSocket transport, and derives effective effort from Anthropic's `effort` field (set by `mapOptionsForApi`) when `reasoning` is absent. Ollama's pre-response TTFB guard is intentionally left unscaled (TTFB does not grow with think time).
+- Streaming idle and first-event timeouts now scale with reasoning effort (high 2×, xhigh 3×, max 4×) so high-effort models that think silently for long periods are no longer killed mid-thought by the default 2-minute watchdog. Applies to all provider SSE paths and the Codex WebSocket transport. The original effort is preserved on the base options so every provider can scale; direct callers that set `effort` instead of `reasoning` are also covered. Ollama's pre-response TTFB guard is intentionally left unscaled (TTFB does not grow with think time).
 ### Added
 
 - Added first-class parentTurnId support for nested Codex requests, allowing stream options and metadata helpers to accept and safely propagate the initiating turn's ID.
