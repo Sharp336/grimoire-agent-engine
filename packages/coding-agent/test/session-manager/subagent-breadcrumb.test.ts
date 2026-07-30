@@ -89,7 +89,8 @@ describe("SessionManager subagent breadcrumb isolation", () => {
 
 		const resumed = await SessionManager.continueRecent(cwd);
 		try {
-			expect(resumed.getSessionFile()).toBe(path.resolve(mainFile));
+			// A resumed manager reports the canonical target its ownership lock pinned.
+			expect(resumed.getSessionFile()).toBe(fs.realpathSync(mainFile));
 			const dump = JSON.stringify(resumed.getEntries());
 			expect(dump).toContain("main work");
 			expect(dump).not.toContain("subagent work");
@@ -108,7 +109,7 @@ describe("SessionManager subagent breadcrumb isolation", () => {
 		const resumed = await SessionManager.continueRecent(cwd);
 		try {
 			// Redirected up to the interactive root rather than resuming the subagent.
-			expect(resumed.getSessionFile()).toBe(path.resolve(mainFile));
+			expect(resumed.getSessionFile()).toBe(fs.realpathSync(mainFile));
 			const dump = JSON.stringify(resumed.getEntries());
 			expect(dump).toContain("main work");
 			expect(dump).not.toContain("subagent work");

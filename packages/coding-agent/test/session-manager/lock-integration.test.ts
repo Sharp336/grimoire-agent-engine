@@ -124,6 +124,48 @@ describe("SessionManager persistent lock integration", () => {
 		}
 	});
 
+	it("retries lock cleanup when continueRecent fails after acquisition", async () => {
+		const { cwd, sessions } = fixture();
+		const source = SessionManager.create(cwd, sessions);
+		source.appendMessage({ role: "user", content: "continue cleanup", timestamp: Date.now() });
+		await source.ensureOnDisk();
+		const sessionFile = source.getSessionFile();
+		if (!sessionFile) throw new Error("missing session file");
+		await source.close();
+
+		class FailingContinueStorage extends FileSessionStorage {
+			override readText(filePath: string): Promise<string> {
+				if (fs.existsSync(lockPathForSession(filePath))) {
+					return Promise.reject(new Error("continue load after lock failed"));
+				}
+				return super.readText(filePath);
+			}
+		}
+		const lockPath = lockPathForSession(sessionFile);
+		const unlinkSync = fs.unlinkSync;
+		let releaseFailed = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (!releaseFailed && String(target) === lockPath) {
+				releaseFailed = true;
+				const error = new Error("transient unlink failure") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		try {
+			await expect(SessionManager.continueRecent(cwd, sessions, new FailingContinueStorage())).rejects.toThrow(
+				"continue load after lock failed",
+			);
+			expect(fs.existsSync(lockPath)).toBe(false);
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+
+		const reopened = await SessionManager.open(sessionFile);
+		await reopened.close();
+	});
+
 	it("preserves source state when branching cannot release its lock", async () => {
 		const { cwd, sessions } = fixture();
 		const manager = SessionManager.create(cwd, sessions);
@@ -322,7 +364,13 @@ describe("SessionManager persistent lock integration", () => {
 
 		expect(fs.existsSync(lockPathForSession(oldFile))).toBe(false);
 		expect(inspectSessionLock(newFile).status).toBe("live");
+		const alias = path.join(sessions, "moved-inode-alias.jsonl");
+		fs.linkSync(newFile, alias);
+		fs.unlinkSync(newFile);
+		await expect(SessionManager.open(alias)).rejects.toBeInstanceOf(SessionLockError);
 		await manager.close();
+		const aliasManager = await SessionManager.open(alias);
+		await aliasManager.close();
 	});
 
 	it("rolls back a move when source ownership cannot be released", async () => {
@@ -355,7 +403,13 @@ describe("SessionManager persistent lock integration", () => {
 		expect(fs.existsSync(newFile)).toBe(false);
 		expect(fs.existsSync(lockPathForSession(newFile))).toBe(false);
 		expect(inspectSessionLock(oldFile).status).toBe("live");
+		const alias = path.join(sessions, "rollback-inode-alias.jsonl");
+		fs.linkSync(oldFile, alias);
+		fs.unlinkSync(oldFile);
+		await expect(SessionManager.open(alias)).rejects.toBeInstanceOf(SessionLockError);
 		await manager.close();
+		const aliasManager = await SessionManager.open(alias);
+		await aliasManager.close();
 	});
 
 	it("keeps target ownership when move rollback leaves the journal there", async () => {

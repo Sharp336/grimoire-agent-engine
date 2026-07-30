@@ -123,6 +123,8 @@ export interface SessionLockHandle extends PathSessionLockHandle {
 	 * Commit the claim after publication, or roll it back if publication fails.
 	 */
 	prepareFileIdentity(filePath: string): SessionFileIdentityClaim;
+	/** Transfer an already-held file identity to another path lock without releasing the identity lock. */
+	transferFileIdentityTo(target: SessionLockHandle, filePath: string): void;
 }
 
 /** Stable filesystem identity used to fence path replacements and hard-link aliases. */
@@ -137,6 +139,11 @@ export interface SessionFileIdentityClaim {
 	commit(): void;
 	rollback(): void;
 }
+
+const sessionLockIdentityReceivers = new WeakMap<
+	SessionLockHandle,
+	(identity: SessionFileIdentity, handle: PathSessionLockHandle) => void
+>();
 
 interface SessionLockClaim {
 	protocolVersion: number;
@@ -242,6 +249,16 @@ const defaultProcessProbe: SessionLockProcessProbe = {
 		return currentMarker === processStartMarker;
 	},
 };
+
+/**
+ * Canonical identity of a session path: the same absolute target the lock
+ * pins after resolving symlinks. Callers that compare a caller-supplied path
+ * against a manager's live session file MUST normalize both sides through
+ * this, because the manager reports the canonicalized target.
+ */
+export function canonicalSessionPath(sessionFile: string): string {
+	return normalizeSessionFile(sessionFile);
+}
 
 function normalizeSessionFile(sessionFile: string): string {
 	const resolved = path.resolve(sessionFile);
@@ -942,7 +959,7 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 			pathHandle.lockPath,
 		);
 	}
-	return {
+	const sessionLock: SessionLockHandle = {
 		record: pathHandle.record,
 		lockPath: pathHandle.lockPath,
 		get fileIdentity() {
@@ -979,6 +996,24 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 				},
 			};
 		},
+		transferFileIdentityTo(target: SessionLockHandle, filePath: string): void {
+			const nextIdentity = fileIdentity(filePath);
+			if (!nextIdentity) throw new Error(`Cannot transfer missing session file identity: ${filePath}`);
+			if (
+				!ownedIdentity ||
+				ownedIdentity.dev !== nextIdentity.dev ||
+				ownedIdentity.ino !== nextIdentity.ino ||
+				!identityHandle
+			) {
+				throw new Error(`Cannot transfer unowned session file identity: ${filePath}`);
+			}
+			const receive = sessionLockIdentityReceivers.get(target);
+			if (!receive) throw new Error("Cannot transfer session file identity to an unknown lock");
+			const transferred = identityHandle;
+			identityHandle = undefined;
+			ownedIdentity = undefined;
+			receive(nextIdentity, transferred);
+		},
 		heartbeat(): void {
 			identityHandle?.heartbeat();
 			pathHandle.heartbeat();
@@ -1012,6 +1047,13 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 			);
 		},
 	};
+	sessionLockIdentityReceivers.set(sessionLock, (identity, handle) => {
+		const previous = identityHandle;
+		identityHandle = handle;
+		ownedIdentity = identity;
+		if (previous) supersededIdentityHandles.add(previous);
+	});
+	return sessionLock;
 }
 
 /** Return the canonical sidecar lock path for a session file. */

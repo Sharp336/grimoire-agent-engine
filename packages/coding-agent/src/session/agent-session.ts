@@ -319,6 +319,7 @@ import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
+import { canonicalSessionPath } from "./session-lock";
 import {
 	COMPACTION_CHECK_NONE,
 	createCodexCompactionContext as createMaintenanceCodexCompactionContext,
@@ -7432,7 +7433,7 @@ export class AgentSession {
 	async switchSession(sessionPath: string): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
-			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
+			? canonicalSessionPath(previousSessionFile) !== canonicalSessionPath(sessionPath)
 			: true;
 		// Emit session_before_switch event (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {

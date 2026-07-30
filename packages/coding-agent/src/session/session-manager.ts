@@ -62,6 +62,7 @@ import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo 
 import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
 import {
 	acquireSessionLock,
+	canonicalSessionPath,
 	inspectSessionLock,
 	lockPathForSession,
 	SESSION_LOCK_HEARTBEAT_MS,
@@ -1681,9 +1682,13 @@ export class SessionManager {
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
+		// The lock pins the canonical session target, so `#sessionFile`/`#sessionDir`
+		// are realpaths. Compare canonical forms here and below: a symlinked ancestor
+		// (macOS `/tmp` → `/private/tmp`) would otherwise look like a relocation and
+		// re-lock the session this manager already owns.
 		if (
 			resolvedCwd === path.resolve(this.#cwd) &&
-			(!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir))
+			(!resolvedTargetDir || canonicalSessionPath(resolvedTargetDir) === canonicalSessionPath(this.#sessionDir))
 		) {
 			return;
 		}
@@ -1717,8 +1722,8 @@ export class SessionManager {
 				const newSessionFile = path.join(nextSessionDir, path.basename(oldSessionFile));
 				const oldArtifactsDir = artifactsDirectoryFor(oldSessionFile)!;
 				const newArtifactsDir = artifactsDirectoryFor(newSessionFile)!;
-				const sessionPathChanged = path.resolve(oldSessionFile) !== path.resolve(newSessionFile);
-				const artifactPathChanged = path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
+				const sessionPathChanged = canonicalSessionPath(oldSessionFile) !== canonicalSessionPath(newSessionFile);
+				const artifactPathChanged = canonicalSessionPath(oldArtifactsDir) !== canonicalSessionPath(newArtifactsDir);
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 
 				let targetLock: SessionLockHandle | undefined;
@@ -1739,6 +1744,8 @@ export class SessionManager {
 
 				let sessionMoved = false;
 				let artifactsMoved = false;
+				const sourceLockHandle = this.#sessionLock?.handle;
+				let identityTransferred = false;
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
 						await fs.promises.rename(oldSessionFile, newSessionFile);
@@ -1756,6 +1763,13 @@ export class SessionManager {
 							if (!isEnoent(err)) throw err;
 						}
 					}
+					if (targetLock && sessionMoved) {
+						if (!sourceLockHandle) {
+							throw new Error("Cannot relocate a session file without its source ownership lock");
+						}
+						sourceLockHandle.transferFileIdentityTo(targetLock, newSessionFile);
+						identityTransferred = true;
+					}
 					if (targetLock) this.#releaseSessionLock();
 				} catch (err) {
 					const rollbackErrors: Error[] = [];
@@ -1765,10 +1779,9 @@ export class SessionManager {
 						} catch (rollbackErr) {
 							rollbackErrors.push(
 								new Error(
-								`Failed to move artifacts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-							),
-						);
-					}
+									`Failed to move artifacts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+								),
+							);
 						}
 					}
 					if (sessionMoved) {
@@ -1777,13 +1790,20 @@ export class SessionManager {
 						} catch (rollbackErr) {
 							rollbackErrors.push(
 								new Error(
-								`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-							),
-						);
-					}
+									`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+								),
+							);
 						}
 					}
 
+					if (identityTransferred && targetLock && sourceLockHandle && rollbackErrors.length === 0) {
+						try {
+							targetLock.transferFileIdentityTo(sourceLockHandle, oldSessionFile);
+							identityTransferred = false;
+						} catch (rollbackErr) {
+							rollbackErrors.push(toError(rollbackErr));
+						}
+					}
 					if (rollbackErrors.length === 0) {
 						targetLock?.release();
 						throw err;
@@ -1799,11 +1819,11 @@ export class SessionManager {
 						targetErrorHandlers &&
 						targetLockState
 					) {
-						const sourceLock = this.#sessionLock;
+						const sharedSourceLock = this.#sessionLock;
 						try {
 							this.#releaseSessionLock();
 						} catch (releaseError) {
-							if (sourceLock) this.#supersededSessionLocks.add(sourceLock);
+							if (sharedSourceLock) this.#supersededSessionLocks.add(sharedSourceLock);
 							rollbackErrors.push(toError(releaseError));
 						}
 						this.#sessionLock = {
@@ -1996,9 +2016,14 @@ export class SessionManager {
 	/** Flush pending writes. Call before switching sessions or on shutdown. */
 	async flush(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
-		await this.#scheduleDiskWork(async () => {
-			if (this.#writer?.isOpen()) await this.#writer.flush();
-		});
+		try {
+			await this.#scheduleDiskWork(async () => {
+				if (this.#writer?.isOpen()) await this.#writer.flush();
+			});
+		} catch (error) {
+			if ((this.#diskFailure as NodeJS.ErrnoException | undefined)?.code !== "ELOOP") throw error;
+			await this.recoverPersistenceFromCurrentState();
+		}
 		// Drain any fire-and-forget backing writes (e.g. `writeTextSync` queued
 		// on IndexedSessionStorage during `flushSync`) so callers relying on
 		// flush() see the write durably visible to readers.
@@ -3112,15 +3137,20 @@ export class SessionManager {
 				// explicit sessionDir is reused across the move, the stale breadcrumb file
 				// may be the newest entry there; prefer a genuine current-cwd session.
 				let newestInTargetDir = await findMostRecentSession(dir, storage);
-				const breadcrumbFile = path.resolve(breadcrumb.sessionFile);
+				// Breadcrumbs record the owner's canonical session file, while directory
+				// listings report the requested path, so both sides need canonicalizing
+				// before the "is the newest entry just the stale crumb?" comparison.
+				const breadcrumbFile = canonicalSessionPath(breadcrumb.sessionFile);
 				const breadcrumbCwdMissing = !fs.existsSync(breadcrumbCwd);
-				const newestIsBreadcrumb = newestInTargetDir ? path.resolve(newestInTargetDir) === breadcrumbFile : false;
+				const newestIsBreadcrumb = newestInTargetDir
+					? canonicalSessionPath(newestInTargetDir) === breadcrumbFile
+					: false;
 				let currentProjectAlreadyHasSession = false;
 
 				if (breadcrumbCwdMissing && newestIsBreadcrumb) {
 					const localSession = (await SessionManager.list(cwd, dir, storage)).find(
 						session =>
-							path.resolve(session.path) !== breadcrumbFile &&
+							canonicalSessionPath(session.path) !== breadcrumbFile &&
 							session.cwd &&
 							path.resolve(session.cwd) === resolvedCwd,
 					);
@@ -3161,9 +3191,18 @@ export class SessionManager {
 		if (chosenSession === undefined) chosenSession = await findMostRecentSession(dir, storage);
 
 		const manager = new SessionManager(cwd, dir, true, storage);
-		if (chosenSession) await manager.setSessionFile(chosenSession);
-		else manager.#resetToNewSession();
-		return manager;
+		try {
+			if (chosenSession) await manager.setSessionFile(chosenSession);
+			else manager.#resetToNewSession();
+			return manager;
+		} catch (error) {
+			try {
+				manager.#releaseAllSessionLocks();
+			} catch {
+				SessionManager.#retainFailedOpenManager(manager);
+			}
+			throw error;
+		}
 	}
 
 	/** Create an in-memory session (no file persistence). */
@@ -3205,7 +3244,7 @@ export async function cleanupEmptyMoveSession(
 ): Promise<void> {
 	const sessionFile = sessionManager.getSessionFile();
 	if (!sessionFile || !movedFromEmptySessionFile) return;
-	if (path.resolve(sessionFile) !== path.resolve(movedFromEmptySessionFile)) return;
+	if (canonicalSessionPath(sessionFile) !== canonicalSessionPath(movedFromEmptySessionFile)) return;
 	const entries = sessionManager.getEntries();
 	const hasRealMessages = entries.some(
 		e => e.type === "message" && (e.message.role === "user" || e.message.role === "assistant"),

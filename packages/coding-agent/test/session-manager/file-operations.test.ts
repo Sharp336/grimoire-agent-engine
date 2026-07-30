@@ -416,7 +416,7 @@ describe("SessionManager legacy session migration persistence", () => {
 
 		const resumed = await SessionManager.continueRecent(tempDir, tempDir);
 		try {
-			expect(resumed.getSessionFile()).toBe(previousSessionFile);
+			expect(resumed.getSessionFile()).toBe(fs.realpathSync(previousSessionFile));
 		} finally {
 			await resumed.close();
 			await session.close();
