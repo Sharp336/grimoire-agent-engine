@@ -33,8 +33,6 @@ import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import type { TaskTreeBudget } from "../task/tree-budget";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
-import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
-import type { DiscoverableTool, DiscoverableToolSearchIndex } from "../tool-discovery/tool-index";
 import type { EventBus } from "../utils/event-bus";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";

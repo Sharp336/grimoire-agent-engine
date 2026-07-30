@@ -14,6 +14,7 @@ import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import { TaskTreeBudget } from "@oh-my-pi/pi-coding-agent/task/tree-budget";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -46,18 +47,29 @@ interface RevivedSessionHandle {
 	observer: () => IrcWakeObserver | undefined;
 }
 
-function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle {
+function createRevivedSession(
+	activeToolNames: string[][],
+	listeners: Set<(event: AgentSessionEvent) => void> = new Set(),
+	abortCount: { value: number } = { value: 0 },
+): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
 	const session = {
+		isDisposed: false,
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},
-		subscribe: (_listener: (event: AgentSessionEvent) => void) => () => {},
+		subscribe: (listener: (event: AgentSessionEvent) => void) => {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
 		getLastAssistantMessage: () => undefined,
+		abort: async () => {
+			abortCount.value += 1;
+		},
 	} as unknown as AgentSession;
 	return { session, observer: () => observer };
 }
@@ -95,7 +107,7 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean, 
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, taskTreeBudget?: TaskTreeBudget, eventBus?: EventBus) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -107,6 +119,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
+		taskTreeBudget: taskTreeBudget ?? new TaskTreeBudget({}),
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
 		settings: Settings.isolated(),
@@ -245,7 +258,7 @@ describe("persisted subagent revival", () => {
 			sessionFile,
 			status: "parked",
 		});
-		const reviver = await createFactory(cwd, eventBus)(ref);
+		const reviver = await createFactory(cwd, undefined, eventBus)(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
@@ -276,5 +289,43 @@ describe("persisted subagent revival", () => {
 		rpcRegistry.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("restores shared tree-budget accounting for cold-revived follow-up turns", async () => {
+		const cwd = makeTempDir("@pi-budgeted-revive-");
+		const sessionFile = await createPersistedSession(cwd);
+		const taskTreeBudget = new TaskTreeBudget({ maxRequests: 1 });
+		const listeners = new Set<(event: AgentSessionEvent) => void>();
+		const abortCount = { value: 0 };
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([], listeners, abortCount).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, taskTreeBudget)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+		expect(capturedOptions?.taskTreeBudget).toBe(taskTreeBudget);
+
+		const emitAssistantTurn = () => {
+			const event = {
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "follow-up" }],
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
+				},
+			} as unknown as AgentSessionEvent;
+			for (const listener of listeners) listener(event);
+		};
+		emitAssistantTurn();
+		expect(taskTreeBudget.snapshot()).toMatchObject({ requests: 1, exhausted: false });
+		expect(abortCount.value).toBe(0);
+
+		emitAssistantTurn();
+		expect(taskTreeBudget.snapshot()).toMatchObject({ requests: 2, exhausted: true });
+		expect(abortCount.value).toBe(1);
 	});
 });

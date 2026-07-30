@@ -342,24 +342,7 @@
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
 ### Added
 
-- Added optional session-wide spawn, request, and counted-token budgets for task trees, with atomic batch rejection, graceful descendant aborts, and budget usage telemetry.
-### Breaking Changes
-
-- Reworked the task tool wire schema: the top-level `agent` field moved into each task item as `agent` (so one call can mix agent types), `assignment` was renamed `task`, `id` was renamed `name`, and the `role` and `description` fields were removed. The one-line UI label previously supplied via `description` is now generated automatically from the `task` text by the tiny/title model.
-
-### Added
-
-- Added `auto` as a valid `thinking-level` in agent frontmatter; the bundled `task` subagent now defaults to it. An explicit `:level` suffix on a resolved model pattern takes precedence over an agent-definition default.
-- Added optional session-wide spawn, request, and counted-token budgets for task trees, with atomic batch rejection, graceful descendant aborts, and budget usage telemetry.
-
-### Changed
-
-- Rewrote the task tool prompt for the new wire schema and to push callers toward the most specific agent type: read-only research is directed to `agent: "scout"`, and omitting `agent` is framed as an explicit decision that no listed specialist fits.
-- Task rendering now keeps the `⟨agent⟩` type badge on live progress and finished result rows (previously it vanished after the streaming call preview), and the Task header shows only the spawn count instead of repeating the per-item agent types.
-### Fixed
-
-- Fixed compiled Linux binary extension loading when bundled web-search header generation cannot read `header-generator` data files from the build-time path. ([#5178](https://github.com/can1357/oh-my-pi/issues/5178))
-- Fixed task-tree budgets to honor runtime limit changes and abort keep-alive follow-up turns after aggregate exhaustion.
+- Added optional session-wide spawn, request, and counted-token budgets for task trees, with atomic batch rejection, cancellation-safe spawn accounting, budget-aware revived follow-ups, graceful descendant aborts, and budget usage telemetry.
 
 ## [17.2.1] - 2026-07-30
 
@@ -1543,7 +1526,6 @@
 - Fixed agents getting stuck waiting for messages from peers that have already stopped running.
 - Fixed compiled Linux binary extension loading when bundled web-search header generation cannot read `header-generator` data files from the build-time path. ([#5178](https://github.com/can1357/oh-my-pi/issues/5178))
 - Fixed plugin custom tool loading to skip and report invalid feature entries instead of crashing startup when a plugin dependency tree leaves one feature unresolved. ([#5189](https://github.com/can1357/oh-my-pi/issues/5189))
-### Added
 
 ## [16.4.4] - 2026-07-11
 
@@ -1557,7 +1539,6 @@
 - Fixed native Windows binary compatibility on older Windows 10 CPUs by building the `omp-windows-x64.exe` release asset with a baseline x64 runtime instead of AVX2. (#5172)
 - Fixed `GenerateImage` rejecting OpenAI Codex-compatible proxy bearer keys when the token does not expose a `chatgpt-account-id`. (#5174)
 - Fixed context promotion documentation to accurately reflect the `contextPromotionTarget` runtime behavior and `contextPromotion.enabled` default. (#5163)
-### Added
 
 ## [16.4.3] - 2026-07-11
 

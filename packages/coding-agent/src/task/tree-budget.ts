@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 
 interface TaskTreeAbortTarget {
 	readonly isDisposed: boolean;
@@ -24,6 +25,11 @@ export interface TaskTreeBudgetSnapshot {
 	reason?: string;
 }
 
+export interface TaskTreeBudgetPersistenceOptions {
+	initialSnapshot?: TaskTreeBudgetSnapshot;
+	onSnapshot?: (snapshot: TaskTreeBudgetSnapshot) => void;
+}
+
 /** Session-wide safety budget shared by task and eval-agent descendants. */
 export class TaskTreeBudget {
 	#maxSpawns: number;
@@ -35,21 +41,38 @@ export class TaskTreeBudget {
 	#requests = 0;
 	#tokens = 0;
 	#reason?: string;
+	readonly #onSnapshot: ((snapshot: TaskTreeBudgetSnapshot) => void) | undefined;
 
-	constructor(limits: TaskTreeBudgetLimits = {}) {
+	constructor(limits: TaskTreeBudgetLimits = {}, persistence: TaskTreeBudgetPersistenceOptions = {}) {
 		this.#maxSpawns = normalizeLimit(limits.maxSpawns);
 		this.#maxRequests = normalizeLimit(limits.maxRequests);
 		this.#maxTokens = normalizeLimit(limits.maxTokens);
+		this.#onSnapshot = persistence.onSnapshot;
+		const initial = persistence.initialSnapshot;
+		if (initial) {
+			this.#spawns = normalizeLimit(initial.spawns);
+			this.#requests = normalizeLimit(initial.requests);
+			this.#tokens = normalizeLimit(initial.tokens);
+			this.#reason = this.#usageExhaustReason();
+			if (this.#reason) this.#controller.abort(new Error(this.#reason));
+		}
 	}
 
 	/** Apply configured task settings to the shared budget before a new descendant starts. */
 	updateLimits(limits: TaskTreeBudgetLimits): void {
+		const previous = [this.#maxSpawns, this.#maxRequests, this.#maxTokens] as const;
 		if (limits.maxSpawns !== undefined) this.#maxSpawns = normalizeLimit(limits.maxSpawns);
 		if (limits.maxRequests !== undefined) this.#maxRequests = normalizeLimit(limits.maxRequests);
 		if (limits.maxTokens !== undefined) this.#maxTokens = normalizeLimit(limits.maxTokens);
-		if (this.#reason) return;
+		const changed =
+			previous[0] !== this.#maxSpawns || previous[1] !== this.#maxRequests || previous[2] !== this.#maxTokens;
+		if (this.#reason) {
+			if (changed) this.#persist();
+			return;
+		}
 		const reason = this.#usageExhaustReason();
 		if (reason) this.#exhaust(reason);
+		else if (changed) this.#persist();
 	}
 
 	get signal(): AbortSignal {
@@ -80,11 +103,15 @@ export class TaskTreeBudget {
 			return `Task tree spawn budget exceeded (${next} requested; budget ${this.#maxSpawns})`;
 		}
 		this.#spawns = next;
+		this.#persist();
 		return undefined;
 	}
 
 	releaseSpawns(count: number): void {
-		this.#spawns = Math.max(0, this.#spawns - Math.max(0, Math.trunc(count)));
+		const next = Math.max(0, this.#spawns - Math.max(0, Math.trunc(count)));
+		if (next === this.#spawns) return;
+		this.#spawns = next;
+		this.#persist();
 	}
 
 	recordRequest(tokens: number): string | undefined {
@@ -92,7 +119,9 @@ export class TaskTreeBudget {
 		this.#requests += 1;
 		this.#tokens += Math.max(0, Math.trunc(tokens));
 		const reason = this.#usageExhaustReason();
-		return reason ? this.#exhaust(reason) : undefined;
+		if (reason) return this.#exhaust(reason);
+		this.#persist();
+		return undefined;
 	}
 
 	snapshot(): TaskTreeBudgetSnapshot {
@@ -127,6 +156,7 @@ export class TaskTreeBudget {
 			if (target && !target.isDisposed) this.#abortTarget(target);
 		}
 		this.#abortTargets.clear();
+		this.#persist();
 		return reason;
 	}
 
@@ -137,6 +167,24 @@ export class TaskTreeBudget {
 			});
 		});
 	}
+
+	#persist(): void {
+		this.#onSnapshot?.(this.snapshot());
+	}
+}
+
+/** Refresh the shared ledger from live root settings; descendants hold stale isolated snapshots. */
+export function refreshTaskTreeBudgetLimits(
+	budget: TaskTreeBudget | undefined,
+	settings: Settings,
+	taskDepth: number | undefined,
+): void {
+	if (!budget || (taskDepth ?? 0) > 0) return;
+	budget.updateLimits({
+		...(settings.isConfigured("task.treeMaxSpawns") && { maxSpawns: settings.get("task.treeMaxSpawns") }),
+		...(settings.isConfigured("task.treeMaxRequests") && { maxRequests: settings.get("task.treeMaxRequests") }),
+		...(settings.isConfigured("task.treeMaxTokens") && { maxTokens: settings.get("task.treeMaxTokens") }),
+	});
 }
 
 function normalizeLimit(value: number | undefined): number {

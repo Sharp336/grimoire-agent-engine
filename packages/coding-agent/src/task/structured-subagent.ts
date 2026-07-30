@@ -113,6 +113,8 @@ export interface StructuredSubagentRequest {
 	/** `0` disables executor wall-clock timeout. Undefined inherits settings. */
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
+	/** Called at the exact child-dispatch boundary, after all pre-dispatch setup succeeds. */
+	onStart?: () => void;
 	onProgress?: (progress: AgentProgress) => void;
 }
 
@@ -420,8 +422,8 @@ function buildExecutorOptions(
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
-		taskTreeBudget: request.session.taskTreeBudget,
 		restrictToolNames,
+		onStart: request.onStart,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,

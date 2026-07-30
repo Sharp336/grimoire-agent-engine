@@ -22,7 +22,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition, AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
@@ -41,6 +41,7 @@ function createSession(
 		planMode?: boolean;
 		taskTreeBudget?: executorModule.TaskTreeBudget;
 		getSpawns?: () => string;
+		taskDepth?: number;
 	} = {},
 ): ToolSession {
 	return {
@@ -53,6 +54,7 @@ function createSession(
 		getPlanModeState: options.planMode ? () => ({ enabled: true }) : undefined,
 		asyncJobManager: options.manager,
 		taskTreeBudget: options.taskTreeBudget,
+		taskDepth: options.taskDepth,
 	} as unknown as ToolSession;
 }
 
@@ -320,7 +322,10 @@ describe("task.batch validation", () => {
 		mockDiscovery();
 		let spawnPolicy = "reviewer";
 		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 1 });
-		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Allowed"));
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
+			return makeResult("Allowed");
+		});
 		const tool = await TaskTool.create(
 			createSession({
 				settings: { "task.batch": false, "async.enabled": false },
@@ -380,7 +385,10 @@ describe("task.batch validation", () => {
 			taskTreeBudget,
 		});
 		session.settings.set("task.treeMaxSpawns", 1);
-		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("runtime-limit"));
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
+			return makeResult("runtime-limit");
+		});
 		const tool = await TaskTool.create(session);
 
 		const first = await tool.execute("tool-call-runtime-limit-1", { agent: "task", task: "Allowed." });
@@ -392,20 +400,85 @@ describe("task.batch validation", () => {
 		expect(taskTreeBudget.snapshot()).toMatchObject({ spawns: 1, maxSpawns: 1 });
 	});
 
+	it("does not let descendant settings restore stale tree limits", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 1 });
+		taskTreeBudget.updateLimits({ maxSpawns: 2 });
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
+			return makeResult(options.id ?? "descendant-limit");
+		});
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": false, "async.enabled": false, "task.treeMaxSpawns": 1 },
+				taskTreeBudget,
+				taskDepth: 1,
+			}),
+		);
+
+		await tool.execute("tool-call-descendant-limit-1", { agent: "task", task: "First." });
+		await tool.execute("tool-call-descendant-limit-2", { agent: "task", task: "Second." });
+
+		expect(runSpy).toHaveBeenCalledTimes(2);
+		expect(taskTreeBudget.snapshot()).toMatchObject({ spawns: 2, maxSpawns: 2 });
+	});
+
+	it("includes current tree-budget snapshots in synchronous results and updates", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 2, maxRequests: 4 });
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
+			options.onProgress?.({
+				index: 0,
+				id: options.id ?? "sync-budget",
+				agent: "task",
+				agentSource: "bundled",
+				status: "running",
+				task: "task prompt",
+				assignment: "Report budget.",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				requests: 1,
+				tokens: 15,
+				cost: 0,
+				durationMs: 1,
+			} satisfies AgentProgress);
+			return makeResult(options.id ?? "sync-budget");
+		});
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": false, "async.enabled": false },
+				taskTreeBudget,
+			}),
+		);
+		const updates: Array<{ spawns?: number; maxSpawns?: number }> = [];
+
+		const result = await tool.execute(
+			"tool-call-sync-budget",
+			{ agent: "task", task: "Report budget." },
+			undefined,
+			update => {
+				if (update.details?.treeBudget) updates.push(update.details.treeBudget);
+			},
+		);
+
+		expect(result.details?.treeBudget).toMatchObject({ spawns: 1, maxSpawns: 2, maxRequests: 4 });
+		expect(updates.at(-1)).toMatchObject({ spawns: 1, maxSpawns: 2 });
+	});
+
 	it("releases a queued sync spawn reservation when cancellation prevents execution", async () => {
 		mockDiscovery();
 		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 2 });
-		let allowFirstToFinish!: () => void;
 		const firstRunning = Promise.withResolvers<void>();
-		const firstFinished = new Promise<void>(resolve => {
-			allowFirstToFinish = resolve;
-		});
+		const firstFinished = Promise.withResolvers<void>();
 		let calls = 0;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
 			calls += 1;
 			if (calls === 1) {
 				firstRunning.resolve();
-				await firstFinished;
+				await firstFinished.promise;
 			}
 			return makeResult(options.id ?? `spawn-${calls}`);
 		});
@@ -424,7 +497,7 @@ describe("task.batch validation", () => {
 		await expect(cancelled).rejects.toThrow();
 		expect(taskTreeBudget.snapshot().spawns).toBe(1);
 
-		allowFirstToFinish();
+		firstFinished.resolve();
 		await first;
 		const later = await tool.execute("tool-call-later", { agent: "task", task: "Uses released capacity." });
 		expect(getFirstText(later)).toContain("All done.");
@@ -447,6 +520,90 @@ describe("task.batch validation", () => {
 		const result = await tool.execute("tool-call-allocation", { agent: "task", task: "Cannot allocate." });
 		expect(getFirstText(result)).toContain("Task execution failed");
 		expect(taskTreeBudget.snapshot().spawns).toBe(0);
+	});
+
+	it("keeps a consumed reservation when execution rejects after child dispatch starts", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 1 });
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
+			throw new Error("executor failed after dispatch");
+		});
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": false, "async.enabled": false },
+				taskTreeBudget,
+			}),
+		);
+
+		const result = await tool.execute("tool-call-post-dispatch-failure", {
+			agent: "task",
+			task: "Start, then fail.",
+		});
+
+		expect(getFirstText(result)).toContain("executor failed after dispatch");
+		expect(taskTreeBudget.snapshot().spawns).toBe(1);
+	});
+
+	it("refunds a reservation when cancellation wins after acquisition but before dispatch", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 1 });
+		const controller = new AbortController();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			controller.abort();
+			return makeResult(options.id ?? "pre-aborted", {
+				exitCode: 1,
+				output: "",
+				stderr: "Cancelled before start",
+				error: "Cancelled before start",
+				aborted: true,
+				abortReason: "Cancelled before start",
+			});
+		});
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": false, "async.enabled": false },
+				taskTreeBudget,
+			}),
+		);
+
+		const result = await tool.execute(
+			"tool-call-pre-dispatch-cancel",
+			{ agent: "task", task: "Cancel at dispatch." },
+			controller.signal,
+		);
+
+		expect(result.details?.results[0]).toMatchObject({ aborted: true, abortReason: "Cancelled before start" });
+		expect(taskTreeBudget.snapshot().spawns).toBe(0);
+	});
+
+	it("refunds every unstarted reservation in a pre-aborted synchronous batch", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 2 });
+		const runSpy = vi.spyOn(executorModule, "runSubprocess");
+		const controller = new AbortController();
+		controller.abort();
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false },
+				taskTreeBudget,
+			}),
+		);
+
+		await tool.execute(
+			"tool-call-pre-aborted-batch",
+			{
+				context: "Shared.",
+				tasks: [
+					{ name: "First", task: "Do A." },
+					{ name: "Second", task: "Do B." },
+				],
+			},
+			controller.signal,
+		);
+
+		expect(runSpy).not.toHaveBeenCalled();
+		expect(taskTreeBudget.snapshot()).toMatchObject({ spawns: 0, maxSpawns: 2 });
 	});
 });
 
@@ -638,6 +795,33 @@ describe("task.batch spawning", () => {
 		expect(reviewerSpawn?.outputSchemaOverridesAgent).toBe(true);
 	});
 
+	it("refunds the full async fan-out reservation when child-id allocation fails", async () => {
+		mockDiscovery();
+		const manager = createManager();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 2 });
+		const outputManager = { allocate: vi.fn().mockRejectedValue(new Error("allocation failed")) };
+		const tool = await TaskTool.create({
+			...createSession({
+				manager,
+				settings: { "async.enabled": true, "task.batch": true },
+				taskTreeBudget,
+			}),
+			agentOutputManager: outputManager,
+		} as unknown as ToolSession);
+
+		const result = await tool.execute("tc-allocation-failure", {
+			context: "Shared.",
+			tasks: [
+				{ name: "First", task: "Do A." },
+				{ name: "Second", task: "Do B." },
+			],
+		});
+
+		expect(getFirstText(result)).toContain("Task execution failed: allocation failed");
+		expect(result.details?.treeBudget).toMatchObject({ spawns: 0, maxSpawns: 2 });
+		expect(taskTreeBudget.snapshot().spawns).toBe(0);
+	});
+
 	it("releases spawn capacity when no background job can be registered", async () => {
 		mockDiscovery();
 		const manager = createManager();
@@ -782,6 +966,7 @@ describe("task.batch spawning", () => {
 		const started: string[] = [];
 		const gates = new Map<string, { promise: Promise<void>; resolve: () => void }>();
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
 			const id = options.id ?? "?";
 			started.push(id);
 			const { promise, resolve } = Promise.withResolvers<void>();
@@ -789,12 +974,14 @@ describe("task.batch spawning", () => {
 			await promise;
 			return makeResult(id);
 		});
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 2 });
 
 		const manager = createManager();
 		const tool = await TaskTool.create(
 			createSession({
 				manager,
 				settings: { "async.enabled": true, "task.batch": true, "task.maxConcurrency": 1 },
+				taskTreeBudget,
 			}),
 		);
 
@@ -833,6 +1020,7 @@ describe("task.batch spawning", () => {
 
 		expect(manager.cancel(secondJob.id)).toBe(true);
 		await secondJob.promise;
+		expect(taskTreeBudget.snapshot().spawns).toBe(1);
 
 		gates.get("First")!.resolve();
 		await firstJob.promise;
@@ -845,5 +1033,6 @@ describe("task.batch spawning", () => {
 		expect(last?.async?.state).toBe("failed");
 		expect(last?.progress?.find(p => p.id === "Second")?.status).toBe("aborted");
 		expect(last?.progress?.find(p => p.id === "First")?.status).toBe("completed");
+		expect(taskTreeBudget.snapshot().spawns).toBe(1);
 	});
 });

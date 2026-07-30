@@ -641,4 +641,75 @@ describe("createAgentSession session storage isolation", () => {
 			});
 		});
 	});
+
+	it("restores session-wide task-tree exhaustion after a branch rewind and reopen", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-tree-budget-resume-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+		const settings = Settings.isolated({
+			"task.treeMaxSpawns": 3,
+			"task.treeMaxRequests": 1,
+			"task.treeMaxTokens": 100,
+		});
+		const initialManager = SessionManager.create(cwd, path.join(agentDir, "sessions"));
+		const commonOptions = {
+			cwd,
+			agentDir,
+			modelRegistry: sharedModelRegistry,
+			settings,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		};
+		const { session: initialSession, taskTreeBudget: initialBudget } = await createAgentSession({
+			...commonOptions,
+			sessionManager: initialManager,
+		});
+		const branchPoint = initialManager.appendMessage({
+			role: "user",
+			content: "Persist this session's task-tree budget.",
+			timestamp: Date.now(),
+		});
+		if (!initialBudget) throw new Error("Expected task-tree budget");
+		initialBudget.reserveSpawns(2);
+		initialBudget.recordRequest(25);
+		initialBudget.recordRequest(25);
+		initialManager.branch(branchPoint);
+		initialManager.appendMessage({
+			role: "user",
+			content: "Continue from before the task-tree budget was consumed.",
+			timestamp: Date.now(),
+		});
+		await initialManager.ensureOnDisk();
+		await initialManager.flush();
+		const sessionFile = initialManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await initialSession.dispose();
+
+		const resumedManager = await SessionManager.open(sessionFile, path.dirname(sessionFile));
+		const { session: resumedSession, taskTreeBudget: resumedBudget } = await createAgentSession({
+			...commonOptions,
+			sessionManager: resumedManager,
+		});
+		try {
+			expect(resumedBudget?.snapshot()).toMatchObject({
+				spawns: 2,
+				requests: 2,
+				tokens: 50,
+				maxSpawns: 3,
+				maxRequests: 1,
+				maxTokens: 100,
+				exhausted: true,
+			});
+			expect(resumedBudget?.reserveSpawns(1)).toContain("Task tree request budget exceeded");
+		} finally {
+			await resumedSession.dispose();
+		}
+	});
 });

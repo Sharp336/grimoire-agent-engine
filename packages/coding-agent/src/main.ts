@@ -1674,11 +1674,12 @@ export async function runRootCommand(
 				)
 			: undefined;
 
-		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await createSession({
-			...sessionOptions,
-			eventBus,
-			preloadedExtensions: extensionsResult,
-		});
+		const { session, taskTreeBudget, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } =
+			await createSession({
+				...sessionOptions,
+				eventBus,
+				preloadedExtensions: extensionsResult,
+			});
 
 		// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
 		// scan, collab mirror, resumed process) has a sessionFile but no in-memory
@@ -1690,6 +1691,7 @@ export async function runRootCommand(
 		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
 			createPersistedSubagentReviverFactory({
 				session,
+				taskTreeBudget,
 				authStorage,
 				modelRegistry,
 				settings: settingsInstance,

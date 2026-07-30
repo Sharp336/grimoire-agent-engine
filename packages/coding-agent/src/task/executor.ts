@@ -80,7 +80,7 @@ import {
 } from "./types";
 import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 
-export { TaskTreeBudget } from "./tree-budget";
+export * from "./tree-budget";
 export type { YieldItem } from "./types";
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
@@ -410,6 +410,8 @@ export interface ExecutorOptions {
 	 */
 	restrictToolNames?: boolean;
 	signal?: AbortSignal;
+	/** Called after the already-aborted guard, immediately before child setup begins. */
+	onStart?: () => void;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
 	 * Epochs (ms, `Date.now()`) bracketing the concurrency-semaphore wait:
@@ -786,28 +788,44 @@ function getUsageTokens(usage: unknown): number {
 	return firstNumberField(record, ["totalTokens", "total_tokens"]) ?? 0;
 }
 
-function attachFollowUpTreeBudgetAccounting(session: AgentSession, budget: TaskTreeBudget): void {
-	budget.registerAbortTarget(session);
+export function attachFollowUpTreeBudgetAccounting(session: AgentSession, budget: TaskTreeBudget): void {
+	const sessionRef = new WeakRef(session);
+	let terminalYieldPending = false;
+	const abortSession = () => {
+		const activeSession = sessionRef.deref();
+		if (!activeSession || activeSession.isDisposed) return;
+		void activeSession.abort().catch(error => {
+			logger.debug("Task-tree follow-up abort failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	};
+	const abortForBudget = () => {
+		if (!terminalYieldPending) abortSession();
+	};
+	if (budget.signal.aborted) abortForBudget();
+	else budget.signal.addEventListener("abort", abortForBudget, { once: true });
 	session.subscribe(event => {
 		if (event.type === "agent_start" && budget.signal.aborted) {
-			void session.abort().catch(error => {
-				logger.debug("Task-tree follow-up abort failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
+			abortForBudget();
+			return;
+		}
+		if (event.type === "tool_execution_end" && event.toolName === "yield") {
+			const preserveTerminalYield = terminalYieldPending && !event.isError;
+			terminalYieldPending = false;
+			if (budget.signal.aborted && !preserveTerminalYield) abortSession();
 			return;
 		}
 		if (event.type !== "message_end" || !isRecord(event.message) || event.message.role !== "assistant") return;
+		const content = Array.isArray(event.message.content) ? event.message.content : [];
+		terminalYieldPending = content.some(block => {
+			if (!isRecord(block) || block.type !== "toolCall" || block.name !== "yield") return false;
+			const args = isRecord(block.arguments) ? block.arguments : undefined;
+			return !Array.isArray(args?.type);
+		});
 		const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
 		const messageUsage = "usage" in event.message ? event.message.usage : eventUsage;
-		const budgetError = budget.recordRequest(getUsageTokens(messageUsage));
-		if (budgetError) {
-			void session.abort().catch(error => {
-				logger.debug("Task-tree follow-up budget abort failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
-		}
+		budget.recordRequest(getUsageTokens(messageUsage));
 	});
 }
 
@@ -2245,9 +2263,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	if (runtimeLimitExceeded && exitCode === 0) {
 		exitCode = 1;
 	}
+	const cleanupAborted = done.aborted && done.abortReason?.startsWith("cleanup exceeded ") === true;
 	const wasAborted =
 		runtimeLimitExceeded ||
 		abortedViaYield ||
+		cleanupAborted ||
 		(!monitor.terminalYieldAccepted() && (done.aborted || signal?.aborted || false));
 	if (wasAborted && exitCode === 0) {
 		exitCode = 1;
@@ -2330,6 +2350,7 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
+	taskTreeBudget?: TaskTreeBudget;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2377,6 +2398,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
+			taskTreeBudget: options.taskTreeBudget,
 		});
 
 		if (options.eventBus) {
@@ -2475,10 +2497,11 @@ export async function finalizeSubagentLifecycle(args: {
 	const disposeSession = async (): Promise<void> => {
 		const disposal = args.session.dispose();
 		const remainingMs = Math.max(0, cleanupDeadlineAt - Date.now());
+		const cleanupSignal = AbortSignal.timeout(remainingMs);
 		try {
-			await untilAborted(AbortSignal.timeout(remainingMs), () => disposal);
+			await untilAborted(cleanupSignal, () => disposal);
 		} catch (error) {
-			if (Date.now() >= cleanupDeadlineAt) {
+			if (cleanupSignal.aborted) {
 				args.onCleanupDeferred?.(disposal);
 				return;
 			}
@@ -2712,6 +2735,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			abortReason: "Cancelled before start",
 		};
 	}
+	options.onStart?.();
 
 	// Set up artifact paths and write input file upfront if artifacts dir provided
 	let subtaskSessionFile: string | undefined;
@@ -2837,6 +2861,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			parentToolCallId: options.parentToolCallId,
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
+			taskTreeBudget: options.taskTreeBudget,
 			outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
@@ -3363,13 +3388,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			sessionAbortController.abort();
 			const activeSessionAbort = monitor.waitForActiveSessionAbort();
+			const cleanupSignal = AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now()));
 			try {
-				await untilAborted(
-					AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now())),
-					() => activeSessionAbort,
-				);
+				await untilAborted(cleanupSignal, () => activeSessionAbort);
 			} catch (cleanupError) {
-				if (Date.now() >= cleanupDeadlineAt) {
+				if (cleanupSignal.aborted) {
 					deferCleanup(activeSessionAbort);
 				} else {
 					logger.warn("Subagent abort cleanup failed", {

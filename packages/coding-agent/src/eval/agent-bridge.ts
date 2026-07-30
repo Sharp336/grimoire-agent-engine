@@ -8,6 +8,7 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentSchemaMode,
 } from "../task/structured-subagent";
+import { refreshTaskTreeBudgetLimits } from "../task/tree-budget";
 import type { AgentProgress, SingleResult } from "../task/types";
 import type { NestedRepoPatch } from "../task/worktree";
 import type { ToolSession } from "../tools";
@@ -138,10 +139,13 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				}
 			: undefined;
 
+	let reservationState: "unreserved" | "reserved" | "started" | "refunded" = "unreserved";
+	refreshTaskTreeBudgetLimits(options.session.taskTreeBudget, options.session.settings, options.session.taskDepth);
 	try {
 		if (options.session.taskTreeBudget) {
 			const treeBudgetError = options.session.taskTreeBudget.reserveSpawns(1);
 			if (treeBudgetError) throw new ToolError(treeBudgetError);
+			reservationState = "reserved";
 		}
 		const execution = await withBridgeTimeoutPause(
 			options.emitStatus,
@@ -165,6 +169,9 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					...(options.emitStatus
 						? { onProgress: (progress: AgentProgress) => emitProgressStatus(options.emitStatus, progress) }
 						: {}),
+					onStart: () => {
+						if (reservationState === "reserved") reservationState = "started";
+					},
 				}),
 			{ deferExternalAbort: true },
 		);
@@ -222,6 +229,10 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			},
 		};
 	} catch (error) {
+		if (reservationState === "reserved") {
+			reservationState = "refunded";
+			options.session.taskTreeBudget?.releaseSpawns(1);
+		}
 		if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
 		throw error;
 	}

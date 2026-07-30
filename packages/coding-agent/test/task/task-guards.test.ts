@@ -362,6 +362,31 @@ describe("runSubprocess request guards", () => {
 		expect(handle.abortCalls()).toBeGreaterThan(abortsBeforeFollowUp);
 	});
 
+	it("preserves a terminal yield when a keep-alive follow-up crosses the shared tree budget", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
+		const budget = new TaskTreeBudget({ maxRequests: 1 });
+		const handle = createFakeSession({
+			events: [assistantMessageEnd("initial"), yieldToolEnd()],
+		});
+		mockCreateAgentSession(handle.session);
+
+		await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-terminal-follow-up",
+			settings,
+			taskTreeBudget: budget,
+			keepAlive: true,
+		});
+		const abortsBeforeFollowUp = handle.abortCalls();
+
+		handle.emit(assistantYieldMessageEnd());
+		expect(budget.snapshot()).toMatchObject({ requests: 2, exhausted: true });
+		expect(handle.abortCalls()).toBe(abortsBeforeFollowUp);
+
+		handle.emit(yieldToolEnd());
+		expect(handle.abortCalls()).toBe(abortsBeforeFollowUp);
+	});
+
 	it("aborts an idle keep-alive child when a sibling exhausts the shared budget", async () => {
 		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
 		const budget = new TaskTreeBudget({ maxRequests: 2 });
@@ -395,6 +420,65 @@ describe("runSubprocess request guards", () => {
 		budget.registerAbortTarget(revived.session);
 
 		expect(revived.abortCalls()).toBe(1);
+	});
+
+	it("clears restored exhaustion when the request limit is raised", () => {
+		const budget = new TaskTreeBudget(
+			{ maxRequests: 3 },
+			{
+				initialSnapshot: {
+					spawns: 1,
+					requests: 2,
+					tokens: 30,
+					maxSpawns: 0,
+					maxRequests: 1,
+					maxTokens: 0,
+					exhausted: true,
+					reason: "Task tree request budget exceeded (2 requests; budget 1)",
+				},
+			},
+		);
+
+		expect(budget.snapshot()).toMatchObject({
+			spawns: 1,
+			requests: 2,
+			tokens: 30,
+			maxRequests: 3,
+			exhausted: false,
+			reason: undefined,
+		});
+		expect(budget.signal.aborted).toBe(false);
+		expect(budget.recordRequest(10)).toBeUndefined();
+	});
+
+	it("clears restored exhaustion when the request limit is disabled", () => {
+		const budget = new TaskTreeBudget(
+			{ maxRequests: 0 },
+			{
+				initialSnapshot: {
+					spawns: 1,
+					requests: 2,
+					tokens: 30,
+					maxSpawns: 0,
+					maxRequests: 1,
+					maxTokens: 0,
+					exhausted: true,
+					reason: "Task tree request budget exceeded (2 requests; budget 1)",
+				},
+			},
+		);
+
+		expect(budget.snapshot()).toMatchObject({
+			spawns: 1,
+			requests: 2,
+			tokens: 30,
+			maxRequests: 0,
+			exhausted: false,
+			reason: undefined,
+		});
+		expect(budget.signal.aborted).toBe(false);
+		expect(budget.recordRequest(10)).toBeUndefined();
+		expect(budget.snapshot().exhausted).toBe(false);
 	});
 
 	it("aborts a keep-alive follow-up that starts after tree exhaustion", async () => {

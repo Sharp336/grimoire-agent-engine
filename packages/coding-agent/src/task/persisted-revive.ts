@@ -10,7 +10,13 @@ import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
-import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+import {
+	attachFollowUpTreeBudgetAccounting,
+	attachIrcWakeTurnMonitor,
+	createMCPProxyTools,
+	createSubagentSettings,
+} from "./executor";
+import type { TaskTreeBudget } from "./tree-budget";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -21,6 +27,7 @@ import type { AgentDefinition } from "./types";
  */
 export interface PersistedSubagentReviveContext {
 	session: AgentSession;
+	taskTreeBudget?: TaskTreeBudget;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
 	settings: Settings;
@@ -137,6 +144,7 @@ export function createPersistedSubagentReviverFactory(
 							mcpManager,
 							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 						}),
+				taskTreeBudget: ctx.taskTreeBudget,
 			});
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
@@ -167,6 +175,9 @@ export function createPersistedSubagentReviverFactory(
 				outputSchemaMode: init.outputSchemaMode,
 				artifactsDir: ctx.session.sessionFile?.slice(0, -6),
 			});
+			if (ctx.taskTreeBudget) {
+				attachFollowUpTreeBudgetAccounting(session, ctx.taskTreeBudget);
+			}
 			return session;
 		};
 	};
