@@ -158,6 +158,20 @@ describe("disabledProviders — discovery/model namespace", () => {
 		await active.flush();
 
 		expect(await readGlobalConfig()).not.toHaveProperty("disabledProviders");
+		// Reporting it as enabled would load it for this process only.
+		expect(isProviderEnabled("github")).toBe(false);
+	});
+
+	test("enabling reports the truth when a path-scoped rule keeps a provider off", async () => {
+		await writeGlobalConfig({ disabledProviders: [{ paths: [projectDir], providers: ["opencode"] }] });
+		const active = await initSettings();
+		expect(isProviderEnabled("opencode")).toBe(false);
+
+		enableProvider("opencode");
+		await active.flush();
+
+		expect((await readGlobalConfig()).disabledProviders).toEqual([{ paths: [projectDir], providers: ["opencode"] }]);
+		expect(isProviderEnabled("opencode")).toBe(false);
 	});
 
 	test("replacing the discovery set keeps a model-only disable", async () => {

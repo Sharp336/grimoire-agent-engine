@@ -317,7 +317,19 @@ export async function loadCapability<T>(
  */
 export function initializeWithSettings(activeSettings: Settings): void {
 	settings = activeSettings;
-	// Load disabled providers from settings
+	syncDisabledFromSettings();
+}
+
+/**
+ * Re-derive the disabled set from the settings that are actually in effect.
+ *
+ * Run after every toggle so the in-memory state cannot disagree with what a
+ * restart would produce. A provider disabled by a path-scoped rule or by a
+ * project config has no entry this registry can drop, and reporting it as
+ * enabled would load it for this process only, until the next reload.
+ */
+function syncDisabledFromSettings(): void {
+	if (!settings) return;
 	disabledProviders.clear();
 	for (const entry of settings.get("disabledProviders")) {
 		disabledProviders.add(unqualify(entry));
@@ -353,6 +365,7 @@ export function disableProvider(providerId: string): void {
 	editPersistedEntries(entries =>
 		entries.some(entry => entryNames(entry, providerId)) ? entries : [...entries, qualify(providerId)],
 	);
+	syncDisabledFromSettings();
 }
 
 /**
@@ -365,6 +378,7 @@ export function disableProvider(providerId: string): void {
 export function enableProvider(providerId: string): void {
 	disabledProviders.delete(providerId);
 	editPersistedEntries(entries => entries.filter(entry => !entryNames(entry, providerId)));
+	syncDisabledFromSettings();
 }
 
 /**
@@ -393,6 +407,7 @@ export function setDisabledProviders(providerIds: string[]): void {
 	// no discovery provider — a model-only disable such as `anthropic` — stay as
 	// authored, since replacing the discovery set says nothing about them.
 	editPersistedEntries(entries => [...entries.filter(entry => !ownsEntry(entry)), ...providerIds.map(qualify)]);
+	syncDisabledFromSettings();
 }
 
 // =============================================================================
