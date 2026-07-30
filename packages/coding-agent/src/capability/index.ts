@@ -49,22 +49,20 @@ const providerMeta = new Map<string, { displayName: string; description: string 
  */
 const DISCOVERY_SCOPE_PREFIX = "discovery:";
 
-/**
- * Raw `disabledProviders` entries as persisted. Kept verbatim so writing a
- * discovery toggle cannot drop an entry that belongs to another subsystem.
- */
-let disabledEntries: string[] = [];
-
-/** Disabled providers (by ID), resolved from `disabledEntries` */
+/** Disabled providers (by ID), resolved from the `disabledProviders` setting */
 const disabledProviders = new Set<string>();
 
-function syncDisabledProviders(): void {
-	disabledProviders.clear();
-	for (const entry of disabledEntries) {
-		disabledProviders.add(
-			entry.startsWith(DISCOVERY_SCOPE_PREFIX) ? entry.slice(DISCOVERY_SCOPE_PREFIX.length) : entry,
-		);
-	}
+function qualify(providerId: string): string {
+	return `${DISCOVERY_SCOPE_PREFIX}${providerId}`;
+}
+
+function unqualify(entry: string): string {
+	return entry.startsWith(DISCOVERY_SCOPE_PREFIX) ? entry.slice(DISCOVERY_SCOPE_PREFIX.length) : entry;
+}
+
+/** Whether a persisted entry names `providerId`, qualified or not. */
+function entryNames(entry: unknown, providerId: string): boolean {
+	return entry === providerId || entry === qualify(providerId);
 }
 
 /** Settings manager for persistence (if set) */
@@ -310,27 +308,36 @@ export async function loadCapability<T>(
 export function initializeWithSettings(activeSettings: Settings): void {
 	settings = activeSettings;
 	// Load disabled providers from settings
-	disabledEntries = [...settings.get("disabledProviders")];
-	syncDisabledProviders();
+	disabledProviders.clear();
+	for (const entry of settings.get("disabledProviders")) {
+		disabledProviders.add(unqualify(entry));
+	}
 }
 
 /**
- * Persist current disabled providers to settings.
+ * Edit this registry's own entries in the persisted `disabledProviders` array.
+ *
+ * Reads the raw global layer rather than `Settings.get()`: the getter resolves
+ * path-scoped rules against the current cwd and merges the project layer, so
+ * writing its result back would flatten `{ paths, providers }` entries into
+ * plain ids and promote another project's disables to global ones. Entries this
+ * registry does not own are passed through untouched.
  */
-function persistDisabledProviders(): void {
-	if (settings) {
-		settings.set("disabledProviders", [...disabledEntries]);
-	}
+function editPersistedEntries(edit: (entries: unknown[]) => unknown[]): void {
+	if (!settings) return;
+	const raw = settings.getGlobalRaw("disabledProviders");
+	const next = edit(Array.isArray(raw) ? [...raw] : []);
+	settings.set("disabledProviders", next as string[]);
 }
 
 /**
  * Disable a provider globally (across all capabilities).
  */
 export function disableProvider(providerId: string): void {
-	if (disabledProviders.has(providerId)) return;
-	disabledEntries.push(`${DISCOVERY_SCOPE_PREFIX}${providerId}`);
-	syncDisabledProviders();
-	persistDisabledProviders();
+	disabledProviders.add(providerId);
+	editPersistedEntries(entries =>
+		entries.some(entry => entryNames(entry, providerId)) ? entries : [...entries, qualify(providerId)],
+	);
 }
 
 /**
@@ -341,10 +348,8 @@ export function disableProvider(providerId: string): void {
  * keep that half disabled would disable a backend the user never named.
  */
 export function enableProvider(providerId: string): void {
-	const qualified = `${DISCOVERY_SCOPE_PREFIX}${providerId}`;
-	disabledEntries = disabledEntries.filter(entry => entry !== providerId && entry !== qualified);
-	syncDisabledProviders();
-	persistDisabledProviders();
+	disabledProviders.delete(providerId);
+	editPersistedEntries(entries => entries.filter(entry => !entryNames(entry, providerId)));
 }
 
 /**
@@ -365,9 +370,15 @@ export function getDisabledProviders(): string[] {
  * Set disabled providers from a list (replaces current set).
  */
 export function setDisabledProviders(providerIds: string[]): void {
-	disabledEntries = [...providerIds];
-	syncDisabledProviders();
-	persistDisabledProviders();
+	disabledProviders.clear();
+	for (const id of providerIds) {
+		disabledProviders.add(unqualify(id));
+	}
+	// Replaces this registry's own ids; path-scoped rules stay as authored.
+	editPersistedEntries(entries => [
+		...entries.filter(entry => typeof entry !== "string"),
+		...providerIds.map(qualify),
+	]);
 }
 
 // =============================================================================

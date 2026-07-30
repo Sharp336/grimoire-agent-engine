@@ -217,6 +217,8 @@ disabledProviders:
 
 A scoped entry applies when the cwd equals the configured path or sits beneath it; `~` expands to home. Bare string entries apply everywhere.
 
+Toggling a provider from `/extensions` or the settings selector edits only that provider's own entry in your global config. Scoped rules, entries for other providers, and anything set in a project config are left exactly as you wrote them.
+
 Remember that higher-precedence settings layers **replace** array settings rather than appending to them. If your global config disables `claude` but a project config sets `disabledProviders: [github]`, then inside that project Claude discovery is re-enabled and only GitHub is disabled. See [Settings](./settings.md) for the full layer precedence, merge rules, and path-scoped array details.
 
 ## Troubleshooting

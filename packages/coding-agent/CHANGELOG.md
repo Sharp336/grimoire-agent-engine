@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed turning off Cursor config discovery also removing the Cursor model backend from `/model` and `/login`. `disabledProviders` is one id namespace shared by discovery providers and model providers, and `cursor` is the only id registered as both, so the unqualified entry written by `/extensions` and the settings selector matched the model registry too. Discovery toggles now persist `discovery:<id>`, which the model registry does not match; unqualified entries keep disabling both ([#7066](https://github.com/can1357/oh-my-pi/pull/7066) by [@Gy-Hu](https://github.com/Gy-Hu)).
+- Fixed a provider toggle rewriting `disabledProviders` entries it does not own. The toggle persisted the value of `Settings.get()`, which resolves path-scoped rules against the current cwd and merges the project layer, into the global config: `{ paths, providers }` rules collapsed into plain ids, rules scoped to other directories were dropped, and a project-local disable was promoted to a global one. Toggles now edit the raw global array and leave every other entry untouched ([#7066](https://github.com/can1357/oh-my-pi/pull/7066) by [@Gy-Hu](https://github.com/Gy-Hu)).
 
 ## [17.2.0] - 2026-07-30
 

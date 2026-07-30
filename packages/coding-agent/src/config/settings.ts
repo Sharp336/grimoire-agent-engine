@@ -491,6 +491,20 @@ export class Settings {
 	}
 
 	/**
+	 * The global layer's value for `path`, exactly as persisted.
+	 *
+	 * `get()` returns the merged layers with path-scoped entries already resolved
+	 * against the current cwd, so writing that value back through `set()` — which
+	 * only ever targets the global layer — collapses `{ paths, providers }` rules
+	 * into plain ids and copies project-layer entries into the global config. A
+	 * caller that edits one entry of an array setting reads the raw global value,
+	 * changes its own entry, and writes the rest back untouched.
+	 */
+	getGlobalRaw(path: SettingPath): unknown {
+		return getByPath(this.#global, SETTING_PATH_SEGMENTS[path]);
+	}
+
+	/**
 	 * Set a setting value (sync).
 	 * Updates global settings and queues a background save.
 	 * Triggers hooks for settings that have side effects.
