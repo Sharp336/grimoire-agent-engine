@@ -80,4 +80,27 @@ describe("theme extends", () => {
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("Invalid theme");
 	});
+
+	it("layers a custom file over the built-in of the same name without `extends`", async () => {
+		const builtin = await getThemeByName("dark");
+		await writeTheme("dark", { symbols: { overrides: { "boxRound.topLeft": "+" } } });
+
+		const shadowed = await getThemeByName("dark");
+		expect(shadowed).toBeDefined();
+		expect(shadowed!.symbol("boxRound.topLeft")).toBe("+");
+		// Everything else still comes from the built-in it shadows.
+		expect(shadowed!.getColorHex("accent")).toBe(builtin!.getColorHex("accent"));
+		expect(shadowed!.symbol("boxRound.topRight")).toBe(builtin!.symbol("boxRound.topRight"));
+	});
+
+	it("prefers an explicit `extends` over the same-named built-in", async () => {
+		const light = await getThemeByName("light");
+		await writeTheme("dark", { extends: "light", colors: { accent: "#ff0000" } });
+
+		const shadowed = await getThemeByName("dark");
+		expect(shadowed).toBeDefined();
+		expect(shadowed!.getColorHex("accent")).toBe("#ff0000");
+		// Inherited from `light`, not from built-in `dark`.
+		expect(shadowed!.getColorHex("syntaxString")).toBe(light!.getColorHex("syntaxString"));
+	});
 });

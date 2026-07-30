@@ -2045,11 +2045,19 @@ export async function getAvailableThemesWithPaths(): Promise<ThemeInfo[]> {
 	return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Read one theme file without resolving `extends`; built-ins are already complete. */
-async function loadThemeSource(name: string): Promise<ThemeSource> {
+/**
+ * Read one theme file without resolving `extends`.
+ *
+ * A custom file wins over a same-named built-in and implicitly extends it, so dropping
+ * `titanium.json` into the themes dir layers over built-in `titanium` instead of being
+ * ignored. `builtinOnly` resolves that implicit parent without re-reading the child.
+ */
+async function loadThemeSource(name: string, builtinOnly = false): Promise<ThemeSource> {
 	const builtinThemes = getBuiltinThemes();
-	if (name in builtinThemes) {
-		return builtinThemes[name];
+	const builtin = name in builtinThemes ? builtinThemes[name] : undefined;
+	if (builtinOnly) {
+		if (!builtin) throw new Error(`Theme not found: ${name}`);
+		return builtin;
 	}
 	const customThemesDir = getCustomThemesDir();
 	const themePath = path.join(customThemesDir, `${name}.json`);
@@ -2057,8 +2065,9 @@ async function loadThemeSource(name: string): Promise<ThemeSource> {
 	try {
 		content = await Bun.file(themePath).text();
 	} catch (err) {
-		if (isEnoent(err)) throw new Error(`Theme not found: ${name}`);
-		throw err;
+		if (!isEnoent(err)) throw err;
+		if (builtin) return builtin;
+		throw new Error(`Theme not found: ${name}`);
 	}
 	let json: unknown;
 	try {
@@ -2070,7 +2079,10 @@ async function loadThemeSource(name: string): Promise<ThemeSource> {
 	if (parsed instanceof type.errors) {
 		throw new Error(`Invalid theme "${name}":\n\nValidation error:\n  - ${parsed.summary}`);
 	}
-	return parsed as ThemeSource;
+	const source = parsed as ThemeSource;
+	// Same-named built-in becomes the implicit base when the file declares no other one.
+	if (!source.extends && builtin) return { ...source, extends: name };
+	return source;
 }
 
 /** Layer `child` over `base`. Sections merge key-by-key so a child overrides only what it names. */
@@ -2096,13 +2108,17 @@ function mergeThemeSource(base: ThemeSource, child: ThemeSource): ThemeSource {
 async function loadThemeJson(name: string): Promise<ThemeJson> {
 	const chain: string[] = [];
 	let source = await loadThemeSource(name);
+	// A custom file shadowing a built-in points at its own name on the first hop only; that
+	// hop resolves to the built-in rather than back to the file, so it is not a cycle.
+	// Any later return to `name` is a genuine cycle.
 	while (source.extends) {
 		const parent = source.extends;
-		if (chain.includes(parent) || parent === name) {
+		const shadowsBuiltin = parent === name && chain.length === 0;
+		if (!shadowsBuiltin && (chain.includes(parent) || parent === name)) {
 			throw new Error(`Invalid theme "${name}": circular extends chain (${[name, ...chain, parent].join(" -> ")})`);
 		}
-		chain.push(parent);
-		source = mergeThemeSource(await loadThemeSource(parent), source);
+		if (!shadowsBuiltin) chain.push(parent);
+		source = mergeThemeSource(await loadThemeSource(parent, shadowsBuiltin), source);
 	}
 	// A child inherits its base's name unless it set one; validation requires a name.
 	const named: ThemeSource = { ...source, name: source.name ?? name };
