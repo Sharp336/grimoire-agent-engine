@@ -107,6 +107,32 @@ export class CollabSocket {
 		return this.#sendChain;
 	}
 
+	/**
+	 * Push every frame already passed to {@link send} through to the live
+	 * WebSocket before an intentional {@link close}. Resolves once the reconnect
+	 * buffer is empty (or the socket is gone). Envelopes handed to `ws.send()`
+	 * are still delivered by a following orderly close; only frames left in
+	 * `#pendingSends` are dropped by `close()`, so this is what keeps a
+	 * correlated reply (e.g. a `control-disabled` ctl-result) from being lost
+	 * when the host tears down right after sending it.
+	 */
+	flush(): Promise<void> {
+		this.#sendChain = this.#sendChain
+			.then(async () => {
+				const ws = this.#ws;
+				if (this.#closed || !ws || ws.readyState !== WebSocket.OPEN) return;
+				while (this.#pendingSends.length > 0) {
+					const envelope = this.#pendingSends.shift();
+					if (!envelope) break;
+					ws.send(envelope);
+				}
+			})
+			.catch((err: unknown) => {
+				logger.debug("collab: flush failed", { error: String(err) });
+			});
+		return this.#sendChain;
+	}
+
 	#enqueuePendingSend(envelope: Uint8Array, frameType: CollabFrame["t"]): void {
 		if (this.#pendingSends.length >= MAX_PENDING_SENDS) {
 			logger.debug("collab: dropping frame, reconnect buffer full", { t: frameType });
