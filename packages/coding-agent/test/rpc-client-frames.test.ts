@@ -131,4 +131,28 @@ describe("RpcClient frame coverage", () => {
 		await client.start();
 		await expect(aborted.promise).resolves.toBeUndefined();
 	});
+
+	test("restores host URI schemes after restarting the client", async () => {
+		using tempDir = TempDir.createSync("@omp-rpc-client-host-uri-restart-");
+		const captureFile = tempDir.join("captured.jsonl");
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: {
+				MOCK_RPC_CLIENT_FRAMES: "1",
+				MOCK_RPC_CAPTURE_FILE: captureFile,
+			},
+		});
+
+		await client.start();
+		expect(await client.setHostUriSchemes([{ scheme: "fixture", immutable: true }])).toEqual(["fixture"]);
+		await client.stop();
+		await client.start();
+
+		const captured = await waitForCapturedFrames(captureFile, frames =>
+			frames.some(frame => frame.type === "set_host_uri_schemes"),
+		);
+		expect(captured.find(frame => frame.type === "set_host_uri_schemes")).toMatchObject({
+			schemes: [{ scheme: "fixture", immutable: true }],
+		});
+	});
 });
