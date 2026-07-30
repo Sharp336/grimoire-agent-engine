@@ -1,9 +1,9 @@
 import type { Agent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
+	AudioContent,
 	Context,
 	Effort,
 	ImageContent,
-	MediaContent,
 	Message,
 	MessageAttribution,
 	Model,
@@ -11,6 +11,7 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 	ToolChoice,
+	VideoContent,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
@@ -231,8 +232,7 @@ export interface PromptOptions {
 	/** Image attachments, normalized for the active model. */
 	images?: ImageContent[];
 	/** Audio or video attachments forwarded without image normalization. */
-	attachments?: MediaContent[];
-	/** Queue behavior while streaming. */
+	attachments?: (AudioContent | VideoContent)[];
 	streamingBehavior?: "steer" | "followUp";
 	/** Optional tool choice override for the next LLM call. */
 	toolChoice?: ToolChoice;
@@ -346,4 +346,9 @@ export interface FreshSessionResult {
 }
 
 /** Queued user content restored to the editor. */
-export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+export type RestoredQueuedMessage = {
+	text: string;
+	images?: ImageContent[];
+	audio?: AudioContent[];
+	video?: VideoContent[];
+};

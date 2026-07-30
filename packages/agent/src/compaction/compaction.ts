@@ -358,8 +358,12 @@ const AUDIO_TOKEN_ESTIMATE = 8_000;
 const VIDEO_TOKEN_ESTIMATE = 24_000;
 
 function estimateMediaTokens(content: MediaContent): number {
-	const minimum = content.type === "audio" ? AUDIO_TOKEN_ESTIMATE : VIDEO_TOKEN_ESTIMATE;
-	return Math.max(minimum, Math.ceil(content.data.length / 4));
+	// Provider tokenization of compressed media is unrelated to base64 payload
+	// length: a 3 MiB MP3 is ~4 MiB of base64 but bills far fewer tokens than
+	// the ~1M that raw length / 4 would imply, which spuriously trips context
+	// preflight and compaction on a normal attachment. Use a fixed, bounded,
+	// modality-aware estimate instead of the payload size.
+	return content.type === "audio" ? AUDIO_TOKEN_ESTIMATE : VIDEO_TOKEN_ESTIMATE;
 }
 
 /**

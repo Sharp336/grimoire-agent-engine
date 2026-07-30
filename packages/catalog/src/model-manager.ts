@@ -478,7 +478,9 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// dynamic discovery also pre-applies the correct image fallback for omitted
 	// `supports.vision`, so its explicit `false` must not be OR-upgraded by the
 	// canonical bundled model.
-	const dynamicInputAuthoritative = existingModel.baseUrl !== dynamicModel.baseUrl;
+	const dynamicInputAuthoritative =
+		existingModel.baseUrl !== dynamicModel.baseUrl ||
+		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot");
 	const dynamicVendorInput = dynamicModel.vendorInput ?? dynamicModel.input;
 	const existingVendorInput = existingModel.vendorInput ?? existingModel.input;
 	const vendorInput = dynamicInputAuthoritative

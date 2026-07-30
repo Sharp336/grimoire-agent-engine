@@ -26,38 +26,35 @@ function truncateString(value: string, maxLength: number): string {
 	return truncated;
 }
 
-export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"type" in value &&
-		(value as { type?: string }).type === "image" &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string"
-	);
+export function isMediaBlock(
+	value: unknown,
+): value is { type: "image" | "audio" | "video"; data: string; mimeType?: string } {
+	if (typeof value !== "object" || value === null) return false;
+	if (!("type" in value) || !("data" in value)) return false;
+	const { type, data } = value;
+	return (type === "image" || type === "audio" || type === "video") && typeof data === "string";
 }
 
-function isImageMimeType(value: unknown): value is string {
-	return typeof value === "string" && value.toLowerCase().startsWith("image/");
+function isMediaMimeType(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	const lowered = value.toLowerCase();
+	return lowered.startsWith("image/") || lowered.startsWith("audio/") || lowered.startsWith("video/");
 }
 
-export function isImageDataPayload(value: unknown): value is { data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string" &&
-		(isImageBlock(value) || ("mimeType" in value && isImageMimeType((value as { mimeType?: unknown }).mimeType)))
-	);
+export function isMediaDataPayload(value: unknown): value is { data: string; mimeType?: string } {
+	if (typeof value !== "object" || value === null || !("data" in value)) return false;
+	if (typeof value.data !== "string") return false;
+	if (isMediaBlock(value)) return true;
+	return "mimeType" in value && isMediaMimeType(value.mimeType);
 }
 
-function shouldExternalizeImagePayload(
+function shouldExternalizeMediaPayload(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
-	if (!isImageDataPayload(value)) return false;
+	if (!isMediaDataPayload(value)) return false;
 	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
-	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images";
+	return (key === TEXT_CONTENT_KEY && isMediaBlock(value)) || key === "images";
 }
 
 /** True for a non-empty string — marks signature/encrypted fields whose block must persist verbatim. */
@@ -91,7 +88,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	) {
 		return { ...obj, result: externalizeImageDataSync(blobStore, obj.result) };
 	}
-	if (shouldExternalizeImagePayload(obj, key)) {
+	if (shouldExternalizeMediaPayload(obj, key)) {
 		return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
 	}
 	// Signed content is bound to its exact bytes: a truncated `thinking`/`text`/

@@ -203,4 +203,23 @@ describe("media token estimation", () => {
 		expect(userAudio).toBeGreaterThan(textOnly);
 		expect(toolVideo).toBeGreaterThan(userAudio);
 	});
+	test("charges a bounded modality estimate independent of base64 payload length", () => {
+		// A large media payload must charge the fixed, modality-aware estimate
+		// rather than Math.ceil(data.length/4), which spuriously trips context
+		// preflight and compaction on a normal attachment.
+		const smallAudio = estimateTokens({
+			role: "user",
+			content: [{ type: "audio", mimeType: "audio/wav", data: "a".repeat(64) }],
+			timestamp: 1,
+		} as AgentMessage);
+		const largeAudio = estimateTokens({
+			role: "user",
+			content: [{ type: "audio", mimeType: "audio/wav", data: "a".repeat(100_000) }],
+			timestamp: 2,
+		} as AgentMessage);
+		// The estimate is the fixed audio cost regardless of payload size …
+		expect(largeAudio).toBe(smallAudio);
+		// … and equals the documented conservative audio estimate, not length/4.
+		expect(largeAudio).toBe(8000);
+	});
 });
