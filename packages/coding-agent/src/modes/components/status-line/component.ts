@@ -1385,6 +1385,7 @@ export class StatusLineComponent implements Component {
 			if (this.#cachedBalance !== null) this.#cachedBalance = null;
 			return;
 		}
+		this.#balanceInFlight = true;
 		this.#balanceTimer = setTimeout(() => {
 			this.#balanceTimer = null;
 			void this.#runBalanceRefresh(session);
