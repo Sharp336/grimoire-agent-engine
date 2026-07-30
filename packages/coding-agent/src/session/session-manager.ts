@@ -675,6 +675,12 @@ export class SessionManager {
 		this.#sessionLock = next;
 	}
 
+	#prepareSessionFileIdentity(stagedPath: string) {
+		const lock = this.#sessionLock;
+		if (!lock) throw new Error("Cannot publish a session file without an ownership lock");
+		return lock.handle.prepareFileIdentity(stagedPath);
+	}
+
 	#retainSessionLock(): SharedSessionLock | undefined {
 		if (!this.#sessionLock) return undefined;
 		this.#sessionLock.references++;
@@ -836,6 +842,7 @@ export class SessionManager {
 				try {
 					await this.#storage.writeTextAtomic(sessionFile, body, {
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+						prepareFileIdentity: stagedPath => this.#prepareSessionFileIdentity(stagedPath),
 					});
 				} catch (error) {
 					const recoveryErrors = [toError(error)];
@@ -884,6 +891,7 @@ export class SessionManager {
 		this.#writer = this.#storage.openWriter(this.#sessionFile, {
 			flags: "a",
 			onError: err => this.#noteDiskFailure(err),
+			expectedFileIdentity: this.#sessionLock?.handle.fileIdentity,
 		});
 		return this.#writer;
 	}
@@ -951,7 +959,9 @@ export class SessionManager {
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
-			this.#storage.writeTextSync(targetPath, body);
+			this.#storage.writeTextSync(targetPath, body, {
+				prepareFileIdentity: stagedPath => this.#prepareSessionFileIdentity(stagedPath),
+			});
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
 			// still the pre-repoint source until moveTo repoints it.
@@ -1022,6 +1032,7 @@ export class SessionManager {
 				if (this.#diskEpoch !== epoch) return false;
 				await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
 					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+					prepareFileIdentity: stagedPath => this.#prepareSessionFileIdentity(stagedPath),
 				});
 				if (this.#diskEpoch !== epoch) return false;
 			} while (this.#atomicRewriteDirty);
@@ -1140,7 +1151,9 @@ export class SessionManager {
 				if (!sessionFile) return;
 				try {
 					await this.#appendWriter().append(line);
-					await this.#storage.updateSessionTitle(sessionFile, update);
+					await this.#storage.updateSessionTitle(sessionFile, update, {
+						expectedFileIdentity: this.#sessionLock?.handle.fileIdentity,
+					});
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
 					if (!(await this.#runFencedAtomicRewrite(epoch))) return;

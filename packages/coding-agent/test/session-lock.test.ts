@@ -456,6 +456,30 @@ describe("session lock", () => {
 		aliasLock.release();
 	});
 
+	it("claims the inode published after locking a missing session path", () => {
+		const { dir, session } = fixture();
+		const options = {
+			pid: 42,
+			processStartMarker: "marker",
+			processProbe: probe(true),
+		};
+		const lock = acquireSessionLock(session, options);
+		const staged = path.join(dir, "staged.jsonl");
+		fs.writeFileSync(staged, "session");
+		const claim = lock.prepareFileIdentity(staged);
+		fs.renameSync(staged, session);
+		claim.commit();
+
+		const alias = path.join(dir, "published-alias.jsonl");
+		fs.linkSync(session, alias);
+		fs.unlinkSync(session);
+		expect(() => acquireSessionLock(alias, { ...options, ownerId: OWNER_B })).toThrow(
+			expect.objectContaining({ name: "SessionLockError", code: "locked" }),
+		);
+
+		lock.release();
+	});
+
 	it("does not publish ownership while another mutation claim is live", () => {
 		const { session } = fixture();
 		const claimPath = `${lockPathForSession(session)}.steal`;

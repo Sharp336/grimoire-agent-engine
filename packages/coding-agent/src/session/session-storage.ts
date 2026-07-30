@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import type { SessionFileIdentity, SessionFileIdentityClaim } from "./session-lock";
 import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 const utf8Decoder = new TextDecoder("utf-8");
@@ -53,12 +54,17 @@ export interface SessionStorageWriter {
  */
 export interface WriteTextAtomicOptions {
 	commitGuard?: () => boolean;
+	prepareFileIdentity?: (stagedPath: string) => SessionFileIdentityClaim;
+}
+
+export interface SessionFileMutationOptions {
+	expectedFileIdentity?: SessionFileIdentity;
 }
 
 export interface SessionStorage {
 	ensureDirSync(dir: string): void;
 	existsSync(path: string): boolean;
-	writeTextSync(path: string, content: string): void;
+	writeTextSync(path: string, content: string, options?: WriteTextAtomicOptions): void;
 	/**
 	 * Update the current session title through the storage backend.
 	 *
@@ -66,7 +72,7 @@ export interface SessionStorage {
 	 * backends can store the semantic title fields and synthesize the slot when
 	 * reading.
 	 */
-	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
+	updateSessionTitle(path: string, update: SessionTitleUpdate, options?: SessionFileMutationOptions): Promise<void>;
 	statSync(path: string): SessionStorageStat;
 	listFilesSync(dir: string, pattern: string): string[];
 
@@ -79,7 +85,14 @@ export interface SessionStorage {
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
-	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter;
+	openWriter(
+		path: string,
+		options?: {
+			flags?: "a" | "w";
+			onError?: (err: Error) => void;
+			expectedFileIdentity?: SessionFileIdentity;
+		},
+	): SessionStorageWriter;
 	/**
 	 * Wait for every backing write scheduled by this storage to become durably
 	 * visible. Sync backends (file, memory) return immediately because their
@@ -107,12 +120,20 @@ function atomicWriteTarget(fpath: string): string {
 	return path.resolve(fpath);
 }
 
-function openPinnedFileSync(fpath: string, flags: number, mode?: number): number {
+function openPinnedFileSync(
+	fpath: string,
+	flags: number,
+	mode?: number,
+	expectedFileIdentity?: SessionFileIdentity,
+): number {
 	const fd = fs.openSync(fpath, flags | (fs.constants.O_NOFOLLOW ?? 0), mode);
 	try {
 		const opened = fs.fstatSync(fd);
 		const named = fs.lstatSync(fpath);
-		if (named.isSymbolicLink() || opened.dev !== named.dev || opened.ino !== named.ino) {
+		const changedFromOwned =
+			expectedFileIdentity !== undefined &&
+			(opened.dev !== expectedFileIdentity.dev || opened.ino !== expectedFileIdentity.ino);
+		if (named.isSymbolicLink() || opened.dev !== named.dev || opened.ino !== named.ino || changedFromOwned) {
 			const error = new Error(`Refusing to follow replacement session symlink: ${fpath}`) as NodeJS.ErrnoException;
 			error.code = "ELOOP";
 			throw error;
@@ -130,7 +151,14 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	#error: Error | undefined;
 	#onError: ((err: Error) => void) | undefined;
 
-	constructor(fpath: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }) {
+	constructor(
+		fpath: string,
+		options?: {
+			flags?: "a" | "w";
+			onError?: (err: Error) => void;
+			expectedFileIdentity?: SessionFileIdentity;
+		},
+	) {
 		this.#onError = options?.onError;
 		const flags = options?.flags ?? "a";
 		// Ensure parent directory exists
@@ -144,7 +172,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		// latches ELOOP and repairs its canonical path with an atomic rewrite.
 		const commonFlags = fs.constants.O_WRONLY | fs.constants.O_CREAT;
 		const openFlags = flags === "w" ? commonFlags | fs.constants.O_TRUNC : commonFlags | fs.constants.O_APPEND;
-		this.#fd = openPinnedFileSync(fpath, openFlags, 0o666);
+		this.#fd = openPinnedFileSync(fpath, openFlags, 0o666, options?.expectedFileIdentity);
 		// Register for cleanup if abandoned without close()
 		writerRegistry.register(this, this.#fd, this);
 	}
@@ -227,31 +255,42 @@ export class FileSessionStorage implements SessionStorage {
 		return fs.existsSync(path);
 	}
 
-	writeTextSync(fpath: string, content: string): void {
+	writeTextSync(fpath: string, content: string, options?: WriteTextAtomicOptions): void {
 		fpath = atomicWriteTarget(fpath);
 		const dir = path.dirname(fpath);
 		this.ensureDirSync(dir);
 		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
+		let identityClaim: SessionFileIdentityClaim | undefined;
 		try {
 			fs.writeFileSync(tempPath, content);
+			identityClaim = options?.prepareFileIdentity?.(tempPath);
 			fs.renameSync(tempPath, fpath);
+			identityClaim?.commit();
 		} catch (err) {
 			if (hasFsCode(err, "EPERM")) {
 				try {
-					this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err);
+					const published = this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err, options?.commitGuard);
+					if (published) identityClaim?.commit();
+					else identityClaim?.rollback();
 					return;
 				} catch (fallbackErr) {
+					identityClaim?.rollback();
 					this.#discardTemp(tempPath, fpath);
 					throw fallbackErr;
 				}
 			}
+			identityClaim?.rollback();
 			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
 		}
 	}
 
-	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
-		const fd = openPinnedFileSync(fpath, fs.constants.O_RDWR);
+	async updateSessionTitle(
+		fpath: string,
+		update: SessionTitleUpdate,
+		options?: SessionFileMutationOptions,
+	): Promise<void> {
+		const fd = openPinnedFileSync(fpath, fs.constants.O_RDWR, undefined, options?.expectedFileIdentity);
 		try {
 			const buf = Buffer.from(serializeTitleSlot(update), "utf-8");
 			let offset = 0;
@@ -318,25 +357,38 @@ export class FileSessionStorage implements SessionStorage {
 			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
 		}
+		let identityClaim: SessionFileIdentityClaim | undefined;
+		try {
+			identityClaim = options?.prepareFileIdentity?.(tempPath);
+		} catch (err) {
+			this.#discardTemp(tempPath, fpath);
+			throw toError(err);
+		}
 		// Guard-check + rename MUST NOT be separated by an await. A concurrent
 		// synchronous rewrite (flushSync -> #rewriteSynchronously) can otherwise
 		// publish a fresh body between the check and the rename, and this stale
 		// staged body would overwrite it. Sync rename closes that window.
 		if (options?.commitGuard && !options.commitGuard()) {
+			identityClaim?.rollback();
 			this.#discardTemp(tempPath, fpath);
 			return;
 		}
 		try {
 			this.renameSync(tempPath, fpath);
+			identityClaim?.commit();
 			return;
 		} catch (err) {
 			if (!hasFsCode(err, "EPERM")) {
+				identityClaim?.rollback();
 				this.#discardTemp(tempPath, fpath);
 				throw toError(err);
 			}
 			try {
-				this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err, options?.commitGuard);
+				const published = this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err, options?.commitGuard);
+				if (published) identityClaim?.commit();
+				else identityClaim?.rollback();
 			} catch (fallbackErr) {
+				identityClaim?.rollback();
 				this.#discardTemp(tempPath, fpath);
 				throw fallbackErr;
 			}
@@ -371,7 +423,7 @@ export class FileSessionStorage implements SessionStorage {
 		targetPath: string,
 		renameError: unknown,
 		commitGuard?: () => boolean,
-	): void {
+	): boolean {
 		const dir = path.resolve(targetPath, "..");
 		const backupPath = path.join(dir, `${path.basename(targetPath)}.${Snowflake.next()}.bak`);
 		try {
@@ -380,10 +432,10 @@ export class FileSessionStorage implements SessionStorage {
 			if (isEnoent(moveAsideError)) {
 				if (commitGuard && !commitGuard()) {
 					this.#discardTemp(tempPath, targetPath);
-					return;
+					return false;
 				}
 				this.renameSync(tempPath, targetPath);
-				return;
+				return true;
 			}
 			throw toError(renameError);
 		}
@@ -402,7 +454,7 @@ export class FileSessionStorage implements SessionStorage {
 				});
 			}
 			this.#discardTemp(tempPath, targetPath);
-			return;
+			return false;
 		}
 		try {
 			this.renameSync(tempPath, targetPath);
@@ -431,6 +483,7 @@ export class FileSessionStorage implements SessionStorage {
 				});
 			}
 		}
+		return true;
 	}
 
 	async rename(path: string, nextPath: string): Promise<void> {
@@ -451,7 +504,14 @@ export class FileSessionStorage implements SessionStorage {
 		return Promise.resolve();
 	}
 
-	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
+	openWriter(
+		path: string,
+		options?: {
+			flags?: "a" | "w";
+			onError?: (err: Error) => void;
+			expectedFileIdentity?: SessionFileIdentity;
+		},
+	): SessionStorageWriter {
 		return new FileSessionStorageWriter(path, options);
 	}
 

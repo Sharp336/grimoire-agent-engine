@@ -106,13 +106,36 @@ export class SessionLockError extends Error {
 	}
 }
 
-/** Exclusive session ownership handle with heartbeat and release operations. */
-export interface SessionLockHandle {
+interface PathSessionLockHandle {
 	readonly record: SessionLockRecord;
 	readonly lockPath: string;
 	heartbeat(): void;
 	release(): void;
 	readonly released: boolean;
+}
+
+/** Exclusive session ownership handle with heartbeat and release operations. */
+export interface SessionLockHandle extends PathSessionLockHandle {
+	/** Device/inode identity currently owned for the published session file. */
+	readonly fileIdentity: SessionFileIdentity | undefined;
+	/**
+	 * Claim the identity of a staged session file before publishing it.
+	 * Commit the claim after publication, or roll it back if publication fails.
+	 */
+	prepareFileIdentity(filePath: string): SessionFileIdentityClaim;
+}
+
+/** Stable filesystem identity used to fence path replacements and hard-link aliases. */
+export interface SessionFileIdentity {
+	dev: number;
+	ino: number;
+}
+
+/** Prepared identity-lock rotation for an atomic session-file publication. */
+export interface SessionFileIdentityClaim {
+	readonly identity: SessionFileIdentity;
+	commit(): void;
+	rollback(): void;
 }
 
 interface SessionLockClaim {
@@ -628,7 +651,7 @@ function rejectHardLinkedSessionFile(sessionFile: string, lockPath: string): voi
 }
 
 /** Acquire exclusive write ownership for a session until the returned handle is released. */
-function acquirePathSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockHandle {
+function acquirePathSessionLock(sessionFile: string, options: SessionLockOptions = {}): PathSessionLockHandle {
 	const normalized = normalizeSessionFile(sessionFile);
 	if (byteLength(normalized) > MAX_SESSION_PATH_BYTES) {
 		throw new SessionLockError(
@@ -851,7 +874,7 @@ function acquirePathSessionLock(sessionFile: string, options: SessionLockOptions
 	};
 }
 
-function identityLockTarget(sessionFile: string): string | undefined {
+function fileIdentity(sessionFile: string): SessionFileIdentity | undefined {
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(sessionFile);
@@ -859,19 +882,24 @@ function identityLockTarget(sessionFile: string): string | undefined {
 		if (errorCode(error) === "ENOENT") return undefined;
 		throw error;
 	}
+	return { dev: stat.dev, ino: stat.ino };
+}
+
+function identityLockTarget(identity: SessionFileIdentity): string {
 	const uid = typeof process.getuid === "function" ? process.getuid() : "user";
 	const identityDir = path.join(os.tmpdir(), `oh-my-pi-session-identities-${uid}`);
 	fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
 	fs.chmodSync(identityDir, 0o700);
-	return path.join(identityDir, `${stat.dev.toString(16)}-${stat.ino.toString(16)}.identity`);
+	return path.join(identityDir, `${identity.dev.toString(16)}-${identity.ino.toString(16)}.identity`);
 }
 
 /** Acquire exclusive write ownership for a session until the returned handle is released. */
 export function acquireSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockHandle {
 	const normalized = normalizeSessionFile(sessionFile);
-	const identityTarget = identityLockTarget(normalized);
-	const identityHandle = identityTarget ? acquirePathSessionLock(identityTarget, options) : undefined;
-	let pathHandle: SessionLockHandle;
+	let ownedIdentity = fileIdentity(normalized);
+	let identityHandle = ownedIdentity ? acquirePathSessionLock(identityLockTarget(ownedIdentity), options) : undefined;
+	const supersededIdentityHandles = new Set<PathSessionLockHandle>();
+	let pathHandle: PathSessionLockHandle;
 	try {
 		pathHandle = acquirePathSessionLock(normalized, options);
 	} catch (error) {
@@ -885,13 +913,45 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		}
 		throw error;
 	}
-	if (!identityHandle) return pathHandle;
-
 	return {
 		record: pathHandle.record,
 		lockPath: pathHandle.lockPath,
+		get fileIdentity() {
+			return ownedIdentity;
+		},
+		prepareFileIdentity(filePath: string): SessionFileIdentityClaim {
+			const nextIdentity = fileIdentity(filePath);
+			if (!nextIdentity) throw new Error(`Cannot claim missing session file identity: ${filePath}`);
+			if (ownedIdentity && nextIdentity.dev === ownedIdentity.dev && nextIdentity.ino === ownedIdentity.ino) {
+				return { identity: nextIdentity, commit() {}, rollback() {} };
+			}
+			const nextHandle = acquirePathSessionLock(identityLockTarget(nextIdentity), options);
+			let settled = false;
+			return {
+				identity: nextIdentity,
+				commit(): void {
+					if (settled) return;
+					settled = true;
+					const previous = identityHandle;
+					identityHandle = nextHandle;
+					ownedIdentity = nextIdentity;
+					if (previous) {
+						try {
+							previous.release();
+						} catch {
+							supersededIdentityHandles.add(previous);
+						}
+					}
+				},
+				rollback(): void {
+					if (settled) return;
+					settled = true;
+					nextHandle.release();
+				},
+			};
+		},
 		heartbeat(): void {
-			identityHandle.heartbeat();
+			identityHandle?.heartbeat();
 			pathHandle.heartbeat();
 		},
 		release(): void {
@@ -902,7 +962,11 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 				pathError = error;
 			}
 			try {
-				identityHandle.release();
+				identityHandle?.release();
+				for (const handle of supersededIdentityHandles) {
+					handle.release();
+					supersededIdentityHandles.delete(handle);
+				}
 			} catch (identityError) {
 				if (pathError) {
 					throw new AggregateError([pathError, identityError], "Failed to release session locks");
@@ -912,7 +976,11 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 			if (pathError) throw pathError;
 		},
 		get released() {
-			return pathHandle.released && identityHandle.released;
+			return (
+				pathHandle.released &&
+				(identityHandle?.released ?? true) &&
+				Array.from(supersededIdentityHandles).every(handle => handle.released)
+			);
 		},
 	};
 }
