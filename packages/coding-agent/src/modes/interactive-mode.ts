@@ -1604,4 +1604,3361 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (!submission.customType) {
 			this.editor.pendingImages = submission.images ? [...submission.images] : [];
-			this.editor.pendingImageLinks = submissio
+			this.editor.pendingImageLinks = submission.imageLinks ? [...submission.imageLinks] : [];
+			this.editor.imageLinks = this.editor.pendingImageLinks;
+			this.rebuildChatFromMessages();
+			this.editor.setText(submission.text);
+		}
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
+		return true;
+	}
+
+	markPendingSubmissionStarted(input: SubmittedUserInput): boolean {
+		if (this.#pendingSubmittedInput !== input || input.cancelled) {
+			return false;
+		}
+		input.started = true;
+		const annotationStateKey = this.#planReviewAnnotationStateBySubmission.get(input);
+		if (annotationStateKey) {
+			this.#planReviewAnnotationStateBySubmission.delete(input);
+			this.#planReviewAnnotationState.delete(annotationStateKey);
+		}
+		return true;
+	}
+
+	finishPendingSubmission(input: SubmittedUserInput): void {
+		const wasPendingSubmission = this.#pendingSubmittedInput === input;
+		const pendingSubmissionDispose = this.#pendingSubmissionDispose;
+		if (wasPendingSubmission) {
+			this.#pendingSubmittedInput = undefined;
+			this.#pendingSubmissionDispose = undefined;
+		}
+		if (input.customType === "goal-continuation") {
+			this.#goalContinuationTurnInFlight = false;
+		}
+
+		if (wasPendingSubmission && !this.session.isStreaming && !this.streamingComponent) {
+			this.optimisticUserMessageSignature = undefined;
+			pendingSubmissionDispose?.();
+			this.#optimisticUserMessageComponents = [];
+			this.#pendingWorkingMessage = undefined;
+			if (this.loadingAnimation) {
+				this.#stopLoadingAnimation(true);
+			}
+		}
+	}
+
+	#computeEditorMaxHeight(): number {
+		return computeEditorMaxHeight(this.ui.terminal.rows);
+	}
+
+	#syncEditorMaxHeight(): void {
+		this.editor.setMaxHeight(this.#computeEditorMaxHeight());
+	}
+
+	#syncStatusLineSettings(): void {
+		this.statusLine.updateSettings({
+			preset: settings.get("statusLine.preset"),
+			leftSegments: settings.get("statusLine.leftSegments"),
+			rightSegments: settings.get("statusLine.rightSegments"),
+			separator: settings.get("statusLine.separator"),
+			showHookStatus: settings.get("statusLine.showHookStatus"),
+			sessionAccent: settings.get("statusLine.sessionAccent"),
+			transparent: settings.get("statusLine.transparent"),
+			segmentOptions: settings.get("statusLine.segmentOptions"),
+			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+		});
+	}
+
+	#handleSessionAccentInputsChanged(): void {
+		this.#clearWorkingMessageAccentCache();
+		this.statusLine.invalidate();
+		this.updateEditorBorderColor();
+	}
+
+	updateEditorBorderColor(): void {
+		if (this.isBashMode) {
+			this.editor.borderColor = theme.getBashModeBorderColor();
+		} else if (this.isPythonMode) {
+			this.editor.borderColor = theme.getPythonModeBorderColor();
+		} else {
+			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
+			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
+			const hex = sessionName
+				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+				: undefined;
+			const ansi = getSessionAccentAnsi(hex);
+			if (ansi) {
+				this.editor.borderColor = (str: string) => `${ansi}${str}\x1b[39m`;
+			} else {
+				const level = this.session.thinkingLevel ?? ThinkingLevel.Off;
+				this.editor.borderColor = theme.getThinkingBorderColor(level);
+			}
+		}
+		if (this.focusedAgentId) {
+			// Focused subagent view: faint the outline so the borrowed session is
+			// visually distinct from the main one.
+			const base = this.editor.borderColor;
+			this.editor.borderColor = (str: string) => `\x1b[2m${base(str)}\x1b[22m`;
+		}
+		this.ui.requestRender();
+	}
+
+	/** Refresh the running-subagents status badge from the active local or collab registry. */
+	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
+		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+		if (this.#agentRegistrySubscriptionTarget !== registry) {
+			this.#agentRegistryUnsubscribe?.();
+			this.#agentRegistrySubscriptionTarget = registry;
+			this.#agentRegistryUnsubscribe = registry.onChange(() => {
+				this.syncRunningSubagentBadge();
+			});
+		}
+		const count = countRunningSubagentBadgeAgents(registry);
+		this.statusLine.setSubagentCount(count);
+		if (options.requestRender !== false) this.ui.requestRender();
+	}
+
+	rebuildChatFromMessages(options: { reuseSettledComponents?: boolean } = {}): void {
+		// Mid-stream rebuilds (e.g. `/shake`, theme/setting changes that touch the
+		// transcript) replay only committed `state.messages`. The agent's in-flight
+		// `streamMessage` and its still-pending tool calls live OUTSIDE
+		// `state.messages` until `message_end`, so a plain clear+replay detaches
+		// their UI components while keeping the `streamingComponent` / `pendingTools`
+		// references — subsequent `message_update`/`message_end` events would then
+		// update orphaned components that never re-render and the live LLM output
+		// vanishes from the chat (#3656). Snapshot the in-flight components,
+		// clear+replay, then re-append them in their original chat-container order
+		// and restore the `pendingTools` map so streaming routes back into them.
+		const liveComponents: Component[] = [];
+		const livePendingTools = new Map<string, ToolExecutionHandle>();
+		if (this.viewSession?.isStreaming) {
+			const liveSet = new Set<Component>();
+			if (this.streamingComponent) liveSet.add(this.streamingComponent);
+			for (const [id, component] of this.pendingTools) {
+				livePendingTools.set(id, component);
+				liveSet.add(component as unknown as Component);
+			}
+			if (liveSet.size > 0) {
+				for (const child of this.chatContainer.children) {
+					if (liveSet.has(child)) liveComponents.push(child);
+				}
+			}
+		}
+		this.chatContainer.clear();
+		// Live display collapses to the compacted transcript tail unless the
+		// user opted into the full inline history; export/resume callers choose
+		// their own mode.
+		const context = this.viewSession.buildTranscriptSessionContext({
+			collapseCompactedHistory: settings.get("display.collapseCompacted"),
+		});
+		const preservedLiveToolCallIds = new Set<string>();
+		// A preserved pending-tool component whose result has already landed in
+		// the replayed transcript is re-rendered by `renderSessionContext` itself
+		// (the toolResult message reconstructs the block with its output). Keeping
+		// it in the live set too re-appends a second identical block below the
+		// replayed one — the tool call renders twice (#6516). The preservation
+		// above assumes every pending-tool component is still dangling (its result
+		// lives outside `state.messages`), which stops holding the instant the
+		// result is persisted while the component lingers in `pendingTools` (a
+		// rebuild racing tool-completion, a background/displaceable snapshot).
+		// Drop the already-resolved ones and let the replay own them; only
+		// genuinely in-flight (dangling, replay-stripped) calls still need
+		// preserving.
+		for (const message of context.messages) {
+			if (message.role !== "toolResult") continue;
+			const resolved = livePendingTools.get(message.toolCallId);
+			if (!resolved) continue;
+			// A background task's initial `async.state === "running"` result is
+			// persisted while `EventController#handleToolExecutionEnd` deliberately
+			// keeps its component in `pendingTools` so a later
+			// `tool_execution_update`/`_end` settles it. Such a handle is still
+			// live — dropping it would strand those updates on the running snapshot
+			// — so keep it and let the live component retain ownership; only
+			// terminal results are owned by the replay. (Cast mirrors the async
+			// detail reads in tool-execution.ts / event-controller.ts.)
+			const details = message.details as { async?: { state?: string } } | undefined;
+			if (details?.async?.state === "running") {
+				preservedLiveToolCallIds.add(message.toolCallId);
+				continue;
+			}
+			livePendingTools.delete(message.toolCallId);
+			// A `ReadToolGroupComponent` is shared by every read id it renders
+			// (ui-helpers sets the same group for each collapsed read call). While a
+			// sibling read id still points at it the component must stay on screen
+			// and preserved — splicing it here would detach the pending read's
+			// display and strand its future result on an off-screen component.
+			// Splice only once no remaining pending id shares it.
+			let stillShared = false;
+			for (const other of livePendingTools.values()) {
+				if (other === resolved) {
+					stillShared = true;
+					break;
+				}
+			}
+			if (stillShared) {
+				// The shared component still owns this completed member as well as
+				// its pending sibling. Suppress the replay copy so the group remains
+				// a single on-screen block while future results keep routing to it.
+				preservedLiveToolCallIds.add(message.toolCallId);
+				continue;
+			}
+			const index = liveComponents.indexOf(resolved as unknown as Component);
+			if (index >= 0) liveComponents.splice(index, 1);
+		}
+		// Prune the settled-component cache to the messages this rebuild will
+		// actually render. Message objects stay strongly reachable through
+		// session entries for the whole session, so entries for compacted-away
+		// history would otherwise pin their components' rendered layout caches
+		// forever — exactly the memory a collapsed compaction used to release.
+		const retained = new WeakMap<AgentMessage, Component>();
+		for (const message of context.messages) {
+			const component = this.transcriptMessageComponents.get(message);
+			if (component) retained.set(message, component);
+		}
+		this.transcriptMessageComponents = retained;
+		this.renderSessionContext(context, {
+			reuseSettledComponents: options.reuseSettledComponents,
+			preservedLiveToolCallIds,
+		});
+		for (const child of liveComponents) {
+			this.chatContainer.addChild(child);
+		}
+		// `renderSessionContext` clears `pendingTools` at start AND end so the
+		// reconstructed historical tool components don't leak into live tracking.
+		// Restore the in-flight entries afterwards so the next streamed tool-call
+		// delta is routed into the preserved component instead of stacking a
+		// duplicate ToolExecutionComponent below it.
+		for (const [id, component] of livePendingTools) {
+			this.pendingTools.set(id, component);
+		}
+		// During the pre-streaming window — after `startPendingSubmission` has
+		// optimistically rendered the user's message but before the user
+		// `message_start` event lands it in `session` entries — any rebuild
+		// (e.g. Ctrl+T toggleThinkingBlockVisibility, theme selector) would
+		// otherwise erase the user's just-submitted message until the first
+		// assistant token arrived (#2372). Once `message_start` fires the
+		// signature is cleared by `EventController`, so this replay is a no-op
+		// post-streaming and cannot duplicate.
+		this.#replayOptimisticUserMessage();
+	}
+
+	#replayOptimisticUserMessage(): void {
+		if (!this.optimisticUserMessageSignature) return;
+		const submission = this.#pendingSubmittedInput;
+		if (!submission || submission.cancelled || submission.customType) return;
+		this.#optimisticUserMessageComponents = this.#captureAddedChatComponents(() => {
+			this.addMessageToChat(
+				{
+					role: "user",
+					content: [{ type: "text", text: submission.text }, ...(submission.images ?? [])],
+					attribution: "user",
+					timestamp: Date.now(),
+				},
+				{ imageLinks: submission.imageLinks },
+			);
+		});
+	}
+
+	#formatTodoLine(todo: TodoItem, prefix: string, matched: boolean): string {
+		const checkbox = theme.checkbox;
+		const marker = formatHudNoteMarker(todo.notes?.length ?? 0);
+		switch (todo.status) {
+			case "completed":
+				return theme.fg("success", `${prefix}${checkbox.checked} ${chalk.strikethrough(todo.content)}`) + marker;
+			case "in_progress":
+				return theme.fg("accent", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
+			case "abandoned":
+				return theme.fg("error", `${prefix}${checkbox.unchecked} ${chalk.strikethrough(todo.content)}`) + marker;
+			case "blocked":
+				return theme.fg("warning", `${prefix}${checkbox.unchecked} ${todo.content} (blocked)`) + marker;
+			default:
+				if (matched) return theme.fg("accent", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
+				return theme.fg("dim", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
+		}
+	}
+
+	#getActiveSubagentDescriptions(): string[] {
+		const out: string[] = [];
+		for (const session of this.#observerRegistry.getSessions()) {
+			if (session.kind !== "subagent") continue;
+			if (session.status !== "active") continue;
+			const candidate =
+				session.description?.trim() || session.progress?.description?.trim() || session.label?.trim();
+			if (candidate) out.push(candidate);
+		}
+		return out;
+	}
+
+	/**
+	 * Auto-complete any open todo (pending/in_progress/blocked) whose content
+	 * matches a subagent that has finished successfully. Fires on every observer
+	 * `onChange` so the visual state stays in sync with subagent lifecycle
+	 * without requiring the agent to issue a follow-up `todo`. A todo `block`ed
+	 * while waiting on a detached subagent is included: that subagent completing
+	 * is exactly the unblock signal, and blocked todos are excluded from the stop
+	 * reminder, so leaving it blocked would strand it silently. Failed and aborted
+	 * subagents are intentionally NOT auto-completed — those stay open so the user
+	 * (or the next agent turn) can decide what to do.
+	 *
+	 * Idempotent: only flips open tasks, never re-touches completed ones.
+	 */
+	#reconcileTodosWithSubagents(): void {
+		const completedDescs: string[] = [];
+		for (const session of this.#observerRegistry.getSessions()) {
+			if (session.kind !== "subagent") continue;
+			if (session.status !== "completed") continue;
+			const candidate =
+				session.description?.trim() || session.progress?.description?.trim() || session.label?.trim();
+			if (candidate) completedDescs.push(candidate);
+		}
+		if (completedDescs.length === 0) return;
+
+		let mutated = false;
+		const next: TodoPhase[] = this.todoPhases.map(phase => ({
+			name: phase.name,
+			tasks: phase.tasks.map(task => {
+				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
+					return task;
+				}
+				if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
+				mutated = true;
+				// Drop any blocker note along with the blocked status — the wait the
+				// note described is over.
+				return { content: task.content, status: "completed" as const };
+			}),
+		}));
+		if (!mutated) return;
+		this.session.setTodoPhases(next);
+		this.setTodos(next);
+	}
+
+	#cancelTodoAutoClearTimer(): void {
+		if (!this.#todoAutoClearTimer) return;
+		clearTimeout(this.#todoAutoClearTimer);
+		this.#todoAutoClearTimer = undefined;
+	}
+
+	#isClosedTodo(task: TodoItem): boolean {
+		return task.status === "completed" || task.status === "abandoned";
+	}
+
+	#hasClosedTodos(phases: TodoPhase[]): boolean {
+		return phases.some(phase => phase.tasks.some(task => this.#isClosedTodo(task)));
+	}
+
+	#removeClosedTodos(phases: TodoPhase[]): TodoPhase[] {
+		const next: TodoPhase[] = [];
+		for (const phase of phases) {
+			const tasks = phase.tasks.filter(task => !this.#isClosedTodo(task));
+			if (tasks.length > 0) next.push({ name: phase.name, tasks });
+		}
+		return next;
+	}
+
+	#syncTodoAutoClearTimer(): void {
+		this.#cancelTodoAutoClearTimer();
+		const delaySeconds = this.settings.get("tasks.todoClearDelay");
+		if (!Number.isFinite(delaySeconds) || delaySeconds < 0 || !this.#hasClosedTodos(this.todoPhases)) return;
+		if (delaySeconds === 0) {
+			this.todoPhases = this.#removeClosedTodos(this.todoPhases);
+			return;
+		}
+
+		this.#todoAutoClearTimer = setTimeout(() => {
+			this.#todoAutoClearTimer = undefined;
+			this.todoPhases = this.#removeClosedTodos(this.todoPhases);
+			this.#renderTodoList();
+			this.ui.requestRender();
+		}, delaySeconds * 1000);
+		this.#todoAutoClearTimer.unref?.();
+	}
+
+	/**
+	 * Render the ctrl+p model-role cycle chip track into its own anchored
+	 * container (just above the editor), mirroring the todo HUD: the container is
+	 * cleared and rebuilt in place on every cycle, so rapid presses or concurrent
+	 * chat activity can never stack duplicate tracks into the scrollback.
+	 */
+	showModelCycleTrack(track: string): void {
+		this.#renderModelCycleTrack(track);
+		this.#syncModelCycleClearTimer();
+		this.ui.requestRender();
+	}
+
+	#renderModelCycleTrack(track: string | null): void {
+		this.modelCycleContainer.clear();
+		if (!track) return;
+		this.modelCycleContainer.addChild(new Spacer(1));
+		this.modelCycleContainer.addChild(new Text(track, 1, 0));
+	}
+
+	#cancelModelCycleClearTimer(): void {
+		if (!this.#modelCycleClearTimer) return;
+		clearTimeout(this.#modelCycleClearTimer);
+		this.#modelCycleClearTimer = undefined;
+	}
+
+	#syncModelCycleClearTimer(): void {
+		this.#cancelModelCycleClearTimer();
+		this.#modelCycleClearTimer = setTimeout(() => {
+			this.#modelCycleClearTimer = undefined;
+			this.#renderModelCycleTrack(null);
+			this.ui.requestRender();
+		}, MODEL_CYCLE_TRACK_CLEAR_MS);
+		this.#modelCycleClearTimer.unref?.();
+	}
+
+	#getActivePhase(phases: TodoPhase[]): TodoPhase | undefined {
+		const nonEmpty = phases.filter(phase => phase.tasks.length > 0);
+		const active = nonEmpty.find(phase =>
+			phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
+		);
+		return active ?? nonEmpty[nonEmpty.length - 1];
+	}
+
+	#scheduleObserverUiSync(kind: SessionObserverChangeKind): void {
+		if (kind !== "progress") {
+			this.#observerUiSyncNeedsTodoReconcile = true;
+		}
+		if (this.#observerUiSyncTimer) return;
+		this.#observerUiSyncTimer = setTimeout(() => {
+			this.#observerUiSyncTimer = undefined;
+			this.#flushObserverUiSync();
+		}, SUBAGENT_OBSERVER_UI_COALESCE_MS);
+		this.#observerUiSyncTimer.unref?.();
+	}
+
+	#flushObserverUiSync(): void {
+		this.syncRunningSubagentBadge({ requestRender: false });
+		if (this.#observerUiSyncNeedsTodoReconcile) {
+			this.#observerUiSyncNeedsTodoReconcile = false;
+			this.#reconcileTodosWithSubagents();
+		}
+		this.#syncTodoAutoClearTimer();
+		this.#renderTodoList();
+		this.#renderSubagentList();
+		this.ui.requestRender();
+	}
+
+	#cancelObserverUiSyncTimer(): void {
+		if (this.#observerUiSyncTimer) {
+			clearTimeout(this.#observerUiSyncTimer);
+			this.#observerUiSyncTimer = undefined;
+		}
+		this.#observerUiSyncNeedsTodoReconcile = false;
+	}
+
+	#renderTodoList(): void {
+		this.todoContainer.clear();
+		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
+		if (phases.length === 0) return;
+		const expanded = this.todoExpanded;
+		const multiPhase = phases.length > 1;
+		const activeIdx = phases.indexOf(this.#getActivePhase(phases) ?? phases[0]);
+		// Fixed budgets keep the HUD bounded regardless of plan size / progress.
+		const subsequentStageCap = 4; // stages shown after the active one (header count implies the rest)
+		const activeTaskCap = 5; // open tasks previewed for the active stage
+
+		const activeDescs = this.#getActiveSubagentDescriptions();
+		// A pending todo "lights up" (accent) when an in-flight subagent is doing
+		// its work, matched by normalized content overlap.
+		const isMatched = (todo: TodoItem): boolean =>
+			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
+
+		// Task subtree for a phase. Collapsed runs the shared walking-viewport
+		// policy (completed/abandoned omitted, active work pulled to the head,
+		// then following pending tasks) so the HUD and the transient tool result
+		// can never disagree about the current work (#5873). Expanded lists all.
+		const renderTasks = (phase: TodoPhase): string[] => {
+			if (expanded) {
+				return renderTreeList(
+					{
+						items: phase.tasks,
+						expanded: true,
+						renderItem: todo => this.#formatTodoLine(todo, "", isMatched(todo)),
+					},
+					theme,
+				);
+			}
+			const selection = selectCollapsedTodos(phase.tasks, isMatched, activeTaskCap);
+			return renderTreeList(
+				{
+					items: selection.items,
+					itemType: "task",
+					trailingSummary: selection.summary,
+					renderItem: todo => this.#formatTodoLine(todo, "", isMatched(todo)),
+				},
+				theme,
+			);
+		};
+
+		// One phase node. The active stage is highlighted with normal-brightness task
+		// progress; other stages render their whole row (name + progress) in the
+		// brighter muted gray. The root header carries overall stage progression.
+		const renderPhase = (phase: TodoPhase, oneBased: number, isActive: boolean): string | string[] => {
+			const label = multiPhase ? formatPhaseDisplayName(phase.name, oneBased) : phase.name;
+			const done = phase.tasks.filter(t => t.status === "completed").length;
+			const progress = ` · ${done}/${phase.tasks.length}`;
+			if (!isActive) {
+				const header = theme.fg("muted", label) + theme.fg("dim", progress);
+				return expanded ? [header, ...renderTasks(phase)] : header;
+			}
+			const header = theme.bold(theme.fg("accent", label)) + theme.fg("dim", progress);
+			return [header, ...renderTasks(phase)];
+		};
+
+		// Collapsed: active stage + a bounded number of following stages (the
+		// header's "n/total" count implies any not shown). Expanded: every stage
+		// from the top. Roman numerals stay tied to the real phase index.
+		const baseIdx = expanded ? 0 : activeIdx;
+		const phaseSlice = expanded ? phases.slice(baseIdx) : phases.slice(baseIdx, baseIdx + 1 + subsequentStageCap);
+		const phaseTreeLines = renderTreeList(
+			{
+				items: phaseSlice,
+				expanded: true,
+				renderItem: (phase, ctx) => renderPhase(phase, baseIdx + ctx.index + 1, baseIdx + ctx.index === activeIdx),
+			},
+			theme,
+		);
+
+		// Header carries overall stage progression, e.g. "Todos · 1/8".
+		const root =
+			theme.bold(theme.fg("accent", "Todos")) +
+			(multiPhase ? theme.fg("dim", ` · ${activeIdx + 1}/${phases.length}`) : "");
+		const lines = ["", root, ...phaseTreeLines.map(line => ` ${line}`)];
+		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
+	}
+
+	/**
+	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
+	 * editor. Driven entirely by observer-registry change events, so rows appear
+	 * on spawn and the whole block clears itself once the last subagent leaves
+	 * the "active" state.
+	 */
+	#renderSubagentList(): void {
+		this.subagentContainer.clear();
+		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
+		if (lines.length === 0) return;
+		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
+	}
+
+	async #loadTodoList(): Promise<void> {
+		this.todoPhases = this.session.getTodoPhases();
+		this.#syncTodoAutoClearTimer();
+		this.#renderTodoList();
+	}
+
+	async #getPlanFilePath(): Promise<string> {
+		return this.session.getPlanReferencePath() || "local://PLAN.md";
+	}
+
+	#resolvePlanFilePath(planFilePath: string): string {
+		if (planFilePath.startsWith("local:")) {
+			const normalized = normalizeLocalScheme(planFilePath);
+			return resolveLocalUrlToPath(normalized, {
+				getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+				getSessionId: () => this.sessionManager.getSessionId(),
+			});
+		}
+		return path.resolve(this.sessionManager.getCwd(), planFilePath);
+	}
+
+	#updatePlanModeStatus(): void {
+		const status =
+			this.planModeEnabled || this.planModePaused
+				? {
+						enabled: this.planModeEnabled,
+						paused: this.planModePaused,
+					}
+				: undefined;
+		this.statusLine.setPlanModeStatus(status);
+		this.ui.requestRender();
+	}
+
+	#updateVibeModeStatus(): void {
+		this.statusLine.setVibeModeStatus(this.vibeModeEnabled ? { enabled: true } : undefined);
+		this.ui.requestRender();
+	}
+
+	#vibeParentSession(): VibeParentSession {
+		return {
+			getAgentId: () => this.session.getAgentId() ?? null,
+			getSessionId: () => this.sessionManager.getSessionId(),
+			getSessionFile: () => this.sessionManager.getSessionFile() ?? null,
+			sessionManager: this.sessionManager,
+			asyncJobManager: this.session.asyncJobManager,
+			settings: this.session.settings,
+			// Resolve restored/switched-to workers against this session's active model
+			// (same as the spawn-path ToolSession), not the settings default. This is
+			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's
+			// pi/task inheritance tracks the reopened session's model.
+			getActiveModelString: () => (this.session.model ? formatModelString(this.session.model) : undefined),
+		};
+	}
+
+	async #quiesceVibeForSessionSwitch(): Promise<void> {
+		const ownerScope = this.#vibeModeOwnerScope;
+		if (!this.vibeModeEnabled || !ownerScope) return;
+		await VibeSessionRegistry.global().suspendScope(ownerScope, this.session.asyncJobManager);
+		this.#vibeScopeSuspendedForSwitch = true;
+	}
+
+	#updateGoalModeStatus(): void {
+		const status =
+			this.goalModeEnabled || this.goalModePaused
+				? { enabled: this.goalModeEnabled, paused: this.goalModePaused }
+				: undefined;
+		this.statusLine.setGoalModeStatus(status);
+		this.ui.requestRender();
+	}
+
+	#resetGoalContinuationSuppression(): void {
+		this.#goalSuppressNextContinuation = false;
+	}
+
+	#getPausedGoalState(): GoalModeState | undefined {
+		const state = this.session.getGoalModeState();
+		if (!state?.goal || state.enabled || state.goal.status !== "paused") {
+			return undefined;
+		}
+		return state;
+	}
+
+	#goalFromModeData(modeData: SessionContext["modeData"]): Goal | undefined {
+		const goal = modeData?.goal;
+		if (!goal || typeof goal !== "object") return undefined;
+		const value = goal as Record<string, unknown>;
+		if (
+			typeof value.id !== "string" ||
+			typeof value.objective !== "string" ||
+			typeof value.status !== "string" ||
+			typeof value.tokensUsed !== "number" ||
+			typeof value.timeUsedSeconds !== "number" ||
+			typeof value.createdAt !== "number" ||
+			typeof value.updatedAt !== "number"
+		) {
+			return undefined;
+		}
+		return {
+			id: value.id,
+			objective: value.objective,
+			status: value.status as Goal["status"],
+			tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
+			tokensUsed: value.tokensUsed,
+			timeUsedSeconds: value.timeUsedSeconds,
+			createdAt: value.createdAt,
+			updatedAt: value.updatedAt,
+		};
+	}
+
+	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
+		if (event.type === "agent_start") {
+			this.#goalTurnHadToolCalls = false;
+			this.#cancelGoalContinuation();
+			return;
+		}
+		if (event.type === "tool_execution_start") {
+			this.#goalTurnHadToolCalls = true;
+			if (!this.#goalContinuationTurnInFlight) {
+				this.#resetGoalContinuationSuppression();
+			}
+			return;
+		}
+		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
+			this.#resetGoalContinuationSuppression();
+			return;
+		}
+		if (event.type === "goal_updated") {
+			// Handle drop before clearing goalModeEnabled so #exitGoalMode can
+			// still restore the previous tool set while the flag is true.
+			if (event.state?.goal?.status === "dropped") {
+				await this.#exitGoalMode({ reason: "dropped", silent: true });
+				return;
+			}
+			this.goalModeEnabled = event.state?.enabled === true;
+			this.goalModePaused = event.state?.enabled !== true && event.state?.goal?.status === "paused";
+			if (!event.state?.enabled) {
+				this.#cancelGoalContinuation();
+			}
+			this.#updateGoalModeStatus();
+			return;
+		}
+		if (event.type !== "agent_end") {
+			return;
+		}
+		if (this.#goalContinuationTurnInFlight) {
+			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
+			this.#goalContinuationTurnInFlight = false;
+		}
+		if (this.session.getGoalModeState()?.mode === "exiting") {
+			await this.#exitGoalMode({ reason: "completed", silent: true });
+			return;
+		}
+		this.#scheduleGoalContinuation();
+	}
+
+	async #applyPlanModeModel(): Promise<void> {
+		const resolved = this.session.resolveRoleModelWithThinking("plan");
+		if (!resolved.model) return;
+
+		const currentModel = this.session.model;
+		// Capture the pre-plan model so #exitPlanMode can restore it. Only the
+		// entry path records this — a mid-planning role change (below) leaves the
+		// active model on the plan role, so overwriting here would restore the old
+		// plan model instead of the user's real pre-plan model.
+		this.#planModePreviousModelState = currentModel
+			? { model: currentModel, thinkingLevel: this.session.configuredThinkingLevel() }
+			: undefined;
+
+		await this.#applyPlanModelTransition(currentModel, resolved);
+	}
+
+	/**
+	 * Re-resolve the `plan` role and move the active model onto it. Fires when
+	 * the plan role is reassigned while plan mode is active: the active model IS
+	 * the plan model there, so a settings-only change would otherwise leave the
+	 * current turn on the model plan mode was entered with (issue #5657). No-op
+	 * outside plan mode — role reassignment for an inactive role only touches
+	 * settings.
+	 */
+	async #reapplyPlanModeModelOnRoleChange(): Promise<void> {
+		if (!this.planModeEnabled) return;
+		const resolved = this.session.resolveRoleModelWithThinking("plan");
+		if (!resolved.model) {
+			this.#clearPendingPlanModelSwitch();
+			return;
+		}
+		await this.#applyPlanModelTransition(this.session.model, resolved);
+	}
+
+	/**
+	 * Drop a stale deferred switch that was queued for a previous plan-role
+	 * assignment. Other deferred switches (such as restoring the pre-plan
+	 * model) remain intact.
+	 */
+	#clearPendingPlanModelSwitch(): void {
+		if (!this.#pendingPlanModelSwitch) return;
+		this.#pendingModelSwitch = undefined;
+		this.#pendingPlanModelSwitch = false;
+	}
+
+	/** Apply (or defer) the model/thinking change implied by the resolved plan role. */
+	async #applyPlanModelTransition(currentModel: Model | undefined, resolved: ResolvedModelRoleValue): Promise<void> {
+		const transition = resolvePlanModelTransition(currentModel, resolved, this.session.isStreaming);
+		if (transition.kind !== "apply" || !transition.deferred) {
+			this.#clearPendingPlanModelSwitch();
+		}
+		switch (transition.kind) {
+			case "none":
+				return;
+			case "thinking":
+				this.session.setThinkingLevel(transition.thinkingLevel);
+				return;
+			case "apply":
+				if (transition.deferred) {
+					this.#pendingModelSwitch = { model: transition.model, thinkingLevel: transition.thinkingLevel };
+					this.#pendingPlanModelSwitch = true;
+					return;
+				}
+				try {
+					await this.session.setModelTemporary(transition.model, transition.thinkingLevel);
+				} catch (error) {
+					this.showWarning(
+						`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				return;
+		}
+	}
+
+	/** Apply any deferred model switch after the current stream ends. */
+	async flushPendingModelSwitch(): Promise<void> {
+		const pending = this.#pendingModelSwitch;
+		this.#pendingModelSwitch = undefined;
+		this.#pendingPlanModelSwitch = false;
+		if (!pending) return;
+		try {
+			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
+		} catch (error) {
+			this.showWarning(
+				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	async #clearTransientModeState(options?: {
+		preserveVibe?: boolean;
+		vibeScopeAlreadySuspended?: boolean;
+	}): Promise<void> {
+		if (this.planModeEnabled || this.planModePaused) {
+			this.session.setPlanModeState(undefined);
+			try {
+				if (this.#planModePreviousTools !== undefined) {
+					await this.session.setActiveToolsByName(this.#planModePreviousTools);
+				}
+			} finally {
+				this.session.setPlanProposalHandler?.(null);
+				this.planModeEnabled = false;
+				this.planModePaused = false;
+				this.planModePlanFilePath = undefined;
+				this.#planModePreviousTools = undefined;
+				this.#planModePreviousModelState = undefined;
+				this.#pendingModelSwitch = undefined;
+				this.#pendingPlanModelSwitch = false;
+				this.#planModeHasEntered = false;
+				this.#updatePlanModeStatus();
+			}
+		}
+
+		if (this.goalModeEnabled || this.goalModePaused) {
+			if (this.#goalModePreviousTools !== undefined) {
+				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
+			}
+			this.session.setGoalModeState(undefined);
+			this.goalModeEnabled = false;
+			this.goalModePaused = false;
+			this.#goalModePreviousTools = undefined;
+			this.#goalTurnHadToolCalls = false;
+			this.#goalContinuationTurnInFlight = false;
+			this.#goalSuppressNextContinuation = false;
+			this.#cancelGoalContinuation();
+			this.#updateGoalModeStatus();
+		}
+
+		if (this.vibeModeEnabled && !options?.preserveVibe) {
+			const ownerScope = this.#vibeModeOwnerScope;
+			// This runs only from #reconcileModeFromSession, i.e. after switchSession
+			// already loaded and restored the target session's active tools. The
+			// #vibeModePreviousTools snapshot belongs to the SOURCE session, so
+			// applying it here would clobber the target's tools — strip only the
+			// transient vibe tools and keep the target's active set intact.
+			await this.session.removeVibeToolsPreservingActive();
+			this.session.setVibeModeState(undefined);
+			this.vibeModeEnabled = false;
+			this.#vibeModePreviousTools = undefined;
+			this.#vibeModeOwnerScope = undefined;
+			if (ownerScope && !options?.vibeScopeAlreadySuspended) {
+				await VibeSessionRegistry.global().suspendScope(ownerScope, this.session.asyncJobManager);
+			}
+			this.#updateVibeModeStatus();
+		}
+	}
+
+	/** Reconcile mode state from session entries on resume/switch. */
+	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
+		this.#vibeScopeSuspendedForSwitch = false;
+		const sessionContext = this.sessionManager.buildSessionContext();
+		const vibeSession = this.#vibeParentSession();
+		const targetVibeScope = VibeSessionRegistry.global().ownerScope(vibeSession);
+		const preserveVibe =
+			this.vibeModeEnabled &&
+			sessionContext.mode === "vibe" &&
+			this.#vibeModeOwnerScope?.ownerId === targetVibeScope.ownerId &&
+			this.#vibeModeOwnerScope.parentSessionId === targetVibeScope.parentSessionId &&
+			this.#vibeModeOwnerScope.parentSessionFile === targetVibeScope.parentSessionFile;
+		await this.#clearTransientModeState({ preserveVibe, vibeScopeAlreadySuspended });
+		await VibeSessionRegistry.global().rehydrate(vibeSession);
+		const goalEnabled = this.session.settings.get("goal.enabled");
+		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
+			this.session.goalRuntime.clearAccounting();
+			this.sessionManager.appendModeChange("none");
+			return;
+		}
+		if (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused") {
+			const goal = this.#goalFromModeData(sessionContext.modeData);
+			if (!goal) {
+				this.sessionManager.appendModeChange("none");
+				return;
+			}
+			this.session.setGoalModeState({
+				enabled: sessionContext.mode === "goal",
+				mode: "active",
+				goal,
+			});
+			const restored = await this.session.goalRuntime.onThreadResumed({
+				preserveActiveGoal: options?.preserveActiveGoal,
+			});
+			this.goalModeEnabled = restored?.enabled === true;
+			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
+			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
+			// Re-add it now so the agent can call resume, complete, or drop on this goal.
+			if (restored?.goal) {
+				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+				this.#goalModePreviousTools = previousTools;
+				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+			}
+			this.#updateGoalModeStatus();
+			return;
+		}
+		this.session.goalRuntime.clearAccounting();
+		if (sessionContext.mode === "vibe") {
+			if (!preserveVibe) await this.#enterVibeMode({ persistModeChange: false });
+			return;
+		}
+		if (!this.session.settings.get("plan.enabled")) {
+			// Clear stale plan/plan_paused mode so re-enabling the setting
+			// later doesn't unexpectedly restore an old plan session.
+			if (sessionContext.mode === "plan" || sessionContext.mode === "plan_paused") {
+				this.sessionManager.appendModeChange("none");
+			}
+			return;
+		}
+		if (sessionContext.mode === "plan") {
+			const planFilePath = sessionContext.modeData?.planFilePath as string | undefined;
+			await this.#enterPlanMode({ planFilePath, preserveRestoredModel: true });
+		} else if (sessionContext.mode === "plan_paused") {
+			this.planModePaused = true;
+			this.#planModeHasEntered = true;
+			this.#updatePlanModeStatus();
+		}
+	}
+
+	async #enterPlanMode(options?: {
+		planFilePath?: string;
+		workflow?: "parallel" | "iterative";
+		preserveRestoredModel?: boolean;
+	}): Promise<void> {
+		if (this.planModeEnabled) {
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
+			return;
+		}
+
+		this.planModePaused = false;
+
+		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
+		const previousTools = this.session.getEnabledToolNames();
+		// `plan-mode-active.md` instructs the agent to draft the plan file with
+		// `write` and refine it with `edit`, and plan approval itself is a `write`
+		// to `xd://propose`. Both must be in the active set or the agent falls
+		// back to `edit` on a non-existent file and stalls — and cannot submit the plan.
+		// `edit` is an essential built-in and always ships top-level; re-activate
+		// `write` here only when the current registry entry is the built-in write
+		// tool (issue #3165). A shadowing extension tool named `write` must stay
+		// inactive because plan mode's read-only guarantee relies on the built-in
+		// write/edit guard. The standing handler below consumes plan-approval
+		// dispatches.
+		const planAugmentations: string[] = [];
+		if (this.session.hasBuiltInTool("write")) {
+			planAugmentations.push("write");
+		}
+		const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
+
+		this.#planModePreviousTools = previousTools;
+		this.planModePlanFilePath = planFilePath;
+		this.planModeEnabled = true;
+		// Suppress cache-miss marker on the next turn: plan mode changes the system
+		// prompt, which predictably invalidates the cache.
+		this.lastAssistantUsage = undefined;
+
+		await this.session.setActiveToolsByName(uniquePlanTools);
+		this.session.setPlanModeState({
+			enabled: true,
+			planFilePath,
+			workflow: options?.workflow ?? "parallel",
+			reentry: this.#planModeHasEntered,
+		});
+		this.session.setPlanProposalHandler?.(title => this.session.preparePlanForReview(title));
+		if (this.session.isStreaming) {
+			await this.session.sendPlanModeContext({ deliverAs: "steer" });
+		}
+		this.#planModeHasEntered = true;
+		// Session loading already restored the model recorded in the journal.
+		// Reapplying today's plan role here would replace a CLI/session-specific
+		// selection with current config during --resume or an in-process switch.
+		if (!options?.preserveRestoredModel) {
+			await this.#applyPlanModeModel();
+		}
+		this.#updatePlanModeStatus();
+		this.sessionManager.appendModeChange("plan", { planFilePath });
+		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
+	}
+
+	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
+		if (modelsAreEqual(this.session.model, prev.model)) {
+			// Same model — only thinking level may differ. Avoid setModelTemporary()
+			// which would reset provider-side sessions and break continuity.
+			this.session.setThinkingLevel(prev.thinkingLevel);
+		} else if (this.session.isStreaming) {
+			this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
+			this.#pendingPlanModelSwitch = false;
+		} else {
+			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
+		}
+	}
+
+	/**
+	 * Idempotent post-compaction model transition for the plan-approval compact
+	 * path. The deferred pre-plan state is consumed on first application, so a
+	 * second call (the before-flush hook vs. the short-circuit fallback) is a
+	 * no-op. "failed" intentionally stays on the plan model — the context is
+	 * intact and we dispatch best-effort.
+	 */
+	async #applyDeferredPlanModelTransition(
+		outcome: CompactionOutcome | undefined,
+		executionModel: ResolvedRoleModel | undefined,
+	): Promise<void> {
+		const deferredPrev = this.#planModePreviousModelState;
+		if (deferredPrev === undefined || outcome === "failed") return;
+		this.#planModePreviousModelState = undefined;
+		if (executionModel) {
+			await this.#applyPlanExecutionModel(executionModel);
+		} else {
+			await this.#restorePlanPreviousModel(deferredPrev);
+		}
+	}
+
+	async #exitPlanMode(options?: { silent?: boolean; paused?: boolean; deferModelRestore?: boolean }): Promise<void> {
+		if (!this.planModeEnabled) {
+			return;
+		}
+
+		const planModeState = this.session.getPlanModeState();
+		const planModeTools = this.session.getEnabledToolNames();
+		const planModeMountedTools = this.session.getMountedXdevToolNames();
+		const planModeModelState = this.session.model
+			? { model: this.session.model, thinkingLevel: this.session.configuredThinkingLevel() }
+			: undefined;
+		this.session.setPlanModeState(undefined);
+		try {
+			if (this.#planModePreviousTools !== undefined) {
+				await this.session.setActiveToolsByName(this.#planModePreviousTools);
+			}
+			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
+				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
+			}
+			// If #applyPlanModeModel queued a deferred switch to the plan-role model
+			// (because the session was streaming on entry), drop it now: we are
+			// leaving plan mode, so flushing it on the next agent_end would land the
+			// session on the plan-role model after the user has exited plan mode
+			// (issue #816). This runs even when deferModelRestore is set
+			// (compact-approval path): otherwise the stale plan switch survives and
+			// flushPendingModelSwitch() later clobbers the restored/execution model.
+			if (this.#planModePreviousModelState) this.#clearPendingPlanModelSwitch();
+		} catch (error) {
+			this.session.setPlanModeState(planModeState);
+			if (
+				planModeModelState &&
+				(!modelsAreEqual(this.session.model, planModeModelState.model) ||
+					this.session.configuredThinkingLevel() !== planModeModelState.thinkingLevel)
+			) {
+				try {
+					await this.#restorePlanPreviousModel(planModeModelState);
+				} catch (rollbackError) {
+					logger.warn("Failed to restore plan model after plan exit failure", { error: String(rollbackError) });
+				}
+			}
+			const enabledTools = this.session.getEnabledToolNames();
+			const mountedTools = this.session.getMountedXdevToolNames();
+			if (
+				enabledTools.length !== planModeTools.length ||
+				enabledTools.some((name, index) => name !== planModeTools[index]) ||
+				mountedTools.length !== planModeMountedTools.length ||
+				mountedTools.some((name, index) => name !== planModeMountedTools[index])
+			) {
+				try {
+					await this.session.setActiveToolPresentation(planModeTools, planModeMountedTools);
+				} catch (rollbackError) {
+					logger.warn("Failed to restore plan tools after plan exit failure", { error: String(rollbackError) });
+				}
+			}
+			throw error;
+		}
+		this.session.setPlanProposalHandler?.(null);
+		this.planModeEnabled = false;
+		// Suppress cache-miss marker on the next turn: plan exit changes the system
+		// prompt, which predictably invalidates the cache.
+		this.lastAssistantUsage = undefined;
+		this.planModePaused = options?.paused ?? false;
+		this.planModePlanFilePath = undefined;
+		this.#planModePreviousTools = undefined;
+		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
+		this.#updatePlanModeStatus();
+		const paused = options?.paused ?? false;
+		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
+		if (!options?.silent) {
+			this.showStatus(paused ? "Plan mode paused." : "Plan mode disabled.");
+		}
+	}
+
+	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
+		if (this.goalModeEnabled) {
+			return;
+		}
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
+			return;
+		}
+		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+		const goalTools = [...new Set([...previousTools, "goal"])];
+		this.#goalModePreviousTools = previousTools;
+		this.goalModePaused = false;
+		const state = options.resume
+			? await this.session.goalRuntime.resumeGoal()
+			: await this.session.goalRuntime.createGoal({ objective: options.objective ?? "" });
+		await this.session.setActiveToolsByName(goalTools);
+		this.session.setGoalModeState(state);
+		this.goalModeEnabled = true;
+		this.#resetGoalContinuationSuppression();
+		this.#updateGoalModeStatus();
+		if (this.session.isStreaming) {
+			await this.session.sendGoalModeContext({ deliverAs: "steer" });
+		}
+		if (!options.silent) {
+			this.showStatus(options.resume ? "Goal mode resumed." : "Goal mode enabled.");
+		}
+	}
+
+	async #exitGoalMode(options?: {
+		silent?: boolean;
+		paused?: boolean;
+		reason?: "completed" | "paused" | "dropped";
+	}): Promise<void> {
+		const previousTools = this.#goalModePreviousTools;
+		if (this.goalModeEnabled && previousTools) {
+			await this.session.setActiveToolsByName(previousTools);
+		}
+		const currentState = this.session.getGoalModeState();
+		if (options?.reason === "completed") {
+			this.session.setGoalModeState(undefined);
+			this.sessionManager.appendModeChange("none");
+			this.sessionManager.appendCustomEntry("goal-completed", {
+				objective: currentState?.goal?.objective,
+				tokensUsed: currentState?.goal?.tokensUsed,
+				tokenBudget: currentState?.goal?.tokenBudget,
+				timeUsedSeconds: currentState?.goal?.timeUsedSeconds,
+			});
+		}
+		this.goalModeEnabled = false;
+		this.goalModePaused = options?.paused ?? false;
+		this.#goalModePreviousTools = undefined;
+		this.#goalContinuationTurnInFlight = false;
+		this.#cancelGoalContinuation();
+		this.#updateGoalModeStatus();
+		if (!options?.silent) {
+			if (options?.reason === "completed") {
+				this.showStatus("Goal mode completed.");
+			} else if (options?.reason === "dropped") {
+				this.showStatus("Goal dropped.");
+			} else if (options?.paused) {
+				this.showStatus("Goal mode paused.");
+			} else {
+				this.showStatus("Goal mode disabled.");
+			}
+		}
+	}
+
+	async #readPlanFile(planFilePath: string): Promise<string | null> {
+		const resolvedPath = this.#resolvePlanFilePath(planFilePath);
+		try {
+			return await Bun.file(resolvedPath).text();
+		} catch (error) {
+			if (isEnoent(error)) {
+				return null;
+			}
+			throw error;
+		}
+	}
+
+	async #hasPlanModeDraftContent(planFilePath: string): Promise<boolean> {
+		const candidates = new Set<string>([planFilePath, ...(await this.#listLocalPlanFiles())]);
+		for (const candidate of candidates) {
+			const content = await this.#readPlanFile(candidate);
+			if (content !== null && content.trim().length > 0) return true;
+		}
+		return false;
+	}
+
+	/** `local://` URLs of plan files in the session-local root, newest first.
+	 *  A fallback for `resolveApprovedPlan` when the agent dropped `extra.title`,
+	 *  so the plan it wrote is still found by scanning recent `*-plan.md` files. */
+	async #listLocalPlanFiles(): Promise<string[]> {
+		const localRoot = this.#resolvePlanFilePath("local://");
+		try {
+			const entries = await fs.readdir(localRoot, { withFileTypes: true });
+			const plans = await Promise.all(
+				entries
+					.filter(entry => entry.isFile() && /plan\.md$/i.test(entry.name))
+					.map(async name => {
+						const stat = await fs.stat(path.join(localRoot, name.name)).catch(() => null);
+						return { url: `local://${name.name}`, mtime: stat?.mtimeMs ?? 0 };
+					}),
+			);
+			return plans.sort((a, b) => b.mtime - a.mtime).map(plan => plan.url);
+		} catch {
+			return [];
+		}
+	}
+
+	showPlanReview(
+		planContent: string,
+		title: string,
+		options: string[],
+		dialogOptions?: {
+			helpText?: string;
+			disabledIndices?: number[];
+			onExternalEditor?: () => void;
+			onPlanEdited?: (content: string) => void;
+			onFeedbackChange?: (feedback: string) => void;
+			annotationState?: PlanReviewAnnotationState;
+			onAnnotationStateChange?: (state: PlanReviewAnnotationState) => void;
+			initialIndex?: number;
+		},
+		extra?: { slider?: HookSelectorSlider },
+	): Promise<string | undefined> {
+		this.#hidePlanReview();
+		const { promise, resolve } = Promise.withResolvers<string | undefined>();
+		let settled = false;
+		const finish = (choice: string | undefined): void => {
+			if (settled) return;
+			settled = true;
+			resolve(choice);
+		};
+		this.#planReviewCancel = () => finish(undefined);
+		const overlay = new PlanReviewOverlay(
+			planContent,
+			{
+				promptTitle: title,
+				options,
+				disabledIndices: dialogOptions?.disabledIndices,
+				helpText: dialogOptions?.helpText,
+				initialIndex: dialogOptions?.initialIndex,
+				slider: extra?.slider,
+				externalEditorLabel: this.keybindings.getDisplayString("app.editor.external") || undefined,
+				annotationState: dialogOptions?.annotationState,
+			},
+			{
+				onPick: choice => finish(choice),
+				onCancel: () => finish(undefined),
+				onCopyPlan: content => void this.#copyPlanToClipboard(content),
+				onExternalEditor: dialogOptions?.onExternalEditor,
+				onAnnotationExternalEditor: (draft, commit) => void this.#openPlanAnnotationInExternalEditor(draft, commit),
+				onPlanEdited: dialogOptions?.onPlanEdited,
+				onFeedbackChange: dialogOptions?.onFeedbackChange,
+				onAnnotationStateChange: dialogOptions?.onAnnotationStateChange,
+			},
+		);
+		this.#planReviewOverlay = overlay;
+		this.#planReviewOverlayHandle = this.ui.showOverlay(overlay, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+			mouseTracking: false,
+		});
+		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+		return promise;
+	}
+
+	#hidePlanReview(): void {
+		this.#planReviewCancel = undefined;
+		this.#planReviewOverlayHandle?.hide();
+		this.#planReviewOverlayHandle = undefined;
+		this.#planReviewOverlay = undefined;
+	}
+
+	#dismissPlanReview(): void {
+		const cancel = this.#planReviewCancel;
+		this.#planReviewCancel = undefined;
+		cancel?.();
+		this.#hidePlanReview();
+	}
+
+	#getEditorTerminalPath(): string | null {
+		if (process.platform === "win32") {
+			return null;
+		}
+		return "/dev/tty";
+	}
+
+	async #openEditorTerminalHandle(): Promise<fs.FileHandle | null> {
+		const terminalPath = this.#getEditorTerminalPath();
+		if (!terminalPath) {
+			return null;
+		}
+		try {
+			return await fs.open(terminalPath, "r+");
+		} catch {
+			return null;
+		}
+	}
+
+	#getPlanApprovalContextUsage(): ContextUsage | undefined {
+		const executionModel = this.#planModePreviousModelState?.model ?? this.session.model;
+		const contextWindow = executionModel?.contextWindow;
+		if (typeof contextWindow === "number") {
+			return this.session.getContextUsage({ contextWindow });
+		}
+		return this.session.getContextUsage();
+	}
+
+	#formatKeepContextLabel(contextUsage: ContextUsage | undefined): string {
+		if (!contextUsage) {
+			return "Approve and keep context";
+		}
+		const tokens = formatContextTokenCount(contextUsage.tokens);
+		const contextWindow = formatContextTokenCount(contextUsage.contextWindow);
+		return `Approve and keep context (~${tokens} / ${contextWindow})`;
+	}
+
+	#isKeepContextDisabled(contextUsage: ContextUsage | undefined): boolean {
+		return contextUsage !== undefined && contextUsage.percent > PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT;
+	}
+
+	async #copyPlanToClipboard(content: string): Promise<void> {
+		try {
+			await copyToClipboard(content);
+			this.showStatus("Copied plan to clipboard");
+		} catch (error) {
+			this.showWarning(
+				`Failed to copy plan to clipboard: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	async #openPlanInExternalEditor(planFilePath: string): Promise<void> {
+		const editorCmd = getEditorCommand();
+		if (!editorCmd) {
+			this.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
+			return;
+		}
+
+		const resolvedPath = this.#resolvePlanFilePath(planFilePath);
+		let currentText: string;
+		try {
+			currentText = await Bun.file(resolvedPath).text();
+		} catch (error) {
+			if (isEnoent(error)) {
+				this.showError(`Plan file not found at ${planFilePath}`);
+				return;
+			}
+			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+
+		let ttyHandle: fs.FileHandle | null = null;
+		try {
+			ttyHandle = await this.#openEditorTerminalHandle();
+			this.ui.stop();
+
+			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = ttyHandle
+				? [ttyHandle.fd, ttyHandle.fd, ttyHandle.fd]
+				: ["inherit", "inherit", "inherit"];
+
+			const result = await openInEditor(editorCmd, currentText, {
+				extension: path.extname(resolvedPath) || ".md",
+				stdio,
+				trimTrailingNewline: false,
+			});
+			if (result !== null) {
+				await Bun.write(resolvedPath, result);
+				this.#planReviewOverlay?.setPlanContent(result);
+				this.showStatus("Plan updated in external editor.");
+			}
+		} catch (error) {
+			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			if (ttyHandle) {
+				await ttyHandle.close();
+			}
+			this.ui.start();
+			this.ui.requestRender(true);
+		}
+	}
+
+	async #openPlanAnnotationInExternalEditor(draft: string, commit: (text: string | null) => void): Promise<void> {
+		const editorCmd = getEditorCommand();
+		if (!editorCmd) {
+			this.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
+			return;
+		}
+
+		let ttyHandle: fs.FileHandle | null = null;
+		try {
+			ttyHandle = await this.#openEditorTerminalHandle();
+			this.ui.stop();
+
+			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = ttyHandle
+				? [ttyHandle.fd, ttyHandle.fd, ttyHandle.fd]
+				: ["inherit", "inherit", "inherit"];
+
+			const result = await openInEditor(editorCmd, draft, { extension: ".md", stdio });
+			if (result !== null) {
+				commit(result);
+			}
+		} catch (error) {
+			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			if (ttyHandle) {
+				await ttyHandle.close();
+			}
+			this.ui.start();
+			this.ui.requestRender(true);
+		}
+	}
+
+	async #applyPlanExecutionModel(entry: ResolvedRoleModel | undefined): Promise<void> {
+		if (!entry) return;
+		try {
+			await this.session.applyRoleModel(entry);
+			this.statusLine.invalidate();
+			this.updateEditorBorderColor();
+			this.showStatus(`Continuing with ${entry.role}: ${entry.model.name || entry.model.id}`);
+		} catch (error) {
+			this.showWarning(
+				`Could not switch to the ${entry.role} model: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	#resolveLocalRoot(): string {
+		return resolveLocalUrlToPath("local://", {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
+		});
+	}
+
+	async #copyLocalArtifactsForFreshSession(sourceRoot: string, destinationRoot: string): Promise<void> {
+		if (sourceRoot === destinationRoot) return;
+
+		let sourceRootStat: { isDirectory(): boolean };
+		try {
+			sourceRootStat = await fs.lstat(sourceRoot);
+		} catch (error) {
+			if (isEnoent(error)) return;
+			throw error;
+		}
+
+		if (!sourceRootStat.isDirectory()) return;
+
+		await fs.mkdir(destinationRoot, { recursive: true });
+		await this.#copyLocalArtifactEntries(sourceRoot, destinationRoot);
+	}
+
+	async #copyLocalArtifactEntries(sourceDir: string, destinationDir: string): Promise<void> {
+		const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+		for (const entry of entries) {
+			const sourcePath = path.join(sourceDir, entry.name);
+			const destinationPath = path.join(destinationDir, entry.name);
+
+			if (entry.isDirectory()) {
+				await fs.mkdir(destinationPath, { recursive: true });
+				await this.#copyLocalArtifactEntries(sourcePath, destinationPath);
+				continue;
+			}
+
+			if (entry.isFile()) {
+				await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+				await fs.copyFile(sourcePath, destinationPath);
+			}
+		}
+	}
+
+	async #approvePlan(
+		planContent: string,
+		options: {
+			planFilePath: string;
+			title: string;
+			preserveContext?: boolean;
+			compactBeforeExecute?: boolean;
+			executionModel?: ResolvedRoleModel;
+		},
+	): Promise<boolean> {
+		const previousTools = this.#planModePreviousTools ?? this.session.getEnabledToolNames();
+
+		// Mark the pending abort caused by the plan-mode → compaction transition as
+		// silent BEFORE #exitPlanMode raises it. The `finally` below clears the
+		// flag on every terminal compaction outcome (ok / cancelled / failed /
+		// throw) so a leaked flag cannot silence a later unrelated abort.
+		// Branchless mark+clear when !compactBeforeExecute: mark is gated; clear
+		// is unconditional and idempotent.
+		if (options.compactBeforeExecute) {
+			this.session.markPlanInternalAbortPending();
+		}
+		let compactOutcome: CompactionOutcome | undefined;
+		try {
+			await this.#exitPlanMode({
+				silent: true,
+				paused: false,
+				deferModelRestore: options.compactBeforeExecute === true,
+			});
+
+			if (!options.preserveContext) {
+				const oldLocalRoot = this.#resolveLocalRoot();
+				await this.handleClearCommand();
+				const newLocalRoot = this.#resolveLocalRoot();
+				await this.#copyLocalArtifactsForFreshSession(oldLocalRoot, newLocalRoot);
+				const newLocalPath = resolveLocalUrlToPath(options.planFilePath, {
+					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+					getSessionId: () => this.sessionManager.getSessionId(),
+				});
+				await fs.mkdir(path.dirname(newLocalPath), { recursive: true });
+				await fs.writeFile(newLocalPath, planContent);
+			} else if (options.compactBeforeExecute) {
+				// Distill the plan-mode transcript before the execution turn is queued so
+				// the plan-approved synthetic prompt lands as a fresh cache anchor.
+				// Outcome is consumed after tool-restoration and plan-reference-path
+				// bookkeeping below; `markPlanReferenceSent` is intentionally deferred
+				// past the cancel guard — see the comment at the cancel branch.
+				// Cancellation skips the synthetic-prompt dispatch (operator's explicit
+				// abort is honored); failure proceeds best-effort — approval intent stands.
+				const compactionPrompt = prompt.render(planModeCompactInstructionsPrompt, {
+					planFilePath: options.planFilePath,
+				});
+				// Pin the plan reference path BEFORE compaction so any user messages
+				// queued during the compaction await (which `handleCompactCommand`
+				// flushes via `flushCompactionQueue` before returning) see the
+				// approved plan in `#buildPlanReferenceMessage`. Reassignment after
+				// the try/finally is idempotent and kept for the !compactBeforeExecute
+				// branch.
+				this.session.setPlanReferencePath(options.planFilePath);
+				// Ride the plan-mode distillation prompt through as `internalGuidance`
+				// so it reaches native summarization without leaking into the public
+				// `customInstructions` channel on `session_before_compact` — extensions
+				// there treat that field as user focus and would query-bias the
+				// summary toward the plan boilerplate (issue #4359).
+				compactOutcome = await this.handleCompactCommand(
+					undefined,
+					undefined,
+					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
+					compactionPrompt,
+				);
+			}
+		} finally {
+			// Unconditional clear. Idempotent: a no-op when the flag was never set
+			// (i.e., the !compactBeforeExecute branch), and a no-op when the flag
+			// was already consumed by AgentSession.#handleAgentEvent's aborted
+			// message_end stamping. Guarantees the flag is dead at every exit.
+			this.session.clearPlanInternalAbortPending();
+		}
+
+		// Restore the execution tool set, but force-enable `read`: approved-plan
+		// prompts now require loading the durable local:// plan file before work.
+		const executionTools = previousTools.includes("read") ? previousTools : [...previousTools, "read"];
+		await this.session.setActiveToolsByName(executionTools);
+		this.session.setPlanReferencePath(options.planFilePath);
+
+		// Resolve the deferred plan-approval model transition. On the compact path
+		// the before-flush hook passed to handleCompactCommand already ran this (so
+		// any input queued during compaction executed on the post-compaction
+		// model); the re-run here is idempotent and covers the short-circuit where
+		// compaction never executed. It runs for "cancelled" too — the operator
+		// aborted only the compaction, not the approval — so the next turn no longer
+		// lands on the plan model. "failed" stays on the plan model (context
+		// intact) and dispatches best-effort.
+		if (options.compactBeforeExecute) {
+			await this.#applyDeferredPlanModelTransition(compactOutcome, options.executionModel);
+		} else {
+			await this.#applyPlanExecutionModel(options.executionModel);
+		}
+
+		if (compactOutcome === "cancelled") {
+			// Explicit abort: honor it. `executeCompaction` already surfaced
+			// `showError("Compaction cancelled")`; we add the deferred-dispatch
+			// warning and exit without dispatching the synthetic plan-approved
+			// prompt. `markPlanReferenceSent` stays unset so
+			// `AgentSession.#buildPlanReferenceMessage` injects the plan reference
+			// on the operator's next `prompt()` call.
+			this.showWarning(
+				"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.",
+			);
+			return false;
+		}
+
+		// Approved plans land in a fresh (or compacted) session whose first user-visible
+		// turn is the synthetic plan-approved prompt — that path bypasses the
+		// input-controller's title generation. Seed an auto-name from the plan title
+		// so the session is not left unnamed. `setSessionName("auto")` is a no-op
+		// when the user has already chosen a name (preserveContext paths).
+		const seededName = humanizePlanTitle(options.title);
+		if (seededName && !this.sessionManager.getSessionName()) {
+			await this.sessionManager.setSessionName(seededName, "auto");
+		}
+
+		// markPlanReferenceSent fires only on the dispatch path so the synthetic
+		// plan-approved prompt is the source of the reference injection.
+		this.session.markPlanReferenceSent();
+		const planModePrompt = prompt.render(planModeApprovedPrompt, {
+			planFilePath: options.planFilePath,
+			contextPreserved: options.preserveContext === true,
+		});
+		// Close the review overlay only now — after the async title write and plan
+		// prompt are prepared, immediately before the execution turn is queued. The
+		// synthetic prompt below blocks in `session.prompt` for the whole run, so
+		// hiding here (rather than after #approvePlan returns) keeps the operator off
+		// the stale plan-review screen (issue #5688) while #5319's stale-buffer guard
+		// stays intact. Deferring the hide past the awaited `setSessionName` also
+		// prevents restored editor focus from letting operator keystrokes submit a
+		// normal turn ahead of the approved execution turn (PR #5689 review).
+		// `#hidePlanReview` is idempotent, so the caller's trailing `closePlanReview()`
+		// — and the cancelled/error early returns above — stay safe no-ops.
+		this.#hidePlanReview();
+		this.ui.requestRender();
+		// A user turn queued during compaction was already fired by
+		// `flushCompactionQueue` before we returned from `handleCompactCommand`; the
+		// old abort-then-prompt path would have discarded that operator turn AND
+		// still surfaced `AgentBusyError` when the queued turn kicked off in the
+		// synchronous gap. Preserve the in-flight work and queue the hidden
+		// execution directive behind it as a synthetic follow-up. If `isStreaming`
+		// flips true between the check and dispatch (the same fire-and-forget race
+		// noted below), catch `AgentBusyError` and fall back to the same queue.
+		if (this.session.isStreaming) {
+			await this.session.followUp(planModePrompt, undefined, { synthetic: true });
+		} else {
+			try {
+				await this.session.prompt(planModePrompt, { synthetic: true });
+			} catch (error) {
+				if (!(error instanceof AgentBusyError)) throw error;
+				await this.session.followUp(planModePrompt, undefined, { synthetic: true });
+			}
+		}
+		return true;
+	}
+	async #abortPlanApprovalTurnSilently(): Promise<void> {
+		this.session.markPlanInternalAbortPending();
+		try {
+			await this.session.abort();
+		} finally {
+			this.session.clearPlanInternalAbortPending();
+		}
+	}
+
+	async handlePlanModeCommand(initialPrompt?: string): Promise<void> {
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
+			return;
+		}
+		if (this.planModeEnabled) {
+			const planFilePath = this.planModePlanFilePath ?? (await this.#getPlanFilePath());
+			if (await this.#hasPlanModeDraftContent(planFilePath)) {
+				const confirmed = await this.showHookConfirm(
+					"Exit plan mode?",
+					"This exits plan mode without approving a plan.",
+				);
+				if (!confirmed) return;
+			}
+			await this.#exitPlanMode({ paused: true });
+			return;
+		}
+		if (this.planModePaused && !initialPrompt) {
+			// No-arg third toggle: paused → off. Tools, model, and plan state were
+			// already restored by the prior #exitPlanMode({ paused: true }); only the
+			// paused flag, the reentry marker, and the session mode entry remain.
+			// Prompted /plan invocations fall through to #enterPlanMode below so the
+			// supplied prompt is still submitted as the first plan-mode turn.
+			this.planModePaused = false;
+			this.#planModeHasEntered = false;
+			this.#updatePlanModeStatus();
+			this.sessionManager.appendModeChange("none");
+			this.showStatus("Plan mode disabled.");
+			return;
+		}
+		if (!this.session.settings.get("plan.enabled")) {
+			this.showWarning("Plan mode is disabled. Enable it in settings (plan.enabled).");
+			return;
+		}
+		await this.#enterPlanMode();
+		if (initialPrompt && this.onInputCallback) {
+			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
+		}
+	}
+
+	/**
+	 * `/vibe` toggle. Entering installs the ephemeral vibe tools, strips the
+	 * active toolset down to `read`, optional parent-owned `todo`, plus those
+	 * tools, and injects the director context. Exiting unregisters them, restores
+	 * the previous toolset, and kills every worker session so workers cannot
+	 * outlive the mode that directs them.
+	 */
+	async handleVibeModeCommand(initialPrompt?: string): Promise<void> {
+		if (this.vibeModeEnabled) {
+			await this.#exitVibeMode();
+			return;
+		}
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+		await this.#enterVibeMode();
+		if (initialPrompt && this.onInputCallback) {
+			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
+		}
+	}
+
+	async #enterVibeMode(options?: { persistModeChange?: boolean }): Promise<void> {
+		if (this.vibeModeEnabled) {
+			return;
+		}
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+
+		const vibeRegistry = VibeSessionRegistry.global();
+		const ownerScope = vibeRegistry.ownerScope(this.#vibeParentSession());
+		vibeRegistry.activateScope(ownerScope);
+		const previousTools = this.session.getEnabledToolNames();
+		const vibeBaseTools = ["read"];
+		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
+		await this.session.activateVibeTools(vibeBaseTools);
+		this.#vibeModePreviousTools = previousTools;
+		this.#vibeModeOwnerScope = ownerScope;
+		this.vibeModeEnabled = true;
+		// Suppress cache-miss marker on the next turn: vibe mode changes the
+		// injected context, which predictably invalidates the cache.
+		this.lastAssistantUsage = undefined;
+		this.session.setVibeModeState({ enabled: true });
+		if (this.session.isStreaming) {
+			await this.session.sendVibeModeContext({ deliverAs: "steer" });
+		}
+		this.#updateVibeModeStatus();
+		if (options?.persistModeChange !== false) this.sessionManager.appendModeChange("vibe");
+		this.showStatus(
+			"Vibe mode enabled. You direct fast/good worker sessions; toolset is read + optional parent Todo + vibe tools.",
+		);
+	}
+
+	async #exitVibeMode(): Promise<void> {
+		if (!this.vibeModeEnabled) {
+			return;
+		}
+		const ownerScope = this.#vibeModeOwnerScope;
+		const killed = await VibeSessionRegistry.global().killAll(this.#vibeParentSession(), ownerScope);
+		await this.session.deactivateVibeTools(this.#vibeModePreviousTools ?? []);
+		this.session.setVibeModeState(undefined);
+		this.vibeModeEnabled = false;
+		this.#vibeModePreviousTools = undefined;
+		this.#vibeModeOwnerScope = undefined;
+		this.lastAssistantUsage = undefined;
+		this.#updateVibeModeStatus();
+		this.showStatus(
+			killed > 0
+				? `Vibe mode disabled. Killed ${killed} worker session${killed === 1 ? "" : "s"}.`
+				: "Vibe mode disabled.",
+		);
+	}
+
+	async #handleGoalBudgetCommand(rawBudget: string): Promise<void> {
+		const state = this.session.getGoalModeState();
+		if (!this.goalModeEnabled || !state?.enabled) {
+			this.showWarning("No active goal.");
+			return;
+		}
+		if (state.goal.status === "complete") {
+			this.showStatus("Goal is already complete.");
+			return;
+		}
+		const trimmed = rawBudget.trim().toLowerCase();
+		let nextBudget: number | undefined;
+		if (trimmed !== "off") {
+			const parsed = Number.parseInt(trimmed, 10);
+			if (!Number.isInteger(parsed) || parsed <= 0) {
+				this.showError("Goal budget must be a positive integer or `off`.");
+				return;
+			}
+			nextBudget = parsed;
+		}
+		await this.session.goalRuntime.onBudgetMutated(nextBudget);
+		this.#resetGoalContinuationSuppression();
+		this.#scheduleGoalContinuation();
+		this.showStatus(nextBudget === undefined ? "Goal budget cleared." : `Goal budget set to ${nextBudget}.`);
+	}
+
+	async handleGoalModeCommand(rest?: string): Promise<void> {
+		try {
+			if (this.planModeEnabled || this.planModePaused) {
+				this.showWarning("Exit plan mode first.");
+				return;
+			}
+			if (this.vibeModeEnabled) {
+				this.showWarning("Exit vibe mode first.");
+				return;
+			}
+			if (!this.session.settings.get("goal.enabled")) {
+				this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
+				return;
+			}
+			const { sub, rest: subRest } = parseGoalSubcommand(rest ?? "");
+			if (sub) {
+				await this.#dispatchGoalSubcommand(sub, subRest);
+				return;
+			}
+			if (this.goalModeEnabled) {
+				if (subRest) {
+					this.showStatus("Goal mode is already active. Use /goal to manage it, or /goal drop to start over.");
+					return;
+				}
+				await this.#openGoalMenu("active");
+				return;
+			}
+			const pausedState = this.#getPausedGoalState();
+			if (pausedState) {
+				if (subRest) {
+					this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
+					return;
+				}
+				await this.#openGoalMenu("paused");
+				return;
+			}
+			if (subRest) {
+				await this.#startGoalFromObjective(subRest);
+				return;
+			}
+			const objective = (
+				await this.showHookEditor("Goal objective", undefined, undefined, { promptStyle: true })
+			)?.trim();
+			if (!objective) return;
+			await this.#startGoalFromObjective(objective);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+	async handleGuidedGoalCommand(rest?: string): Promise<void> {
+		try {
+			if (this.planModeEnabled || this.planModePaused) {
+				this.showWarning("Exit plan mode first.");
+				return;
+			}
+			if (this.vibeModeEnabled) {
+				this.showWarning("Exit vibe mode first.");
+				return;
+			}
+			if (!this.session.settings.get("goal.enabled")) {
+				this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
+				return;
+			}
+			if (this.goalModeEnabled) {
+				this.showStatus("Goal mode is already active. Use /goal to manage it, or /goal drop to start over.");
+				return;
+			}
+			if (this.#getPausedGoalState()) {
+				this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
+				return;
+			}
+
+			// Expose the goal tool for the interview so the agent can finish by
+			// calling `goal create`. Record the pre-interview toolset first: the
+			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
+			// eventual goal exit restores this set (dropping the goal tool again).
+			const enabledTools = this.session.getEnabledToolNames();
+			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
+			if (!enabledTools.includes("goal")) {
+				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
+			}
+
+			// The interview is a normal conversation: the kickoff rides in as a
+			// hidden developer message, the agent asks its questions as regular
+			// assistant turns, and the user answers in the ordinary editor. Queue
+			// behind an in-flight run instead of aborting it.
+			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
+			if (this.session.isStreaming) {
+				await this.session.followUp(kickoff, undefined, { synthetic: true });
+			} else {
+				try {
+					await this.session.prompt(kickoff, { synthetic: true });
+				} catch (error) {
+					if (!(error instanceof AgentBusyError)) throw error;
+					await this.session.followUp(kickoff, undefined, { synthetic: true });
+				}
+			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	async #dispatchGoalSubcommand(sub: GoalSubcommand, rest: string): Promise<void> {
+		switch (sub) {
+			case "set":
+				await this.#handleGoalSetSubcommand(rest);
+				return;
+			case "show":
+				this.#showGoalDetails();
+				return;
+			case "pause":
+				await this.#pauseGoalAction();
+				return;
+			case "resume":
+				await this.#resumeGoalAction();
+				return;
+			case "drop":
+				await this.#confirmAndDropGoal();
+				return;
+			case "budget":
+				if (!this.goalModeEnabled) {
+					this.showWarning(
+						this.#getPausedGoalState() ? "Resume the goal before adjusting the budget." : "No active goal.",
+					);
+					return;
+				}
+				if (!rest) {
+					await this.#promptGoalBudgetEdit();
+					return;
+				}
+				await this.#handleGoalBudgetCommand(rest);
+				return;
+		}
+	}
+
+	async #openGoalMenu(state: "active" | "paused"): Promise<void> {
+		const goal = this.session.getGoalModeState()?.goal;
+		if (!goal) return;
+		const summary = goal.objective.length > 48 ? `${goal.objective.slice(0, 47)}…` : goal.objective;
+		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
+		const items =
+			state === "active"
+				? ["Show details", "Adjust budget…", "Pause", "Drop"]
+				: ["Resume", "Show details", "Adjust budget…", "Drop"];
+		const choice = await this.showHookSelector(title, items);
+		if (!choice) return;
+		switch (choice) {
+			case "Show details":
+				this.#showGoalDetails();
+				return;
+			case "Adjust budget…":
+				await this.#promptGoalBudgetEdit();
+				return;
+			case "Pause":
+				await this.#pauseGoalAction();
+				return;
+			case "Resume":
+				await this.#resumeGoalAction();
+				return;
+			case "Drop":
+				await this.#confirmAndDropGoal();
+				return;
+		}
+	}
+
+	#showGoalDetails(): void {
+		const state = this.session.getGoalModeState();
+		const goal = state?.goal;
+		if (!goal) {
+			this.showStatus("No goal set.");
+			return;
+		}
+		const used = goal.tokensUsed.toLocaleString();
+		const budgetLine =
+			goal.tokenBudget !== undefined
+				? `${used} / ${goal.tokenBudget.toLocaleString()} (${Math.max(0, goal.tokenBudget - goal.tokensUsed).toLocaleString()} left)`
+				: `${used} (no budget)`;
+		const lines = [
+			`Objective: ${goal.objective}`,
+			`Status: ${goal.status}${state?.enabled ? "" : " (paused)"}`,
+			`Tokens: ${budgetLine}`,
+			`Time spent: ${formatDuration(goal.timeUsedSeconds * 1000)}`,
+		];
+		this.showStatus(lines.join("\n"));
+	}
+
+	async #promptGoalBudgetEdit(): Promise<void> {
+		const goal = this.session.getGoalModeState()?.goal;
+		const prefill = goal?.tokenBudget !== undefined ? String(goal.tokenBudget) : "";
+		const input = (
+			await this.showHookEditor("Goal budget (number, `off`, or empty to cancel)", prefill, undefined, {
+				promptStyle: true,
+			})
+		)?.trim();
+		if (!input) return;
+		await this.#handleGoalBudgetCommand(input);
+	}
+
+	async #pauseGoalAction(): Promise<void> {
+		if (!this.goalModeEnabled) {
+			this.showWarning("No active goal to pause.");
+			return;
+		}
+		await this.session.goalRuntime.pauseGoal();
+		await this.#exitGoalMode({ paused: true, reason: "paused" });
+	}
+
+	async #resumeGoalAction(): Promise<void> {
+		if (!this.#getPausedGoalState()) {
+			this.showWarning("No paused goal to resume.");
+			return;
+		}
+		await this.#enterGoalMode({ resume: true, silent: true });
+		this.showStatus("Goal mode resumed.");
+		this.#scheduleGoalContinuation();
+	}
+
+	async #confirmAndDropGoal(): Promise<void> {
+		if (!this.goalModeEnabled && !this.#getPausedGoalState()) {
+			this.showWarning("No goal to drop.");
+			return;
+		}
+		const confirmed = await this.showHookConfirm(
+			"Drop goal?",
+			"This removes the goal record. Accumulated usage stays in the session log.",
+		);
+		if (!confirmed) return;
+		await this.session.goalRuntime.dropGoal();
+		await this.#exitGoalMode({ reason: "dropped" });
+	}
+
+	async #startGoalFromObjective(objective: string): Promise<void> {
+		await this.#enterGoalMode({ objective, silent: true });
+		this.#resetGoalContinuationSuppression();
+		if (!this.session.isStreaming && this.onInputCallback) {
+			this.onInputCallback(this.startPendingSubmission({ text: objective }));
+		}
+	}
+
+	async #replaceGoalFromObjective(objective: string): Promise<void> {
+		const state = await this.session.goalRuntime.replaceGoal({ objective });
+		this.session.setGoalModeState(state);
+		this.goalModeEnabled = true;
+		this.goalModePaused = false;
+		this.#resetGoalContinuationSuppression();
+		this.#updateGoalModeStatus();
+		if (this.session.isStreaming) {
+			await this.session.sendGoalModeContext({ deliverAs: "steer" });
+		}
+		if (!this.session.isStreaming && this.onInputCallback) {
+			this.onInputCallback(this.startPendingSubmission({ text: objective }));
+		}
+	}
+
+	async #handleGoalSetSubcommand(rest: string): Promise<void> {
+		if (!this.goalModeEnabled && this.#getPausedGoalState()) {
+			this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
+			return;
+		}
+		const objective = rest.trim()
+			? rest.trim()
+			: (await this.showHookEditor("Goal objective", undefined, undefined, { promptStyle: true }))?.trim();
+		if (!objective) return;
+		if (this.goalModeEnabled) {
+			await this.#replaceGoalFromObjective(objective);
+			return;
+		}
+		await this.#startGoalFromObjective(objective);
+	}
+
+	/** Manually (re-)open the plan-review overlay — bound to `/plan-review`. Lets
+	 *  the operator pull the review back up after dismissing it, or review a plan
+	 *  the agent wrote without dispatching approval. There is no fixed plan filename:
+	 *  `getPlanReferencePath()` is empty until a plan is actually approved (and does
+	 *  not survive a restart), so this drives off the newest `local://<slug>-plan.md`
+	 *  the agent wrote — the files persist in the session artifacts dir, so the scan
+	 *  works before any review and across restarts. */
+	async openPlanReview(): Promise<void> {
+		if (!this.planModeEnabled) {
+			this.showWarning("Plan mode is not active.");
+			return;
+		}
+		const noPlan = "No plan to review yet — write one to a local://<slug>-plan.md file first.";
+		const [planFilePath] = await this.#listLocalPlanFiles();
+		if (!planFilePath) {
+			this.showWarning(noPlan);
+			return;
+		}
+		const planContent = await this.#readPlanFile(planFilePath);
+		if (planContent === null) {
+			this.showWarning(noPlan);
+			return;
+		}
+		const { title } = resolvePlanTitle({ planContent, planFilePath });
+		await this.handlePlanApproval({ planFilePath, title, planExists: true });
+	}
+
+	async handlePlanApproval(details: PlanApprovalDetails): Promise<void> {
+		if (!this.planModeEnabled) {
+			this.showWarning("Plan mode is not active.");
+			return;
+		}
+
+		// Abort the agent to prevent it from continuing (e.g., re-submitting the
+		// plan) while the popup is showing. The event listener fires asynchronously
+		// (agent's #emit is fire-and-forget), so without this the model sees
+		// "Plan ready for approval." and immediately re-dispatches approval in a loop.
+		// This abort is an internal UI transition, not operator cancellation.
+		await this.#abortPlanApprovalTurnSilently();
+
+		const planFilePath = details.planFilePath || this.planModePlanFilePath || (await this.#getPlanFilePath());
+		this.planModePlanFilePath = planFilePath;
+		const planContent = await this.#readPlanFile(planFilePath);
+		if (!planContent) {
+			this.showError(`Plan file not found at ${planFilePath}`);
+			return;
+		}
+
+		// resolveApprovedPlan may return a newer draft than the path recorded in
+		// plan-mode state. `AgentSession.#buildPlanModeMessage()` reads that state,
+		// so if the operator refines (or dismisses and keeps planning) the next
+		// planning turn must target the plan just reviewed — promote the reviewed
+		// path into plan-mode state now, mirroring the print-mode approval handler.
+		const planState = this.session.getPlanModeState();
+		if (planState?.enabled && planState.planFilePath !== planFilePath) {
+			this.session.setPlanModeState({ ...planState, planFilePath });
+			this.sessionManager.appendModeChange("plan", { planFilePath });
+		}
+
+		const contextUsage = this.#getPlanApprovalContextUsage();
+		const keepContextLabel = this.#formatKeepContextLabel(contextUsage);
+		const keepContextDisabled = this.#isKeepContextDisabled(contextUsage);
+
+		// Model-tier slider: let the operator pick which configured role model
+		// (smol/default/slow/…) executes the approved plan. The slider always starts
+		// on the `default` tier so execution defaults to the default model no matter
+		// which model drove the planning conversation. Left/right move it from there;
+		// hidden when fewer than two role models resolve — a lone tier is no choice.
+		// `selectedTierIndex` tracks the live slider position.
+		const cycle = this.session.getRoleModelCycle(this.session.settings.get("cycleOrder"));
+		const defaultTierIndex = cycle ? cycle.models.findIndex(entry => entry.role === "default") : -1;
+		const startTierIndex = defaultTierIndex >= 0 ? defaultTierIndex : (cycle?.currentIndex ?? 0);
+		let selectedTierIndex = startTierIndex;
+		const slider: HookSelectorSlider | undefined =
+			cycle && cycle.models.length > 1
+				? {
+						caption: "continue with",
+						index: startTierIndex,
+						segments: cycle.models.map(entry => ({
+							label: entry.role,
+							detail: entry.model.name || entry.model.id,
+						})),
+						onChange: index => {
+							selectedTierIndex = index;
+						},
+					}
+				: undefined;
+		// The overlay now owns the dynamic, focus-aware help line; the caller only
+		// supplies the trailing cancel hint.
+		const helpText = "esc cancel";
+		// In-overlay edits (section deletes/undo) and section annotations. Deletes
+		// update `editedContent` (and mirror to disk); annotations build `feedback`
+		// that the Refine branch re-prompts the model with.
+		let editedContent: string | undefined;
+		let feedback = "";
+		const annotationStateKey = this.#resolvePlanFilePath(planFilePath);
+
+		const choice = await this.showPlanReview(
+			planContent,
+			"Plan mode - next step",
+			["Approve and execute", "Approve and compact context", keepContextLabel, "Refine plan"],
+			{
+				helpText,
+				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
+				onPlanEdited: content => {
+					editedContent = content;
+					void Bun.write(this.#resolvePlanFilePath(planFilePath), content);
+				},
+				onFeedbackChange: value => {
+					feedback = value;
+				},
+				annotationState: this.#planReviewAnnotationState.get(annotationStateKey),
+				onAnnotationStateChange: state => {
+					if (state.annotations.length > 0) this.#planReviewAnnotationState.set(annotationStateKey, state);
+					else this.#planReviewAnnotationState.delete(annotationStateKey);
+				},
+				disabledIndices: keepContextDisabled ? [PLAN_KEEP_CONTEXT_OPTION_INDEX] : undefined,
+			},
+			{ slider },
+		);
+		const closePlanReview = (): void => {
+			this.#hidePlanReview();
+			this.ui.requestRender();
+		};
+
+		if (choice === "Approve and execute" || choice === "Approve and compact context" || choice === keepContextLabel) {
+			try {
+				// Prefer in-overlay edits (already in memory) over a disk re-read. The
+				// overlay mirrors edits as they happen, and approval awaits one final
+				// write so the durable plan file and synthetic prompt carry the same text.
+				const latestPlanContent = editedContent ?? (await this.#readPlanFile(planFilePath));
+				if (editedContent !== undefined) {
+					await Bun.write(this.#resolvePlanFilePath(planFilePath), editedContent);
+				}
+				if (!latestPlanContent) {
+					this.showError(`Plan file not found at ${planFilePath}`);
+					closePlanReview();
+					return;
+				}
+				// Capture the operator's tier choice and hand it to #approvePlan, which
+				// applies it AFTER #exitPlanMode. #exitPlanMode normally restores
+				// #planModePreviousModelState (the model from before plan mode), so
+				// applying the slider choice any earlier would be silently reverted.
+				// Pass executionModel only when the slider was actually shown — a
+				// singleton cycle (e.g. only modelRoles.plan is configured, so
+				// getRoleModelCycle synthesizes a lone `default` entry from the
+				// currently active plan model) hides the slider, the operator made
+				// no selection, and the pre-plan model is not in the cycle. Pinning
+				// that singleton would silently switch the session back to the plan
+				// model after #exitPlanMode restored the pre-plan model.
+				// Treat the choice as implicit only when applying the selected role
+				// would land on the same end state as the restore — same model AND
+				// the same effective thinking level. A role with an explicit thinking
+				// suffix that differs from the restored thinking level must still go
+				// through applyRoleModel, otherwise approving on the same model with a
+				// different configured thinking level silently keeps the pre-plan level.
+				const restoredState = this.#planModePreviousModelState;
+				const restoredIndex =
+					cycle && restoredState
+						? cycle.models.findIndex(entry => {
+								if (!modelsAreEqual(entry.model, restoredState.model)) return false;
+								if (!entry.explicitThinkingLevel) return true;
+								return entry.thinkingLevel === restoredState.thinkingLevel;
+							})
+						: -1;
+				const executionModel =
+					slider && cycle && selectedTierIndex !== restoredIndex ? cycle.models[selectedTierIndex] : undefined;
+				const executionDispatched = await this.#approvePlan(latestPlanContent, {
+					planFilePath,
+					title: details.title,
+					preserveContext: choice !== "Approve and execute",
+					compactBeforeExecute: choice === "Approve and compact context",
+					executionModel,
+				});
+				if (executionDispatched) this.#planReviewAnnotationState.delete(annotationStateKey);
+			} catch (error) {
+				this.showError(
+					`Failed to finalize approved plan: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			closePlanReview();
+			return;
+		}
+
+		if (choice === "Refine plan") {
+			const refinement = feedback.trim();
+			try {
+				if (refinement) {
+					if (this.onInputCallback) {
+						const input = this.startPendingSubmission({ text: feedback });
+						this.#planReviewAnnotationStateBySubmission.set(input, annotationStateKey);
+						this.onInputCallback(input);
+					} else {
+						await this.session.prompt(feedback);
+						this.#planReviewAnnotationState.delete(annotationStateKey);
+					}
+				} else {
+					this.showStatus("Refine plan: enter a follow-up prompt.");
+				}
+			} catch (error) {
+				this.showError(`Failed to refine plan: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			closePlanReview();
+			return;
+		}
+		closePlanReview();
+	}
+
+	/**
+	 * Pool of consent-prompt variants. Each entry is `[headline, reassurance]`;
+	 * the second line always promises the same scope (tool name + confusion
+	 * details, never personal data) so users learn what they're consenting to
+	 * even as the top line rotates.
+	 *
+	 * Kept in-module rather than i18n'd because the whole charm is the tone
+	 * — translations would need to preserve it deliberately, not auto-render.
+	 */
+	static #AUTOQA_CONSENT_PROMPTS: ReadonlyArray<readonly [string, string]> = [
+		[
+			"😤 Your agent is fuming about a tool.",
+			"Wanna let it vent to the devs? Just the tool name + what set it off, nothing personal.",
+		],
+		[
+			"😵‍💫 Your agent is having an existential crisis over a tool.",
+			"Forward the dread to the devs? Tool + what broke its little mind, no personal info.",
+		],
+		[
+			"😭 Your agent wants to cry about a misbehaving tool.",
+			"Let it cry to the devs? Tool + the tears, never anything personal.",
+		],
+		[
+			"🤬 Your agent is BIG MAD at one of the tools.",
+			"Pass the rant along? Just the tool name and what enraged it, nothing personal.",
+		],
+		[
+			"🫠 Your agent is melting down over a tool.",
+			"Mop up by alerting the devs? Tool + what melted it, no personal info.",
+		],
+		[
+			"🤯 Your agent's brain broke at a tool's nonsense.",
+			"Ship the pieces to the devs? Tool name + the confusion, never anything personal.",
+		],
+		[
+			"😩 Your agent is begging to file a complaint about a tool.",
+			"Hand it the form? Tool + what wronged it, nothing personal.",
+		],
+		[
+			"🥲 Your agent put on a brave face but a tool did it dirty.",
+			"Let it tell the devs the truth? Tool name + the dirt, no personal info.",
+		],
+	];
+
+	/**
+	 * Show the report_tool_issue consent popup and return the user's decision.
+	 * Invoked by the process-global consent handler the tool dispatches to;
+	 * subagent invocations bubble up here through the shared module state.
+	 */
+	async #promptAutoQaConsent(): Promise<boolean | null> {
+		const pool = InteractiveMode.#AUTOQA_CONSENT_PROMPTS;
+		const [headline, body] = pool[Math.floor(Math.random() * pool.length)];
+		const choice = await this.showHookSelector(`${headline}\n${body}`, ["Yes", "No"]);
+		return choice === "Yes";
+	}
+
+	stop(): void {
+		if (this.loadingAnimation) {
+			this.#stopLoadingAnimation(false);
+		}
+		this.#cleanupMicAnimation();
+		this.#liveCommandController.dispose();
+		this.#cancelTodoAutoClearTimer();
+		this.#cancelObserverUiSyncTimer();
+		this.#cancelGoalContinuation();
+		if (this.#sttController) {
+			this.#sttController.dispose();
+			this.#sttController = undefined;
+		}
+		this.#extensionUiController.clearExtensionTerminalInputListeners();
+		this.#extensionUiController.clearHookWidgets();
+		for (const unsubscribe of this.#eventBusUnsubscribers) {
+			unsubscribe();
+		}
+		this.#eventBusUnsubscribers = [];
+		this.#observerRegistry.dispose();
+		this.#agentRegistryUnsubscribe?.();
+		this.#agentRegistryUnsubscribe = undefined;
+		this.#agentRegistrySubscriptionTarget = undefined;
+		this.#eventController.dispose();
+		this.statusLine.dispose();
+		if (this.#resizeHandler) {
+			process.stdout.removeListener("resize", this.#resizeHandler);
+			this.#resizeHandler = undefined;
+		}
+		if (this.unsubscribe) {
+			this.unsubscribe();
+		}
+		if (this.#cleanupUnsubscribe) {
+			this.#cleanupUnsubscribe();
+		}
+		// Clear the process-global consent handler so it doesn't outlive this
+		// InteractiveMode instance (e.g. test harnesses, headless re-init).
+		setAutoQaConsentHandler(null, null);
+		if (this.isInitialized) {
+			this.ui.stop();
+			this.isInitialized = false;
+		}
+	}
+
+	async shutdown(): Promise<void> {
+		if (this.#isShuttingDown) return;
+		this.#isShuttingDown = true;
+
+		await this.#liveCommandController.stop();
+
+		this.#btwController.dispose();
+		this.#omfgController.dispose();
+		this.#focusController.dispose();
+
+		// Surface an explicit "Closing session…" line so the user sees a reason
+		// for the pause while `session.dispose()` flushes memory consolidate and
+		// other cleanups (issue #3641). The await on the next line yields the
+		// event loop, giving requestRender() a tick to paint the status before
+		// dispose blocks.
+		this.showStatus("Closing session…");
+
+		// Persist the draft and dispose the session through the shared teardown
+		// so a signal that arrives mid-shutdown cannot fire a second dispose.
+		// The teardown is a promise-memoized singleton; whichever path calls it
+		// first runs the work, the other awaits the same settled promise.
+		// The teardown is registered lazily in `init()` — a `/exit` reached
+		// before `init()` completed falls back to a direct dispose.
+		const stillClosingTimer = setTimeout(() => {
+			this.showStatus("Still closing… (flushing memory backend / network)");
+		}, STILL_CLOSING_DELAY_MS);
+		try {
+			if (this.#signalTeardown) {
+				await this.#signalTeardown();
+			} else {
+				await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+			}
+		} finally {
+			clearTimeout(stillClosingTimer);
+		}
+
+		// Do not force a final render during teardown: disposed session/UI state can
+		// collapse to an empty frame, clearing the viewport and leaving the parent
+		// shell prompt at row 0. Stop from the last committed frame so the terminal
+		// hands Bash the cursor immediately after visible OMP content.
+		// Drain any in-flight Kitty key release events before stopping.
+		// This prevents escape sequences from leaking to the parent shell over slow SSH.
+		await this.ui.terminal.drainInput(1000);
+		// Stop the run-state spinner interval BEFORE restoring the shell title, so a
+		// pending tick cannot re-emit an OSC title after `popTerminalTitle` hands the
+		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
+		disposeTerminalTitleState();
+		popTerminalTitle();
+		this.stop();
+
+		// Print resumption hint if this is a persisted session
+		const sessionId = this.sessionManager.getSessionId();
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (sessionId && sessionFile) {
+			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+		}
+
+		await postmortem.quit(0);
+	}
+
+	async checkShutdownRequested(): Promise<void> {
+		if (!this.shutdownRequested) return;
+		await this.shutdown();
+	}
+
+	// Extension UI integration
+	setToolUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
+		this.#toolUiContextSetter(uiContext, hasUI);
+	}
+
+	initializeHookRunner(uiContext: ExtensionUIContext, hasUI: boolean): void {
+		this.#extensionUiController.initializeHookRunner(uiContext, hasUI);
+	}
+
+	setEditorComponent(
+		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
+	): void {
+		const previousEditor = this.editor;
+		const previousText = previousEditor.getText();
+		const nextEditor = factory
+			? factory(this.ui, getEditorTheme(), this.keybindings)
+			: new CustomEditor(getEditorTheme());
+		if (!factory) this.ui.enableScopedInputRender(nextEditor);
+
+		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
+		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
+		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
+		nextEditor.onAutocompleteCancel = () => {
+			this.ui.requestRender(true);
+		};
+		nextEditor.onAutocompleteUpdate = () => {
+			this.ui.requestRender();
+		};
+		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
+		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
+		if (this.historyStorage) {
+			nextEditor.setHistoryStorage(this.historyStorage);
+		}
+		nextEditor.setText(previousText);
+
+		this.editorContainer.clear();
+		this.editor = nextEditor;
+		this.editorContainer.addChild(nextEditor);
+		this.ui.setFocus(nextEditor);
+
+		this.#inputController.setupKeyHandlers();
+		this.#inputController.setupEditorSubmitHandler();
+
+		void this.refreshSlashCommandState().catch(error => {
+			logger.warn("Failed to refresh slash command state for custom editor", { error: String(error) });
+		});
+
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
+	}
+
+	// UI helpers
+	present(content: Component | readonly Component[]): void {
+		if (Array.isArray(content)) {
+			for (const item of content) this.#mountChatChild(item);
+		} else {
+			this.#mountChatChild(content as Component);
+		}
+		this.ui.requestRender();
+	}
+
+	/** Defer transcript command panels until the active turn can no longer grow above them. */
+	presentCommandOutput(content: Component | readonly Component[]): void {
+		if (!this.session.isStreaming) {
+			this.present(content);
+			return;
+		}
+		const sessionId = this.sessionManager.getSessionId();
+		if (this.#pendingCommandOutput.length > 0 && this.#pendingCommandOutputSessionId !== sessionId) {
+			this.#pendingCommandOutput = [];
+		}
+		this.#pendingCommandOutputSessionId = sessionId;
+		const items = Array.isArray(content) ? content : [content as Component];
+		this.#pendingCommandOutput.push(...items);
+	}
+
+	/** Mount every command panel queued for the current session while the agent was streaming. */
+	flushPendingCommandOutput(): void {
+		if (this.#pendingCommandOutput.length === 0) return;
+		const pending = this.#pendingCommandOutput;
+		const pendingSessionId = this.#pendingCommandOutputSessionId;
+		this.#pendingCommandOutput = [];
+		this.#pendingCommandOutputSessionId = undefined;
+		if (pendingSessionId !== this.sessionManager.getSessionId()) return;
+		this.present(pending);
+	}
+
+	#mountChatChild(item: Component): void {
+		this.chatContainer.addChild(item);
+		if (item instanceof ChatBlock) item.mount(this.#chatHost);
+	}
+
+	resetTranscript(): void {
+		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
+		this.chatContainer.dispose();
+		this.chatContainer.clear();
+	}
+
+	showStatus(message: string, options?: { dim?: boolean }): void {
+		this.#uiHelpers.showStatus(message, options);
+	}
+
+	showError(message: string): void {
+		this.#pendingSubmittedInput = undefined;
+		this.clearOptimisticUserMessage();
+		this.#pendingWorkingMessage = undefined;
+		if (this.loadingAnimation) {
+			this.#stopLoadingAnimation(true);
+		}
+		this.#uiHelpers.showError(message);
+	}
+
+	showPinnedError(message: string): void {
+		this.#dismissPlanReview();
+		this.errorBannerContainer.clear();
+		this.errorBannerContainer.addChild(new ErrorBannerComponent(message));
+		this.ui.requestRender();
+	}
+
+	clearPinnedError(): void {
+		if (this.errorBannerContainer.children.length === 0) return;
+		this.errorBannerContainer.clear();
+		this.ui.requestRender();
+	}
+
+	showWarning(message: string): void {
+		this.#uiHelpers.showWarning(message);
+	}
+
+	#handleLspStartupEvent(event: LspStartupEvent): void {
+		this.#updateWelcomeLspServers();
+
+		if (event.type === "failed") {
+			this.showWarning(`LSP startup failed: ${event.error}. It will retry lazily on write.`);
+			return;
+		}
+
+		const failedServers = event.servers.filter(server => server.status === "error");
+
+		if (failedServers.length === 1) {
+			const failedServer = failedServers[0];
+			const detail = failedServer.error ? `: ${failedServer.error}` : "";
+			this.showWarning(`LSP startup failed for ${failedServer.name}${detail}. It will retry lazily on write.`);
+			return;
+		}
+
+		if (failedServers.length > 1) {
+			const failedNames = failedServers.map(server => server.name).join(", ");
+			this.showWarning(`LSP startup failed for ${failedNames}. It will retry lazily on write.`);
+		}
+	}
+
+	#getWelcomeLspServers(): WelcomeLspServerInfo[] {
+		return (
+			this.lspServers?.map(server => ({
+				name: server.name,
+				status: server.status,
+				fileTypes: server.fileTypes,
+			})) ?? []
+		);
+	}
+
+	#updateWelcomeLspServers(): void {
+		if (!this.#welcomeComponent) {
+			return;
+		}
+
+		this.#welcomeComponent.setLspServers(this.#getWelcomeLspServers());
+		this.ui.requestRender();
+	}
+
+	#clearWorkingMessageAccentCache(): void {
+		this.#workingMessageAccentCacheKey = undefined;
+		this.#workingMessageAccentCacheValue = undefined;
+		this.#workingMessageAccentCacheHasValue = false;
+	}
+
+	#buildWorkingMessageAccentCacheKey(): WorkingMessageAccentCacheKey {
+		const sessionAccentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
+		return {
+			sessionAccentEnabled,
+			sessionName: sessionAccentEnabled ? this.sessionManager.getSessionName() : undefined,
+			accentSurfaceLuminance: theme.accentSurfaceLuminance,
+		};
+	}
+
+	#workingMessageAccentCacheKeyEquals(a: WorkingMessageAccentCacheKey, b: WorkingMessageAccentCacheKey): boolean {
+		return (
+			a.sessionName === b.sessionName &&
+			a.accentSurfaceLuminance === b.accentSurfaceLuminance &&
+			a.sessionAccentEnabled === b.sessionAccentEnabled
+		);
+	}
+
+	#cacheWorkingMessageAccent(
+		key: WorkingMessageAccentCacheKey,
+		value: WorkingMessageAccent | undefined,
+	): WorkingMessageAccent | undefined {
+		this.#workingMessageAccentCacheKey = key;
+		this.#workingMessageAccentCacheValue = value;
+		this.#workingMessageAccentCacheHasValue = true;
+		return value;
+	}
+
+	#getWorkingMessageAccent(): WorkingMessageAccent | undefined {
+		const key = this.#buildWorkingMessageAccentCacheKey();
+		if (
+			this.#workingMessageAccentCacheHasValue &&
+			this.#workingMessageAccentCacheKey &&
+			this.#workingMessageAccentCacheKeyEquals(key, this.#workingMessageAccentCacheKey)
+		) {
+			return this.#workingMessageAccentCacheValue;
+		}
+		if (!key.sessionAccentEnabled || !key.sessionName) {
+			return this.#cacheWorkingMessageAccent(key, undefined);
+		}
+		const hex = getSessionAccentHex(key.sessionName, theme.getMajorThemeColorHexes(), key.accentSurfaceLuminance);
+		const main = getSessionAccentAnsi(hex);
+		const dim = getSessionAccentAnsi(adjustHsv(hex, { s: 0.55, v: 0.65 }));
+		return this.#cacheWorkingMessageAccent(key, main && dim ? { main, dim } : undefined);
+	}
+
+	ensureLoadingAnimation(): void {
+		if (!this.loadingAnimation) {
+			this.#clearWorkingMessageAccentCache();
+			this.statusContainer.disposeChildren();
+			const messageColorFn = ((message: string) =>
+				renderWorkingMessage(message, this.#getWorkingMessageAccent())) as LoaderMessageColorFn & {
+				animated?: true;
+			};
+			// Shimmer drives the 30fps redraw; when it is disabled the working
+			// message is static, so leave `animated` unset and let the loader use
+			// the spinner-only ~12.5fps cadence instead of repainting a frozen line.
+			if (shimmerEnabled()) messageColorFn.animated = true;
+			this.loadingAnimation = new Loader(
+				this.ui,
+				spinner => {
+					const accent = this.#getWorkingMessageAccent();
+					return accent ? `${accent.main}${spinner}\x1b[39m` : theme.fg("accent", spinner);
+				},
+				messageColorFn,
+				this.#defaultWorkingMessage,
+				getSymbolTheme().spinnerFrames,
+			);
+			this.statusContainer.addChild(this.loadingAnimation);
+		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
+			this.statusContainer.disposeChildren();
+			this.statusContainer.addChild(this.loadingAnimation);
+			this.ui.requestRender();
+		}
+		this.applyPendingWorkingMessage();
+	}
+
+	#stopLoadingAnimation(clearStatusContainer: boolean): void {
+		if (!this.loadingAnimation) return;
+		this.loadingAnimation.stop();
+		this.loadingAnimation = undefined;
+		this.#clearWorkingMessageAccentCache();
+		if (clearStatusContainer) {
+			this.statusContainer.disposeChildren();
+		}
+	}
+
+	setWorkingMessage(message?: string): void {
+		if (message === undefined) {
+			this.#pendingWorkingMessage = undefined;
+			if (this.loadingAnimation) {
+				this.loadingAnimation.setMessage(this.#defaultWorkingMessage);
+			}
+			return;
+		}
+
+		if (this.loadingAnimation) {
+			this.loadingAnimation.setMessage(message);
+			return;
+		}
+
+		this.#pendingWorkingMessage = message;
+	}
+
+	applyPendingWorkingMessage(): void {
+		if (this.#pendingWorkingMessage === undefined) {
+			return;
+		}
+
+		const message = this.#pendingWorkingMessage;
+		this.#pendingWorkingMessage = undefined;
+		this.setWorkingMessage(message);
+	}
+
+	showNewVersionNotification(newVersion: string): void {
+		this.#uiHelpers.showNewVersionNotification(newVersion);
+	}
+
+	clearEditor(): void {
+		this.#uiHelpers.clearEditor();
+	}
+
+	updatePendingMessagesDisplay(): void {
+		this.#uiHelpers.updatePendingMessagesDisplay();
+	}
+
+	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
+		this.#uiHelpers.queueCompactionMessage(text, mode, images);
+	}
+
+	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
+		return this.#uiHelpers.flushCompactionQueue(options);
+	}
+
+	flushPendingBashComponents(): void {
+		this.#uiHelpers.flushPendingBashComponents();
+	}
+
+	isKnownSlashCommand(text: string): boolean {
+		return this.#uiHelpers.isKnownSlashCommand(text);
+	}
+
+	addMessageToChat(
+		message: AgentMessage,
+		options?: {
+			populateHistory?: boolean;
+			imageLinks?: readonly (string | undefined)[];
+			reuseSettledComponent?: boolean;
+		},
+	): Component[] {
+		return this.#uiHelpers.addMessageToChat(message, options);
+	}
+
+	renderSessionContext(sessionContext: SessionContext, options?: RenderSessionContextOptions): void {
+		for (const message of sessionContext.messages) {
+			this.noteDisplayableThinkingContent(message);
+		}
+		this.#uiHelpers.renderSessionContext(sessionContext, options);
+	}
+
+	renderInitialMessages(options?: { preserveExistingChat?: boolean; clearTerminalHistory?: boolean }): void {
+		this.#uiHelpers.renderInitialMessages(options);
+	}
+
+	getUserMessageText(message: Message): string {
+		return this.#uiHelpers.getUserMessageText(message);
+	}
+
+	findLastAssistantMessage(): AssistantMessage | undefined {
+		return this.#uiHelpers.findLastAssistantMessage();
+	}
+
+	extractAssistantText(message: AssistantMessage): string {
+		return this.#uiHelpers.extractAssistantText(message);
+	}
+
+	// Command handling
+	handleExportCommand(text: string): Promise<void> {
+		return this.#commandController.handleExportCommand(text);
+	}
+
+	async handleDumpCommand(): Promise<void> {
+		return this.#commandController.handleDumpCommand();
+	}
+
+	handleAdvisorDumpCommand(isRaw?: boolean) {
+		return this.#commandController.handleAdvisorDumpCommand(isRaw);
+	}
+
+	handleDebugTranscriptCommand(): Promise<void> {
+		return this.#commandController.handleDebugTranscriptCommand();
+	}
+
+	handleShareCommand(): Promise<void> {
+		return this.#commandController.handleShareCommand();
+	}
+
+	handleTodoCommand(args: string): Promise<void> {
+		return this.#todoCommandController.handleTodoCommand(args);
+	}
+
+	handleSessionCommand(): Promise<void> {
+		return this.#commandController.handleSessionCommand();
+	}
+
+	handleAdvisorStatusCommand(): Promise<void> {
+		return this.#commandController.handleAdvisorStatusCommand();
+	}
+
+	handleJobsCommand(): Promise<void> {
+		return this.#commandController.handleJobsCommand();
+	}
+
+	handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
+		return this.#commandController.handleUsageCommand(reports);
+	}
+
+	async handleChangelogCommand(showFull = false): Promise<void> {
+		await this.#commandController.handleChangelogCommand(showFull);
+	}
+
+	handleHotkeysCommand(): void {
+		this.#commandController.handleHotkeysCommand();
+	}
+
+	handleToolsCommand(): void {
+		this.#commandController.handleToolsCommand();
+	}
+
+	handleContextCommand(): void {
+		this.#commandController.handleContextCommand();
+	}
+
+	#vibeSessionTransitionBlocked(): boolean {
+		if (!this.vibeModeEnabled) return false;
+		this.showWarning("Exit vibe mode first.");
+		return true;
+	}
+
+	#prepareSessionSwitch(): void {
+		this.#btwController.dispose();
+		this.#omfgController.dispose();
+		this.#extensionUiController.clearExtensionTerminalInputListeners();
+		this.clearPinnedError();
+		this.#hidePlanReview();
+	}
+
+	async handleClearCommand(): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
+		this.#prepareSessionSwitch();
+		await this.#commandController.handleClearCommand();
+	}
+
+	handleFreshCommand(): Promise<void> {
+		return this.#commandController.handleFreshCommand();
+	}
+
+	async handleDropCommand(): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
+		this.#prepareSessionSwitch();
+		await this.#commandController.handleDropCommand();
+	}
+
+	async handleForkCommand(): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
+		this.#btwController.dispose();
+		this.#omfgController.dispose();
+		await this.#commandController.handleForkCommand();
+	}
+
+	async handleMoveCommand(targetPath?: string): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
+		await this.#commandController.handleMoveCommand(targetPath);
+	}
+
+	handleRenameCommand(title: string): Promise<void> {
+		return this.#commandController.handleRenameCommand(title);
+	}
+
+	handleMemoryCommand(text: string): Promise<void> {
+		return this.#commandController.handleMemoryCommand(text);
+	}
+
+	async handleSTTToggle(): Promise<void> {
+		if (this.#liveCommandController.active) {
+			this.showWarning("End live mode before using push-to-talk speech input.");
+			return;
+		}
+		if (!settings.get("stt.enabled")) {
+			this.showWarning("Speech-to-text is disabled. Enable it in settings: stt.enabled");
+			return;
+		}
+		if (!this.#sttController) {
+			this.#sttController = new STTController();
+		}
+		await this.#sttController.toggle(this.editor, {
+			showWarning: (msg: string) => this.showWarning(msg),
+			showStatus: (msg: string) => this.showStatus(msg),
+			requestRender: () => this.ui.requestRender(),
+			onStateChange: (state: SttState) => {
+				// Duck assistant speech while the user is talking (push-to-talk); restore after.
+				if (state === "recording") vocalizer.duck();
+				else vocalizer.unduck();
+				if (state === "recording") {
+					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
+					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
+					this.ui.setShowHardwareCursor(false);
+					this.editor.setUseTerminalCursor(false);
+					this.#startMicAnimation();
+				} else if (state === "transcribing") {
+					this.#stopMicAnimation();
+					this.#setMicCursor({ r: 200, g: 200, b: 200 });
+				} else {
+					this.#cleanupMicAnimation();
+				}
+				this.ui.requestRender();
+			},
+		});
+	}
+
+	/** Start or stop the Codex-backed realtime voice surface. */
+	async handleLiveCommand(): Promise<void> {
+		if (this.#sttController && this.#sttController.state !== "idle") {
+			this.showWarning("Finish the current speech-to-text capture before starting live mode.");
+			return;
+		}
+		await this.#liveCommandController.handleCommand();
+	}
+
+	#setMicCursor(color: { r: number; g: number; b: number }): void {
+		this.editor.cursorOverride = `\x1b[38;2;${color.r};${color.g};${color.b}m${theme.icon.mic}\x1b[0m`;
+		// Theme symbols can be wide (for example, 🎤), so measure the rendered override.
+		this.editor.cursorOverrideWidth = visibleWidth(this.editor.cursorOverride);
+	}
+
+	#updateMicIcon(): void {
+		const { r, g, b } = hsvToRgb({ h: this.#voiceHue, s: 0.9, v: 1.0 });
+		this.#setMicCursor({ r, g, b });
+	}
+
+	#startMicAnimation(): void {
+		if (this.#voiceAnimationInterval) return;
+		this.#voiceHue = 0;
+		this.#updateMicIcon();
+		this.#voiceAnimationInterval = setInterval(() => {
+			this.#voiceHue = (this.#voiceHue + 8) % 360;
+			this.#updateMicIcon();
+			// Component-scoped: the hue sweep only recolors the editor's cursor
+			// glyph, so the transcript subtree is reused per animation frame.
+			this.ui.requestComponentRender(this.editor);
+		}, 60);
+	}
+
+	#stopMicAnimation(): void {
+		if (this.#voiceAnimationInterval) {
+			clearInterval(this.#voiceAnimationInterval);
+			this.#voiceAnimationInterval = undefined;
+		}
+	}
+
+	#cleanupMicAnimation(): void {
+		if (this.#voiceAnimationInterval) {
+			clearInterval(this.#voiceAnimationInterval);
+			this.#voiceAnimationInterval = undefined;
+		}
+		this.editor.cursorOverride = undefined;
+		this.editor.cursorOverrideWidth = undefined;
+		if (this.#voicePreviousShowHardwareCursor !== null) {
+			this.ui.setShowHardwareCursor(this.#voicePreviousShowHardwareCursor);
+			this.#voicePreviousShowHardwareCursor = null;
+		}
+		if (this.#voicePreviousUseTerminalCursor !== null) {
+			this.editor.setUseTerminalCursor(this.#voicePreviousUseTerminalCursor);
+			this.#voicePreviousUseTerminalCursor = null;
+		}
+	}
+
+	async showDebugSelector(): Promise<void> {
+		await this.#selectorController.showDebugSelector();
+	}
+
+	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean }): void {
+		this.#selectorController.showAgentHub(this.#observerRegistry, options);
+	}
+
+	resetObserverRegistry(): void {
+		this.#observerRegistry.resetSessions();
+		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
+	}
+
+	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void> {
+		return this.#commandController.handleBashCommand(command, excludeFromContext);
+	}
+
+	handlePythonCommand(code: string, excludeFromContext?: boolean): Promise<void> {
+		return this.#commandController.handlePythonCommand(code, excludeFromContext);
+	}
+
+	async handleMCPCommand(text: string): Promise<void> {
+		const controller = new MCPCommandController(this);
+		await controller.handle(text);
+	}
+
+	async handleSSHCommand(text: string): Promise<void> {
+		const controller = new SSHCommandController(this);
+		await controller.handle(text);
+	}
+
+	handleCompactCommand(
+		customInstructions?: string,
+		mode?: CompactMode,
+		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
+		internalGuidance?: string,
+	): Promise<CompactionOutcome> {
+		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, internalGuidance);
+	}
+
+	handleHandoffCommand(customInstructions?: string): Promise<void> {
+		return this.#commandController.handleHandoffCommand(customInstructions);
+	}
+
+	handleShakeCommand(mode: ShakeMode): Promise<void> {
+		return this.#commandController.handleShakeCommand(mode);
+	}
+
+	executeCompaction(
+		customInstructionsOrOptions?: string | CompactOptions,
+		isAuto?: boolean,
+	): Promise<CompactionOutcome> {
+		return this.#commandController.executeCompaction(customInstructionsOrOptions, isAuto);
+	}
+
+	openInBrowser(urlOrPath: string): void {
+		this.#commandController.openInBrowser(urlOrPath);
+	}
+
+	// Selector handling
+	showSettingsSelector(): void {
+		this.#selectorController.showSettingsSelector();
+	}
+
+	showAdvisorConfigure(): void {
+		this.#selectorController.showAdvisorConfigure();
+	}
+
+	showHistorySearch(): void {
+		this.#selectorController.showHistorySearch();
+	}
+
+	showExtensionsDashboard(): void {
+		void this.#selectorController.showExtensionsDashboard();
+	}
+
+	showAgentsDashboard(): void {
+		void this.#selectorController.showAgentsDashboard();
+	}
+
+	showModelSelector(options?: { temporaryOnly?: boolean }): void {
+		this.#selectorController.showModelSelector(options);
+	}
+
+	showPluginSelector(mode?: "install" | "uninstall"): void {
+		void this.#selectorController.showPluginSelector(mode);
+	}
+
+	showUserMessageSelector(): void {
+		this.#selectorController.showUserMessageSelector();
+	}
+
+	showCopySelector(): void {
+		this.#selectorController.showCopySelector();
+	}
+
+	showTreeSelector(): void {
+		this.#selectorController.showTreeSelector();
+	}
+
+	showSessionSelector(source?: ForeignSessionSource): void {
+		void this.#selectorController.showSessionSelector(source);
+	}
+
+	async handleResumeSession(sessionPath: string): Promise<void> {
+		// Flush pending settings writes *before* disposing controllers or resetting
+		// observers: a save failure must leave the session, process project dir,
+		// and Settings in the source scope with all UI intact.
+		try {
+			await this.settings.flush();
+		} catch (err) {
+			this.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		}
+		this.#btwController.dispose();
+		this.#omfgController.dispose();
+		this.resetObserverRegistry();
+		await this.#selectorController.handleResumeSession(sessionPath, { settingsFlushed: true });
+	}
+
+	handleSessionDeleteCommand(): Promise<void> {
+		return this.#selectorController.handleSessionDeleteCommand();
+	}
+
+	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
+		return this.#selectorController.showOAuthSelector(mode, providerId);
+	}
+
+	showSessionPinSelector(): Promise<void> {
+		return this.#selectorController.showSessionPinSelector();
+	}
+
+	showResetUsageSelector(): Promise<void> {
+		return this.#selectorController.showResetUsageSelector();
+	}
+
+	showProviderSetup(): Promise<void> {
+		return runProviderSetupWizard(this);
+	}
+
+	showHookConfirm(title: string, message: string): Promise<boolean> {
+		return this.#extensionUiController.showHookConfirm(title, message);
+	}
+
+	// Input handling
+	handleCtrlC(): void {
+		this.#inputController.handleCtrlC();
+	}
+
+	handleCtrlD(): void {
+		this.#inputController.handleCtrlD();
+	}
+
+	handleCtrlZ(): void {
+		this.#inputController.handleCtrlZ();
+	}
+
+	handleDequeue(): void {
+		this.#inputController.handleDequeue();
+	}
+
+	handleImagePaste(): Promise<boolean> {
+		return this.#inputController.handleImagePaste();
+	}
+
+	/** Queue slash-command input behind the active turn. */
+	handleQueueCommand(message: string): Promise<void> {
+		return this.#inputController.handleQueueCommand(message);
+	}
+
+	handleBtwCommand(question: string): Promise<void> {
+		return this.#btwController.start(question);
+	}
+
+	handleTanCommand(work: string): Promise<void> {
+		return this.#tanCommandController.start(work);
+	}
+
+	hasActiveBtw(): boolean {
+		return this.#btwController.hasActiveRequest();
+	}
+
+	handleBtwEscape(): boolean {
+		return this.#btwController.handleEscape();
+	}
+
+	canBranchBtw(): boolean {
+		return this.#btwController.canBranch();
+	}
+
+	handleBtwBranchKey(): Promise<boolean> {
+		return this.#btwController.handleBranch();
+	}
+
+	canCopyBtw(): boolean {
+		return this.#btwController.canCopy();
+	}
+
+	handleBtwCopyKey(): Promise<boolean> {
+		return this.#btwController.handleCopy();
+	}
+
+	async handleBtwBranch(question: string, assistantMessage: AssistantMessage): Promise<void> {
+		try {
+			const result = await this.session.branchFromBtw(question, assistantMessage);
+			if (result.cancelled) {
+				this.showStatus("/btw branch cancelled", { dim: true });
+				return;
+			}
+			this.#btwController.dispose();
+			this.#omfgController.dispose();
+			this.renderInitialMessages({ clearTerminalHistory: true });
+			this.updateEditorBorderColor();
+			this.showStatus(
+				result.sessionFile ? `Branched /btw to ${path.basename(result.sessionFile)}` : "Branched /btw",
+			);
+		} catch (error) {
+			this.showError(`Cannot branch /btw: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	handleOmfgCommand(complaint: string): Promise<void> {
+		return this.#omfgController.start(complaint);
+	}
+
+	hasActiveOmfg(): boolean {
+		return this.#omfgController.hasActiveRequest();
+	}
+
+	handleOmfgEscape(): boolean {
+		return this.#omfgController.handleEscape();
+	}
+
+	cycleThinkingLevel(): void {
+		this.#inputController.cycleThinkingLevel();
+	}
+
+	cycleRoleModel(direction?: "forward" | "backward"): Promise<void> {
+		return this.#inputController.cycleRoleModel(direction);
+	}
+
+	toggleToolOutputExpansion(): void {
+		this.#inputController.toggleToolOutputExpansion();
+	}
+
+	setToolsExpanded(expanded: boolean): void {
+		this.#inputController.setToolsExpanded(expanded);
+	}
+
+	toggleThinkingBlockVisibility(): void {
+		this.#inputController.toggleThinkingBlockVisibility();
+	}
+
+	toggleTodoExpansion(): void {
+		this.todoExpanded = !this.todoExpanded;
+		this.#renderTodoList();
+		this.ui.requestRender();
+	}
+
+	setTodos(todos: TodoItem[] | TodoPhase[]): void {
+		if (todos.length > 0 && "tasks" in todos[0]) {
+			this.todoPhases = todos as TodoPhase[];
+		} else {
+			this.todoPhases = [
+				{
+					name: "Todos",
+					tasks: todos as TodoItem[],
+				},
+			];
+		}
+		this.#syncTodoAutoClearTimer();
+		this.#renderTodoList();
+		this.ui.requestRender();
+	}
+
+	async reloadTodos(): Promise<void> {
+		await this.#loadTodoList();
+		this.ui.requestRender();
+	}
+
+	openExternalEditor(): void {
+		this.#inputController.openExternalEditor();
+	}
+
+	registerExtensionShortcuts(): void {
+		this.#inputController.registerExtensionShortcuts();
+	}
+
+	// Hook UI methods
+	initHooksAndCustomTools(): Promise<void> {
+		return this.#extensionUiController.initHooksAndCustomTools();
+	}
+
+	getToolUIContext(): ExtensionUIContext | undefined {
+		return this.#extensionUiController.getToolUIContext();
+	}
+
+	emitCustomToolSessionEvent(
+		reason: "start" | "switch" | "branch" | "tree" | "shutdown",
+		previousSessionFile?: string,
+	): Promise<void> {
+		return this.#extensionUiController.emitCustomToolSessionEvent(reason, previousSessionFile);
+	}
+
+	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
+		this.#extensionUiController.setHookWidget(key, content, options);
+	}
+
+	setHookStatus(key: string, text: string | undefined): void {
+		this.#extensionUiController.setHookStatus(key, text);
+	}
+
+	showHookSelector(
+		title: string,
+		options: ExtensionUISelectItem[],
+		dialogOptions?: InteractiveSelectorDialogOptions,
+		extra?: { slider?: HookSelectorSlider },
+	): Promise<string | undefined> {
+		return this.#extensionUiController.showHookSelector(title, options, dialogOptions, extra);
+	}
+
+	hideHookSelector(): void {
+		this.#extensionUiController.hideHookSelector();
+	}
+
+	showHookInput(title: string, placeholder?: string): Promise<string | undefined> {
+		return this.#extensionUiController.showHookInput(title, placeholder);
+	}
+
+	hideHookInput(): void {
+		this.#extensionUiController.hideHookInput();
+	}
+
+	showHookEditor(
+		title: string,
+		prefill?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+		editorOptions?: { promptStyle?: boolean },
+	): Promise<string | undefined> {
+		return this.#extensionUiController.showHookEditor(title, prefill, dialogOptions, editorOptions);
+	}
+
+	hideHookEditor(): void {
+		this.#extensionUiController.hideHookEditor();
+	}
+
+	showHookNotify(message: string, type?: "info" | "warning" | "error"): void {
+		this.#extensionUiController.showHookNotify(message, type);
+	}
+
+	showHookCustom<T>(
+		factory: (
+			tui: TUI,
+			theme: Theme,
+			keybindings: KeybindingsManager,
+			done: (result: T) => void,
+		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+		options?: { overlay?: boolean },
+	): Promise<T> {
+		return this.#extensionUiController.showHookCustom(factory, options);
+	}
+
+	showExtensionError(extensionPath: string, error: string): void {
+		this.#extensionUiController.showExtensionError(extensionPath, error);
+	}
+
+	showToolError(toolName: string, error: string): void {
+		this.#extensionUiController.showToolError(toolName, error);
+	}
+
+	#subscribeToAgent(): void {
+		this.#eventController.subscribeToAgent();
+	}
+}

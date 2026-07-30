@@ -2790,7 +2790,349 @@ export const SETTINGS_SCHEMA = {
 			group: "Mnemopi",
 			label: "Mnemopi Embedding Model",
 			description:
-				"Advanced: explicit em
+				"Advanced: explicit embedding model id that overrides the variant. Leave empty to use mnemopi.embeddingVariant.",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.embeddingApiUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi Embedding API URL",
+			description: "Optional OpenAI-compatible embedding endpoint passed to Mnemopi",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.embeddingApiKey": {
+		type: "string",
+		credential: true,
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi Embedding API Key",
+			description: "Optional embedding API key passed to Mnemopi",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.llmMode": {
+		type: "enum",
+		values: ["none", "smol", "remote"] as const,
+		default: "smol",
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi LLM Mode",
+			description:
+				"Use no LLM, the online tiny model (the TINY role from /models, else @smol), or a remote OpenAI-compatible endpoint",
+			condition: "mnemopiActive",
+			options: [
+				{ value: "none", label: "None", description: "Disable Mnemopi LLM-backed extraction" },
+				{
+					value: "smol",
+					label: "Online (tiny)",
+					description: "Use the online tiny model (the TINY role from /models, else @smol)",
+				},
+				{ value: "remote", label: "Remote", description: "Use the Mnemopi remote LLM settings below" },
+			],
+		},
+	},
+	"mnemopi.llmBaseUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi LLM Base URL",
+			description: "Optional OpenAI-compatible LLM endpoint for Mnemopi remote mode",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.llmApiKey": {
+		type: "string",
+		credential: true,
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi LLM API Key",
+			description: "Optional LLM API key for Mnemopi remote mode",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.llmModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi LLM Model",
+			description: "Optional LLM model name for Mnemopi remote mode",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.retainEveryNTurns": { type: "number", default: 4 },
+	"mnemopi.recallLimit": { type: "number", default: 8 },
+	"mnemopi.recallContextTurns": { type: "number", default: 3 },
+	"mnemopi.recallMaxQueryChars": { type: "number", default: 4000 },
+	"mnemopi.injectionTokenLimit": { type: "number", default: 5000 },
+	"mnemopi.debug": { type: "boolean", default: false },
+
+	// Hindsight (https://hindsight.vectorize.io)
+	"hindsight.apiUrl": {
+		type: "string",
+		default: "http://localhost:8888",
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight API URL",
+			description: "Hindsight server URL (Cloud or self-hosted)",
+			condition: "hindsightActive",
+		},
+	},
+
+	"hindsight.apiToken": {
+		type: "string",
+		credential: true,
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight API Token",
+			description: "Bearer token for authenticated Hindsight servers",
+			condition: "hindsightActive",
+		},
+	},
+
+	"hindsight.bankId": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Bank ID",
+			description: "Memory bank identifier (default: project name)",
+			condition: "hindsightActive",
+		},
+	},
+
+	"hindsight.bankIdPrefix": { type: "string", default: undefined },
+	"hindsight.scoping": {
+		type: "enum",
+		values: ["global", "per-project", "per-project-tagged"] as const,
+		default: "per-project-tagged",
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Scoping",
+			description:
+				"global = one shared bank; per-project = isolated bank per cwd; per-project-tagged = shared bank with project tags so global + project memories merge on recall",
+			options: [
+				{
+					value: "global",
+					label: "Global",
+					description: "One shared bank — every project sees the same memories",
+				},
+				{
+					value: "per-project",
+					label: "Per project",
+					description: "Isolated bank per cwd basename — projects cannot see each other's memories",
+				},
+				{
+					value: "per-project-tagged",
+					label: "Per project (tagged)",
+					description:
+						"Shared bank, retains tagged with project:<cwd>. Recall surfaces project + untagged global memories together",
+				},
+			],
+			condition: "hindsightActive",
+		},
+	},
+	"hindsight.bankMission": { type: "string", default: undefined },
+	"hindsight.retainMission": { type: "string", default: undefined },
+
+	"hindsight.autoRecall": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Auto Recall",
+			description: "Recall memories on the first turn of each session",
+			condition: "hindsightActive",
+		},
+	},
+	"hindsight.autoRetain": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Auto Retain",
+			description: "Retain transcript every N turns and at session boundaries",
+			condition: "hindsightActive",
+		},
+	},
+
+	"hindsight.retainMode": {
+		type: "enum",
+		values: ["full-session", "last-turn"] as const,
+		default: "full-session",
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Retain Mode",
+			description: "full-session = upsert one document per session, last-turn = chunked",
+			options: [
+				{
+					value: "full-session",
+					label: "Full session",
+					description: "Upsert one document per session (recommended)",
+				},
+				{ value: "last-turn", label: "Last turn", description: "Chunked retention sliced by turn boundaries" },
+			],
+			condition: "hindsightActive",
+		},
+	},
+	"hindsight.retainEveryNTurns": { type: "number", default: 3 },
+	"hindsight.retainOverlapTurns": { type: "number", default: 2 },
+	"hindsight.retainContext": { type: "string", default: "omp" },
+
+	"hindsight.recallBudget": {
+		type: "enum",
+		values: ["low", "mid", "high"] as const,
+		default: "mid",
+	},
+	"hindsight.recallMaxTokens": { type: "number", default: 1024 },
+	"hindsight.recallContextTurns": { type: "number", default: 1 },
+	"hindsight.recallMaxQueryChars": { type: "number", default: 800 },
+	"hindsight.recallTypes": { type: "array", default: HINDSIGHT_RECALL_TYPES_DEFAULT },
+
+	"hindsight.debug": { type: "boolean", default: false },
+
+	"hindsight.requestTimeoutMs": { type: "number", default: 30_000 },
+	"hindsight.reflectTimeoutMs": { type: "number", default: 120_000 },
+	"hindsight.recallTimeoutMs": { type: "number", default: 30_000 },
+	"hindsight.retainTimeoutMs": { type: "number", default: 60_000 },
+
+	"hindsight.mentalModelsEnabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Mental Models",
+			description:
+				"Read curated reflect summaries (mental models) into developer instructions at boot. Loads existing models on the bank — does not write. Pair with hindsight.mentalModelAutoSeed to also auto-create the built-in seed set.",
+			condition: "hindsightActive",
+		},
+	},
+	"hindsight.mentalModelAutoSeed": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Mental Model Auto-Seed",
+			description:
+				"At session start, create any built-in mental models (project-conventions, project-decisions, user-preferences) that do not yet exist on the bank.",
+			condition: "hindsightActive",
+		},
+	},
+	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
+	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
+
+	// TTSR
+	"ttsr.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "TTSR",
+			description: "Interrupt the agent mid-stream when output matches rule patterns (Time-Traveling Stream Rules)",
+		},
+	},
+
+	"ttsr.contextMode": {
+		type: "enum",
+		values: ["discard", "keep"] as const,
+		default: "discard",
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "TTSR Context Mode",
+			description: "What to do with partial output when TTSR triggers",
+		},
+	},
+
+	"ttsr.interruptMode": {
+		type: "enum",
+		values: ["never", "prose-only", "tool-only", "always"] as const,
+		default: "always",
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "TTSR Interrupt Mode",
+			description: "When to interrupt mid-stream vs inject warning after completion",
+			options: [
+				{ value: "always", label: "always", description: "Interrupt on prose and tool streams" },
+				{ value: "prose-only", label: "prose-only", description: "Interrupt only on reply/thinking matches" },
+				{ value: "tool-only", label: "tool-only", description: "Interrupt only on tool-call argument matches" },
+				{ value: "never", label: "never", description: "Never interrupt; inject warning after completion" },
+			],
+		},
+	},
+
+	"ttsr.repeatMode": {
+		type: "enum",
+		values: ["once", "after-gap"] as const,
+		default: "once",
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "TTSR Repeat Mode",
+			description: "How rules can repeat: once per session or after a message gap",
+		},
+	},
+
+	"ttsr.repeatGap": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "TTSR Repeat Gap",
+			description: "Messages before a rule can trigger again",
+			options: [
+				{ value: "5", label: "5 messages" },
+				{ value: "10", label: "10 messages" },
+				{ value: "15", label: "15 messages" },
+				{ value: "20", label: "20 messages" },
+				{ value: "30", label: "30 messages" },
+			],
+		},
+	},
+
+	"ttsr.builtinRules": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "Built-in Rules",
+			description: "Load the default rules shipped with the agent (override individually with ttsr.disabledRules)",
+		},
+	},
+
+	"ttsr.disabledRules": {
+		type: "array",
+		default: [] as string[],
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
 			label: "Disabled Rules",
 			description: "Rule names to ignore entirely (applies to bundled defaults and your own rules)",
 		},
@@ -3748,274 +4090,6 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Grep & Browser",
 			label: "cmux Browser",
-			description:rue,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Launch",
-			description: "Enable the launch tool for supervising shared long-running project processes",
-		},
-	},
-
-	"speechgen.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Speech Generation",
-			description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
-		},
-	},
-	"generate_image.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Generate Image",
-			description:
-				"Enable the generate_image tool (text-to-image generation and editing). Exposed as an xd:// device when tools.xdev is on.",
-		},
-	},
-
-	// Legacy boolean kept only for back-compat migration to `inspect_image.mode`
-	// (see config/settings.ts). Hidden from UI.
-	"inspect_image.enabled": {
-		type: "boolean",
-		default: false,
-	},
-
-	"inspect_image.mode": {
-		type: "enum",
-		values: ["auto", "on", "off"] as const,
-		default: "auto",
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Inspect Image",
-			description:
-				"Controls the inspect_image tool, which delegates image understanding to a vision-capable model. 'auto' exposes it only when the active model lacks native image input; 'on' always exposes it; 'off' never does.",
-			options: [
-				{ value: "auto", label: "Auto (only for models without vision)" },
-				{ value: "on", label: "On" },
-				{ value: "off", label: "Off" },
-			],
-		},
-	},
-
-	"computer.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Computer",
-			description: "Enable native host-desktop screenshots and input for OpenAI computer use",
-		},
-	},
-
-	"computer.backend": {
-		type: "enum",
-		values: ["auto", "native"] as const,
-		default: "auto",
-		ui: {
-			tab: "tools",
-			group: "Computer",
-			label: "Computer Backend",
-			description: "Select automatic or explicit platform-native desktop capture and input",
-			options: [
-				{ value: "auto", label: "Auto" },
-				{ value: "native", label: "Native" },
-			],
-		},
-	},
-
-	"computer.display": {
-		type: "string",
-		default: "all",
-		ui: {
-			tab: "tools",
-			group: "Computer",
-			label: "Computer Display",
-			description: "Composite all displays or select a native display id",
-		},
-	},
-
-	"computer.maxWidth": {
-		type: "number",
-		default: 1920,
-		ui: {
-			tab: "tools",
-			group: "Computer",
-			label: "Computer Screenshot Width",
-			description: "Maximum composite screenshot width in pixels",
-		},
-	},
-
-	"computer.maxHeight": {
-		type: "number",
-		default: 1200,
-		ui: {
-			tab: "tools",
-			group: "Computer",
-			label: "Computer Screenshot Height",
-			description: "Maximum composite screenshot height in pixels",
-		},
-	},
-
-	"inspect_image.timeoutMs": {
-		type: "number",
-		default: 300_000,
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "Inspect Image Timeout",
-			description:
-				"Per-request timeout for the inspect_image vision-model call, in milliseconds. A stalled provider fails fast with a timeout error instead of blocking until manual abort. Set to 0 to disable the timeout.",
-			options: [
-				{ value: "0", label: "Disabled" },
-				{ value: "60000", label: "1 minute" },
-				{ value: "120000", label: "2 minutes" },
-				{ value: "180000", label: "3 minutes" },
-				{ value: "300000", label: "5 minutes" },
-			],
-		},
-	},
-
-	"checkpoint.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Checkpoint/Rewind",
-			description: "Enable the checkpoint and rewind tools for context checkpointing",
-		},
-	},
-
-	// Fetching and browser
-	"fetch.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Read URLs",
-			description: "Allow the read tool to fetch and process URLs",
-		},
-	},
-
-	"vault.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Obsidian Vault",
-			description:
-				"Enable the vault:// internal URL for reading and editing Obsidian vault content via the Obsidian CLI. When disabled, vault:// resolution is refused and the vault:// entry is omitted from the system prompt.",
-		},
-	},
-
-	"github.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "GitHub CLI",
-			description:
-				"Enable the github tool (op-based dispatch for repository, issue, pull request, diff, search, checkout, push, and Actions watch workflows)",
-		},
-	},
-
-	"github.cache.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "GitHub",
-			label: "GitHub View Cache",
-			description: "Cache rendered issue/PR view output in ~/.omp/cache/github-cache.db so repeated reads are free",
-		},
-	},
-
-	"github.cache.softTtlSec": {
-		type: "number",
-		default: 300,
-		ui: {
-			tab: "tools",
-			group: "GitHub",
-			label: "GitHub Cache Soft TTL",
-			description:
-				"Within this window, cached issue/PR view rows are returned directly (seconds; default 5 minutes)",
-		},
-	},
-
-	"github.cache.hardTtlSec": {
-		type: "number",
-		default: 604800,
-		ui: {
-			tab: "tools",
-			group: "GitHub",
-			label: "GitHub Cache Hard TTL",
-			description:
-				"Past the soft TTL the cached row is returned and refreshed in the background; past the hard TTL it is dropped (seconds; default 7 days)",
-		},
-	},
-
-	"web_search.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Web Search",
-			description: "Enable the web_search tool for live web results",
-		},
-	},
-
-	"ask.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Ask",
-			description: "Enable the ask tool for interactive user questions",
-		},
-	},
-
-	"browser.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Browser",
-			description: "Enable the browser tool for scripted Chromium automation (puppeteer)",
-		},
-	},
-
-	"browser.headless": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Grep & Browser",
-			label: "Headless Browser",
-			description: "Launch browser in headless mode (disable to show browser UI)",
-		},
-	},
-
-	"browser.cmux": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Grep & Browser",
-			label: "cmux Browser",
 			description:
 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
 		},
@@ -4405,4 +4479,1291 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"task.eager
+	"task.eager": {
+		type: "enum",
+		values: ["default", "preferred", "always"] as const,
+		default: "default",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Prefer Task Delegation",
+			description: "How strongly to push delegating work to subagents",
+			options: [
+				{ value: "default", label: "Default", description: "Model decides when to delegate" },
+				{ value: "preferred", label: "Preferred", description: "Adds delegation guidance to the system prompt" },
+				{ value: "always", label: "Always", description: "Prompt guidance plus a first-turn delegation reminder" },
+			],
+		},
+	},
+
+	"task.batch": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Batch Task Calls",
+			description:
+				"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
+		},
+	},
+
+	"task.enableEffort": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Per-Task Effort",
+			description:
+				"Expose the optional effort parameter on task spawns, allowing callers to override each subagent's thinking level",
+		},
+	},
+
+	"task.maxConcurrency": {
+		type: "number",
+		default: 32,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Max Concurrent Tasks",
+			description: "Maximum number of subagents running concurrently",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "1", label: "1 task" },
+				{ value: "2", label: "2 tasks" },
+				{ value: "4", label: "4 tasks" },
+				{ value: "8", label: "8 tasks" },
+				{ value: "16", label: "16 tasks" },
+				{ value: "32", label: "32 tasks" },
+				{ value: "64", label: "64 tasks" },
+			],
+		},
+	},
+
+	"task.enableLsp": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "LSP in Subagents",
+			description:
+				"Allow subagents spawned via the task tool to use the lsp tool. Off by default to keep subagents cheap; enable when LSP-aware delegation is worth the extra tokens.",
+		},
+	},
+
+	"task.maxRecursionDepth": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Max Task Recursion",
+			description: "How many levels deep subagents can spawn their own subagents",
+			options: [
+				{ value: "-1", label: "Unlimited" },
+				{ value: "0", label: "None" },
+				{ value: "1", label: "Single" },
+				{ value: "2", label: "Double" },
+				{ value: "3", label: "Triple" },
+			],
+		},
+	},
+
+	"task.maxRuntimeMs": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Max Subagent Runtime",
+			description:
+				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason.",
+			options: [
+				{ value: "0", label: "Unlimited", description: "Default" },
+				{ value: "300000", label: "5 minutes" },
+				{ value: "900000", label: "15 minutes" },
+				{ value: "1800000", label: "30 minutes" },
+				{ value: "3600000", label: "1 hour" },
+			],
+		},
+	},
+
+	"task.agentIdleTtlMs": {
+		type: "number",
+		default: 420_000,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Agent Idle TTL",
+			description:
+				"How long an idle subagent stays live in memory before being parked to disk (ms). Parked agents are revived automatically when messaged or resumed. 0 keeps idle agents live until exit.",
+		},
+	},
+
+	"task.softRequestBudget": {
+		type: "number",
+		default: 200,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Soft Subagent Request Budget",
+			description:
+				"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must yield its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them.",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "90", label: "90 requests" },
+				{ value: "150", label: "150 requests" },
+				{ value: "200", label: "200 requests", description: "Default" },
+			],
+		},
+	},
+
+	"task.softRequestBudgetNotice": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Soft Request Budget Notice",
+			description:
+				"Inject one steering notice when a subagent crosses its soft request budget, asking it to wrap up before the 1.5x forced-yield stop.",
+		},
+	},
+
+	"task.maxEffort": {
+		type: "enum",
+		values: THINKING_EFFORTS,
+		default: "max",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Maximum Per-Spawn Effort",
+			description:
+				"Maximum reasoning effort allowed for the task tool's per-spawn effort hint. Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
+			options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
+		},
+	},
+
+	"task.disabledAgents": {
+		type: "array",
+		default: [] as string[],
+	},
+
+	"task.agentModelOverrides": {
+		type: "record",
+		default: {} as Record<string, string>,
+	},
+	"task.agentPrewalk": {
+		type: "record",
+		default: {} as Record<string, string>,
+	},
+	"task.prewalk": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Generic Task Prewalk",
+			description:
+				"Arm prewalk for the bundled generic `task` subagent: it starts on its resolved model, plans and begins the implementation, then hands off to the 'smol' role at its first edit/write. Per-agent overrides (task.agentPrewalk, toggled with P in /agents) and user agent `prewalk` frontmatter apply regardless of this toggle.",
+		},
+	},
+
+	"tasks.todoClearDelay": {
+		type: "number",
+		default: 60,
+		ui: {
+			tab: "tools",
+			group: "Todos",
+			label: "Todo Auto-Clear Delay",
+			description: "Delay before completed or abandoned todos are removed from the todo widget",
+			options: [
+				{ value: "0", label: "Instant" },
+				{ value: "60", label: "1 minute", description: "Default" },
+				{ value: "300", label: "5 minutes" },
+				{ value: "900", label: "15 minutes" },
+				{ value: "1800", label: "30 minutes" },
+				{ value: "3600", label: "1 hour" },
+				{ value: "-1", label: "Never" },
+			],
+		},
+	},
+
+	"task.showResolvedModelBadge": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Show Resolved Model Badge",
+			description: "Display the actual model ID used by each subagent in the task widget status line",
+		},
+	},
+
+	// Skills
+	"skills.enabled": { type: "boolean", default: true },
+
+	"skills.enableSkillCommands": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skill Commands",
+			description: "Register skills as /skill:name commands",
+		},
+	},
+
+	"skills.enableCodexUser": { type: "boolean", default: true },
+
+	"skills.enableClaudeUser": { type: "boolean", default: true },
+
+	"skills.enableClaudeProject": { type: "boolean", default: true },
+
+	"skills.enablePiUser": { type: "boolean", default: true },
+
+	"skills.enablePiProject": { type: "boolean", default: true },
+
+	"skills.enableAgentsUser": { type: "boolean", default: true },
+
+	"skills.enableAgentsProject": { type: "boolean", default: true },
+
+	"skills.customDirectories": { type: "array", default: [] as string[] },
+
+	"skills.ignoredSkills": { type: "array", default: [] as string[] },
+
+	"skills.includeSkills": { type: "array", default: [] as string[] },
+
+	// Commands
+	"commands.enableClaudeUser": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Claude User Commands",
+			description: "Load commands from ~/.claude/commands/",
+		},
+	},
+
+	"commands.enableClaudeProject": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Claude Project Commands",
+			description: "Load commands from .claude/commands/",
+		},
+	},
+
+	"commands.enableOpencodeUser": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "OpenCode User Commands",
+			description: "Load commands from ~/.config/opencode/commands/",
+		},
+	},
+
+	"commands.enableOpencodeProject": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "OpenCode Project Commands",
+			description: "Load commands from .opencode/commands/",
+		},
+	},
+
+	// ────────────────────────────────────────────────────────────────────────
+	// Providers
+	// ────────────────────────────────────────────────────────────────────────
+
+	// Secret handling
+	"secrets.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Privacy",
+			label: "Hide Secrets",
+			description: "Obfuscate configured secrets and redact credential-shaped tokens before sending to AI providers",
+		},
+	},
+
+	// Provider selection
+	"providers.ollama-cloud.maxConcurrency": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Ollama Cloud Max Concurrency",
+			description:
+				"Maximum concurrent Ollama Cloud subagent runs per process; 0 disables the provider-specific limit",
+		},
+	},
+	"providers.webSearchOrder": {
+		type: "array",
+		default: [] as SearchProviderId[],
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Web Search Provider Order",
+			description:
+				"Prioritized providers for the web_search tool; unlisted providers retain their default order afterward",
+			options: SEARCH_PROVIDER_CHOICES,
+			ordered: true,
+		},
+	},
+	"providers.webSearchExclude": {
+		type: "array",
+		default: [] as SearchProviderId[],
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Excluded Web Search Providers",
+			description: "Providers that web_search should never use, even as fallbacks",
+			options: SEARCH_PROVIDER_CHOICES,
+		},
+	},
+	"providers.webSearchGeminiModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Gemini web_search model",
+			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
+		},
+	},
+	"providers.antigravityEndpoint": {
+		type: "enum",
+		values: ["auto", "production", "sandbox"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Antigravity Endpoint Mode",
+			description: "Endpoint routing strategy for google-antigravity providers (chat, search, image, discovery)",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Try production endpoint, fail over to sandbox on 5xx/429",
+				},
+				{
+					value: "production",
+					label: "Production Only",
+					description: "Force production endpoint only",
+				},
+				{
+					value: "sandbox",
+					label: "Sandbox Only",
+					description: "Force sandbox endpoint only",
+				},
+			],
+		},
+	},
+	"providers.imageOrder": {
+		type: "array",
+		default: [] as ImageProvider[],
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Image Provider Order",
+			description:
+				"Prioritized providers for image generation; unlisted providers follow the active session provider and the built-in order",
+			options: IMAGE_PROVIDER_CHOICES,
+			ordered: true,
+		},
+	},
+	"providers.fireworksTier": {
+		type: "enum",
+		values: ["standard", "priority"] as const,
+		default: "standard",
+		ui: {
+			tab: "providers",
+			group: "Fireworks",
+			label: "Fireworks Tier",
+			description:
+				'Serving path for Fireworks requests. Priority sends `service_tier: "priority"` for higher reliability during peak traffic at a higher price; Standard omits it. Fast (`-fast`) models ignore this — Fast is its own serving path.',
+			options: [
+				{ value: "standard", label: "Standard", description: "Default serving path (no service_tier)" },
+				{
+					value: "priority",
+					label: "Priority",
+					description: "Priority serving path: higher reliability, premium per-token pricing",
+				},
+			],
+		},
+	},
+	"live.voice": {
+		type: "enum",
+		values: LIVE_VOICE_VALUES,
+		default: DEFAULT_LIVE_VOICE,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Live Voice",
+			description: "Voice used by Codex-backed realtime voice sessions",
+			options: LIVE_VOICE_OPTIONS,
+		},
+	},
+	"providers.tts": {
+		type: "enum",
+		values: ["auto", "local", "xai"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Text-to-Speech Provider",
+			description: "Backend for the tts tool: local on-device neural TTS (Kokoro-82M) or xAI Grok Voice",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Prefer local on-device TTS; route .mp3 output to xAI when credentials exist",
+				},
+				{ value: "local", label: "Local", description: "On-device neural TTS (Kokoro-82M); output is WAV/PCM16" },
+				{
+					value: "xai",
+					label: "xAI Grok Voice",
+					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
+				},
+			],
+		},
+	},
+	"tts.localModel": {
+		type: "enum",
+		values: TTS_LOCAL_MODEL_VALUES,
+		default: DEFAULT_TTS_LOCAL_MODEL_KEY,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Local TTS Model",
+			description: "On-device neural TTS model (Kokoro-82M) used by the local TTS backend",
+			options: TTS_LOCAL_MODEL_OPTIONS,
+		},
+	},
+	"tts.localVoice": {
+		type: "enum",
+		values: TTS_LOCAL_VOICE_VALUES,
+		default: DEFAULT_TTS_VOICE,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Local TTS Voice",
+			description: "Kokoro voice used by the local TTS backend (American/British, female/male)",
+			options: TTS_LOCAL_VOICE_OPTIONS,
+		},
+	},
+	"speech.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Speech Vocalization",
+			description: "Speak the assistant's output aloud through the speakers as it streams",
+		},
+	},
+	"speech.mode": {
+		type: "enum",
+		values: ["all", "assistant", "yield"] as const,
+		default: "assistant",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Speech Vocalization Mode",
+			description:
+				"What to speak: all = assistant messages + thinking; assistant = messages only; yield = only the final message at turn end",
+			options: [
+				{ value: "all", label: "All (messages + thinking)" },
+				{ value: "assistant", label: "Assistant messages" },
+				{ value: "yield", label: "Final message only" },
+			],
+		},
+	},
+	"speech.enhanced": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Enhanced Speech Rewriting",
+			description:
+				"Rewrite assistant output into natural spoken prose with the tiny/smol model before synthesis (describes code, drops links and markdown). Falls back to mechanical cleanup on failure",
+		},
+	},
+	"speech.voice": {
+		type: "enum",
+		values: TTS_LOCAL_VOICE_VALUES,
+		default: DEFAULT_TTS_VOICE,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Speech Vocalization Voice",
+			description: "Kokoro voice used when speaking the assistant's output aloud",
+			options: TTS_LOCAL_VOICE_OPTIONS,
+		},
+	},
+	"providers.tinyModel": {
+		type: "enum",
+		values: TINY_TITLE_MODEL_VALUES,
+		default: ONLINE_TINY_TITLE_MODEL_KEY,
+		ui: {
+			tab: "providers",
+			group: "Tiny Model",
+			label: "Tiny Model",
+			description:
+				"Session-title model: online (the TINY role from /models, else @smol) by default, or a local on-device model",
+			options: TINY_TITLE_MODEL_OPTIONS,
+		},
+	},
+	"providers.tinyModelDevice": {
+		type: "enum",
+		values: TINY_MODEL_DEVICE_SETTING_VALUES,
+		default: TINY_MODEL_DEVICE_DEFAULT,
+		ui: {
+			tab: "providers",
+			group: "Tiny Model",
+			label: "Tiny Model Device",
+			description:
+				"ONNX execution provider for local tiny models (titles + memory). Default uses CPU-only inference. The PI_TINY_DEVICE env var overrides this.",
+			options: TINY_MODEL_DEVICE_SETTING_OPTIONS,
+		},
+	},
+	"providers.tinyModelDtype": {
+		type: "enum",
+		values: TINY_MODEL_DTYPE_SETTING_VALUES,
+		default: TINY_MODEL_DTYPE_DEFAULT,
+		ui: {
+			tab: "providers",
+			group: "Tiny Model",
+			label: "Tiny Model Precision",
+			description:
+				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. The PI_TINY_DTYPE env var overrides this.",
+			options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
+		},
+	},
+	"providers.memoryModel": {
+		type: "enum",
+		values: TINY_MEMORY_MODEL_VALUES,
+		default: ONLINE_MEMORY_MODEL_KEY,
+		ui: {
+			tab: "memory",
+			group: "General",
+			label: "Memory Model",
+			description:
+				"Mnemopi LLM for fact extraction + consolidation: online (the TINY role from /models, else smol/remote) by default, or a local on-device model",
+			condition: "mnemopiActive",
+			options: TINY_MEMORY_MODEL_OPTIONS,
+		},
+	},
+
+	"providers.autoThinkingModel": {
+		type: "enum",
+		values: AUTO_THINKING_MODEL_VALUES,
+		default: ONLINE_AUTO_THINKING_MODEL_KEY,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Auto Thinking Model",
+			description:
+				"Difficulty classifier for the `auto` thinking level: online (the TINY role from /models, else smol) by default, or a local on-device model",
+			condition: "autoThinkingActive",
+			options: AUTO_THINKING_MODEL_OPTIONS,
+		},
+	},
+	"features.unexpectedStopDetection": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Agent",
+			label: "Detect unexpected stops",
+			description:
+				"Use a small model to detect when the assistant says it will continue but stops without tool calls; automatically prompt it to continue.",
+		},
+	},
+	"providers.unexpectedStopModel": {
+		type: "enum",
+		values: TINY_MEMORY_MODEL_VALUES,
+		default: ONLINE_MEMORY_MODEL_KEY,
+		ui: {
+			tab: "providers",
+			group: "Tiny Model",
+			label: "Unexpected Stop Model",
+			description:
+				"Classifier for unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.",
+			condition: "unexpectedStopDetection",
+			options: TINY_MEMORY_MODEL_OPTIONS,
+		},
+	},
+
+	"providers.kimiApiFormat": {
+		type: "enum",
+		values: ["auto", "openai", "anthropic"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Kimi API Format",
+			description: "API format for Kimi Code provider (auto follows live model metadata)",
+			options: [
+				{ value: "auto", label: "Auto", description: "Use the model's server-declared protocol" },
+				{ value: "openai", label: "OpenAI", description: "api.kimi.com" },
+				{ value: "anthropic", label: "Anthropic", description: "api.moonshot.ai" },
+			],
+		},
+	},
+
+	"providers.openaiWebsockets": {
+		type: "enum",
+		values: ["auto", "off", "on"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "OpenAI WebSockets",
+			description: "Websocket policy for OpenAI Codex models (auto uses model defaults, on forces, off disables)",
+			options: [
+				{ value: "auto", label: "Auto", description: "Use model/provider default websocket behavior" },
+				{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },
+				{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
+			],
+		},
+	},
+
+	"providers.streamFirstEventTimeoutSeconds": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "providers",
+			group: "Timeouts",
+			label: "Stream First Event Timeout",
+			description:
+				"Seconds to wait for the first model stream event; -1 uses provider/env defaults, 0 disables the watchdog",
+			options: [
+				{ value: "-1", label: "Auto", description: "Use provider defaults and PI_* timeout env vars" },
+				{ value: "0", label: "Off", description: "Disable first-event timeout" },
+				{ value: "300", label: "5 minutes" },
+				{ value: "600", label: "10 minutes" },
+				{ value: "1800", label: "30 minutes" },
+			],
+		},
+	},
+
+	"providers.streamIdleTimeoutSeconds": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "providers",
+			group: "Timeouts",
+			label: "Stream Idle Timeout",
+			description:
+				"Seconds a model stream may stay silent between events; -1 uses provider/env defaults, 0 disables the watchdog",
+			options: [
+				{ value: "-1", label: "Auto", description: "Use provider defaults and PI_* timeout env vars" },
+				{ value: "0", label: "Off", description: "Disable idle timeout" },
+				{ value: "300", label: "5 minutes" },
+				{ value: "600", label: "10 minutes" },
+				{ value: "1800", label: "30 minutes" },
+			],
+		},
+	},
+
+	"providers.openrouterVariant": {
+		type: "enum",
+		values: ["default", "nitro", "floor", "online", "exacto"] as const,
+		default: "default",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "OpenRouter Routing",
+			description:
+				"Default routing-variant suffix appended to OpenRouter model IDs (overridden when the selector already names a variant)",
+			options: [
+				{ value: "default", label: "Default", description: "No suffix; use OpenRouter's default routing" },
+				{ value: "nitro", label: ":nitro", description: "Prioritize throughput / lowest latency" },
+				{ value: "floor", label: ":floor", description: "Prioritize cheapest available provider" },
+				{ value: "online", label: ":online", description: "Enable OpenRouter's web-search plugin" },
+				{
+					value: "exacto",
+					label: ":exacto",
+					description: "Cherry-picked high-quality providers (only defined for select models)",
+				},
+			],
+		},
+	},
+	"providers.fetch": {
+		type: "enum",
+		values: ["auto", "native", "trafilatura", "lynx", "parallel", "jina"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Fetch Provider",
+			description: "Reader backend priority for the fetch/read URL tool",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Priority: native > trafilatura > lynx > parallel > jina",
+				},
+				{ value: "native", label: "Native", description: "In-process HTML→Markdown converter (always available)" },
+				{ value: "trafilatura", label: "Trafilatura", description: "Auto-installs via uv/pip" },
+				{ value: "lynx", label: "Lynx", description: "Requires lynx system package" },
+				{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
+				{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
+			],
+		},
+	},
+	// Codex saved rate-limit resets (auto-redeem)
+	"codexResets.autoRedeem": {
+		type: "enum",
+		values: ["unset", "yes", "no"] as const,
+		default: "unset" as const,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Auto-Redeem Saved Resets",
+			description:
+				"When a turn is blocked by the Codex weekly limit on the active account and no other account is available, run the conservative saved-reset check. unset asks before spending the first eligible reset, yes spends eligible resets without prompting, and no disables the check entirely. Requires retries enabled.",
+			options: [
+				{
+					value: "unset",
+					label: "Unset",
+					description: "Check eligibility, then ask before spending the first saved reset.",
+				},
+				{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
+				{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
+			],
+		},
+	},
+	"codexResets.minBlockedMinutes": {
+		type: "number",
+		default: 60,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Auto-Redeem Min Block",
+			description:
+				"Only auto-redeem when the natural weekly reset is at least this many minutes away (don't spend a ~30-day credit to save a short wait).",
+		},
+	},
+	"codexResets.keepCredits": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Auto-Redeem Reserve",
+			description: "Never auto-spend below this many saved resets (0 = the last credit may be spent automatically).",
+		},
+	},
+	"provider.appendOnlyContext": {
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Append-Only Context",
+			description:
+				"Cache system prompt + tool specs and keep an append-only message log so provider prefix caches (DeepSeek, Xiaomi/SGLang, Anthropic) hit at maximum rate. Auto enables for known prefix-cache providers.",
+			options: [
+				{ value: "auto", label: "Auto", description: "Enable for known prefix-cache providers (recommended)" },
+				{ value: "on", label: "On", description: "Always enable append-only context" },
+				{ value: "off", label: "Off", description: "Disable append-only context" },
+			],
+		},
+	},
+
+	// Exa
+	"exa.enabled": {
+		type: "boolean",
+		default: true,
+		ui: { tab: "providers", group: "Services", label: "Exa", description: "Master toggle for all Exa search tools" },
+	},
+
+	"exa.enableSearch": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Exa Search",
+			description: "Enable Exa basic search, deep search, code search, and crawl tools",
+		},
+	},
+
+	"exa.searchDelayMs": {
+		type: "number",
+		default: 1_000,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Exa Search Delay",
+			description: "Minimum delay between Exa web search requests in milliseconds; set 0 to disable pacing",
+		},
+	},
+
+	"exa.enableResearcher": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Exa Researcher",
+			description: "Enable the Exa researcher tool for AI-powered deep research",
+		},
+	},
+
+	"exa.enableWebsets": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Exa Websets",
+			description: "Enable Exa webset management and enrichment tools",
+		},
+	},
+
+	// SearXNG
+	"searxng.endpoint": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "SearXNG Endpoint",
+			description: "Base URL of a self-hosted SearXNG instance used for web search",
+		},
+	},
+
+	"searxng.token": {
+		type: "string",
+		default: undefined,
+		credential: true,
+	},
+
+	"searxng.basicUsername": {
+		type: "string",
+		default: undefined,
+	},
+
+	"searxng.basicPassword": {
+		type: "string",
+		default: undefined,
+		credential: true,
+	},
+
+	"searxng.categories": {
+		type: "string",
+		default: undefined,
+	},
+
+	"searxng.engines": {
+		type: "string",
+		default: undefined,
+	},
+
+	"searxng.language": {
+		type: "string",
+		default: undefined,
+	},
+
+	"commit.mapReduceEnabled": { type: "boolean", default: true },
+
+	"commit.mapReduceMinFiles": { type: "number", default: 4 },
+
+	"commit.mapReduceMaxFileTokens": { type: "number", default: 50000 },
+
+	"commit.mapReduceTimeoutMs": { type: "number", default: 120000 },
+
+	"commit.mapReduceMaxConcurrency": { type: "number", default: 5 },
+
+	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
+
+	"dev.autoqa": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Developer",
+			label: "Auto QA",
+			description:
+				"Automated tool issue reporting (xd://report_issue). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
+		},
+	},
+
+	"dev.autoqaPush.endpoint": {
+		type: "string",
+		default: "https://qa.omp.sh/v1/grievances" as const,
+		ui: {
+			tab: "tools",
+			group: "Developer",
+			label: "Auto QA Push Endpoint",
+			description: "Full URL receiving Auto QA JSON reports (default https://qa.omp.sh/v1/grievances)",
+		},
+	},
+
+	"dev.autoqaPush.token": {
+		type: "string",
+		default: undefined,
+		credential: true,
+	},
+
+	/**
+	 * User decision on sharing automatic `report_tool_issue` grievances.
+	 *
+	 *   - `"unset"`  — never asked; the first `report_tool_issue` invocation
+	 *                  pops a consent dialog and persists the answer here.
+	 *   - `"granted"` — record and (when push is configured) ship grievances.
+	 *   - `"denied"`  — silently no-op every `report_tool_issue` call.
+	 *
+	 * Owned by `packages/coding-agent/src/tools/report-tool-issue.ts` via the
+	 * process-global consent handler registered by `InteractiveMode`.
+	 *
+	 * @default "unset"
+	 */
+	"dev.autoqaConsent": {
+		type: "enum",
+		values: ["unset", "granted", "denied"] as const,
+		default: "unset" as const,
+	},
+
+	"gc.blobs": { type: "boolean", default: true },
+
+	"gc.archive": { type: "boolean", default: true },
+
+	"gc.wal": { type: "boolean", default: true },
+
+	"gc.coldArchiveAfterDays": { type: "number", default: 30 },
+
+	"gc.retainNewestGlobal": { type: "number", default: 20 },
+
+	"gc.retainNewestPerCwd": { type: "number", default: 10 },
+
+	"thinkingBudgets.minimal": { type: "number", default: 1024 },
+
+	"thinkingBudgets.low": { type: "number", default: 2048 },
+
+	"thinkingBudgets.medium": { type: "number", default: 8192 },
+
+	"thinkingBudgets.high": { type: "number", default: 16384 },
+
+	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
+
+	"thinkingBudgets.max": { type: "number", default: 32768 },
+} as const;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Type Inference
+// ═══════════════════════════════════════════════════════════════════════════
+
+type Schema = typeof SETTINGS_SCHEMA;
+
+/** All valid setting paths */
+export type SettingPath = keyof Schema;
+
+/** Infer the value type for a setting path */
+export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boolean"; default: undefined }
+	? boolean | undefined
+	: Schema[P] extends { type: "boolean" }
+		? boolean
+		: Schema[P] extends { type: "string" }
+			? string | undefined
+			: Schema[P] extends { type: "number"; default: undefined }
+				? number | undefined
+				: Schema[P] extends { type: "number" }
+					? number
+					: Schema[P] extends { type: "enum"; values: infer V }
+						? V extends readonly string[]
+							? V[number]
+							: never
+						: Schema[P] extends { type: "array"; default: infer D }
+							? D
+							: Schema[P] extends { type: "record"; default: infer D }
+								? D
+								: never;
+
+/** Get the default value for a setting path */
+export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {
+	return SETTINGS_SCHEMA[path].default as SettingValue<P>;
+}
+
+/** Check if a path has UI metadata (should appear in settings panel) */
+export function hasUi(path: SettingPath): boolean {
+	return "ui" in SETTINGS_SCHEMA[path];
+}
+
+/**
+ * Whether a setting holds a credential and must never be printed or exported
+ * without an explicit request. Drives both CLI redaction and settings-panel
+ * masking, so the two cannot disagree.
+ */
+export function isCredential(path: SettingPath): boolean {
+	const def = SETTINGS_SCHEMA[path];
+	if ("credential" in def && def.credential === true) return true;
+	// `ui.secret` predates this marker and still means "never display". Reading
+	// both here keeps ONE accessor, so the two spellings cannot produce
+	// different behaviour on different surfaces.
+	return getUi(path)?.secret === true;
+}
+
+/** Get UI metadata for a path (undefined if no UI) */
+export function getUi(path: SettingPath): AnyUiMetadata | undefined {
+	const def = SETTINGS_SCHEMA[path];
+	return "ui" in def ? (def.ui as AnyUiMetadata) : undefined;
+}
+
+/** Get all paths for a specific tab */
+export function getPathsForTab(tab: SettingTab): SettingPath[] {
+	return (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(path => {
+		const ui = getUi(path);
+		return ui?.tab === tab;
+	});
+}
+
+/** Get the type of a setting */
+export function getType(path: SettingPath): SettingDef["type"] {
+	return SETTINGS_SCHEMA[path].type;
+}
+
+/** Get enum values for an enum setting */
+export function getEnumValues(path: SettingPath): readonly string[] | undefined {
+	const def = SETTINGS_SCHEMA[path];
+	return "values" in def ? (def.values as readonly string[]) : undefined;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Derived Types from Schema
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Status line preset - derived from schema */
+export type StatusLinePreset = SettingValue<"statusLine.preset">;
+
+/** Status line separator style - derived from schema */
+export type StatusLineSeparatorStyle = SettingValue<"statusLine.separator">;
+
+/** Tree selector filter mode - derived from schema */
+export type TreeFilterMode = SettingValue<"treeFilterMode">;
+
+/** Personality preset - derived from schema */
+export type Personality = SettingValue<"personality">;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Typed Group Definitions
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface CompactionSettings {
+	enabled: boolean;
+	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	thresholdPercent: number;
+	thresholdTokens: number;
+	reserveTokens: number | undefined;
+	keepRecentTokens: number;
+	midTurnEnabled: boolean;
+	handoffSaveToDisk: boolean;
+	autoContinue: boolean;
+	remoteEnabled: boolean;
+	remoteEndpoint: string | undefined;
+	remoteStreamingV2Enabled: boolean;
+	v2RetainedMessageBudget: number;
+	idleEnabled: boolean;
+	idleThresholdTokens: number;
+	idleTimeoutSeconds: number;
+	supersedeReads: boolean;
+	dropUseless: boolean;
+}
+
+export interface RecapSettings {
+	enabled: boolean;
+	idleSeconds: number;
+}
+
+export interface TitleSettings {
+	refreshOnReplan: boolean;
+}
+
+export interface ContextPromotionSettings {
+	enabled: boolean;
+}
+export interface RetrySettings {
+	enabled: boolean;
+	maxRetries: number;
+	baseDelayMs: number;
+	maxDelayMs: number;
+	modelFallback: boolean;
+	usageAwareFallback: boolean;
+	usageReservePct: number;
+	usageReservePolicy: "confirm" | "auto" | "fail-closed";
+}
+
+export interface MemoriesSettings {
+	enabled: boolean;
+	maxRolloutsPerStartup: number;
+	maxRolloutAgeDays: number;
+	minRolloutIdleHours: number;
+	threadScanLimit: number;
+	maxRawMemoriesForGlobal: number;
+	stage1Concurrency: number;
+	stage1LeaseSeconds: number;
+	stage1RetryDelaySeconds: number;
+	phase2LeaseSeconds: number;
+	phase2RetryDelaySeconds: number;
+	phase2HeartbeatSeconds: number;
+	rolloutPayloadPercent: number;
+	fallbackTokenLimit: number;
+	summaryInjectionTokenLimit: number;
+}
+
+export interface TodoCompletionSettings {
+	enabled: boolean;
+	maxReminders: number;
+}
+
+export interface BranchSummarySettings {
+	enabled: boolean;
+	reserveTokens: number;
+}
+
+export interface SkillsSettings {
+	enabled?: boolean;
+	enableSkillCommands?: boolean;
+	enableCodexUser?: boolean;
+	enableClaudeUser?: boolean;
+	enableClaudeProject?: boolean;
+	enablePiUser?: boolean;
+	enablePiProject?: boolean;
+	enableAgentsUser?: boolean;
+	enableAgentsProject?: boolean;
+	customDirectories?: string[];
+	ignoredSkills?: string[];
+	includeSkills?: string[];
+	disabledExtensions?: string[];
+}
+
+export interface CommitSettings {
+	mapReduceEnabled: boolean;
+	mapReduceMinFiles: number;
+	mapReduceMaxFileTokens: number;
+	mapReduceTimeoutMs: number;
+	mapReduceMaxConcurrency: number;
+	changelogMaxDiffChars: number;
+}
+
+export interface TtsrSettings {
+	enabled: boolean;
+	contextMode: "discard" | "keep";
+	interruptMode: "never" | "prose-only" | "tool-only" | "always";
+	repeatMode: "once" | "after-gap";
+	repeatGap: number;
+	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
+	builtinRules?: boolean;
+	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
+	disabledRules?: string[];
+}
+
+export interface ExaSettings {
+	enabled: boolean;
+	enableSearch: boolean;
+	searchDelayMs: number;
+	enableResearcher: boolean;
+	enableWebsets: boolean;
+}
+
+export interface StatusLineSettings {
+	preset: StatusLinePreset;
+	separator: StatusLineSeparatorStyle;
+	showHookStatus: boolean;
+	leftSegments: StatusLineSegmentId[];
+	rightSegments: StatusLineSegmentId[];
+	segmentOptions: Record<string, unknown>;
+}
+
+export interface ThinkingBudgetsSettings {
+	minimal: number;
+	low: number;
+	medium: number;
+	high: number;
+	xhigh: number;
+	max: number;
+}
+
+export interface SttSettings {
+	enabled: boolean;
+	language: string | undefined;
+	modelName: string;
+	streaming: boolean;
+}
+
+export interface BashInterceptorRule {
+	pattern: string;
+	flags?: string;
+	tool: string;
+	message: string;
+	allowSubcommands?: string[];
+}
+
+export interface ShellMinimizerSettings {
+	enabled: boolean;
+	settingsPath: string | undefined;
+	only: string[];
+	except: string[];
+	maxCaptureBytes: number;
+	sourceOutlineLevel: "default" | "aggressive";
+	legacyFilters: boolean | undefined;
+}
+export type CodexAutoRedeemMode = "unset" | "yes" | "no";
+
+export interface CodexResetsSettings {
+	autoRedeem: CodexAutoRedeemMode;
+	minBlockedMinutes: number;
+	keepCredits: number;
+}
+
+export interface GcSettings {
+	blobs: boolean;
+	archive: boolean;
+	wal: boolean;
+	coldArchiveAfterDays: number;
+	retainNewestGlobal: number;
+	retainNewestPerCwd: number;
+}
+
+/** Map group prefix -> typed settings interface */
+export interface GroupTypeMap {
+	compaction: CompactionSettings;
+	recap: RecapSettings;
+	title: TitleSettings;
+	contextPromotion: ContextPromotionSettings;
+	retry: RetrySettings;
+	memories: MemoriesSettings;
+	branchSummary: BranchSummarySettings;
+	skills: SkillsSettings;
+	commit: CommitSettings;
+	ttsr: TtsrSettings;
+	exa: ExaSettings;
+	statusLine: StatusLineSettings;
+	thinkingBudgets: ThinkingBudgetsSettings;
+	stt: SttSettings;
+	modelRoles: Record<string, string>;
+	modelTags: ModelTagsSettings;
+	cycleOrder: string[];
+	shellMinimizer: ShellMinimizerSettings;
+	codexResets: CodexResetsSettings;
+	gc: GcSettings;
+}
+
+export type GroupPrefix = keyof GroupTypeMap;
