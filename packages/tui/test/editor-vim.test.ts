@@ -81,6 +81,27 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("dispatches batched printable input through Vim modes", () => {
+		const inserted = createVimEditor();
+		inserted.handleInput("ihello");
+		expect(inserted.getText()).toBe("hello");
+		expect(inserted.getVimMode()).toBe("insert");
+
+		inserted.handleInput("\x1b");
+		inserted.handleInput("u");
+		expect(inserted.getText()).toBe("");
+
+		const deleted = createVimEditor();
+		deleted.setText("one\ntwo");
+		deleted.handleInput("ggdd");
+		expect(deleted.getText()).toBe("two");
+		expect(deleted.getVimMode()).toBe("normal");
+
+		const grapheme = createVimEditor();
+		grapheme.handleInput("e\u0301");
+		expect(grapheme.getText()).toBe("");
+	});
+
 	it("undoes an insert session as one change", () => {
 		const editor = createVimEditor();
 

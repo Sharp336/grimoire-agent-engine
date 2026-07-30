@@ -1275,14 +1275,21 @@ export class Editor implements Component, Focusable {
 		}
 
 		// Bulk printable fast path: a multi-scalar run of plain text (paste
-		// remainder, batched stdin) parses to no key, so no binding probe or
-		// special-key branch below can consume it — it always falls through to
-		// one #insertCharacter call. Take that path directly and skip the
-		// dispatch cascade. Runs containing ESC or control bytes (including
-		// \r/\n) keep the full path: those bytes carry key semantics.
+		// remainder, batched stdin) parses to no key. Vim must see each grapheme
+		// while outside insert mode because one command can change how the
+		// remainder is interpreted, such as `ihello` or `dd`.
 		if (canonical === undefined && data.length > 1 && isPlainTextRun(data)) {
-			this.#insertCharacter(data);
-			return;
+			if (this.#inputMode === "vim" && this.#vim.mode !== "insert") {
+				const graphemes = [...segmenter.segment(data)];
+				if (graphemes.length > 1) {
+					for (const { segment } of graphemes) this.#handleInputChunk(segment);
+					return;
+				}
+			} else {
+				if (this.#inputMode === "vim") this.#vim.prepareInsertInput(data, kb);
+				this.#insertCharacter(data);
+				return;
+			}
 		}
 
 		// Handle special key combinations first
