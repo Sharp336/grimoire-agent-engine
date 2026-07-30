@@ -134,6 +134,10 @@ export interface InteractiveModeContext {
 	focusParentSession(): Promise<void>;
 	/** Return the view to the main session (delegates to SessionFocusController.unfocus). */
 	unfocusSession(): Promise<void>;
+	/** Cycle focus to the next agent tab (Main + agents, wraps). No-op when only Main exists. */
+	focusNextAgent(): Promise<void>;
+	/** Cycle focus to the previous agent tab (wraps). */
+	focusPrevAgent(): Promise<void>;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
 	clearTransientSessionUi(): void;
 	settings: Settings;

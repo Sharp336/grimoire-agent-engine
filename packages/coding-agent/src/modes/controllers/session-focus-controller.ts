@@ -58,6 +58,42 @@ export class SessionFocusController {
 		}
 		return this.unfocus();
 	}
+	/**
+	 * Cycle focus to the next agent tab (Main + every non-advisor, non-aborted
+	 * agent, in registration order). Wraps around. No-op when only Main exists.
+	 */
+	async focusNext(): Promise<void> {
+		return this.#cycleFocus(1);
+	}
+
+	/** Cycle focus to the previous agent tab. Wraps around. */
+	async focusPrev(): Promise<void> {
+		return this.#cycleFocus(-1);
+	}
+
+	/**
+	 * Build the tab list: Main first, then every registered agent except advisors
+	 * and aborted refs, in registration (`createdAt`) order for stable cycling.
+	 */
+	#focusableTabs(): string[] {
+		const agents = this.registry
+			.list()
+			.filter(ref => ref.kind !== "advisor" && ref.status !== "aborted" && ref.id !== MAIN_AGENT_ID)
+			.sort((a, b) => a.createdAt - b.createdAt)
+			.map(ref => ref.id);
+		return [MAIN_AGENT_ID, ...agents];
+	}
+
+	async #cycleFocus(direction: 1 | -1): Promise<void> {
+		if (this.ctx.collabGuest) return; // viewing agents is unavailable in a collab session
+		const tabs = this.#focusableTabs();
+		if (tabs.length <= 1) return;
+		const current = this.#focusedAgentId ?? MAIN_AGENT_ID;
+		const idx = tabs.indexOf(current);
+		const next = tabs[(idx + direction + tabs.length) % tabs.length];
+		if (next === MAIN_AGENT_ID) return this.unfocus();
+		return this.focusAgent(next);
+	}
 
 	/** Return to the main session. No-op when unfocused. */
 	async unfocus(): Promise<void> {

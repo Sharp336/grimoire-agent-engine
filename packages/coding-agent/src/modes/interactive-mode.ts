@@ -95,7 +95,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
 };
-import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -443,6 +443,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	statusContainer: Container;
 	todoContainer: Container;
 	subagentContainer: Container;
+	agentTabsContainer: Container;
 	btwContainer: Container;
 	omfgContainer: Container;
 	errorBannerContainer: Container;
@@ -611,14 +612,25 @@ export class InteractiveMode implements InteractiveModeContext {
 	get sessionName(): string | undefined {
 		return this.session.sessionName;
 	}
-	focusAgentSession(id: string): Promise<void> {
-		return this.#focusController.focusAgent(id);
+	async focusAgentSession(id: string): Promise<void> {
+		await this.#focusController.focusAgent(id);
+		this.#renderAgentTabs();
 	}
-	focusParentSession(): Promise<void> {
-		return this.#focusController.focusParent();
+	async focusParentSession(): Promise<void> {
+		await this.#focusController.focusParent();
+		this.#renderAgentTabs();
 	}
-	unfocusSession(): Promise<void> {
-		return this.#focusController.unfocus();
+	async unfocusSession(): Promise<void> {
+		await this.#focusController.unfocus();
+		this.#renderAgentTabs();
+	}
+	async focusNextAgent(): Promise<void> {
+		await this.#focusController.focusNext();
+		this.#renderAgentTabs();
+	}
+	async focusPrevAgent(): Promise<void> {
+		await this.#focusController.focusPrev();
+		this.#renderAgentTabs();
 	}
 	clearTransientSessionUi(): void {
 		if (this.loadingAnimation) {
@@ -719,6 +731,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusContainer = new AnchoredLiveContainer();
 		this.todoContainer = new AnchoredLiveContainer();
 		this.subagentContainer = new AnchoredLiveContainer();
+		this.agentTabsContainer = new AnchoredLiveContainer();
 		this.btwContainer = new AnchoredLiveContainer();
 		this.omfgContainer = new AnchoredLiveContainer();
 		this.errorBannerContainer = new AnchoredLiveContainer();
@@ -979,6 +992,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Working loader / transient status sits below the sticky todo + subagent
 		// HUDs, just above the editor's hook-widget top margin — so it reads next to
 		// the prompt while keeping the one-line gap above the editor.
+		// Agent tab strip — a tmux-style bar of Main + every registered agent, with the
+		// focused tab highlighted. Sits just above the working loader / editor so it
+		// reads like a tab bar over the prompt. Hidden when only Main is present.
+		this.ui.addChild(this.agentTabsContainer);
 		this.ui.addChild(this.statusContainer);
 		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
 		this.ui.addChild(this.hookWidgetContainerAbove);
@@ -995,6 +1012,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
 		this.syncRunningSubagentBadge();
+		this.#renderAgentTabs();
 		this.#observerRegistry.onChange(kind => {
 			this.#scheduleObserverUiSync(kind);
 		});
@@ -1719,6 +1737,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(() => {
 				this.syncRunningSubagentBadge();
+				this.#renderAgentTabs();
 			});
 		}
 		const count = countRunningSubagentBadgeAgents(registry);
@@ -2043,8 +2062,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#reconcileTodosWithSubagents();
 		}
 		this.#syncTodoAutoClearTimer();
-		this.#renderTodoList();
 		this.#renderSubagentList();
+		this.#renderAgentTabs();
 		this.ui.requestRender();
 	}
 
@@ -2148,6 +2167,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
 		if (lines.length === 0) return;
 		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
+	}
+	/**
+	 * Render the tmux-style agent tab strip: Main + every non-advisor, non-aborted
+	 * agent, in registration order, with the focused tab highlighted. Hidden when
+	 * only Main is present (no subagents to switch between) and for collab guests
+	 * (agent focusing is unavailable). Mirrors SessionFocusController.#cycleFocus
+	 * ordering so the bar matches the alt+. / alt+, cycle.
+	 */
+	#renderAgentTabs(): void {
+		this.agentTabsContainer.clear();
+		if (this.collabGuest) return;
+		const refs = AgentRegistry.global().list();
+		const agents = refs
+			.filter(ref => ref.kind !== "advisor" && ref.status !== "aborted" && ref.id !== MAIN_AGENT_ID)
+			.sort((a, b) => a.createdAt - b.createdAt);
+		if (agents.length === 0) return;
+		const focused = this.focusedAgentId ?? MAIN_AGENT_ID;
+		const renderTab = (id: string, name: string, status: AgentStatus): string => {
+			const glyph = status === "running" ? "●" : status === "parked" ? "◌" : "○";
+			const label = `${glyph} ${name}`;
+			if (id === focused) return theme.bold(theme.fg("accent", `▶ ${label}`));
+			if (status === "running") return theme.fg("accent", label);
+			if (status === "parked") return theme.fg("dim", label);
+			return theme.fg("muted", label);
+		};
+		const mainRef = refs.find(ref => ref.id === MAIN_AGENT_ID);
+		const segments = [renderTab(MAIN_AGENT_ID, "Main", mainRef?.status ?? "idle")];
+		for (const ref of agents) segments.push(renderTab(ref.id, ref.displayName || ref.id, ref.status));
+		const line = `${theme.fg("dim", "Agents")}  ${segments.join("  ")}`;
+		this.agentTabsContainer.addChild(new Text(line, 1, 0));
 	}
 
 	async #loadTodoList(): Promise<void> {

@@ -206,4 +206,65 @@ describe("SessionFocusController", () => {
 			[h.main.session, undefined],
 		]);
 	});
+	it("focusNext cycles Main → first agent → … → last agent → Main (wrap)", async () => {
+		const h = makeHarness();
+		const a = makeSessionStub();
+		const b = makeSessionStub();
+		registerSub(h.registry, "Alpha", a.session, MAIN_AGENT_ID);
+		registerSub(h.registry, "Beta", b.session, MAIN_AGENT_ID);
+
+		// Main → Alpha (registration order)
+		await h.controller.focusNext();
+		expect(h.controller.focusedAgentId).toBe("Alpha");
+
+		// Alpha → Beta
+		await h.controller.focusNext();
+		expect(h.controller.focusedAgentId).toBe("Beta");
+
+		// Beta → Main (wrap, unfocus)
+		await h.controller.focusNext();
+		expect(h.controller.focusedAgentId).toBeUndefined();
+		expect(h.controller.target).toBeUndefined();
+	});
+
+	it("focusPrev wraps from Main to the last agent", async () => {
+		const h = makeHarness();
+		const a = makeSessionStub();
+		const b = makeSessionStub();
+		registerSub(h.registry, "Alpha", a.session, MAIN_AGENT_ID);
+		registerSub(h.registry, "Beta", b.session, MAIN_AGENT_ID);
+
+		await h.controller.focusPrev();
+		expect(h.controller.focusedAgentId).toBe("Beta");
+
+		// Beta → Alpha
+		await h.controller.focusPrev();
+		expect(h.controller.focusedAgentId).toBe("Alpha");
+	});
+
+	it("cycling skips advisors and aborted agents", async () => {
+		const h = makeHarness();
+		const a = makeSessionStub();
+		const adv = makeSessionStub();
+		const dead = makeSessionStub();
+		registerSub(h.registry, "Alpha", a.session, MAIN_AGENT_ID);
+		h.registry.register({ id: "Adv", displayName: "Adv", kind: "advisor", session: adv.session, status: "running" });
+		registerSub(h.registry, "Dead", dead.session, MAIN_AGENT_ID);
+		h.registry.setStatus("Dead", "aborted");
+
+		// Only Main + Alpha are focusable → next from Main lands on Alpha, then wraps to Main.
+		await h.controller.focusNext();
+		expect(h.controller.focusedAgentId).toBe("Alpha");
+		await h.controller.focusNext();
+		expect(h.controller.focusedAgentId).toBeUndefined();
+	});
+
+	it("focusNext is a no-op when only Main is registered", async () => {
+		const h = makeHarness();
+		await h.controller.focusNext();
+		expect(h.controller.focusedAgentId).toBeUndefined();
+		await h.controller.focusPrev();
+		expect(h.controller.focusedAgentId).toBeUndefined();
+	});
+
 });

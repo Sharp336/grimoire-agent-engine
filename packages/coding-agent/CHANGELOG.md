@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a tmux-style agent tab strip to the TUI: a single-line bar above the prompt lists Main plus every running/parked/idle subagent as a switchable tab, with the focused tab marked and status glyphs (`●` running, `◌` parked, `○` idle). The strip stays hidden until a subagent exists and is suppressed for collab guests. `app.agents.next` / `app.agents.prev` keybindings (default `alt+l` / `alt+h`) cycle focus across the tabs, wrapping Main → first agent → … → last agent → Main and skipping advisors and aborted agents.
+
 ## [17.2.0] - 2026-07-30
 
 ### Breaking Changes

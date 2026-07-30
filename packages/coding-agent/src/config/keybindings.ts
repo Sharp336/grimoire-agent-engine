@@ -38,6 +38,8 @@ interface AppKeybindings {
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
 	"app.agents.hub": true;
+	"app.agents.next": true;
+	"app.agents.prev": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
@@ -177,6 +179,14 @@ export const KEYBINDINGS = {
 	"app.agents.hub": {
 		defaultKeys: "alt+a",
 		description: "Open the agent hub",
+	},
+	"app.agents.next": {
+		defaultKeys: "alt+l",
+		description: "Cycle focus to the next agent tab",
+	},
+	"app.agents.prev": {
+		defaultKeys: "alt+h",
+		description: "Cycle focus to the previous agent tab",
 	},
 	"app.session.observe": {
 		defaultKeys: "ctrl+s",
