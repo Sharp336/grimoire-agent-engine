@@ -686,7 +686,13 @@ export class SessionManager {
 		const lock = source.#sessionLock;
 		if (!lock || lock.handle.lockPath !== lockPathForSession(sessionFile)) return false;
 		if (this.#sessionLock === lock) return true;
-		this.#releaseSessionLock();
+		const previous = this.#sessionLock;
+		try {
+			this.#releaseSessionLock();
+		} catch {
+			if (previous) this.#supersededSessionLocks.add(previous);
+			this.#sessionLock = undefined;
+		}
 		lock.references++;
 		lock.errorHandlers.add(this.#sessionLockErrorHandler);
 		this.#sessionLock = lock;
@@ -3083,8 +3089,17 @@ export class SessionManager {
 					const manager = await SessionManager.open(breadcrumb.sessionFile, undefined, storage, {
 						initialCwd: breadcrumbCwd,
 					});
-					await manager.moveTo(cwd, sessionDir);
-					return manager;
+					try {
+						await manager.moveTo(cwd, sessionDir);
+						return manager;
+					} catch (error) {
+						try {
+							await manager.close();
+						} catch (closeError) {
+							throw new AggregateError([error, closeError], "Failed to relocate and close resumed session");
+						}
+						throw error;
+					}
 				}
 
 				chosenSession = newestInTargetDir;
