@@ -24,9 +24,19 @@ const INSUFFICIENT_BALANCE_PATTERN = /insufficient.?balance/i;
 const SPEND_LIMIT_PATTERN = /spend.?limit/i;
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
 const CONCURRENT_LIMIT_PATTERN =
-	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|request|invocation|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b/i;
+	// Require an actual cap signal (limit/quota/exceeded/reached) near "concurrent".
+	// Bare nouns ("concurrent request is not supported", "only one concurrent
+	// invocation is supported") are deterministic 4xx feature rejections, not
+	// transient caps — matching them here would set Flag.Transient and retry the
+	// rejection instead of surfacing it.
+	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b/i;
 const ACCOUNT_SCOPED_403_PATTERN =
-	/\b(?:overall|account|organization|team|workspace)\b[^\n]{0,40}\b(?:message |request )?rate.?limit\b|\blimit will reset\b|\bwill reset in\b/i;
+	// The bare "limit will reset" / "will reset in" phrasing also appears on
+	// statusless per-minute transients ("Rate limit will reset in 30 seconds"),
+	// so gate the reset-window alternative on account-specific wording (Devin's
+	// "Your limit will reset in …"); the overall/account qualifiers arm above
+	// already covers the rest.
+	/\b(?:overall|account|organization|team|workspace)\b[^\n]{0,40}\b(?:message |request )?rate.?limit\b|\byour\b[^\n]{0,30}\b(?:limit )?will reset\b/i;
 
 /**
  * Classify a rate-limit error message into a reason category.

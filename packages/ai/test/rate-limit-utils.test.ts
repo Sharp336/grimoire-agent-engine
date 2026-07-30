@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
+import { classify, classifyMessage, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
 import {
 	calculateRateLimitBackoffMs,
 	isUsageLimitOutcome,
@@ -40,6 +40,18 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("Maximum concurrent invocation limit reached")).toBe("CONCURRENT_LIMIT");
 		expect(parseRateLimitReason("Rate limit reached for gpt-4o")).toBe("RATE_LIMIT_EXCEEDED");
 		expect(parseRateLimitReason("Your quota will reset at 07-28")).toBe("QUOTA_EXHAUSTED");
+	});
+
+	// Deterministic 4xx feature rejections worded with bare concurrency nouns
+	// ("concurrent request/invocation is not supported") must not classify as a
+	// concurrency cap — doing so would set Flag.Transient and retry the rejection
+	// instead of surfacing it. A cap needs an explicit limit/quota/exceeded/reached
+	// signal near "concurrent".
+	it("does not classify bare concurrency feature rejections as CONCURRENT_LIMIT", () => {
+		expect(parseRateLimitReason("Concurrent invocation is not supported")).not.toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("Only one concurrent request is supported")).not.toBe("CONCURRENT_LIMIT");
+		// The deterministic rejection must surface as a hard error, not be retried.
+		expect(is(classify("Concurrent invocation is not supported"), Flag.Transient)).toBe(false);
 	});
 
 	it("classifies overloaded 529 as MODEL_CAPACITY_EXHAUSTED", () => {
@@ -252,6 +264,41 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(undefined, devinTrailer)).toBe(true);
 		expect(isUsageLimit(devinTrailer)).toBe(true);
 		expect(isUsageLimitOutcome(403, "Forbidden")).toBe(false);
+	});
+
+	// A statusless per-minute reset-window transient ("Rate limit will reset in
+	// 30 seconds") is ordinary throttling (RATE_LIMIT_EXCEEDED), not an account
+	// usage cap. The reset-window alternative is gated on account scope so it stays
+	// in the backoff lane instead of rotating the credential.
+	it("does not rotate on a statusless per-minute reset-window transient", () => {
+		const message = "Rate limit will reset in 30 seconds";
+		expect(parseRateLimitReason(message)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(undefined, message)).toBe(false);
+		expect(isUsageLimit(message)).toBe(false);
+	});
+
+	// agent-session gates Copilot credential removal on AuthFailed && !UsageLimit.
+	// A 403 whose body is a recognized account cap carries UsageLimit, so the gate
+	// suppresses removal and retains the still-valid credential; a plain 401 has no
+	// UsageLimit, so removal proceeds. Pin the gate condition for both shapes.
+	it("keeps Copilot credentials for a 403 account cap, removes on a 401", () => {
+		const cap = new ProviderHttpError(
+			"Reached overall message rate limit. Your limit will reset in 13 minutes.",
+			403,
+		);
+		const capId = classifyMessage({
+			errorId: classify(cap),
+			errorMessage: "GitHub Copilot access denied (HTTP 403).",
+			errorStatus: 403,
+		});
+		expect(is(capId, Flag.AuthFailed) && !is(capId, Flag.UsageLimit)).toBe(false);
+		const auth = new ProviderHttpError("401 Unauthorized", 401);
+		const authId = classifyMessage({
+			errorId: classify(auth),
+			errorMessage: "GitHub Copilot authentication failed (HTTP 401).",
+			errorStatus: 401,
+		});
+		expect(is(authId, Flag.AuthFailed) && !is(authId, Flag.UsageLimit)).toBe(true);
 	});
 
 	it("rotates on xAI Grok Build 402 usage-balance exhaustion regardless of status", () => {

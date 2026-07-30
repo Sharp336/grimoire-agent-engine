@@ -2537,14 +2537,17 @@ export class AgentSession {
 			// outside the session transcript (issue #6177).
 			logProviderTurnError(msg);
 
-			// Invalidate GitHub Copilot credentials on auth failure so stale tokens
-			// aren't reused on the next request
-			if (
-				msg.stopReason === "error" &&
-				msg.provider === "github-copilot" &&
-				AIError.is(AIError.classifyMessage(msg), AIError.Flag.AuthFailed)
-			) {
-				await this.#modelRegistry.authStorage.remove("github-copilot");
+			// Invalidate GitHub Copilot credentials on a hard auth failure (401, or an
+			// expired/revoked token) so stale tokens aren't reused on the next request.
+			// A 403 whose body is a recognized account usage cap is NOT an auth failure —
+			// the credential is valid, only temporarily blocked until its reset window —
+			// so gate the removal on the absence of Flag.UsageLimit and keep the
+			// still-valid credential around until the cap resets.
+			if (msg.stopReason === "error" && msg.provider === "github-copilot") {
+				const errorId = AIError.classifyMessage(msg);
+				if (AIError.is(errorId, AIError.Flag.AuthFailed) && !AIError.is(errorId, AIError.Flag.UsageLimit)) {
+					await this.#modelRegistry.authStorage.remove("github-copilot");
+				}
 			}
 
 			if (this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
