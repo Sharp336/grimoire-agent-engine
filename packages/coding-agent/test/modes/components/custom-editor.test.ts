@@ -229,6 +229,36 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("does not attach an empty bracketed image paste in Vim visual mode", () => {
+		const { editor } = makeEditor();
+		const onPasteImage = vi.fn();
+		editor.onPasteImage = onPasteImage;
+		editor.setInputMode("vim");
+		editor.setText("text");
+		editor.handleInput("v");
+		expect(editor.getVimMode()).toBe("visual");
+
+		editor.handleInput(bracketedPaste(""));
+
+		expect(onPasteImage).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("text");
+	});
+
+	it("does not attach bracketed image paths in Vim visual mode", () => {
+		const { editor } = makeEditor();
+		const onPasteImagePath = vi.fn();
+		editor.onPasteImagePath = onPasteImagePath;
+		editor.setInputMode("vim");
+		editor.setText("text");
+		editor.handleInput("v");
+		expect(editor.getVimMode()).toBe("visual");
+
+		editor.handleInput(bracketedPaste("/tmp/image.png"));
+
+		expect(onPasteImagePath).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("text");
+	});
+
 	it("keeps a two-file drag with unescaped spaces as text instead of attaching one fused path", () => {
 		// PR #6582 review: selecting two screenshots and dropping them together
 		// emits a single space-separated payload the splitter also refuses

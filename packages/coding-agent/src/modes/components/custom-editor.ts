@@ -810,7 +810,8 @@ export class CustomEditor extends Editor {
 			// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
 			// completes — fixes the race where submit runs against an empty `pendingImages`.
 			if (remaining.length > 0) this.#pendingInput.push(remaining);
-			if (this.getVimMode() === "normal") {
+			const pasteVimMode = this.getVimMode();
+			if (pasteVimMode !== undefined && pasteVimMode !== "insert") {
 				const drained = this.#pendingInput.splice(0);
 				for (const chunk of drained) this.handleInput(chunk);
 				return;
