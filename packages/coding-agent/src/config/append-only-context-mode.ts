@@ -54,6 +54,7 @@ function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 function shouldAutoEnableAppendOnlyContext(model: AppendOnlyContextModel | null | undefined): boolean {
 	if (!model) return false;
 	if (model.provider === "deepseek") return true;
+	if (model.provider === "kimi-code") return true;
 	if (LOCAL_INFERENCE_PROVIDERS.has(model.provider)) return true;
 	if (hostMatchesUrl(model.baseUrl, "xiaomi")) return true;
 	if (hasLocalLoopbackBaseUrl(model.baseUrl)) return true;

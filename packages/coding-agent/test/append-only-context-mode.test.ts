@@ -25,6 +25,14 @@ describe("shouldEnableAppendOnlyContext", () => {
 		);
 	});
 
+	test("auto enables for Kimi Code while explicit settings still win", () => {
+		const model = { provider: "kimi-code", baseUrl: "https://api.kimi.com/coding/v1" };
+		expect(shouldEnableAppendOnlyContext("auto", model)).toBe(true);
+		expect(shouldEnableAppendOnlyContext(undefined, model)).toBe(true);
+		expect(shouldEnableAppendOnlyContext("on", model)).toBe(true);
+		expect(shouldEnableAppendOnlyContext("off", model)).toBe(false);
+	});
+
 	test("auto enables for Xiaomi Token Plan SGLang HiCache endpoints", () => {
 		expect(shouldEnableAppendOnlyContext("auto", XIAOMI_TOKEN_PLAN_ANTHROPIC)).toBe(true);
 	});
