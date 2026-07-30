@@ -1884,7 +1884,10 @@ describe("AgentSession handoff", () => {
 		expect(mock.calls.map(c => c.context.systemPrompt?.join("\n\n") ?? "")).toEqual(["Hook override"]);
 		const handoffCall = generateHandoffSpy.mock.calls[0];
 		if (!handoffCall) throw new Error("Expected generateHandoffFromContext call");
-		expect(handoffCall[0].systemPrompt).toEqual(["Test"]);
+		// The handoff uses the base prompt (not the before_agent_start hook
+		// override), now composed with the volatile turn-context date suffix so
+		// relative dates in the transcript resolve against today.
+		expect(handoffCall[0].systemPrompt).toEqual(["Test", expect.stringMatching(/^Today is .+\.$/)]);
 	});
 
 	it("forwards the agent's provider prompt-cache key to the handoff request", async () => {

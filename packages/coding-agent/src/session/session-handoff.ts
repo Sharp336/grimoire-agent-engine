@@ -10,12 +10,14 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { generateHandoffFromContext, renderHandoffPrompt } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeSwitchResult } from "../extensibility/extensions";
+import turnContextPrompt from "../prompts/system/turn-context.md" with { type: "text" };
 import { obfuscateProviderContext, type SecretObfuscator } from "../secrets/obfuscator";
 import type { SystemPromptPlan } from "../system-prompt";
+import { formatLocalCalendarDate } from "../utils/local-date";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { BashSessionTransition } from "./bash-runner";
 import type { SessionContext } from "./session-context";
@@ -166,11 +168,16 @@ export class SessionHandoff {
 			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal);
 			// Base system prompt, not a per-turn `before_agent_start` hook override —
 			// the handoff seeds a fresh session and must not carry prompt-specific
-			// hook state. Matches the prompt the old handoff path sent.
-			const handoffContext = await this.#host.agent.buildSideRequestContext(
-				handoffLlmMessages,
-				this.#host.baseSystemPromptPlan(),
-			);
+			// memory or extension hook state. The date lives in the volatile turn
+			// suffix now (moved out of buildSystemPrompt), so compose it onto the
+			// base plan without pulling in before_agent_start recall: relative dates
+			// in the transcript/handoff instructions must resolve against today.
+			const handoffBasePlan = this.#host.baseSystemPromptPlan();
+			const handoffDateContext = prompt.render(turnContextPrompt, { date: formatLocalCalendarDate() }).trim();
+			const handoffPromptPlan: SystemPromptPlan = handoffDateContext
+				? { ...handoffBasePlan, systemPrompt: [...handoffBasePlan.systemPrompt, handoffDateContext] }
+				: handoffBasePlan;
+			const handoffContext = await this.#host.agent.buildSideRequestContext(handoffLlmMessages, handoffPromptPlan);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{
 					apiKey: this.#host.modelRegistry.resolver(model, cacheSessionId),

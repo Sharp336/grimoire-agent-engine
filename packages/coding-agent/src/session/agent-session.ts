@@ -6978,10 +6978,15 @@ export class AgentSession {
 			return "";
 		}
 		const content = firstUserMessage.content;
-		const seed =
+		const rawSeed =
 			typeof content === "string"
 				? content
 				: (content.find((block): block is TextContent => block.type === "text")?.text ?? "");
+		// The main OAuth turn derives its Claude Code billing-header seed from the
+		// provider-visible (obfuscated) first-user text. Derive the side seed from
+		// the same obfuscated text so a secret in the first user message does not
+		// split the main/side system-prefix cache breakpoint.
+		const seed = this.#obfuscateTextForProvider(rawSeed) ?? "";
 		this.#sideRequestAnthropicBillingSeed = { sessionId, seed };
 		return seed;
 	}

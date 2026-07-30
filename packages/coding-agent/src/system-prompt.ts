@@ -876,17 +876,25 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs,
 		autoQaEnabled,
 	};
-	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
+	// Custom prompt templates embed volatile project context (context files,
+	// append text) directly. Strip those from the stable-block render so only
+	// the (stable) custom instructions are cached; the project footer below
+	// re-adds them in a non-stable block so a context/append change does not
+	// cold-miss the otherwise reusable custom-prefix bytes.
+	const stableRenderData = resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data;
+	const rendered = prompt.render(
+		resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate,
+		stableRenderData,
+	);
 	const systemPrompt = [rendered];
 	if (toolNames.includes("computer")) {
 		systemPrompt.push(computerSafetyPrompt.trim());
 	}
 	const stableSystemPromptBlockCount = systemPrompt.length;
-	// Custom prompt templates already render context files and append text; the
-	// project footer still carries environment, cwd, workspace, and dir-context.
-	const projectPrompt = prompt
-		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
-		.trim();
+	// The project footer carries volatile project/context data (context files,
+	// append text, environment, cwd, workspace, dir-context) for both the
+	// bundled and custom prompt, after the stable cache breakpoint.
+	const projectPrompt = prompt.render(projectPromptTemplate, data).trim();
 	if (projectPrompt) {
 		systemPrompt.push(projectPrompt);
 	}

@@ -767,6 +767,77 @@ describe("AgentSession message pipeline", () => {
 		});
 	});
 
+	it("derives the Anthropic billing seed from the obfuscated first user message so a secret never splits the main/side cache breakpoint", async () => {
+		await withNativeDialectEnv(async () => {
+			const api = "test-ephemeral-obfuscated-billing-seed";
+			const secret = "BILLING_SEED_SECRET_TOKEN_12345";
+			const contexts: Context[] = [];
+			registerCustomApi(api, (_model, context, _options) => {
+				contexts.push(context);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Answer");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			});
+
+			const model = buildModel({
+				id: "side-model-obfuscated-billing-seed",
+				name: "Side Model Obfuscated Billing Seed",
+				api,
+				provider: "test-provider",
+				baseUrl: "",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 1024,
+			} as ModelSpec<Api>) as Model<Api>;
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["stable harness instructions"], messages: [], tools: [] },
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+				obfuscator,
+			});
+			sessions.push(session);
+
+			// The first persisted user message carries the secret in plaintext. The
+			// provider derives the Claude Code billing-header seed from the
+			// provider-visible (obfuscated) form of this text.
+			const firstUserText = `main request carries ${secret}`;
+			await agent.prompt(firstUserText);
+			// A side request after the main turn derives its seed from the same
+			// provider-visible first-user text.
+			await session.runEphemeralTurn({ promptText: "unrelated side request" });
+
+			// Main never carries a seed override (the provider derives it from
+			// messages); the side request always carries an explicit seed.
+			const mainContext = contexts.find(context => context.anthropicBillingSeed === undefined);
+			const sideContext = contexts[contexts.length - 1];
+			expect(mainContext).toBeDefined();
+			expect(sideContext).not.toBe(mainContext);
+
+			const expectedSeed = obfuscator.obfuscate(firstUserText);
+			// Sanity: the obfuscator really redacts the secret (guards a no-op).
+			expect(expectedSeed).not.toBe(firstUserText);
+			expect(expectedSeed).not.toContain(secret);
+			// F2 contract: the side-request seed is the obfuscated derivation — the
+			// same provider-visible text the main OAuth request derives its billing
+			// header from — so a secret in the first user message cannot split the
+			// main/side cache breakpoint. Reverting to the raw seed fails here.
+			expect(sideContext?.anthropicBillingSeed).toBe(expectedSeed);
+			// The raw secret must never reach the provider-bound seed.
+			expect(sideContext?.anthropicBillingSeed).not.toContain(secret);
+		});
+	});
+
 	it("records raw SSE diagnostics into the session buffer before request hooks", async () => {
 		const requestOnSseEvent = vi.fn();
 		const session = new AgentSession({

@@ -766,7 +766,7 @@ export class Agent {
 	 */
 	async buildSideRequestContext(
 		llmMessages: Message[],
-		prompt: Pick<AgentContext, "systemPrompt" | "stableSystemPromptBlockCount"> = this.#state,
+		prompt: string[] | Pick<AgentContext, "systemPrompt" | "stableSystemPromptBlockCount"> = this.#state,
 		options?: { anthropicBillingSeed?: string },
 	): Promise<Context> {
 		const model = this.#state.model;
@@ -781,9 +781,15 @@ export class Agent {
 					preferredDialect(model.id),
 					this.#pruneToolDescriptions,
 				) ?? []);
+		// Preserve the previous array form: existing SDK callers may pass a bare
+		// prompt array. Normalize it into a plan so the cache boundary carries
+		// instead of silently becoming undefined.
+		const promptPlan: Pick<AgentContext, "systemPrompt" | "stableSystemPromptBlockCount"> = Array.isArray(prompt)
+			? { systemPrompt: prompt }
+			: prompt;
 		let context: Context = {
-			systemPrompt: prompt.systemPrompt,
-			stableSystemPromptBlockCount: prompt.stableSystemPromptBlockCount,
+			systemPrompt: promptPlan.systemPrompt,
+			stableSystemPromptBlockCount: promptPlan.stableSystemPromptBlockCount,
 			...(options?.anthropicBillingSeed !== undefined && { anthropicBillingSeed: options.anthropicBillingSeed }),
 			messages,
 			tools,

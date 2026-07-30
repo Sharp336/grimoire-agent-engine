@@ -984,8 +984,22 @@ export class SessionTools {
 		) {
 			this.#host.clearInheritedProviderPromptCacheKey();
 		}
+		// A turn in flight composes the base plan with a volatile turn suffix
+		// (date, and any recalled-memory injection from before_agent_start).
+		// Setting the base-only plan here would strip that suffix mid-turn, so
+		// syncContextBeforeModelCall would send the base plan without the
+		// date/memory context on the next tool-loop model call. Carry the live
+		// suffix (the part of the current agent prompt beyond the previous base)
+		// so only the stable base is refreshed, not the active turn's context.
+		const liveSystemPrompt = this.#host.agent.state.systemPrompt;
+		const previousBase = previousSystemPromptPlan.systemPrompt;
+		const turnSuffix =
+			liveSystemPrompt.length > previousBase.length &&
+			previousBase.every((part, index) => liveSystemPrompt[index] === part)
+				? liveSystemPrompt.slice(previousBase.length)
+				: [];
 		this.#host.agent.setSystemPrompt(
-			this.#systemPromptPlan.systemPrompt,
+			[...this.#systemPromptPlan.systemPrompt, ...turnSuffix],
 			this.#systemPromptPlan.stableSystemPromptBlockCount,
 		);
 		this.#promptModelKey = this.#currentPromptModelKey();
