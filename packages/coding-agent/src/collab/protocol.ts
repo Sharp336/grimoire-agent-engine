@@ -12,6 +12,7 @@ import type {
 	BusChannel,
 	CollabUiRequest,
 	GuestFrame,
+	HostFrame,
 	ParsedCollabLink,
 	Participant,
 	SessionState,
@@ -102,9 +103,8 @@ export type CollabFrame =
 	| { t: "ui-request-end"; reqId: number }
 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
-	/** Reply to a `ctl` control frame (correlated by `reqId`); pure wire types, taken verbatim from the grammar. */
-	| { t: "ctl-result"; reqId: number; ok: true; data: unknown }
-	| { t: "ctl-result"; reqId: number; ok: false; error: string; code?: string }
+	/** Reply to a `ctl` control frame (correlated by `reqId`); composed from the wire `HostFrame` grammar so a transport shape change stays type-checked here. */
+	| Extract<HostFrame, { t: "ctl-result" }>
 	| { t: "bye"; reason: string }
 	| { t: "error"; message: string };
 

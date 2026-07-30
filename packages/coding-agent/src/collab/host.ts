@@ -871,9 +871,13 @@ export class CollabHost {
 		}
 
 		const transition = isSessionTransition(parsed);
-		if (transition) this.#sessionTransitions++;
 		void this.#enqueueMutation(async () => {
 			let endCollab = false;
+			// Count the transition only once it is actually running, not while it is
+			// still queued behind another mutation (e.g. a guest prompt holding
+			// #mutationTail). Otherwise the prompt/interrupt/agent-control guards
+			// reject an interrupt of a hung turn before the transition can start.
+			if (transition) this.#sessionTransitions++;
 			try {
 				this.#assertLiveControl(fromPeer);
 				const data = await this.#runControlCommand(parsed, fromPeer);

@@ -108,6 +108,12 @@ const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL)
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
 	#defaultRoleMutationTail = Promise.resolve();
+	/** Reentrancy guard: handleResumeSession is the single choke point every
+	 * session resume funnels through (local /resume, the picker, session import,
+	 * the collab guest's leave-restore, and a remote switch-session control
+	 * command). Two concurrent switchSessions interleave their rollback
+	 * snapshots, so a second caller is rejected until the first settles. */
+	#resumeInFlight = false;
 
 	async #acquireDefaultRoleMutation(): Promise<() => void> {
 		const previous = this.#defaultRoleMutationTail;
@@ -1528,6 +1534,25 @@ export class SelectorController {
 	}
 
 	async handleResumeSession(sessionPath: string, options?: { settingsFlushed?: boolean }): Promise<boolean> {
+		// Guard against a concurrent resume: a remote switch-session control
+		// command, a local /resume, and the session picker all reach here, and
+		// two overlapping switchSessions interleave their rollback snapshots.
+		// Hold the guard across the whole resume; the picker unlocks its input on
+		// a `false` return so the user can retry, and other callers surface the
+		// status themselves.
+		if (this.#resumeInFlight) {
+			this.ctx.showStatus("A session switch is already in progress; please retry");
+			return false;
+		}
+		this.#resumeInFlight = true;
+		try {
+			return await this.#doResumeSession(sessionPath, options);
+		} finally {
+			this.#resumeInFlight = false;
+		}
+	}
+
+	async #doResumeSession(sessionPath: string, options?: { settingsFlushed?: boolean }): Promise<boolean> {
 		const previousCwd = this.ctx.sessionManager.getCwd();
 		// Flush pending settings writes before switching sessions so a save
 		// failure leaves the session, process project dir, and Settings in the
