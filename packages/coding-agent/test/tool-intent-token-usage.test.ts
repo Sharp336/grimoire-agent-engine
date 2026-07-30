@@ -13,11 +13,15 @@ function makeSession(): ToolSession {
 		cwd: process.cwd(),
 		hasUI: false,
 		settings: Settings.isolated({ "inspect_image.enabled": false }),
-		getSessionFile: () => undefined,
+		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => undefined,
 		allocateOutputArtifact: async () => undefined,
-	} as ToolSession;
+	} as unknown as ToolSession;
+}
+
+function asAgentTool(tool: unknown): AgentTool {
+	return tool as AgentTool;
 }
 
 function requireModelIntent(tool: AgentTool): AgentTool {
@@ -51,11 +55,9 @@ function providerFootprint(tools: AgentTool[], sampleCalls: Array<Record<string,
 
 describe("built-in tool intent token usage", () => {
 	test("iteration 1 derives read/search intents without a provider-generated i field", () => {
-		const tools: AgentTool[] = [
-			new ReadTool(makeSession()),
-			new GrepTool(makeSession()),
-			new GlobTool(makeSession()),
-		];
+		const tools = [new ReadTool(makeSession()), new GrepTool(makeSession()), new GlobTool(makeSession())].map(
+			asAgentTool,
+		);
 		const normalized = normalizeTools(tools, true) ?? [];
 
 		for (const tool of normalized) {
@@ -90,8 +92,8 @@ describe("built-in tool intent token usage", () => {
 
 	test("iteration 2 derives mutation intents without a provider-generated i field", () => {
 		const session = makeSession();
-		const readTools: AgentTool[] = [new ReadTool(session), new GrepTool(session), new GlobTool(session)];
-		const mutationTools: AgentTool[] = [new BashTool(session), new EditTool(session), new WriteTool(session)];
+		const readTools = [new ReadTool(session), new GrepTool(session), new GlobTool(session)].map(asAgentTool);
+		const mutationTools = [new BashTool(session), new EditTool(session), new WriteTool(session)].map(asAgentTool);
 		const tools = [...readTools, ...mutationTools];
 		const normalized = normalizeTools(tools, true) ?? [];
 

@@ -21,6 +21,8 @@
 
 ### Changed
 
+- Reduced model input overhead by deriving concise runtime labels for the built-in read, grep, glob, bash, edit, and write tools from their existing arguments instead of requiring a duplicate `i` field.
+- Enabled append-only context automatically for Kimi Code models to keep prompt prefixes stable across turns while preserving explicit `on` and `off` overrides.
 - Improved grouped read-call layout by nesting each request's usage metrics beneath its final path.
 - Improved turn recovery to prevent duplicate output streaming during credential rotation or model fallback when visible text has already been streamed.
 - Optimized tool guidance for bash, grep, and glob to be more concise while clarifying shell boundaries and search timeouts.
