@@ -1420,6 +1420,79 @@ describe("AskDialogComponent", () => {
 		expect(render(component)).toContain("filter: bet");
 	});
 
+	it("activates search via a Kitty CSI-u slash sequence", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose one?",
+					searchable: true,
+					options: [
+						{ label: "Alpha" },
+						{ label: "Beta target" },
+						{ label: "Gamma" },
+						{ label: "Delta" },
+						{ label: "Epsilon" },
+						{ label: "Zeta" },
+						{ label: "Eta" },
+					],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		expect(render(component)).toContain("Alpha");
+		// The Kitty keyboard protocol reports "/" as the CSI-u sequence \x1b[47u.
+		component.handleInput("\x1b[47u");
+		for (const character of "beta") component.handleInput(character);
+
+		const filtered = render(component);
+		expect(filtered).toContain("Beta target");
+		expect(filtered).not.toContain("Alpha");
+		expect(filtered).toContain("filter: beta");
+	});
+
+	it("hides toggle and note shortcuts from the footer while a search filter is active", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose multiple?",
+				searchable: true,
+				multi: true,
+				options: [
+					{ label: "Alpha target" },
+					{ label: "Beta target" },
+					{ label: "Gamma target" },
+					{ label: "Delta target" },
+					{ label: "Epsilon target" },
+					{ label: "Zeta target" },
+					{ label: "Eta target" },
+				],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+
+		// Before filtering, the footer advertises the multi-select shortcuts.
+		const idle = render(component);
+		expect(idle).toContain("Space/Enter toggle");
+		expect(idle).toContain("n note");
+
+		// Activate the filter and type a query.
+		component.handleInput("/");
+		for (const character of "beta") component.handleInput(character);
+
+		// While filtering, Space and n are consumed by the query, so the footer
+		// must stop advertising the shortcuts they would normally trigger.
+		const filtering = render(component);
+		expect(filtering).not.toContain("Space/Enter toggle");
+		expect(filtering).not.toContain("n note");
+		expect(filtering).toContain("filter: beta");
+	});
+
 	it("renders diff previews with added and removed lines", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{

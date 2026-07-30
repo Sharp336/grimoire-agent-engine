@@ -588,12 +588,22 @@ export class AskDialogComponent implements Component {
 			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}`;
 		}
 		const question = this.questions[this.#currentQuestionIndex()];
-		const action = question?.multi ? "Space/Enter toggle · n note" : "Enter select · n note";
+		const state = this.#states[this.#currentQuestionIndex()];
+		const searchActive = !!question && !!state && this.#isSearchEnabled(question) && state.searchActive;
+		const isMulti = question?.multi === true;
+		let action = isMulti ? "Space/Enter toggle · n note" : "Enter select · n note";
+		if (searchActive) {
+			// The filter query consumes every printable key (Space, n, …) before
+			// the question actions run, so the footer must not advertise the
+			// toggle/note shortcuts those keys would normally trigger; Enter
+			// still selects the highlighted option.
+			action = isMulti ? "Enter toggle" : "Enter select";
+		}
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
 		const search =
-			question && this.#states[this.#currentQuestionIndex()] && this.#isSearchEnabled(question)
-				? this.#states[this.#currentQuestionIndex()].searchActive
-					? ` · filter: ${this.#states[this.#currentQuestionIndex()].searchQuery || "type to filter"}`
+			question && state && this.#isSearchEnabled(question)
+				? searchActive
+					? ` · filter: ${state.searchQuery || "type to filter"}`
 					: " · / filter"
 				: "";
 		if (this.#questionCanPage && indicator) {
@@ -609,7 +619,7 @@ export class AskDialogComponent implements Component {
 
 	#handleSearchInput(question: ExtensionAskDialogQuestion, state: QuestionState, keyData: string): boolean {
 		if (!this.#isSearchEnabled(question)) return false;
-		if (!state.searchActive && keyData === "/") {
+		if (!state.searchActive && extractPrintableText(keyData) === "/") {
 			state.searchActive = true;
 			this.#requestRender();
 			return true;
