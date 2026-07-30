@@ -1880,8 +1880,20 @@ function mapOptionsForApi<TApi extends Api>(
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
 		}
-		case "kiro-agent":
-			return castApi<"kiro-agent">({ ...base, cwd: options?.cwd });
+		case "kiro-agent": {
+			const kiroModel = model as Model<"kiro-agent">;
+			const effort =
+				options?.reasoning && !options.disableReasoning && kiroModel.reasoning
+					? requireSupportedEffort(kiroModel, options.reasoning)
+					: undefined;
+			return castApi<"kiro-agent">({
+				...base,
+				cwd: options?.cwd,
+				reasoning: effort,
+				disableReasoning: options?.disableReasoning,
+				hideThinkingSummary: options?.hideThinkingSummary,
+			});
+		}
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);
 	}

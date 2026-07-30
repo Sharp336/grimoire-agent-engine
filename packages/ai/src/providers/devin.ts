@@ -266,6 +266,11 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const body = response.body;
 			stream.push({ type: "start", partial: output });
 			const frameReader = createConnectFrameReader();
+			// Track whether the peer sent a Connect end-of-stream frame. A missing
+			// terminal frame (HTTP 200 then truncation, including an empty body) is a
+			// transport truncation, not a malformed envelope — it must surface as an
+			// incomplete stream so the retry/fallback layer can act on it.
+			let sawEndOfStream = false;
 			for await (const chunk of body) {
 				if (debugResponseLogPromise) void debugResponseLogPromise.then(log => log?.write(chunk));
 				let frames: ConnectFrame[];
@@ -279,6 +284,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				}
 				for (const connectFrame of frames) {
 					if (connectFrame.endOfStream) {
+						sawEndOfStream = true;
 						const trailerError = readConnectTrailerError(connectFrame.payload);
 						if (trailerError) throw devinConnectError(trailerError.code, trailerError.message);
 						continue;
@@ -387,9 +393,14 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			try {
 				frameReader.finish();
 			} catch (error) {
+				// `finish()` throws "Connect stream ended without end-of-stream" when the
+				// peer closed before sending a terminal frame — an ordinary transport
+				// truncation (retryable, eligible for fallback). Any other `finish()` error
+				// is a malformed frame body (envelope). Distinguish the two so the
+				// retry layer's `Flag.Transient` path sees the truncation.
 				throw new AIError.ProviderResponseError(`Devin ${error instanceof Error ? error.message : String(error)}`, {
 					provider: model.provider,
-					kind: "envelope",
+					kind: sawEndOfStream ? "envelope" : "incomplete-stream",
 				});
 			}
 

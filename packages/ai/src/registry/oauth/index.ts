@@ -134,24 +134,34 @@ export async function getOAuthApiKey(
 		);
 	}
 	// For providers that need request-time credential metadata, return JSON.
+	// Kiro defines its OWN credential serializer (`kiroProvider.getApiKey`),
+	// the same one the runtime custom-provider path calls. The built-in
+	// AuthStorage path must emit the SAME bytes — delegate to the registry
+	// serializer so a non-`us-east-1` OAuth account keeps its `profileArn` and
+	// discovers/invokes models with its regional scope. The other structured
+	// providers keep the generic metadata envelope below.
+	const kiroApiKey = getProviderDefinition("kiro")?.getApiKey;
 	const needsStructuredApiKey =
 		provider === "github-copilot" ||
 		provider === "google-gemini-cli" ||
 		provider === "google-antigravity" ||
 		provider === "alibaba-coding-plan" ||
 		provider === "devin";
-	const apiKey = needsStructuredApiKey
-		? JSON.stringify({
-				apiEndpoint: creds.apiEndpoint,
-				token: creds.access,
-				enterpriseUrl: creds.enterpriseUrl,
-				projectId: creds.projectId,
-				refreshToken: creds.refresh,
-				expiresAt: creds.expires,
-				email: creds.email,
-				accountId: creds.accountId,
-			})
-		: creds.access;
+	const apiKey =
+		provider === "kiro" && kiroApiKey
+			? kiroApiKey(creds)
+			: needsStructuredApiKey
+				? JSON.stringify({
+						apiEndpoint: creds.apiEndpoint,
+						token: creds.access,
+						enterpriseUrl: creds.enterpriseUrl,
+						projectId: creds.projectId,
+						refreshToken: creds.refresh,
+						expiresAt: creds.expires,
+						email: creds.email,
+						accountId: creds.accountId,
+					})
+				: creds.access;
 	return { newCredentials: creds, apiKey };
 }
 

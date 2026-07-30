@@ -1,3 +1,4 @@
+import { DEVIN_DEFAULT_BASE_URL, parseDevinCredential } from "../discovery/devin";
 import { parseKiroCredentials, resolveKiroRegion } from "../discovery/kiro";
 
 export interface ModelCacheProviderIdOptions {
@@ -27,6 +28,20 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 	switch (providerId) {
 		case "cursor":
 			return "cursor:max-mode-v2";
+		case "devin": {
+			// Discovery is account/endpoint-specific: the credential may carry its
+			// own `apiEndpoint`, and an explicit `baseUrl` override wins over it.
+			// Mirror `fetchDevinModels`' endpoint resolution so switching accounts or
+			// regional endpoints cannot reuse another identity's authoritative cache.
+			const credential = parseDevinCredential(options.apiKey);
+			if (!credential.token) return providerId;
+			const endpoint = (
+				credential.apiEndpoint && (!options.baseUrl || options.baseUrl === DEVIN_DEFAULT_BASE_URL)
+					? credential.apiEndpoint
+					: (options.baseUrl ?? DEVIN_DEFAULT_BASE_URL)
+			).replace(/\/+$/, "");
+			return `devin:models-v1:${Bun.hash(`${credential.token}\u0000${endpoint}`).toString(36)}`;
+		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `litellm:rich-v5:${Bun.hash(baseUrl).toString(36)}`;

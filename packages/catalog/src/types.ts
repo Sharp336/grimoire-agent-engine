@@ -29,7 +29,9 @@ export type ThinkingControlMode =
 	| "budget"
 	| "google-level"
 	| "anthropic-adaptive"
-	| "anthropic-budget-effort";
+	| "anthropic-budget-effort"
+	| "kiro-thinking"
+	| "kiro-reasoning";
 
 /** Per-model thinking capabilities used to clamp and map user-facing effort levels. */
 export interface ThinkingConfig {

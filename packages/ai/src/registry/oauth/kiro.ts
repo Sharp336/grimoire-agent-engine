@@ -150,6 +150,14 @@ async function pollForToken(
 	fetchImpl: FetchImpl,
 	signal?: AbortSignal,
 ): Promise<TokenResponse> {
+	// A one-off network/TLS flap during token polling must not terminate a login
+	// whose device code is still valid — `pollOAuthDeviceCodeFlow` already bounds
+	// the loop by the device-code expiry deadline. Treat transient fetch failures
+	// as another pending poll attempt, with a consecutive-failure cap so a
+	// persistently unreachable endpoint still terminates instead of looping
+	// until the deadline.
+	const MAX_CONSECUTIVE_FETCH_FAILURES = 5;
+	let consecutiveFetchFailures = 0;
 	return pollOAuthDeviceCodeFlow<TokenResponse>({
 		intervalSeconds: device.interval,
 		expiresInSeconds: device.expiresIn,
@@ -165,8 +173,23 @@ async function pollForToken(
 				});
 			} catch (error) {
 				if (signal?.aborted) throw new AIError.LoginCancelledError();
-				throw error;
+				// Absorb transient transport failures (connection reset, TLS handshake
+				// flap, DNS hiccup) as a pending poll. A provider-side denial arrives as
+				// a structured `error` field below, not as a thrown fetch, so this only
+				// catches transport-level noise. The deadline plus the cap below keep
+				// the loop finite.
+				consecutiveFetchFailures += 1;
+				if (consecutiveFetchFailures > MAX_CONSECUTIVE_FETCH_FAILURES) {
+					return {
+						status: "failed",
+						message: `Kiro device login failed after ${MAX_CONSECUTIVE_FETCH_FAILURES} consecutive network errors: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					};
+				}
+				return { status: "pending" };
 			}
+			consecutiveFetchFailures = 0;
 			const payload: unknown = await response.json().catch(() => undefined);
 			if (!isRecord(payload)) {
 				return { status: "failed", message: `Kiro device login failed with HTTP ${response.status}` };

@@ -1,6 +1,6 @@
 import { once } from "@oh-my-pi/pi-utils";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
-import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { type DevinModelDiscoveryOptions, fetchDevinModels } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import { fetchKiroModels, type KiroModelDiscoveryOptions } from "../discovery/kiro";
 import type { ModelManagerOptions } from "../model-manager";
@@ -190,19 +190,20 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 	const { apiKey, baseUrl, fetch } = config;
 	return {
 		providerId: "devin",
+		// Discovery is account/endpoint-specific (the credential may embed its own
+		// `apiEndpoint`), so partition the cache by credential identity + effective
+		// endpoint. Without this, switching accounts or regional endpoints while the
+		// authoritative cache is fresh reuses the previous account's model list and
+		// routes requests to its endpoint.
+		...(apiKey ? { cacheProviderId: resolveModelCacheProviderId("devin", { apiKey, baseUrl }) } : undefined),
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
-					fetchDynamicModels: async () => {
-						const { fetchDevinModels } = await devinDiscovery();
-						return fetchDevinModels({ apiKey, baseUrl, fetch });
-					},
+					fetchDynamicModels: async () => fetchDevinModels({ apiKey, baseUrl, fetch }),
 				}
 			: undefined),
 	};
 }
-
-const devinDiscovery = once(() => import("../discovery/devin"));
 
 // ---------------------------------------------------------------------------
 // Kiro

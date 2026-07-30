@@ -1,5 +1,6 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { FetchImpl, ModelSpec } from "../types";
+import { Effort } from "../effort";
+import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
 import { discoveryFetch } from "../utils";
 
 export const KIRO_DEFAULT_REGION = "us-east-1";
@@ -102,27 +103,42 @@ export function normalizeKiroModels(
 		const tokenLimits = isRecord(candidate.tokenLimits) ? candidate.tokenLimits : undefined;
 		const maxInputTokens = finitePositive(tokenLimits?.maxInputTokens);
 		const maxOutputTokens = finitePositive(tokenLimits?.maxOutputTokens);
+		const thinking = kiroThinkingConfig(candidate);
 		models.set(id, {
 			id,
 			name: typeof candidate.modelName === "string" && candidate.modelName.trim() ? candidate.modelName.trim() : id,
 			api: "kiro-agent",
 			provider: "kiro",
 			baseUrl: baseUrl ?? `https://runtime.${region}.kiro.dev`,
-			reasoning: supportsKiroReasoning(candidate),
+			reasoning: thinking !== undefined,
 			input: ["text"],
 			supportsTools: true,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: maxInputTokens ?? 200_000,
 			maxTokens: maxOutputTokens ?? 64_000,
+			...(thinking ? { thinking } : undefined),
 		});
 	}
 	return [...models.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function supportsKiroReasoning(candidate: Record<string, unknown>): boolean {
+// Both Kiro reasoning schemas accept the same effort ladder (low..max); the
+// `reasoning` schema's `none` is the off state, expressed via `disableReasoning`
+// rather than a user-facing effort tier. The mode discriminates the wire shape
+// (`thinking`+`output_config` for Claude-family, `reasoning` for GPT-family) so
+// the provider serializes schema-appropriate fields under `additionalProperties: false`.
+const KIRO_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
+
+function kiroThinkingConfig(candidate: Record<string, unknown>): ThinkingConfig | undefined {
 	const schema = candidate.additionalModelRequestFieldsSchema;
-	if (!isRecord(schema) || !isRecord(schema.properties)) return false;
-	return isRecord(schema.properties.thinking) || isRecord(schema.properties.reasoning);
+	if (!isRecord(schema) || !isRecord(schema.properties)) return undefined;
+	if (isRecord(schema.properties.thinking)) {
+		return { mode: "kiro-thinking", efforts: KIRO_REASONING_EFFORTS };
+	}
+	if (isRecord(schema.properties.reasoning)) {
+		return { mode: "kiro-reasoning", efforts: KIRO_REASONING_EFFORTS };
+	}
+	return undefined;
 }
 
 function finitePositive(value: unknown): number | undefined {

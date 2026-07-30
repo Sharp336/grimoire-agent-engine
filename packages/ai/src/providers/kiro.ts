@@ -1,4 +1,5 @@
 import { parseKiroCredentials, resolveKiroRegion } from "@oh-my-pi/pi-catalog/discovery/kiro";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isRecord, parseStreamingJsonThrottled, prompt } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -65,6 +66,9 @@ export interface KiroOptions extends StreamOptions {
 	conversationId?: string;
 	profileArn?: string;
 	region?: string;
+	reasoning?: Effort;
+	disableReasoning?: boolean;
+	hideThinkingSummary?: boolean;
 }
 
 export const streamKiro: StreamFunction<"kiro-agent"> = (
@@ -240,6 +244,17 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 					}
 					case "metadataEvent":
 						if (payload.stopReason === "END_TURN") sawEndTurn = true;
+						// `metadataEvent` may carry a Bedrock-style `usage` block when the
+						// server reports token counts inline. Populate the output usage from
+						// it so callers (and `calculateCost`) see actual token consumption.
+						if (isRecord(payload.usage)) {
+							const u = payload.usage;
+							output.usage.input = finiteNumber(u.inputTokens) ?? output.usage.input;
+							output.usage.output = finiteNumber(u.outputTokens) ?? output.usage.output;
+							output.usage.cacheRead = finiteNumber(u.cacheReadInputTokens) ?? output.usage.cacheRead;
+							output.usage.cacheWrite = finiteNumber(u.cacheWriteInputTokens) ?? output.usage.cacheWrite;
+							output.usage.totalTokens = finiteNumber(u.totalTokens) ?? output.usage.totalTokens;
+						}
 						break;
 					default:
 						break;
@@ -348,6 +363,7 @@ function buildKiroRequest(
 		...(tools.length > 0 ? { tools } : undefined),
 		...(toolResults.length > 0 ? { toolResults } : undefined),
 	};
+	const additionalModelRequestFields = buildKiroReasoningFields(model, options);
 	return {
 		conversationState: {
 			conversationId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
@@ -358,7 +374,36 @@ function buildKiroRequest(
 			agentTaskType: "vibe",
 		},
 		...(profileArn ? { profileArn } : {}),
+		...(additionalModelRequestFields ? { additionalModelRequestFields } : {}),
 	};
+}
+
+/**
+ * Serialize the schema-appropriate Kiro reasoning controls. The model's
+ * `thinking.mode` discriminates the two wire shapes, both of which reject
+ * unknown properties (`additionalProperties: false`):
+ *  - `kiro-thinking` (Claude-family): `{ thinking: { type, display? }, output_config: { effort } }`
+ *  - `kiro-reasoning` (GPT-family): `{ reasoning: { effort } }`
+ * Disabling reasoning emits the schema's off state (`thinking.type: "disabled"`
+ * or `reasoning.effort: "none"`) so the server does not fall back to its default.
+ */
+function buildKiroReasoningFields(
+	model: Model<"kiro-agent">,
+	options: KiroOptions | undefined,
+): Record<string, unknown> | undefined {
+	const mode = model.thinking?.mode;
+	if (mode !== "kiro-thinking" && mode !== "kiro-reasoning") return undefined;
+	const effort = options?.reasoning;
+	const disabled = options?.disableReasoning || !effort;
+	const wireEffort = (effort ?? Effort.High) as string;
+	if (mode === "kiro-thinking") {
+		const thinking: Record<string, unknown> = { type: disabled ? "disabled" : "adaptive" };
+		if (!disabled && !options?.hideThinkingSummary) thinking.display = "summarized";
+		const fields: Record<string, unknown> = { thinking };
+		if (!disabled) fields.output_config = { effort: wireEffort };
+		return fields;
+	}
+	return { reasoning: { effort: disabled ? "none" : wireEffort } };
 }
 
 function findLastInputMessage(messages: readonly Message[]): number {
@@ -524,4 +569,8 @@ function kiroStreamErrorStatus(code: string | undefined): number {
 		default:
 			return 400;
 	}
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }

@@ -12,7 +12,7 @@ import {
 	MetadataSchema,
 } from "./devin-gen/exa/codeium_common_pb/codeium_common_pb";
 
-const DEVIN_DEFAULT_BASE_URL = "https://server.codeium.com";
+export const DEVIN_DEFAULT_BASE_URL = "https://server.codeium.com";
 const DEVIN_GET_CLI_MODEL_CONFIGS_PATH = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
 const DEVIN_IDE_NAME = "chisel";
 const DEVIN_IDE_VERSION = "0.0.0-dev";
