@@ -2026,16 +2026,18 @@ export async function getAvailableThemesWithPaths(): Promise<ThemeInfo[]> {
 		result.push({ name, path: undefined });
 	}
 
-	// Custom themes
+	// Custom themes. A custom file wins the lookup even when it shadows a built-in, so its
+	// path replaces the built-in's empty metadata rather than being discarded.
 	const customThemesDir = getCustomThemesDir();
 	try {
 		const files = await fs.promises.readdir(customThemesDir);
 		for (const file of files) {
 			if (file.endsWith(".json")) {
 				const name = file.slice(0, -5);
-				if (!result.some(themeInfo => themeInfo.name === name)) {
-					result.push({ name, path: path.join(customThemesDir, file) });
-				}
+				const themePath = path.join(customThemesDir, file);
+				const existing = result.find(themeInfo => themeInfo.name === name);
+				if (existing) existing.path = themePath;
+				else result.push({ name, path: themePath });
 			}
 		}
 	} catch {
@@ -2046,19 +2048,16 @@ export async function getAvailableThemesWithPaths(): Promise<ThemeInfo[]> {
 }
 
 /**
- * Read one theme file without resolving `extends`.
+ * Read one theme file, resolving only the implicit same-name base.
  *
- * A custom file wins over a same-named built-in and implicitly extends it, so dropping
- * `titanium.json` into the themes dir layers over built-in `titanium` instead of being
- * ignored. `builtinOnly` resolves that implicit parent without re-reading the child.
+ * A custom file wins over a same-named built-in and layers over it, so dropping
+ * `titanium.json` into the themes dir customizes built-in `titanium` instead of being
+ * ignored. That implicit hop is merged here rather than emitted as an `extends`, so a
+ * shadowed theme resolves identically wherever it appears in a chain.
  */
-async function loadThemeSource(name: string, builtinOnly = false): Promise<ThemeSource> {
+async function loadThemeSource(name: string): Promise<ThemeSource> {
 	const builtinThemes = getBuiltinThemes();
 	const builtin = name in builtinThemes ? builtinThemes[name] : undefined;
-	if (builtinOnly) {
-		if (!builtin) throw new Error(`Theme not found: ${name}`);
-		return builtin;
-	}
 	const customThemesDir = getCustomThemesDir();
 	const themePath = path.join(customThemesDir, `${name}.json`);
 	let content: string;
@@ -2080,8 +2079,9 @@ async function loadThemeSource(name: string, builtinOnly = false): Promise<Theme
 		throw new Error(`Invalid theme "${name}":\n\nValidation error:\n  - ${parsed.summary}`);
 	}
 	const source = parsed as ThemeSource;
-	// Same-named built-in becomes the implicit base when the file declares no other one.
-	if (!source.extends && builtin) return { ...source, extends: name };
+	// A same-named built-in is the implicit base. Merging it here — instead of emitting
+	// `extends: name` — keeps the chain free of self-referencing hops that read as cycles.
+	if (!source.extends && builtin) return mergeThemeSource(builtin, source);
 	return source;
 }
 
@@ -2108,17 +2108,13 @@ function mergeThemeSource(base: ThemeSource, child: ThemeSource): ThemeSource {
 async function loadThemeJson(name: string): Promise<ThemeJson> {
 	const chain: string[] = [];
 	let source = await loadThemeSource(name);
-	// A custom file shadowing a built-in points at its own name on the first hop only; that
-	// hop resolves to the built-in rather than back to the file, so it is not a cycle.
-	// Any later return to `name` is a genuine cycle.
 	while (source.extends) {
 		const parent = source.extends;
-		const shadowsBuiltin = parent === name && chain.length === 0;
-		if (!shadowsBuiltin && (chain.includes(parent) || parent === name)) {
+		if (parent === name || chain.includes(parent)) {
 			throw new Error(`Invalid theme "${name}": circular extends chain (${[name, ...chain, parent].join(" -> ")})`);
 		}
-		if (!shadowsBuiltin) chain.push(parent);
-		source = mergeThemeSource(await loadThemeSource(parent, shadowsBuiltin), source);
+		chain.push(parent);
+		source = mergeThemeSource(await loadThemeSource(parent), source);
 	}
 	// A child inherits its base's name unless it set one; validation requires a name.
 	const named: ThemeSource = { ...source, name: source.name ?? name };
@@ -2936,19 +2932,36 @@ export async function getResolvedThemeColors(themeName?: string): Promise<Record
 export function isLightTheme(themeName?: string): boolean {
 	const name = themeName ?? "dark";
 	const builtinThemes = getBuiltinThemes();
-	let themeJson: ThemeJson | undefined;
-	if (name in builtinThemes) {
-		themeJson = builtinThemes[name];
-	} else {
+	// Mirrors `loadThemeSource` synchronously: callers here run inside settings migration and
+	// the setup wizard, which cannot await. Classification must see inherited colors, or an
+	// inheriting light theme gets filed under `theme.dark`.
+	const readSource = (themeId: string): ThemeSource | undefined => {
+		const builtin = themeId in builtinThemes ? builtinThemes[themeId] : undefined;
+		let source: ThemeSource | undefined;
 		try {
-			const customPath = path.join(getCustomThemesDir(), `${name}.json`);
-			const content = fs.readFileSync(customPath, "utf-8");
-			themeJson = JSON.parse(content) as ThemeJson;
+			const content = fs.readFileSync(path.join(getCustomThemesDir(), `${themeId}.json`), "utf-8");
+			const candidate = themeSourceSchema(JSON.parse(content));
+			if (!(candidate instanceof type.errors)) source = candidate as ThemeSource;
 		} catch {
-			return false;
+			// No readable custom file; the built-in below is the source.
 		}
+		if (!source) return builtin;
+		if (!source.extends && builtin) return mergeThemeSource(builtin, source);
+		return source;
+	};
+
+	let source = readSource(name);
+	if (!source) return false;
+	const chain: string[] = [];
+	while (source.extends) {
+		const parent = source.extends;
+		if (parent === name || chain.includes(parent)) return false;
+		chain.push(parent);
+		const base = readSource(parent);
+		if (!base) return false;
+		source = mergeThemeSource(base, source);
 	}
-	return isLightThemeJson(themeJson);
+	return isLightThemeJson(source as ThemeJson);
 }
 
 /**

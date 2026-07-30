@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getThemeByName, setTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	getAvailableThemesWithPaths,
+	getThemeByName,
+	isLightTheme,
+	setTheme,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getConfigRootDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -102,5 +107,33 @@ describe("theme extends", () => {
 		expect(shadowed!.getColorHex("accent")).toBe("#ff0000");
 		// Inherited from `light`, not from built-in `dark`.
 		expect(shadowed!.getColorHex("syntaxString")).toBe(light!.getColorHex("syntaxString"));
+	});
+
+	it("resolves a chain whose base is a shadowed built-in", async () => {
+		await writeTheme("dark", { symbols: { overrides: { "boxRound.topLeft": "S" } } });
+		await writeTheme("leaf", { extends: "dark", colors: { accent: "#ff0000" } });
+
+		const result = await setTheme("leaf");
+		expect(result.success).toBe(true);
+		const leaf = await getThemeByName("leaf");
+		// Reaches the shadow's override, not a false cycle.
+		expect(leaf!.symbol("boxRound.topLeft")).toBe("S");
+		expect(leaf!.getColorHex("accent")).toBe("#ff0000");
+	});
+
+	it("classifies an inheriting theme by its resolved colors", async () => {
+		await writeTheme("inherited-light", { extends: "light" });
+
+		expect(isLightTheme("inherited-light")).toBe(true);
+		expect(isLightTheme("dark")).toBe(false);
+	});
+
+	it("reports the custom file path for a name that shadows a built-in", async () => {
+		await writeTheme("dark", { symbols: { overrides: { "boxRound.topLeft": "S" } } });
+
+		const entries = await getAvailableThemesWithPaths();
+		const shadowed = entries.filter(entry => entry.name === "dark");
+		expect(shadowed).toHaveLength(1);
+		expect(shadowed[0].path).toBe(path.join(getCustomThemesDir(), "dark.json"));
 	});
 });
