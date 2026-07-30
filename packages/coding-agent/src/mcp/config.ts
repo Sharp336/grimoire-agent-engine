@@ -201,10 +201,16 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	let servers = result.items;
 	if (options?.extraConfigPaths?.length) {
 		const extraServers = await loadExtraMCPConfigs(cwd, options.extraConfigPaths);
-		const extraNames = new Set(extraServers.map(server => server.name));
+		// The flag is repeatable, and later files win per name. Resolve that
+		// precedence BEFORE suppression: filtering first would drop a later
+		// `enabled: false` entry and leave the earlier enabled definition
+		// standing, so a downstream file could never turn off a server an
+		// upstream one generated.
+		const resolved = new Map<string, MCPServer>();
+		for (const server of extraServers) resolved.set(server.name, server);
 		servers = [
-			...extraServers.filter(server => !suppressServer(server)),
-			...servers.filter(server => !extraNames.has(server.name)),
+			...[...resolved.values()].filter(server => !suppressServer(server)),
+			...servers.filter(server => !resolved.has(server.name)),
 		];
 	}
 
