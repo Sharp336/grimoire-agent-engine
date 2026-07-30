@@ -69,10 +69,18 @@ function imageDataBytes(value: string): number {
 	return decodedBase64Bytes(value.startsWith("data:") && comma >= 0 ? value.slice(comma + 1) : value);
 }
 
-function isDataUrlInputImage(
-	record: Record<string, unknown>,
-): record is Record<string, unknown> & { image_url: string } {
-	return record.type === "input_image" && typeof record.image_url === "string" && record.image_url.startsWith("data:");
+function isInputImage(record: Record<string, unknown>): record is Record<string, unknown> & { type: "input_image" } {
+	return record.type === "input_image";
+}
+
+/** Decoded byte size of an `input_image` reference: embedded `data:` URLs occupy
+ *  the transport budget; remote/file references (`https://…`, `file_id`) resolve
+ *  provider-side and carry no payload bytes, so they count toward the image cap
+ *  but never the byte budget. */
+function inputImageBytes(record: Record<string, unknown>): number {
+	return typeof record.image_url === "string" && record.image_url.startsWith("data:")
+		? imageDataBytes(record.image_url)
+		: 0;
 }
 
 /** Replay `input_image` slots carried by a message's native history payload. */
@@ -80,13 +88,13 @@ function replayImageSlots(messageIndex: number, items: Array<Record<string, unkn
 	const slots: ImageSlot[] = [];
 	for (let ii = 0; ii < items.length; ii++) {
 		const item = items[ii];
-		if (isDataUrlInputImage(item)) {
+		if (isInputImage(item)) {
 			slots.push({
 				messageIndex,
 				kind: "replay",
 				partIndex: ii,
 				nestedIndex: -1,
-				bytes: imageDataBytes(item.image_url),
+				bytes: inputImageBytes(item),
 				droppable: true,
 			});
 			continue;
@@ -95,13 +103,13 @@ function replayImageSlots(messageIndex: number, items: Array<Record<string, unkn
 			const content = item.content as Array<Record<string, unknown>>;
 			for (let ci = 0; ci < content.length; ci++) {
 				const part = content[ci];
-				if (part && isDataUrlInputImage(part)) {
+				if (part && isInputImage(part)) {
 					slots.push({
 						messageIndex,
 						kind: "replay",
 						partIndex: ii,
 						nestedIndex: ci,
-						bytes: imageDataBytes(part.image_url),
+						bytes: inputImageBytes(part),
 						droppable: true,
 					});
 				}
@@ -129,6 +137,12 @@ function replayImageSlots(messageIndex: number, items: Array<Record<string, unkn
  */
 function collectImageStats(context: Context, model: Model): { count: number; slots: ImageSlot[] } {
 	const provider = model.provider;
+	// Only these serializers replay openaiResponsesHistory payloads; a matching
+	// provider alone is insufficient after an in-session API switch.
+	const replaysNativeResponsesHistory =
+		model.api === "openai-responses" ||
+		model.api === "openai-codex-responses" ||
+		model.api === "azure-openai-responses";
 	const nativeComputerUse = model.supportsComputerUse === true;
 	let count = 0;
 	const slots: ImageSlot[] = [];
@@ -191,7 +205,9 @@ function collectImageStats(context: Context, model: Model): { count: number; slo
 					? message.api === model.api && message.model === model.id
 						? getOpenAIResponsesHistoryItems(message.providerPayload, provider, message.provider)
 						: undefined
-					: getOpenAIResponsesHistoryItems(message.providerPayload, provider);
+					: replaysNativeResponsesHistory
+						? getOpenAIResponsesHistoryItems(message.providerPayload, provider)
+						: undefined;
 			if (items) {
 				const replaySlots = replayImageSlots(mi, items);
 				count += replaySlots.length;

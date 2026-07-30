@@ -179,6 +179,32 @@ const COMPUTER_MODEL = buildModel({
 	maxTokens: 16384,
 });
 
+const ANTHROPIC_RESPONSES_MODEL = buildModel({
+	id: "anthropic-responses-test",
+	name: "anthropic-responses-test",
+	api: "openai-responses",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 16384,
+});
+
+const UMANS_RESPONSES_MODEL = buildModel({
+	id: "umans-responses-test",
+	name: "umans-responses-test",
+	api: "openai-responses",
+	provider: "umans",
+	baseUrl: "https://api.code.umans.ai",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 128000,
+	maxTokens: 4096,
+});
+
 /** Create an ImageContent whose decoded byte size (Math.floor(data.length * 3 / 4)) equals `decodedBytes`. */
 function imageOfDecodedBytes(decodedBytes: number): ImageContent {
 	const len = Math.ceil((decodedBytes * 4) / 3);
@@ -495,7 +521,7 @@ describe("transport image byte budget", () => {
 		};
 		// 20 MiB replay image + 10 MiB content image = 30 MiB > 24 MiB.
 
-		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const result = clampProviderContextImages(context, ANTHROPIC_RESPONSES_MODEL);
 		const first = result.messages[0];
 		expect(first?.role).toBe("user");
 		if (first?.role === "user" && first.providerPayload) {
@@ -506,6 +532,79 @@ describe("transport image byte budget", () => {
 			expect(item).toMatchObject({ type: "input_image", detail: "auto" });
 		}
 		expect(imageData(result).length).toBe(1);
+	});
+
+	it("counts remote/file-backed replay input_images toward the cap", () => {
+		// A replay input_image referenced by file_id (no data: bytes) is uploaded
+		// unchanged, so it must count toward the image cap even though it carries no
+		// payload bytes. Pre-fix the data:-only predicate never collected these.
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: "describe these",
+					timestamp: 0,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "umans",
+						items: Array.from({ length: 12 }, (_, i) => ({
+							type: "input_image",
+							file_id: `file-${i}`,
+						})),
+					},
+				},
+			],
+		};
+
+		const result = clampProviderContextImages(context, UMANS_RESPONSES_MODEL);
+		const first = result.messages[0];
+		expect(first?.role).toBe("user");
+		if (first?.role === "user" && first.providerPayload) {
+			const items = first.providerPayload.items as Array<{ file_id?: string; image_url?: string }>;
+			// umans cap is 10: the two oldest file_id images are dropped (count cap),
+			// and the survivors are untouched (file refs carry no payload bytes).
+			expect(items.length).toBe(10);
+			expect(items.map(it => it.file_id)).toEqual(Array.from({ length: 10 }, (_, i) => `file-${i + 2}`));
+			expect(items.every(it => it.image_url === undefined)).toBe(true);
+		}
+	});
+
+	it("ignores stale native replay payloads for chat-completions serializers", () => {
+		const chatModel = buildModel({
+			id: "gpt-5.4-chat",
+			name: "gpt-5.4-chat",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: "https://api.openai.com",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 16384,
+		});
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: "previous Responses request",
+					timestamp: 0,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "openai",
+						items: Array.from({ length: 200 }, (_, i) => ({ type: "input_image", file_id: `file-${i}` })),
+					},
+				},
+				{ role: "user", content: [image("actual")], timestamp: 1 },
+			],
+		};
+
+		// The stale payload plus one actual image would exceed OpenAI's 200-image
+		// cap if the chat-completions serializer replayed it; it does not.
+		expect(clampProviderContextImages(context, chatModel)).toBe(context);
 	});
 
 	it("retains smaller older images once a larger one is elided", () => {
@@ -602,7 +701,7 @@ describe("transport image byte budget", () => {
 		// Two 20 MiB replay images + 10 MiB content image. Newest (10 MiB)
 		// retained; each 20 MiB image crosses 24 MiB on its own → both elided.
 
-		const result = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const result = clampProviderContextImages(context, ANTHROPIC_RESPONSES_MODEL);
 		const first = result.messages[0];
 		if (first?.role === "user" && first.providerPayload) {
 			const item = first.providerPayload.items[0] as {
@@ -639,7 +738,7 @@ describe("transport image byte budget", () => {
 			})),
 		};
 
-		const result = clampProviderContextImages(context, UMANS_MODEL);
+		const result = clampProviderContextImages(context, UMANS_RESPONSES_MODEL);
 		// The 2 oldest items are dropped entirely; 10 remain.
 		const first = result.messages[0];
 		if (first?.role === "user" && first.providerPayload) {
