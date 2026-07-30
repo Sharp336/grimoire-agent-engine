@@ -326,7 +326,12 @@ export function initializeWithSettings(activeSettings: Settings): void {
 function editPersistedEntries(edit: (entries: unknown[]) => unknown[]): void {
 	if (!settings) return;
 	const raw = settings.getGlobalRaw("disabledProviders");
-	const next = edit(Array.isArray(raw) ? [...raw] : []);
+	const current = Array.isArray(raw) ? raw : [];
+	const next = edit([...current]);
+	// A toggle that changes nothing must not queue a save or fire a change event:
+	// re-disabling an already-listed provider, or enabling one that only a project
+	// config disables, leaves this layer's entries exactly as they were.
+	if (next.length === current.length && next.every((entry, index) => entry === current[index])) return;
 	settings.set("disabledProviders", next as string[]);
 }
 

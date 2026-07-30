@@ -140,6 +140,22 @@ describe("disabledProviders — discovery/model namespace", () => {
 		expect((await readGlobalConfig()).disabledProviders).toEqual(["cursor"]);
 	});
 
+	test("a toggle that changes nothing does not touch the config", async () => {
+		await writeGlobalConfig({ setupVersion: 1 });
+		await Bun.write(
+			path.join(getProjectAgentDir(projectDir), "settings.json"),
+			JSON.stringify({ disabledProviders: ["github"] }),
+		);
+		const active = await initSettings();
+		expect(isProviderEnabled("github")).toBe(false);
+
+		// Only the project layer disables it, so there is nothing to drop here.
+		enableProvider("github");
+		await active.flush();
+
+		expect(await readGlobalConfig()).not.toHaveProperty("disabledProviders");
+	});
+
 	test("a toggle preserves path-scoped entries instead of flattening them", async () => {
 		const scoped = { paths: [projectDir], providers: ["anthropic"] };
 		await writeGlobalConfig({ disabledProviders: ["github", scoped] });
