@@ -6,6 +6,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import { LIVE_DELEGATION_MESSAGE_TYPE } from "../session/messages";
+import { DEFAULT_LIVE_LANGUAGE, getLiveLanguageName, type LiveLanguage, resolveLiveLanguage } from "./languages";
 import agentFinalMessageTemplate from "./prompts/agent-final-message.md" with { type: "text" };
 import liveInstructionsTemplate from "./prompts/live-instructions.md" with { type: "text" };
 import {
@@ -15,7 +16,7 @@ import {
 	type LiveClientMessage,
 	type LiveServerEvent,
 } from "./protocol";
-import { CodexLiveTransport } from "./transport";
+import { CodexLiveTransport, type LiveTransportOptions } from "./transport";
 import type { LivePhase } from "./visualizer";
 import { DEFAULT_LIVE_VOICE } from "./voices";
 
@@ -54,7 +55,12 @@ export interface LiveSessionControllerOptions {
 	extractAssistantText(message: AssistantMessage): string;
 	/** Realtime output voice, defaulting to sol. */
 	voice?: string;
+	/** Preferred response language, defaulting to automatic detection. */
+	language?: LiveLanguage;
 }
+
+type LiveTransport = Pick<CodexLiveTransport, "close" | "connect" | "pushAudio" | "send" | "setMuted">;
+type LiveTransportFactory = (options: LiveTransportOptions) => LiveTransport;
 
 function errorFrom(cause: unknown): Error {
 	return cause instanceof Error ? cause : new Error(String(cause));
@@ -87,14 +93,25 @@ function currentUser(): { username: string; firstName: string } {
 	return { username, firstName: firstPart ?? "there" };
 }
 
+function renderLiveInstructions(language: unknown = DEFAULT_LIVE_LANGUAGE): string {
+	const resolvedLanguage = resolveLiveLanguage(language);
+	return prompt.render(liveInstructionsTemplate, {
+		...currentUser(),
+		automaticLanguage: resolvedLanguage === DEFAULT_LIVE_LANGUAGE,
+		languageName: getLiveLanguageName(resolvedLanguage),
+	});
+}
+
 /** Coordinates the realtime conversational surface with normal AgentSession turns. */
 export class LiveSessionController {
 	readonly #session: AgentSession;
 	readonly #callbacks: LiveSessionCallbacks;
 	readonly #extractAssistantText: (message: AssistantMessage) => string;
 	readonly #voice: string;
+	readonly #language: LiveLanguage;
+	readonly #createTransport: LiveTransportFactory | undefined;
 
-	#transport: CodexLiveTransport | undefined;
+	#transport: LiveTransport | undefined;
 	#recorder: AudioCapture | undefined;
 	#unsubscribeSession: (() => void) | undefined;
 	#sendChain: Promise<void> = Promise.resolve();
@@ -116,11 +133,13 @@ export class LiveSessionController {
 	#assistantTranscriptTurn = 0;
 	#lastTranscript: LiveTranscript | undefined;
 
-	constructor(options: LiveSessionControllerOptions) {
+	constructor(options: LiveSessionControllerOptions, createTransport?: LiveTransportFactory) {
 		this.#session = options.session;
 		this.#callbacks = options.callbacks;
 		this.#extractAssistantText = options.extractAssistantText;
 		this.#voice = options.voice?.trim() || DEFAULT_LIVE_VOICE;
+		this.#language = options.language ?? DEFAULT_LIVE_LANGUAGE;
+		this.#createTransport = createTransport;
 	}
 
 	/** Current realtime call phase. */
@@ -149,9 +168,8 @@ export class LiveSessionController {
 		}
 
 		try {
-			const user = currentUser();
-			const instructions = prompt.render(liveInstructionsTemplate, user);
-			const transport = new CodexLiveTransport({
+			const instructions = renderLiveInstructions(this.#language);
+			const transportOptions: LiveTransportOptions = {
 				authStorage: this.#session.modelRegistry.authStorage,
 				sessionId: this.#session.sessionId,
 				instructions,
@@ -160,7 +178,10 @@ export class LiveSessionController {
 					onEvent: event => this.#guardEvent(() => this.#handleLiveEvent(event)),
 					onOutputLevel: level => this.#guardEvent(() => this.#handleOutputLevel(level)),
 				},
-			});
+			};
+			const transport = this.#createTransport
+				? this.#createTransport(transportOptions)
+				: new CodexLiveTransport(transportOptions);
 			this.#transport = transport;
 			await transport.connect();
 			if (this.#stopped) {

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LiveSessionController } from "@oh-my-pi/pi-coding-agent/live/controller";
+import type { LiveTransportOptions } from "@oh-my-pi/pi-coding-agent/live/transport";
 import { LiveVisualizer } from "@oh-my-pi/pi-coding-agent/live/visualizer";
 import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 /** Fake InteractiveModeContext plus typed capture channels for focus/mount traffic. */
 interface ContextHarness {
@@ -27,7 +29,7 @@ function createContext(): ContextHarness {
 	const mounted: unknown[] = [];
 	const refocused = Promise.withResolvers<void>();
 	const ctx = {
-		settings: Settings.isolated({ "live.voice": "vale" }),
+		settings: Settings.isolated({ "live.language": "sv", "live.voice": "vale" }),
 		keybindings: { getKeys: vi.fn(() => ["ctrl+l"]) },
 		session: {},
 		extractAssistantText: vi.fn(() => ""),
@@ -55,15 +57,55 @@ function createContext(): ContextHarness {
 	return { ctx, editor, focused, mounted, editorRefocused: refocused.promise };
 }
 
+async function captureTransportOptions(language: unknown): Promise<LiveTransportOptions> {
+	const settings = Settings.isolated({ "live.language": language, "live.voice": "vale" });
+	const connectFailure = new Error("stop after transport construction");
+	let receivedOptions: LiveTransportOptions | undefined;
+	const session = {
+		modelRegistry: { authStorage: {} },
+		sessionId: "test-live-session",
+	} as unknown as AgentSession;
+	const controller = new LiveSessionController(
+		{
+			session,
+			callbacks: {
+				onPhase: vi.fn(),
+				onLevels: vi.fn(),
+				onTranscript: vi.fn(),
+				onTerminal: vi.fn(),
+			},
+			extractAssistantText: vi.fn(() => ""),
+			language: settings.get("live.language"),
+			voice: settings.get("live.voice"),
+		},
+		options => {
+			receivedOptions = options;
+			return {
+				connect: () => Promise.reject(connectFailure),
+				send: () => Promise.resolve(),
+				close: () => Promise.resolve(),
+				setMuted: () => Promise.resolve(),
+				pushAudio: () => {},
+			};
+		},
+	);
+
+	await expect(controller.start()).rejects.toBe(connectFailure);
+	if (!receivedOptions) throw new Error("Live session did not construct a transport");
+	return receivedOptions;
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
 describe("LiveCommandController", () => {
-	it("forwards the selected voice across the live-session boundary", async () => {
+	it("forwards the selected live preferences across the session boundary", async () => {
 		const { ctx } = createContext();
+		let receivedLanguage: string | undefined;
 		let receivedVoice: string | undefined;
 		const controller = new LiveCommandController(ctx, options => {
+			receivedLanguage = options.language;
 			receivedVoice = options.voice;
 			const session = new LiveSessionController(options);
 			vi.spyOn(session, "start").mockResolvedValue();
@@ -73,10 +115,30 @@ describe("LiveCommandController", () => {
 
 		try {
 			await controller.handleCommand();
+			expect(receivedLanguage).toBe("sv");
 			expect(receivedVoice).toBe("vale");
 		} finally {
 			await controller.stop();
 		}
+	});
+
+	it("passes selected language policy into the realtime transport", async () => {
+		const options = await captureTransportOptions("sv");
+
+		expect(options.voice).toBe("vale");
+		expect(options.instructions).toContain("Swedish is the session-default response language");
+		expect(options.instructions).toContain("requested language becomes current until another explicit request");
+		expect(options.instructions).not.toContain("first substantive utterance");
+	});
+
+	it("falls back stale language settings before constructing the realtime transport", async () => {
+		const options = await captureTransportOptions("stale-language");
+
+		expect(options.voice).toBe("vale");
+		expect(options.instructions).toContain("Before the first substantive utterance");
+		expect(options.instructions).toContain("If no language is identifiable");
+		expect(options.instructions).toContain("requested language becomes current until another explicit request");
+		expect(options.instructions).not.toContain("is the session-default response language");
 	});
 
 	it("stops the session and restores the editor when the live-toggle chord hits the focused visualizer", async () => {
