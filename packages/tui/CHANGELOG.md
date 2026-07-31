@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added macOS Command as a mirror of every Ctrl keybinding, so shortcuts documented as Ctrl also answer to Command on darwin.
+
 ## [17.2.0] - 2026-07-30
 
 ### Added
