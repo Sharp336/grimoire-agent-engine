@@ -21,7 +21,7 @@
 - Fixed Python eval's loopback tool bridge being routed through macOS system HTTP proxies, which caused `parallel()` tool reads to fail with `ConnectionRefusedError` after a local proxy stopped.
 ### Added
 
-- Added `/switch <model>`: passing a model selector (`provider/id`, bare id, configured role, or an explicit `:<thinking>` suffix) switches the session model directly without opening the picker; bare `/switch` keeps the compact session-only selector. The switch stays session-only (same as alt+p) and is never persisted to model settings.
+- Added `/switch <model>`: passing a model selector (`provider/id`, bare id, configured role, or an explicit `:<thinking>` suffix) switches the session model directly without opening the picker; bare `/switch` keeps the compact session-only selector. The switch stays session-only (same as alt+p) and is never persisted to model settings. In sessions scoped by `--models`/`enabledModels`, direct resolution is restricted to the scoped list and rejects models outside it.
 
 ## [17.2.0] - 2026-07-30
 

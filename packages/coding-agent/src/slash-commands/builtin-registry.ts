@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getMCPConfigPath, getProjectDir, logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
@@ -39,6 +40,7 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
+import { applyTemporarySessionModel } from "../modes/utils/interactive-context-helpers";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
@@ -592,9 +594,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.showModelSelector({ temporaryOnly: true });
 				return;
 			}
+			// Sessions scoped by --models/enabledModels restrict the picker's
+			// selectable list to the scope; resolve against the same list so the
+			// direct path cannot switch to a model the picker would not offer.
+			const scopedModels = runtime.ctx.session.scopedModels;
 			const resolved = resolveCliModel({
 				cliModel: selectorArg,
 				modelRegistry: runtime.ctx.session.modelRegistry,
+				availableModels: scopedModels.length > 0 ? scopedModels.map(scoped => scoped.model) : undefined,
 				settings: runtime.ctx.settings,
 				preferences: getModelMatchPreferences(runtime.ctx.settings),
 			});
@@ -602,16 +609,19 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.showError(resolved.error ?? `Model "${selectorArg}" not found.`);
 				return;
 			}
+			if (scopedModels.length > 0 && !scopedModels.some(scoped => modelsAreEqual(scoped.model, resolved.model))) {
+				const scopedList = scopedModels.map(scoped => formatModelString(scoped.model)).join(", ");
+				runtime.ctx.showError(
+					`Model "${formatModelString(resolved.model)}" is outside this session's model scope (--models). Scoped models: ${scopedList}.`,
+				);
+				return;
+			}
 			try {
-				// Session-only, mirroring the picker: never persist to settings.
-				const thinkingLevel =
-					resolved.thinkingLevel ?? runtime.ctx.session.resolveTemporaryModelThinkingLevel(resolved.model);
-				await runtime.ctx.session.setModelTemporary(resolved.model, thinkingLevel);
-				runtime.ctx.statusLine.invalidate();
-				runtime.ctx.updateEditorBorderColor();
-				const roleSelectorHint = runtime.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
-				runtime.ctx.showStatus(
-					`Session-only model: ${resolved.selector ?? formatModelString(resolved.model)}. Use ${roleSelectorHint} or /model for roles.`,
+				await applyTemporarySessionModel(
+					runtime.ctx,
+					resolved.model,
+					resolved.selector ?? formatModelString(resolved.model),
+					resolved.thinkingLevel,
 				);
 			} catch (error) {
 				runtime.ctx.showError(error instanceof Error ? error.message : String(error));

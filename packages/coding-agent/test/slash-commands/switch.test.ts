@@ -34,7 +34,10 @@ const FAKE_MODELS = [
 	{ provider: "openai", id: "gpt-5.2" },
 ];
 
-function createSwitchRuntime(options?: { roleThinkingLevel?: string }) {
+function createSwitchRuntime(options?: {
+	roleThinkingLevel?: string;
+	scopedModels?: ReadonlyArray<{ provider: string; id: string }>;
+}) {
 	const showModelSelector = vi.fn();
 	const setText = vi.fn();
 	const showStatus = vi.fn();
@@ -65,6 +68,7 @@ function createSwitchRuntime(options?: { roleThinkingLevel?: string }) {
 						getAll: () => FAKE_MODELS,
 						getAvailable: () => FAKE_MODELS,
 					},
+					scopedModels: (options?.scopedModels ?? []).map(model => ({ model })),
 					setModelTemporary,
 					resolveTemporaryModelThinkingLevel,
 				},
@@ -123,5 +127,29 @@ describe("/switch slash command", () => {
 		expect(harness.setModelTemporary).not.toHaveBeenCalled();
 		expect(harness.showStatus).not.toHaveBeenCalled();
 		expect(harness.showError).toHaveBeenCalled();
+	});
+
+	it("rejects an out-of-scope model in a scoped session without switching", async () => {
+		const harness = createSwitchRuntime({ scopedModels: [FAKE_MODELS[0]] });
+
+		const handled = await executeBuiltinSlashCommand("/switch openai/gpt-5.2", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.setModelTemporary).not.toHaveBeenCalled();
+		expect(harness.showStatus).not.toHaveBeenCalled();
+		expect(harness.showError.mock.calls[0][0]).toContain(
+			'Model "openai/gpt-5.2" is outside this session\'s model scope (--models)',
+		);
+	});
+
+	it("accepts an in-scope model in a scoped session", async () => {
+		const harness = createSwitchRuntime({ scopedModels: [FAKE_MODELS[0]] });
+
+		const handled = await executeBuiltinSlashCommand("/switch anthropic/claude-opus-4-5", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.setModelTemporary).toHaveBeenCalledWith(FAKE_MODELS[0], undefined);
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.showStatus.mock.calls[0][0]).toContain("Session-only model: anthropic/claude-opus-4-5");
 	});
 });
