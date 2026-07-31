@@ -50,6 +50,7 @@ import {
 	type AdvisorRuntimeStatus,
 	type AdvisorSeverity,
 	AdvisorTranscriptRecorder,
+	advisorRunsForAgentKind,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
 	formatAdvisorBatchContent,
@@ -569,6 +570,16 @@ export class SessionAdvisors {
 				continue;
 			}
 
+			// Session-kind gate: skip advisors not eligible for subagent sessions.
+			// Main sessions include the full roster; unset `subagents` inherits the
+			// global `advisor.subagents` setting to preserve existing behavior.
+			const agentKind = this.#host.agentKind();
+			const subagentDefault = this.#host.settings.get("advisor.subagents");
+			if (agentKind !== "main" && !advisorRunsForAgentKind(config, agentKind, subagentDefault)) {
+				this.#advisorStatuses.set(slug, { name: config.name, status: "paused" });
+				continue;
+			}
+
 			// Resolve the advisor's model: an explicit `model` override wins; else the
 			// `advisor` role chain. A model that fails to resolve skips just this advisor.
 			let model: Model | undefined;
@@ -653,7 +664,6 @@ export class SessionAdvisors {
 		if (this.#host.isDisposed()) return false;
 		if (this.#advisors.length > 0) return true;
 		if (!this.#advisorEnabled) return false;
-		if (this.#host.agentKind() !== "main" && !this.#host.settings.get("advisor.subagents")) return false;
 
 		// Rebuild the status map from scratch so removed/renamed advisors don't
 		// leave stale entries. #resolveAdvisorRuntimeDescriptors populates every
