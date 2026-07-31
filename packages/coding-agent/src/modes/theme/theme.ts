@@ -2190,6 +2190,18 @@ async function loadTheme(name: string, options: CreateThemeOptions = {}): Promis
 	return createTheme(themeJson, options);
 }
 
+/**
+ * Recovery loader for the fallback paths: the embedded built-in only.
+ *
+ * A custom file shadows a same-named built-in, so `loadTheme("dark")` would re-read a broken
+ * `dark.json` and fail again. Recovery has to reach past it.
+ */
+async function loadBuiltinTheme(name: string, options: CreateThemeOptions = {}): Promise<Theme> {
+	const themeJson = getBuiltinThemes()[name];
+	if (!themeJson) throw new Error(`Theme not found: ${name}`);
+	return createTheme(themeJson, options);
+}
+
 export async function getThemeByName(name: string): Promise<Theme | undefined> {
 	try {
 		return await loadTheme(name);
@@ -2304,7 +2316,7 @@ export async function initTheme(
 	} catch (err) {
 		logger.debug("Theme loading failed, falling back to dark theme", { error: String(err) });
 		currentThemeName = "dark";
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = await loadBuiltinTheme("dark", getCurrentThemeOptions());
 		// Don't start watcher for fallback theme
 	}
 }
@@ -2333,7 +2345,7 @@ export async function setTheme(
 		}
 		// Theme is invalid - fall back to dark theme
 		currentThemeName = "dark";
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = await loadBuiltinTheme("dark", getCurrentThemeOptions());
 		// The active theme just changed to the fallback — bump the epoch so memoized
 		// renderers (e.g. ToolExecutionComponent) re-shape with the fallback colors
 		// instead of holding the failed theme's stale styling.
@@ -2422,7 +2434,7 @@ export async function setSymbolPreset(preset: SymbolPreset): Promise<void> {
 	} catch {
 		if (requestId !== themeLoadRequestId) return;
 		// Fall back to dark theme with new preset
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = await loadBuiltinTheme("dark", getCurrentThemeOptions());
 		if (requestId !== themeLoadRequestId) return;
 	}
 	notifyThemeChange({ ephemeral: true });
@@ -2451,7 +2463,7 @@ export async function setColorBlindMode(enabled: boolean): Promise<void> {
 	} catch {
 		if (requestId !== themeLoadRequestId) return;
 		// Fall back to dark theme
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = await loadBuiltinTheme("dark", getCurrentThemeOptions());
 		if (requestId !== themeLoadRequestId) return;
 	}
 	notifyThemeChange({ ephemeral: true });
@@ -2507,8 +2519,9 @@ export function isValidSymbolPreset(preset: string): preset is SymbolPreset {
 async function startThemeWatcher(): Promise<void> {
 	stopThemeWatcher();
 
-	// Only watch if it's a custom theme (not built-in)
-	if (!currentThemeName || currentThemeName === "dark" || currentThemeName === "light") {
+	// Watch whenever a file backs the active theme. A custom file may shadow a built-in name,
+	// so the name alone no longer says whether anything is on disk — the existsSync below does.
+	if (!currentThemeName) {
 		return;
 	}
 

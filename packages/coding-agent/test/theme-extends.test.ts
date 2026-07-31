@@ -5,8 +5,12 @@ import * as path from "node:path";
 import {
 	getAvailableThemesWithPaths,
 	getThemeByName,
+	initTheme,
 	isLightTheme,
+	onThemeChange,
 	setTheme,
+	stopThemeWatcher,
+	theme,
 } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getConfigRootDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -135,5 +139,56 @@ describe("theme extends", () => {
 		const shadowed = entries.filter(entry => entry.name === "dark");
 		expect(shadowed).toHaveLength(1);
 		expect(shadowed[0].path).toBe(path.join(getCustomThemesDir(), "dark.json"));
+	});
+});
+
+describe("theme shadowing edge cases", () => {
+	beforeEach(async () => {
+		tmpAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-theme-shadow-"));
+		setAgentDir(tmpAgentDir);
+	});
+
+	afterEach(async () => {
+		stopThemeWatcher();
+		if (originalAgentDir) {
+			setAgentDir(originalAgentDir);
+		} else {
+			setAgentDir(fallbackAgentDir);
+			delete process.env.PI_CODING_AGENT_DIR;
+		}
+		await removeWithRetries(tmpAgentDir);
+	});
+
+	it("recovers to the embedded built-in when a custom file shadowing it is broken", async () => {
+		const themesDir = getCustomThemesDir();
+		await fs.mkdir(themesDir, { recursive: true });
+		await Bun.write(path.join(themesDir, "dark.json"), "{ this is not valid json");
+
+		// Must not throw: the fallback has to reach past the broken shadow to the built-in.
+		await initTheme(false, undefined, false, "dark", "light");
+		expect(theme).toBeDefined();
+		expect(theme.symbol("boxRound.topLeft")).toBe("╭");
+	});
+
+	it("watches a custom file that shadows a built-in name", async () => {
+		const themesDir = getCustomThemesDir();
+		await fs.mkdir(themesDir, { recursive: true });
+		const file = path.join(themesDir, "dark.json");
+		await Bun.write(file, JSON.stringify({ symbols: { overrides: { "boxRound.topLeft": "1" } } }));
+
+		await initTheme(true, undefined, false, "dark", "light");
+		expect(theme.symbol("boxRound.topLeft")).toBe("1");
+
+		// Await the reload event itself. The watcher is fs-backed and debounced, so there is no
+		// clock to fake here; if it never fires the test times out, which is the right failure.
+		let dispose = () => {};
+		const reloaded = new Promise<void>(resolve => {
+			dispose = onThemeChange(() => resolve());
+		});
+		await Bun.write(file, JSON.stringify({ symbols: { overrides: { "boxRound.topLeft": "2" } } }));
+		await reloaded;
+		dispose();
+
+		expect(theme.symbol("boxRound.topLeft")).toBe("2");
 	});
 });
