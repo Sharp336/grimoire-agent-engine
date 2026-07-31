@@ -188,9 +188,10 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 	}
 }
 
-/** Flatten env values for single-line display: ANSI escapes and control chars
- *  (including newlines; tabs are left for `replaceTabs`) collapse to a space so
- *  an arbitrary value cannot add rows or move the cursor in either surface. */
+/** Flatten env keys and values for single-line display: ANSI escapes and
+ *  control chars (including newlines; tabs are left for `replaceTabs`) collapse
+ *  to a space so an arbitrary entry cannot add rows or move the cursor in
+ *  either surface — the spec schema allows arbitrary strings on both sides. */
 function flattenEnvValue(value: string): string {
 	return value.replace(/\u001b\[[0-9;]*[A-Za-z]/g, " ").replace(/[\u0000-\u0008\u000a-\u001f\u007f]+/g, " ");
 }
@@ -277,7 +278,7 @@ export function toolContent(result: DaemonRpcResult, params: LaunchParams): stri
 				`Cwd: ${shortenPath(result.spec.cwd)}`,
 				`PTY: ${result.spec.pty}; restart=${result.spec.restart}; persist=${result.spec.persist}; detached=${result.spec.detached}`,
 				...(envEntries.length > 0
-					? [`Env: ${envEntries.map(([k, v]) => `${k}=${flattenEnvValue(v)}`).join("; ")}`]
+					? [`Env: ${envEntries.map(([k, v]) => `${flattenEnvValue(k)}=${flattenEnvValue(v)}`).join("; ")}`]
 					: []),
 			].join("\n");
 		}
@@ -530,7 +531,9 @@ export function launchRenderResult(
 						body.push(
 							theme.fg(
 								"dim",
-								replaceTabs(`env ${envEntries.map(([k, v]) => `${k}=${flattenEnvValue(v)}`).join(" ")}`),
+								replaceTabs(
+									`env ${envEntries.map(([k, v]) => `${flattenEnvValue(k)}=${flattenEnvValue(v)}`).join(" ")}`,
+								),
 							),
 						);
 				}
