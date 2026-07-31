@@ -472,6 +472,7 @@ function isShadowedExtension(ext: Extension): boolean {
 export function applyDisabledExtensionsToState(state: DashboardState, disabledIds: string[]): DashboardState {
 	const disabled = new Set(disabledIds);
 	const updateExtension = (ext: Extension): Extension => {
+		if (ext.activationLocked) return ext;
 		if (disabled.has(ext.id)) {
 			if (ext.state === "disabled" && ext.disabledReason === "item-disabled") return ext;
 			return { ...ext, state: "disabled", disabledReason: "item-disabled" };

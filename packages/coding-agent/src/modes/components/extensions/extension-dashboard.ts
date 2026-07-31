@@ -463,13 +463,19 @@ export class ExtensionDashboard implements Component {
 			mode: this.#getProviderActivationMode(providerId),
 			rowDisabled: currentlyDisabled,
 		});
-		void sm.setProviderActivation(providerId, next, this.#activationScope).then(() => {
-			syncCapabilityDisabledProviders((sm.get("disabledProviders") as string[]) ?? []);
-			void this.#refreshFromState();
-		});
+		void sm
+			.setProviderActivation(providerId, next, this.#activationScope)
+			.then(() => {
+				syncCapabilityDisabledProviders((sm.get("disabledProviders") as string[]) ?? []);
+				void this.#refreshFromState();
+			})
+			.catch(error =>
+				logger.warn("Failed to update extension provider activation", { providerId, error: String(error) }),
+			);
 	}
 
 	#handleExtensionToggle(extensionId: string, enabled: boolean): void {
+		if (this.#activationScope === "project") return;
 		const sm = this.settings ?? Settings.instance;
 		const disabled = ((sm.get("disabledExtensions") as string[]) ?? []).slice();
 		if (enabled) {

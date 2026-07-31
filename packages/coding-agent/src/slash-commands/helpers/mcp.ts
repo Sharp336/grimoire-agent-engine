@@ -1,7 +1,7 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
-import { addMCPServer, readMCPConfigFile, removeMCPServer } from "../../mcp/config-writer";
+import { addMCPServer, readMCPConfigFile, removeMCPServer, updateMCPServer } from "../../mcp/config-writer";
 import { MCPManager } from "../../mcp/manager";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
@@ -424,9 +424,20 @@ async function handleEnableDisableCommand(
 			readMCPConfigFile(userPath),
 			readMCPConfigFile(projectPath),
 		]);
-		const configured = projectConfig.mcpServers?.[name] !== undefined || userConfig.mcpServers?.[name] !== undefined;
+		const projectServer = projectConfig.mcpServers?.[name];
+		const userServer = userConfig.mcpServers?.[name];
+		const configured = projectServer !== undefined || userServer !== undefined;
 		const current = runtime.settings.getProjectActivation("mcp", name);
 		if (configured || current === "disabled") {
+			const sourceDisabled =
+				projectServer?.enabled === false
+					? { config: projectServer, path: projectPath }
+					: userServer?.enabled === false
+						? { config: userServer, path: userPath }
+						: undefined;
+			if (enabled && sourceDisabled) {
+				await updateMCPServer(sourceDisabled.path, name, { ...sourceDisabled.config, enabled: true });
+			}
 			await runtime.settings.setProjectActivation("mcp", name, enabled ? "enabled" : "disabled");
 			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}.`);
 			return commandConsumed();

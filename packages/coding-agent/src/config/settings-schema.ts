@@ -315,7 +315,6 @@ export type ProjectActivationKind = "skills" | "mcp" | "rules" | "extensions" | 
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
-const EMPTY_PROJECT_ACTIVATION_RECORD: ProjectActivationRecord = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
@@ -566,10 +565,6 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
-	"activation.skills": { type: "record", default: EMPTY_PROJECT_ACTIVATION_RECORD },
-	"activation.mcp": { type: "record", default: EMPTY_PROJECT_ACTIVATION_RECORD },
-	"activation.rules": { type: "record", default: EMPTY_PROJECT_ACTIVATION_RECORD },
-
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
