@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed key hints to render Mac glyphs on macOS, so shortcuts display as ⌥↑ and ⇧⌘↑ instead of Alt+Up and Ctrl+Shift+Up.
+
 ## [17.2.1] - 2026-07-30
 
 ### Added
