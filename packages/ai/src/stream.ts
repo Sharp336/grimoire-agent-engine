@@ -31,6 +31,7 @@ import type { AnthropicOptions } from "./providers/anthropic";
 // pi-utils — so eager import costs the startup parse graph nothing measurable.
 import { resolveAwsCredentials } from "./providers/aws-credentials";
 import { signRequest } from "./providers/aws-sigv4";
+import { coworkFetch } from "./providers/cowork-fetch";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
@@ -88,6 +89,11 @@ import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { wrapFetchForProxy } from "./utils/proxy";
 import { withRequestDebugFetch } from "./utils/request-debug";
 import { withGeminiThinkingLoopGuard } from "./utils/thinking-loop";
+
+function defaultFetchForModel(model: Model<Api>): FetchImpl {
+	if (model.provider === "anthropic" && model.api === "anthropic-messages") return coworkFetch;
+	return globalThis.fetch;
+}
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
@@ -812,7 +818,6 @@ type KeyResolver = string | (() => string | undefined);
 const LEGACY_ENV_KEYS: Record<string, KeyResolver> = {
 	// Non-provider / search-tool keys and API-name keys not modeled as registry provider defs.
 	"azure-openai-responses": "AZURE_OPENAI_API_KEY",
-	exa: "EXA_API_KEY",
 	jina: "JINA_API_KEY",
 	brave: "BRAVE_API_KEY",
 	tinyfish: "TINYFISH_API_KEY",
@@ -891,11 +896,12 @@ function streamDispatch<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
-	const baseOptions = (options || {}) as StreamOptions;
+	const inputOptions = (options || {}) as StreamOptions;
+	const baseOptions = { ...inputOptions, fetch: inputOptions.fetch ?? defaultFetchForModel(model) };
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));
 	const requestOptions = {
 		...debugOptions,
-		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
+		fetch: wrapFetchForProxy(debugOptions.fetch, model.provider),
 	} as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1148,11 +1154,12 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const baseOptions = (options || {}) as SimpleStreamOptions;
+	const inputOptions = (options || {}) as SimpleStreamOptions;
+	const baseOptions = { ...inputOptions, fetch: inputOptions.fetch ?? defaultFetchForModel(model) };
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));
 	const requestOptions = {
 		...debugOptions,
-		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
+		fetch: wrapFetchForProxy(debugOptions.fetch, model.provider),
 	} as SimpleStreamOptions;
 
 	// `bedrock-mantle` credentials come from the AWS chain, so it must bypass key
