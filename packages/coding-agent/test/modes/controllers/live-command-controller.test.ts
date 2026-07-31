@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { LiveSessionController } from "@oh-my-pi/pi-coding-agent/live/controller";
+import { LiveSessionController, renderLiveInstructions } from "@oh-my-pi/pi-coding-agent/live/controller";
 import { LiveVisualizer } from "@oh-my-pi/pi-coding-agent/live/visualizer";
 import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -27,7 +27,7 @@ function createContext(): ContextHarness {
 	const mounted: unknown[] = [];
 	const refocused = Promise.withResolvers<void>();
 	const ctx = {
-		settings: Settings.isolated({ "live.voice": "vale" }),
+		settings: Settings.isolated({ "live.language": "sv", "live.voice": "vale" }),
 		keybindings: { getKeys: vi.fn(() => ["ctrl+l"]) },
 		session: {},
 		extractAssistantText: vi.fn(() => ""),
@@ -60,10 +60,12 @@ afterEach(() => {
 });
 
 describe("LiveCommandController", () => {
-	it("forwards the selected voice across the live-session boundary", async () => {
+	it("forwards the selected live preferences across the session boundary", async () => {
 		const { ctx } = createContext();
+		let receivedLanguage: string | undefined;
 		let receivedVoice: string | undefined;
 		const controller = new LiveCommandController(ctx, options => {
+			receivedLanguage = options.language;
 			receivedVoice = options.voice;
 			const session = new LiveSessionController(options);
 			vi.spyOn(session, "start").mockResolvedValue();
@@ -73,10 +75,31 @@ describe("LiveCommandController", () => {
 
 		try {
 			await controller.handleCommand();
+			expect(receivedLanguage).toBe("sv");
 			expect(receivedVoice).toBe("vale");
 		} finally {
 			await controller.stop();
 		}
+	});
+
+	it("renders automatic language following with sticky explicit overrides", () => {
+		const instructions = renderLiveInstructions("auto");
+
+		expect(instructions).toContain("first substantive utterance");
+		expect(instructions).toContain("Until the user explicitly requests a language");
+		expect(instructions).toContain("requested language becomes current until another explicit request");
+		expect(instructions).toContain("regardless of the language the user speaks");
+		expect(instructions).not.toContain("is the session-default response language");
+	});
+
+	it("renders the selected language as the session default with sticky explicit overrides", () => {
+		const instructions = renderLiveInstructions("sv");
+
+		expect(instructions).toContain("Swedish is the session-default response language");
+		expect(instructions).toContain("switch immediately when the user explicitly requests another language");
+		expect(instructions).toContain("requested language becomes current until another explicit request");
+		expect(instructions).toContain("regardless of the language the user speaks");
+		expect(instructions).not.toContain("first substantive utterance");
 	});
 
 	it("stops the session and restores the editor when the live-toggle chord hits the focused visualizer", async () => {
