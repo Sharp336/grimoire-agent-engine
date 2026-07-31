@@ -2,14 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { type AuthCredentialStore, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
-import { minimaxCodeUsageProvider } from "@oh-my-pi/pi-ai/usage/minimax-code";
+import { minimaxCodeCnUsageProvider, minimaxCodeUsageProvider } from "@oh-my-pi/pi-ai/usage/minimax-code";
 
 const INTERVAL_START = 1_785_009_600_000;
 const INTERVAL_END = 1_785_024_000_000;
 const WEEKLY_START = 1_784_505_600_000;
 const WEEKLY_END = 1_785_110_400_000;
 
-function params(provider: "minimax-code" = "minimax-code", apiKey = "sk-cp-test"): UsageFetchParams {
+function params(
+	provider: "minimax-code" | "minimax-code-cn" = "minimax-code",
+	apiKey = "sk-cp-test",
+): UsageFetchParams {
 	return { provider, credential: { type: "api_key", apiKey }, accountKey: "account-1" };
 }
 
@@ -176,6 +179,20 @@ describe("MiniMax Token Plan usage", () => {
 		expect(videoWeekly?.notes).toEqual(["Requests: 1/21"]);
 	});
 
+	test("routes China Token Plan credentials to the mainland endpoint", async () => {
+		const requests: { url: string; init?: RequestInit }[] = [];
+		const fetchMock: FetchImpl = (input, init) => {
+			requests.push({ url: String(input), init });
+			return Promise.resolve(Response.json(remainsPayload()));
+		};
+
+		const report = await minimaxCodeCnUsageProvider.fetchUsage(params("minimax-code-cn"), { fetch: fetchMock });
+
+		expect(requests[0]?.url).toBe("https://api.minimaxi.com/v1/token_plan/remains");
+		expect(new Headers(requests[0]?.init?.headers).get("Authorization")).toBe("Bearer sk-cp-test");
+		expect(report?.provider).toBe("minimax-code-cn");
+	});
+
 	test("honors a configured base URL for the quota request", async () => {
 		// One case per trim the provider applies: trailing slash, trailing `/v1`, and both together.
 		for (const configured of ["https://proxy.example", "https://proxy.example/", "https://proxy.example/v1/"]) {
@@ -319,12 +336,12 @@ describe("MiniMax Token Plan usage", () => {
 		expect(await minimaxCodeUsageProvider.fetchUsage(params("minimax-code"), { fetch: fetchMock })).toBeNull();
 	});
 
-	test("registers the Token Plan id in AuthStorage's default usage resolver", async () => {
+	test("registers both regional Token Plan ids in AuthStorage's default usage resolver", async () => {
 		const storage = new AuthStorage(emptyStore());
 		await storage.reload();
 		try {
 			expect(storage.usageProviderFor("minimax-code")).toBe(minimaxCodeUsageProvider);
-			expect(storage.usageProviderFor("minimax-code-cn")).toBeUndefined();
+			expect(storage.usageProviderFor("minimax-code-cn")).toBe(minimaxCodeCnUsageProvider);
 		} finally {
 			storage.close();
 		}
