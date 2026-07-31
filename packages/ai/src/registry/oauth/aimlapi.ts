@@ -108,23 +108,9 @@ async function validateAimlApiKey(apiKey: string, fetchImpl: FetchImpl, signal?:
 
 	if (response.ok) return;
 
-	let details = "";
-	try {
-		const body = (await response.text()).trim();
-		try {
-			// The API returns `{ ..., "message": "This request requires a valid API key…" }`;
-			// surface that human-readable line rather than the whole JSON envelope.
-			const parsed = JSON.parse(body) as { message?: unknown };
-			details = typeof parsed.message === "string" ? parsed.message : body;
-		} catch {
-			details = body;
-		}
-	} catch {
-		// Body read failed — the status code alone is enough to report.
-	}
-
-	const suffix = details ? `: ${details}` : "";
-	throw new AIError.ApiKeyRequiredError(`aimlapi.com API key validation failed (${response.status})${suffix}`);
+	// Report the status only — the API's error body (the "create a key on the
+	// Billing page" blurb) makes the one-line login error too long to read.
+	throw new AIError.ApiKeyRequiredError(`aimlapi.com API key validation failed (${response.status})`);
 }
 
 function resolveRequestedUsdLimitMinor(): number {
