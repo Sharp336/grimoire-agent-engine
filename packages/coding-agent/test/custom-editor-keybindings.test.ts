@@ -46,6 +46,25 @@ describe("CustomEditor keybindings", () => {
 		expect(onRetry).not.toHaveBeenCalled();
 	});
 
+	it("routes each dequeue chord to its own handler through handleInput", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onDequeue = vi.fn();
+		const onDequeueFollowUp = vi.fn();
+
+		editor.onDequeue = onDequeue;
+		editor.onDequeueFollowUp = onDequeueFollowUp;
+
+		// ctrl+shift+up must not fall through to the steering dequeue, whose own
+		// binding is checked first in the dispatch chain.
+		editor.handleInput("\x1b[1;6A");
+		expect(onDequeueFollowUp).toHaveBeenCalledTimes(1);
+		expect(onDequeue).not.toHaveBeenCalled();
+
+		editor.handleInput("\x1b[1;3A");
+		expect(onDequeue).toHaveBeenCalledTimes(1);
+		expect(onDequeueFollowUp).toHaveBeenCalledTimes(1);
+	});
+
 	it("binds ctrl+shift+up to the follow-up dequeue", () => {
 		const keybindings = KeybindingsManager.inMemory();
 		expect(keybindings.getKeys("app.message.dequeueFollowUp")).toEqual(["ctrl+shift+up"]);
