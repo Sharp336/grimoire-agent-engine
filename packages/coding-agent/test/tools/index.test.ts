@@ -40,6 +40,7 @@ function createSessionManager(): NonNullable<ToolSession["sessionManager"]> {
 			});
 			return id;
 		},
+		appendEntriesAtomically: async <T>(append: () => T): Promise<T> => append(),
 		ensureOnDisk: async () => {},
 		flush: async () => {},
 		getBranch: () => entries,
