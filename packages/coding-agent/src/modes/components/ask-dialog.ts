@@ -242,14 +242,14 @@ function renderCachedPreview(cache: PreviewRenderCache, preview: string, width: 
 }
 
 function pageKeysLabel(): string {
-	const pageUp = editorKey("tui.select.pageUp");
-	const pageDown = editorKey("tui.select.pageDown");
-	return `${pageUp === "pageup" ? "PgUp" : pageUp}/${pageDown === "pagedown" ? "PgDn" : pageDown}`;
+	// `editorKey` formats through `formatKeyHints`, so "pageup" already arrives as
+	// "PgUp"; the local pageup/escape special cases this used to carry are gone.
+	return `${editorKey("tui.select.pageUp")}/${editorKey("tui.select.pageDown")}`;
 }
 
 function cancelKeyLabel(): string {
 	const [key = ""] = editorKey("tui.select.cancel").split("/");
-	return key === "escape" ? "Esc" : key;
+	return key;
 }
 
 function normalizedInlineInput(input: string): string {
