@@ -3386,11 +3386,14 @@ const BEDROCK_MANTLE_GPT_5_6_THINKING: ThinkingConfig = {
  * page — deliberately **not** OpenAI's first-party numbers. AWS charges ~10%
  * more, described on that page as parity with OpenAI's data-residency tier.
  * `cacheWrite` is the 30-minute retention rate.
+ *
+ * Reflects the 2026-07-30 cut that took Luna down 80% and Terra down 20%; Sol
+ * was unaffected.
  * https://aws.amazon.com/bedrock/pricing/
  */
 const BEDROCK_MANTLE_GPT_5_6_SOL_COST = { input: 5.5, output: 33, cacheRead: 0.55, cacheWrite: 6.88 } as const;
-const BEDROCK_MANTLE_GPT_5_6_TERRA_COST = { input: 2.75, output: 16.5, cacheRead: 0.28, cacheWrite: 3.44 } as const;
-const BEDROCK_MANTLE_GPT_5_6_LUNA_COST = { input: 1.1, output: 6.6, cacheRead: 0.11, cacheWrite: 1.38 } as const;
+const BEDROCK_MANTLE_GPT_5_6_TERRA_COST = { input: 2.2, output: 13.2, cacheRead: 0.22, cacheWrite: 2.75 } as const;
+const BEDROCK_MANTLE_GPT_5_6_LUNA_COST = { input: 0.22, output: 1.32, cacheRead: 0.022, cacheWrite: 0.275 } as const;
 
 /**
  * Context window (272K), modalities and Standard-only service tier come from the

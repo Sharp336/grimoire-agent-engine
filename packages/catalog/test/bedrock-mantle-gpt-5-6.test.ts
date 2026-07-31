@@ -13,11 +13,12 @@ const DOCUMENTED_IDS = ["openai.gpt-5.6-sol", "openai.gpt-5.6-terra", "openai.gp
 
 // Per 1M tokens, us-east-1/us-east-2, from AWS's Bedrock pricing page — not
 // OpenAI's first-party rates. `cacheWrite` is the 30-minute retention rate.
+// Reflects the 2026-07-30 cut: Luna -80%, Terra -20%, Sol unchanged.
 // https://aws.amazon.com/bedrock/pricing/
 const DOCUMENTED_COST: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
 	"openai.gpt-5.6-sol": { input: 5.5, output: 33, cacheRead: 0.55, cacheWrite: 6.88 },
-	"openai.gpt-5.6-terra": { input: 2.75, output: 16.5, cacheRead: 0.28, cacheWrite: 3.44 },
-	"openai.gpt-5.6-luna": { input: 1.1, output: 6.6, cacheRead: 0.11, cacheWrite: 1.38 },
+	"openai.gpt-5.6-terra": { input: 2.2, output: 13.2, cacheRead: 0.22, cacheWrite: 2.75 },
+	"openai.gpt-5.6-luna": { input: 0.22, output: 1.32, cacheRead: 0.022, cacheWrite: 0.275 },
 };
 
 describe("Bedrock Mantle GPT-5.6", () => {
