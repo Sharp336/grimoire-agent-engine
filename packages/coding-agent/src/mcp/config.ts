@@ -147,7 +147,7 @@ export async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): P
 		// present too: pointing the flag at some other valid JSON file (say
 		// `package.json`) is a mistake, and accepting it would start the session
 		// with none of the servers the caller asked for.
-		const invalid = validateMCPConfigFile(config, { requireServers: true });
+		const invalid = validateMCPConfigFile(config, { strict: true });
 		if (invalid) {
 			throw new ExplicitMCPConfigError(resolved, `Invalid MCP config ${resolved}: ${invalid}`);
 		}
@@ -253,7 +253,15 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 			claimed.add(server.name);
 			if (!suppressServer(server)) kept.push(server);
 		}
-		servers = [...kept, ...servers.filter(server => !claimed.has(server.name))];
+		// Same-endpoint aliases shadow each other inside `loadCapability` via
+		// `mcpCapability.equivalent`; extras are merged after that, so a discovered
+		// server the caller renamed in an explicit file has to be dropped here too.
+		// Otherwise the manager opens a second connection to the one endpoint and
+		// mounts its tools twice — the exact case this flag invites, since a
+		// generated per-workspace config renames what the project file already has.
+		const shadowedByExtra = (server: MCPServer): boolean =>
+			kept.some(extra => mcpCapability.equivalent?.(extra, server) ?? false);
+		servers = [...kept, ...servers.filter(server => !claimed.has(server.name) && !shadowedByExtra(server))];
 	}
 
 	// Convert to legacy format and preserve source metadata.

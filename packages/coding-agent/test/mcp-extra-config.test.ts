@@ -330,6 +330,7 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		['"mcpServers" is a string', { mcpServers: "not-a-map" }, /"mcpServers" must be an object/],
 		['"mcpServers" is an array', { mcpServers: ["a", "b"] }, /"mcpServers" must be an object/],
 		["a server entry is not an object", { mcpServers: { broken: "oops" } }, /server "broken" must be an object/],
+		["a server entry is null", { mcpServers: { nulled: null } }, /server "nulled" must be an object/],
 		["the root is not an object", ["mcpServers"], /expected a JSON object at the top level/],
 		// Pointing the flag at some other valid JSON file is a mistake, not a
 		// request for zero servers.
@@ -392,6 +393,50 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		expect(configs.other).toMatchObject({ type: "stdio", command: "other-server" });
 	});
 
+	// `loadCapability` shadows discovered aliases through `mcpCapability.equivalent`,
+	// but extras merge after that call, so an explicit server naming an endpoint a
+	// discovered server already covers would otherwise open a second connection to
+	// it and expose the same tools twice.
+	test("an explicit server shadows a discovered alias for the same endpoint", async () => {
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					penpot: { url: "http://localhost:14401/mcp" },
+					unrelated: { url: "http://localhost:9999/mcp" },
+				},
+			}),
+		);
+		const explicitPath = path.join(projectDir, "explicit.json");
+		await fs.writeFile(
+			explicitPath,
+			JSON.stringify({ mcpServers: { "penpot-ws1": { url: "http://localhost:14401/mcp" } } }),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+		expect(configs["penpot-ws1"]).toMatchObject({ type: "http", url: "http://localhost:14401/mcp" });
+		expect(configs.penpot).toBeUndefined();
+		expect(configs.unrelated).toMatchObject({ type: "http", url: "http://localhost:9999/mcp" });
+	});
+
+	test("a stdio alias with different args is not shadowed", async () => {
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { local: { command: "srv", args: ["--port", "1"] } } }),
+		);
+		const explicitPath = path.join(projectDir, "explicit.json");
+		await fs.writeFile(
+			explicitPath,
+			JSON.stringify({ mcpServers: { other: { command: "srv", args: ["--port", "2"] } } }),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+		expect(configs.local).toMatchObject({ command: "srv" });
+		expect(configs.other).toMatchObject({ command: "srv" });
+	});
+
 	// Discovery keeps the other half of the asymmetry: same defect, warning only.
 	test("an invalid discovered server is dropped rather than raised", async () => {
 		await fs.writeFile(
@@ -451,6 +496,35 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		const { configs } = await loadAllMCPConfigs(projectDir);
 
 		expect(Object.keys(configs)).toEqual([]);
+	});
+
+	// Discovery is best-effort per entry, not per file: one malformed entry must
+	// not cost the file its valid servers. Capability validation drops the bad
+	// one on its own, which is what happened before the file-level check existed.
+	test("a discovered file with one bad entry still loads its valid servers", async () => {
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { bad: "oops", good: { command: "good-server" } } }),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir);
+
+		expect(configs.good).toMatchObject({ type: "stdio", command: "good-server" });
+		expect(configs.bad).toBeUndefined();
+	});
+
+	// `null` is the entry shape that would throw on first field access rather
+	// than merely producing a useless server.
+	test("a discovered null entry does not take the file down with it", async () => {
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { nulled: null, good: { command: "good-server" } } }),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir);
+
+		expect(configs.good).toMatchObject({ type: "stdio", command: "good-server" });
+		expect(configs.nulled).toBeUndefined();
 	});
 
 	// The `mcpServers` requirement is scoped to explicitly named files: discovery

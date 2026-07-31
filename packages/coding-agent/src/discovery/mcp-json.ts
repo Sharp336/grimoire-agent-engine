@@ -61,27 +61,32 @@ export interface MCPConfigFile {
  * named after character or array indices. Callers validate first and then
  * either warn (discovery) or hard-fail (explicitly named files).
  *
- * @param options.requireServers Reject a file with no `mcpServers` key at all
- *   (an empty object is still fine). Discovery leaves this off: it probes fixed
- *   paths, and a file there without the key simply contributes nothing. A file
- *   the caller named is the opposite case — `--mcp-config package.json` is a
- *   mistake, not a request for zero servers.
+ * @param options.strict Also apply the checks that only make sense for a file
+ *   the caller named explicitly (`--mcp-config`): `mcpServers` has to be present
+ *   (an empty object is fine), and every entry has to be an object. Discovery
+ *   leaves this off. It probes fixed paths, so a file there without the key just
+ *   contributes nothing, and it stays best-effort per entry rather than per
+ *   file — rejecting a whole file over one bad entry would take unrelated
+ *   servers down with it, when {@link transformMCPConfig} skips the bad entry
+ *   and capability validation drops whatever it produced.
  * @returns A human-readable reason when the shape is invalid, `null` when valid.
  */
-export function validateMCPConfigFile(value: unknown, options?: { requireServers?: boolean }): string | null {
+export function validateMCPConfigFile(value: unknown, options?: { strict?: boolean }): string | null {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		return "expected a JSON object at the top level";
 	}
 	const { mcpServers } = value as { mcpServers?: unknown };
 	if (mcpServers === undefined) {
-		return options?.requireServers ? 'missing an "mcpServers" object' : null;
+		return options?.strict ? 'missing an "mcpServers" object' : null;
 	}
 	if (typeof mcpServers !== "object" || mcpServers === null || Array.isArray(mcpServers)) {
 		return '"mcpServers" must be an object mapping server names to server configs';
 	}
-	for (const [name, entry] of Object.entries(mcpServers)) {
-		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-			return `server "${name}" must be an object`;
+	if (options?.strict) {
+		for (const [name, entry] of Object.entries(mcpServers)) {
+			if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+				return `server "${name}" must be an object`;
+			}
 		}
 	}
 	return null;
@@ -97,6 +102,15 @@ export function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): M
 
 	if (config.mcpServers) {
 		for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
+			// A non-object entry has no fields to read — and `null` would throw on
+			// the first access. Skipping keeps the rest of the file usable, which
+			// is what discovery wants; explicitly named files never reach this
+			// because `validateMCPConfigFile({strict: true})` rejects them first.
+			if (typeof serverConfig !== "object" || serverConfig === null || Array.isArray(serverConfig)) {
+				logger.warn("MCP server entry is not an object, ignoring", { name });
+				continue;
+			}
+
 			// Runtime type validation for user-controlled JSON values
 			let enabled: boolean | undefined;
 			if (serverConfig.enabled !== undefined) {
