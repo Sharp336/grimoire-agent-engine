@@ -84,6 +84,9 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		session,
+		// No subagent is focused in these scenarios, so the viewed session is the
+		// session itself — the dequeue reads `viewSession`, matching the pending bar.
+		viewSession: session,
 		sessionManager: { getSessionName: () => "named-session" } as InteractiveModeContext["sessionManager"],
 		compactionQueuedMessages: [] as InteractiveModeContext["compactionQueuedMessages"],
 		fileSlashCommands: new Set<string>(),

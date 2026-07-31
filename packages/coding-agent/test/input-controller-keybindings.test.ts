@@ -681,4 +681,64 @@ describe("InputController keybinding setup", () => {
 		controller.restoreQueuedMessagesToEditor({ abort: true });
 		expect(ctx.compactionQueuedMessages).toHaveLength(0);
 	});
+	it("preserves the retained queue's draft-protection signature on a selective dequeue", async () => {
+		const { InputController, ctx, editor, steeringQueue, followUpQueue } = await createContext();
+		steeringQueue.push({ text: "steer one" });
+		followUpQueue.push({ text: "follow one" });
+		// Both messages were locally submitted when queued, so their draft-protection
+		// signatures live in the set until delivery consumes them (#handleMessageStart
+		// clears the editor only when the delivered signature is absent).
+		ctx.locallySubmittedUserSignatures.add("steer one\u00000");
+		ctx.locallySubmittedUserSignatures.add("follow one\u00000");
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		// Dequeue ONLY the follow-up; the steering message stays queued.
+		editor.onDequeueFollowUp?.();
+
+		// The retained steering message keeps its signature, so delivering it later
+		// still matches and #handleMessageStart leaves the editor alone — the
+		// restored draft survives. Previously a blanket `.clear()` stranded the
+		// retained signature and let the delivery wipe the just-restored draft.
+		expect(ctx.locallySubmittedUserSignatures.has("steer one\u00000")).toBe(true);
+		// The restored follow-up's own signature is removed (it is back in the
+		// editor, no longer pending delivery).
+		expect(ctx.locallySubmittedUserSignatures.has("follow one\u00000")).toBe(false);
+		expect(editor.getText()).toContain("follow one");
+	});
+
+	it("preserves the retained follow-up signature on an empty steering dequeue", async () => {
+		const { InputController, ctx, editor, followUpQueue } = await createContext();
+		// Only a follow-up is queued. A steering dequeue restores nothing, but it
+		// must not strand the follow-up's signature either — else that message's
+		// later delivery would not match and would erase the restored draft.
+		followUpQueue.push({ text: "follow one" });
+		ctx.locallySubmittedUserSignatures.add("follow one\u00000");
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onDequeue?.();
+
+		expect(ctx.locallySubmittedUserSignatures.has("follow one\u00000")).toBe(true);
+		expect(editor.getText()).toBe("");
+	});
+
+	it("drains the viewed session's queue on dequeue, not the parent session's", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		// Focused subagent: the pending bar reads viewSession, so the dequeue must
+		// drain viewSession too — otherwise it can neither restore what the bar
+		// advertises nor avoid discarding unrelated parent messages.
+		const viewClearQueue = vi.fn(() => ({ steering: [{ text: "view-steer" }], followUp: [] }));
+		(ctx as unknown as { viewSession: { clearQueue: typeof viewClearQueue } }).viewSession = {
+			clearQueue: viewClearQueue,
+		};
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onDequeue?.();
+
+		expect(viewClearQueue).toHaveBeenCalledTimes(1);
+		expect(spies.clearQueue).not.toHaveBeenCalled();
+		expect(editor.getText()).toContain("view-steer");
+	});
 });

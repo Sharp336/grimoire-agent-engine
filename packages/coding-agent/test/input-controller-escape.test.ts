@@ -173,6 +173,7 @@ function createContext(): {
 			}),
 		} as unknown as InteractiveModeContext["session"],
 		viewSession: {
+			clearQueue,
 			isCompacting: false,
 			isGeneratingHandoff: false,
 			isRetrying: false,

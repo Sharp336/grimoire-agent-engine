@@ -1382,15 +1382,29 @@ export class InputController {
 		currentText?: string;
 		queue?: "steering" | "followUp";
 	}): number {
-		this.ctx.locallySubmittedUserSignatures.clear();
 		// On Esc (abort) drop non-user internal steers so the post-abort drain can't
 		// auto-resume; a plain dequeue preserves them for the continuing stream.
 		const wantSteering = options?.queue !== "followUp";
 		const wantFollowUp = options?.queue !== "steering";
-		const { steering, followUp } = this.ctx.session.clearQueue({
+		// The pending bar advertises the *viewed* session's queue, so drain that
+		// one — when a subagent is focused `viewSession` diverges from `session`,
+		// and draining the parent can neither restore what the bar shows nor avoid
+		// discarding unrelated parent messages.
+		const { steering, followUp } = this.ctx.viewSession.clearQueue({
 			forInterrupt: options?.abort,
 			only: options?.queue,
 		});
+		// Drop the draft-protection signature only for messages pulled back into
+		// the editor. The retained queue keeps its signatures, so when one of its
+		// messages is later delivered `#handleMessageStart` still finds a match and
+		// leaves the restored draft intact (it clears the editor only when the
+		// signature is absent). A blanket `.clear()` would strand the retained
+		// half's signatures and let the delivery wipe the just-restored draft.
+		// `clearQueue({ only })` returns an empty array for the queue it left alone,
+		// so iterating both covers exactly the restored messages.
+		for (const restored of [...steering, ...followUp]) {
+			this.ctx.locallySubmittedUserSignatures.delete(`${restored.text}\u0000${restored.images?.length ?? 0}`);
+		}
 		// Messages typed while compacting live in `compactionQueuedMessages`, not the
 		// agent queue `clearQueue()` drains — but the pending bar shows the same
 		// "to edit" hint for them (ui-helpers `updatePendingMessagesDisplay`).
