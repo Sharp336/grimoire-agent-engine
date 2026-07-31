@@ -261,13 +261,16 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 			return `Stopped ${daemonLabel(result.daemon)}`;
 		case "restart":
 			return `Restarted ${daemonLabel(result.daemon)}`;
-		case "describe":
+		case "describe": {
+			const envEntries = Object.entries(result.spec.env ?? {});
 			return [
 				daemonLabel(result.daemon),
 				`Command: ${[result.spec.application, ...result.spec.args].join(" ")}`,
 				`Cwd: ${shortenPath(result.spec.cwd)}`,
 				`PTY: ${result.spec.pty}; restart=${result.spec.restart}; persist=${result.spec.persist}; detached=${result.spec.detached}`,
+				...(envEntries.length > 0 ? [`Env: ${envEntries.map(([k, v]) => `${k}=${v}`).join("; ")}`] : []),
 			].join("\n");
+		}
 	}
 }
 
@@ -512,6 +515,9 @@ export function launchRenderResult(
 					if (spec.detached) flags.push("detached");
 					else if (spec.persist) flags.push("persistent");
 					body.push(theme.fg("dim", flags.join(theme.sep.dot)));
+					const envEntries = Object.entries(spec.env ?? {});
+					if (envEntries.length > 0)
+						body.push(theme.fg("dim", `env ${envEntries.map(([k, v]) => `${k}=${v}`).join(" ")}`));
 				}
 				break;
 			}
