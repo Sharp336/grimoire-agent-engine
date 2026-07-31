@@ -35,7 +35,8 @@ app.history.search: []
 | `app.thinking.cycle`        | `Shift+Tab`                            | Cycle thinking level                          |
 | `app.editor.external`       | `Ctrl+G`                               | Edit the draft in `$VISUAL` / `$EDITOR`       |
 | `app.message.followUp`      | `Ctrl+Q`, `Ctrl+Enter`                 | Queue a follow-up message                     |
-| `app.message.dequeue`       | `Alt+Up`                               | Dequeue a queued message back into the editor |
+| `app.message.dequeue`       | `Alt+Up`                               | Restore steering messages to the editor       |
+| `app.message.dequeueFollowUp` | `Ctrl+Shift+Up`                      | Restore follow-up messages to the editor      |
 | `app.retry`                 | `Alt+R`                                | Retry the last failed assistant turn          |
 | `app.display.reset`         | `Ctrl+L`                               | Reset terminal display                        |
 | `app.clipboard.copyLine`    | `Alt+Shift+L`                          | Copy the current line                         |
