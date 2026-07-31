@@ -5,6 +5,7 @@ import {
 	canonicalKeyId,
 	Editor,
 	type EditorTheme,
+	getKeybindings,
 	type KeyId,
 	parseKey,
 	parseKittySequence,
@@ -69,6 +70,12 @@ function buildMatchKeys(keys: readonly KeyId[], reserved?: ReadonlySet<string>):
 		addKeyAliases(matchKeys, key, reserved);
 	}
 	return matchKeys;
+}
+
+/** `getResolvedBindings()` returns a single key or a list per action. */
+function normalizeToKeyList(keys: KeyId | KeyId[] | undefined): readonly KeyId[] {
+	if (keys === undefined) return [];
+	return Array.isArray(keys) ? keys : [keys];
 }
 
 /** Explicit chords of the shipped defaults, so the initial match sets get the same
@@ -636,11 +643,19 @@ export class CustomEditor extends Editor {
 
 	/** Rebuilds every action's match set together. One action's explicitly-declared
 	 *  chord must suppress another action's generated Command alias, which is only
-	 *  decidable with all actions in view. Custom handlers count as explicit: an
-	 *  extension registering `super+o` outranks the mirror of a built-in `ctrl+o`,
-	 *  which `handleInput` would otherwise reach first. */
+	 *  decidable with all bindings in view.
+	 *
+	 *  The reservation set spans all three registries this editor dispatches across:
+	 *  the central manager's resolved bindings (which `super.handleInput` serves),
+	 *  this editor's own actions, and custom/extension handlers. Reconstructing only
+	 *  the local two would restore a mirror the manager had already suppressed —
+	 *  `tui.editor.undo: super+o` would lose Command+O to `app.tools.expand`, since
+	 *  `handleInput` intercepts before the base editor ever sees the key. */
 	#rebuildActionMatchKeys(): void {
 		const explicit = new Set<string>();
+		for (const keys of Object.values(getKeybindings().getResolvedBindings())) {
+			for (const key of normalizeToKeyList(keys)) explicit.add(canonicalKeyId(key));
+		}
 		for (const keys of this.#actionKeys.values()) {
 			for (const key of keys) explicit.add(canonicalKeyId(key));
 		}
