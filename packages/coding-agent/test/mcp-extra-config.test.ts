@@ -231,6 +231,71 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 			expect(configs.shared).toBeUndefined();
 		});
 
+		// `enabled: false` alongside a command or url is a complete config that
+		// happens to be off, not a tombstone. Discovery keeps exactly that shape
+		// when force-enabled, so the explicit path has to as well — dropping it
+		// would demote the highest-priority definition to a lower-priority one.
+		test("a force-enabled complete config is kept, not replaced by the discovered one", async () => {
+			await fs.writeFile(
+				path.join(projectDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { shared: { command: "discovered-server" } } }),
+			);
+			const explicitPath = path.join(projectDir, "explicit.json");
+			await fs.writeFile(
+				explicitPath,
+				JSON.stringify({ mcpServers: { shared: { enabled: false, command: "explicit-server" } } }),
+			);
+			await forceEnable("shared");
+
+			const { configs, sources } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+			expect(configs.shared).toMatchObject({ type: "stdio", command: "explicit-server" });
+			expect(sources.shared.provider).toBe("mcp-config-flag");
+		});
+
+		// The parity baseline the case above has to match: discovery has always
+		// kept a disabled-but-complete server when the allowlist force-enables it.
+		test("discovery keeps a force-enabled complete but disabled server", async () => {
+			await fs.writeFile(
+				path.join(projectDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { shared: { enabled: false, command: "discovered-server" } } }),
+			);
+			await forceEnable("shared");
+
+			const { configs } = await loadAllMCPConfigs(projectDir);
+
+			expect(configs.shared).toMatchObject({ type: "stdio", command: "discovered-server" });
+		});
+
+		test("a force-enabled complete config with a url is kept", async () => {
+			const explicitPath = path.join(projectDir, "explicit.json");
+			await fs.writeFile(
+				explicitPath,
+				JSON.stringify({ mcpServers: { remote: { enabled: false, url: "http://localhost:4401/mcp" } } }),
+			);
+			await forceEnable("remote");
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+			expect(configs.remote).toMatchObject({ type: "http", url: "http://localhost:4401/mcp" });
+		});
+
+		test("without force-enable a complete but disabled config drops both it and the discovered server", async () => {
+			await fs.writeFile(
+				path.join(projectDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { shared: { command: "discovered-server" } } }),
+			);
+			const explicitPath = path.join(projectDir, "explicit.json");
+			await fs.writeFile(
+				explicitPath,
+				JSON.stringify({ mcpServers: { shared: { enabled: false, command: "explicit-server" } } }),
+			);
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+			expect(configs.shared).toBeUndefined();
+		});
+
 		test("without force-enable the tombstone still disables the discovered server", async () => {
 			await fs.writeFile(
 				path.join(projectDir, ".mcp.json"),
