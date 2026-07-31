@@ -283,10 +283,7 @@ export function initializeWithSettings(activeSettings: Settings): void {
 	settings = activeSettings;
 	// Load disabled providers from settings
 	const disabled = settings.get("disabledProviders");
-	disabledProviders.clear();
-	for (const id of disabled) {
-		disabledProviders.add(id);
-	}
+	syncDisabledProviders(disabled);
 }
 
 /**
@@ -328,14 +325,25 @@ export function getDisabledProviders(): string[] {
 	return Array.from(disabledProviders);
 }
 
-/**
- * Set disabled providers from a list (replaces current set).
- */
-export function setDisabledProviders(providerIds: string[]): void {
+function replaceDisabledProviders(providerIds: string[]): void {
 	disabledProviders.clear();
 	for (const id of providerIds) {
 		disabledProviders.add(id);
 	}
+}
+
+/**
+ * Sync disabled providers from already-persisted effective settings without writing them back.
+ */
+export function syncDisabledProviders(providerIds: string[]): void {
+	replaceDisabledProviders(providerIds);
+}
+
+/**
+ * Set disabled providers from a list (replaces current set).
+ */
+export function setDisabledProviders(providerIds: string[]): void {
+	replaceDisabledProviders(providerIds);
 	persistDisabledProviders();
 }
 

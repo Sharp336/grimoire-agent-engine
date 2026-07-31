@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
+	CONFIG_DIR_NAME,
 	getAgentDbPath,
 	getAgentDir,
 	getLastChangelogVersionPath,
@@ -34,19 +35,30 @@ import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
-import { loadCapability } from "../discovery";
+import { invalidate as invalidateDiscoveryCache, loadCapability } from "../discovery";
+import { setServerDisabled, setServerForceEnabled } from "../mcp/config-writer";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
+import {
+	type ActivationScope,
+	type ActivationTargetInfo,
+	type ActivationWriteTarget,
+	canUseProjectActivation,
+	getDefaultActivationScope,
+	resolveActivationTarget,
+} from "./activation-paths";
 import { withFileLock } from "./file-lock";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
 	type GroupTypeMap,
 	getDefault,
+	type ProjectActivation,
+	type ProjectActivationKind,
 	SETTINGS_SCHEMA,
 	type SettingPath,
 	type SettingValue,
@@ -70,6 +82,32 @@ type YamlLoadResult =
 	| { kind: "loaded"; settings: RawSettings }
 	| { kind: "invalid"; error: unknown; backupPath?: string }
 	| { kind: "unreadable"; error: unknown };
+const PROJECT_ACTIVATION_SETTING_PATHS = [
+	"disabledExtensions",
+	"enabledExtensions",
+	"disabledProviders",
+	"enabledProviders",
+] as const satisfies readonly SettingPath[];
+
+type ActivationDisabledPath = "disabledExtensions" | "disabledProviders";
+type ActivationEnabledPath = "enabledExtensions" | "enabledProviders";
+
+interface ActivationLists {
+	disabled: Set<string>;
+	enabled: Set<string>;
+}
+
+function deleteProjectActivationSettings(settings: RawSettings): void {
+	for (const path of PROJECT_ACTIVATION_SETTING_PATHS) delete settings[path];
+}
+
+function pickProjectActivationSettings(settings: RawSettings): RawSettings {
+	const activationSettings: RawSettings = {};
+	for (const path of PROJECT_ACTIVATION_SETTING_PATHS) {
+		if (Object.hasOwn(settings, path)) activationSettings[path] = settings[path];
+	}
+	return activationSettings;
+}
 
 export interface SettingsOptions {
 	/** Current working directory for project settings discovery */
@@ -124,6 +162,58 @@ function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
 	current[segments[segments.length - 1]] = value;
 }
 
+function deleteByPath(obj: RawSettings, segments: string[]): void {
+	const stack: Array<{ obj: RawSettings; key: string }> = [];
+	let current: unknown = obj;
+	for (let i = 0; i < segments.length - 1; i++) {
+		if (!current || typeof current !== "object" || Array.isArray(current)) return;
+		const key = segments[i];
+		stack.push({ obj: current as RawSettings, key });
+		current = (current as RawSettings)[key];
+	}
+
+	if (!current || typeof current !== "object" || Array.isArray(current)) return;
+	delete (current as RawSettings)[segments[segments.length - 1]];
+
+	for (let i = stack.length - 1; i >= 0; i--) {
+		const { obj: parent, key } = stack[i];
+		const child = parent[key];
+		if (!child || typeof child !== "object" || Array.isArray(child) || Object.keys(child).length > 0) break;
+		delete parent[key];
+	}
+}
+
+export type { ActivationScope, ActivationWriteTarget } from "./activation-paths";
+
+const ACTIVATION_EXTENSION_PREFIXES: Record<ProjectActivationKind, "skill" | "mcp" | "rule" | "extension-module"> = {
+	skills: "skill",
+	mcp: "mcp",
+	rules: "rule",
+	extensions: "extension-module",
+};
+
+export function projectActivationKindFromExtensionId(id: string): { kind: ProjectActivationKind; name: string } | null {
+	const colon = id.indexOf(":");
+	if (colon <= 0 || colon === id.length - 1) return null;
+	const prefix = id.slice(0, colon);
+	const name = id.slice(colon + 1);
+	if (prefix === "skill") return { kind: "skills", name };
+	if (prefix === "mcp") return { kind: "mcp", name };
+	if (prefix === "rule") return { kind: "rules", name };
+	if (prefix === "extension-module") return { kind: "extensions", name };
+	return null;
+}
+
+export function extensionIdForProjectActivation(kind: ProjectActivationKind, name: string): string {
+	return `${ACTIVATION_EXTENSION_PREFIXES[kind]}:${name}`;
+}
+
+function normalizeStringArrayForSettings(value: unknown): string[] {
+	return stringArrayFromUnknown(value)
+		.map(item => item.trim())
+		.filter(Boolean);
+}
+
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 	const normalized: Record<string, number> = {};
@@ -151,7 +241,7 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 	return normalized;
 }
 
-const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
+const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders", "enabledProviders"]);
 type PathScopedStringArrayEntry = {
 	path?: unknown;
 	paths?: unknown;
@@ -476,8 +566,14 @@ export class Settings {
 		}
 
 		const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
-		const resolved =
+		const baseValue =
 			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
+		const resolved =
+			path === "disabledExtensions"
+				? this.#resolveEffectiveDisabledExtensions(baseValue)
+				: path === "disabledProviders"
+					? this.#resolveEffectiveDisabledProviders(baseValue)
+					: baseValue;
 		this.#resolvedCache.set(path, resolved);
 		return resolved as SettingValue<P>;
 	}
@@ -635,15 +731,12 @@ export class Settings {
 	async reloadForCwd(cwd: string): Promise<void> {
 		const normalized = path.normalize(cwd);
 		if (normalized === this.#cwd) return;
-		await this.flush();
-		this.#restoreRuntimeModelRoleOverrides();
-		const prevModelRoles = this.get("modelRoles");
+
 		this.#cwd = normalized;
 		if (this.#persist) {
 			this.#project = await this.#loadProjectSettings();
 		}
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
 		this.#fireAllHooks();
 	}
 
@@ -812,34 +905,8 @@ export class Settings {
 	}
 
 	/**
-	 * Restore original process-wide model-role overrides that were temporarily
-	 * replaced by project edits, mutating `#overrides` in place without
-	 * rebuilding. All remaining captures are valid because superseding
-	 * operations (late `overrideModelRoles`, global-mode `setModelRole`,
-	 * whole-map `override`/`clearOverride`) invalidate the affected captures
-	 * at the point of supersession. Caller is responsible for `#rebuildMerged()`.
-	 */
-	#restoreRuntimeModelRoleOverrides(): void {
-		if (this.#savedRuntimeModelRoleOverrides.size === 0) return;
-		const runtimeRoles = getByPath(this.#overrides, ["modelRoles"]);
-		if (!isRecord(runtimeRoles)) {
-			this.#savedRuntimeModelRoleOverrides.clear();
-			return;
-		}
-		for (const [role, originalValue] of this.#savedRuntimeModelRoleOverrides) {
-			if (originalValue === undefined) {
-				delete runtimeRoles[role];
-			} else {
-				runtimeRoles[role] = originalValue;
-			}
-		}
-		this.#savedRuntimeModelRoleOverrides.clear();
-	}
-
-	/**
 	 * Produce a deep copy of `#overrides` with original process-wide model-role
-	 * overrides restored, for use by {@link cloneForCwd}. All remaining
-	 * captures are valid (see {@link #restoreRuntimeModelRoleOverrides}).
+	 * overrides restored, for use by {@link cloneForCwd}.
 	 * Does not mutate the current instance's `#overrides`.
 	 */
 	#buildOriginalOverrides(): RawSettings {
@@ -1029,6 +1096,345 @@ export class Settings {
 		this.set("disabledProviders", ids);
 	}
 
+	#configActivationLists(
+		config: RawSettings,
+		disabledPath: ActivationDisabledPath,
+		enabledPath: ActivationEnabledPath,
+	): ActivationLists {
+		return {
+			disabled: new Set(normalizeStringArrayForSettings(getByPath(config, [disabledPath]))),
+			enabled: new Set(normalizeStringArrayForSettings(getByPath(config, [enabledPath]))),
+		};
+	}
+
+	#activationFromLists(lists: ActivationLists, id: string, fallback: ProjectActivation): ProjectActivation {
+		if (lists.disabled.has(id)) return "disabled";
+		if (lists.enabled.has(id)) return "enabled";
+		return fallback;
+	}
+
+	#getConfigActivation(
+		targetInfo: ActivationTargetInfo,
+		id: string,
+		disabledPath: ActivationDisabledPath,
+		enabledPath: ActivationEnabledPath,
+	): ProjectActivation {
+		const config = targetInfo.target === "global" ? this.#global : this.#project;
+		return this.#activationFromLists(
+			this.#configActivationLists(config, disabledPath, enabledPath),
+			id,
+			targetInfo.target === "global" ? "enabled" : "inherit",
+		);
+	}
+
+	#isConfigActivationEffectivelyDisabled(
+		targetInfo: ActivationTargetInfo,
+		id: string,
+		disabledPath: ActivationDisabledPath,
+	): boolean {
+		if (targetInfo.target === "global") {
+			return new Set(normalizeStringArrayForSettings(getByPath(this.#global, [disabledPath]))).has(id);
+		}
+		return new Set(this.get(disabledPath) as string[]).has(id);
+	}
+
+	getProviderActivation(providerId: string, scope?: ActivationScope): ProjectActivation {
+		const id = providerId.trim();
+		if (!id) return "enabled";
+		return this.#getConfigActivation(
+			this.#resolveActivationTarget(this.#cwd, scope),
+			id,
+			"disabledProviders",
+			"enabledProviders",
+		);
+	}
+
+	isProviderEffectivelyDisabled(providerId: string, scope?: ActivationScope): boolean {
+		const id = providerId.trim();
+		if (!id) return false;
+		return this.#isConfigActivationEffectivelyDisabled(
+			this.#resolveActivationTarget(this.#cwd, scope),
+			id,
+			"disabledProviders",
+		);
+	}
+
+	async setProviderActivation(
+		providerId: string,
+		state: ProjectActivation,
+		scope?: ActivationScope,
+	): Promise<{ target: ActivationWriteTarget; path: string | null }> {
+		const id = providerId.trim();
+		if (!id) throw new Error("Provider id must not be empty.");
+
+		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
+		if (targetInfo.target === "global") {
+			await this.#setGlobalActivationList("disabledProviders", id, state);
+			return { target: targetInfo.target, path: targetInfo.configPath };
+		}
+
+		const writtenPath = await this.#saveProjectActivationList(
+			targetInfo.configPath,
+			id,
+			state,
+			"disabledProviders",
+			"enabledProviders",
+		);
+		return { target: targetInfo.target, path: writtenPath };
+	}
+	getActivationWriteTarget(cwd: string = this.#cwd, scope?: ActivationScope): ActivationWriteTarget {
+		return this.#resolveActivationTarget(cwd, scope).target;
+	}
+
+	getActivationProjectRoot(cwd: string = this.#cwd, scope?: ActivationScope): string | null {
+		return this.#resolveActivationTarget(cwd, scope).projectRoot;
+	}
+
+	getDefaultActivationScope(cwd: string = this.#cwd): ActivationScope {
+		return getDefaultActivationScope(cwd, this.#agentDir);
+	}
+
+	getActivationDisabledExtensions(scope?: ActivationScope): string[] {
+		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
+		if (targetInfo.target === "global") {
+			return normalizeStringArrayForSettings(getByPath(this.#global, ["disabledExtensions"])).sort();
+		}
+		return (this.get("disabledExtensions") as string[]) ?? [];
+	}
+
+	canUseProjectActivation(cwd: string = this.#cwd): boolean {
+		return canUseProjectActivation(cwd, this.#agentDir);
+	}
+
+	#resolveActivationTarget(cwd: string = this.#cwd, scope?: ActivationScope): ActivationTargetInfo {
+		return resolveActivationTarget(cwd, this.#agentDir, this.#configPath, scope);
+	}
+
+	getProjectActivation(kind: ProjectActivationKind, name: string, scope?: ActivationScope): ProjectActivation {
+		const trimmed = name.trim();
+		if (!trimmed) return "inherit";
+
+		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
+		if (kind === "mcp") return this.#getMcpActivation(targetInfo, trimmed);
+
+		return this.#getConfigActivation(
+			targetInfo,
+			extensionIdForProjectActivation(kind, trimmed),
+			"disabledExtensions",
+			"enabledExtensions",
+		);
+	}
+
+	#getMcpActivation(targetInfo: ActivationTargetInfo, name: string): ProjectActivation {
+		return this.#activationFromLists(
+			this.#readMcpActivationLists(this.#mcpActivationPath(targetInfo)),
+			name,
+			targetInfo.target === "global" ? "enabled" : "inherit",
+		);
+	}
+
+	isProjectActivationEffectivelyDisabled(kind: ProjectActivationKind, name: string, scope?: ActivationScope): boolean {
+		const trimmed = name.trim();
+		if (!trimmed) return false;
+
+		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
+		if (kind === "mcp") return this.#isMcpEffectivelyDisabled(targetInfo, trimmed);
+		return this.#isConfigActivationEffectivelyDisabled(
+			targetInfo,
+			extensionIdForProjectActivation(kind, trimmed),
+			"disabledExtensions",
+		);
+	}
+
+	#isMcpEffectivelyDisabled(targetInfo: ActivationTargetInfo, name: string): boolean {
+		const globalLists = this.#readMcpActivationLists(path.join(this.#agentDir, "mcp.json"));
+		if (targetInfo.target === "global") return globalLists.disabled.has(name);
+
+		const projectLists = this.#readMcpActivationLists(this.#mcpActivationPath(targetInfo));
+		if (projectLists.disabled.has(name)) return true;
+		if (projectLists.enabled.has(name)) return false;
+		return globalLists.disabled.has(name);
+	}
+
+	#readMcpActivationLists(configPath: string): ActivationLists {
+		try {
+			const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+				disabledServers?: unknown;
+				enabledServers?: unknown;
+			};
+			return {
+				disabled: new Set(normalizeStringArrayForSettings(parsed.disabledServers)),
+				enabled: new Set(normalizeStringArrayForSettings(parsed.enabledServers)),
+			};
+		} catch (error) {
+			if (!isEnoent(error))
+				logger.warn("Settings: failed to read MCP activation", { path: configPath, error: String(error) });
+			return { disabled: new Set(), enabled: new Set() };
+		}
+	}
+
+	isGlobalActivationDisabled(kind: ProjectActivationKind, name: string): boolean {
+		const trimmed = name.trim();
+		if (!trimmed) return false;
+		if (kind === "mcp") {
+			return this.#readMcpActivationLists(path.join(this.#agentDir, "mcp.json")).disabled.has(trimmed);
+		}
+		const id = extensionIdForProjectActivation(kind, trimmed);
+		return this.#isConfigActivationEffectivelyDisabled(
+			this.#resolveActivationTarget(this.#cwd, "global"),
+			id,
+			"disabledExtensions",
+		);
+	}
+
+	isGlobalActivationEnabled(kind: ProjectActivationKind, name: string): boolean {
+		const trimmed = name.trim();
+		if (!trimmed || kind !== "mcp") return false;
+		return this.#readMcpActivationLists(path.join(this.#agentDir, "mcp.json")).enabled.has(trimmed);
+	}
+	async setProjectActivation(
+		kind: ProjectActivationKind,
+		name: string,
+		state: ProjectActivation,
+		scope?: ActivationScope,
+	): Promise<{ target: ActivationWriteTarget; path: string | null }> {
+		const trimmed = name.trim();
+		if (!trimmed) throw new Error("Activation name must not be empty.");
+
+		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
+		if (kind === "mcp") {
+			const writtenPath = await this.#setMcpActivation(targetInfo, trimmed, state);
+			return { target: targetInfo.target, path: writtenPath };
+		}
+
+		const id = extensionIdForProjectActivation(kind, trimmed);
+		if (targetInfo.target === "global") {
+			await this.#setGlobalActivationList("disabledExtensions", id, state);
+			return { target: targetInfo.target, path: targetInfo.configPath };
+		}
+
+		const writtenPath = await this.#saveProjectActivationList(
+			targetInfo.configPath,
+			id,
+			state,
+			"disabledExtensions",
+			"enabledExtensions",
+		);
+		return { target: targetInfo.target, path: writtenPath };
+	}
+
+	async #setGlobalActivationList(path: ActivationDisabledPath, id: string, state: ProjectActivation): Promise<void> {
+		const disabled = new Set(normalizeStringArrayForSettings(getByPath(this.#global, [path])));
+		if (state === "disabled") disabled.add(id);
+		else disabled.delete(id);
+		this.set(path, [...disabled].sort() as never);
+		await this.flush();
+	}
+
+	#resolveEffectiveDisabledExtensions(baseValue: unknown): string[] {
+		return this.#resolveEffectiveDisabledList(baseValue, "disabledExtensions", "enabledExtensions");
+	}
+
+	#resolveEffectiveDisabledProviders(baseValue: unknown): string[] {
+		return this.#resolveEffectiveDisabledList(baseValue, "disabledProviders", "enabledProviders");
+	}
+
+	#resolveEffectiveDisabledList(
+		baseValue: unknown,
+		disabledPath: ActivationDisabledPath,
+		enabledPath: ActivationEnabledPath,
+	): string[] {
+		const disabled = new Set(normalizeStringArrayForSettings(baseValue));
+		for (const id of normalizeStringArrayForSettings(getByPath(this.#global, [disabledPath]))) {
+			disabled.add(id);
+		}
+
+		const projectDisabled = new Set([
+			...normalizeStringArrayForSettings(getByPath(this.#project, [disabledPath])),
+			...normalizeStringArrayForSettings(getByPath(this.#overrides, [disabledPath])),
+		]);
+		for (const id of projectDisabled) disabled.add(id);
+
+		const projectEnabled = new Set([
+			...normalizeStringArrayForSettings(getByPath(this.#project, [enabledPath])),
+			...normalizeStringArrayForSettings(getByPath(this.#overrides, [enabledPath])),
+		]);
+		for (const id of projectEnabled) {
+			if (!projectDisabled.has(id)) disabled.delete(id);
+		}
+
+		return [...disabled].sort();
+	}
+
+	#mcpActivationPath(targetInfo: ActivationTargetInfo): string {
+		return targetInfo.target === "global"
+			? path.join(this.#agentDir, "mcp.json")
+			: path.join(targetInfo.projectRoot, CONFIG_DIR_NAME, "mcp.json");
+	}
+
+	async #setMcpActivation(
+		targetInfo: ActivationTargetInfo,
+		name: string,
+		state: ProjectActivation,
+	): Promise<string | null> {
+		if (!this.#persist) return null;
+		const configPath = this.#mcpActivationPath(targetInfo);
+		if (state === "disabled") {
+			await setServerForceEnabled(configPath, name, false);
+			await setServerDisabled(configPath, name, true);
+		} else if (state === "enabled") {
+			await setServerDisabled(configPath, name, false);
+			await setServerForceEnabled(configPath, name, true);
+		} else {
+			await setServerDisabled(configPath, name, false);
+			await setServerForceEnabled(configPath, name, false);
+		}
+		return configPath;
+	}
+	async #saveProjectActivationList(
+		configPath: string,
+		id: string,
+		state: ProjectActivation,
+		disabledPath: ActivationDisabledPath,
+		enabledPath: ActivationEnabledPath,
+	): Promise<string | null> {
+		if (!this.#persist) return null;
+
+		try {
+			await fs.promises.mkdir(path.dirname(configPath), { recursive: true });
+			await withFileLock(configPath, async () => {
+				const current = await this.#loadYaml(configPath);
+				const disabled = new Set(normalizeStringArrayForSettings(getByPath(current, [disabledPath])));
+				const enabled = new Set(normalizeStringArrayForSettings(getByPath(current, [enabledPath])));
+
+				if (state === "disabled") {
+					enabled.delete(id);
+					disabled.add(id);
+				} else if (state === "enabled") {
+					disabled.delete(id);
+					enabled.add(id);
+				} else {
+					disabled.delete(id);
+					enabled.delete(id);
+				}
+
+				if (disabled.size === 0) deleteByPath(current, [disabledPath]);
+				else setByPath(current, [disabledPath], [...disabled].sort());
+				if (enabled.size === 0) deleteByPath(current, [enabledPath]);
+				else setByPath(current, [enabledPath], [...enabled].sort());
+
+				await Bun.write(configPath, YAML.stringify(current, null, 2));
+				invalidateDiscoveryCache(configPath);
+			});
+		} catch (error) {
+			logger.warn("Settings: project activation save failed", { path: configPath, error: String(error) });
+			throw error;
+		}
+
+		this.#project = await this.#loadProjectSettings();
+		this.#rebuildMerged();
+		return configPath;
+	}
 	// ─────────────────────────────────────────────────────────────────────────
 	// Loading
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1236,17 +1642,12 @@ export class Settings {
 					if (Object.hasOwn(item.data, "shellPath")) this.#projectShellPathSource = item.path;
 				}
 			}
-		} catch {
-			this.#projectShellPathSource = undefined;
-			// Capability discovery is best-effort; the native project config below
-			// remains authoritative for its model-role layer and must not be hidden.
-		}
-		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
-		const nativeProject = await this.#loadYaml(projectConfigPath);
-		this.#projectFileSettings = structuredClone(nativeProject);
-		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
-		if (nativeModelRoles !== undefined) {
-			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
+		} catch {}
+
+		const targetInfo = this.#resolveActivationTarget(this.#cwd, "project");
+		if (targetInfo.target === "project") {
+			deleteProjectActivationSettings(merged);
+			merged = this.#deepMerge(merged, pickProjectActivationSettings(await this.#loadYaml(targetInfo.configPath)));
 		}
 		return this.#migrateRawSettings(merged);
 	}
@@ -2214,8 +2615,7 @@ class SettingSignal<A extends unknown[] = []> {
 	 * Invoke every listener with `args`. Iterates a snapshot so a listener may
 	 * (un)subscribe mid-fire without re-entrancy — the Hindsight backend
 	 * re-registers the fresh state's listener on every rebuild — and wraps each
-	 * call so a throwing listener is logged and skipped instead of aborting the
-	 * rest.
+	 * call so a throwing listener can't abort the rest or bubble out of `Settings.set()`.
 	 */
 	fire(...args: A): void {
 		for (const cb of [...this.#listeners]) {

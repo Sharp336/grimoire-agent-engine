@@ -307,11 +307,15 @@ export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
 
+export type ProjectActivation = "inherit" | "enabled" | "disabled";
+export type ProjectActivationKind = "skills" | "mcp" | "rules" | "extensions";
+
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_PROJECT_ACTIVATION_RECORD: ProjectActivationRecord = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
@@ -522,6 +526,7 @@ export const SETTINGS_SCHEMA = {
 	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	disabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
+	enabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	"providers.maxInFlightRequests": {
 		type: "record",
@@ -536,6 +541,7 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
+	enabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	modelRoleStorage: {
 		type: "enum",
@@ -560,6 +566,9 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"activation.skills": { type: "record", default: EMPTY_PROJECT_ACTIVATION_RECORD },
+	"activation.mcp": { type: "record", default: EMPTY_PROJECT_ACTIVATION_RECORD },
+	"activation.rules": { type: "record", default: EMPTY_PROJECT_ACTIVATION_RECORD },
 
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
 
@@ -5717,6 +5726,7 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
+	enabledExtensions?: string[];
 }
 
 export interface CommitSettings {

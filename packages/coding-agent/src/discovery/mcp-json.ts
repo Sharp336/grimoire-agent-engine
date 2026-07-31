@@ -12,6 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
+import { isGlobalActivationCwd } from "../config/activation-paths";
 import { createSourceMeta, expandEnvVarsDeep } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
@@ -148,6 +149,10 @@ async function loadMCPJsonFile(
  * MCP JSON Provider loader.
  */
 async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
+	if (isGlobalActivationCwd(ctx.cwd)) {
+		return { items: [] };
+	}
+
 	const filenames = ["mcp.json", ".mcp.json"];
 	const results = await Promise.all(
 		filenames.map(filename => loadMCPJsonFile(ctx, path.join(ctx.cwd, filename), "project")),

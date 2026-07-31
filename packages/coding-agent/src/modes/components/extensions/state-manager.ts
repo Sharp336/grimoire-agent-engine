@@ -15,33 +15,25 @@ import type { Skill } from "../../../capability/skill";
 import type { SlashCommand } from "../../../capability/slash-command";
 import type { CustomTool } from "../../../capability/tool";
 import type { SourceMeta } from "../../../capability/types";
-import {
-	disableProvider,
-	enableProvider,
-	getAllProvidersInfo,
-	isProviderEnabled,
-	loadCapability,
-} from "../../../discovery";
+import { isGlobalActivationCwd, resolveProjectMcpConfigPath } from "../../../config/activation-paths";
+import { getAllProvidersInfo, isProviderEnabled, loadCapability } from "../../../discovery";
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
-import type {
-	DashboardState,
-	Extension,
-	ExtensionKind,
-	ExtensionState,
-	FlatTreeItem,
-	ProviderTab,
-	TreeNode,
-} from "./types";
+import type { DashboardState, Extension, ExtensionKind, FlatTreeItem, ProviderTab, TreeNode } from "./types";
 import { makeExtensionId, sourceFromMeta } from "./types";
-
-/**
- * Settings manager interface for granular toggle persistence.
- */
-export interface ExtensionSettingsManager {
-	getDisabledExtensions(): string[];
-	setDisabledExtensions(ids: string[]): void;
+export function extensionRowKey(ext: Pick<Extension, "id" | "path" | "source">): string {
+	return `${ext.id}\0${ext.source.provider}\0${ext.source.level}\0${ext.path}`;
 }
 
+function activationRowState(input: {
+	itemDisabled: boolean;
+	shadowed: boolean | undefined;
+	providerEnabled: boolean;
+}): Pick<Extension, "state" | "disabledReason"> {
+	if (input.itemDisabled) return { state: "disabled", disabledReason: "item-disabled" };
+	if (input.shadowed) return { state: "shadowed", disabledReason: "shadowed" };
+	if (!input.providerEnabled) return { state: "disabled", disabledReason: "provider-disabled" };
+	return { state: "active" };
+}
 /**
  * Load all extensions from all capabilities.
  */
@@ -61,26 +53,11 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 	): void {
 		for (const item of items) {
 			const id = makeExtensionId(kind, item.name);
-			const isDisabled = disabledExtensions.has(id);
-			const isShadowed = (item as { _shadowed?: boolean })._shadowed;
-			const providerEnabled = isProviderEnabled(item._source.provider);
-
-			let state: ExtensionState;
-			let disabledReason: "shadowed" | "provider-disabled" | "item-disabled" | undefined;
-
-			// Item-disabled takes precedence over shadowed
-			if (isDisabled) {
-				state = "disabled";
-				disabledReason = "item-disabled";
-			} else if (isShadowed) {
-				state = "shadowed";
-				disabledReason = "shadowed";
-			} else if (!providerEnabled) {
-				state = "disabled";
-				disabledReason = "provider-disabled";
-			} else {
-				state = "active";
-			}
+			const { state, disabledReason } = activationRowState({
+				itemDisabled: disabledExtensions.has(id),
+				shadowed: (item as { _shadowed?: boolean })._shadowed,
+				providerEnabled: isProviderEnabled(item._source.provider),
+			});
 
 			extensions.push({
 				id,
@@ -144,13 +121,12 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 
 	// Load MCP servers. The dashboard mirrors `/mcp list` (issue #3827) by
 	// honoring the same disable signals: the dashboard-private settings list,
-	// the per-server `enabled: false` flag, and the user-level `disabledServers`
-	// denylist that `/mcp disable` writes through `setServerDisabled`. The
-	// user-level `enabledServers` allowlist overrides a non-writable source's
-	// `enabled: false` (e.g. opencode.json) but never the denylist.
+	// per-server `enabled: false`, and the user/project MCP deny/allow lists.
+	// Disabled lists win over enabled lists when both contain the same server.
 	try {
 		const userMcpPath = cwd ? getMCPConfigPath("user", cwd) : undefined;
-		const [mcpDisabledNames, mcpForcedEnabled] = await Promise.all([
+		const projectMcpPath = cwd && !isGlobalActivationCwd(cwd) ? resolveProjectMcpConfigPath(cwd) : undefined;
+		const [userDisabledNames, userForcedEnabled, projectDisabledNames, projectForcedEnabled] = await Promise.all([
 			userMcpPath
 				? readDisabledServers(userMcpPath)
 						.then(list => new Set(list))
@@ -161,31 +137,32 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 						.then(list => new Set(list))
 						.catch(() => new Set<string>())
 				: Promise.resolve(new Set<string>()),
+			projectMcpPath
+				? readDisabledServers(projectMcpPath)
+						.then(list => new Set(list))
+						.catch(() => new Set<string>())
+				: Promise.resolve(new Set<string>()),
+			projectMcpPath
+				? readEnabledServers(projectMcpPath)
+						.then(list => new Set(list))
+						.catch(() => new Set<string>())
+				: Promise.resolve(new Set<string>()),
 		]);
 		const mcps = await loadCapability<MCPServer>("mcps", loadOpts);
 		for (const server of mcps.all) {
 			const id = makeExtensionId("mcp", server.name);
-			const forced = mcpForcedEnabled.has(server.name);
+			const projectDisabled = projectDisabledNames.has(server.name);
+			const projectEnabled = projectForcedEnabled.has(server.name);
+			const userDisabled = userDisabledNames.has(server.name);
+			const userEnabled = userForcedEnabled.has(server.name);
+			const disabledByMcpList = projectDisabled || (!projectEnabled && userDisabled);
+			const forced = !projectDisabled && (projectEnabled || (!userDisabled && userEnabled));
 			const sourceSaysDisabled = server.enabled === false && !forced;
-			const isDisabled = mcpDisabledNames.has(server.name) || disabledExtensions.has(id) || sourceSaysDisabled;
-			const isShadowed = (server as { _shadowed?: boolean })._shadowed;
-			const providerEnabled = isProviderEnabled(server._source.provider);
-
-			let state: ExtensionState;
-			let disabledReason: "shadowed" | "provider-disabled" | "item-disabled" | undefined;
-
-			if (isDisabled) {
-				state = "disabled";
-				disabledReason = "item-disabled";
-			} else if (isShadowed) {
-				state = "shadowed";
-				disabledReason = "shadowed";
-			} else if (!providerEnabled) {
-				state = "disabled";
-				disabledReason = "provider-disabled";
-			} else {
-				state = "active";
-			}
+			const { state, disabledReason } = activationRowState({
+				itemDisabled: disabledByMcpList || disabledExtensions.has(id) || sourceSaysDisabled,
+				shadowed: (server as { _shadowed?: boolean })._shadowed,
+				providerEnabled: isProviderEnabled(server._source.provider),
+			});
 
 			extensions.push({
 				id,
@@ -232,25 +209,11 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 		const hooks = await loadCapability<Hook>("hooks", loadOpts);
 		for (const hook of hooks.all) {
 			const id = makeExtensionId("hook", `${hook.type}:${hook.tool}:${hook.name}`);
-			const isDisabled = disabledExtensions.has(id);
-			const isShadowed = (hook as { _shadowed?: boolean })._shadowed;
-			const providerEnabled = isProviderEnabled(hook._source.provider);
-
-			let state: ExtensionState;
-			let disabledReason: "shadowed" | "provider-disabled" | "item-disabled" | undefined;
-
-			if (isDisabled) {
-				state = "disabled";
-				disabledReason = "item-disabled";
-			} else if (isShadowed) {
-				state = "shadowed";
-				disabledReason = "shadowed";
-			} else if (!providerEnabled) {
-				state = "disabled";
-				disabledReason = "provider-disabled";
-			} else {
-				state = "active";
-			}
+			const { state, disabledReason } = activationRowState({
+				itemDisabled: disabledExtensions.has(id),
+				shadowed: (hook as { _shadowed?: boolean })._shadowed,
+				providerEnabled: isProviderEnabled(hook._source.provider),
+			});
 
 			extensions.push({
 				id,
@@ -277,25 +240,11 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			// Extract filename from path for display
 			const name = path.basename(file.path);
 			const id = makeExtensionId("context-file", `${file.level}:${name}`);
-			const isDisabled = disabledExtensions.has(id);
-			const isShadowed = (file as { _shadowed?: boolean })._shadowed;
-			const providerEnabled = isProviderEnabled(file._source.provider);
-
-			let state: ExtensionState;
-			let disabledReason: "shadowed" | "provider-disabled" | "item-disabled" | undefined;
-
-			if (isDisabled) {
-				state = "disabled";
-				disabledReason = "item-disabled";
-			} else if (isShadowed) {
-				state = "shadowed";
-				disabledReason = "shadowed";
-			} else if (!providerEnabled) {
-				state = "disabled";
-				disabledReason = "provider-disabled";
-			} else {
-				state = "active";
-			}
+			const { state, disabledReason } = activationRowState({
+				itemDisabled: disabledExtensions.has(id),
+				shadowed: (file as { _shadowed?: boolean })._shadowed,
+				providerEnabled: isProviderEnabled(file._source.provider),
+			});
 
 			extensions.push({
 				id,
@@ -592,17 +541,16 @@ export async function createInitialState(cwd?: string, disabledIds?: string[]): 
 	};
 }
 
-/**
- * Toggle provider enabled state.
- */
-export function toggleProvider(providerId: string): boolean {
-	if (isProviderEnabled(providerId)) {
-		disableProvider(providerId);
-		return false;
-	} else {
-		enableProvider(providerId);
-		return true;
-	}
+export function selectAfterRefresh(
+	state: DashboardState,
+	providerId: string,
+	searchFiltered: Extension[],
+): Extension | null {
+	const selectedKey = state.selected ? extensionRowKey(state.selected) : null;
+	if (selectedKey) return searchFiltered.find(ext => extensionRowKey(ext) === selectedKey) ?? null;
+	if (providerId !== "all") return null;
+	if (searchFiltered.length === 0) return null;
+	return searchFiltered[Math.min(state.listIndex, searchFiltered.length - 1)];
 }
 
 /**
@@ -627,13 +575,7 @@ export async function refreshState(
 	// Find new index for current provider (tabs may have reordered)
 	const newActiveTabIndex = tabs.findIndex(t => t.id === providerId);
 	const activeTabIndex = newActiveTabIndex >= 0 ? newActiveTabIndex : 0;
-
-	// Try to preserve selection
-	const selectedId = state.selected?.id;
-	let selected = selectedId ? searchFiltered.find(e => e.id === selectedId) : null;
-	if (!selected && searchFiltered.length > 0) {
-		selected = searchFiltered[Math.min(state.listIndex, searchFiltered.length - 1)];
-	}
+	const selected = selectAfterRefresh(state, providerId, searchFiltered);
 
 	return {
 		...state,

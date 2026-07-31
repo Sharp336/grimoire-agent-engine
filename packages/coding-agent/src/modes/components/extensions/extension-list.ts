@@ -6,29 +6,40 @@
  * master switch is off.
  */
 import { type Component, matchesKey, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { isProviderEnabled } from "../../../discovery";
+import type { ProjectActivation } from "../../../config/settings";
 import { theme } from "../../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../utils/keybinding-matchers";
 import { clampSelection, contentRowWidth, renderScrollableList, searchableChar } from "../selector-helpers";
-import { applyFilter } from "./state-manager";
-import type { Extension, ExtensionKind, ExtensionState } from "./types";
-
+import { applyFilter, extensionRowKey } from "./state-manager";
+import type { Extension, ExtensionKind } from "./types";
 export interface ExtensionListCallbacks {
 	/** Called when selection changes */
 	onSelectionChange?: (extension: Extension | null) => void;
 	/** Called when extension is toggled */
 	onToggle?: (extensionId: string, enabled: boolean) => void;
+	/** Called when a project/global activation-managed row should cycle state. */
+	onActivationCycle?: (extension: Extension) => void;
 	/** Called when master switch is toggled */
 	onMasterToggle?: (providerId: string) => void;
 	/** Provider ID for master switch (null = no master switch) */
 	masterSwitchProvider?: string | null;
+	/** Activation state for the provider master switch, used only for status color. */
+	masterSwitchActivationState?: ProjectActivation | null;
+	/** Scoped enabled state for the provider master switch. */
+	masterSwitchEnabled?: boolean | null;
 }
 
 const DEFAULT_MAX_VISIBLE = 15;
 
 /** Flattened list item for rendering */
 type ListItem =
-	| { type: "master"; providerId: string; providerName: string; enabled: boolean }
+	| {
+			type: "master";
+			providerId: string;
+			providerName: string;
+			enabled: boolean;
+			activationState: ProjectActivation | null;
+	  }
 	| { type: "kind-header"; kind: ExtensionKind; label: string; icon: string; count: number }
 	| { type: "extension"; item: Extension };
 
@@ -39,6 +50,8 @@ export class ExtensionList implements Component {
 	#searchQuery = "";
 	#focused = false;
 	#masterSwitchProvider: string | null = null;
+	#masterSwitchActivationState: ProjectActivation | null = null;
+	#masterSwitchEnabled: boolean | null = null;
 	#maxVisible: number;
 	#hoveredIndex: number | null = null;
 	/** Item rows rendered in the last frame, for mouse hit-testing. */
@@ -50,6 +63,8 @@ export class ExtensionList implements Component {
 		maxVisible?: number,
 	) {
 		this.#masterSwitchProvider = callbacks.masterSwitchProvider ?? null;
+		this.#masterSwitchActivationState = callbacks.masterSwitchActivationState ?? null;
+		this.#masterSwitchEnabled = callbacks.masterSwitchEnabled ?? null;
 		this.#maxVisible = maxVisible ?? DEFAULT_MAX_VISIBLE;
 		this.#rebuildList();
 	}
@@ -69,8 +84,14 @@ export class ExtensionList implements Component {
 		this.#focused = focused;
 	}
 
-	setMasterSwitchProvider(providerId: string | null): void {
+	setMasterSwitchProvider(
+		providerId: string | null,
+		activationState: ProjectActivation | null = null,
+		enabled: boolean | null = null,
+	): void {
 		this.#masterSwitchProvider = providerId;
+		this.#masterSwitchActivationState = activationState;
+		this.#masterSwitchEnabled = enabled;
 		this.#rebuildList();
 	}
 
@@ -87,6 +108,15 @@ export class ExtensionList implements Component {
 	getSelectedExtension(): Extension | null {
 		const item = this.#listItems[this.#selectedIndex];
 		return item?.type === "extension" ? item.item : null;
+	}
+
+	selectExtensionByKey(key: string | null): boolean {
+		if (!key) return false;
+		const index = this.#listItems.findIndex(item => item.type === "extension" && extensionRowKey(item.item) === key);
+		if (index < 0) return false;
+		this.#selectedIndex = index;
+		this.#clampSelection();
+		return true;
 	}
 
 	/** Get the currently selected kind header (for preview purposes) */
@@ -107,6 +137,10 @@ export class ExtensionList implements Component {
 		this.setSearchQuery("");
 	}
 
+	#isMasterDisabled(): boolean {
+		return this.#masterSwitchProvider !== null && !(this.#masterSwitchEnabled ?? true);
+	}
+
 	invalidate(): void {}
 
 	render(width: number): readonly string[] {
@@ -125,8 +159,7 @@ export class ExtensionList implements Component {
 			return lines;
 		}
 
-		// Determine if master switch is off (for dimming child items)
-		const masterDisabled = this.#masterSwitchProvider !== null && !isProviderEnabled(this.#masterSwitchProvider);
+		const masterDisabled = this.#isMasterDisabled();
 
 		// Calculate visible range
 		const startIdx = this.#scrollOffset;
@@ -168,7 +201,7 @@ export class ExtensionList implements Component {
 
 	#renderMasterSwitch(item: ListItem & { type: "master" }, isSelected: boolean, width: number): string {
 		const checkbox = item.enabled
-			? theme.fg("success", theme.checkbox.checked)
+			? theme.fg(item.activationState === "inherit" ? "warning" : "success", theme.checkbox.checked)
 			: theme.fg("dim", theme.checkbox.unchecked);
 		const icon = theme.icon.package;
 		const label = `Enable ${item.providerName}`;
@@ -205,7 +238,7 @@ export class ExtensionList implements Component {
 		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
 
 		// Status icon
-		const stateIcon = this.#getStateIcon(ext.state, masterDisabled);
+		const stateIcon = this.#getStateIcon(ext, masterDisabled);
 
 		// Name
 		let name = ext.displayName;
@@ -226,7 +259,6 @@ export class ExtensionList implements Component {
 		const namePadded = this.#padText(name, nameWidth);
 		line += namePadded;
 
-		// Trigger hint
 		if (ext.trigger) {
 			const triggerStyle = effectivelyDisabled ? "dim" : "muted";
 			const remainingWidth = width - visibleWidth(line) - 2;
@@ -270,13 +302,16 @@ export class ExtensionList implements Component {
 		}
 	}
 
-	#getStateIcon(state: ExtensionState, masterDisabled: boolean): string {
+	#getStateIcon(ext: Extension, masterDisabled: boolean): string {
 		if (masterDisabled) {
 			return theme.fg("dim", theme.status.disabled);
 		}
-		switch (state) {
+		switch (ext.state) {
 			case "active":
-				return theme.fg("success", theme.status.enabled);
+				return theme.fg(
+					ext.activationTarget === "project" && ext.activationState === "inherit" ? "warning" : "success",
+					theme.status.enabled,
+				);
 			case "disabled":
 				return theme.fg("dim", theme.status.disabled);
 			case "shadowed":
@@ -309,13 +344,14 @@ export class ExtensionList implements Component {
 		// Provider-specific view: Master switch + flat list
 		if (this.#masterSwitchProvider) {
 			const providerName = filtered[0]?.source.providerName ?? this.#masterSwitchProvider;
-			const enabled = isProviderEnabled(this.#masterSwitchProvider);
+			const enabled = this.#masterSwitchEnabled ?? true;
 
 			this.#listItems.push({
 				type: "master",
 				providerId: this.#masterSwitchProvider,
 				providerName,
 				enabled,
+				activationState: this.#masterSwitchActivationState,
 			});
 
 			for (const ext of filtered) {
@@ -402,9 +438,13 @@ export class ExtensionList implements Component {
 		if (item?.type === "master") {
 			this.callbacks.onMasterToggle?.(item.providerId);
 		} else if (item?.type === "extension") {
-			// Only allow toggling if the provider master switch is enabled.
-			const masterDisabled = this.#masterSwitchProvider !== null && !isProviderEnabled(this.#masterSwitchProvider);
-			if (!masterDisabled) {
+			// Only allow toggling if the provider master switch is enabled and the row is not shadowed.
+			const masterDisabled = this.#isMasterDisabled();
+			if (!masterDisabled && item.item.state !== "shadowed") {
+				if (item.item.activationState) {
+					this.callbacks.onActivationCycle?.(item.item);
+					return;
+				}
 				const newEnabled = item.item.state === "disabled";
 				this.callbacks.onToggle?.(item.item.id, newEnabled);
 			}
@@ -415,7 +455,6 @@ export class ExtensionList implements Component {
 	setHoverIndex(index: number | null): void {
 		this.#hoveredIndex = index;
 	}
-
 	/**
 	 * Map a 0-based line within this component's render to the absolute list-item
 	 * index, or null when the line is the search banner, a padding row, or outside

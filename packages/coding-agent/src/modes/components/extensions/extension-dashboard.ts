@@ -24,9 +24,14 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
-import { Settings } from "../../../config/settings";
-import { setMcpServerEnabled } from "../../../mcp/config-writer";
+import {
+	type ActivationScope,
+	type ActivationWriteTarget,
+	type ProjectActivation,
+	projectActivationKindFromExtensionId,
+	Settings,
+} from "../../../config/settings";
+import { syncDisabledProviders as syncCapabilityDisabledProviders } from "../../../discovery";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
@@ -36,21 +41,51 @@ import { InspectorPanel } from "./inspector-panel";
 import {
 	applyDisabledExtensionsToState,
 	applyFilter,
+	buildProviderTabs,
 	createInitialState,
+	extensionRowKey,
 	filterByProvider,
 	refreshState,
-	toggleProvider,
 } from "./state-manager";
-import type { DashboardState, ProviderTab } from "./types";
+import type { ActivationMode, DashboardState, ProviderTab } from "./types";
 
-const EXT_FOOTER = " ↑/↓: navigate · Space: toggle · ←/→: provider · Esc: close";
+const EXT_FOOTER = "↑/↓: navigate · Space: toggle · ←/→: provider · Esc: close";
+const EXT_SCOPE_FOOTER = "↑/↓: navigate · Space: toggle · Ctrl+P: scope · ←/→: provider · Esc: close";
+const WRITE_SCOPE_ICON = "✎";
 
-/**
- * Map dashboard provider tabs to {@link TabBar} tabs. Empty *enabled* providers
- * are muted — skipped by keyboard nav and unclickable; disabled providers stay
- * selectable (with a leading disabled glyph) so their master switch can be
- * re-enabled from the list. The "all" tab is never muted or marked.
- */
+export function extensionDashboardTitle(scope: ActivationScope): string {
+	return `Extension Control Center · ${WRITE_SCOPE_ICON} ${scope === "project" ? "Project" : "Global"}`;
+}
+
+export function extensionDashboardFooter(canUseProjectScope: boolean): string {
+	return ` ${canUseProjectScope ? EXT_SCOPE_FOOTER : EXT_FOOTER}`;
+}
+
+interface ActivationCycleInput {
+	current: ProjectActivation;
+	currentlyDisabled: boolean;
+	target: ActivationWriteTarget;
+	mode?: ActivationMode;
+	rowDisabled?: boolean;
+}
+
+export function nextExtensionActivationState(input: ActivationCycleInput): ProjectActivation {
+	if (input.target === "global") return input.current === "disabled" ? "enabled" : "disabled";
+	if (input.mode === "binary") return input.rowDisabled ? "enabled" : "disabled";
+	if (input.current === "inherit") return input.currentlyDisabled ? "enabled" : "disabled";
+	if (input.current === "disabled") return "enabled";
+	return "inherit";
+}
+
+function normalizeBinaryActivationState(
+	current: ProjectActivation,
+	mode: ActivationMode,
+	fallback: ProjectActivation,
+): ProjectActivation {
+	if (mode !== "binary" || current !== "inherit") return current;
+	return fallback;
+}
+
 export function buildTabBarTabs(tabs: ProviderTab[]): Tab[] {
 	return tabs.map(tab => {
 		const isAll = tab.id === "all";
@@ -69,6 +104,8 @@ export class ExtensionDashboard implements Component {
 	#inspector!: InspectorPanel;
 	#tabBar!: TabBar;
 	#body!: TwoColumnBody;
+	#activationScope: ActivationScope = "global";
+	#canUseProjectScope = false;
 	#refreshToken = 0;
 	// Frame geometry from the last render, for SGR mouse hit-testing. The
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1.
@@ -98,8 +135,10 @@ export class ExtensionDashboard implements Component {
 
 	async #init(): Promise<void> {
 		const sm = this.settings ?? (await Settings.init());
-		const disabledIds = sm ? ((sm.get("disabledExtensions") as string[]) ?? []) : [];
-		this.#state = await createInitialState(this.cwd, disabledIds);
+		this.#canUseProjectScope = sm.canUseProjectActivation(this.cwd);
+		this.#activationScope = sm.getDefaultActivationScope(this.cwd);
+		const disabledIds = sm.getActivationDisabledExtensions(this.#activationScope);
+		this.#state = this.#withActivationMetadata(await createInitialState(this.cwd, disabledIds));
 
 		const initialMaxVisible = Math.max(3, this.terminalHeight - 9);
 		this.#mainList = new ExtensionList(
@@ -112,8 +151,11 @@ export class ExtensionDashboard implements Component {
 					this.#body.resetInspectorScroll();
 				},
 				onToggle: (extensionId, enabled) => this.#handleExtensionToggle(extensionId, enabled),
+				onActivationCycle: extension => this.#handleActivationCycle(extension),
 				onMasterToggle: providerId => this.#handleProviderToggle(providerId),
 				masterSwitchProvider: this.#getActiveProviderId(),
+				masterSwitchActivationState: this.#getActiveProviderActivationState(),
+				masterSwitchEnabled: this.#getActiveProviderEnabled(),
 			},
 			initialMaxVisible,
 		);
@@ -136,6 +178,155 @@ export class ExtensionDashboard implements Component {
 	#getActiveProviderId(): string | null {
 		const tab = this.#state.tabs[this.#state.activeTabIndex];
 		return tab && tab.id !== "all" ? tab.id : null;
+	}
+
+	#getActiveProviderActivationState(): ProjectActivation | null {
+		const providerId = this.#getActiveProviderId();
+		if (!providerId) return null;
+		const sm = this.settings ?? Settings.instance;
+		const current = sm.getProviderActivation(providerId, this.#activationScope);
+		const mode = this.#getProviderActivationMode(providerId);
+		const fallback = sm.isProviderEffectivelyDisabled(providerId, this.#activationScope) ? "disabled" : "enabled";
+		return normalizeBinaryActivationState(current, mode, fallback);
+	}
+
+	#getProviderActivationMode(providerId: string): ActivationMode {
+		if (this.#activationScope !== "project") return "tri-state";
+		const hasNonProjectRows = this.#state.extensions.some(
+			ext => ext.source.provider === providerId && ext.source.level !== "project",
+		);
+		return hasNonProjectRows ? "tri-state" : "binary";
+	}
+
+	#getActiveProviderEnabled(): boolean | null {
+		const providerId = this.#getActiveProviderId();
+		if (!providerId) return null;
+		const sm = this.settings ?? Settings.instance;
+		return !sm.isProviderEffectivelyDisabled(providerId, this.#activationScope);
+	}
+
+	#withActivationMetadata(state: DashboardState): DashboardState {
+		const sm = this.settings ?? Settings.instance;
+		const target = sm.getActivationWriteTarget(this.cwd, this.#activationScope);
+		const scopedState = target === "global" ? this.#withoutProjectRows(state) : state;
+		// Capability discovery marks lower-priority rows as shadowed before the
+		// dashboard applies project activation overrides. If the project row that
+		// caused the shadow is disabled, reveal the user/global peer while preserving
+		// its original disable signals (provider off, global disabled, MCP enabled:false).
+		const nonProjectIds = new Set(
+			scopedState.extensions.filter(ext => ext.source.level !== "project").map(ext => ext.id),
+		);
+		const disabledProjectShadowIds = new Set(
+			scopedState.extensions
+				.filter(ext => {
+					if (ext.source.level !== "project" || !nonProjectIds.has(ext.id)) return false;
+					const parsed = projectActivationKindFromExtensionId(ext.id);
+					return !!parsed && sm.getProjectActivation(parsed.kind, parsed.name, "project") === "disabled";
+				})
+				.map(ext => ext.id),
+		);
+		const annotate = (ext: DashboardState["extensions"][number]): DashboardState["extensions"][number] => {
+			const revealNonProjectPeer =
+				ext.source.level !== "project" &&
+				disabledProjectShadowIds.has(ext.id) &&
+				ext.disabledReason !== "provider-disabled";
+			const revealParsed = revealNonProjectPeer ? projectActivationKindFromExtensionId(ext.id) : null;
+			const rawMcpEnabled = (ext.raw as { enabled?: unknown }).enabled;
+			const sourceMcpDisabled = revealParsed?.kind === "mcp" && rawMcpEnabled === false;
+			const revealAsProviderDisabled =
+				revealNonProjectPeer && sm.isProviderEffectivelyDisabled(ext.source.provider, "project");
+			const revealAsItemDisabled = revealParsed
+				? sm.isGlobalActivationDisabled(revealParsed.kind, revealParsed.name) ||
+					(sourceMcpDisabled && !sm.isGlobalActivationEnabled(revealParsed.kind, revealParsed.name))
+				: false;
+			const effectiveExt = revealNonProjectPeer
+				? {
+						...ext,
+						state: revealAsProviderDisabled || revealAsItemDisabled ? ("disabled" as const) : ("active" as const),
+						disabledReason: revealAsProviderDisabled
+							? ("provider-disabled" as const)
+							: revealAsItemDisabled
+								? ("item-disabled" as const)
+								: undefined,
+						shadowedBy: undefined,
+					}
+				: ext;
+			const parsed = projectActivationKindFromExtensionId(effectiveExt.id);
+			if (!parsed || effectiveExt.state === "shadowed") {
+				return {
+					...effectiveExt,
+					activationState: undefined,
+					activationTarget: undefined,
+					activationMode: undefined,
+				};
+			}
+			const hasNonProjectPeer = nonProjectIds.has(effectiveExt.id);
+			const projectOnly = target === "project" && effectiveExt.source.level === "project" && !hasNonProjectPeer;
+			const storedState = sm.getProjectActivation(parsed.kind, parsed.name, this.#activationScope);
+			const activationMode: ActivationMode = projectOnly || target === "global" ? "binary" : "tri-state";
+			return {
+				...effectiveExt,
+				activationState: normalizeBinaryActivationState(storedState, activationMode, "enabled"),
+				activationTarget: target,
+				activationMode,
+			};
+		};
+		const selectedKey = scopedState.selected ? extensionRowKey(scopedState.selected) : null;
+		const extensions = scopedState.extensions.map(annotate);
+		const tabFiltered = scopedState.tabFiltered.map(annotate);
+		const searchFiltered = scopedState.searchFiltered.map(annotate);
+		return {
+			...scopedState,
+			extensions,
+			tabFiltered,
+			searchFiltered,
+			selected: selectedKey ? (searchFiltered.find(ext => extensionRowKey(ext) === selectedKey) ?? null) : null,
+		};
+	}
+
+	#withoutProjectRows(state: DashboardState): DashboardState {
+		const sm = this.settings ?? Settings.instance;
+		const projectIds = new Set(state.extensions.filter(ext => ext.source.level === "project").map(ext => ext.id));
+		const normalizeGlobalRow = (ext: DashboardState["extensions"][number]): DashboardState["extensions"][number] => {
+			const parsed = projectActivationKindFromExtensionId(ext.id);
+			if (parsed && sm.isProjectActivationEffectivelyDisabled(parsed.kind, parsed.name, "global")) {
+				return { ...ext, state: "disabled", disabledReason: "item-disabled", shadowedBy: undefined };
+			}
+			if (sm.isProviderEffectivelyDisabled(ext.source.provider, "global")) {
+				return { ...ext, state: "disabled", disabledReason: "provider-disabled", shadowedBy: undefined };
+			}
+			if (ext.state !== "disabled" && !(projectIds.has(ext.id) && ext.state === "shadowed")) return ext;
+
+			const active = { ...ext, state: "active" as const };
+			if (projectIds.has(ext.id)) active.shadowedBy = undefined;
+			delete active.disabledReason;
+			return active;
+		};
+
+		const extensions = state.extensions.filter(ext => ext.source.level !== "project").map(normalizeGlobalRow);
+		const tabs = buildProviderTabs(extensions).map(tab =>
+			tab.id === "all" ? tab : { ...tab, enabled: !sm.isProviderEffectivelyDisabled(tab.id, "global") },
+		);
+		const currentTabId = state.tabs[state.activeTabIndex]?.id ?? "all";
+		const activeTabIndex = Math.max(
+			0,
+			tabs.findIndex(tab => tab.id === currentTabId),
+		);
+		const activeTabId = tabs[activeTabIndex]?.id ?? "all";
+		const tabFiltered = filterByProvider(extensions, activeTabId);
+		const searchFiltered = applyFilter(tabFiltered, state.searchQuery);
+		const selectedKey = state.selected ? extensionRowKey(state.selected) : null;
+		const selected = selectedKey ? (searchFiltered.find(ext => extensionRowKey(ext) === selectedKey) ?? null) : null;
+
+		return {
+			...state,
+			tabs,
+			activeTabIndex,
+			extensions,
+			tabFiltered,
+			searchFiltered,
+			selected: selected ?? searchFiltered[0] ?? null,
+		};
 	}
 
 	/** Live terminal height so the dashboard tracks resize while open. */
@@ -162,7 +353,7 @@ export class ExtensionDashboard implements Component {
 		const bodyLines = this.#body.render(innerWidth);
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Extension Control Center"));
+		out.push(topBorder(width, extensionDashboardTitle(this.#activationScope)));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) out.push(row(line, width));
@@ -171,7 +362,7 @@ export class ExtensionDashboard implements Component {
 		this.#bodyRowCount = contentRows;
 		for (let i = 0; i < contentRows; i++) out.push(row(bodyLines[i] ?? "", width));
 		out.push(divider(width));
-		out.push(row(theme.fg("dim", EXT_FOOTER), width));
+		out.push(row(theme.fg("dim", extensionDashboardFooter(this.#canUseProjectScope)), width));
 		out.push(bottomBorder(width));
 		return out;
 	}
@@ -247,7 +438,11 @@ export class ExtensionDashboard implements Component {
 		this.#state.selected = this.#state.searchFiltered[0] ?? null;
 
 		this.#mainList.setExtensions(this.#state.searchFiltered);
-		this.#mainList.setMasterSwitchProvider(this.#getActiveProviderId());
+		this.#mainList.setMasterSwitchProvider(
+			this.#getActiveProviderId(),
+			this.#getActiveProviderActivationState(),
+			this.#getActiveProviderEnabled(),
+		);
 		this.#mainList.resetSelection();
 		if (this.#state.selected) {
 			this.#inspector.setExtension(this.#state.selected);
@@ -257,22 +452,25 @@ export class ExtensionDashboard implements Component {
 	}
 
 	#handleProviderToggle(providerId: string): void {
-		toggleProvider(providerId);
-		void this.#refreshFromState();
+		const sm = this.settings ?? Settings.instance;
+		const current = sm.getProviderActivation(providerId, this.#activationScope);
+		const target = sm.getActivationWriteTarget(this.cwd, this.#activationScope);
+		const currentlyDisabled = sm.isProviderEffectivelyDisabled(providerId, this.#activationScope);
+		const next = nextExtensionActivationState({
+			current,
+			currentlyDisabled,
+			target,
+			mode: this.#getProviderActivationMode(providerId),
+			rowDisabled: currentlyDisabled,
+		});
+		void sm.setProviderActivation(providerId, next, this.#activationScope).then(() => {
+			syncCapabilityDisabledProviders((sm.get("disabledProviders") as string[]) ?? []);
+			void this.#refreshFromState();
+		});
 	}
 
 	#handleExtensionToggle(extensionId: string, enabled: boolean): void {
 		const sm = this.settings ?? Settings.instance;
-		if (!sm) return;
-
-		// MCP toggles route through the canonical denylist in
-		// `~/.omp/agent/mcp.json` so `/mcp list`, the MCP runtime, and this
-		// dashboard agree on every server's enabled state (issue #3827).
-		if (extensionId.startsWith("mcp:")) {
-			void this.#toggleMcpExtension(extensionId, enabled, sm);
-			return;
-		}
-
 		const disabled = ((sm.get("disabledExtensions") as string[]) ?? []).slice();
 		if (enabled) {
 			const index = disabled.indexOf(extensionId);
@@ -280,51 +478,39 @@ export class ExtensionDashboard implements Component {
 				disabled.splice(index, 1);
 				sm.set("disabledExtensions", disabled);
 			}
-		} else {
-			if (!disabled.includes(extensionId)) {
-				disabled.push(extensionId);
-				sm.set("disabledExtensions", disabled);
-			}
+		} else if (!disabled.includes(extensionId)) {
+			disabled.push(extensionId);
+			sm.set("disabledExtensions", disabled);
 		}
 
 		this.#applyDisabledExtensions(disabled);
 		void this.#refreshFromState();
 	}
 
-	async #toggleMcpExtension(extensionId: string, enabled: boolean, sm: Settings): Promise<void> {
-		const name = extensionId.slice("mcp:".length);
-		try {
-			await setMcpServerEnabled({
-				userPath: getMCPConfigPath("user", this.cwd),
-				projectPath: getMCPConfigPath("project", this.cwd),
-				sourcePath: this.#writableMcpSourcePath(extensionId),
-				name,
-				enabled,
-			});
-		} catch (error) {
-			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });
-		}
+	#handleActivationCycle(extension: DashboardState["extensions"][number]): void {
+		const sm = this.settings ?? Settings.instance;
+		if (!extension.activationState || extension.state === "shadowed") return;
+		const parsed = projectActivationKindFromExtensionId(extension.id);
+		if (!parsed) return;
 
-		// Reconcile `settings.disabledExtensions` with the canonical mcp.json
-		// state so a legacy `mcp:<name>` flag from before this routing change
-		// doesn't keep the server marked disabled after the user re-enables it
-		// via the UI.
-		const stored = ((sm.get("disabledExtensions") as string[]) ?? []).slice();
-		const had = stored.indexOf(extensionId);
-		if (enabled && had !== -1) {
-			stored.splice(had, 1);
-			sm.set("disabledExtensions", stored);
-			this.#applyDisabledExtensions(stored);
-		}
-
-		await this.#refreshFromState();
-	}
-
-	#writableMcpSourcePath(extensionId: string): string | undefined {
-		const extension = this.#state.extensions.find(ext => ext.id === extensionId);
-		if (!extension) return undefined;
-		if (extension.source.provider !== "native" && extension.source.provider !== "mcp-json") return undefined;
-		return extension.path;
+		const current = sm.getProjectActivation(parsed.kind, parsed.name, this.#activationScope);
+		const target = sm.getActivationWriteTarget(this.cwd, this.#activationScope);
+		const currentlyDisabled = sm.isProjectActivationEffectivelyDisabled(
+			parsed.kind,
+			parsed.name,
+			this.#activationScope,
+		);
+		const next = nextExtensionActivationState({
+			current,
+			currentlyDisabled,
+			target,
+			mode: extension.activationMode,
+			rowDisabled: extension.state === "disabled",
+		});
+		void sm.setProjectActivation(parsed.kind, parsed.name, next, this.#activationScope).then(() => {
+			this.#applyDisabledExtensions(sm.getActivationDisabledExtensions(this.#activationScope));
+			void this.#refreshFromState();
+		});
 	}
 
 	async #refreshFromState(): Promise<void> {
@@ -333,10 +519,10 @@ export class ExtensionDashboard implements Component {
 		const currentTabId = this.#state.tabs[this.#state.activeTabIndex]?.id;
 
 		const sm = this.settings ?? Settings.instance;
-		const disabledIds = sm ? ((sm.get("disabledExtensions") as string[]) ?? []) : [];
+		const disabledIds = sm.getActivationDisabledExtensions(this.#activationScope);
 		const nextState = await refreshState(this.#state, this.cwd, disabledIds);
 		if (refreshToken !== this.#refreshToken) return;
-		this.#state = nextState;
+		this.#state = this.#withActivationMetadata(nextState);
 
 		// Re-anchor on the same tab id in the (re-sorted) list.
 		if (currentTabId) {
@@ -346,24 +532,36 @@ export class ExtensionDashboard implements Component {
 			}
 		}
 
-		this.#mainList.setExtensions(this.#state.searchFiltered);
-		this.#mainList.setMasterSwitchProvider(this.#getActiveProviderId());
-		if (this.#state.selected) {
-			this.#inspector.setExtension(this.#state.selected);
-		}
+		this.#syncListSelection();
 
 		this.#tabBar.setTabs(buildTabBarTabs(this.#state.tabs), currentTabId);
 		this.onRequestRender?.();
 	}
 
 	#applyDisabledExtensions(disabledIds: string[]): void {
-		this.#state = applyDisabledExtensionsToState(this.#state, disabledIds);
-		this.#mainList.setExtensions(this.#state.searchFiltered);
-		if (this.#state.selected) {
-			this.#inspector.setExtension(this.#state.selected);
-		}
+		this.#state = this.#withActivationMetadata(applyDisabledExtensionsToState(this.#state, disabledIds));
+		this.#syncListSelection();
 		this.#tabBar.setTabs(buildTabBarTabs(this.#state.tabs), this.#state.tabs[this.#state.activeTabIndex]?.id);
 		this.onRequestRender?.();
+	}
+
+	#syncListSelection(): void {
+		this.#mainList.setExtensions(this.#state.searchFiltered);
+		this.#mainList.setMasterSwitchProvider(
+			this.#getActiveProviderId(),
+			this.#getActiveProviderActivationState(),
+			this.#getActiveProviderEnabled(),
+		);
+		this.#mainList.selectExtensionByKey(this.#state.selected ? extensionRowKey(this.#state.selected) : null);
+		this.#inspector.setExtension(this.#state.selected ?? null);
+	}
+
+	#toggleActivationScope(): void {
+		if (!this.#canUseProjectScope) return;
+		const sm = this.settings ?? Settings.instance;
+		this.#activationScope = this.#activationScope === "project" ? "global" : "project";
+		this.#applyDisabledExtensions(sm.getActivationDisabledExtensions(this.#activationScope));
+		void this.#refreshFromState();
 	}
 
 	handleInput(data: string): void {
@@ -376,6 +574,11 @@ export class ExtensionDashboard implements Component {
 		// Ctrl+C - close immediately
 		if (matchesKey(data, "ctrl+c")) {
 			this.onClose?.();
+			return;
+		}
+
+		if (matchesKey(data, "ctrl+p")) {
+			this.#toggleActivationScope();
 			return;
 		}
 

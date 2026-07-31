@@ -3,10 +3,10 @@
  *
  * Uses the capability system to load MCP servers from multiple sources.
  */
-
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
+import { isGlobalActivationCwd, resolveProjectMcpConfigPath } from "../config/activation-paths";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
@@ -100,9 +100,13 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	// Load user-level disable/force-enable lists. The denylist always wins; the
 	// allowlist overrides a non-writable source config's `enabled: false`.
 	const userPath = getMCPConfigPath("user", cwd);
-	const [disabledServers, forcedEnabled] = await Promise.all([
+	const projectPath =
+		enableProjectConfig && !isGlobalActivationCwd(cwd) ? resolveProjectMcpConfigPath(cwd) : undefined;
+	const [userDisabledServers, userForcedEnabled, projectDisabledServers, projectForcedEnabled] = await Promise.all([
 		readDisabledServers(userPath).then(list => new Set(list)),
 		readEnabledServers(userPath).then(list => new Set(list)),
+		projectPath ? readDisabledServers(projectPath).then(list => new Set(list)) : Promise.resolve(new Set<string>()),
+		projectPath ? readEnabledServers(projectPath).then(list => new Set(list)) : Promise.resolve(new Set<string>()),
 	]);
 
 	// Scope exclusions drop entries entirely BEFORE deduplication: with project
@@ -116,8 +120,14 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	// differently-named enabled server — otherwise the disabled alias would be
 	// removed downstream and starve the surviving connection.
 	const suppressServer = (server: MCPServer & { _source: SourceMeta }): boolean => {
-		if (disabledServers.has(server.name)) return true;
-		if (server.enabled === false && !forcedEnabled.has(server.name)) return true;
+		const projectDisabled = projectDisabledServers.has(server.name);
+		const projectEnabled = projectForcedEnabled.has(server.name);
+		const userDisabled = userDisabledServers.has(server.name);
+		const userEnabled = userForcedEnabled.has(server.name);
+		const disabledByList = projectDisabled || (!projectEnabled && userDisabled);
+		const forceEnabled = !projectDisabled && (projectEnabled || (!userDisabled && userEnabled));
+		if (disabledByList) return true;
+		if (server.enabled === false && !forceEnabled) return true;
 		return false;
 	};
 
