@@ -487,6 +487,16 @@ export class Settings {
 	}
 
 	/**
+	 * Get a raw value from only the global settings layer.
+	 *
+	 * Unlike {@link get}, this does not merge project settings, config overlays,
+	 * runtime overrides, or schema defaults.
+	 */
+	getGlobalSetting<P extends SettingPath>(path: P): SettingValue<P> | undefined {
+		return getByPath(this.#global, SETTING_PATH_SEGMENTS[path]) as SettingValue<P> | undefined;
+	}
+
+	/**
 	 * Whether `path` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
 	 */

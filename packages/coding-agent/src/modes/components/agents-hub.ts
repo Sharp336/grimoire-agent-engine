@@ -301,7 +301,7 @@ export class AgentsHubComponent implements Component {
 			const overrides = this.#settings.get("task.agentModelOverrides") ?? {};
 			const prewalkOverrides = this.#settings.get("task.agentPrewalk") ?? {};
 			const advisorOverrides = this.#settings.get("task.agentAdvisor") ?? {};
-			const serviceTierOverrides = this.#settings.get("task.agentServiceTierOverrides") ?? {};
+			const serviceTierOverrides = this.#settings.getGlobalSetting("task.agentServiceTierOverrides") ?? {};
 			this.#allAgents = agents
 				.slice()
 				.sort((a, b) => {
@@ -454,7 +454,7 @@ export class AgentsHubComponent implements Component {
 
 	#persistRecord(changedAgent: HubAgent, property: PropertyKind): void {
 		if (property === "serviceTier") {
-			const overrides = { ...this.#settings.get("task.agentServiceTierOverrides") };
+			const overrides = { ...this.#settings.getGlobalSetting("task.agentServiceTierOverrides") };
 			const value = changedAgent.serviceTierOverride;
 			if (isServiceTierInheritSettingValue(value)) {
 				overrides[changedAgent.name] = value;
