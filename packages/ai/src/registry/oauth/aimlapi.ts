@@ -30,6 +30,11 @@ const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
 const DEFAULT_APP_URL = "https://app.aimlapi.com";
 const DEFAULT_VERIFICATION_BASE_URL = "https://aimlapi.com/app";
+/** OpenAI-compatible inference host — also serves the key-validation balance probe. */
+const DEFAULT_INFERENCE_URL = "https://api.aimlapi.com/v1";
+
+/** Cap the manual-key validation probe so a stuck network can't hang login. */
+const VALIDATION_TIMEOUT_MS = 15_000;
 
 const DEFAULT_INTERVAL_SECONDS = 5;
 const DEFAULT_EXPIRES_IN_SECONDS = 900;
@@ -73,6 +78,53 @@ function resolveAppUrl(): string {
 
 function resolveVerificationBaseUrl(): string {
 	return envOrDefault("AIMLAPI_VERIFICATION_BASE_URL", DEFAULT_VERIFICATION_BASE_URL);
+}
+
+function resolveInferenceBaseUrl(): string {
+	return envOrDefault("AIMLAPI_INFERENCE_URL", DEFAULT_INFERENCE_URL).replace(/\/+$/, "");
+}
+
+/**
+ * Verify a manually-pasted key actually works before accepting it — otherwise a
+ * bad key would be stored and the provider shown as "logged in" until the first
+ * real request 401s. Uses the balance endpoint (`GET /v1/billing/balance`): it
+ * needs auth (401 on a bad key) but, unlike an inference call, spends nothing
+ * and any valid key of the account can read it. Honors `AIMLAPI_INFERENCE_URL`
+ * so it validates against the same environment inference will run on.
+ */
+async function validateAimlApiKey(apiKey: string, fetchImpl: FetchImpl, signal?: AbortSignal): Promise<void> {
+	const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
+	const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
+	const response = await fetchImpl(`${resolveInferenceBaseUrl()}/billing/balance`, {
+		method: "GET",
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${apiKey}`,
+			...getAimlApiCommonHeaders(),
+		},
+		signal: combinedSignal,
+	});
+
+	if (response.ok) return;
+
+	let details = "";
+	try {
+		const body = (await response.text()).trim();
+		try {
+			// The API returns `{ ..., "message": "This request requires a valid API key…" }`;
+			// surface that human-readable line rather than the whole JSON envelope.
+			const parsed = JSON.parse(body) as { message?: unknown };
+			details = typeof parsed.message === "string" ? parsed.message : body;
+		} catch {
+			details = body;
+		}
+	} catch {
+		// Body read failed — the status code alone is enough to report.
+	}
+
+	const suffix = details ? `: ${details}` : "";
+	throw new AIError.ApiKeyRequiredError(`aimlapi.com API key validation failed (${response.status})${suffix}`);
 }
 
 function resolveRequestedUsdLimitMinor(): number {
@@ -281,15 +333,25 @@ export async function loginAimlApi(callbacks: OAuthController): Promise<string> 
 				win(key);
 			}, fail);
 
-			// Manual paste option. A non-empty submit wins; an empty submit is
-			// ignored so the browser flow can still complete. No placeholder: the
-			// field stays bare until the browser flow auto-fills it (onPromptResolve).
+			// Manual paste option. A non-empty submit is validated before it wins;
+			// an empty submit is ignored so the browser flow can still complete. No
+			// placeholder: the field stays bare until the browser flow auto-fills it
+			// (onPromptResolve).
 			const pastePrompt = callbacks.onPrompt?.({
 				message: "Already have an aimlapi.com API key? Just paste it below.",
 			});
-			pastePrompt?.then(value => {
+			pastePrompt?.then(async value => {
 				const trimmed = value.trim();
-				if (trimmed) win(trimmed);
+				if (!trimmed) return;
+				try {
+					// Prove the pasted key works (non-inference balance probe) before
+					// accepting it — a bad key must fail login, not be stored as valid.
+					callbacks.onProgress?.("Validating API key...");
+					await validateAimlApiKey(trimmed, fetchImpl, abort.signal);
+					win(trimmed);
+				} catch (error) {
+					fail(error);
+				}
 			}, fail);
 		});
 	} finally {

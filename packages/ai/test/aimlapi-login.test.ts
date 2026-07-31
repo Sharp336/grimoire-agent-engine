@@ -20,6 +20,27 @@ function queuedFetch(responses: Response[]): { fetch: typeof fetch; calls: Fetch
 	return { fetch: fetchImpl, calls };
 }
 
+/**
+ * Fetch mock that routes by URL — needed once the paste path validates the key
+ * (balance probe) concurrently with token polling, so response order isn't
+ * deterministic. Each handler returns a fresh Response per call.
+ */
+function routingFetch(handlers: { authorizations: () => Response; token: () => Response; balance?: () => Response }): {
+	fetch: typeof fetch;
+	calls: FetchCall[];
+} {
+	const calls: FetchCall[] = [];
+	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = String(input);
+		calls.push({ url, init: init ?? {} });
+		if (url.includes("/v3/agent-auth/authorizations")) return handlers.authorizations();
+		if (url.includes("/v3/agent-auth/token")) return handlers.token();
+		if (url.includes("/billing/balance")) return (handlers.balance ?? (() => jsonResponse({}, 500)))();
+		throw new Error(`unexpected fetch: ${url}`);
+	}) as typeof fetch;
+	return { fetch: fetchImpl, calls };
+}
+
 function makeCallbacks(fetchImpl: typeof fetch): {
 	controller: OAuthController;
 	auth: OAuthAuthInfo[];
@@ -100,16 +121,20 @@ describe("loginAimlApi (device authorization)", () => {
 		expect(progress).not.toContain("Your API key was successfully generated.");
 	});
 
-	test("uses a manually pasted key and stops polling", async () => {
-		const { fetch: fetchImpl, calls } = queuedFetch([
-			jsonResponse({ requestId: "req_p", deviceCode: "dev_p", interval: 1, expiresIn: 900 }),
+	test("validates a manually pasted key against the balance endpoint and accepts it", async () => {
+		const { fetch: fetchImpl, calls } = routingFetch({
+			authorizations: () => jsonResponse({ requestId: "req_p", deviceCode: "dev_p", interval: 1, expiresIn: 900 }),
 			// Browser side never approves within the test — poll stays pending.
-			jsonResponse({ status: "pending" }),
-		]);
+			token: () => jsonResponse({ status: "pending" }),
+			// Valid key → balance readable.
+			balance: () => jsonResponse({ balance: 1000 }),
+		});
 		let promptResolved = false;
+		const progress: string[] = [];
 		const controller: OAuthController = {
 			fetch: fetchImpl,
 			onAuth: () => {},
+			onProgress: message => progress.push(message),
 			onPrompt: () => Promise.resolve("  pasted-key-123  "),
 			onPromptResolve: () => {
 				promptResolved = true;
@@ -119,10 +144,30 @@ describe("loginAimlApi (device authorization)", () => {
 		const key = await loginAimlApi(controller);
 
 		expect(key).toBe("pasted-key-123");
-		// The browser flow didn't win, so the field is not auto-filled…
-		expect(promptResolved).toBe(false);
-		// …and polling is aborted rather than looping for a second token check.
-		expect(calls.filter(call => call.url.includes("/v3/agent-auth/token"))).toHaveLength(1);
+		expect(promptResolved).toBe(false); // browser flow didn't win → no auto-fill
+		expect(progress).toContain("Validating API key...");
+		// The key was checked against the non-inference balance probe, bearer-authed.
+		const balanceCall = calls.find(call => call.url.includes("/billing/balance"));
+		expect(balanceCall).toBeDefined();
+		expect(balanceCall?.url).toContain("/v1/billing/balance");
+		const balanceHeaders = balanceCall?.init.headers as Record<string, string> | undefined;
+		expect(balanceHeaders?.Authorization).toBe("Bearer pasted-key-123");
+	});
+
+	test("rejects an invalid manually pasted key with a validation error", async () => {
+		const { fetch: fetchImpl } = routingFetch({
+			authorizations: () => jsonResponse({ requestId: "req_x", deviceCode: "dev_x", interval: 1, expiresIn: 900 }),
+			token: () => jsonResponse({ status: "pending" }),
+			// Bad key → balance endpoint 401s.
+			balance: () => jsonResponse({ message: "This request requires a valid API key." }, 401),
+		});
+		const controller: OAuthController = {
+			fetch: fetchImpl,
+			onAuth: () => {},
+			onPrompt: () => Promise.resolve("bad-key"),
+		};
+
+		await expect(loginAimlApi(controller)).rejects.toThrow(/key validation failed \(401\)/i);
 	});
 
 	test("throws when the authorization is denied", async () => {
