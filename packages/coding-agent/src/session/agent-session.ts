@@ -317,6 +317,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { UndoTracker } from "./undo-tracker";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -581,6 +582,7 @@ export class AgentSession {
 	#pendingRewindReport: string | undefined = undefined;
 	#lastCompletedRewind: CompletedRewindState | undefined = undefined;
 	#rewoundToolResultIds = new Set<string>();
+	readonly #undoTracker: UndoTracker;
 	#lastSuccessfulYieldToolCallId: string | undefined = undefined;
 	/**
 	 * Sticky across an in-flight prompt run: a successful `yield` makes the run
@@ -798,6 +800,10 @@ export class AgentSession {
 		this.#prewalk.arm(target, thinkingLevel);
 	}
 
+	getUndoTracker(): UndoTracker {
+		return this.#undoTracker;
+	}
+
 	/** Validate the active plan artifact and shape an `xd://propose` result for review-mode hosts. */
 	async preparePlanForReview(title: string): Promise<AgentToolResult<PlanApprovalDetails>> {
 		const state = this.getPlanModeState();
@@ -834,6 +840,11 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
+		this.#undoTracker = new UndoTracker({
+			sessionManager: this.sessionManager,
+			projectRoot: this.sessionManager.getCwd(),
+			enabled: config.undoEnabled ?? this.settings.get("snapshots.enabled"),
+		});
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -2790,6 +2801,7 @@ export class AgentSession {
 				return;
 			}
 			const sessionStopWillContinue = await this.#emitSessionStopEvent(activeMessages, msg);
+			await this.#undoTracker.onAssistantTurnEnd();
 			await emitAgentEndNotification(sessionStopWillContinue ? { willContinue: true } : undefined);
 		}
 	};
@@ -5142,6 +5154,7 @@ export class AgentSession {
 				this.#planReferenceSent = true;
 			}
 			try {
+				await this.#undoTracker.onUserTurnStart();
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
