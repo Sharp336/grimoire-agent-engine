@@ -35,6 +35,7 @@ function createYieldingSession(): AgentSession {
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
 		setActiveToolsByName: async () => {},
+		setIrcWakeTurnObserver: () => {},
 		subscribe: (listener: (event: { type: string; [key: string]: unknown }) => void) => {
 			listeners.push(listener);
 			return () => {};
@@ -59,7 +60,13 @@ function createYieldingSession(): AgentSession {
 }
 
 async function withTemplateEnvironment(
-	run: (paths: { projectDir: string; projectTemplate: string; userTemplate: string }) => Promise<void>,
+	run: (paths: {
+		projectDir: string;
+		projectTemplate: string;
+		userTemplate: string;
+		projectBaseTemplate: string;
+		userBaseTemplate: string;
+	}) => Promise<void>,
 ): Promise<void> {
 	const fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-subagent-template-"));
 	const projectDir = path.join(fixtureDir, "project");
@@ -76,6 +83,8 @@ async function withTemplateEnvironment(
 			projectDir,
 			projectTemplate: path.join(projectDir, ".omp", "SUBAGENT-SYSTEM.template.md"),
 			userTemplate: path.join(userConfigDir, "SUBAGENT-SYSTEM.template.md"),
+			projectBaseTemplate: path.join(projectDir, ".omp", "SYSTEM.template.md"),
+			userBaseTemplate: path.join(userConfigDir, "SYSTEM.template.md"),
 		});
 	} finally {
 		homedirSpy.mockRestore();
@@ -88,13 +97,17 @@ async function withTemplateEnvironment(
 	}
 }
 
-async function executeAndCaptureSystemPrompt(cwd: string): Promise<string[]> {
+async function executeAndCaptureSystemPrompt(
+	cwd: string,
+): Promise<{ blocks: string[]; systemPromptTemplate: string | undefined }> {
 	let capturedPrompt: string[] | undefined;
+	let capturedSystemPromptTemplate: string | undefined;
 	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 		if (!options) throw new Error("Expected createAgentSession options");
 		if (typeof options.systemPrompt !== "function") throw new Error("Expected a child system prompt callback");
 		const renderedPrompt = options.systemPrompt(["base-block", "project-block"]);
 		capturedPrompt = typeof renderedPrompt === "string" ? [renderedPrompt] : renderedPrompt;
+		capturedSystemPromptTemplate = options.systemPromptTemplate;
 		return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 	});
 	const testModel = model();
@@ -121,7 +134,7 @@ async function executeAndCaptureSystemPrompt(cwd: string): Promise<string[]> {
 	});
 	if (result.error) throw new Error(result.error);
 	if (!capturedPrompt) throw new Error("Expected the child system prompt to be captured");
-	return capturedPrompt;
+	return { blocks: capturedPrompt, systemPromptTemplate: capturedSystemPromptTemplate };
 }
 
 describe("subagent system prompt templates", () => {
@@ -131,33 +144,40 @@ describe("subagent system prompt templates", () => {
 
 	test.serial("uses the bundled wrapper between provider sentinel blocks", async () => {
 		await withTemplateEnvironment(async ({ projectDir }) => {
-			const blocks = await executeAndCaptureSystemPrompt(projectDir);
+			const { blocks, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
 			expect(blocks[0]).toBe("base-block");
 			expect(blocks[1]).toContain("COOP");
 			expect(blocks[1]).toContain("Rendered scout role");
 			expect(blocks[2]).toBe("project-block");
+			expect(systemPromptTemplate).toBeUndefined();
 		});
 	});
 
 	test.serial("renders a user template", async () => {
-		await withTemplateEnvironment(async ({ projectDir, userTemplate }) => {
+		await withTemplateEnvironment(async ({ projectDir, userTemplate, userBaseTemplate }) => {
 			await fs.mkdir(path.dirname(userTemplate), { recursive: true });
 			await fs.writeFile(userTemplate, "USER-SUBAGENT-MARKER {{agent}}");
-			const blocks = await executeAndCaptureSystemPrompt(projectDir);
-			expect(blocks[1]).toBe("USER-SUBAGENT-MARKER Rendered scout role");
+			await fs.writeFile(userBaseTemplate, "USER-BASE-MARKER {{cwd}}");
+			const { blocks, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
+			expect(blocks).toEqual(["base-block", "USER-SUBAGENT-MARKER Rendered scout role", "project-block"]);
+			expect(systemPromptTemplate).toBe(userBaseTemplate);
 		});
 	});
 
 	test.serial("prefers a project template over the user template", async () => {
-		await withTemplateEnvironment(async ({ projectDir, projectTemplate, userTemplate }) => {
-			await fs.mkdir(path.dirname(projectTemplate), { recursive: true });
-			await fs.mkdir(path.dirname(userTemplate), { recursive: true });
-			await fs.writeFile(userTemplate, "USER-SUBAGENT-MARKER {{agent}}");
-			await fs.writeFile(projectTemplate, "PROJECT-SUBAGENT-MARKER {{agent}}");
-			const blocks = await executeAndCaptureSystemPrompt(projectDir);
-			expect(blocks[1]).toContain("PROJECT-SUBAGENT-MARKER Rendered scout role");
-			expect(blocks[1]).not.toContain("USER-SUBAGENT-MARKER");
-		});
+		await withTemplateEnvironment(
+			async ({ projectDir, projectTemplate, userTemplate, projectBaseTemplate, userBaseTemplate }) => {
+				await fs.mkdir(path.dirname(projectTemplate), { recursive: true });
+				await fs.mkdir(path.dirname(userTemplate), { recursive: true });
+				await fs.writeFile(userTemplate, "USER-SUBAGENT-MARKER {{agent}}");
+				await fs.writeFile(projectTemplate, "PROJECT-SUBAGENT-MARKER {{agent}}");
+				await fs.writeFile(userBaseTemplate, "USER-BASE-MARKER {{cwd}}");
+				await fs.writeFile(projectBaseTemplate, "PROJECT-BASE-MARKER {{cwd}}");
+				const { blocks, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
+				expect(blocks).toEqual(["base-block", "PROJECT-SUBAGENT-MARKER Rendered scout role", "project-block"]);
+				expect(systemPromptTemplate).toBe(projectBaseTemplate);
+			},
+		);
 	});
 
 	test.serial("rejects an empty selected template before dispatch", async () => {

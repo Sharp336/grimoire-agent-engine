@@ -6,6 +6,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
 	buildSystemPrompt,
 	buildSystemPromptToolMetadata,
+	discoverSubagentBaseSystemPromptTemplate,
 	discoverSubagentSystemPromptTemplate,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { getProjectDir, prompt, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -463,6 +464,7 @@ describe("system Handlebars prompt templates", () => {
 			process.env.PI_CONFIG_DIR = configDirName;
 			try {
 				expect(discoverSubagentSystemPromptTemplate(dir)).toBeUndefined();
+				expect(discoverSubagentBaseSystemPromptTemplate(dir)).toBeUndefined();
 			} finally {
 				if (originalConfigDir === undefined) {
 					delete process.env.PI_CONFIG_DIR;
@@ -478,12 +480,15 @@ describe("system Handlebars prompt templates", () => {
 			const originalConfigDir = process.env.PI_CONFIG_DIR;
 			const configDirName = `.omp-test-${path.basename(dir)}`;
 			const userConfigDir = path.join(os.homedir(), configDirName, "agent");
-			const templatePath = path.join(userConfigDir, "SUBAGENT-SYSTEM.template.md");
+			const wrapperTemplatePath = path.join(userConfigDir, "SUBAGENT-SYSTEM.template.md");
+			const baseTemplatePath = path.join(userConfigDir, "SYSTEM.template.md");
 			process.env.PI_CONFIG_DIR = configDirName;
 			try {
 				await fs.mkdir(userConfigDir, { recursive: true });
-				await fs.writeFile(templatePath, "User child template");
-				expect(discoverSubagentSystemPromptTemplate(dir)).toBe(templatePath);
+				await fs.writeFile(wrapperTemplatePath, "User child wrapper");
+				await fs.writeFile(baseTemplatePath, "User child base");
+				expect(discoverSubagentSystemPromptTemplate(dir)).toBe(wrapperTemplatePath);
+				expect(discoverSubagentBaseSystemPromptTemplate(dir)).toBe(baseTemplatePath);
 			} finally {
 				await fs.rm(path.join(os.homedir(), configDirName), { recursive: true, force: true });
 				if (originalConfigDir === undefined) {
@@ -500,14 +505,18 @@ describe("system Handlebars prompt templates", () => {
 			const originalConfigDir = process.env.PI_CONFIG_DIR;
 			const configDirName = `.omp-test-${path.basename(dir)}`;
 			const userConfigDir = path.join(os.homedir(), configDirName, "agent");
-			const projectTemplatePath = path.join(dir, ".omp", "SUBAGENT-SYSTEM.template.md");
+			const projectWrapperTemplatePath = path.join(dir, ".omp", "SUBAGENT-SYSTEM.template.md");
+			const projectBaseTemplatePath = path.join(dir, ".omp", "SYSTEM.template.md");
 			process.env.PI_CONFIG_DIR = configDirName;
 			try {
 				await fs.mkdir(userConfigDir, { recursive: true });
-				await fs.mkdir(path.dirname(projectTemplatePath), { recursive: true });
-				await fs.writeFile(path.join(userConfigDir, "SUBAGENT-SYSTEM.template.md"), "User child template");
-				await fs.writeFile(projectTemplatePath, "Project child template");
-				expect(discoverSubagentSystemPromptTemplate(dir)).toBe(projectTemplatePath);
+				await fs.mkdir(path.dirname(projectWrapperTemplatePath), { recursive: true });
+				await fs.writeFile(path.join(userConfigDir, "SUBAGENT-SYSTEM.template.md"), "User child wrapper");
+				await fs.writeFile(path.join(userConfigDir, "SYSTEM.template.md"), "User child base");
+				await fs.writeFile(projectWrapperTemplatePath, "Project child wrapper");
+				await fs.writeFile(projectBaseTemplatePath, "Project child base");
+				expect(discoverSubagentSystemPromptTemplate(dir)).toBe(projectWrapperTemplatePath);
+				expect(discoverSubagentBaseSystemPromptTemplate(dir)).toBe(projectBaseTemplatePath);
 			} finally {
 				await fs.rm(path.join(os.homedir(), configDirName), { recursive: true, force: true });
 				if (originalConfigDir === undefined) {

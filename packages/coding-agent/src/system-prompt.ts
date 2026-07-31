@@ -330,6 +330,14 @@ export function discoverSystemPromptSources(cwd: string): SystemPromptSourceDisc
 	return { templatePath: userTemplate?.path, appendPath };
 }
 
+/** Select the child base template using project-before-user precedence. */
+export function discoverSubagentBaseSystemPromptTemplate(cwd: string): string | undefined {
+	return (
+		findConfigFile("SYSTEM.template.md", { user: false, cwd }) ??
+		findConfigFile("SYSTEM.template.md", { project: false, cwd })
+	);
+}
+
 /** Select the child wrapper template using project-before-user precedence. */
 export function discoverSubagentSystemPromptTemplate(cwd: string): string | undefined {
 	return (

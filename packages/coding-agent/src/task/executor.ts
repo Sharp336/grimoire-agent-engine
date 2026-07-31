@@ -47,7 +47,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import { discoverSubagentSystemPromptTemplate } from "../system-prompt";
+import { discoverSubagentBaseSystemPromptTemplate, discoverSubagentSystemPromptTemplate } from "../system-prompt";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
@@ -2995,6 +2995,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				});
 			}
 
+			const childSystemPromptTemplatePath = discoverSubagentBaseSystemPromptTemplate(options.cwd);
 			const customSubagentTemplatePath = discoverSubagentSystemPromptTemplate(options.cwd);
 			let effectiveSubagentSystemPromptTemplate = defaultSubagentSystemPromptTemplate;
 			if (customSubagentTemplatePath) {
@@ -3049,6 +3050,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				rules: options.rules,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
+				systemPromptTemplate: childSystemPromptTemplatePath,
 				systemPrompt: defaultPrompt => {
 					const subagentPrompt = prompt.render(effectiveSubagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
