@@ -429,12 +429,7 @@ export class AgentsHubComponent implements Component {
 	} {
 		const fallbackSetting = this.#settings.get("tier.subagent");
 		const fallback = isServiceTierInheritSettingValue(fallbackSetting) ? fallbackSetting : "inherit";
-		const overrides: Record<string, string> = {};
-		for (const entry of this.#allAgents) {
-			if (isServiceTierInheritSettingValue(entry.serviceTierOverride)) {
-				overrides[entry.name] = entry.serviceTierOverride;
-			}
-		}
+		const overrides = this.#settings.get("task.agentServiceTierOverrides") ?? {};
 		return {
 			setting: resolveAgentServiceTierSetting(agent.name, overrides, fallback),
 			source: isServiceTierInheritSettingValue(overrides[agent.name]) ? "override" : "tier.subagent",
@@ -457,7 +452,19 @@ export class AgentsHubComponent implements Component {
 		this.#tui.requestRender();
 	}
 
-	#persistRecord(property: PropertyKind): void {
+	#persistRecord(changedAgent: HubAgent, property: PropertyKind): void {
+		if (property === "serviceTier") {
+			const overrides = { ...this.#settings.get("task.agentServiceTierOverrides") };
+			const value = changedAgent.serviceTierOverride;
+			if (isServiceTierInheritSettingValue(value)) {
+				overrides[changedAgent.name] = value;
+			} else {
+				delete overrides[changedAgent.name];
+			}
+			this.#settings.set("task.agentServiceTierOverrides", overrides);
+			return;
+		}
+
 		const overrides: Record<string, string> = {};
 		for (const agent of this.#allAgents) {
 			const value = this.#overrideFor(agent, property)?.trim();
@@ -468,9 +475,7 @@ export class AgentsHubComponent implements Component {
 				? "task.agentModelOverrides"
 				: property === "prewalk"
 					? "task.agentPrewalk"
-					: property === "advisor"
-						? "task.agentAdvisor"
-						: "task.agentServiceTierOverrides";
+					: "task.agentAdvisor";
 		this.#settings.set(key, overrides);
 	}
 
@@ -503,7 +508,7 @@ export class AgentsHubComponent implements Component {
 				agent.serviceTierOverride = isServiceTierInheritSettingValue(trimmed) ? trimmed : undefined;
 				break;
 		}
-		this.#persistRecord(property);
+		this.#persistRecord(agent, property);
 		this.#notice = this.#describeProperty(agent, property);
 		this.#tui.requestRender();
 	}

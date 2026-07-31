@@ -252,4 +252,31 @@ describe("AgentsHub service-tier override", () => {
 		expect(overrides()).toEqual({});
 		expect(strip()).toContain("service tier: scale (tier.subagent)");
 	});
+
+	test("preserves service-tier overrides for agents omitted from discovery", async () => {
+		mockAgents();
+		const settings = Settings.isolated({
+			"task.agentServiceTierOverrides": { "temporarily-undiscovered-agent": "priority" },
+		});
+		const { hub } = await createHub(settings);
+		const openServiceTierStrip = () => {
+			hub.handleInput("\r");
+			for (let i = 0; i < 3; i++) hub.handleInput("\x1b[C");
+			hub.handleInput("\r");
+		};
+
+		openServiceTierStrip();
+		hub.handleInput("\x1b[C");
+		hub.handleInput("\r");
+		expect(settings.get("task.agentServiceTierOverrides")).toEqual({
+			dev: "inherit",
+			"temporarily-undiscovered-agent": "priority",
+		});
+
+		openServiceTierStrip();
+		hub.handleInput("\r");
+		expect(settings.get("task.agentServiceTierOverrides")).toEqual({
+			"temporarily-undiscovered-agent": "priority",
+		});
+	});
 });
