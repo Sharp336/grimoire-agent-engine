@@ -221,3 +221,35 @@ describe("AgentsHub configuration strips", () => {
 		expect(cancelled()).toBe(false);
 	});
 });
+
+describe("AgentsHub service-tier override", () => {
+	test("cycles service-tier overrides, persists a sparse map, and clears back to the subagent tier", async () => {
+		mockAgents();
+		const settings = Settings.isolated({ "tier.subagent": "scale" });
+		const { hub, strip } = await createHub(settings);
+		const overrides = () => settings.get("task.agentServiceTierOverrides");
+		const openServiceTierStrip = () => {
+			hub.handleInput("\r");
+			for (let i = 0; i < 3; i++) hub.handleInput("\x1b[C");
+			hub.handleInput("\r");
+		};
+
+		expect(overrides()).toEqual({});
+		expect(strip()).toContain("service tier: scale (tier.subagent)");
+
+		for (const [index, tier] of ["inherit", "none", "auto", "default", "flex", "scale", "priority"].entries()) {
+			openServiceTierStrip();
+			for (let i = 0; i <= index; i++) hub.handleInput("\x1b[C");
+			hub.handleInput("\r");
+
+			expect(overrides()).toEqual({ dev: tier });
+			expect(strip()).toContain(`service tier: ${tier} (override)`);
+		}
+
+		openServiceTierStrip();
+		hub.handleInput("\r");
+
+		expect(overrides()).toEqual({});
+		expect(strip()).toContain("service tier: scale (tier.subagent)");
+	});
+});

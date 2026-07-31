@@ -229,6 +229,10 @@ export interface SessionInitEntry extends SessionEntryBase {
 	readSummarize?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
+	/** Explicit per-agent service-tier override; absent means use the current subagent fallback on revival. */
+	serviceTierOverride?: string;
+	/** Immediate parent's effective tiers recorded for faithful `inherit` revival; absent in legacy entries. */
+	parentServiceTier?: ServiceTierByFamily;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

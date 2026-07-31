@@ -137,6 +137,83 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.preloadedCustomToolPaths).toBe(preloadedCustomToolPaths);
 	});
 
+	it("lets a selected agent tier override beat the global fallback while unlisted agents retain it", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const settings = Settings.isolated({
+			"tier.subagent": "none",
+			"task.agentServiceTierOverrides": { selected: "priority" },
+		});
+
+		const selected = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "selected" },
+			settings,
+		});
+		const unlisted = await runSubprocess({
+			...baseOptions,
+			id: "unlisted-tier-child",
+			agent: { ...baseAgent, name: "unlisted" },
+			settings,
+		});
+
+		expect(selected.exitCode).toBe(0);
+		expect(unlisted.exitCode).toBe(0);
+		expect(spy).toHaveBeenCalledTimes(2);
+		const selectedSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(selectedSettings?.get("tier.openai")).toBe("priority");
+		expect(selectedSettings?.get("tier.anthropic")).toBe("priority");
+		expect(selectedSettings?.get("tier.google")).toBe("priority");
+		const unlistedSettings = spy.mock.calls[1]?.[0]?.settings;
+		expect(unlistedSettings?.get("tier.openai")).toBe("none");
+		expect(unlistedSettings?.get("tier.anthropic")).toBe("none");
+		expect(unlistedSettings?.get("tier.google")).toBe("none");
+	});
+
+	it("lets an explicit none override disable a priority subagent fallback", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const settings = Settings.isolated({
+			"tier.subagent": "priority",
+			"task.agentServiceTierOverrides": { standard: "none" },
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "standard" },
+			settings,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(childSettings?.get("tier.openai")).toBe("none");
+		expect(childSettings?.get("tier.anthropic")).toBe("none");
+		expect(childSettings?.get("tier.google")).toBe("none");
+	});
+
+	it("passes supplied live parent tiers to an agent explicitly configured to inherit", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const settings = Settings.isolated({
+			"tier.subagent": "none",
+			"task.agentServiceTierOverrides": { inheriting: "inherit" },
+		});
+		const parentServiceTier = { openai: "flex" as const, anthropic: "priority" as const, google: "flex" as const };
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "inheriting" },
+			settings,
+			parentServiceTier,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(childSettings?.get("tier.openai")).toBe(parentServiceTier.openai);
+		expect(childSettings?.get("tier.anthropic")).toBe(parentServiceTier.anthropic);
+		expect(childSettings?.get("tier.google")).toBe(parentServiceTier.google);
+	});
+
 	it("forwards an exact credential resolver without replacing it", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));

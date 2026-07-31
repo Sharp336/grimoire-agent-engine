@@ -2214,6 +2214,8 @@ export class SessionManager {
 		spawns?: string;
 		readSummarize?: boolean;
 		advisor?: string;
+		serviceTierOverride?: string;
+		parentServiceTier?: ServiceTierByFamily;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -2741,6 +2743,8 @@ export class SessionManager {
 			spawns?: string;
 			readSummarize?: boolean;
 			advisor?: string;
+			serviceTierOverride?: string;
+			parentServiceTier?: ServiceTierByFamily;
 		} | null;
 	} | null> {
 		let header: SessionHeader | undefined;
@@ -2757,6 +2761,8 @@ export class SessionManager {
 			spawns?: string;
 			readSummarize?: boolean;
 			advisor?: string;
+			serviceTierOverride?: string;
+			parentServiceTier?: ServiceTierByFamily;
 		} | null = null;
 		const visit = (entry: FileEntry): void => {
 			if (entry.type === "session") {
@@ -2775,6 +2781,8 @@ export class SessionManager {
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
 					readSummarize: entry.readSummarize,
+					serviceTierOverride: entry.serviceTierOverride,
+					parentServiceTier: entry.parentServiceTier,
 					spawns: entry.spawns,
 					advisor: entry.advisor,
 				};

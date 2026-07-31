@@ -4729,6 +4729,10 @@ export const SETTINGS_SCHEMA = {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
 	},
+	"task.agentServiceTierOverrides": {
+		type: "record",
+		default: {} as Record<string, string>,
+	},
 	"task.agentPrewalk": {
 		type: "record",
 		default: {} as Record<string, string>,

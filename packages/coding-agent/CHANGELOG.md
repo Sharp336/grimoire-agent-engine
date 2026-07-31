@@ -549,6 +549,8 @@
 
 - Added an app.live.toggle keybinding (default Ctrl+L) to start or stop live voice mode.
 - Added ctx.invokeTool(params, options?) to extension contexts, allowing wrappers to run native tools while inheriting context, abort signals, and progress updates.
+- Added an `app.live.toggle` keybinding (default `Ctrl+L`) that starts or stops live voice mode, same as `/live`.
+- Added sparse per-agent service-tier overrides through `task.agentServiceTierOverrides`, editable with `T` in `/agents`, so selected subagents can use priority processing without enabling fast mode broadly ([#7106](https://github.com/can1357/oh-my-pi/issues/7106)).
 
 ### Changed
 

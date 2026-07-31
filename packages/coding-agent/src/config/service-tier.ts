@@ -64,6 +64,25 @@ export const SERVICE_TIER_INHERIT_SETTING_VALUES = [
 
 export type ServiceTierInheritSettingValue = (typeof SERVICE_TIER_INHERIT_SETTING_VALUES)[number];
 
+/** Whether a runtime value is an inherit-capable subagent service-tier setting. */
+export function isServiceTierInheritSettingValue(value: unknown): value is ServiceTierInheritSettingValue {
+	return typeof value === "string" && (SERVICE_TIER_INHERIT_SETTING_VALUES as readonly string[]).includes(value);
+}
+
+/**
+ * Resolve one agent's sparse service-tier override. Missing or invalid entries
+ * deliberately use the configured subagent fallback so unvalidated settings
+ * values cannot reach provider configuration.
+ */
+export function resolveAgentServiceTierSetting(
+	agentName: string,
+	overrides: Readonly<Record<string, string>>,
+	fallback: ServiceTierInheritSettingValue,
+): ServiceTierInheritSettingValue {
+	const override = overrides[agentName];
+	return isServiceTierInheritSettingValue(override) ? override : fallback;
+}
+
 export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierOpenAISettingValue>> = [
 	{ value: "none", label: "None", description: "Omit service_tier (standard processing)" },
 	{ value: "auto", label: "Auto", description: "Provider default tier selection" },
