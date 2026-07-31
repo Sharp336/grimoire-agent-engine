@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The `hub` tool's `describe` op now reports the env overrides the daemon was launched with — an `Env: KEY=value; ...` line in the tool content and a dim `env` row in the interactive rendering, both omitted when the spec carries no env entries. Values are flattened (ANSI escapes and control characters collapse to a space) so an arbitrary value cannot break the row.
+
 ## [17.2.1] - 2026-07-30
 
 ### Added

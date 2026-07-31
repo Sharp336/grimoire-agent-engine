@@ -188,6 +188,13 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 	}
 }
 
+/** Flatten env values for single-line display: ANSI escapes and control chars
+ *  (including newlines; tabs are left for `replaceTabs`) collapse to a space so
+ *  an arbitrary value cannot add rows or move the cursor in either surface. */
+function flattenEnvValue(value: string): string {
+	return value.replace(/\u001b\[[0-9;]*[A-Za-z]/g, " ").replace(/[\u0000-\u0008\u000a-\u001f\u007f]+/g, " ");
+}
+
 function daemonLabel(daemon: DaemonSnapshot): string {
 	const pid = daemon.pid === undefined ? "" : ` pid=${daemon.pid}`;
 	const exit = daemon.exitCode === undefined ? "" : ` exit=${daemon.exitCode}`;
@@ -217,7 +224,8 @@ function readyPendingSummary(daemon: DaemonSnapshot, ready?: LaunchParams["ready
 	return parts;
 }
 
-function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
+/** Exported for unit testing of the describe output contract. */
+export function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 	switch (result.op) {
 		case "ping":
 		case "shutdown":
@@ -268,7 +276,9 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 				`Command: ${[result.spec.application, ...result.spec.args].join(" ")}`,
 				`Cwd: ${shortenPath(result.spec.cwd)}`,
 				`PTY: ${result.spec.pty}; restart=${result.spec.restart}; persist=${result.spec.persist}; detached=${result.spec.detached}`,
-				...(envEntries.length > 0 ? [`Env: ${envEntries.map(([k, v]) => `${k}=${v}`).join("; ")}`] : []),
+				...(envEntries.length > 0
+					? [`Env: ${envEntries.map(([k, v]) => `${k}=${flattenEnvValue(v)}`).join("; ")}`]
+					: []),
 			].join("\n");
 		}
 	}
@@ -517,7 +527,12 @@ export function launchRenderResult(
 					body.push(theme.fg("dim", flags.join(theme.sep.dot)));
 					const envEntries = Object.entries(spec.env ?? {});
 					if (envEntries.length > 0)
-						body.push(theme.fg("dim", `env ${envEntries.map(([k, v]) => `${k}=${v}`).join(" ")}`));
+						body.push(
+							theme.fg(
+								"dim",
+								replaceTabs(`env ${envEntries.map(([k, v]) => `${k}=${flattenEnvValue(v)}`).join(" ")}`),
+							),
+						);
 				}
 				break;
 			}
