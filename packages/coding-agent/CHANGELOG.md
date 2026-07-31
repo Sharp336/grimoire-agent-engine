@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `tier.autoFastMode` (default `false`) and `tier.autoFastModeDurationMinutes` (default `20`). Primary-session requests use priority processing for the configured duration after a user prompt; manual `/fast` remains authoritative, while tasks, advisors, panels, side-channel turns, and auto-learn capture keep their configured tiers.
+
 ## [17.2.2] - 2026-07-31
 
 ### Added

@@ -2,9 +2,13 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentDashboard } from "@oh-my-pi/pi-coding-agent/modes/components/agent-dashboard";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import type { PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -151,6 +155,40 @@ describe("AgentDashboard create editor", () => {
 		const afterSubmit = dashboard.render(80).join("\n").replace(ANSI_PATTERN, "");
 
 		expect(afterSubmit).toContain("Model registry unavailable in current session.");
+	});
+
+	test("marks the agent-creation architect prompt as agent-attributed", async () => {
+		const model = getBundledModel("openai", "gpt-5.2");
+		if (!model) throw new Error("Expected bundled gpt-5.2 model to exist");
+		const prompts: Array<{ text: string; options?: PromptOptions }> = [];
+		const session = {
+			prompt: async (text: string, options?: PromptOptions) => {
+				prompts.push({ text, options });
+				throw new Error("stop after prompt attribution");
+			},
+			subscribe: () => () => {},
+			dispose: async () => {},
+		};
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session,
+		} as unknown as CreateAgentSessionResult);
+		const modelRegistry = {
+			authStorage: {} as never,
+			refresh: async () => {},
+			getAvailable: () => [model],
+		} as never;
+		await initTheme(false);
+		const dashboard = await AgentDashboard.create(await makeTempCwd(), Settings.isolated(), 24, { modelRegistry });
+
+		dashboard.handleInput("n");
+		typeText(dashboard, "Generate a release-notes agent");
+		dashboard.handleInput("\x11");
+		for (let i = 0; i < 100 && prompts.length === 0; i++) {
+			await Bun.sleep(1);
+		}
+
+		expect(prompts).toHaveLength(1);
+		expect(prompts[0]?.options).toMatchObject({ attribution: "agent", expandPromptTemplates: false });
 	});
 });
 

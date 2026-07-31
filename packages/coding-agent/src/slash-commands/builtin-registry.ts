@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getMCPConfigPath, getProjectDir, logger, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -96,9 +97,13 @@ function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.ui.requestRender();
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** `/fast status` label for the active model: "on" when the next request uses priority on a
+ *  family `/fast` can control. Fireworks priority is a separate `providers.fireworksTier` knob
+ *  `/fast off`/toggle cannot clear, so a Fireworks-only tier never reports "on" here. */
 function formatFastModeStatus(session: AgentSession): string {
-	return session.isFastModeEnabled() ? "on" : "off";
+	const model = session.model;
+	if (!model || !serviceTierFamily(model)) return "off";
+	return session.isFastModeActive() ? "on" : "off";
 }
 
 /** Detailed, session-effective `/computer status` diagnostics. */
