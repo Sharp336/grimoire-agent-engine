@@ -118,4 +118,31 @@ describe("Command mirrors Ctrl on macOS (superMirrorsCtrl)", () => {
 		// A binding of alt+up has no ctrl+ twin, so Command+Up must not match it.
 		expect(keybindings.matches("\x1b[1;9A", "tui.input.copy")).toBe(false);
 	});
+
+	it("lets an explicit super binding win over another action's generated mirror", () => {
+		setSuperMirrorsCtrl(true);
+		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.input.copy": "ctrl+up",
+			"tui.input.submit": "super+up",
+		});
+
+		// The mirror of ctrl+up would also claim super+up. The explicit binding owns
+		// the chord; the generated alias yields rather than shadowing it by handler order.
+		expect(keybindings.matches("\x1b[1;9A", "tui.input.submit")).toBe(true);
+		expect(keybindings.matches("\x1b[1;9A", "tui.input.copy")).toBe(false);
+		// The mirrored action keeps its own real binding.
+		expect(keybindings.matches("\x1b[1;5A", "tui.input.copy")).toBe(true);
+	});
+
+	it("does not mirror Ctrl+Alt chords onto the Option wire form", () => {
+		setSuperMirrorsCtrl(true);
+		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.input.copy": "ctrl+alt+]",
+		});
+
+		// Terminals that report Option as alt+super would deliver a plain Option+]
+		// press as alt+super+]; mirroring ctrl+alt+] there would eat ordinary input.
+		expect(keybindings.matches("\x1b[93;11u", "tui.input.copy")).toBe(false);
+		expect(keybindings.matches("\x1b[93;7u", "tui.input.copy")).toBe(true);
+	});
 });

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added macOS Command as a mirror of every Ctrl keybinding, so shortcuts documented as Ctrl also answer to Command on darwin.
+- Added macOS Command as a mirror of registry-managed Ctrl keybindings, so those shortcuts also answer to Command on darwin. Ctrl+Alt chords are excluded, and an explicitly bound `super+` chord always wins over a generated mirror. Components that match Ctrl directly rather than through the keybindings manager are unaffected and remain Ctrl-only.
 
 ## [17.2.0] - 2026-07-30
 

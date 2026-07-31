@@ -222,17 +222,29 @@ export function setSuperMirrorsCtrl(enabled: boolean): void {
 	superMirrorsCtrl = enabled;
 }
 
-export function addKeyAliases(keys: Set<string>, key: KeyId): void {
+/**
+ * Expands `key` into every canonical form that should match it.
+ *
+ * `reserved` holds the canonical keys some binding claims EXPLICITLY. The darwin
+ * Command mirror is a generated alias, so it yields to those: a user who binds
+ * `super+o` keeps it even when a built-in `ctrl+o` would otherwise mirror onto
+ * the same chord. Without this, the generated alias wins by handler order and
+ * `getConflicts()` reports nothing.
+ */
+export function addKeyAliases(keys: Set<string>, key: KeyId, reserved?: ReadonlySet<string>): void {
 	const canonical = canonicalKeyId(key);
 	keys.add(canonical);
 	if (SHIFTED_SYMBOL_KEYS.has(canonical)) {
 		keys.add(`shift+${canonical}`);
 	}
-	// macOS: Command mirrors Ctrl. Expand bindings rather than rewriting input —
-	// `super+alt+backspace` and friends are Ghostty's Option wire forms, not Command.
-	if (superMirrorsCtrl && canonical.startsWith("ctrl+")) {
-		keys.add(canonicalKeyId(`super+${canonical.slice("ctrl+".length)}`));
-	}
+	if (!superMirrorsCtrl || !canonical.startsWith("ctrl+")) return;
+	// Ctrl+Alt chords are excluded: macOS terminals that report Option as
+	// `alt+super` would see the mirror of `ctrl+alt+X` as a plain Option+X press,
+	// so mirroring here would consume ordinary Option input.
+	if (canonical.includes("alt+")) return;
+	const mirrored = canonicalKeyId(`super+${canonical.slice("ctrl+".length)}`);
+	if (reserved?.has(mirrored)) return;
+	keys.add(mirrored);
 }
 
 const normalizeKeyId = (key: KeyId): KeyId => key.toLowerCase() as KeyId;
@@ -286,15 +298,24 @@ export class KeybindingsManager {
 			}
 		}
 
+		// Two passes: every explicitly-declared key is collected first, so the second
+		// pass can suppress a generated Command alias that would shadow one.
+		const resolved: Array<[Keybinding, KeyId[]]> = [];
+		const explicitKeys = new Set<string>();
 		for (const [id, definition] of Object.entries(this.#definitions)) {
 			const userKeys = this.#userBindings[id];
 			const keys = userKeys === undefined ? normalizeKeys(definition.defaultKeys) : normalizeKeys(userKeys);
+			resolved.push([id as Keybinding, keys]);
 			this.#keysById.set(id as Keybinding, keys);
+			for (const key of keys) explicitKeys.add(canonicalKeyId(key));
+		}
+
+		for (const [id, keys] of resolved) {
 			const matchKeys = new Set<string>();
 			for (const key of keys) {
-				addKeyAliases(matchKeys, key);
+				addKeyAliases(matchKeys, key, explicitKeys);
 			}
-			this.#matchKeysById.set(id as Keybinding, matchKeys);
+			this.#matchKeysById.set(id, matchKeys);
 		}
 	}
 

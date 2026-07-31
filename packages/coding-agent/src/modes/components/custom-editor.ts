@@ -63,13 +63,19 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
 };
 
-function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
+function buildMatchKeys(keys: readonly KeyId[], reserved?: ReadonlySet<string>): Set<string> {
 	const matchKeys = new Set<string>();
 	for (const key of keys) {
-		addKeyAliases(matchKeys, key);
+		addKeyAliases(matchKeys, key, reserved);
 	}
 	return matchKeys;
 }
+
+/** Explicit chords of the shipped defaults, so the initial match sets get the same
+ *  alias precedence `#rebuildActionMatchKeys` applies after any `setActionKeys`. */
+const DEFAULT_EXPLICIT_KEYS: ReadonlySet<string> = new Set(
+	Object.values(DEFAULT_ACTION_KEYS).flatMap(keys => keys.map(key => canonicalKeyId(key))),
+);
 
 function unionOfMatchKeys(matchKeys: ReadonlyMap<ConfigurableEditorAction, ReadonlySet<string>>): Set<string> {
 	const union = new Set<string>();
@@ -616,7 +622,7 @@ export class CustomEditor extends Editor {
 	#actionMatchKeys = new Map<ConfigurableEditorAction, Set<string>>(
 		Object.entries(DEFAULT_ACTION_KEYS).map(([action, keys]) => [
 			action as ConfigurableEditorAction,
-			buildMatchKeys(keys),
+			buildMatchKeys(keys, DEFAULT_EXPLICIT_KEYS),
 		]),
 	);
 	/** Union of every action's match keys: one probe in `handleInput` decides
@@ -625,7 +631,20 @@ export class CustomEditor extends Editor {
 
 	setActionKeys(action: ConfigurableEditorAction, keys: KeyId[]): void {
 		this.#actionKeys.set(action, [...keys]);
-		this.#actionMatchKeys.set(action, buildMatchKeys(keys));
+		this.#rebuildActionMatchKeys();
+	}
+
+	/** Rebuilds every action's match set together. One action's explicitly-declared
+	 *  chord must suppress another action's generated Command alias, which is only
+	 *  decidable with all actions in view. */
+	#rebuildActionMatchKeys(): void {
+		const explicit = new Set<string>();
+		for (const keys of this.#actionKeys.values()) {
+			for (const key of keys) explicit.add(canonicalKeyId(key));
+		}
+		for (const [action, keys] of this.#actionKeys) {
+			this.#actionMatchKeys.set(action, buildMatchKeys(keys, explicit));
+		}
 		this.#actionMatchKeyUnion = unionOfMatchKeys(this.#actionMatchKeys);
 	}
 
