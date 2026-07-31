@@ -73,6 +73,58 @@ describe("loginAimlApi (device authorization)", () => {
 		expect(pollBody.grant_type).toBe("urn:ietf:params:oauth:grant-type:device_code");
 	});
 
+	test("fills the paste field and resolves it when the browser flow wins", async () => {
+		const { fetch: fetchImpl } = queuedFetch([
+			jsonResponse({ requestId: "req_9", deviceCode: "dev_9", interval: 1, expiresIn: 900 }),
+			jsonResponse({ status: "ready", apiKey: "aiml-browser-key" }),
+		]);
+		const resolved: Array<{ value: string; message?: string }> = [];
+		const progress: string[] = [];
+		const controller: OAuthController = {
+			fetch: fetchImpl,
+			onAuth: () => {},
+			onProgress: message => progress.push(message),
+			// A rendered paste field that the user never submits.
+			onPrompt: () => new Promise<string>(() => {}),
+			onPromptResolve: (value, message) => resolved.push({ value, message }),
+		};
+
+		const key = await loginAimlApi(controller);
+
+		expect(key).toBe("aiml-browser-key");
+		// The minted key is pushed into the field with the green confirmation…
+		expect(resolved).toEqual([
+			{ value: "aiml-browser-key", message: "Your key has already been generated and added above" },
+		]);
+		// …and the plain progress fallback is not also emitted.
+		expect(progress).not.toContain("Your API key was successfully generated.");
+	});
+
+	test("uses a manually pasted key and stops polling", async () => {
+		const { fetch: fetchImpl, calls } = queuedFetch([
+			jsonResponse({ requestId: "req_p", deviceCode: "dev_p", interval: 1, expiresIn: 900 }),
+			// Browser side never approves within the test — poll stays pending.
+			jsonResponse({ status: "pending" }),
+		]);
+		let promptResolved = false;
+		const controller: OAuthController = {
+			fetch: fetchImpl,
+			onAuth: () => {},
+			onPrompt: () => Promise.resolve("  pasted-key-123  "),
+			onPromptResolve: () => {
+				promptResolved = true;
+			},
+		};
+
+		const key = await loginAimlApi(controller);
+
+		expect(key).toBe("pasted-key-123");
+		// The browser flow didn't win, so the field is not auto-filled…
+		expect(promptResolved).toBe(false);
+		// …and polling is aborted rather than looping for a second token check.
+		expect(calls.filter(call => call.url.includes("/v3/agent-auth/token"))).toHaveLength(1);
+	});
+
 	test("throws when the authorization is denied", async () => {
 		const { fetch: fetchImpl } = queuedFetch([
 			jsonResponse({ requestId: "req_1", deviceCode: "dev_1", interval: 1, expiresIn: 900 }),

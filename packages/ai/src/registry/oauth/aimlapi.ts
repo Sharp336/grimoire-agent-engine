@@ -21,6 +21,7 @@ import {
 	resolveAimlApiPartnerName,
 } from "@oh-my-pi/pi-catalog/provider-models/aimlapi";
 import * as AIError from "../../error";
+import type { FetchImpl } from "../../types";
 import type { OAuthController } from "./types";
 
 const PROVIDER = "aimlapi";
@@ -98,6 +99,97 @@ function positiveOrDefault(value: number | undefined, fallback: number): number 
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+/** Sleep that rejects immediately on abort so cancelling doesn't wait out the interval. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new AIError.LoginCancelledError());
+			return;
+		}
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(timer);
+				reject(new AIError.LoginCancelledError());
+			},
+			{ once: true },
+		);
+	});
+}
+
+interface PollParams {
+	fetchImpl: FetchImpl;
+	appUrl: string;
+	requestHeaders: Record<string, string>;
+	deviceCode: string;
+	intervalMs: number;
+	expiresInSeconds: number;
+	signal: AbortSignal;
+}
+
+/** Poll the token endpoint until the browser approval mints a key (or it fails/expires). */
+async function pollForApiKey(params: PollParams): Promise<string> {
+	const { fetchImpl, appUrl, requestHeaders, deviceCode, intervalMs, expiresInSeconds, signal } = params;
+	const deadline = Date.now() + expiresInSeconds * 1000;
+	while (Date.now() < deadline) {
+		if (signal.aborted) {
+			throw new AIError.LoginCancelledError();
+		}
+
+		const pollResponse = await fetchImpl(`${appUrl}/v3/agent-auth/token`, {
+			method: "POST",
+			headers: requestHeaders,
+			body: JSON.stringify({
+				partnerId: resolveAimlApiPartnerId(),
+				deviceCode,
+				grant_type: DEVICE_CODE_GRANT,
+			}),
+			signal,
+		});
+
+		if (!pollResponse.ok) {
+			throw new AIError.OAuthError(`AIML API authorization check failed: ${pollResponse.status}`, {
+				kind: "polling",
+				provider: PROVIDER,
+				status: pollResponse.status,
+			});
+		}
+
+		const pollData = (await pollResponse.json()) as PollTokenResponse;
+		const apiKey = (pollData.apiKey || pollData.api_key || pollData.access_token || pollData.key || "").trim();
+		if (apiKey) {
+			return apiKey;
+		}
+
+		const status = (pollData.status ?? "").trim().toLowerCase();
+		if (TERMINAL_FAILURE_STATUSES.has(status)) {
+			throw new AIError.OAuthError(`AIML API authorization ${status}`, {
+				kind: "device-auth",
+				provider: PROVIDER,
+			});
+		}
+
+		await abortableSleep(intervalMs, signal);
+	}
+
+	throw new AIError.OAuthError("AIML API authorization timed out. Please try again.", {
+		kind: "timeout",
+		provider: PROVIDER,
+	});
+}
+
+/**
+ * Runs two paths for one key, first to finish wins:
+ *  - the browser device grant (poll), and
+ *  - an optional manual paste field ({@link OAuthController.onPrompt}) for users
+ *    who already have a key — parity with OpenRouter's paste flow.
+ *
+ * When the browser side wins it drops the minted key into the paste field via
+ * {@link OAuthController.onPromptResolve} (green "already generated" line); when
+ * the user pastes first, polling is aborted. Without an `onPrompt` surface it
+ * degrades to a plain device-grant login (progress message, no field).
+ */
 export async function loginAimlApi(callbacks: OAuthController): Promise<string> {
 	const fetchImpl = callbacks.fetch ?? fetch;
 	const appUrl = resolveAppUrl();
@@ -144,54 +236,64 @@ export async function loginAimlApi(callbacks: OAuthController): Promise<string> 
 
 	callbacks.onAuth?.({
 		url: buildVerificationUrl(requestId),
-		instructions: "Open this link, sign in, and approve access to generate your AIML API key.",
+		instructions: "Sign in via the link above and we'll create an API key for you.",
 	});
 
-	const deadline = Date.now() + expiresInSeconds * 1000;
-	while (Date.now() < deadline) {
-		if (callbacks.signal?.aborted) {
-			throw new AIError.LoginCancelledError();
-		}
+	// One abort controller drives both the poll loop and any in-flight token
+	// fetch; it fires when either path wins, or when the caller cancels login.
+	const abort = new AbortController();
+	const cancel = () => abort.abort();
+	callbacks.signal?.addEventListener("abort", cancel, { once: true });
 
-		const pollResponse = await fetchImpl(`${appUrl}/v3/agent-auth/token`, {
-			method: "POST",
-			headers: requestHeaders,
-			body: JSON.stringify({
-				partnerId: resolveAimlApiPartnerId(),
-				deviceCode,
-				grant_type: DEVICE_CODE_GRANT,
-			}),
-			signal: callbacks.signal,
+	const poll = pollForApiKey({
+		fetchImpl,
+		appUrl,
+		requestHeaders,
+		deviceCode,
+		intervalMs,
+		expiresInSeconds,
+		signal: abort.signal,
+	});
+
+	try {
+		return await new Promise<string>((resolve, reject) => {
+			let settled = false;
+			const win = (key: string) => {
+				if (settled) return;
+				settled = true;
+				resolve(key);
+			};
+			const fail = (error: unknown) => {
+				if (settled) return;
+				settled = true;
+				reject(error);
+			};
+
+			poll.then(key => {
+				// Browser approval finished. Reflect the minted key into the paste
+				// field (screen shows it filled + a green confirmation); fall back
+				// to a progress line when there is no field to fill.
+				if (callbacks.onPromptResolve) {
+					callbacks.onPromptResolve(key, "Your key has already been generated and added above");
+				} else {
+					callbacks.onProgress?.("Your API key was successfully generated.");
+				}
+				win(key);
+			}, fail);
+
+			// Manual paste option. A non-empty submit wins; an empty submit is
+			// ignored so the browser flow can still complete. No placeholder: the
+			// field stays bare until the browser flow auto-fills it (onPromptResolve).
+			const pastePrompt = callbacks.onPrompt?.({
+				message: "Already have an aimlapi.com API key? Just paste it below.",
+			});
+			pastePrompt?.then(value => {
+				const trimmed = value.trim();
+				if (trimmed) win(trimmed);
+			}, fail);
 		});
-
-		if (!pollResponse.ok) {
-			throw new AIError.OAuthError(`AIML API authorization check failed: ${pollResponse.status}`, {
-				kind: "polling",
-				provider: PROVIDER,
-				status: pollResponse.status,
-			});
-		}
-
-		const pollData = (await pollResponse.json()) as PollTokenResponse;
-		const apiKey = (pollData.apiKey || pollData.api_key || pollData.access_token || pollData.key || "").trim();
-		if (apiKey) {
-			callbacks.onProgress?.("Your API key was successfully generated.");
-			return apiKey;
-		}
-
-		const status = (pollData.status ?? "").trim().toLowerCase();
-		if (TERMINAL_FAILURE_STATUSES.has(status)) {
-			throw new AIError.OAuthError(`AIML API authorization ${status}`, {
-				kind: "device-auth",
-				provider: PROVIDER,
-			});
-		}
-
-		await Bun.sleep(intervalMs);
+	} finally {
+		abort.abort();
+		callbacks.signal?.removeEventListener("abort", cancel);
 	}
-
-	throw new AIError.OAuthError("AIML API authorization timed out. Please try again.", {
-		kind: "timeout",
-		provider: PROVIDER,
-	});
 }
