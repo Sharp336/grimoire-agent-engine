@@ -621,9 +621,9 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 	/**
 	 * Get display string for a keybinding (e.g., "ctrl+c/escape").
 	 */
-	getDisplayString(keybinding: Keybinding): string {
+	getDisplayString(keybinding: Keybinding, platform: NodeJS.Platform = process.platform): string {
 		const keys = this.getKeys(keybinding);
-		return formatKeyHints(keys.length === 0 ? [] : keys);
+		return formatKeyHints(keys.length === 0 ? [] : keys, platform);
 	}
 
 	/**
@@ -696,16 +696,46 @@ const MAC_KEY_GLYPHS: Record<string, string> = {
 	end: "↘",
 };
 
-/** Mac modifier order. `⌃` is absent by design: ctrl renders as ⌘, because the
- *  `super` alias in `addKeyAliases` makes Command the reachable modifier on darwin. */
+/** Mac modifier order. `⌃` is absent by design: ctrl renders as ⌘ so that once the
+ *  companion `super` alias in `addKeyAliases` lands (mirroring Ctrl onto Command),
+ *  the hint advertises the modifier that is actually reachable on darwin. */
 const MAC_GLYPH_ORDER = ["⌥", "⇧", "⌘"];
 
+const MAC_MODIFIER_TOKENS = ["ctrl", "shift", "alt", "super"] as const;
+
+/** Consume a leading `modifier+` token. Walks the prefix like `canonicalKeyId` in
+ *  tui/keybindings.ts so a base key that is itself `+` (keypad `ctrl++`) is not
+ *  swallowed by a naive `split("+")`. */
+function startsWithModifier(key: string, offset: number, modifier: string): boolean {
+	const next = offset + modifier.length;
+	if (key.length <= next || key.charCodeAt(next) !== 43) return false;
+	for (let i = 0; i < modifier.length; i++) {
+		const actual = key.charCodeAt(offset + i);
+		const expected = modifier.charCodeAt(i);
+		if (actual !== expected && actual !== expected - 32) return false;
+	}
+	return true;
+}
+
 function formatKeyHintMac(key: KeyId): string {
-	const parts = key.split("+");
-	const base = parts[parts.length - 1] ?? "";
-	const glyphs = parts.slice(0, -1).map(part => MAC_MODIFIER_GLYPHS[part.toLowerCase()]);
-	const ordered = MAC_GLYPH_ORDER.filter(glyph => glyphs.includes(glyph));
+	const modifiers: string[] = [];
+	let offset = 0;
+	let found = true;
+	while (found) {
+		found = false;
+		for (const modifier of MAC_MODIFIER_TOKENS) {
+			if (startsWithModifier(key, offset, modifier)) {
+				modifiers.push(modifier);
+				offset += modifier.length + 1;
+				found = true;
+				break;
+			}
+		}
+	}
+	const base = key.slice(offset);
 	const baseLabel = MAC_KEY_GLYPHS[base.toLowerCase()] ?? formatKeyPart(base);
+	const glyphs = modifiers.map(modifier => MAC_MODIFIER_GLYPHS[modifier]);
+	const ordered = MAC_GLYPH_ORDER.filter(glyph => glyphs.includes(glyph));
 	return `${ordered.join("")}${baseLabel}`;
 }
 

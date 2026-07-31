@@ -385,8 +385,8 @@ async function executeLegacyBashOperations(
 }
 
 /** Format the active shortcut for legacy extensions that render keybinding hints. */
-export function keyText(action: Keybinding): string {
-	return formatKeyHints(getKeybindings().getKeys(action));
+export function keyText(action: Keybinding, platform: NodeJS.Platform = process.platform): string {
+	return formatKeyHints(getKeybindings().getKeys(action), platform);
 }
 
 /** Parse frontmatter using the historical Pi package-root helper. */

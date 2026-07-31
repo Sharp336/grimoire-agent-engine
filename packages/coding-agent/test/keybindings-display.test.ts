@@ -14,13 +14,13 @@ describe("KeybindingsManager.getDisplayString", () => {
 			"app.message.dequeue": "alt+up",
 		});
 
-		expect(keybindings.getDisplayString("app.message.dequeue")).toBe("Alt+Up");
+		expect(keybindings.getDisplayString("app.message.dequeue", "linux")).toBe("Alt+Up");
 	});
 
 	it("defaults retry to Alt+R", () => {
 		const keybindings = KeybindingsManager.inMemory();
 
-		expect(keybindings.getDisplayString("app.retry")).toBe("Alt+R");
+		expect(keybindings.getDisplayString("app.retry", "linux")).toBe("Alt+R");
 	});
 
 	it("formats multiple bindings with the existing separator", () => {
@@ -28,7 +28,7 @@ describe("KeybindingsManager.getDisplayString", () => {
 			"app.clipboard.copyPrompt": ["alt+shift+c", "ctrl+shift+c"],
 		});
 
-		expect(keybindings.getDisplayString("app.clipboard.copyPrompt")).toBe("Alt+Shift+C/Ctrl+Shift+C");
+		expect(keybindings.getDisplayString("app.clipboard.copyPrompt", "linux")).toBe("Alt+Shift+C/Ctrl+Shift+C");
 	});
 
 	it("returns an empty string when the action has no binding", () => {
@@ -54,7 +54,7 @@ describe("legacy keyText", () => {
 	it("formats the active binding for legacy extensions", () => {
 		setKeybindings(KeybindingsManager.inMemory({ "app.tools.expand": "alt+e" }));
 
-		expect(keyText("app.tools.expand")).toBe("Alt+E");
+		expect(keyText("app.tools.expand", "linux")).toBe("Alt+E");
 	});
 });
 
@@ -84,5 +84,12 @@ describe("formatKeyHint / formatKeyHints (Mac glyphs on darwin)", () => {
 
 	it("dedupes ctrl and super to a single ⌘ glyph on darwin", () => {
 		expect(formatKeyHint("ctrl+super+o", "darwin")).toBe("⌘O");
+	});
+
+	it("preserves a literal + base key on darwin (keypad ctrl++)", () => {
+		expect(formatKeyHint("+", "darwin")).toBe("+");
+		expect(formatKeyHint("ctrl++", "darwin")).toBe("⌘+");
+		expect(formatKeyHint("shift++", "darwin")).toBe("⇧+");
+		expect(formatKeyHint("ctrl++", "linux")).toBe("Ctrl++");
 	});
 });
